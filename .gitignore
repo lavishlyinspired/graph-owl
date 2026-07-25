@@ -1,0 +1,14 @@
+/target
+.DS_Store
+.env
+
+# Local reference material, not part of this project
+.claude/docs/referenceRepo/
+
+# Local-only Claude Code settings, not shared
+.claude/settings.local.json
+
+# cargo-mutants scratch output
+/mutants.out/
+
+.gitignore

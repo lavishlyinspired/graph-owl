@@ -1,0 +1,23 @@
+[package]
+name = "graph-owl-storage-postgres"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+graph-owl-core.workspace = true
+graph-owl-storage.workspace = true
+async-trait.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+refinery.workspace = true
+tokio-postgres.workspace = true
+
+[dev-dependencies]
+testcontainers-modules.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true
