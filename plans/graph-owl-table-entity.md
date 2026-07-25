@@ -1,7 +1,7 @@
 # Plan: Table Entity Walking Skeleton
 
 **Branch**: feat/table-entity
-**Status**: Active — decisions resolved, Slice A acceptance criteria pending human confirmation before RED
+**Status**: Active — Slice A done (commits 1956461, 1f40a5a); Slices B-E remain
 
 ## Goal
 
@@ -26,7 +26,7 @@ Prove the real end-to-end path (HTTP → domain → Postgres) for a single entit
 
 Every slice follows RED-GREEN-MUTATE-KILL MUTANTS-REFACTOR. No production code without a failing test first.
 
-### Slice A: API client creates a Table and it is durably persisted
+### Slice A: API client creates a Table and it is durably persisted — DONE
 
 **Value**: Any caller of the catalog HTTP API can register a new Table entity that survives a server restart (real Postgres, not in-memory).
 **Path**: `POST /tables` → axum handler (`graph-owl-server`) → `graph-owl-api::Catalog::create_table` → `graph-owl-storage::Storage` trait → `graph-owl-storage-postgres` sqlx impl → `tables` row inserted → 201 response with the created Table (generated `id`, submitted fields, timestamps).
