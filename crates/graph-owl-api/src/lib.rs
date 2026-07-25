@@ -1,2 +1,99 @@
-// Catalog / CatalogBuilder facade lands here, driven out via TDD (see plans/).
-// graph-owl-server and graph-owl-cli depend on nothing but this crate.
+use std::sync::Arc;
+
+use chrono::Utc;
+use graph_owl_core::Table;
+use graph_owl_storage::{Storage, StorageError};
+use serde::Deserialize;
+use uuid::Uuid;
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTable {
+    pub name: String,
+    pub fully_qualified_name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct Catalog {
+    storage: Arc<dyn Storage>,
+}
+
+impl Catalog {
+    pub fn new(storage: Arc<dyn Storage>) -> Self {
+        Self { storage }
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails, e.g. a duplicate `fully_qualified_name`.
+    pub async fn create_table(&self, request: CreateTable) -> Result<Table, StorageError> {
+        let now = Utc::now();
+        let table = Table {
+            id: Uuid::new_v4(),
+            name: request.name,
+            fully_qualified_name: request.fully_qualified_name,
+            description: request.description,
+            created_at: now,
+            updated_at: now,
+        };
+        self.storage.insert_table(table).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use graph_owl_storage::Storage;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct InMemoryStorage {
+        inserted: Mutex<Vec<Table>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Storage for InMemoryStorage {
+        async fn insert_table(&self, table: Table) -> Result<Table, StorageError> {
+            self.inserted.lock().unwrap().push(table.clone());
+            Ok(table)
+        }
+    }
+
+    fn mock_create_table_request() -> CreateTable {
+        CreateTable {
+            name: "customers".to_string(),
+            fully_qualified_name: "warehouse.public.customers".to_string(),
+            description: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn creating_a_table_assigns_matching_created_and_updated_timestamps() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let table = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+
+        assert_eq!(table.name, "customers");
+        assert_eq!(table.fully_qualified_name, "warehouse.public.customers");
+        assert_eq!(table.created_at, table.updated_at);
+    }
+
+    #[tokio::test]
+    async fn creating_two_tables_assigns_different_ids() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let first = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+        let second = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+
+        assert_ne!(first.id, second.id);
+    }
+}

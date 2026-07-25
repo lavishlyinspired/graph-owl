@@ -12,3 +12,5 @@
 /mutants.out/
 
 .gitignore
+
+.claude/docs/analysis.md

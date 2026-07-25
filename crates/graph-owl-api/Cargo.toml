@@ -7,10 +7,12 @@ license.workspace = true
 [dependencies]
 graph-owl-core.workspace = true
 graph-owl-storage.workspace = true
-graph-owl-storage-postgres.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+serde.workspace = true
+uuid.workspace = true
+chrono.workspace = true
 
 [lints]
 workspace = true
