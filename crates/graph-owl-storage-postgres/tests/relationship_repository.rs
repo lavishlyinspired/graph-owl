@@ -155,3 +155,37 @@ async fn listing_relationships_does_not_return_unrelated_entities_relationships(
 
     assert_eq!(found, Vec::new());
 }
+
+#[tokio::test]
+async fn deleting_an_existing_relationship_removes_it_and_returns_true() {
+    let (storage, _container, _connection_string) = test_storage().await;
+    let relationship = mock_relationship();
+    storage
+        .create_relationship(relationship.clone())
+        .await
+        .expect("create_relationship should succeed");
+
+    let deleted = storage
+        .delete_relationship(relationship.id)
+        .await
+        .expect("delete_relationship should succeed");
+
+    assert!(deleted);
+    let found = storage
+        .list_relationships_for_entity("table", relationship.from_entity_id)
+        .await
+        .expect("list_relationships_for_entity should succeed");
+    assert_eq!(found, Vec::new());
+}
+
+#[tokio::test]
+async fn deleting_a_nonexistent_relationship_returns_false() {
+    let (storage, _container, _connection_string) = test_storage().await;
+
+    let deleted = storage
+        .delete_relationship(Uuid::new_v4())
+        .await
+        .expect("delete_relationship should succeed");
+
+    assert!(!deleted);
+}

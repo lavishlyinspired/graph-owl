@@ -1,7 +1,7 @@
 # Plan: Table-to-Table Relationships
 
 **Branch**: feat/entity-relationships
-**Status**: Active
+**Status**: All slices (A-C) done — ready to close out
 
 ## Goal
 
@@ -18,11 +18,11 @@ Prove a generic entity-relationship pattern (polymorphic `from_entity_type`/`to_
 
 ## Acceptance Criteria (feature-level)
 
-- [ ] An API client can create a relationship between two existing tables via a real HTTP request, and it is durably persisted in Postgres.
-- [ ] An API client can retrieve all relationships involving a given table (as either side).
-- [ ] An API client can delete a relationship.
-- [ ] Creating a relationship against a nonexistent table returns `404`, not a panic or 500.
-- [ ] Creating a duplicate relationship returns `409`.
+- [x] An API client can create a relationship between two existing tables via a real HTTP request, and it is durably persisted in Postgres.
+- [x] An API client can retrieve all relationships involving a given table (as either side).
+- [x] An API client can delete a relationship.
+- [x] Creating a relationship against a nonexistent table returns `404`, not a panic or 500.
+- [x] Creating a duplicate relationship returns `409`.
 
 ## Slices
 
@@ -61,7 +61,7 @@ Every slice follows RED-GREEN-MUTATE-KILL MUTANTS-REFACTOR. No production code w
   - `GET /tables/{id}/relationships` for a nonexistent table returns `404`.
 **Done when**: acceptance criteria met, mutation report reviewed, human approves commit.
 
-### Slice C: API client deletes a relationship
+### Slice C: API client deletes a relationship — DONE
 
 **Value**: A caller can remove a relationship that's no longer accurate.
 **Path**: `DELETE /relationships/{relationship_id}` → `Catalog::delete_relationship` → `Storage::delete_relationship` → Postgres `DELETE` → `204`, or `404` if absent.

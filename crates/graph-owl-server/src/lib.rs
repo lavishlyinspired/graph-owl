@@ -3,7 +3,7 @@ use axum::{
     extract::{FromRequest, Path, Request, State, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use graph_owl_api::{Catalog, CreateRelationship, CreateRelationshipError, CreateTable};
 use graph_owl_core::{Relationship, Table, TableUpdate};
@@ -24,6 +24,7 @@ pub fn app(catalog: Catalog) -> Router {
             "/tables/{id}/relationships",
             post(create_relationship).get(list_relationships_for_table),
         )
+        .route("/relationships/{id}", delete(delete_relationship))
         .with_state(catalog)
 }
 
@@ -92,6 +93,17 @@ async fn list_relationships_for_table(
         .await?
         .map(Json)
         .ok_or(AppError::NotFound)
+}
+
+async fn delete_relationship(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    if catalog.delete_relationship(id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound)
+    }
 }
 
 /// Wraps [`Json`] to return `400 Bad Request` for any malformed or

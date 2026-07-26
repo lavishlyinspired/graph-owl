@@ -143,6 +143,13 @@ impl Catalog {
             .await?;
         Ok(Some(relationships))
     }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn delete_relationship(&self, id: Uuid) -> Result<bool, StorageError> {
+        self.storage.delete_relationship(id).await
+    }
 }
 
 #[cfg(test)]
@@ -233,6 +240,13 @@ mod tests {
                 })
                 .cloned()
                 .collect())
+        }
+
+        async fn delete_relationship(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut relationships = self.relationships.lock().unwrap();
+            let original_len = relationships.len();
+            relationships.retain(|relationship| relationship.id != id);
+            Ok(relationships.len() != original_len)
         }
     }
 
@@ -589,5 +603,53 @@ mod tests {
             .expect("list_relationships_for_table should succeed");
 
         assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn deleting_an_existing_relationship_removes_it_and_returns_true() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let from = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+        let to = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+        let relationship = catalog
+            .create_relationship(
+                from.id,
+                CreateRelationship {
+                    to_table_id: to.id,
+                    relationship_type: "derived_from".to_string(),
+                },
+            )
+            .await
+            .expect("create_relationship should succeed");
+
+        let deleted = catalog
+            .delete_relationship(relationship.id)
+            .await
+            .expect("delete_relationship should succeed");
+
+        assert!(deleted);
+        let remaining = catalog
+            .list_relationships_for_table(from.id)
+            .await
+            .expect("list_relationships_for_table should succeed")
+            .expect("table should exist");
+        assert_eq!(remaining, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_nonexistent_relationship_returns_false() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let deleted = catalog
+            .delete_relationship(Uuid::new_v4())
+            .await
+            .expect("delete_relationship should succeed");
+
+        assert!(!deleted);
     }
 }

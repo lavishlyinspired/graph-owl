@@ -31,4 +31,5 @@ pub trait Storage: Send + Sync {
         entity_type: &str,
         entity_id: Uuid,
     ) -> Result<Vec<Relationship>, StorageError>;
+    async fn delete_relationship(&self, id: Uuid) -> Result<bool, StorageError>;
 }
