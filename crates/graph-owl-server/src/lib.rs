@@ -5,8 +5,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use graph_owl_api::{Catalog, CreateTable};
-use graph_owl_core::{Table, TableUpdate};
+use graph_owl_api::{Catalog, CreateRelationship, CreateRelationshipError, CreateTable};
+use graph_owl_core::{Relationship, Table, TableUpdate};
 use graph_owl_storage::StorageError;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -20,6 +20,7 @@ pub fn app(catalog: Catalog) -> Router {
             "/tables/{id}",
             get(get_table).patch(update_table).delete(delete_table),
         )
+        .route("/tables/{id}/relationships", post(create_relationship))
         .with_state(catalog)
 }
 
@@ -70,6 +71,15 @@ async fn delete_table(
     }
 }
 
+async fn create_relationship(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<CreateRelationship>,
+) -> Result<(StatusCode, Json<Relationship>), AppError> {
+    let relationship = catalog.create_relationship(id, payload).await?;
+    Ok((StatusCode::CREATED, Json(relationship)))
+}
+
 /// Wraps [`Json`] to return `400 Bad Request` for any malformed or
 /// semantically invalid body, rather than axum's default `422` for data errors.
 struct AppJson<T>(T);
@@ -101,6 +111,18 @@ impl From<StorageError> for AppError {
         match error {
             StorageError::Conflict(fqn) => AppError::Conflict(fqn),
             StorageError::Unexpected(message) => AppError::Internal(message),
+        }
+    }
+}
+
+impl From<CreateRelationshipError> for AppError {
+    fn from(error: CreateRelationshipError) -> Self {
+        match error {
+            CreateRelationshipError::InvalidRelationshipType => {
+                AppError::BadRequest("relationship_type must not be empty".to_string())
+            }
+            CreateRelationshipError::TableNotFound => AppError::NotFound,
+            CreateRelationshipError::Storage(storage_error) => storage_error.into(),
         }
     }
 }

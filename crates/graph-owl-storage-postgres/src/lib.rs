@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use graph_owl_core::{Table, TableUpdate};
+use graph_owl_core::{Relationship, Table, TableUpdate};
 use graph_owl_storage::{Storage, StorageError};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -133,5 +133,40 @@ impl Storage for PostgresStorage {
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn create_relationship(
+        &self,
+        relationship: Relationship,
+    ) -> Result<Relationship, StorageError> {
+        sqlx::query(
+            "INSERT INTO entity_relationships
+                (id, from_entity_type, from_entity_id, relationship_type, to_entity_type, to_entity_id, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(relationship.id)
+        .bind(&relationship.from_entity_type)
+        .bind(relationship.from_entity_id)
+        .bind(&relationship.relationship_type)
+        .bind(&relationship.to_entity_type)
+        .bind(relationship.to_entity_id)
+        .bind(relationship.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some(UNIQUE_VIOLATION) => {
+                StorageError::Conflict(format!(
+                    "{}:{} -{}-> {}:{}",
+                    relationship.from_entity_type,
+                    relationship.from_entity_id,
+                    relationship.relationship_type,
+                    relationship.to_entity_type,
+                    relationship.to_entity_id
+                ))
+            }
+            _ => StorageError::Unexpected(e.to_string()),
+        })?;
+
+        Ok(relationship)
     }
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use graph_owl_core::{Table, TableUpdate};
+use graph_owl_core::{Relationship, Table, TableUpdate};
 use graph_owl_storage::{Storage, StorageError};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -11,6 +11,25 @@ pub struct CreateTable {
     pub name: String,
     pub fully_qualified_name: String,
     pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateRelationship {
+    pub to_table_id: Uuid,
+    pub relationship_type: String,
+}
+
+#[derive(Debug)]
+pub enum CreateRelationshipError {
+    InvalidRelationshipType,
+    TableNotFound,
+    Storage(StorageError),
+}
+
+impl From<StorageError> for CreateRelationshipError {
+    fn from(error: StorageError) -> Self {
+        CreateRelationshipError::Storage(error)
+    }
 }
 
 #[derive(Clone)]
@@ -70,6 +89,41 @@ impl Catalog {
     pub async fn delete_table(&self, id: Uuid) -> Result<bool, StorageError> {
         self.storage.delete_table(id).await
     }
+
+    /// # Errors
+    ///
+    /// Returns `CreateRelationshipError::InvalidRelationshipType` if `relationship_type` is
+    /// empty, `CreateRelationshipError::TableNotFound` if either table doesn't exist, or
+    /// `CreateRelationshipError::Storage` if the underlying storage fails (e.g. a duplicate
+    /// relationship).
+    pub async fn create_relationship(
+        &self,
+        from_table_id: Uuid,
+        request: CreateRelationship,
+    ) -> Result<Relationship, CreateRelationshipError> {
+        if request.relationship_type.is_empty() {
+            return Err(CreateRelationshipError::InvalidRelationshipType);
+        }
+
+        if self.storage.get_table(from_table_id).await?.is_none() {
+            return Err(CreateRelationshipError::TableNotFound);
+        }
+        if self.storage.get_table(request.to_table_id).await?.is_none() {
+            return Err(CreateRelationshipError::TableNotFound);
+        }
+
+        let relationship = Relationship {
+            id: Uuid::new_v4(),
+            from_entity_type: "table".to_string(),
+            from_entity_id: from_table_id,
+            relationship_type: request.relationship_type,
+            to_entity_type: "table".to_string(),
+            to_entity_id: request.to_table_id,
+            created_at: Utc::now(),
+        };
+
+        Ok(self.storage.create_relationship(relationship).await?)
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +182,13 @@ mod tests {
             let original_len = inserted.len();
             inserted.retain(|table| table.id != id);
             Ok(inserted.len() != original_len)
+        }
+
+        async fn create_relationship(
+            &self,
+            relationship: Relationship,
+        ) -> Result<Relationship, StorageError> {
+            Ok(relationship)
         }
     }
 
@@ -303,5 +364,112 @@ mod tests {
             .expect("delete_table should succeed");
 
         assert!(!deleted);
+    }
+
+    #[tokio::test]
+    async fn creating_a_relationship_between_two_existing_tables_succeeds() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let from = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+        let to = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+
+        let relationship = catalog
+            .create_relationship(
+                from.id,
+                CreateRelationship {
+                    to_table_id: to.id,
+                    relationship_type: "derived_from".to_string(),
+                },
+            )
+            .await
+            .expect("create_relationship should succeed");
+
+        assert_eq!(relationship.from_entity_type, "table");
+        assert_eq!(relationship.from_entity_id, from.id);
+        assert_eq!(relationship.to_entity_type, "table");
+        assert_eq!(relationship.to_entity_id, to.id);
+        assert_eq!(relationship.relationship_type, "derived_from");
+    }
+
+    #[tokio::test]
+    async fn creating_a_relationship_from_a_nonexistent_table_returns_table_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let to = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+
+        let result = catalog
+            .create_relationship(
+                Uuid::new_v4(),
+                CreateRelationship {
+                    to_table_id: to.id,
+                    relationship_type: "derived_from".to_string(),
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(CreateRelationshipError::TableNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn creating_a_relationship_to_a_nonexistent_table_returns_table_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let from = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+
+        let result = catalog
+            .create_relationship(
+                from.id,
+                CreateRelationship {
+                    to_table_id: Uuid::new_v4(),
+                    relationship_type: "derived_from".to_string(),
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(CreateRelationshipError::TableNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn creating_a_relationship_with_empty_relationship_type_returns_invalid_relationship_type()
+     {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let from = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+        let to = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+
+        let result = catalog
+            .create_relationship(
+                from.id,
+                CreateRelationship {
+                    to_table_id: to.id,
+                    relationship_type: String::new(),
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(CreateRelationshipError::InvalidRelationshipType)
+        ));
     }
 }

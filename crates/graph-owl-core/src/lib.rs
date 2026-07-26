@@ -17,3 +17,14 @@ pub struct TableUpdate {
     pub name: Option<String>,
     pub description: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Relationship {
+    pub id: Uuid,
+    pub from_entity_type: String,
+    pub from_entity_id: Uuid,
+    pub relationship_type: String,
+    pub to_entity_type: String,
+    pub to_entity_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use graph_owl_core::{Table, TableUpdate};
+use graph_owl_core::{Relationship, Table, TableUpdate};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -22,4 +22,8 @@ pub trait Storage: Send + Sync {
         update: TableUpdate,
     ) -> Result<Option<Table>, StorageError>;
     async fn delete_table(&self, id: Uuid) -> Result<bool, StorageError>;
+    async fn create_relationship(
+        &self,
+        relationship: Relationship,
+    ) -> Result<Relationship, StorageError>;
 }
