@@ -1,5 +1,5 @@
 use chrono::Utc;
-use graph_owl_core::{Table, TableUpdate};
+use graph_owl_core::{Table, TableUpdate, page::PageRequest};
 use graph_owl_storage::{Storage, StorageError};
 use graph_owl_storage_postgres::PostgresStorage;
 use testcontainers_modules::{
@@ -128,12 +128,12 @@ async fn getting_a_nonexistent_table_returns_none() {
 async fn listing_tables_with_no_rows_returns_an_empty_vec() {
     let (storage, _container, _connection_string) = test_storage().await;
 
-    let tables = storage
-        .list_tables()
+    let page = storage
+        .list_tables(&PageRequest::new(None, None).expect("valid"))
         .await
         .expect("list_tables should succeed");
 
-    assert_eq!(tables, Vec::new());
+    assert_eq!(page.data, Vec::new());
 }
 
 #[tokio::test]
@@ -155,15 +155,14 @@ async fn listing_tables_returns_all_persisted_tables() {
         .await
         .expect("insert should succeed");
 
-    let mut tables = storage
-        .list_tables()
+    let page = storage
+        .list_tables(&PageRequest::new(None, None).expect("valid"))
         .await
         .expect("list_tables should succeed");
-    tables.sort_by_key(|table| table.id);
-    let mut expected = vec![first, second];
-    expected.sort_by_key(|table| table.id);
 
-    assert_eq!(tables, expected);
+    let mut expected = vec![first, second];
+    expected.sort_by(|a, b| a.fully_qualified_name.cmp(&b.fully_qualified_name));
+    assert_eq!(page.data, expected);
 }
 
 #[tokio::test]

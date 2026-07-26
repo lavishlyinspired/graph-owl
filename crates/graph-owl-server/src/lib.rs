@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{FromRequest, Path, Request, State, rejection::JsonRejection},
+    extract::{FromRequest, Path, Query, Request, State, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -9,7 +9,10 @@ use graph_owl_api::{
     Catalog, CreateRelationship, CreateRelationshipError, CreateTable,
     validation::{FieldError, FieldErrorCode, ValidateBody},
 };
-use graph_owl_core::{Relationship, Table, TableUpdate};
+use graph_owl_core::{
+    Relationship, Table, TableUpdate,
+    page::{Page, PageRequest, PageRequestError},
+};
 use graph_owl_storage::StorageError;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -39,9 +42,18 @@ async fn create_table(
     Ok((StatusCode::CREATED, Json(table)))
 }
 
-async fn list_tables(State(catalog): State<Catalog>) -> Result<Json<Vec<Table>>, AppError> {
-    let tables = catalog.list_tables().await?;
-    Ok(Json(tables))
+#[derive(serde::Deserialize)]
+struct ListQuery {
+    limit: Option<usize>,
+    after: Option<String>,
+}
+
+async fn list_tables(
+    State(catalog): State<Catalog>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Page<Table>>, AppError> {
+    let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    Ok(Json(catalog.list_tables(&page).await?))
 }
 
 async fn get_table(
@@ -205,6 +217,31 @@ impl AppError {
             }
             AppError::NotFound => "the requested resource does not exist".to_string(),
         }
+    }
+}
+
+impl From<PageRequestError> for AppError {
+    fn from(error: PageRequestError) -> Self {
+        let field_error = match error {
+            PageRequestError::LimitTooLarge { requested, max } => FieldError::new(
+                "limit",
+                FieldErrorCode::Type,
+                format!("`limit` must be at most {max}, got {requested}"),
+            ),
+            PageRequestError::LimitZero => FieldError::new(
+                "limit",
+                FieldErrorCode::Type,
+                "`limit` must be at least 1".to_string(),
+            ),
+            // Opaque by design, so there is nothing useful to say about *why* it
+            // failed to decode — only that the client must not construct one.
+            PageRequestError::MalformedCursor => FieldError::new(
+                "after",
+                FieldErrorCode::Type,
+                "`after` is not a cursor this server issued".to_string(),
+            ),
+        };
+        AppError::Validation(vec![field_error])
     }
 }
 

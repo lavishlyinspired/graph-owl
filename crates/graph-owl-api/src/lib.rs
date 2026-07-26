@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use graph_owl_core::{Relationship, Table, TableUpdate};
+use graph_owl_core::{
+    Relationship, Table, TableUpdate,
+    page::{Cursor, Page, PageRequest},
+};
 use graph_owl_storage::{Storage, StorageError};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -112,8 +115,8 @@ impl Catalog {
     /// # Errors
     ///
     /// Returns an error if the underlying storage fails.
-    pub async fn list_tables(&self) -> Result<Vec<Table>, StorageError> {
-        self.storage.list_tables().await
+    pub async fn list_tables(&self, page: &PageRequest) -> Result<Page<Table>, StorageError> {
+        self.storage.list_tables(page).await
     }
 
     /// # Errors
@@ -225,8 +228,26 @@ mod tests {
                 .cloned())
         }
 
-        async fn list_tables(&self) -> Result<Vec<Table>, StorageError> {
-            Ok(self.inserted.lock().unwrap().clone())
+        async fn list_tables(&self, page: &PageRequest) -> Result<Page<Table>, StorageError> {
+            // The fake honours the same ordering and keyset contract as the
+            // Postgres adapter. A fake that returns insertion order would let
+            // a pagination bug pass here and fail only against a real database,
+            // which is the whole failure mode a port is supposed to prevent.
+            let mut tables = self.inserted.lock().unwrap().clone();
+            tables.sort_by(|a, b| {
+                a.fully_qualified_name
+                    .cmp(&b.fully_qualified_name)
+                    .then(a.id.cmp(&b.id))
+            });
+            if let Some(cursor) = &page.after {
+                tables.retain(|t| {
+                    (t.fully_qualified_name.as_str(), t.id) > (cursor.sort_key.as_str(), cursor.id)
+                });
+            }
+            tables.truncate(page.limit + 1);
+            Ok(Page::from_overfetch(tables, page.limit, |t| {
+                Cursor::new(t.fully_qualified_name.clone(), t.id)
+            }))
         }
 
         async fn update_table(
@@ -364,12 +385,13 @@ mod tests {
     async fn listing_tables_with_none_created_returns_an_empty_vec() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
 
-        let tables = catalog
-            .list_tables()
+        let page = catalog
+            .list_tables(&PageRequest::new(None, None).expect("valid"))
             .await
             .expect("list_tables should succeed");
 
-        assert_eq!(tables, Vec::new());
+        assert_eq!(page.data, Vec::new());
+        assert_eq!(page.paging.after, None);
     }
 
     #[tokio::test]
@@ -387,15 +409,16 @@ mod tests {
             .await
             .expect("create_table should succeed");
 
-        let mut tables = catalog
-            .list_tables()
+        let page = catalog
+            .list_tables(&PageRequest::new(None, None).expect("valid"))
             .await
             .expect("list_tables should succeed");
-        tables.sort_by_key(|table| table.id);
-        let mut expected = vec![first, second];
-        expected.sort_by_key(|table| table.id);
 
-        assert_eq!(tables, expected);
+        // Sorted by FQN, so the order is the contract's, not insertion order.
+        let mut expected = vec![first, second];
+        expected.sort_by(|a, b| a.fully_qualified_name.cmp(&b.fully_qualified_name));
+        assert_eq!(page.data, expected);
+        assert_eq!(page.paging.after, None, "both rows fit in one page");
     }
 
     #[tokio::test]

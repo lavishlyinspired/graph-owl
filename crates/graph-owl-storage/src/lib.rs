@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use graph_owl_core::{Relationship, Table, TableUpdate};
+use graph_owl_core::{
+    Relationship, Table, TableUpdate,
+    page::{Page, PageRequest},
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -21,7 +24,7 @@ pub enum StorageError {
 pub trait Storage: Send + Sync {
     async fn insert_table(&self, table: Table) -> Result<Table, StorageError>;
     async fn get_table(&self, id: Uuid) -> Result<Option<Table>, StorageError>;
-    async fn list_tables(&self) -> Result<Vec<Table>, StorageError>;
+    async fn list_tables(&self, page: &PageRequest) -> Result<Page<Table>, StorageError>;
     async fn update_table(
         &self,
         id: Uuid,

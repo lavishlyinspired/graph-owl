@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use graph_owl_core::{Relationship, Table, TableUpdate};
+use graph_owl_core::{
+    Relationship, Table, TableUpdate,
+    page::{Cursor, Page, PageRequest},
+};
 use graph_owl_storage::{Storage, StorageError};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -120,16 +123,49 @@ impl Storage for PostgresStorage {
         Ok(row.map(table_from_row))
     }
 
-    async fn list_tables(&self) -> Result<Vec<Table>, StorageError> {
-        let rows = sqlx::query(
-            "SELECT id, name, fully_qualified_name, description, created_at, updated_at
-             FROM tables",
-        )
-        .fetch_all(&self.pool)
-        .await
+    async fn list_tables(&self, page: &PageRequest) -> Result<Page<Table>, StorageError> {
+        // Overfetch by one: the extra row answers "is there a next page" without
+        // a second COUNT, and is dropped before the page is returned.
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+
+        // Keyset, not OFFSET. The row comparison `(fqn, id) > ($1, $2)` is a
+        // single index-ordered seek and is stable under concurrent insert;
+        // OFFSET re-counts from the start and shifts under any earlier insert.
+        let rows = match &page.after {
+            Some(cursor) => {
+                sqlx::query(
+                    "SELECT id, name, fully_qualified_name, description, created_at, updated_at
+                     FROM tables
+                     WHERE (fully_qualified_name, id) > ($1, $2)
+                     ORDER BY fully_qualified_name, id
+                     LIMIT $3",
+                )
+                .bind(&cursor.sort_key)
+                .bind(cursor.id)
+                .bind(overfetch)
+                .fetch_all(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query(
+                    "SELECT id, name, fully_qualified_name, description, created_at, updated_at
+                     FROM tables
+                     ORDER BY fully_qualified_name, id
+                     LIMIT $1",
+                )
+                .bind(overfetch)
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-        Ok(rows.into_iter().map(table_from_row).collect())
+        let tables: Vec<Table> = rows.into_iter().map(table_from_row).collect();
+        Ok(Page::from_overfetch(tables, page.limit, |table| {
+            Cursor::new(table.fully_qualified_name.clone(), table.id)
+        }))
     }
 
     async fn update_table(

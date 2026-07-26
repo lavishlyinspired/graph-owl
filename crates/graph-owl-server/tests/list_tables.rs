@@ -43,7 +43,7 @@ async fn get_tables_with_no_rows_returns_an_empty_array() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
-    assert_eq!(body, json!([]));
+    assert_eq!(body, json!({ "data": [], "paging": { "after": null } }));
 }
 
 #[tokio::test]
@@ -64,9 +64,13 @@ async fn get_tables_returns_all_created_tables() {
         .expect("request should be handled");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let mut body = json_body(response).await.as_array().unwrap().clone();
-    body.sort_by_key(|table| table["id"].as_str().unwrap().to_string());
-    let mut expected = vec![first, second];
-    expected.sort_by_key(|table| table["id"].as_str().unwrap().to_string());
-    assert_eq!(body, expected);
+    let body = json_body(response).await;
+    // Sorted by FQN — `customers` before `orders` — which is the contract now,
+    // not insertion order.
+    assert_eq!(body["data"], json!([first, second]));
+    assert_eq!(
+        body["paging"]["after"],
+        Value::Null,
+        "both rows fit one page"
+    );
 }
