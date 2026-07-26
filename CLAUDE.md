@@ -1,22 +1,55 @@
 # graph-owl
 
-Rust metadata-catalog service. Layered workspace:
+A knowledge graph engine that stores, queries, reasons over, and validates enterprise metadata as a connected graph. Rust workspace, 28 crates — 5 built, 23 placeholders created by the epic that needs them.
+
+**Built** (the walking skeleton: HTTP → facade → port → Postgres):
 
 ```
-graph-owl-core             pure domain types, no I/O
-graph-owl-storage           Storage trait + StorageError (the port)
+graph-owl-core               pure domain types, no I/O
+graph-owl-storage            Storage trait + StorageError (the port)
 graph-owl-storage-postgres   sqlx-backed impl of Storage (the adapter)
 graph-owl-api                Catalog facade, wraps Arc<dyn Storage>
-graph-owl-server             axum HTTP layer
+graph-owl-server             axum HTTP layer, composition root
 ```
 
-Edition 2024, Rust workspace with `[workspace.lints.clippy] all = "warn", pedantic = "warn"`.
+**Placeholders**, grouped by what they are:
+
+| Group | Crates |
+|---|---|
+| Engine | `engine` (port) · `engine-postgres` · `ontology` · `constraint` · `reasoning` · `query` · `traversal` |
+| Property graph | `lpg` · `bolt` · `lpg-io` |
+| Search | `search` (port) · `search-hnsw` · `search-opensearch` |
+| Interop & activation | `rdf-io` · `events` · `mcp` · `connectors` · `cli` |
+| Other | `authz` · `resolution` · `analytics` · `ui` · `storage-memory` |
+
+Every placeholder's `lib.rs` names the epic that implements it. `plans/00e-crate-architecture.md` is the authority on which crates exist, which were rejected, and the growth trigger for adding one — **read it before creating a crate**.
+
+Edition 2024, Rust workspace with `[workspace.lints.clippy] all = "warn", pedantic = "warn"`. Frontend sources live in `ui/`, outside `crates/`; `graph-owl-ui` only embeds and serves the build output.
 
 ## Process
 
 TDD is non-negotiable: RED (failing test first) → GREEN (minimum code) → MUTATE (`cargo mutants`) → KILL MUTANTS → REFACTOR (only if it adds value). Never commit without explicit user approval — this holds even during "complete all remaining slices" autonomous runs; still pause at each commit point.
 
-Never commit/write any mention of the third-party reference systems anywhere in this project (code, comments, commit messages, plan docs). The local reference clones under `.claude/docs/referenceRepo/` may stay on disk for architecture research but must never be committed or cited in project files. This project's git history was deliberately squashed once already to scrub prior references — don't reintroduce them.
+Never name the third-party systems whose clones sit under `.claude/docs/referenceRepo/` — not in code, comments, commit messages, plan docs, or any other committed file. Those clones may stay on disk for architecture research, but must never be committed or cited by name. This project's git history was deliberately squashed once already to scrub such references; don't reintroduce them. When a design decision was informed by that research, write down the pattern and the reasoning behind it, never the source.
+
+## Licensing — binding during implementation
+
+**Neither reference under `.claude/docs/referenceRepo/` is permissively licensed throughout, and one is not open source at all.** graph-owl contains no code from either, and that is the entire basis on which their non-compete terms do not bind this project. It is a property to actively maintain while writing code, not a claim made once.
+
+Full rules in **`plans/00i-licensing.md`** — read it before implementing anything in Phase 1. Named specifics (which licence, which directories, incident log) are in `.claude/docs/licensing-detail.md`, gitignored.
+
+The four that matter most while coding:
+
+1. **Do not open reference source while writing the corresponding graph-owl code.** Study and implementation happen in separate sessions. This is the only mechanically checkable rule and the most effective one.
+2. **Specifications are the source; implementations are not.** W3C for RDF/SPARQL/OWL/SHACL/SKOS/JSON-LD, ISO/IEC 39075 and openCypher for Cypher, the published Bolt/PackStream spec, RFC 9457 for errors. If a capability has a spec, the spec is the *only* permitted reference — including when the spec is unclear.
+3. **Never copy anything**: source (including translated or "adapted"), constant tables, thresholds, tuning numbers, size classes, timeouts, error strings, metric names, config keys, test fixtures, golden files, or comments. **Every magic number in graph-owl must be derivable from a stated reason in a plan** — "the reference used this" is not a reason, and a number without one was never justified for this system anyway.
+4. **When stuck**: the spec first, then a permissively licensed implementation (licence checked *before* reading), then ask a human. Never open the source-available or community-licensed reference to unblock a task — that is exactly the moment the rule exists for.
+
+One incident already occurred and was reverted during planning (a cache-tier table reproduced near-verbatim, rationale included). Assume the same failure mode will present itself while coding.
+
+**Dependencies**: `cargo deny` with a permissive-only allowlist (MIT, Apache-2.0, BSD, ISC, Unicode, Zlib). Copyleft and source-available crates are rejected by default.
+
+**Crate naming is not a concern.** `core`, `api`, `server`, `query`, `cli`, `storage` are universal Rust convention, not anyone's expression; `graph-owl-bolt` names the protocol it speaks, which is descriptive use of an openly specified protocol. Do not rename crates for licensing reasons — see `plans/00i-licensing.md`.
 
 ## Gotchas learned building the Table entity slice
 
@@ -42,10 +75,60 @@ These are different problems and shouldn't share a pattern:
 
 - **Storage backends** (where the catalog's own data lives — e.g. Postgres, and later MongoDB) are bounded to a handful of options. One crate per backend, each implementing the `Storage` trait, is the right granularity — `graph-owl-storage-postgres`, later `graph-owl-storage-mongodb`. A factory/config switch at startup (in `graph-owl-server`'s `main.rs`) picks one.
 
-- **Source connectors** (external systems the catalog *catalogs* — Snowflake, Kafka, etc., potentially 100+) do not get one crate each. Verified against a mature reference implementation, which implements all of these as modules inside a single ingestion package behind a shared connector interface, not as 100 separate packages. The Rust equivalent: one `graph-owl-connectors` crate with a module per connector implementing a shared `Connector` trait.
+- **Source connectors** (external systems the catalog *catalogs* — Snowflake, Kafka, etc., potentially 100+) do not get one crate each. Verified against a mature reference implementation, which puts every connector in a single ingestion package behind a shared connector interface rather than shipping 100 separate packages. The Rust equivalent: one `graph-owl-connectors` crate with a module per connector implementing a shared `Connector` trait.
 
-MongoDB storage-backend support is explicitly deferred (not yet implemented) — see `plans/graph-owl-table-entity.md`'s "Explicitly deferred" section.
+MongoDB storage-backend support is explicitly deferred (not yet implemented) — see `plans/90-done-table-entity.md`'s "Explicitly deferred" section.
+
+## Documentation map
+
+Read these before planning or implementing anything non-trivial:
+
+| Document | Answers |
+|---|---|
+| `plans/00a-product-position.md` | What this competes on, what it refuses to compete on, and the enforced budgets |
+| `plans/00b-architecture.md` | Layering, flake model, crate map, error model, testing strategy, decision log |
+| `plans/00c-domain-model.md` | Entities, envelope, FQN rules, relationships, versioning, triple projection |
+| `plans/00d-api-conventions.md` | URL shape, status codes, error body, pagination, filtering, concurrency |
+| `plans/00e-crate-architecture.md` | Which crates exist, which were rejected, and the rule for adding one |
+| `plans/00f-ui-architecture.md` | Console stack, the two-renderer rule, non-negotiables, CI budgets, what the console will never do |
+| `plans/00g-operations.md` | Migration & rollback, backup/DR (RPO/RTO), data retention & erasure, runbooks, the testing levels above unit |
+| `plans/00h-ui-design-system.md` | Design tokens, chrome, the five reusable UI patterns, and the epic → screen inventory |
+| `plans/00i-licensing.md` | **Clean-room rules binding on every implementation session** — what may be read, what may never be copied |
+| `plans/ROADMAP.md` | All 42 epics in 9 phases, sequenced, with the plan-file work queue |
+
+### Which `00*` docs bind which work
+
+The `00*` documents are **standing reference, not per-epic reading** — they are the decisions every epic inherits. Not all of them bind every epic, so this is the routing table. **Read the binding rows before starting an epic, not after a review finds a conflict.**
+
+| Working on | Must read first |
+|---|---|
+| **Anything at all** | `00i` (licensing — before writing a line), `00a` (what this competes on) |
+| An engine epic (4–9a) | `00b` (layering, flake model, error model), `00c` (domain model, FQN, triple projection), `00e` (before creating any crate) |
+| An API surface (1, 2, 3, 16, 34) | `00d` (URL shape, status codes, error body, pagination, concurrency), `00c` |
+| A UI epic (39–42) | `00f` (stack, budgets, non-negotiables), `00h` (tokens, the five patterns, screen inventory), `00d` |
+| A collection epic (15–21) | `00c`, `00d`, `00g` §5 (journey tests) |
+| Anything touching deploy, migration, or data lifetime | `00g` (rollback, DR, retention, runbooks) |
+| Adding a crate | `00e` — it is the authority, and the growth trigger is a gate |
+
+Two standing obligations that apply to **every** epic regardless of the table:
+
+- **When implementation and a `00*` document disagree, the document is right and the code has drifted.** Fix the code, or change the document deliberately and say why in `00b`'s decision log.
+- **Every magic number needs a stated reason in its plan** (`00i` rule 4). This is both a licensing control and a design one.
+
+Differentiator epics are marked ★ in the roadmap — they are the differentiators, not optional polish. Cutting one is a positioning decision, not a scope decision.
+
+**Three distinctions that keep getting conflated.** Each has cost a design discussion; none should cost another:
+
+- **A storage backend is not a connector.** A storage backend is where graph-owl's *own* data lives (read+write, deep, bounded to one); a connector is an external system graph-owl *describes* (read-only, shallow, 100+). Postgres is both, in opposite roles.
+- **An external graph database is not a backend either.** As a *source* it is a connector module; as a *sync destination* it is a one-directional, lossy **projection target** (`plans/09a-lpg-interchange.md`). Never a place the graph lives.
+- **Traversal is not analytics.** Traversal is a bounded walk answering "what is connected to what" (Epic 7a); analytics is an unbounded whole-graph computation answering "what is structurally significant" (Epic 38). Different crates, different budgets, different failure modes.
+
+`plans/00a`–`00i` describe the **target** state, with sections marked **(built)** where they already exist. When implementation and these documents disagree, the documents are right and the code has drifted.
 
 ## Plans
 
-`plans/graph-owl-table-entity.md` documents the completed Table-entity walking skeleton (Slices A-E, all done) and lists explicitly deferred follow-on work. Left in place as a historical record — do not delete.
+`plans/ROADMAP.md` is the entry point — it sequences 42 epics across 9 phases and links a per-epic plan for each. Plans and docs are numbered by epic; `NN-` prefixes give reading order. Each plan carries PR-sized vertical slices with acceptance criteria and the mutants to watch for.
+
+Completed, kept as historical record — do not delete:
+- `plans/90-done-table-entity.md` — Table walking skeleton (Slices A–E)
+- `plans/91-done-relationships.md` — generic relationship edge (Slices A–C)

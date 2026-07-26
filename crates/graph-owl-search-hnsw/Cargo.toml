@@ -1,0 +1,14 @@
+[package]
+name = "graph-owl-search-hnsw"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+graph-owl-core = { path = "../graph-owl-core" }
+graph-owl-search = { path = "../graph-owl-search" }
+async-trait.workspace = true
+thiserror.workspace = true

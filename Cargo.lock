@@ -732,6 +732,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "graph-owl-analytics"
+version = "0.1.0"
+
+[[package]]
 name = "graph-owl-api"
 version = "0.1.0"
 dependencies = [
@@ -746,6 +750,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "graph-owl-authz"
+version = "0.1.0"
+dependencies = [
+ "graph-owl-core",
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "graph-owl-bolt"
+version = "0.1.0"
+
+[[package]]
+name = "graph-owl-cli"
+version = "0.1.0"
+dependencies = [
+ "graph-owl-api",
+ "graph-owl-core",
+ "serde",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "graph-owl-connectors"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "graph-owl-core",
+ "sqlx",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "graph-owl-constraint"
+version = "0.1.0"
+dependencies = [
+ "graph-owl-core",
+ "graph-owl-ontology",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "graph-owl-core"
 version = "0.1.0"
 dependencies = [
@@ -753,6 +801,140 @@ dependencies = [
  "serde",
  "thiserror 2.0.19",
  "uuid",
+]
+
+[[package]]
+name = "graph-owl-engine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "graph-owl-core",
+ "serde",
+ "thiserror 2.0.19",
+ "uuid",
+]
+
+[[package]]
+name = "graph-owl-engine-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "graph-owl-core",
+ "graph-owl-engine",
+ "refinery",
+ "sqlx",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "graph-owl-events"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "graph-owl-core",
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "graph-owl-lpg"
+version = "0.1.0"
+
+[[package]]
+name = "graph-owl-lpg-io"
+version = "0.1.0"
+
+[[package]]
+name = "graph-owl-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "graph-owl-api",
+ "graph-owl-core",
+ "serde",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "graph-owl-ontology"
+version = "0.1.0"
+dependencies = [
+ "graph-owl-core",
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "graph-owl-query"
+version = "0.1.0"
+dependencies = [
+ "graph-owl-core",
+ "graph-owl-engine",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "graph-owl-rdf-io"
+version = "0.1.0"
+dependencies = [
+ "graph-owl-core",
+ "graph-owl-engine",
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "graph-owl-reasoning"
+version = "0.1.0"
+dependencies = [
+ "graph-owl-core",
+ "graph-owl-ontology",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "graph-owl-resolution"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "graph-owl-core",
+ "graph-owl-engine",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "graph-owl-search"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "graph-owl-core",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "graph-owl-search-hnsw"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "graph-owl-core",
+ "graph-owl-search",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "graph-owl-search-opensearch"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "graph-owl-core",
+ "graph-owl-search",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -783,6 +965,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "graph-owl-storage-memory"
+version = "0.1.0"
+
+[[package]]
 name = "graph-owl-storage-postgres"
 version = "0.1.0"
 dependencies = [
@@ -798,6 +984,20 @@ dependencies = [
  "tokio-postgres",
  "uuid",
 ]
+
+[[package]]
+name = "graph-owl-traversal"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "graph-owl-core",
+ "graph-owl-engine",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "graph-owl-ui"
+version = "0.1.0"
 
 [[package]]
 name = "hashbrown"

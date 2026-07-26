@@ -1,0 +1,13 @@
+[package]
+name = "graph-owl-authz"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+graph-owl-core = { path = "../graph-owl-core" }
+thiserror.workspace = true
+serde.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "graph-owl-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+graph-owl-core = { path = "../graph-owl-core" }
+graph-owl-api = { path = "../graph-owl-api" }
+tokio.workspace = true
+serde.workspace = true
+thiserror.workspace = true

@@ -2,6 +2,7 @@
 
 **Branch**: feat/table-entity
 **Status**: All slices (A-E) done — ready to close out
+**Crates**: `graph-owl-core` · `graph-owl-storage` · `graph-owl-storage-postgres` · `graph-owl-api` · `graph-owl-server` (all built)
 
 ## Goal
 

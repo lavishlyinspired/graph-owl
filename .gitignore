@@ -2,8 +2,8 @@
 .DS_Store
 .env
 
-# Local reference material, not part of this project
-.claude/docs/referenceRepo/
+# Local reference material, not part of this project — never committed
+.claude/docs/
 
 # Local-only Claude Code settings, not shared
 .claude/settings.local.json
@@ -15,3 +15,10 @@
 .gitignore
 
 .claude/docs/analysis.md
+.claude/docs/analysis2.md
+
+
+.claude/docs/graph-owl-crate-architecture.md
+.claude/docs/graph-owl-engine.md
+.claude/docs/KGDOCS_to_GRAPHOWL_PLAN.md
+
