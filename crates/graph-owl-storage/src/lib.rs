@@ -21,4 +21,5 @@ pub trait Storage: Send + Sync {
         id: Uuid,
         update: TableUpdate,
     ) -> Result<Option<Table>, StorageError>;
+    async fn delete_table(&self, id: Uuid) -> Result<bool, StorageError>;
 }

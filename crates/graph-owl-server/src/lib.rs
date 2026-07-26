@@ -16,7 +16,10 @@ pub fn app(catalog: Catalog) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/tables", post(create_table).get(list_tables))
-        .route("/tables/{id}", get(get_table).patch(update_table))
+        .route(
+            "/tables/{id}",
+            get(get_table).patch(update_table).delete(delete_table),
+        )
         .with_state(catalog)
 }
 
@@ -54,6 +57,17 @@ async fn update_table(
         .await?
         .map(Json)
         .ok_or(AppError::NotFound)
+}
+
+async fn delete_table(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    if catalog.delete_table(id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound)
+    }
 }
 
 /// Wraps [`Json`] to return `400 Bad Request` for any malformed or

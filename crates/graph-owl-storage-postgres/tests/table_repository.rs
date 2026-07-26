@@ -212,3 +212,37 @@ async fn updating_a_nonexistent_table_returns_none() {
 
     assert_eq!(result, None);
 }
+
+#[tokio::test]
+async fn deleting_an_existing_table_removes_it_and_returns_true() {
+    let (storage, _container, _connection_string) = test_storage().await;
+    let table = mock_table();
+    storage
+        .insert_table(table.clone())
+        .await
+        .expect("insert should succeed");
+
+    let deleted = storage
+        .delete_table(table.id)
+        .await
+        .expect("delete_table should succeed");
+
+    assert!(deleted);
+    let found = storage
+        .get_table(table.id)
+        .await
+        .expect("get_table should succeed");
+    assert_eq!(found, None);
+}
+
+#[tokio::test]
+async fn deleting_a_nonexistent_table_returns_false() {
+    let (storage, _container, _connection_string) = test_storage().await;
+
+    let deleted = storage
+        .delete_table(Uuid::new_v4())
+        .await
+        .expect("delete_table should succeed");
+
+    assert!(!deleted);
+}

@@ -63,6 +63,13 @@ impl Catalog {
     ) -> Result<Option<Table>, StorageError> {
         self.storage.update_table(id, update).await
     }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn delete_table(&self, id: Uuid) -> Result<bool, StorageError> {
+        self.storage.delete_table(id).await
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +121,13 @@ mod tests {
             }
             table.updated_at = Utc::now();
             Ok(Some(table.clone()))
+        }
+
+        async fn delete_table(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut inserted = self.inserted.lock().unwrap();
+            let original_len = inserted.len();
+            inserted.retain(|table| table.id != id);
+            Ok(inserted.len() != original_len)
         }
     }
 
@@ -256,5 +270,38 @@ mod tests {
             .expect("update_table should succeed");
 
         assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn deleting_an_existing_table_removes_it_and_returns_true() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let created = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+
+        let deleted = catalog
+            .delete_table(created.id)
+            .await
+            .expect("delete_table should succeed");
+
+        assert!(deleted);
+        let found = catalog
+            .get_table(created.id)
+            .await
+            .expect("get_table should succeed");
+        assert_eq!(found, None);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_nonexistent_table_returns_false() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let deleted = catalog
+            .delete_table(Uuid::new_v4())
+            .await
+            .expect("delete_table should succeed");
+
+        assert!(!deleted);
     }
 }

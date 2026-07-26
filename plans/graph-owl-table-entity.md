@@ -1,7 +1,7 @@
 # Plan: Table Entity Walking Skeleton
 
 **Branch**: feat/table-entity
-**Status**: Active — Slices A-D done; Slice E remains
+**Status**: All slices (A-E) done — ready to close out
 
 ## Goal
 
@@ -79,7 +79,7 @@ Every slice follows RED-GREEN-MUTATE-KILL MUTANTS-REFACTOR. No production code w
   - `fully_qualified_name` and `id` are immutable via this endpoint — the PATCH request shape (`TableUpdate`) has no fields for them at all, so there's nothing to reject; any extra JSON fields a client sends are silently dropped by default deserialization.
 **Done when**: acceptance criteria met, mutation report reviewed, human approves commit.
 
-### Slice E: API client deletes a Table
+### Slice E: API client deletes a Table — DONE
 
 **Value**: A caller can remove a Table that no longer exists in the source system.
 **Path**: `DELETE /tables/:id` → `Catalog::delete_table` → `Storage::delete_table` → Postgres `DELETE` (hard delete — soft-delete/versioning is an explicitly deferred later slice, see below) → 204, or 404 if absent.

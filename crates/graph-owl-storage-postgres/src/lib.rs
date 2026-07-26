@@ -124,4 +124,14 @@ impl Storage for PostgresStorage {
 
         Ok(row.map(table_from_row))
     }
+
+    async fn delete_table(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM tables WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }
