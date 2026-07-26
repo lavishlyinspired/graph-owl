@@ -77,7 +77,7 @@ async fn creating_a_duplicate_relationship_is_rejected() {
         .expect("first create should succeed");
     let result = storage.create_relationship(second).await;
 
-    assert!(matches!(result, Err(StorageError::Conflict(_))));
+    assert!(matches!(result, Err(StorageError::Conflict { .. })));
 }
 
 #[tokio::test]

@@ -5,8 +5,14 @@ use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
-    #[error("conflict: {0}")]
-    Conflict(String),
+    /// A uniqueness constraint rejected the write. `existing_id` names the row
+    /// that was already there when the adapter can identify it, so a client can
+    /// act on the collision instead of guessing what it hit.
+    #[error("conflict: {detail}")]
+    Conflict {
+        detail: String,
+        existing_id: Option<Uuid>,
+    },
     #[error("unexpected storage error: {0}")]
     Unexpected(String),
 }

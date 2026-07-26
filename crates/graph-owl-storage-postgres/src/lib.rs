@@ -68,7 +68,7 @@ impl PostgresStorage {
 #[async_trait]
 impl Storage for PostgresStorage {
     async fn insert_table(&self, table: Table) -> Result<Table, StorageError> {
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO tables (id, name, fully_qualified_name, description, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6)",
         )
@@ -79,13 +79,30 @@ impl Storage for PostgresStorage {
         .bind(table.created_at)
         .bind(table.updated_at)
         .execute(&self.pool)
-        .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some(UNIQUE_VIOLATION) => {
-                StorageError::Conflict(table.fully_qualified_name.clone())
-            }
-            _ => StorageError::Unexpected(e.to_string()),
-        })?;
+        .await;
+
+        if let Err(e) = result {
+            return Err(match &e {
+                sqlx::Error::Database(db_err)
+                    if db_err.code().as_deref() == Some(UNIQUE_VIOLATION) =>
+                {
+                    // Second query only on the error path: name the row that was
+                    // already there so the caller can act on it.
+                    let existing_id =
+                        sqlx::query_scalar("SELECT id FROM tables WHERE fully_qualified_name = $1")
+                            .bind(&table.fully_qualified_name)
+                            .fetch_optional(&self.pool)
+                            .await
+                            .ok()
+                            .flatten();
+                    StorageError::Conflict {
+                        detail: table.fully_qualified_name.clone(),
+                        existing_id,
+                    }
+                }
+                _ => StorageError::Unexpected(e.to_string()),
+            });
+        }
 
         Ok(table)
     }
@@ -168,14 +185,17 @@ impl Storage for PostgresStorage {
         .await
         .map_err(|e| match &e {
             sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some(UNIQUE_VIOLATION) => {
-                StorageError::Conflict(format!(
-                    "{}:{} -{}-> {}:{}",
-                    relationship.from_entity_type,
-                    relationship.from_entity_id,
-                    relationship.relationship_type,
-                    relationship.to_entity_type,
-                    relationship.to_entity_id
-                ))
+                StorageError::Conflict {
+                    detail: format!(
+                        "{}:{} -{}-> {}:{}",
+                        relationship.from_entity_type,
+                        relationship.from_entity_id,
+                        relationship.relationship_type,
+                        relationship.to_entity_type,
+                        relationship.to_entity_id
+                    ),
+                    existing_id: None,
+                }
             }
             _ => StorageError::Unexpected(e.to_string()),
         })?;

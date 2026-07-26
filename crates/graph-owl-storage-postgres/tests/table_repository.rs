@@ -79,7 +79,7 @@ async fn inserting_a_duplicate_fully_qualified_name_is_rejected() {
         .expect("first insert should succeed");
     let result = storage.insert_table(second).await;
 
-    assert!(matches!(result, Err(StorageError::Conflict(_))));
+    assert!(matches!(result, Err(StorageError::Conflict { .. })));
 }
 
 #[tokio::test]

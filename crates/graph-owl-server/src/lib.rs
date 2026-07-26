@@ -120,22 +120,85 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let Json(value) = Json::<T>::from_request(req, state)
             .await
-            .map_err(|rejection: JsonRejection| AppError::BadRequest(rejection.body_text()))?;
+            .map_err(|rejection: JsonRejection| AppError::MalformedBody(rejection.body_text()))?;
         Ok(AppJson(value))
     }
 }
 
+/// Base for every `type` URI. Clients branch on these, never on prose, so the
+/// strings are part of the wire contract and must not be reworded.
+const PROBLEM_TYPE_BASE: &str = "https://graph-owl.dev/errors/";
+
 enum AppError {
-    BadRequest(String),
-    Conflict(String),
+    /// The body was not parseable as the expected shape.
+    MalformedBody(String),
+    /// The body parsed but a domain rule rejected it.
+    Validation(String),
+    Conflict {
+        detail: String,
+        existing_id: Option<Uuid>,
+    },
     Internal(String),
     NotFound,
+}
+
+impl AppError {
+    /// Stable, machine-readable identity. Distinct per variant — a client
+    /// branches on this, so two variants sharing a slug is a contract bug.
+    fn problem_slug(&self) -> &'static str {
+        match self {
+            AppError::MalformedBody(_) => "malformed-body",
+            AppError::Validation(_) => "validation-failed",
+            AppError::Conflict { .. } => "fqn-conflict",
+            AppError::Internal(_) => "internal-error",
+            AppError::NotFound => "not-found",
+        }
+    }
+
+    /// Short human-readable summary. Constant per variant per RFC 9457 —
+    /// per-occurrence information belongs in `detail`.
+    fn title(&self) -> &'static str {
+        match self {
+            AppError::MalformedBody(_) => "Malformed request body",
+            AppError::Validation(_) => "Validation failed",
+            AppError::Conflict { .. } => "Fully-qualified name already exists",
+            AppError::Internal(_) => "Internal server error",
+            AppError::NotFound => "Resource not found",
+        }
+    }
+
+    fn status(&self) -> StatusCode {
+        match self {
+            AppError::MalformedBody(_) | AppError::Validation(_) => StatusCode::BAD_REQUEST,
+            AppError::Conflict { .. } => StatusCode::CONFLICT,
+            AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::NotFound => StatusCode::NOT_FOUND,
+        }
+    }
+
+    fn detail(&self) -> String {
+        match self {
+            AppError::MalformedBody(message)
+            | AppError::Validation(message)
+            | AppError::Internal(message) => message.clone(),
+            AppError::Conflict { detail, .. } => {
+                format!("an entity with fully_qualified_name '{detail}' already exists")
+            }
+            AppError::NotFound => "the requested resource does not exist".to_string(),
+        }
+    }
 }
 
 impl From<StorageError> for AppError {
     fn from(error: StorageError) -> Self {
         match error {
-            StorageError::Conflict(fqn) => AppError::Conflict(fqn),
+            StorageError::Conflict {
+                detail,
+                existing_id,
+            } => AppError::Conflict {
+                detail,
+                existing_id,
+            },
             StorageError::Unexpected(message) => AppError::Internal(message),
         }
     }
@@ -145,7 +208,7 @@ impl From<CreateRelationshipError> for AppError {
     fn from(error: CreateRelationshipError) -> Self {
         match error {
             CreateRelationshipError::InvalidRelationshipType => {
-                AppError::BadRequest("relationship_type must not be empty".to_string())
+                AppError::Validation("relationship_type must not be empty".to_string())
             }
             CreateRelationshipError::TableNotFound => AppError::NotFound,
             CreateRelationshipError::Storage(storage_error) => storage_error.into(),
@@ -155,15 +218,29 @@ impl From<CreateRelationshipError> for AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
-            AppError::Conflict(fqn) => (
-                StatusCode::CONFLICT,
-                format!("table with fully_qualified_name '{fqn}' already exists"),
-            ),
-            AppError::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
-            AppError::NotFound => (StatusCode::NOT_FOUND, "table not found".to_string()),
-        };
-        (status, Json(json!({ "error": message }))).into_response()
+        let status = self.status();
+        let mut body = json!({
+            "type": format!("{PROBLEM_TYPE_BASE}{}", self.problem_slug()),
+            "title": self.title(),
+            "status": status.as_u16(),
+            "detail": self.detail(),
+        });
+
+        // Extension member: only present when the adapter could identify the
+        // row that was collided with.
+        if let AppError::Conflict {
+            existing_id: Some(id),
+            ..
+        } = &self
+        {
+            body["conflictingId"] = json!(id);
+        }
+
+        let mut response = (status, Json(body)).into_response();
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/problem+json"),
+        );
+        response
     }
 }
