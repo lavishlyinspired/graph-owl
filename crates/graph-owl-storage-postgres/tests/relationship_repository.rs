@@ -92,3 +92,66 @@ async fn creating_a_relationship_with_an_empty_relationship_type_is_rejected() {
 
     assert!(matches!(result, Err(StorageError::Unexpected(_))));
 }
+
+#[tokio::test]
+async fn listing_relationships_for_an_entity_with_none_returns_an_empty_vec() {
+    let (storage, _container, _connection_string) = test_storage().await;
+
+    let relationships = storage
+        .list_relationships_for_entity("table", Uuid::new_v4())
+        .await
+        .expect("list_relationships_for_entity should succeed");
+
+    assert_eq!(relationships, Vec::new());
+}
+
+#[tokio::test]
+async fn listing_relationships_returns_ones_where_the_entity_is_the_from_side() {
+    let (storage, _container, _connection_string) = test_storage().await;
+    let relationship = mock_relationship();
+    storage
+        .create_relationship(relationship.clone())
+        .await
+        .expect("create_relationship should succeed");
+
+    let found = storage
+        .list_relationships_for_entity("table", relationship.from_entity_id)
+        .await
+        .expect("list_relationships_for_entity should succeed");
+
+    assert_eq!(found, vec![relationship]);
+}
+
+#[tokio::test]
+async fn listing_relationships_returns_ones_where_the_entity_is_the_to_side() {
+    let (storage, _container, _connection_string) = test_storage().await;
+    let relationship = mock_relationship();
+    storage
+        .create_relationship(relationship.clone())
+        .await
+        .expect("create_relationship should succeed");
+
+    let found = storage
+        .list_relationships_for_entity("table", relationship.to_entity_id)
+        .await
+        .expect("list_relationships_for_entity should succeed");
+
+    assert_eq!(found, vec![relationship]);
+}
+
+#[tokio::test]
+async fn listing_relationships_does_not_return_unrelated_entities_relationships() {
+    let (storage, _container, _connection_string) = test_storage().await;
+    let relationship = mock_relationship();
+    storage
+        .create_relationship(relationship)
+        .await
+        .expect("create_relationship should succeed");
+
+    let found = storage
+        .list_relationships_for_entity("table", Uuid::new_v4())
+        .await
+        .expect("list_relationships_for_entity should succeed");
+
+    assert_eq!(found, Vec::new());
+}

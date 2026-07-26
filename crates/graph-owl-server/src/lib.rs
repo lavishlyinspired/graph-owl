@@ -20,7 +20,10 @@ pub fn app(catalog: Catalog) -> Router {
             "/tables/{id}",
             get(get_table).patch(update_table).delete(delete_table),
         )
-        .route("/tables/{id}/relationships", post(create_relationship))
+        .route(
+            "/tables/{id}/relationships",
+            post(create_relationship).get(list_relationships_for_table),
+        )
         .with_state(catalog)
 }
 
@@ -78,6 +81,17 @@ async fn create_relationship(
 ) -> Result<(StatusCode, Json<Relationship>), AppError> {
     let relationship = catalog.create_relationship(id, payload).await?;
     Ok((StatusCode::CREATED, Json(relationship)))
+}
+
+async fn list_relationships_for_table(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<Relationship>>, AppError> {
+    catalog
+        .list_relationships_for_table(id)
+        .await?
+        .map(Json)
+        .ok_or(AppError::NotFound)
 }
 
 /// Wraps [`Json`] to return `400 Bad Request` for any malformed or

@@ -124,6 +124,25 @@ impl Catalog {
 
         Ok(self.storage.create_relationship(relationship).await?)
     }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails. Returns `Ok(None)` if the table
+    /// itself doesn't exist.
+    pub async fn list_relationships_for_table(
+        &self,
+        table_id: Uuid,
+    ) -> Result<Option<Vec<Relationship>>, StorageError> {
+        if self.storage.get_table(table_id).await?.is_none() {
+            return Ok(None);
+        }
+
+        let relationships = self
+            .storage
+            .list_relationships_for_entity("table", table_id)
+            .await?;
+        Ok(Some(relationships))
+    }
 }
 
 #[cfg(test)]
@@ -135,6 +154,7 @@ mod tests {
     #[derive(Default)]
     struct InMemoryStorage {
         inserted: Mutex<Vec<Table>>,
+        relationships: Mutex<Vec<Relationship>>,
     }
 
     #[async_trait::async_trait]
@@ -188,7 +208,31 @@ mod tests {
             &self,
             relationship: Relationship,
         ) -> Result<Relationship, StorageError> {
+            self.relationships
+                .lock()
+                .unwrap()
+                .push(relationship.clone());
             Ok(relationship)
+        }
+
+        async fn list_relationships_for_entity(
+            &self,
+            entity_type: &str,
+            entity_id: Uuid,
+        ) -> Result<Vec<Relationship>, StorageError> {
+            Ok(self
+                .relationships
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|relationship| {
+                    (relationship.from_entity_type == entity_type
+                        && relationship.from_entity_id == entity_id)
+                        || (relationship.to_entity_type == entity_type
+                            && relationship.to_entity_id == entity_id)
+                })
+                .cloned()
+                .collect())
         }
     }
 
@@ -471,5 +515,79 @@ mod tests {
             result,
             Err(CreateRelationshipError::InvalidRelationshipType)
         ));
+    }
+
+    #[tokio::test]
+    async fn listing_relationships_for_a_table_with_none_returns_an_empty_vec() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let table = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+
+        let relationships = catalog
+            .list_relationships_for_table(table.id)
+            .await
+            .expect("list_relationships_for_table should succeed")
+            .expect("table should exist");
+
+        assert_eq!(relationships, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn listing_relationships_for_a_table_returns_relationships_from_either_side() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let orders = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+        let customers = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+        let archive = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+        catalog
+            .create_relationship(
+                orders.id,
+                CreateRelationship {
+                    to_table_id: customers.id,
+                    relationship_type: "derived_from".to_string(),
+                },
+            )
+            .await
+            .expect("create_relationship should succeed");
+        catalog
+            .create_relationship(
+                archive.id,
+                CreateRelationship {
+                    to_table_id: orders.id,
+                    relationship_type: "derived_from".to_string(),
+                },
+            )
+            .await
+            .expect("create_relationship should succeed");
+
+        let relationships = catalog
+            .list_relationships_for_table(orders.id)
+            .await
+            .expect("list_relationships_for_table should succeed")
+            .expect("table should exist");
+
+        assert_eq!(relationships.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn listing_relationships_for_a_nonexistent_table_returns_none() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let result = catalog
+            .list_relationships_for_table(Uuid::new_v4())
+            .await
+            .expect("list_relationships_for_table should succeed");
+
+        assert_eq!(result, None);
     }
 }

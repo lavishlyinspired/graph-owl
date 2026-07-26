@@ -50,7 +50,7 @@ Every slice follows RED-GREEN-MUTATE-KILL MUTANTS-REFACTOR. No production code w
 **REFACTOR**: assess only if it adds value.
 **Done when**: acceptance criteria met, mutation report reviewed, human approves commit.
 
-### Slice B: API client retrieves all relationships for a table
+### Slice B: API client retrieves all relationships for a table — DONE
 
 **Value**: A caller can see everything a given table is related to, in either direction, without knowing relationship ids in advance.
 **Path**: `GET /tables/{id}/relationships` → `Catalog::list_relationships_for_table` → `Storage::list_relationships_for_entity("table", id)` → Postgres `SELECT ... WHERE (from_entity_type, from_entity_id) = ('table', $1) OR (to_entity_type, to_entity_id) = ('table', $1)` → `200` with a JSON array (empty array when none exist). Returns `404` if the table itself doesn't exist.

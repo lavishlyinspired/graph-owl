@@ -26,4 +26,9 @@ pub trait Storage: Send + Sync {
         &self,
         relationship: Relationship,
     ) -> Result<Relationship, StorageError>;
+    async fn list_relationships_for_entity(
+        &self,
+        entity_type: &str,
+        entity_id: Uuid,
+    ) -> Result<Vec<Relationship>, StorageError>;
 }

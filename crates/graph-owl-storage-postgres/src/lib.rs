@@ -24,6 +24,19 @@ fn table_from_row(row: PgRow) -> Table {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
+fn relationship_from_row(row: PgRow) -> Relationship {
+    Relationship {
+        id: row.get("id"),
+        from_entity_type: row.get("from_entity_type"),
+        from_entity_id: row.get("from_entity_id"),
+        relationship_type: row.get("relationship_type"),
+        to_entity_type: row.get("to_entity_type"),
+        to_entity_id: row.get("to_entity_id"),
+        created_at: row.get("created_at"),
+    }
+}
+
 pub struct PostgresStorage {
     pool: PgPool,
 }
@@ -168,5 +181,25 @@ impl Storage for PostgresStorage {
         })?;
 
         Ok(relationship)
+    }
+
+    async fn list_relationships_for_entity(
+        &self,
+        entity_type: &str,
+        entity_id: Uuid,
+    ) -> Result<Vec<Relationship>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, from_entity_type, from_entity_id, relationship_type, to_entity_type, to_entity_id, created_at
+             FROM entity_relationships
+             WHERE (from_entity_type = $1 AND from_entity_id = $2)
+                OR (to_entity_type = $1 AND to_entity_id = $2)",
+        )
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows.into_iter().map(relationship_from_row).collect())
     }
 }
