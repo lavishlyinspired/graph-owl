@@ -213,24 +213,92 @@ async fn each_error_variant_carries_a_distinct_type_uri() {
         .await
         .expect("request should be handled");
 
-    let types: Vec<String> = {
-        let mut collected = Vec::new();
-        for response in [conflict, malformed, not_found] {
-            let body = json_body(response).await;
-            collected.push(
-                body["type"]
-                    .as_str()
-                    .expect("every problem carries a type")
-                    .to_string(),
-            );
-        }
-        collected
-    };
+    let mut types = Vec::new();
+    let mut titles = Vec::new();
+    for response in [conflict, malformed, not_found] {
+        let body = json_body(response).await;
+        types.push(
+            body["type"]
+                .as_str()
+                .expect("every problem carries a type")
+                .to_string(),
+        );
+        titles.push(
+            body["title"]
+                .as_str()
+                .expect("every problem carries a title")
+                .to_string(),
+        );
+    }
 
-    let unique: std::collections::HashSet<&String> = types.iter().collect();
+    let unique_types: std::collections::HashSet<&String> = types.iter().collect();
     assert_eq!(
-        unique.len(),
+        unique_types.len(),
         types.len(),
         "each error variant must have its own type URI, got {types:?}"
+    );
+
+    // Same argument one level down: a `title()` collapsed to a single constant
+    // still satisfies every per-variant "is non-empty" assertion. Only comparing
+    // the variants against each other catches it.
+    let unique_titles: std::collections::HashSet<&String> = titles.iter().collect();
+    assert_eq!(
+        unique_titles.len(),
+        titles.len(),
+        "each error variant must have its own title, got {titles:?}"
+    );
+}
+
+/// `detail` is where the per-occurrence explanation lives (RFC 9457 §3.1.4).
+/// An empty or constant detail leaves a client knowing only the error *class* —
+/// which value collided, which field failed to parse, is exactly what it loses.
+#[tokio::test]
+async fn detail_carries_the_specifics_of_this_occurrence() {
+    let (app, _container) = test_app().await;
+    create_table(&app, "customers", "warehouse.public.customers").await;
+
+    let conflict = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/tables")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": "customers",
+                        "fully_qualified_name": "warehouse.public.customers"
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+
+    let body = json_body(conflict).await;
+    let detail = body["detail"].as_str().expect("problems carry a detail");
+    assert!(
+        detail.contains("warehouse.public.customers"),
+        "a conflict detail must name the value that collided, got {detail:?}"
+    );
+
+    let malformed = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/tables")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name": 42}"#))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+
+    let body = json_body(malformed).await;
+    let detail = body["detail"].as_str().expect("problems carry a detail");
+    assert!(
+        detail.contains("name"),
+        "a parse-failure detail must name the offending field, got {detail:?}"
     );
 }
