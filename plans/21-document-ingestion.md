@@ -17,6 +17,8 @@ This epic is the input path for organizational memory (Epic 31). A confidently-w
 ## Resolved decisions
 
 1. **Ontology-constrained extraction, not open information extraction.** Free-form triple extraction produces a graph nothing can query. Extraction targets the Epic 1 entity and relationship model; anything that does not fit is discarded with a reason, not stored as an untyped triple.
+
+0. **This epic runs out of process, in Python.** PDF layout analysis, OCR, chunking, and LLM-based extraction have a Python ecosystem Rust does not come close to matching, and none of it is on graph-owl's read path. The worker parses and extracts; extracted facts arrive through Epic 16's ingestion API and land in the `graph:extraction` named graph (`04-engine-triples.md` decision 5) so a bad run is deletable wholesale. See `00j-language-boundaries.md`.
 2. **Everything lands in `graph:extraction`, never the default graph.** Epic 6's reasoning does not run over it by default. Unconfirmed machine output must not silently feed inference.
 3. **Confidence bands from `00c-domain-model.md` apply**: ≥0.8 assert, 0.5–0.8 surface for confirmation, <0.5 discard.
 4. **Parsers and extractors are ports with optional adapters.** No Python runtime is required for core operation — that would break the operational-simplicity budget (`00a-product-position.md`).

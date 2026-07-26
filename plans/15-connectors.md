@@ -3,7 +3,7 @@
 **Status**: Not started
 **Depends on**: Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable)
 **Unblocks**: Epic 29 (connector-asserted lineage)
-**Crates**: **`graph-owl-connectors`** (new — Connector trait + feature-gated Postgres module) · `graph-owl-core` (SourceRecord) · `graph-owl-api` (bulk upsert) · `graph-owl-server` (bulk endpoints, run history)
+**Crates**: **`graph-owl-connectors`** (new — `Connector` trait, run machinery, and the Rust Postgres reference connector; **not** a module per source — see decision 1) · `graph-owl-core` (SourceRecord) · `graph-owl-api` (bulk upsert) · `graph-owl-server` (bulk endpoints, run history)
 
 ## Goal
 
@@ -11,7 +11,17 @@ Make the catalog populate itself. Hand-registering tables via curl does not surv
 
 ## Resolved decisions
 
-1. **One `graph-owl-connectors` crate, one module per source**, all behind a shared `Connector` trait, gated by cargo features. Not one crate per source: a deployment needing only Postgres must not compile a Snowflake client, and 100 crates is a workspace nobody can navigate. Verified against a mature reference implementation, which places every connector in a single package behind a shared interface.
+1. **The `Connector` trait and the run machinery are Rust, in the binary; connectors beyond the Postgres reference are Python, out of process.** This reverses an earlier decision that put every connector in one Rust crate as a feature-gated module. Reasoning in `00j-language-boundaries.md`:
+
+   - Warehouse, BI, orchestration, and SaaS metadata APIs have mature, maintained Python clients and often no Rust equivalent. Writing a connector should be an afternoon, not a week reimplementing someone else's HTTP client.
+   - A connector is the most likely thing an outside contributor writes, and the data-engineering population writes Python.
+   - **A connector is I/O against someone else's flaky API. It should fail as a *job*, never as a fault inside the process holding the graph.**
+   - A source changes its API; the connector must ship without rebuilding and redeploying the engine.
+
+   What stays Rust is the part that is a **governance** concern rather than an I/O one: run scheduling, scope filters, run history, identity, and above all deletion detection — decision 4 calls that the sharpest edge in this epic, and getting it wrong tombstones a live catalog.
+
+   **The operational-simplicity budget survives**: a deployment cataloguing only Postgres still runs one binary. A deployment wanting Snowflake also runs a Python worker — a cost it opted into, not one imposed on everyone.
+1a. **The Postgres connector stays Rust and in the binary**, as the reference implementation that proves the trait and needs no second runtime.
 2. **Source → Processor → Sink pipeline.** The source yields raw records, processors enrich or filter, the sink writes to the catalog. Each stage is independently testable; the sink is the only stage that talks to graph-owl.
 3. **FQN-keyed idempotent upsert via `PUT`.** A re-run against an unchanged source must produce zero new versions. Epic 3's no-op-produces-no-version rule is what makes this observable and therefore testable.
 4. **Deletion detection is opt-in per run**, and is the sharpest edge in this epic. A connector must distinguish "the table is gone" from "the table was filtered out of this run" from "this run crashed halfway". Getting it wrong tombstones a live catalog.

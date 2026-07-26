@@ -17,6 +17,7 @@ Let a consumer find an asset they did not know existed. Until this ships, the ca
 4. **One index per entity type, queried through an alias.** Alias swap gives zero-downtime mapping changes — the operation you need most and can least afford to take downtime for.
 5. **Relevance ordering is explicit and tested**: exact FQN > exact name > name prefix > name fuzzy > description > column names > tags.
 6. **Lexical search only.** Semantic/vector search is a real later option, but lexical relevance must be good before embeddings are worth their operational cost.
+7. **graph-owl stores and searches vectors; it never produces them.** Embedding *generation* is model inference and lives out of process — a hosted API or a Python worker — feeding vectors in through the ingestion path. Loading a model into the binary would forfeit the `00a-product-position.md` footprint budget for a workload that is not on the read path, and would pin the deployment to one model's runtime. The index is in-process because *searching* a vector is on the read path; generating one is not. See `00j-language-boundaries.md`.
 
 ## Hybrid ranking
 

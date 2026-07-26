@@ -4,7 +4,7 @@
 
 Three layers, one product: an **engine** (triples, time-travel, constraints, reasoning, query), a **catalog** domain model expressed in the graph, and a **context layer** activating both for humans and agents.
 
-**42 epics, 9 phases** (47 counting the lettered sub-epics 7a–7d and 9a). Companions: `plans/00a-product-position.md` (what this competes on), `plans/00b-architecture.md` (crate map, flake model, layering), `plans/00c-domain-model.md` (entities, envelope, relationships), `plans/00d-api-conventions.md` (wire contract), `plans/00e-crate-architecture.md` (which crates exist and why), `plans/00f-ui-architecture.md` (the console), `plans/00g-operations.md` (migration, DR, retention, runbooks, journey tests), `plans/00h-ui-design-system.md` (tokens, patterns, the screen inventory).
+**43 epics, 9 phases** (48 counting the lettered sub-epics 7a–7d and 9a). Companions: `plans/00a-product-position.md` (what this competes on), `plans/00b-architecture.md` (crate map, flake model, layering), `plans/00c-domain-model.md` (entities, envelope, relationships), `plans/00d-api-conventions.md` (wire contract), `plans/00e-crate-architecture.md` (which crates exist and why), `plans/00f-ui-architecture.md` (the console), `plans/00g-operations.md` (migration, DR, retention, runbooks, journey tests), `plans/00h-ui-design-system.md` (tokens, patterns, the screen inventory), `plans/00i-licensing.md` (clean-room rules), `plans/00j-language-boundaries.md` (Rust vs Python vs neither).
 
 ## Revision note — engine repositioning
 
@@ -120,6 +120,7 @@ Full SPARQL 1.1, OWL 2 DL, and SHACL conformance is a multi-year project serving
 | 40 | **Graph explorer, lineage & time travel** ★ | UI | **The differentiators made visible** — the screen nothing comparable can show |
 | 41 | Query workbench, governance & admin | UI | Dual-language query, violations as a workflow, memory, admin |
 | 42 | Semantic browse, review queues & agent activity | UI | Glossary/tags/domains as one browser, four review queues as one queue, agent audit |
+| 43 | Agent framework integrations | Context | LangChain retriever + LangGraph toolkit and checkpointer, in Python, outside the binary |
 
 ## Phase 1 · The engine
 
@@ -269,6 +270,7 @@ Note what that path defers: **constraints, reasoning, and SPARQL**. Triple stora
 | Graph **analytics as a ranking mechanism** — **narrowed, see Epic 38** | The original entry rejected analytics wholesale. That was too broad: three of Epic 38's four algorithms are not ranking at all but **structural** questions no usage signal can answer — orphans, silos, blast radius. What stands is the ranking argument: a table's query count beats its PageRank as an importance signal. PageRank ships **on probation** with a written exit criterion (`38-graph-analytics.md` Slice E) | Already reconsidered. The remaining open question is PageRank's, and the bake-off decides it |
 | Community detection, betweenness, embeddings, link prediction | The narrowing above does **not** extend to these. Domains (Epic 24) are the human-assigned answer to "which things belong together", and a human-assigned grouping beats an inferred one for governance | A question appears that degree and components cannot answer |
 | Summarization, compression, causal reasoning, neuro-symbolic | Research frontiers with no near-term enterprise application | — |
+| A hosted **agent runtime** or prebuilt agents | `00j-language-boundaries.md`: agent frameworks are consumers, not components. Epic 43 ships the *integration* — a retriever, a toolkit, a checkpointer — so a user's LangGraph agent runs in their repo on their schedule | Never. This is the layer `00a-product-position.md` refuses |
 | **A workflow / approval engine** (BPMN-style definitions, instances, state machines) | A general workflow engine is a product, not a feature, and it attracts every "could we also route this for approval" request in the building. The approval cases that actually arise are covered without one: Epic 26's lifecycle transitions carry an issuer and an expiry, Epic 35's proposals carry a reviewer, and Epic 20 puts the rest behind pull-request review, which is a workflow engine every organization already runs | A governance requirement needs multi-step routing that lifecycle transitions and PR review demonstrably cannot express |
 | A general CLI surface mirroring the API | `20-metadata-as-code.md` bounds the CLI to git-shaped and file-shaped operations. A verb per API capability doubles the maintained surface to reach parity with `curl` | Never as parity; individual commands on their merits |
 | Web UI **as the product** — **partially reversed, see Epics 39–41** | What stands: the API and MCP surfaces are the product, every console capability exists in the API first, and the console never gets a private endpoint. What changed: a graph engine whose output you cannot see is very hard to evaluate, adopt, or trust — and the differentiators are disproportionately visual. Recorded in full in `00f-ui-architecture.md` | Already reconsidered. Scope is capped by that document's page-count, dependency, and bundle budgets |
@@ -373,6 +375,8 @@ Match `15-connectors.md`:
 | 41 | `41-ui-workbench-governance.md` | **DONE** — dual-language workbench, violations as a workflow, memory administration, schema-driven admin forms |
 | — | `00h-ui-design-system.md` | **DONE** — tokens, chrome, the five reusable patterns, and a screen inventory mapping every epic to a surface or an explicit "no UI" |
 | 42 | `42-ui-semantic-surfaces.md` | **DONE** — the fifteen surfaces the inventory found unassigned, resolved into three patterns |
+| 43 | `43-framework-integrations.md` | **DONE** — we ship the integration, never the framework. Python, out of process, zero crate changes asserted |
+| — | `00j-language-boundaries.md` | **DONE** — the process boundary is the language boundary. Reverses the Rust-connector decision; keeps MCP in Rust |
 
 ### Existing files that stay
 

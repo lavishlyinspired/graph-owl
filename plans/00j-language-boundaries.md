@@ -59,9 +59,9 @@ That removes the only strong argument for a Python MCP server here. What remains
 
 **Where this decision would flip**: if MCP tool implementations start needing Python-only libraries (an embedding model, a document parser), those move out of process behind the ingestion API and MCP keeps calling the graph. The tool surface stays Rust; the heavy lifting moves.
 
-## Connectors: where Python genuinely wins, and where this plan may be wrong
+## Connectors: where Python genuinely wins
 
-`15-connectors.md` currently specifies one `graph-owl-connectors` crate with a feature-gated Rust module per source. **That decision deserves re-examination, and this document flags it rather than quietly keeping it.**
+`15-connectors.md` originally specified one `graph-owl-connectors` crate with a feature-gated Rust module per source. **That decision has been reversed** — the reasoning is below and the reversal is recorded in that plan.
 
 The case against Rust connectors is strong:
 
@@ -72,7 +72,7 @@ The case against Rust connectors is strong:
 
 The case for keeping Rust connectors is narrower but real: no second runtime, one build, shared types, and the `Connector` trait's compile-time guarantees.
 
-**Proposed resolution — not yet applied to `15-connectors.md`, pending a decision:**
+**Resolution — applied to `15-connectors.md` decision 1:**
 
 | Layer | Language | Why |
 |---|---|---|
@@ -147,7 +147,7 @@ A Python component that reads graph-owl's Postgres schema directly would couple 
 |---|---|---|
 | L1 | MCP in Rust, in the binary | **Decided** — official Rust SDK plus the authorization argument |
 | L2 | Analytics (38) in Rust | **Decided** — four algorithms over an array, not a data-science workload |
-| L3 | Agent frameworks are consumers | **Decided** — restating `00a` |
-| L4 | **Connectors: Rust trait + Postgres, Python for the rest** | **Proposed, not applied.** Requires editing `15-connectors.md` decision 1 and `00e-crate-architecture.md`'s connector row |
-| L5 | Embeddings out of process | **Proposed** — `08-engine-search.md` currently implies in-process generation |
-| L6 | Document ingestion (21) in Python | **Proposed** — the epic does not currently name a language |
+| L3 | Agent frameworks are consumers | **Decided** — restating `00a`. Made concrete by Epic 43 (`43-framework-integrations.md`): we ship the *integration*, never the framework |
+| L4 | **Connectors: Rust trait + Postgres, Python for the rest** | **Decided and applied** — `15-connectors.md` decision 1, `00e-crate-architecture.md` |
+| L5 | Embeddings out of process | **Decided and applied** — `08-engine-search.md` decision 7 |
+| L6 | Document ingestion (21) in Python | **Decided and applied** — `21-document-ingestion.md` decision 0 |

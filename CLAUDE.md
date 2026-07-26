@@ -103,7 +103,7 @@ Read these before planning or implementing anything non-trivial:
 | `plans/00h-ui-design-system.md` | Design tokens, chrome, the five reusable UI patterns, and the epic → screen inventory |
 | `plans/00i-licensing.md` | **Clean-room rules binding on every implementation session** — what may be read, what may never be copied |
 | `plans/00j-language-boundaries.md` | Rust vs Python vs TypeScript — the process boundary is the language boundary; what is a component and what is a consumer |
-| `plans/ROADMAP.md` | All 42 epics in 9 phases, sequenced, with the plan-file work queue |
+| `plans/ROADMAP.md` | All 43 epics in 9 phases, sequenced, with the plan-file work queue |
 
 ### Which `00*` docs bind which work
 
@@ -136,7 +136,7 @@ Differentiator epics are marked ★ in the roadmap — they are the differentiat
 
 ## Plans
 
-`plans/ROADMAP.md` is the entry point — it sequences 42 epics across 9 phases and links a per-epic plan for each. Plans and docs are numbered by epic; `NN-` prefixes give reading order. Each plan carries PR-sized vertical slices with acceptance criteria and the mutants to watch for.
+`plans/ROADMAP.md` is the entry point — it sequences 43 epics across 9 phases and links a per-epic plan for each. Plans and docs are numbered by epic; `NN-` prefixes give reading order. Each plan carries PR-sized vertical slices with acceptance criteria and the mutants to watch for.
 
 Completed, kept as historical record — do not delete:
 - `plans/90-done-table-entity.md` — Table walking skeleton (Slices A–E)

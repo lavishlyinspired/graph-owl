@@ -44,7 +44,7 @@ This plan exists because a 28-crate architecture was proposed by mapping the 54-
 | `graph-owl-search-hnsw` | HNSW adapter | 8 | Vector index library |
 | `graph-owl-rdf-io` | JSON-LD, Turtle, N-Triples, RDF/XML | 9 | rio, json-ld — heavy parser deps |
 | `graph-owl-resolution` | Entity resolution, coreference, temporal | 17 | Distinct algorithms; possible ML deps |
-| `graph-owl-connectors` | `Connector` trait + module per source | 15 | **Feature-gated per source** — a Postgres-only deployment must not compile a Snowflake client |
+| `graph-owl-connectors` | `Connector` trait, run machinery, Postgres reference connector | 15 | Governance concerns (scheduling, scope, deletion detection, identity) stay in the binary. **Connectors beyond Postgres are Python, out of process** — `00j-language-boundaries.md` |
 | `graph-owl-mcp` | MCP server | 14 | Protocol implementation |
 | `graph-owl-cli` | metadata-as-code, admin, DevOps tooling | 20 | clap; binary not library |
 | `graph-owl-storage-memory` | In-memory `Storage` impl, promoted from the test fake | 37c | **Publishability** — it is what an embedding consumer links instead of Postgres. Named in `37c-embeddable.md`'s header and previously missing from this table |
