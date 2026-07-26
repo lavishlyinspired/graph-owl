@@ -11,3 +11,9 @@ pub struct Table {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TableUpdate {
+    pub name: Option<String>,
+    pub description: Option<String>,
+}

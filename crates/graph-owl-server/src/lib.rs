@@ -6,7 +6,7 @@ use axum::{
     routing::{get, post},
 };
 use graph_owl_api::{Catalog, CreateTable};
-use graph_owl_core::Table;
+use graph_owl_core::{Table, TableUpdate};
 use graph_owl_storage::StorageError;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -16,7 +16,7 @@ pub fn app(catalog: Catalog) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/tables", post(create_table).get(list_tables))
-        .route("/tables/{id}", get(get_table))
+        .route("/tables/{id}", get(get_table).patch(update_table))
         .with_state(catalog)
 }
 
@@ -39,6 +39,18 @@ async fn get_table(
 ) -> Result<Json<Table>, AppError> {
     catalog
         .get_table(id)
+        .await?
+        .map(Json)
+        .ok_or(AppError::NotFound)
+}
+
+async fn update_table(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+    AppJson(update): AppJson<TableUpdate>,
+) -> Result<Json<Table>, AppError> {
+    catalog
+        .update_table(id, update)
         .await?
         .map(Json)
         .ok_or(AppError::NotFound)

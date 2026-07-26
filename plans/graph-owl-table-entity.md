@@ -1,7 +1,7 @@
 # Plan: Table Entity Walking Skeleton
 
 **Branch**: feat/table-entity
-**Status**: Active — Slices A-C done; Slices D-E remain
+**Status**: Active — Slices A-D done; Slice E remains
 
 ## Goal
 
@@ -68,7 +68,7 @@ Every slice follows RED-GREEN-MUTATE-KILL MUTANTS-REFACTOR. No production code w
   - [DECIDE later, not blocking]: pagination is explicitly out of scope for this slice — full unpaginated list only.
 **Done when**: acceptance criteria met, mutation report reviewed, human approves commit.
 
-### Slice D: API client updates a Table's mutable fields
+### Slice D: API client updates a Table's mutable fields — DONE
 
 **Value**: A caller can correct/evolve a Table's `name`/`description` after creation.
 **Path**: `PATCH /tables/:id` → `Catalog::update_table` → `Storage::update_table` → Postgres `UPDATE` (bumps `updated_at`) → 200 with the updated Table, or 404 if the id doesn't exist.
@@ -76,7 +76,7 @@ Every slice follows RED-GREEN-MUTATE-KILL MUTANTS-REFACTOR. No production code w
 **Acceptance criteria** (to confirm before RED):
   - `PATCH /tables/:id` with `{description: "new"}` returns 200 with the field updated and `updated_at` advanced, `created_at` unchanged.
   - `PATCH /tables/:id` for a non-existent id returns 404.
-  - `fully_qualified_name` and `id` are immutable via this endpoint (attempting to change them either is rejected or ignored — [DECIDE at slice start]).
+  - `fully_qualified_name` and `id` are immutable via this endpoint — the PATCH request shape (`TableUpdate`) has no fields for them at all, so there's nothing to reject; any extra JSON fields a client sends are silently dropped by default deserialization.
 **Done when**: acceptance criteria met, mutation report reviewed, human approves commit.
 
 ### Slice E: API client deletes a Table
@@ -104,6 +104,3 @@ Every slice follows RED-GREEN-MUTATE-KILL MUTANTS-REFACTOR. No production code w
 2. Refactoring assessment — run `refactoring` skill
 3. `cargo clippy --workspace --all-targets` and `cargo test --workspace` pass
 4. `cargo fmt --check`
-
----
-*Delete this file when the plan is complete. If `plans/` is empty, delete the directory.*

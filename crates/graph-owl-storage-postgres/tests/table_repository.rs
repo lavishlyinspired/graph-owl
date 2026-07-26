@@ -1,5 +1,5 @@
 use chrono::Utc;
-use graph_owl_core::Table;
+use graph_owl_core::{Table, TableUpdate};
 use graph_owl_storage::{Storage, StorageError};
 use graph_owl_storage_postgres::PostgresStorage;
 use testcontainers_modules::{
@@ -164,4 +164,51 @@ async fn listing_tables_returns_all_persisted_tables() {
     expected.sort_by_key(|table| table.id);
 
     assert_eq!(tables, expected);
+}
+
+#[tokio::test]
+async fn updating_a_table_changes_only_the_provided_fields() {
+    let (storage, _container, _connection_string) = test_storage().await;
+    let table = mock_table();
+    storage
+        .insert_table(table.clone())
+        .await
+        .expect("insert should succeed");
+
+    let updated = storage
+        .update_table(
+            table.id,
+            TableUpdate {
+                name: None,
+                description: Some("a new description".to_string()),
+            },
+        )
+        .await
+        .expect("update_table should succeed")
+        .expect("table should exist");
+
+    assert_eq!(updated.id, table.id);
+    assert_eq!(updated.name, table.name);
+    assert_eq!(updated.fully_qualified_name, table.fully_qualified_name);
+    assert_eq!(updated.description, Some("a new description".to_string()));
+    assert_eq!(updated.created_at, table.created_at);
+    assert!(updated.updated_at > table.updated_at);
+}
+
+#[tokio::test]
+async fn updating_a_nonexistent_table_returns_none() {
+    let (storage, _container, _connection_string) = test_storage().await;
+
+    let result = storage
+        .update_table(
+            Uuid::new_v4(),
+            TableUpdate {
+                name: Some("new name".to_string()),
+                description: None,
+            },
+        )
+        .await
+        .expect("update_table should succeed");
+
+    assert_eq!(result, None);
 }

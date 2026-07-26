@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use graph_owl_core::Table;
+use graph_owl_core::{Table, TableUpdate};
 use graph_owl_storage::{Storage, StorageError};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -100,5 +100,28 @@ impl Storage for PostgresStorage {
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
         Ok(rows.into_iter().map(table_from_row).collect())
+    }
+
+    async fn update_table(
+        &self,
+        id: Uuid,
+        update: TableUpdate,
+    ) -> Result<Option<Table>, StorageError> {
+        let row = sqlx::query(
+            "UPDATE tables
+             SET name = COALESCE($2, name),
+                 description = COALESCE($3, description),
+                 updated_at = now()
+             WHERE id = $1
+             RETURNING id, name, fully_qualified_name, description, created_at, updated_at",
+        )
+        .bind(id)
+        .bind(&update.name)
+        .bind(&update.description)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(row.map(table_from_row))
     }
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use graph_owl_core::Table;
+use graph_owl_core::{Table, TableUpdate};
 use graph_owl_storage::{Storage, StorageError};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -52,6 +52,17 @@ impl Catalog {
     pub async fn list_tables(&self) -> Result<Vec<Table>, StorageError> {
         self.storage.list_tables().await
     }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn update_table(
+        &self,
+        id: Uuid,
+        update: TableUpdate,
+    ) -> Result<Option<Table>, StorageError> {
+        self.storage.update_table(id, update).await
+    }
 }
 
 #[cfg(test)]
@@ -84,6 +95,25 @@ mod tests {
 
         async fn list_tables(&self) -> Result<Vec<Table>, StorageError> {
             Ok(self.inserted.lock().unwrap().clone())
+        }
+
+        async fn update_table(
+            &self,
+            id: Uuid,
+            update: TableUpdate,
+        ) -> Result<Option<Table>, StorageError> {
+            let mut inserted = self.inserted.lock().unwrap();
+            let Some(table) = inserted.iter_mut().find(|table| table.id == id) else {
+                return Ok(None);
+            };
+            if let Some(name) = update.name {
+                table.name = name;
+            }
+            if let Some(description) = update.description {
+                table.description = Some(description);
+            }
+            table.updated_at = Utc::now();
+            Ok(Some(table.clone()))
         }
     }
 
@@ -189,5 +219,42 @@ mod tests {
         expected.sort_by_key(|table| table.id);
 
         assert_eq!(tables, expected);
+    }
+
+    #[tokio::test]
+    async fn updating_a_table_changes_only_the_provided_fields() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let created = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+
+        let updated = catalog
+            .update_table(
+                created.id,
+                TableUpdate {
+                    name: None,
+                    description: Some("a new description".to_string()),
+                },
+            )
+            .await
+            .expect("update_table should succeed")
+            .expect("table should exist");
+
+        assert_eq!(updated.name, created.name);
+        assert_eq!(updated.description, Some("a new description".to_string()));
+        assert_eq!(updated.created_at, created.created_at);
+    }
+
+    #[tokio::test]
+    async fn updating_a_nonexistent_table_returns_none() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let result = catalog
+            .update_table(Uuid::new_v4(), TableUpdate::default())
+            .await
+            .expect("update_table should succeed");
+
+        assert_eq!(result, None);
     }
 }
