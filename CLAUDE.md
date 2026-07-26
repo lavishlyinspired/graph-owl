@@ -28,7 +28,15 @@ Edition 2024, Rust workspace with `[workspace.lints.clippy] all = "warn", pedant
 
 ## Process
 
-TDD is non-negotiable: RED (failing test first) → GREEN (minimum code) → MUTATE (`cargo mutants`) → KILL MUTANTS → REFACTOR (only if it adds value). Never commit without explicit user approval — this holds even during "complete all remaining slices" autonomous runs; still pause at each commit point.
+TDD is non-negotiable: RED (failing test first) → GREEN (minimum code) → MUTATE (`cargo mutants`) → KILL MUTANTS → REFACTOR (only if it adds value).
+
+**Commit directly to `main` without asking.** This supersedes the previous rule requiring approval at every commit point, which made autonomous runs stall. A slice is committable when its acceptance criteria are met, the workspace test suite is green, `clippy` and `fmt` are clean on the touched crates, and the mutation run has been started and reviewed. Do not branch, do not open a PR, do not pause — just commit.
+
+Three things that did **not** change with it:
+
+- **The TDD cycle itself.** No production code without a failing test. Committing without approval is not permission to skip RED.
+- **Honest commit messages.** State what was done, what was traded, and what is left — including known-loose design a later slice must fix. A commit message that hides a compromise is worse than the compromise.
+- **Push is still a separate decision.** Commit freely; ask before `git push`.
 
 Never name the third-party systems whose clones sit under `.claude/docs/referenceRepo/` — not in code, comments, commit messages, plan docs, or any other committed file. Those clones may stay on disk for architecture research, but must never be committed or cited by name. This project's git history was deliberately squashed once already to scrub such references; don't reintroduce them. When a design decision was informed by that research, write down the pattern and the reasoning behind it, never the source.
 
