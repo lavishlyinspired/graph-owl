@@ -94,3 +94,32 @@ async fn inserting_a_table_with_an_empty_name_is_rejected() {
 
     assert!(matches!(result, Err(StorageError::Unexpected(_))));
 }
+
+#[tokio::test]
+async fn getting_a_table_by_id_returns_the_persisted_table() {
+    let (storage, _container, _connection_string) = test_storage().await;
+    let table = mock_table();
+    storage
+        .insert_table(table.clone())
+        .await
+        .expect("insert should succeed");
+
+    let found = storage
+        .get_table(table.id)
+        .await
+        .expect("get_table should succeed");
+
+    assert_eq!(found, Some(table));
+}
+
+#[tokio::test]
+async fn getting_a_nonexistent_table_returns_none() {
+    let (storage, _container, _connection_string) = test_storage().await;
+
+    let found = storage
+        .get_table(Uuid::new_v4())
+        .await
+        .expect("get_table should succeed");
+
+    assert_eq!(found, None);
+}

@@ -38,6 +38,13 @@ impl Catalog {
         };
         self.storage.insert_table(table).await
     }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn get_table(&self, id: Uuid) -> Result<Option<Table>, StorageError> {
+        self.storage.get_table(id).await
+    }
 }
 
 #[cfg(test)]
@@ -56,6 +63,16 @@ mod tests {
         async fn insert_table(&self, table: Table) -> Result<Table, StorageError> {
             self.inserted.lock().unwrap().push(table.clone());
             Ok(table)
+        }
+
+        async fn get_table(&self, id: Uuid) -> Result<Option<Table>, StorageError> {
+            Ok(self
+                .inserted
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|table| table.id == id)
+                .cloned())
         }
     }
 
@@ -95,5 +112,33 @@ mod tests {
             .expect("create_table should succeed");
 
         assert_ne!(first.id, second.id);
+    }
+
+    #[tokio::test]
+    async fn getting_a_table_by_id_returns_the_stored_table() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let created = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+
+        let found = catalog
+            .get_table(created.id)
+            .await
+            .expect("get_table should succeed");
+
+        assert_eq!(found, Some(created));
+    }
+
+    #[tokio::test]
+    async fn getting_a_nonexistent_table_returns_none() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let found = catalog
+            .get_table(Uuid::new_v4())
+            .await
+            .expect("get_table should succeed");
+
+        assert_eq!(found, None);
     }
 }

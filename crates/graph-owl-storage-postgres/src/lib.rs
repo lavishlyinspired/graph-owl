@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use graph_owl_core::Table;
 use graph_owl_storage::{Storage, StorageError};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
 
 mod embedded {
     refinery::embed_migrations!("migrations");
@@ -60,5 +61,25 @@ impl Storage for PostgresStorage {
         })?;
 
         Ok(table)
+    }
+
+    async fn get_table(&self, id: Uuid) -> Result<Option<Table>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, name, fully_qualified_name, description, created_at, updated_at
+             FROM tables WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(row.map(|row| Table {
+            id: row.get("id"),
+            name: row.get("name"),
+            fully_qualified_name: row.get("fully_qualified_name"),
+            description: row.get("description"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        }))
     }
 }

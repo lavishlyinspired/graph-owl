@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{FromRequest, Request, State, rejection::JsonRejection},
+    extract::{FromRequest, Path, Request, State, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -10,11 +10,13 @@ use graph_owl_core::Table;
 use graph_owl_storage::StorageError;
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use uuid::Uuid;
 
 pub fn app(catalog: Catalog) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/tables", post(create_table))
+        .route("/tables/{id}", get(get_table))
         .with_state(catalog)
 }
 
@@ -24,6 +26,17 @@ async fn create_table(
 ) -> Result<(StatusCode, Json<Table>), AppError> {
     let table = catalog.create_table(payload).await?;
     Ok((StatusCode::CREATED, Json(table)))
+}
+
+async fn get_table(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Table>, AppError> {
+    catalog
+        .get_table(id)
+        .await?
+        .map(Json)
+        .ok_or(AppError::NotFound)
 }
 
 /// Wraps [`Json`] to return `400 Bad Request` for any malformed or
@@ -49,6 +62,7 @@ enum AppError {
     BadRequest(String),
     Conflict(String),
     Internal(String),
+    NotFound,
 }
 
 impl From<StorageError> for AppError {
@@ -69,6 +83,7 @@ impl IntoResponse for AppError {
                 format!("table with fully_qualified_name '{fqn}' already exists"),
             ),
             AppError::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
+            AppError::NotFound => (StatusCode::NOT_FOUND, "table not found".to_string()),
         };
         (status, Json(json!({ "error": message }))).into_response()
     }

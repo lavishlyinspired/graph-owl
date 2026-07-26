@@ -1,7 +1,7 @@
 # Plan: Table Entity Walking Skeleton
 
 **Branch**: feat/table-entity
-**Status**: Active — Slice A done (commits 1956461, 1f40a5a); Slices B-E remain
+**Status**: Active — Slices A-B done; Slices C-E remain
 
 ## Goal
 
@@ -46,7 +46,7 @@ Every slice follows RED-GREEN-MUTATE-KILL MUTANTS-REFACTOR. No production code w
 **REFACTOR**: assess only if it adds value (e.g. extracting a shared "insert row" helper is premature with one entity — likely skip).
 **Done when**: acceptance criteria met, mutation report reviewed, human approves commit.
 
-### Slice B: API client retrieves a Table by id
+### Slice B: API client retrieves a Table by id — DONE
 
 **Value**: A caller can look up a specific Table they (or someone else) created.
 **Path**: `GET /tables/:id` → `Catalog::get_table` → `Storage::get_table` → Postgres `SELECT` → 200 with Table body, or 404 if absent.
@@ -96,6 +96,7 @@ Every slice follows RED-GREEN-MUTATE-KILL MUTANTS-REFACTOR. No production code w
 - Versioning + change events, soft-delete
 - Auth (JWT) + RBAC
 - Connectors (Postgres/Snowflake introspection)
+- Pluggable storage backend selection: a second `graph-owl-storage-mongodb` crate implementing the existing `Storage` trait, plus a factory/dispatch point (e.g. in `graph-owl-server`'s `main.rs`) choosing a backend by config at startup — the `Storage` trait already makes this additive, no rearchitecting needed when the concrete need arises
 
 ## Pre-PR Quality Gate (each slice)
 
