@@ -22,17 +22,6 @@ pub enum FieldErrorCode {
     Type,
 }
 
-impl FieldErrorCode {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FieldErrorCode::Required => "required",
-            FieldErrorCode::Empty => "empty",
-            FieldErrorCode::Type => "type",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FieldError {
     /// Dotted and indexed path to the offending value, e.g. `owners[0].id`.
@@ -61,7 +50,7 @@ pub enum Segment {
 
 /// Builds the dotted/indexed paths that make a nested failure addressable.
 /// `owners[0].id` tells a client exactly which value to fix; `owners` does not.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldPath(Vec<Segment>);
 
 impl FieldPath {
