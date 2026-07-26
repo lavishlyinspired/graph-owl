@@ -5,7 +5,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
-use graph_owl_api::{Catalog, CreateRelationship, CreateRelationshipError, CreateTable};
+use graph_owl_api::{
+    Catalog, CreateRelationship, CreateRelationshipError, CreateTable,
+    validation::{FieldError, FieldErrorCode, ValidateBody},
+};
 use graph_owl_core::{Relationship, Table, TableUpdate};
 use graph_owl_storage::StorageError;
 use serde::de::DeserializeOwned;
@@ -106,21 +109,34 @@ async fn delete_relationship(
     }
 }
 
-/// Wraps [`Json`] to return `400 Bad Request` for any malformed or
-/// semantically invalid body, rather than axum's default `422` for data errors.
+/// Wraps [`Json`] to return `400 Bad Request` rather than axum's default `422`,
+/// and to report **every** field violation in one response.
+///
+/// The body is parsed to a [`serde_json::Value`] first, because `serde`'s derived
+/// deserializer stops at its first error — which forces a client into one round
+/// trip per mistake. Validation runs over the untyped document, accumulating
+/// failures, and only a clean document is deserialized into `T`.
 struct AppJson<T>(T);
 
 impl<S, T> FromRequest<S> for AppJson<T>
 where
     S: Send + Sync,
-    T: DeserializeOwned,
+    T: DeserializeOwned + ValidateBody,
 {
     type Rejection = AppError;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let Json(value) = Json::<T>::from_request(req, state)
+        let Json(document) = Json::<serde_json::Value>::from_request(req, state)
             .await
             .map_err(|rejection: JsonRejection| AppError::MalformedBody(rejection.body_text()))?;
+
+        let errors = T::validate_body(&document);
+        if !errors.is_empty() {
+            return Err(AppError::Validation(errors));
+        }
+
+        let value = serde_json::from_value(document)
+            .map_err(|error| AppError::MalformedBody(error.to_string()))?;
         Ok(AppJson(value))
     }
 }
@@ -132,8 +148,9 @@ const PROBLEM_TYPE_BASE: &str = "https://graph-owl.dev/errors/";
 enum AppError {
     /// The body was not parseable as the expected shape.
     MalformedBody(String),
-    /// The body parsed but a domain rule rejected it.
-    Validation(String),
+    /// The body is a well-formed document, but one or more fields are invalid.
+    /// Carries every violation, never just the first.
+    Validation(Vec<FieldError>),
     Conflict {
         detail: String,
         existing_id: Option<Uuid>,
@@ -178,9 +195,11 @@ impl AppError {
 
     fn detail(&self) -> String {
         match self {
-            AppError::MalformedBody(message)
-            | AppError::Validation(message)
-            | AppError::Internal(message) => message.clone(),
+            AppError::MalformedBody(message) | AppError::Internal(message) => message.clone(),
+            AppError::Validation(errors) => {
+                let plural = if errors.len() == 1 { "field" } else { "fields" };
+                format!("{} {plural} failed validation", errors.len())
+            }
             AppError::Conflict { detail, .. } => {
                 format!("an entity with fully_qualified_name '{detail}' already exists")
             }
@@ -208,7 +227,11 @@ impl From<CreateRelationshipError> for AppError {
     fn from(error: CreateRelationshipError) -> Self {
         match error {
             CreateRelationshipError::InvalidRelationshipType => {
-                AppError::Validation("relationship_type must not be empty".to_string())
+                AppError::Validation(vec![FieldError::new(
+                    "relationship_type",
+                    FieldErrorCode::Empty,
+                    "`relationship_type` must not be empty",
+                )])
             }
             CreateRelationshipError::TableNotFound => AppError::NotFound,
             CreateRelationshipError::Storage(storage_error) => storage_error.into(),
@@ -225,6 +248,12 @@ impl IntoResponse for AppError {
             "status": status.as_u16(),
             "detail": self.detail(),
         });
+
+        // Extension member: the per-field breakdown a client needs to fix a
+        // request in one pass instead of one round trip per mistake.
+        if let AppError::Validation(errors) = &self {
+            body["errors"] = json!(errors);
+        }
 
         // Extension member: only present when the adapter could identify the
         // row that was collided with.

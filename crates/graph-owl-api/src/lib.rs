@@ -6,6 +6,9 @@ use graph_owl_storage::{Storage, StorageError};
 use serde::Deserialize;
 use uuid::Uuid;
 
+pub mod validation;
+use validation::{FieldError, FieldPath, ValidateBody, optional_string, require_non_empty_string};
+
 #[derive(Debug, Deserialize)]
 pub struct CreateTable {
     pub name: String,
@@ -13,10 +16,51 @@ pub struct CreateTable {
     pub description: Option<String>,
 }
 
+impl ValidateBody for CreateTable {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(value, &FieldPath::root().key("name"), &mut errors);
+        require_non_empty_string(
+            value,
+            &FieldPath::root().key("fully_qualified_name"),
+            &mut errors,
+        );
+        optional_string(value, &FieldPath::root().key("description"), &mut errors);
+        errors
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateRelationship {
     pub to_table_id: Uuid,
     pub relationship_type: String,
+}
+
+/// PATCH semantics: every field is optional, so absence is never an error.
+/// But a field the client *did* send must still be usable — `name: ""` is a
+/// request to blank a required value, not a no-op.
+impl ValidateBody for TableUpdate {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        if value.get("name").is_some_and(|v| !v.is_null()) {
+            require_non_empty_string(value, &FieldPath::root().key("name"), &mut errors);
+        }
+        optional_string(value, &FieldPath::root().key("description"), &mut errors);
+        errors
+    }
+}
+
+impl ValidateBody for CreateRelationship {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(value, &FieldPath::root().key("to_table_id"), &mut errors);
+        require_non_empty_string(
+            value,
+            &FieldPath::root().key("relationship_type"),
+            &mut errors,
+        );
+        errors
+    }
 }
 
 #[derive(Debug)]

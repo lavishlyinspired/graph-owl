@@ -283,7 +283,10 @@ async fn detail_carries_the_specifics_of_this_occurrence() {
         "a conflict detail must name the value that collided, got {detail:?}"
     );
 
-    let malformed = app
+    // Slice B moved field-level specifics out of `detail` and into `errors[]`,
+    // where a wrong-typed field is now reported per field rather than as one
+    // opaque parse message. `detail` keeps the summary; the specifics are below it.
+    let invalid = app
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -295,10 +298,21 @@ async fn detail_carries_the_specifics_of_this_occurrence() {
         .await
         .expect("request should be handled");
 
-    let body = json_body(malformed).await;
+    let body = json_body(invalid).await;
     let detail = body["detail"].as_str().expect("problems carry a detail");
     assert!(
-        detail.contains("name"),
-        "a parse-failure detail must name the offending field, got {detail:?}"
+        !detail.is_empty(),
+        "a validation problem summarises in detail"
+    );
+
+    let details: Vec<&str> = body["errors"]
+        .as_array()
+        .expect("errors array")
+        .iter()
+        .map(|e| e["detail"].as_str().expect("each error has a detail"))
+        .collect();
+    assert!(
+        details.iter().any(|d| d.contains("name")),
+        "the offending field must be named in its own error entry, got {details:?}"
     );
 }
