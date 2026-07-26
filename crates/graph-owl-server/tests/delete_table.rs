@@ -23,7 +23,7 @@ async fn delete_table_removes_it_and_subsequent_get_returns_404() {
                 .body(Body::from(
                     json!({
                         "name": "customers",
-                        "fully_qualified_name": "warehouse.public.customers"
+                        "fullyQualifiedName": "warehouse.public.customers"
                     })
                     .to_string(),
                 ))

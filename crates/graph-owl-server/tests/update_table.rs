@@ -23,7 +23,7 @@ async fn patch_table_updates_description_and_advances_updated_at() {
                 .body(Body::from(
                     json!({
                         "name": "customers",
-                        "fully_qualified_name": "warehouse.public.customers"
+                        "fullyQualifiedName": "warehouse.public.customers"
                     })
                     .to_string(),
                 ))
@@ -51,13 +51,10 @@ async fn patch_table_updates_description_and_advances_updated_at() {
     assert_eq!(patch_response.status(), StatusCode::OK);
     let body = json_body(patch_response).await;
     assert_eq!(body["name"], created["name"]);
-    assert_eq!(
-        body["fully_qualified_name"],
-        created["fully_qualified_name"]
-    );
+    assert_eq!(body["fullyQualifiedName"], created["fullyQualifiedName"]);
     assert_eq!(body["description"], "a new description");
-    assert_eq!(body["created_at"], created["created_at"]);
-    assert_ne!(body["updated_at"], created["updated_at"]);
+    assert_eq!(body["createdAt"], created["createdAt"]);
+    assert_ne!(body["updatedAt"], created["updatedAt"]);
 }
 
 #[tokio::test]

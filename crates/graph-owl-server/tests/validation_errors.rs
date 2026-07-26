@@ -29,7 +29,7 @@ async fn two_independent_violations_are_both_reported() {
 
     let response = post_tables(
         app,
-        json!({ "fully_qualified_name": "" }).to_string(), // name missing AND fqn empty
+        json!({ "fullyQualifiedName": "" }).to_string(), // name missing AND fqn empty
     )
     .await;
 
@@ -58,14 +58,14 @@ async fn two_independent_violations_are_both_reported() {
         .map(|e| e["field"].as_str().expect("each error names a field"))
         .collect();
     assert!(fields.contains(&"name"), "got {fields:?}");
-    assert!(fields.contains(&"fully_qualified_name"), "got {fields:?}");
+    assert!(fields.contains(&"fullyQualifiedName"), "got {fields:?}");
 }
 
 #[tokio::test]
 async fn each_error_entry_carries_field_code_and_detail() {
     let (app, _container) = test_app().await;
 
-    let response = post_tables(app, json!({ "fully_qualified_name": "" }).to_string()).await;
+    let response = post_tables(app, json!({ "fullyQualifiedName": "" }).to_string()).await;
     let body = json_body(response).await;
     let errors = body["errors"].as_array().expect("errors array");
 
@@ -97,7 +97,7 @@ async fn a_wrong_typed_field_is_a_validation_error_not_a_parse_failure() {
 
     let response = post_tables(
         app,
-        json!({ "name": 42, "fully_qualified_name": "warehouse.public.orders" }).to_string(),
+        json!({ "name": 42, "fullyQualifiedName": "warehouse.public.orders" }).to_string(),
     )
     .await;
 
@@ -140,7 +140,7 @@ async fn a_valid_body_still_succeeds() {
         app,
         json!({
             "name": "orders",
-            "fully_qualified_name": "warehouse.public.orders"
+            "fullyQualifiedName": "warehouse.public.orders"
         })
         .to_string(),
     )

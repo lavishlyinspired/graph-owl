@@ -20,7 +20,7 @@ async fn create_table(app: &axum::Router, fully_qualified_name: &str) -> String 
                 .body(Body::from(
                     json!({
                         "name": "customers",
-                        "fully_qualified_name": fully_qualified_name
+                        "fullyQualifiedName": fully_qualified_name
                     })
                     .to_string(),
                 ))
@@ -46,8 +46,8 @@ async fn create_relationship(app: &axum::Router, from_id: &str, to_id: &str) {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
-                        "to_table_id": to_id,
-                        "relationship_type": "derived_from"
+                        "toTableId": to_id,
+                        "relationshipType": "derived_from"
                     })
                     .to_string(),
                 ))

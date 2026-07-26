@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use graph_owl_core::{
     Relationship, Table, TableUpdate,
-    page::{Cursor, Page, PageRequest},
+    page::{Page, PageRequest},
 };
 use graph_owl_storage::{Storage, StorageError};
 use serde::Deserialize;
@@ -13,6 +13,7 @@ pub mod validation;
 use validation::{FieldError, FieldPath, ValidateBody, optional_string, require_non_empty_string};
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateTable {
     pub name: String,
     pub fully_qualified_name: String,
@@ -25,7 +26,7 @@ impl ValidateBody for CreateTable {
         require_non_empty_string(value, &FieldPath::root().key("name"), &mut errors);
         require_non_empty_string(
             value,
-            &FieldPath::root().key("fully_qualified_name"),
+            &FieldPath::root().key("fullyQualifiedName"),
             &mut errors,
         );
         optional_string(value, &FieldPath::root().key("description"), &mut errors);
@@ -34,6 +35,7 @@ impl ValidateBody for CreateTable {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateRelationship {
     pub to_table_id: Uuid,
     pub relationship_type: String,
@@ -56,10 +58,10 @@ impl ValidateBody for TableUpdate {
 impl ValidateBody for CreateRelationship {
     fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
         let mut errors = Vec::new();
-        require_non_empty_string(value, &FieldPath::root().key("to_table_id"), &mut errors);
+        require_non_empty_string(value, &FieldPath::root().key("toTableId"), &mut errors);
         require_non_empty_string(
             value,
-            &FieldPath::root().key("relationship_type"),
+            &FieldPath::root().key("relationshipType"),
             &mut errors,
         );
         errors
@@ -202,6 +204,7 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use graph_owl_core::page::Cursor;
     use graph_owl_storage::Storage;
     use std::sync::{Arc, Mutex};
 

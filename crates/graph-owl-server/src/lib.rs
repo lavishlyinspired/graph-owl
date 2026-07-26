@@ -13,7 +13,7 @@ use graph_owl_core::{
     Relationship, Table, TableUpdate,
     page::{Page, PageRequest, PageRequestError},
 };
-use graph_owl_storage::StorageError;
+use graph_owl_storage::{ConflictKind, StorageError};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use uuid::Uuid;
@@ -166,6 +166,7 @@ enum AppError {
     Conflict {
         detail: String,
         existing_id: Option<Uuid>,
+        kind: ConflictKind,
     },
     Internal(String),
     NotFound,
@@ -178,7 +179,14 @@ impl AppError {
         match self {
             AppError::MalformedBody(_) => "malformed-body",
             AppError::Validation(_) => "validation-failed",
-            AppError::Conflict { .. } => "fqn-conflict",
+            AppError::Conflict {
+                kind: ConflictKind::Fqn,
+                ..
+            } => "fqn-conflict",
+            AppError::Conflict {
+                kind: ConflictKind::RelationshipTuple,
+                ..
+            } => "relationship-conflict",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
         }
@@ -190,7 +198,14 @@ impl AppError {
         match self {
             AppError::MalformedBody(_) => "Malformed request body",
             AppError::Validation(_) => "Validation failed",
-            AppError::Conflict { .. } => "Fully-qualified name already exists",
+            AppError::Conflict {
+                kind: ConflictKind::Fqn,
+                ..
+            } => "Fully-qualified name already exists",
+            AppError::Conflict {
+                kind: ConflictKind::RelationshipTuple,
+                ..
+            } => "Relationship already exists",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
         }
@@ -212,9 +227,16 @@ impl AppError {
                 let plural = if errors.len() == 1 { "field" } else { "fields" };
                 format!("{} {plural} failed validation", errors.len())
             }
-            AppError::Conflict { detail, .. } => {
-                format!("an entity with fully_qualified_name '{detail}' already exists")
-            }
+            AppError::Conflict {
+                detail,
+                kind: ConflictKind::Fqn,
+                ..
+            } => format!("an entity with fullyQualifiedName '{detail}' already exists"),
+            AppError::Conflict {
+                detail,
+                kind: ConflictKind::RelationshipTuple,
+                ..
+            } => format!("the relationship '{detail}' already exists"),
             AppError::NotFound => "the requested resource does not exist".to_string(),
         }
     }
@@ -251,9 +273,11 @@ impl From<StorageError> for AppError {
             StorageError::Conflict {
                 detail,
                 existing_id,
+                kind,
             } => AppError::Conflict {
                 detail,
                 existing_id,
+                kind,
             },
             StorageError::Unexpected(message) => AppError::Internal(message),
         }
@@ -265,7 +289,7 @@ impl From<CreateRelationshipError> for AppError {
         match error {
             CreateRelationshipError::InvalidRelationshipType => {
                 AppError::Validation(vec![FieldError::new(
-                    "relationship_type",
+                    "relationshipType",
                     FieldErrorCode::Empty,
                     "`relationship_type` must not be empty",
                 )])

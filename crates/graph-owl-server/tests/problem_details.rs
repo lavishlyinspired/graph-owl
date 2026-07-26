@@ -27,7 +27,7 @@ async fn create_table(app: &axum::Router, name: &str, fqn: &str) -> serde_json::
                 .uri("/tables")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({ "name": name, "fully_qualified_name": fqn }).to_string(),
+                    json!({ "name": name, "fullyQualifiedName": fqn }).to_string(),
                 ))
                 .expect("request should build"),
         )
@@ -51,7 +51,7 @@ async fn duplicate_fqn_returns_409_problem_json_naming_the_conflicting_entity() 
                 .body(Body::from(
                     json!({
                         "name": "customers",
-                        "fully_qualified_name": "warehouse.public.customers"
+                        "fullyQualifiedName": "warehouse.public.customers"
                     })
                     .to_string(),
                 ))
@@ -141,8 +141,8 @@ async fn invalid_relationship_type_returns_400_problem_json() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
-                        "to_table_id": to["id"],
-                        "relationship_type": ""
+                        "toTableId": to["id"],
+                        "relationshipType": ""
                     })
                     .to_string(),
                 ))
@@ -180,7 +180,7 @@ async fn each_error_variant_carries_a_distinct_type_uri() {
                 .body(Body::from(
                     json!({
                         "name": "customers",
-                        "fully_qualified_name": "warehouse.public.customers"
+                        "fullyQualifiedName": "warehouse.public.customers"
                     })
                     .to_string(),
                 ))
@@ -267,7 +267,7 @@ async fn detail_carries_the_specifics_of_this_occurrence() {
                 .body(Body::from(
                     json!({
                         "name": "customers",
-                        "fully_qualified_name": "warehouse.public.customers"
+                        "fullyQualifiedName": "warehouse.public.customers"
                     })
                     .to_string(),
                 ))

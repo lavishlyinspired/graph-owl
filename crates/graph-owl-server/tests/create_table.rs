@@ -21,7 +21,7 @@ async fn post_tables_with_valid_body_returns_201_with_created_table() {
                 .body(Body::from(
                     json!({
                         "name": "customers",
-                        "fully_qualified_name": "warehouse.public.customers"
+                        "fullyQualifiedName": "warehouse.public.customers"
                     })
                     .to_string(),
                 ))
@@ -33,10 +33,10 @@ async fn post_tables_with_valid_body_returns_201_with_created_table() {
     assert_eq!(response.status(), StatusCode::CREATED);
     let body = json_body(response).await;
     assert_eq!(body["name"], "customers");
-    assert_eq!(body["fully_qualified_name"], "warehouse.public.customers");
+    assert_eq!(body["fullyQualifiedName"], "warehouse.public.customers");
     assert!(body["id"].is_string());
-    assert!(body["created_at"].is_string());
-    assert!(body["updated_at"].is_string());
+    assert!(body["createdAt"].is_string());
+    assert!(body["updatedAt"].is_string());
 }
 
 #[tokio::test]
@@ -50,7 +50,7 @@ async fn post_tables_missing_name_returns_400() {
                 .uri("/tables")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({ "fully_qualified_name": "warehouse.public.customers" }).to_string(),
+                    json!({ "fullyQualifiedName": "warehouse.public.customers" }).to_string(),
                 ))
                 .expect("request should build"),
         )
@@ -65,7 +65,7 @@ async fn post_tables_with_duplicate_fully_qualified_name_returns_409() {
     let (app, _container) = test_app().await;
     let body = json!({
         "name": "customers",
-        "fully_qualified_name": "warehouse.public.customers"
+        "fullyQualifiedName": "warehouse.public.customers"
     })
     .to_string();
 

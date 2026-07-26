@@ -23,7 +23,7 @@ async fn get_table_by_id_returns_the_previously_created_table() {
                 .body(Body::from(
                     json!({
                         "name": "customers",
-                        "fully_qualified_name": "warehouse.public.customers"
+                        "fullyQualifiedName": "warehouse.public.customers"
                     })
                     .to_string(),
                 ))

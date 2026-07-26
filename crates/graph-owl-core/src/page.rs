@@ -115,12 +115,14 @@ impl PageRequest {
 
 /// One page of results plus the token for the next.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Page<T> {
     pub data: Vec<T>,
     pub paging: Paging,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Paging {
     /// Token for the next page, or `None` on the last one. Nullness is the
     /// only end-of-results signal a client gets, so it must be exact.

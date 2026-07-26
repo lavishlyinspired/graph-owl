@@ -33,7 +33,7 @@ async fn seed(app: &axum::Router, count: usize) {
                     .body(Body::from(
                         json!({
                             "name": format!("t{n:03}"),
-                            "fully_qualified_name": format!("warehouse.public.t{n:03}")
+                            "fullyQualifiedName": format!("warehouse.public.t{n:03}")
                         })
                         .to_string(),
                     ))
@@ -58,7 +58,7 @@ async fn a_client_can_walk_every_page_using_only_the_returned_cursor() {
         let body = json_body(get(&app, &uri).await).await;
         pages += 1;
         for table in body["data"].as_array().expect("data array") {
-            seen.push(table["fully_qualified_name"].as_str().unwrap().to_string());
+            seen.push(table["fullyQualifiedName"].as_str().unwrap().to_string());
         }
         let Some(after) = body["paging"]["after"].as_str() else {
             break;

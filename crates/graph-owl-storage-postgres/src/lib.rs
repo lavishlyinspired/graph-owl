@@ -3,7 +3,7 @@ use graph_owl_core::{
     Relationship, Table, TableUpdate,
     page::{Cursor, Page, PageRequest},
 };
-use graph_owl_storage::{Storage, StorageError};
+use graph_owl_storage::{ConflictKind, Storage, StorageError};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
@@ -101,6 +101,7 @@ impl Storage for PostgresStorage {
                     StorageError::Conflict {
                         detail: table.fully_qualified_name.clone(),
                         existing_id,
+                        kind: ConflictKind::Fqn,
                     }
                 }
                 _ => StorageError::Unexpected(e.to_string()),
@@ -231,6 +232,7 @@ impl Storage for PostgresStorage {
                         relationship.to_entity_id
                     ),
                     existing_id: None,
+                    kind: ConflictKind::RelationshipTuple,
                 }
             }
             _ => StorageError::Unexpected(e.to_string()),

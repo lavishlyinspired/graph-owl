@@ -17,7 +17,7 @@ async fn create_table(app: &axum::Router, name: &str, fqn: &str) -> Value {
                 .uri("/tables")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({ "name": name, "fully_qualified_name": fqn }).to_string(),
+                    json!({ "name": name, "fullyQualifiedName": fqn }).to_string(),
                 ))
                 .expect("request should build"),
         )

@@ -6,6 +6,14 @@ use graph_owl_core::{
 use thiserror::Error;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictKind {
+    /// A `fully_qualified_name` already exists.
+    Fqn,
+    /// The `(from, type, to)` relationship tuple already exists.
+    RelationshipTuple,
+}
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     /// A uniqueness constraint rejected the write. `existing_id` names the row
@@ -15,6 +23,10 @@ pub enum StorageError {
     Conflict {
         detail: String,
         existing_id: Option<Uuid>,
+        /// What kind of uniqueness was violated. A duplicate FQN and a
+        /// duplicate relationship tuple need different client responses, so
+        /// they must not share one error identity.
+        kind: ConflictKind,
     },
     #[error("unexpected storage error: {0}")]
     Unexpected(String),
