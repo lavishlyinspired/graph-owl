@@ -102,6 +102,7 @@ Read these before planning or implementing anything non-trivial:
 | `plans/00g-operations.md` | Migration & rollback, backup/DR (RPO/RTO), data retention & erasure, runbooks, the testing levels above unit |
 | `plans/00h-ui-design-system.md` | Design tokens, chrome, the five reusable UI patterns, and the epic → screen inventory |
 | `plans/00i-licensing.md` | **Clean-room rules binding on every implementation session** — what may be read, what may never be copied |
+| `plans/00j-language-boundaries.md` | Rust vs Python vs TypeScript — the process boundary is the language boundary; what is a component and what is a consumer |
 | `plans/ROADMAP.md` | All 42 epics in 9 phases, sequenced, with the plan-file work queue |
 
 ### Which `00*` docs bind which work
@@ -131,7 +132,7 @@ Differentiator epics are marked ★ in the roadmap — they are the differentiat
 - **An external graph database is not a backend either.** As a *source* it is a connector module; as a *sync destination* it is a one-directional, lossy **projection target** (`plans/09a-lpg-interchange.md`). Never a place the graph lives.
 - **Traversal is not analytics.** Traversal is a bounded walk answering "what is connected to what" (Epic 7a); analytics is an unbounded whole-graph computation answering "what is structurally significant" (Epic 38). Different crates, different budgets, different failure modes.
 
-`plans/00a`–`00i` describe the **target** state, with sections marked **(built)** where they already exist. When implementation and these documents disagree, the documents are right and the code has drifted.
+`plans/00a`–`00j` describe the **target** state, with sections marked **(built)** where they already exist. When implementation and these documents disagree, the documents are right and the code has drifted.
 
 ## Plans
 
