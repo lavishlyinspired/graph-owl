@@ -15,7 +15,7 @@ use uuid::Uuid;
 pub fn app(catalog: Catalog) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/tables", post(create_table))
+        .route("/tables", post(create_table).get(list_tables))
         .route("/tables/{id}", get(get_table))
         .with_state(catalog)
 }
@@ -26,6 +26,11 @@ async fn create_table(
 ) -> Result<(StatusCode, Json<Table>), AppError> {
     let table = catalog.create_table(payload).await?;
     Ok((StatusCode::CREATED, Json(table)))
+}
+
+async fn list_tables(State(catalog): State<Catalog>) -> Result<Json<Vec<Table>>, AppError> {
+    let tables = catalog.list_tables().await?;
+    Ok(Json(tables))
 }
 
 async fn get_table(

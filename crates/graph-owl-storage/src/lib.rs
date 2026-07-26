@@ -15,4 +15,5 @@ pub enum StorageError {
 pub trait Storage: Send + Sync {
     async fn insert_table(&self, table: Table) -> Result<Table, StorageError>;
     async fn get_table(&self, id: Uuid) -> Result<Option<Table>, StorageError>;
+    async fn list_tables(&self) -> Result<Vec<Table>, StorageError>;
 }

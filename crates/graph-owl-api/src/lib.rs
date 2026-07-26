@@ -45,6 +45,13 @@ impl Catalog {
     pub async fn get_table(&self, id: Uuid) -> Result<Option<Table>, StorageError> {
         self.storage.get_table(id).await
     }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn list_tables(&self) -> Result<Vec<Table>, StorageError> {
+        self.storage.list_tables().await
+    }
 }
 
 #[cfg(test)]
@@ -73,6 +80,10 @@ mod tests {
                 .iter()
                 .find(|table| table.id == id)
                 .cloned())
+        }
+
+        async fn list_tables(&self) -> Result<Vec<Table>, StorageError> {
+            Ok(self.inserted.lock().unwrap().clone())
         }
     }
 
@@ -140,5 +151,43 @@ mod tests {
             .expect("get_table should succeed");
 
         assert_eq!(found, None);
+    }
+
+    #[tokio::test]
+    async fn listing_tables_with_none_created_returns_an_empty_vec() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let tables = catalog
+            .list_tables()
+            .await
+            .expect("list_tables should succeed");
+
+        assert_eq!(tables, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn listing_tables_returns_all_created_tables() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let first = catalog
+            .create_table(mock_create_table_request())
+            .await
+            .expect("create_table should succeed");
+        let second = catalog
+            .create_table(CreateTable {
+                fully_qualified_name: "warehouse.public.orders".to_string(),
+                ..mock_create_table_request()
+            })
+            .await
+            .expect("create_table should succeed");
+
+        let mut tables = catalog
+            .list_tables()
+            .await
+            .expect("list_tables should succeed");
+        tables.sort_by_key(|table| table.id);
+        let mut expected = vec![first, second];
+        expected.sort_by_key(|table| table.id);
+
+        assert_eq!(tables, expected);
     }
 }

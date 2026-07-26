@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use graph_owl_core::Table;
 use graph_owl_storage::{Storage, StorageError};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
 mod embedded {
@@ -9,6 +9,20 @@ mod embedded {
 }
 
 const UNIQUE_VIOLATION: &str = "23505";
+
+// Takes PgRow by value so it can be passed directly as a fn pointer to
+// Option::map/Iterator::map at both call sites, instead of a wrapping closure.
+#[allow(clippy::needless_pass_by_value)]
+fn table_from_row(row: PgRow) -> Table {
+    Table {
+        id: row.get("id"),
+        name: row.get("name"),
+        fully_qualified_name: row.get("fully_qualified_name"),
+        description: row.get("description"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
 
 pub struct PostgresStorage {
     pool: PgPool,
@@ -73,13 +87,18 @@ impl Storage for PostgresStorage {
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-        Ok(row.map(|row| Table {
-            id: row.get("id"),
-            name: row.get("name"),
-            fully_qualified_name: row.get("fully_qualified_name"),
-            description: row.get("description"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        }))
+        Ok(row.map(table_from_row))
+    }
+
+    async fn list_tables(&self) -> Result<Vec<Table>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, name, fully_qualified_name, description, created_at, updated_at
+             FROM tables",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows.into_iter().map(table_from_row).collect())
     }
 }

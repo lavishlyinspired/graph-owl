@@ -1,0 +1,72 @@
+mod common;
+
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
+use common::{json_body, test_app};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+async fn create_table(app: &axum::Router, name: &str, fqn: &str) -> Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/tables")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "name": name, "fully_qualified_name": fqn }).to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    json_body(response).await
+}
+
+#[tokio::test]
+async fn get_tables_with_no_rows_returns_an_empty_array() {
+    let (app, _container) = test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tables")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body, json!([]));
+}
+
+#[tokio::test]
+async fn get_tables_returns_all_created_tables() {
+    let (app, _container) = test_app().await;
+    let first = create_table(&app, "customers", "warehouse.public.customers").await;
+    let second = create_table(&app, "orders", "warehouse.public.orders").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/tables")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = json_body(response).await.as_array().unwrap().clone();
+    body.sort_by_key(|table| table["id"].as_str().unwrap().to_string());
+    let mut expected = vec![first, second];
+    expected.sort_by_key(|table| table["id"].as_str().unwrap().to_string());
+    assert_eq!(body, expected);
+}

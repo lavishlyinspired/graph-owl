@@ -123,3 +123,45 @@ async fn getting_a_nonexistent_table_returns_none() {
 
     assert_eq!(found, None);
 }
+
+#[tokio::test]
+async fn listing_tables_with_no_rows_returns_an_empty_vec() {
+    let (storage, _container, _connection_string) = test_storage().await;
+
+    let tables = storage
+        .list_tables()
+        .await
+        .expect("list_tables should succeed");
+
+    assert_eq!(tables, Vec::new());
+}
+
+#[tokio::test]
+async fn listing_tables_returns_all_persisted_tables() {
+    let (storage, _container, _connection_string) = test_storage().await;
+    let first = mock_table();
+    let second = Table {
+        id: Uuid::new_v4(),
+        name: "orders".to_string(),
+        fully_qualified_name: "warehouse.public.orders".to_string(),
+        ..mock_table()
+    };
+    storage
+        .insert_table(first.clone())
+        .await
+        .expect("insert should succeed");
+    storage
+        .insert_table(second.clone())
+        .await
+        .expect("insert should succeed");
+
+    let mut tables = storage
+        .list_tables()
+        .await
+        .expect("list_tables should succeed");
+    tables.sort_by_key(|table| table.id);
+    let mut expected = vec![first, second];
+    expected.sort_by_key(|table| table.id);
+
+    assert_eq!(tables, expected);
+}

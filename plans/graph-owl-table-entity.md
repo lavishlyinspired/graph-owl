@@ -1,7 +1,7 @@
 # Plan: Table Entity Walking Skeleton
 
 **Branch**: feat/table-entity
-**Status**: Active — Slices A-B done; Slices C-E remain
+**Status**: Active — Slices A-C done; Slices D-E remain
 
 ## Goal
 
@@ -57,7 +57,7 @@ Every slice follows RED-GREEN-MUTATE-KILL MUTANTS-REFACTOR. No production code w
 **RED/GREEN/MUTATE/KILL MUTANTS/REFACTOR**: same shape as Slice A, scoped to the read path only.
 **Done when**: acceptance criteria met, mutation report reviewed, human approves commit.
 
-### Slice C: API client lists all Tables
+### Slice C: API client lists all Tables — DONE
 
 **Value**: A caller can discover what Tables already exist without knowing ids in advance.
 **Path**: `GET /tables` → `Catalog::list_tables` → `Storage::list_tables` → Postgres `SELECT *` → 200 with a JSON array (empty array when none exist).
