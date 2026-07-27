@@ -145,12 +145,59 @@ that was never read.
 | Full SPARQL 1.1 / 1.2 | The subset is sized to the queries a catalog receives; the tail serves tooling this product does not target | Someone points a SPARQL client or Protégé-class tool at graph-owl |
 | `SERVICE` federated query | No user has asked to join against an external endpoint | One does |
 | Aggregates, `GROUP BY`, subqueries | Already deferred by `07` decision 1 as "not in the first cut" — a scheduling decision, not a rejection | Epic 7 ships and a real query needs them |
-| A second triple-store backend | `00e` already defers it: a second backend before the first is proven adds no information | The first is proven and a read-heavy deployment needs the other's profile |
+| A second triple-store backend | See *An embedded RDF store as a backend* below — the deferral in `00e` is right but its stated reason is the weak one | Only under the conditions named there |
 | OWL 2 EL | Metadata ontologies are thousands of classes; EL exists for hundreds of thousands | An ontology past ~50k classes |
 | OWL 2 QL | Query rewriting hides the derivation, and explainability is a requirement | Virtual integration over an external database becomes a goal |
 | RDF/XML | Nothing new emits it | Never, plausibly |
 | Split read/write partitions (main + delta) | An architecture for stores an order of magnitude past this one's target; it would add a merge path to a system whose write volume does not need one | Epic 37a shows write amplification dominating |
 | Bulk-load path distinct from the API | Already effectively met — Epic 4 batches at the bind-parameter ceiling inside one transaction | A load arrives that the batching path cannot absorb |
+
+### An embedded RDF store as a backend, examined properly
+
+The recommendation was to consider a Rust-native, permissively-licensed,
+RocksDB-backed RDF store as an alternative engine backend, on the strength of
+being several times faster than a JVM store in query benchmarks. `00e` already
+defers it with "a second backend before the first is proven adds no
+information", which is true and is not the interesting reason. The interesting
+reasons are three, and they point the other way.
+
+**1. It does not do what this store exists to do.** graph-owl's flake store is
+not a generic triple store that happens to hold metadata. It is a
+*time-travelling, authorization-filterable* store, and those two properties are
+the product's differentiators. A general RDF store offers neither: no
+`as_of`, and no way to compile an access predicate into the scan. Substituting
+one would mean discarding `?asOf=` and the `AccessPredicate` lowering — replacing
+the parts that make this distinct with a faster version of the parts that do
+not.
+
+**2. The benchmark compares something this project has not built.** "N× faster"
+is a *SPARQL query* number. graph-owl has no SPARQL. Its current hot paths are
+pattern lookups over four composite indexes and a recursive-CTE frontier walk,
+and no published benchmark speaks to either. Adopting a number measured on a
+different workload is how a project acquires someone else's scale assumptions.
+
+**3. It would be a second datastore, not a replacement.** Relational is the
+source of truth and that is Postgres. Adding a second engine means two stores
+to operate, back up, restore and keep consistent, against a deployment model
+that is explicitly single-node with a budgeted footprint (`00a`).
+
+**But there is a real use, and it is a better one than the recommendation
+made.** If Epic 7 implements a SPARQL subset, a permissively-licensed Rust
+SPARQL implementation is available *as a differential-test oracle*: run the same
+query against both, require identical results on the subset, and a divergence is
+a bug in graph-owl's planner rather than an opinion about it. This project
+already uses differential testing internally — Epic 6 against hand-coded
+inheritance, Epic 7's fast paths against the general path — and an external
+oracle is strictly stronger, because it cannot share a misunderstanding with the
+code under test.
+
+That is a **test dependency**, not a runtime one. Licence permits it; nothing
+ships. Recorded here as the form this recommendation should take if it is taken
+at all.
+
+**Reverses when**: a deployment is demonstrably read-heavy SPARQL over a static
+graph, where time-travel and per-principal filtering are not required. That is a
+different product, and saying so is cleaner than pretending the swap is cheap.
 
 **Not a recommendation, but worth recording**: the analyses' benchmark numbers
 (load times, p95 latencies) are from other systems on other hardware. They are

@@ -21,6 +21,52 @@ Low technical risk, high adoption value. Most of the gap between an installed ca
 4. **Packs import as `Approved` terms in their own glossary**, not merged into an organization's glossary. Provenance stays visible and a pack is removable.
 5. **SKOS is the interchange model** (Epic 24 decision 2), so pack import is a mapping rather than a translation.
 
+## The financial pack, examined — because it is the one that will be asked for first
+
+The demo estate is Indian retail and corporate banking, so the financial
+vocabulary is the pack this project will be asked for before any other. Checked
+against its repository on **28 July 2026** rather than assumed:
+
+| | |
+|---|---|
+| Licence | **MIT** — freely redistributable, and unusually permissive for an industry vocabulary. Decision 1's "not vendored" rule stands anyway, on size and update-cadence grounds rather than licensing |
+| Size | ~2,450 classes in the 2026/Q1 production release |
+| Releases | Quarterly, with a **production/development split** — production is the reviewed subset |
+| Authored in | OWL 2 **DL** |
+
+**Three consequences that decide how it is used.**
+
+**1. Take the production release, never development.** The split exists because
+the development branch carries work in review. A catalog that imported it would
+show analysts terms that may not survive the quarter, and a glossary that
+changes under its readers is worse than a smaller one.
+
+**2. It is authored in DL and this engine reasons in RL, so the honest claim is
+the RL-expressible subset.** Most of what a catalog wants from it — class
+hierarchy, property hierarchy, domain, range, inverse, transitivity — is inside
+RL. What falls outside are the DL constructs that make full classification
+expensive, and published experience is that RL is more useful than RDFS for
+reasoning over this vocabulary in practice. **Import must therefore report what
+it dropped**, per-axiom, rather than silently loading a subset and letting a
+user believe the whole ontology is in force. A vocabulary that quietly means
+less than it says is a worse foundation than one that states its own limits.
+
+**3. It is a *business* ontology, not a metadata one — and conflating the two
+is the mistake to avoid.** It describes financial instruments, legal entities
+and contractual obligations. graph-owl describes tables, columns and schemas.
+They are different layers, and the pack's job is to give a *column* something to
+mean: "this column holds a monetary amount", "this table is about a legal
+entity". That is Epic 24's glossary link, not a replacement for the `dsc:`
+vocabulary.
+
+**Where it earns the most, and it is not the glossary.** Its legal-entity
+identifiers — LEI above all — are inverse-functional by definition, which makes
+them the ready-made input to Epic 17's key-based identity (Slice A2) via Epic
+95's `InverseFunctionalProperty` rule. Two records sharing an LEI are the same
+entity, and that is a *derivation with an explanation* rather than a fuzzy
+match. Of everything in this pack, that is the part that does work no
+hand-written matcher does as well.
+
 ## Implementation reference
 
 ```rust

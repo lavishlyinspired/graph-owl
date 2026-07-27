@@ -110,6 +110,55 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: Table-driven normalization tests including the quoted-segment case from Epic 2's tokenizer. A test asserting the scorer is *not* called on an exact match (call counter) — this is a correctness matter, not just performance, because a scorer bug must not affect exact matches. Mutator watch: case-sensitive comparison must fail; skipping the short-circuit must fail the call-count assertion.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+### Slice A2: Key-based identity, before any scoring
+
+**Value**: Two records carrying the same declared identifier are the same
+thing, and no amount of string similarity should be involved in saying so.
+
+FQN normalisation handles assets the catalog itself named. It does not help
+where two sources describe the same *real-world* entity under different names —
+the same legal entity as `HDFC Bank Ltd` and `HDFC BANK LIMITED`, or the same
+counterparty under two internal codes. Fuzzy scoring on names is exactly the
+wrong tool there: it is guessing at something that is already stated.
+
+**The mechanism already exists in the standards.** An inverse-functional
+property is one whose value uniquely determines its subject — if two subjects
+share a value, they *are* the same subject. `owl:hasKey` is the multi-property
+form. Epic 95 adds both as derivation rules, and this slice is their first
+consumer.
+
+Worked example, and the reason this is not hypothetical: an **LEI** (Legal
+Entity Identifier, ISO 17442) identifies exactly one legal entity worldwide. Two
+records with the same LEI are the same entity, full stop. Declaring `lei` as
+inverse-functional makes that a *derivation* rather than a matcher, which means
+it is explainable — Epic 6's derivation chain says "these are the same because
+they share LEI 549300…", which is an answer a data steward can check.
+
+**Acceptance criteria**:
+- A declared inverse-functional property with a shared value derives `sameAs`
+  without invoking the scorer — asserted by call counter, as Slice A does.
+- `owl:hasKey` over a property *set* derives only when every property matches;
+  a partial match derives nothing.
+- A key-based `sameAs` is **not** subject to the confidence bands in Slice D. It
+  is not a probability, and routing it through a threshold would let a tuning
+  change silently unmerge two records that are definitionally the same.
+- The derivation chain names the shared value, so a wrong merge is diagnosable
+  without re-running the matcher.
+- A key whose value is absent on one side derives nothing — absence is not a
+  match, and this is the case a naive implementation gets wrong by treating
+  `NULL = NULL` as agreement.
+
+**RED**: two entities sharing an LEI merge with the scorer never called; two
+sharing three of four `hasKey` properties do not merge; one with a null key
+against one with a value does not merge. Mutator watch: treating absent as equal
+must fail the third; routing key matches through the confidence band must fail
+the second criterion.
+
+**Done when**: criteria met, mutation report reviewed. **Depends on Epic 95** —
+until inverse-functional and `hasKey` exist as rules, this slice has nothing to
+consume and must not be hand-coded here, or there will be two implementations of
+identity that disagree.
+
 ### Slice B: Blocking keys and candidate generation
 
 **Acceptance criteria**: four blocking keys computed and indexed on entity write; candidate generation returns only entities sharing a key; on a 100k-entity corpus, generation is an index scan (query plan asserted) and returns in < 50ms p95; an entity with no shared key produces zero candidates, not an error; blocking keys are recomputed on rename.
