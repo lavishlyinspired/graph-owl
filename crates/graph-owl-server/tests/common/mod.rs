@@ -45,7 +45,10 @@ async fn build_app(secret: Option<&str>) -> (axum::Router, ContainerAsync<Postgr
     let graph = graph_owl_engine_postgres::PostgresTripleStore::connect(&connection_string)
         .await
         .expect("failed to connect the graph engine");
-    let catalog = Catalog::new(Arc::new(storage)).with_graph(Arc::new(graph));
+    let graph = Arc::new(graph);
+    let catalog = Catalog::new(Arc::new(storage))
+        .with_graph(graph.clone())
+        .with_traversal(graph);
 
     (graph_owl_server::app(catalog), container, connection_string)
 }

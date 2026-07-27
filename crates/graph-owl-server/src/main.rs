@@ -20,7 +20,11 @@ async fn main() {
     let graph = PostgresTripleStore::connect(&database_url)
         .await
         .expect("failed to connect the graph engine to postgres");
-    let catalog = Catalog::new(Arc::new(storage)).with_graph(Arc::new(graph));
+    // One backend, seen through both of its capabilities.
+    let graph = Arc::new(graph);
+    let catalog = Catalog::new(Arc::new(storage))
+        .with_graph(graph.clone())
+        .with_traversal(graph);
 
     let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let listener = tokio::net::TcpListener::bind(&bind)

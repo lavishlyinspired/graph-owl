@@ -14,6 +14,7 @@ graph-owl-core.workspace = true
 graph-owl-storage.workspace = true
 graph-owl-storage-postgres.workspace = true
 graph-owl-engine-postgres.workspace = true
+graph-owl-traversal.workspace = true
 chrono.workspace = true
 axum.workspace = true
 tokio.workspace = true

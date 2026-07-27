@@ -12,6 +12,7 @@ use graph_owl_core::{
 };
 use graph_owl_engine::TripleStore;
 use graph_owl_storage::{ConflictKind, Storage, StorageError, StoredUser};
+use graph_owl_traversal::{Bounds, Direction, EdgeFilter, Subgraph, TraversalEngine};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -198,6 +199,11 @@ pub struct Catalog {
     /// than promised: if the projection were required, a graph outage would be
     /// a catalog outage.
     graph: Option<Arc<dyn TripleStore>>,
+    /// The same backend seen through its traversal capability. Two fields
+    /// rather than one combined trait, because storing flakes and walking them
+    /// are genuinely separate contracts — a backend could reasonably implement
+    /// one and not the other.
+    traversal: Option<Arc<dyn TraversalEngine>>,
 }
 
 impl Catalog {
@@ -205,6 +211,7 @@ impl Catalog {
         Self {
             storage,
             graph: None,
+            traversal: None,
         }
     }
 
@@ -213,6 +220,65 @@ impl Catalog {
     pub fn with_graph(mut self, graph: Arc<dyn TripleStore>) -> Self {
         self.graph = Some(graph);
         self
+    }
+
+    /// The traversal capability of the same backend.
+    #[must_use]
+    pub fn with_traversal(mut self, traversal: Arc<dyn TraversalEngine>) -> Self {
+        self.traversal = Some(traversal);
+        self
+    }
+
+    /// The neighbourhood around an asset, as a graph.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the asset does not exist or the caller may not see it.
+    /// `Storage` if no traversal engine is configured — answering a graph
+    /// question with an empty graph would read as "nothing is connected",
+    /// which is a wrong answer rather than a missing feature.
+    pub async fn asset_subgraph(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        direction: Direction,
+        bounds: Bounds,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<Subgraph, CatalogError> {
+        // Visibility first, and against relational state — decision 7. The
+        // projection lags by design, so a permission revoked in that window
+        // would still be honoured by a check that read from the graph.
+        self.get_asset_for(principal, id).await?;
+
+        let traversal = self.traversal.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no traversal engine configured".to_string(),
+            ))
+        })?;
+
+        let as_of_t = match (as_of, &self.graph) {
+            (Some(at), Some(graph)) => graph
+                .time_at(at)
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?,
+            _ => None,
+        };
+
+        traversal
+            .subgraph(
+                &[graph_owl_core::flake::Sid::new(
+                    graph_owl_core::flake::namespace::DSC,
+                    id.to_string(),
+                )],
+                direction,
+                bounds,
+                &EdgeFilter {
+                    relationship_types: None,
+                    as_of: as_of_t,
+                },
+            )
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
     }
 
     /// Project a relationship into the graph, or withdraw it.

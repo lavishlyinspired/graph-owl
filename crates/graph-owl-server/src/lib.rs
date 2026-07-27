@@ -49,6 +49,7 @@ pub fn app(catalog: Catalog) -> Router {
         .route("/assets/{id}/versions", get(asset_versions))
         .route("/assets/{id}/restore", post(restore_asset))
         .route("/assets/{id}/children", get(list_asset_children))
+        .route("/assets/{id}/graph", get(asset_graph))
         .route("/assets/{id}/ancestors", get(asset_ancestors))
         .with_state(catalog)
         // Mounted LAST so the SPA fallback cannot swallow an unknown API path.
@@ -680,6 +681,99 @@ async fn get_asset(
     catalog.get_asset_for(&principal, id).await?;
 
     Ok(Json(catalog.get_asset_as_of(id, at).await?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubgraphQuery {
+    hops: Option<usize>,
+    direction: Option<String>,
+    max_nodes: Option<usize>,
+    as_of: Option<String>,
+}
+
+/// The neighbourhood around an asset.
+///
+/// Returns nodes with their kind and name resolved, so a renderer can draw
+/// labels without N follow-up reads — the whole point of one statement per
+/// traversal is lost if the client then makes one request per node.
+async fn asset_graph(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<SubgraphQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let direction = match query.direction.as_deref() {
+        None | Some("both") => graph_owl_traversal::Direction::Both,
+        Some("outgoing") => graph_owl_traversal::Direction::Outgoing,
+        Some("incoming") => graph_owl_traversal::Direction::Incoming,
+        Some(other) => {
+            return Err(AppError::Validation(vec![FieldError::new(
+                "direction",
+                FieldErrorCode::Type,
+                format!("`{other}` is not one of: outgoing, incoming, both"),
+            )]));
+        }
+    };
+
+    let defaults = graph_owl_traversal::Bounds::default();
+    let bounds = graph_owl_traversal::Bounds {
+        // Capped server-side. A client asking for 50 hops on a real estate is
+        // asking for the whole graph, and the bound exists to protect the
+        // server rather than to be polite to the client.
+        max_hops: query.hops.unwrap_or(defaults.max_hops).min(6),
+        max_nodes: query.max_nodes.unwrap_or(defaults.max_nodes).min(1_000),
+    };
+
+    let as_of = match query.as_of {
+        None => None,
+        Some(raw) => Some(
+            chrono::DateTime::parse_from_rfc3339(&raw)
+                .map_err(|e| {
+                    AppError::Validation(vec![FieldError::new(
+                        "asOf",
+                        FieldErrorCode::Type,
+                        format!("`{raw}` is not an RFC 3339 timestamp: {e}"),
+                    )])
+                })?
+                .with_timezone(&chrono::Utc),
+        ),
+    };
+
+    let graph = catalog
+        .asset_subgraph(&principal, id, direction, bounds, as_of)
+        .await?;
+
+    // Resolve labels for the nodes we are about to return. Unknown ids stay in
+    // the result as bare nodes rather than being dropped: a node the reader
+    // cannot see is still structurally present, and silently removing it would
+    // leave the picture claiming a smaller neighbourhood than exists.
+    let mut nodes = Vec::with_capacity(graph.nodes.len());
+    for node in &graph.nodes {
+        let resolved = match node.id.parse::<Uuid>() {
+            Ok(uuid) => catalog.get_asset_for(&principal, uuid).await.ok(),
+            Err(_) => None,
+        };
+        nodes.push(match resolved {
+            Some(asset) => json!({
+                "id": node.id,
+                "name": asset.name,
+                "kind": asset.kind.as_str(),
+                "fullyQualifiedName": asset.fully_qualified_name,
+            }),
+            None => json!({ "id": node.id, "name": node.id, "kind": null }),
+        });
+    }
+
+    Ok(Json(json!({
+        "nodes": nodes,
+        "edges": graph.edges.iter().map(|e| json!({
+            "from": e.from.id,
+            "to": e.to.id,
+            "relationship": e.relationship,
+        })).collect::<Vec<_>>(),
+        "truncated": graph.truncated,
+    })))
 }
 
 async fn list_roots(

@@ -6,6 +6,7 @@
 //! choosing which ordering a given pattern should use — that judgement lives
 //! here, not in the callers.
 
+pub mod traversal;
 pub mod value;
 
 use async_trait::async_trait;
