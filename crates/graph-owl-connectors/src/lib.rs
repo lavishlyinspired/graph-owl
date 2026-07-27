@@ -321,6 +321,12 @@ mod deletion_plan_tests {
 
     #[test]
     fn the_default_threshold_is_conservative_but_not_zero() {
-        assert!(T > 0.0 && T < 0.5, "got {T}");
+        // Compile-time: both sides are constants, so a runtime assertion here
+        // could only ever fail in a build that already knew it would.
+        //
+        // Above zero or the guard refuses every run; below half or it is not a
+        // guard at all, since a run deleting half an estate is exactly the one
+        // that should stop and ask.
+        const { assert!(T > 0.0 && T < 0.5) };
     }
 }

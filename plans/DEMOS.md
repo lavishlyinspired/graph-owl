@@ -12,9 +12,9 @@
 
 | Demo | Theme | Epics | State |
 |---|---|---|---|
-| **1** | A source becomes a browsable catalog | 1, 2, 15, 39 (partial) | **Shipped** |
-| **2** | A governed catalog people can trust | +3, 8, 10, 11, 12, 13 | **Shipped** (gaps named per epic) |
-| **3** ★ | It is a graph engine | +4, 7, 7a, 40 | **Mostly shipped** — Epic 4 A–G, 7a core, 40 core. **Epic 7 (SPARQL) not started** |
+| **1** | A source becomes a browsable catalog | 1, 2, 15, 39 (partial) | **Shipped** — + deletion detection |
+| **2** | A governed catalog people can trust | +3, 8, 10, 11, 12, 13 | **Shipped** — + `If-Match`/412, console sign-in, facets (gaps named per epic) |
+| **3** ★ | It is a graph engine | +4, 7, 7a, 40, 93 | **Mostly shipped** — Epic 4 A–G, 7a core, 40 core, 93 Overview. **Epic 7 (SPARQL) not started** |
 | **4** | It reasons, and it validates | +5, 6, 41 | |
 | **5** ★ | Agents can use it | +14, 31, 32, 43 | |
 | **6** | It fills itself | +16, 17, 18, 19, 20, 21 | |
