@@ -215,6 +215,41 @@ impl Catalog {
         self
     }
 
+    /// Project a relationship into the graph, or withdraw it.
+    ///
+    /// Same failure isolation as [`project`]: an edge that fails to reach the
+    /// graph leaves the relational row intact and the graph view stale.
+    ///
+    /// [`project`]: Self::project
+    async fn project_relationship(&self, relationship: &Relationship, asserting: bool) {
+        let Some(graph) = &self.graph else {
+            return;
+        };
+
+        let outcome = async {
+            let t = graph.next_time().await?;
+            let flakes = projection::relationship_to_flakes(relationship, t);
+            if asserting {
+                graph.assert_flakes(&flakes).await
+            } else {
+                // Every flake of the edge, withdrawn together. Retracting only
+                // the endpoints would leave an orphan node still carrying
+                // `rdf:type dsc:Relationship` — an edge to nowhere, which a
+                // traversal would count and then fail to follow.
+                graph.retract_flakes(&flakes).await
+            }
+        }
+        .await;
+
+        if let Err(error) = outcome {
+            eprintln!(
+                "graph projection failed for relationship {} ({error}). The edge \
+                 is intact; the graph view is stale until reconciliation.",
+                relationship.id
+            );
+        }
+    }
+
     /// The asset as it stood at a past instant.
     ///
     /// Reconstructed from the graph rather than read from a snapshot table:
@@ -430,7 +465,9 @@ impl Catalog {
             created_at: Utc::now(),
         };
 
-        Ok(self.storage.create_relationship(relationship).await?)
+        let created = self.storage.create_relationship(relationship).await?;
+        self.project_relationship(&created, true).await;
+        Ok(created)
     }
 
     /// # Errors
@@ -461,7 +498,17 @@ impl Catalog {
         id: Uuid,
     ) -> Result<bool, CatalogError> {
         let _ = principal;
-        Ok(self.storage.delete_relationship(id).await?)
+        // Read before deleting: a retraction has to name the exact facts it
+        // withdraws, and after the row is gone there is nothing left to name
+        // them from.
+        let existing = self.storage.get_relationship(id).await.unwrap_or(None);
+        let deleted = self.storage.delete_relationship(id).await?;
+        if deleted {
+            if let Some(relationship) = existing {
+                self.project_relationship(&relationship, false).await;
+            }
+        }
+        Ok(deleted)
     }
 
     // ---- asset hierarchy (Epic 2) ----
@@ -1353,6 +1400,11 @@ mod tests {
                 })
                 .cloned()
                 .collect())
+        }
+
+        async fn get_relationship(&self, id: Uuid) -> Result<Option<Relationship>, StorageError> {
+            let relationships = self.relationships.lock().unwrap();
+            Ok(relationships.iter().find(|r| r.id == id).cloned())
         }
 
         async fn delete_relationship(&self, id: Uuid) -> Result<bool, StorageError> {

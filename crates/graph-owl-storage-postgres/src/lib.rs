@@ -271,6 +271,15 @@ impl Storage for PostgresStorage {
         Ok(rows.into_iter().map(relationship_from_row).collect())
     }
 
+    async fn get_relationship(&self, id: Uuid) -> Result<Option<Relationship>, StorageError> {
+        sqlx::query("SELECT * FROM entity_relationships WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map(|row| row.map(relationship_from_row))
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
     async fn delete_relationship(&self, id: Uuid) -> Result<bool, StorageError> {
         let result = sqlx::query("DELETE FROM entity_relationships WHERE id = $1")
             .bind(id)

@@ -409,6 +409,137 @@ mod projection_tests {
         );
     }
 
+    // ---- relationships ----
+
+    fn relationship() -> crate::Relationship {
+        crate::Relationship {
+            id: Uuid::from_u128(50),
+            from_entity_type: "table".to_string(),
+            from_entity_id: Uuid::from_u128(1),
+            relationship_type: "feeds".to_string(),
+            to_entity_type: "table".to_string(),
+            to_entity_id: Uuid::from_u128(2),
+            created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+        }
+    }
+
+    /// Reification: every flake hangs off the *relationship's* own node, not
+    /// off either endpoint. That is what gives an edge somewhere to carry a
+    /// payload — a flat `(a) feeds (b)` assertion has no subject to attach
+    /// confidence or provenance to.
+    #[test]
+    fn a_relationship_projects_as_a_node_of_its_own() {
+        let edge = relationship();
+        let flakes = relationship_to_flakes(&edge, 1);
+
+        assert!(flakes.len() >= 4, "got {}", flakes.len());
+        let subject = relationship_sid(&edge);
+        assert!(
+            flakes.iter().all(|f| f.s == subject),
+            "every flake must hang off the relationship's own node"
+        );
+        assert!(
+            flakes.iter().all(|f| f.t == 1 && f.op),
+            "one change, one t, all assertions"
+        );
+    }
+
+    /// OPST is reference-only, so an endpoint stored as text is unreachable by
+    /// reverse traversal — and "what feeds this table" is exactly a lookup by
+    /// object.
+    #[test]
+    fn both_endpoints_are_references_not_strings() {
+        let edge = relationship();
+        let flakes = relationship_to_flakes(&edge, 1);
+
+        for predicate in ["fromEntity", "toEntity"] {
+            let value =
+                value_of(&flakes, predicate).unwrap_or_else(|| panic!("{predicate} is missing"));
+            assert!(
+                value.is_reference(),
+                "{predicate} is {value:?}; OPST cannot reach a literal"
+            );
+        }
+    }
+
+    #[test]
+    fn the_endpoints_point_at_the_entities_they_name() {
+        let edge = relationship();
+        let flakes = relationship_to_flakes(&edge, 1);
+
+        assert_eq!(
+            value_of(&flakes, "fromEntity"),
+            Some(&FlakeValue::Ref(Sid::new(
+                namespace::DSC,
+                edge.from_entity_id.to_string()
+            )))
+        );
+        assert_eq!(
+            value_of(&flakes, "toEntity"),
+            Some(&FlakeValue::Ref(Sid::new(
+                namespace::DSC,
+                edge.to_entity_id.to_string()
+            )))
+        );
+    }
+
+    /// Direction is the whole meaning of a lineage edge. A projection that
+    /// treated the endpoints as interchangeable would make "what feeds this"
+    /// and "what this feeds" the same question.
+    #[test]
+    fn the_two_endpoints_are_not_interchangeable() {
+        let flakes = relationship_to_flakes(&relationship(), 1);
+        assert_ne!(
+            value_of(&flakes, "fromEntity"),
+            value_of(&flakes, "toEntity"),
+            "a reversed edge is a different fact"
+        );
+    }
+
+    /// `rdf:type` rather than `dsc:type`: the standard vocabulary is what lets
+    /// Epic 9 export this without a translation table.
+    #[test]
+    fn a_relationship_declares_its_type_in_the_standard_vocabulary() {
+        let flakes = relationship_to_flakes(&relationship(), 1);
+        let typed = flakes
+            .iter()
+            .find(|f| f.p.namespace_code == namespace::RDF && f.p.id == "type")
+            .expect("rdf:type is missing");
+        assert_eq!(typed.o, FlakeValue::Ref(Sid::dsc("Relationship")));
+    }
+
+    #[test]
+    fn the_relationship_type_and_endpoint_kinds_travel_with_the_edge() {
+        let flakes = relationship_to_flakes(&relationship(), 1);
+        assert_eq!(
+            value_of(&flakes, "relType"),
+            Some(&FlakeValue::String("feeds".into()))
+        );
+        // Without these a traversal must resolve both endpoints just to learn
+        // whether an edge is table-to-table — two extra reads per edge.
+        assert_eq!(
+            value_of(&flakes, "fromEntityType"),
+            Some(&FlakeValue::String("table".into()))
+        );
+        assert_eq!(
+            value_of(&flakes, "toEntityType"),
+            Some(&FlakeValue::String("table".into()))
+        );
+    }
+
+    /// Two relationships between the same pair are two nodes. Collapsing them
+    /// would lose the second, and "feeds" plus "sameAs" between one pair is a
+    /// legitimate thing for a catalog to record.
+    #[test]
+    fn two_relationships_between_the_same_pair_are_distinct_nodes() {
+        let first = relationship();
+        let mut second = relationship();
+        second.id = Uuid::from_u128(51);
+        second.relationship_type = "sameAs".to_string();
+
+        assert_ne!(relationship_sid(&first), relationship_sid(&second));
+    }
+
     // ---- reconstruction ----
 
     /// The round trip that the whole flake model exists for: project an entity
@@ -739,4 +870,78 @@ pub fn asset_from_flakes(id: uuid::Uuid, flakes: &[Flake]) -> Option<Asset> {
         created_at: instant("createdAt").unwrap_or_else(chrono::Utc::now),
         updated_at: instant("updatedAt").unwrap_or_else(chrono::Utc::now),
     })
+}
+
+/// The node a relationship occupies in the graph.
+///
+/// A relationship is a **node**, not a bare predicate assertion between its
+/// endpoints. The flat form cannot carry a payload — confidence, provenance,
+/// the SQL that produced a lineage edge — and "every relationship below 0.5
+/// confidence" is not expressible over it at all. The cost is two hops to
+/// traverse (`plans/04-engine-triples.md` decision 4).
+#[must_use]
+pub fn relationship_sid(relationship: &crate::Relationship) -> Sid {
+    Sid::new(namespace::DSC, relationship.id.to_string())
+}
+
+/// Project a relationship into the graph as a reified node.
+#[must_use]
+pub fn relationship_to_flakes(relationship: &crate::Relationship, t: i64) -> Vec<Flake> {
+    let subject = relationship_sid(relationship);
+    let entity = |id: uuid::Uuid| FlakeValue::Ref(Sid::new(namespace::DSC, id.to_string()));
+
+    vec![
+        // `rdf:type`, not `dsc:type`: this says what kind of *thing* the node
+        // is in the standard vocabulary, which is what lets Epic 9 export it
+        // without a translation table.
+        Flake::assert(
+            subject.clone(),
+            Sid::new(namespace::RDF, "type"),
+            FlakeValue::Ref(Sid::dsc("Relationship")),
+            t,
+        ),
+        // Endpoints are references so OPST reverse traversal reaches them —
+        // "what feeds this table" is a lookup by object, and a string endpoint
+        // would put it on a sequential scan.
+        Flake::assert(
+            subject.clone(),
+            Sid::dsc("fromEntity"),
+            entity(relationship.from_entity_id),
+            t,
+        ),
+        Flake::assert(
+            subject.clone(),
+            Sid::dsc("toEntity"),
+            entity(relationship.to_entity_id),
+            t,
+        ),
+        Flake::assert(
+            subject.clone(),
+            Sid::dsc("relType"),
+            FlakeValue::String(relationship.relationship_type.clone()),
+            t,
+        ),
+        // The endpoint *kinds* travel with the edge. Without them a traversal
+        // has to resolve both endpoints to learn whether an edge is
+        // table→table or column→column, which is two extra reads per edge on
+        // the hot path.
+        Flake::assert(
+            subject.clone(),
+            Sid::dsc("fromEntityType"),
+            FlakeValue::String(relationship.from_entity_type.clone()),
+            t,
+        ),
+        Flake::assert(
+            subject.clone(),
+            Sid::dsc("toEntityType"),
+            FlakeValue::String(relationship.to_entity_type.clone()),
+            t,
+        ),
+        Flake::assert(
+            subject,
+            Sid::dsc("createdAt"),
+            FlakeValue::Instant(relationship.created_at),
+            t,
+        ),
+    ]
 }

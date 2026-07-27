@@ -68,6 +68,17 @@ pub trait Storage: Send + Sync {
         entity_type: &str,
         entity_id: Uuid,
     ) -> Result<Vec<Relationship>, StorageError>;
+    /// One relationship by id, or `None`.
+    ///
+    /// Needed by the graph projection on the delete path: a retraction must
+    /// name the exact facts it withdraws, and once the row is deleted there is
+    /// nothing left to name them from.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn get_relationship(&self, id: Uuid) -> Result<Option<Relationship>, StorageError>;
+
     async fn delete_relationship(&self, id: Uuid) -> Result<bool, StorageError>;
 
     // ---- asset hierarchy (Epic 2) ----
