@@ -676,10 +676,8 @@ impl Catalog {
         // them from.
         let existing = self.storage.get_relationship(id).await.unwrap_or(None);
         let deleted = self.storage.delete_relationship(id).await?;
-        if deleted {
-            if let Some(relationship) = existing {
-                self.project_relationship(&relationship, false).await;
-            }
+        if let (true, Some(relationship)) = (deleted, existing) {
+            self.project_relationship(&relationship, false).await;
         }
         Ok(deleted)
     }
@@ -1213,7 +1211,7 @@ impl Catalog {
             .collect();
         for asset in &absent {
             let parent_is_also_absent = fqn::parent(&asset.fully_qualified_name)
-                .is_some_and(|parent| absent_fqns.contains(&*parent));
+                .is_some_and(|parent| absent_fqns.contains(parent));
             if parent_is_also_absent {
                 continue;
             }
@@ -1462,8 +1460,8 @@ mod tests {
             updated_by: &str,
             expected_version: Option<EntityVersion>,
         ) -> Result<UpdateOutcome, StorageError> {
-            self.guard_write("update_asset");
             use graph_owl_core::envelope::{ChangeDescription, ChangeKind, classify};
+            self.guard_write("update_asset");
             let mut assets = self.assets.lock().unwrap();
             let Some(existing) = assets.iter_mut().find(|a| a.id == id) else {
                 return Ok(UpdateOutcome::NotFound);
@@ -1471,10 +1469,8 @@ mod tests {
             let before = existing.clone();
             // The fake enforces the precondition too. One that ignored it would
             // let a lost-update bug pass here and fail only against Postgres.
-            if let Some(expected) = expected_version {
-                if before.version != expected {
-                    return Ok(UpdateOutcome::VersionMismatch(before.version));
-                }
+            if expected_version.is_some_and(|expected| before.version != expected) {
+                return Ok(UpdateOutcome::VersionMismatch(before.version));
             }
             let mut after = before.clone();
             if let Some(description) = &update.description {
@@ -1642,7 +1638,10 @@ mod tests {
                         .is_some_and(|d| !d.trim().is_empty())
                 })
                 .count();
-            Ok((described as i64, visible.len() as i64))
+            Ok((
+                i64::try_from(described).unwrap_or(i64::MAX),
+                i64::try_from(visible.len()).unwrap_or(i64::MAX),
+            ))
         }
 
         async fn recently_changed_visible(
@@ -2230,7 +2229,7 @@ mod projection_isolation_tests {
             })
         }
 
-        fn refuse<T>(&self) -> Result<T, EngineError> {
+        fn refuse<T>() -> Result<T, EngineError> {
             Err(EngineError::Backend("the graph is down".to_string()))
         }
     }
@@ -2239,7 +2238,7 @@ mod projection_isolation_tests {
     impl TripleStore for RecordingGraph {
         async fn assert_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError> {
             if self.fail {
-                return self.refuse();
+                return Self::refuse();
             }
             self.asserted
                 .lock()
@@ -2250,7 +2249,7 @@ mod projection_isolation_tests {
 
         async fn retract_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError> {
             if self.fail {
-                return self.refuse();
+                return Self::refuse();
             }
             self.retracted
                 .lock()
@@ -2282,7 +2281,7 @@ mod projection_isolation_tests {
 
         async fn next_time(&self) -> Result<i64, EngineError> {
             if self.fail {
-                return self.refuse();
+                return Self::refuse();
             }
             Ok(1)
         }

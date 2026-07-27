@@ -502,10 +502,8 @@ impl Storage for PostgresStorage {
 
         // Compared under the row lock taken above, so no writer can slip
         // between the check and the write.
-        if let Some(expected) = expected_version {
-            if before.version != expected {
-                return Ok(UpdateOutcome::VersionMismatch(before.version));
-            }
+        if expected_version.is_some_and(|expected| before.version != expected) {
+            return Ok(UpdateOutcome::VersionMismatch(before.version));
         }
 
         // Absent means "not declared"; explicit null means clear. Collapsing
