@@ -75,6 +75,14 @@ One incident already occurred and was reverted during planning (a cache-tier tab
 
 - **Custom 400 vs axum's default 422.** axum's built-in `Json<T>` extractor returns `422 Unprocessable Entity` for a syntactically valid but semantically invalid body (e.g. a missing required field). This project's acceptance criteria require `400` instead, so `graph-owl-server` wraps it in a custom `AppJson<T>` extractor that remaps the rejection.
 
+- **Run `fmt` → `clippy` → `test` green *before* `cargo mutants`, never after.** Clippy takes seconds; a mutation run takes minutes. A clippy fix changes the code, which invalidates the mutation run you just paid for — doing them in the wrong order means running the slow thing twice, which has happened here more than once.
+
+- **Do not try to speed up `cargo mutants` with parallelism, `nextest`, or debug-info settings. All three were measured on this workspace and all three are slower or neutral.** On a 20-mutant file: baseline **75s**, `-j 2` 91s, `-j 6` **158s** (system time went 74s → 577s — concurrent cargo builds thrash I/O), `--test-tool nextest` 91s, `--in-place` 80s and it mutates the working tree, minimal debug info no change, `--baseline skip` no change.
+
+  The reason none of them help: `cargo test -p graph-owl-query` costs 5.6s of which **0.85s is running the tests**. The other 85% is cargo's per-invocation overhead across 28 crates — fingerprint checks, resolution, linking — and `user` time is under 1s, so it is not CPU-bound and parallelism has nothing to parallelise. Tuning test threads or the test runner optimises the 15%.
+
+  What actually reduces mutation time: **fewer mutants** (`--file` scoping, which is already the practice) and **not re-running** (the ordering rule above). Background any run over ~30 mutants and keep working.
+
 - **The integration suite needs bounded parallelism.** `cargo test --workspace` at full parallelism intermittently fails with testcontainers' `PortNotExposed` — a different test each run. It is Docker container-startup contention, not a product bug: every one of those tests passes alone and the whole suite passes at `--test-threads=2`. The pressure roughly doubled when the graph engine landed, because each integration test now opens two Postgres connections (storage adapter + engine adapter) against its container. **Run `cargo test --workspace -- --test-threads=2`**, and do not spend time debugging a `PortNotExposed` failure as though it were real. The durable fix is fewer containers per run (a shared container per test binary, which needs per-test schema isolation to stay correct) — not yet done.
 
 - **Test organization:** `tests/common/mod.rs` (a subdirectory containing `mod.rs`) is treated by Cargo as a shared module importable from multiple integration test binaries in the same crate. A top-level `tests/common.rs` file, by contrast, becomes its own separate test target — not what you want for shared helpers.
