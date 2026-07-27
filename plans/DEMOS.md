@@ -60,7 +60,7 @@
 - [x] Re-runs converge (FQN is the identity, not the generated id)
 - [x] Run report names each failure and its reason
 - [x] System schemas excluded; views catalogued and marked
-- [ ] Deletion detection with a threshold guard
+- [x] Deletion detection with a threshold guard — off by default; a refusal deletes nothing at all; a source reporting almost nothing is caught by the threshold and names what it saw *(Epic 15)*
 - [ ] Scheduled runs, run history persistence
 - [ ] `source_hash` fingerprinting to skip unchanged records
 
@@ -207,7 +207,9 @@ predicate has to reach it before any graph query is exposed to a real user.
 **What this demo cannot yet show**, stated plainly:
 - **No SPARQL.** Epic 7 is not started, so the graph is queryable through traversal and `?asOf=` but not through a query language.
 - **The time control moves the asset read and the graph walk, not the tree or search.** `?asOf=` is answered per asset and per traversal; the hierarchy and the search index still show the present.
-- **Nothing declares lineage yet.** The graph is real, but its edges are the hierarchy plus any relationship a client creates by hand — no connector infers `feeds`. "Watch a column reappear after a migration" needs Epic 15's deletion detection to remove it in the first place.
+- **Nothing declares lineage yet.** The graph is real, but its edges are the hierarchy plus any relationship a client creates by hand — no connector infers `feeds`.
+
+**The column-reappears moment now works.** Epic 15's deletion detection landed: drop a column from the source, re-run with `detectDeletions`, and it is tombstoned now and live at an instant before the run — reconstructed from the graph, not read from a snapshot.
 
 ### Epic 4 — Triple storage & time travel ★
 - [x] `Flake` in `graph-owl-core`; ten pinned `FlakeValue` variants *(Slice A)*

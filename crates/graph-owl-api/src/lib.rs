@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use graph_owl_authz::{AccessPredicate, MetadataOperation, Policy, Subject, compile};
+use graph_owl_connectors::DeletionPlan;
 use graph_owl_core::projection;
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
@@ -1003,6 +1004,57 @@ impl Catalog {
         Ok(self.storage.soft_delete_asset(id, &principal.id).await?)
     }
 
+    /// Tombstone the assets under `service_fqn` that the source no longer
+    /// reports.
+    ///
+    /// The threshold guard runs **before** anything is deleted, and a refusal
+    /// deletes nothing at all. A guard that stopped partway through would
+    /// leave the estate in a state neither the source nor the catalog
+    /// describes, which is worse than either outcome it is choosing between.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the scan or a delete fails.
+    pub async fn reconcile_deletions(
+        &self,
+        principal: &Principal,
+        service_fqn: &str,
+        seen: &std::collections::HashSet<String>,
+        threshold: f64,
+    ) -> Result<DeletionPlan, CatalogError> {
+        let live = self.storage.list_assets_under_fqn(service_fqn).await?;
+        let absent: Vec<&Asset> = live
+            .iter()
+            .filter(|asset| !seen.contains(&asset.fully_qualified_name))
+            .collect();
+
+        let plan = DeletionPlan::decide(absent.len(), live.len(), threshold);
+        if !plan.is_allowed() {
+            return Ok(plan);
+        }
+
+        // Delete only the *shallowest* absent assets. Soft delete cascades, so
+        // tombstoning a table already tombstones its columns; deleting both
+        // would double-count the result and issue N redundant writes for a
+        // wide table.
+        let absent_fqns: std::collections::HashSet<&str> = absent
+            .iter()
+            .map(|a| a.fully_qualified_name.as_str())
+            .collect();
+        for asset in &absent {
+            let parent_is_also_absent = fqn::parent(&asset.fully_qualified_name)
+                .is_some_and(|parent| absent_fqns.contains(&*parent));
+            if parent_is_also_absent {
+                continue;
+            }
+            self.storage
+                .soft_delete_asset(asset.id, &principal.id)
+                .await?;
+        }
+
+        Ok(plan)
+    }
+
     /// # Errors
     ///
     /// `NotFound` if the asset does not exist.
@@ -1176,6 +1228,22 @@ mod tests {
             Ok(Page::from_overfetch(assets, page.limit, |a| {
                 Cursor::new(a.fully_qualified_name.clone(), a.id)
             }))
+        }
+
+        async fn list_assets_under_fqn(&self, prefix: &str) -> Result<Vec<Asset>, StorageError> {
+            // Same boundary rule as Postgres: `hdfc-core` must not sweep in
+            // `hdfc-core-archive`. A fake that matched more loosely would let a
+            // scope bug pass here and fail only against the real database.
+            let assets = self.assets.lock().unwrap();
+            Ok(assets
+                .iter()
+                .filter(|a| {
+                    !a.deleted
+                        && (a.fully_qualified_name == prefix
+                            || a.fully_qualified_name.starts_with(&format!("{prefix}.")))
+                })
+                .cloned()
+                .collect())
         }
 
         async fn count_assets_by_kind(&self) -> Result<Vec<(AssetKind, i64)>, StorageError> {

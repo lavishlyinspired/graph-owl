@@ -11,7 +11,7 @@ use graph_owl_api::{
     Catalog, CatalogError, CreateRelationship, CreateTable, UpsertAsset,
     validation::{FieldError, FieldErrorCode, ValidateBody, require_non_empty_string},
 };
-use graph_owl_connectors::{Connector, RunScope, postgres::PostgresConnector};
+use graph_owl_connectors::{Connector, DeletionPlan, RunScope, postgres::PostgresConnector};
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
     page::{Page, PageRequest, PageRequestError},
@@ -828,6 +828,15 @@ struct RunPostgresConnector {
     service_name: String,
     #[serde(default)]
     include_schemas: Vec<String>,
+    /// Tombstone assets the source no longer reports. Off by default: a run
+    /// that deletes is a different kind of operation from one that only adds,
+    /// and defaulting to the destructive reading of "sync" is how a routine
+    /// re-run becomes an incident.
+    #[serde(default)]
+    detect_deletions: bool,
+    /// Fraction of the scope this run may tombstone before it refuses.
+    /// Absent uses [`DeletionPlan::DEFAULT_THRESHOLD`].
+    deletion_threshold: Option<f64>,
 }
 
 impl ValidateBody for RunPostgresConnector {
@@ -874,6 +883,11 @@ async fn run_postgres_connector(
     // single unreadable table must not cost the other nine hundred.
     let mut created = 0;
     let mut failures: Vec<serde_json::Value> = Vec::new();
+    // What the source reported *and* the catalog accepted. Deletion is decided
+    // against this, never against the fetched list: an asset that failed to
+    // ingest is a write problem, and treating it as absent would convert a
+    // transient error into a tombstone.
+    let mut ingested: std::collections::HashSet<String> = std::collections::HashSet::new();
     for record in records {
         let path = record.path.join(".");
         match catalog
@@ -886,7 +900,10 @@ async fn run_postgres_connector(
             )
             .await
         {
-            Ok(_) => created += 1,
+            Ok(asset) => {
+                created += 1;
+                ingested.insert(asset.fully_qualified_name);
+            }
             // A run that reports only a count tells an operator something is
             // wrong and nothing about what. Each failure names the record and
             // the reason.
@@ -901,12 +918,30 @@ async fn run_postgres_connector(
         }
     }
 
+    // Deletion runs *after* ingestion, over what the source actually reported.
+    // Running it first would delete against a stale picture; running it on the
+    // fetched records rather than the ingested ones would tombstone anything
+    // that failed to ingest, turning a transient write error into data loss.
+    let deletions = if payload.detect_deletions {
+        let threshold = payload
+            .deletion_threshold
+            .unwrap_or(DeletionPlan::DEFAULT_THRESHOLD);
+        Some(
+            catalog
+                .reconcile_deletions(&principal, &payload.service_name, &ingested, threshold)
+                .await?,
+        )
+    } else {
+        None
+    };
+
     Ok(Json(json!({
         "connector": connector.type_name(),
         "serviceName": payload.service_name,
         "created": created,
         "failed": failures.len(),
         "failures": failures,
+        "deletions": deletions,
     })))
 }
 

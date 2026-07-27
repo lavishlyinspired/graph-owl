@@ -107,6 +107,18 @@ pub trait Storage: Send + Sync {
         kind: Option<AssetKind>,
         page: &PageRequest,
     ) -> Result<Page<Asset>, StorageError>;
+    /// Every **live** asset whose FQN is `prefix` or sits beneath it.
+    ///
+    /// Unpaged on purpose: the caller is a connector run reconciling its whole
+    /// scope, and a paged answer would let an asset slip between pages while
+    /// the run writes — which would then read as "the source no longer reports
+    /// it" and tombstone something that exists.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn list_assets_under_fqn(&self, prefix: &str) -> Result<Vec<Asset>, StorageError>;
+
     async fn count_assets_by_kind(&self) -> Result<Vec<(AssetKind, i64)>, StorageError>;
 
     // ---- envelope (Epic 3) ----

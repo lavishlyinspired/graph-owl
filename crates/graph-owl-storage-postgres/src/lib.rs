@@ -439,6 +439,23 @@ impl Storage for PostgresStorage {
         self.asset_page(q, page).await
     }
 
+    async fn list_assets_under_fqn(&self, prefix: &str) -> Result<Vec<Asset>, StorageError> {
+        // `fqn = prefix OR fqn LIKE prefix || '.%'` rather than a bare prefix
+        // match: `hdfc-core` must not also match a service called
+        // `hdfc-core-archive`, which a plain LIKE would sweep into the scope
+        // and then delete.
+        sqlx::query(&format!(
+            "SELECT {ASSET_COLUMNS} FROM assets
+             WHERE deleted = FALSE AND (fully_qualified_name = $1
+                                        OR fully_qualified_name LIKE $1 || '.%')"
+        ))
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(asset_from_row).collect())
+        .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
     async fn count_assets_by_kind(&self) -> Result<Vec<(AssetKind, i64)>, StorageError> {
         let rows =
             sqlx::query("SELECT kind, count(*) AS n FROM assets WHERE NOT deleted GROUP BY kind")
