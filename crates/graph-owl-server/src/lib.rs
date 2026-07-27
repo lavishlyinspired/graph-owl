@@ -39,6 +39,7 @@ pub fn app(catalog: Catalog) -> Router {
         .route("/assets/roots", get(list_roots))
         .route("/assets/stats", get(asset_stats))
         .route("/overview", get(overview))
+        .route("/graph/reconcile", post(reconcile_projection))
         .route("/connectors/postgres/runs", post(run_postgres_connector))
         // Unauthenticated by design: an orchestrator's probe must not depend
         // on the identity provider being reachable.
@@ -819,6 +820,27 @@ async fn asset_ancestors(
 ) -> Result<Json<Vec<Asset>>, AppError> {
     catalog.get_asset_for(&principal, id).await?;
     Ok(Json(catalog.ancestors_of(id).await?))
+}
+
+/// Re-project whatever the graph is missing, and report the drift either way.
+///
+/// A `POST` because it repairs; the drift count in the response is what makes
+/// it useful to call even when nothing needs repairing — that number is the
+/// operability signal Slice G asks for, and an endpoint that only reported
+/// after fixing would have no way to say "nothing is wrong".
+async fn reconcile_projection(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Reconciliation rewrites the graph view of the whole estate. That is an
+    // administrative operation, not a read, and a non-admin triggering it
+    // repeatedly is a cheap way to load the database.
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let drifted = catalog.projection_drift().await?.len();
+    let repaired = catalog.reconcile_projection().await?;
+    Ok(Json(json!({ "drifted": drifted, "repaired": repaired })))
 }
 
 /// Everything the landing page needs, in one request.

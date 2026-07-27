@@ -347,6 +347,82 @@ impl Catalog {
         }
     }
 
+    /// Assets the graph does not represent.
+    ///
+    /// Deliberately computed by **comparison, not from a queue**. A queue of
+    /// failed projections is itself state that can be lost — by a crash
+    /// between the failure and the enqueue, or by the queue's own storage
+    /// failing — and a drift detector that can silently miss drift is worse
+    /// than none, because it reports zero and is believed.
+    ///
+    /// Comparison cannot miss: relational is the source of truth, so anything
+    /// present there and absent here is drift by definition, however it got
+    /// that way.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if either side cannot be read.
+    pub async fn projection_drift(&self) -> Result<Vec<Asset>, CatalogError> {
+        let Some(graph) = &self.graph else {
+            return Ok(Vec::new());
+        };
+
+        // Every asset the catalog holds, live or tombstoned: a tombstoned
+        // asset still projects (with `dsc:deleted true`), so an unprojected
+        // one is drift regardless of its state.
+        let all = self.storage.list_assets_under_fqn("").await?;
+        let roots = self.storage.list_children(None).await?;
+        let mut assets = all;
+        for root in roots {
+            if !assets.iter().any(|a| a.id == root.id) {
+                assets.push(root);
+            }
+        }
+
+        let mut drifted = Vec::new();
+        for asset in assets {
+            let projected = graph
+                .count(&graph_owl_core::flake::TriplePattern {
+                    s: Some(projection::asset_sid(&asset)),
+                    p: Some(graph_owl_core::flake::Sid::dsc("fqn")),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            if projected == 0 {
+                drifted.push(asset);
+            }
+        }
+        Ok(drifted)
+    }
+
+    /// Re-project everything the graph is missing.
+    ///
+    /// **One-directional, structurally.** This reads relational and writes the
+    /// graph; it has no path that writes relational, which is decision 1's
+    /// invariant. A reconciler that could write back would let the graph view
+    /// — which lags by design — overwrite the source of truth, and the two
+    /// stores would then fight.
+    ///
+    /// Idempotent: re-asserting an identical fact at the same `t` is a no-op,
+    /// so running this twice converges rather than duplicating.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the scan fails. A failure to project one asset does not
+    /// abort the rest — the point of reconciling is to make progress.
+    pub async fn reconcile_projection(&self) -> Result<usize, CatalogError> {
+        let drifted = self.projection_drift().await?;
+        let mut repaired = 0;
+        for asset in &drifted {
+            // `None` before: an unprojected asset has nothing to diff against,
+            // so this asserts its whole state rather than a change to it.
+            self.project(None, asset).await;
+            repaired += 1;
+        }
+        Ok(repaired)
+    }
+
     /// The asset as it stood at a past instant.
     ///
     /// Reconstructed from the graph rather than read from a snapshot table:
@@ -1195,6 +1271,26 @@ mod tests {
         policies: Mutex<Vec<Policy>>,
         inserted: Mutex<Vec<Table>>,
         relationships: Mutex<Vec<Relationship>>,
+        /// When armed, any relational write panics. Lets a test assert "this
+        /// code path writes nothing" structurally instead of by reading it and
+        /// believing what it says.
+        writes_forbidden: std::sync::atomic::AtomicBool,
+    }
+
+    impl InMemoryStorage {
+        pub(super) fn forbid_writes(&self) {
+            self.writes_forbidden
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn guard_write(&self, what: &str) {
+            assert!(
+                !self
+                    .writes_forbidden
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                "{what} wrote to relational storage while writes were forbidden"
+            );
+        }
     }
 
     #[async_trait::async_trait]
@@ -1206,6 +1302,7 @@ mod tests {
         // The fake honours the same identity rule as Postgres: the FQN is the
         // identity, so a re-upsert converges instead of duplicating.
         async fn upsert_asset(&self, asset: Asset) -> Result<Asset, StorageError> {
+            self.guard_write("upsert_asset");
             let mut assets = self.assets.lock().unwrap();
             if let Some(existing) = assets
                 .iter_mut()
@@ -1365,6 +1462,7 @@ mod tests {
             updated_by: &str,
             expected_version: Option<EntityVersion>,
         ) -> Result<UpdateOutcome, StorageError> {
+            self.guard_write("update_asset");
             use graph_owl_core::envelope::{ChangeDescription, ChangeKind, classify};
             let mut assets = self.assets.lock().unwrap();
             let Some(existing) = assets.iter_mut().find(|a| a.id == id) else {
@@ -1419,6 +1517,7 @@ mod tests {
         }
 
         async fn soft_delete_asset(&self, id: Uuid, deleted_by: &str) -> Result<u64, StorageError> {
+            self.guard_write("soft_delete_asset");
             let mut assets = self.assets.lock().unwrap();
             let subtree = descendants(&assets, id);
             let mut affected = 0;
@@ -2164,8 +2263,21 @@ mod projection_isolation_tests {
             Ok(Vec::new())
         }
 
-        async fn count(&self, _: &TriplePattern) -> Result<u64, EngineError> {
-            Ok(0)
+        /// Answers from what was actually asserted.
+        ///
+        /// A double that always returned 0 would make every asset look
+        /// permanently drifted, so an idempotency test over it could never
+        /// pass — and, worse, a reconciler that repaired nothing would look
+        /// identical to one that worked.
+        async fn count(&self, pattern: &TriplePattern) -> Result<u64, EngineError> {
+            let asserted = self.asserted.lock().expect("lock");
+            Ok(asserted
+                .iter()
+                .filter(|f| {
+                    pattern.s.as_ref().is_none_or(|s| &f.s == s)
+                        && pattern.p.as_ref().is_none_or(|p| &f.p == p)
+                })
+                .count() as u64)
         }
 
         async fn next_time(&self) -> Result<i64, EngineError> {
@@ -2191,6 +2303,105 @@ mod projection_isolation_tests {
             description: None,
             properties: None,
         }
+    }
+
+    /// A projection that failed leaves the entity intact and the graph behind.
+    /// The reconciler is what makes that recoverable rather than permanent.
+    #[tokio::test]
+    async fn the_reconciler_repairs_what_a_failed_projection_left_behind() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let broken = Catalog::new(storage.clone()).with_graph(RecordingGraph::broken());
+
+        let created = broken
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("the entity survives a graph that is down");
+
+        // The same storage, now with a working graph — what a restart after an
+        // outage looks like.
+        let graph = RecordingGraph::working();
+        let repaired = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let drifted = repaired.projection_drift().await.expect("drift");
+        assert_eq!(drifted.len(), 1, "the unprojected asset is drift");
+        assert_eq!(drifted[0].id, created.id);
+
+        let count = repaired.reconcile_projection().await.expect("reconcile");
+        assert_eq!(count, 1);
+        assert!(
+            graph
+                .asserted
+                .lock()
+                .expect("lock")
+                .iter()
+                .any(|f| f.p.id == "fqn"),
+            "the repaired asset must actually reach the graph"
+        );
+    }
+
+    /// **Decision 1's invariant.** The fake panics on any relational write
+    /// while the guard is armed, so a reconciler that wrote back could not
+    /// pass this test.
+    ///
+    /// Asserted structurally rather than by reading the reconciler and
+    /// believing it: reconciliation re-projects *from* relational and must
+    /// never write *to* it. If it could, the graph view — which lags by design
+    /// — would overwrite the source of truth and the two stores would fight.
+    #[tokio::test]
+    async fn reconciliation_never_writes_to_relational_storage() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let seeding = Catalog::new(storage.clone()).with_graph(RecordingGraph::broken());
+        seeding
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("seed");
+
+        // From here, any relational write is a bug.
+        storage.forbid_writes();
+
+        let catalog =
+            Catalog::new(storage).with_graph(RecordingGraph::working() as Arc<dyn TripleStore>);
+        let repaired = catalog
+            .reconcile_projection()
+            .await
+            .expect("reconciliation must not need to write relational");
+        assert_eq!(repaired, 1);
+    }
+
+    /// Running it twice must converge, not duplicate — which is what makes it
+    /// safe to schedule.
+    #[tokio::test]
+    async fn reconciliation_is_idempotent() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let broken = Catalog::new(storage.clone()).with_graph(RecordingGraph::broken());
+        broken
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("create");
+
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        assert_eq!(catalog.reconcile_projection().await.expect("first"), 1);
+        // The double records every assertion, so the second pass finding
+        // nothing to repair is what "converged" means here.
+        assert_eq!(
+            catalog.reconcile_projection().await.expect("second"),
+            0,
+            "a second pass must find nothing left to repair"
+        );
+    }
+
+    /// No graph configured is not drift. Reporting every asset as drifted on a
+    /// deployment that never wanted a graph would make the number meaningless.
+    #[tokio::test]
+    async fn a_catalog_with_no_graph_reports_no_drift() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("create");
+        assert!(catalog.projection_drift().await.expect("drift").is_empty());
     }
 
     /// **Decision 6, asserted rather than promised.** Failing an entity write

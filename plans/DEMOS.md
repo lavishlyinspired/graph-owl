@@ -219,7 +219,7 @@ predicate has to reach it before any graph query is exposed to a real user.
 - [x] Entity → flake projection — wired into both write paths; a catalogue run of the 124-asset estate produces 1,234 flakes over 124 subjects *(Slices D, G)*
 - [x] Reified relationships — each edge is a node of its own carrying `rdf:type`, both endpoints as `Ref` (so OPST reverse traversal reaches them), its type and both endpoint kinds; deleting an edge retracts every one of its flakes *(Slice E)*
 - [x] **As-of query API** — `GET /assets/{id}?asOf=<rfc3339>` reconstructs the entity from flakes; 5 HTTP tests *(Slice F)*
-- [~] Reconciliation job and drift metric — **gap**: a projection failure is logged and lost. No pending queue, no reconciler, no drift metric, and therefore nothing enforcing the one-directionality invariant (Slice G remainder)
+- [x] Reconciliation and drift metric — drift computed by comparison rather than from a queue (a queue can be lost; comparison cannot miss); `POST /graph/reconcile` repairs and reports; one-directionality asserted structurally by a fake that panics on any relational write *(Slice G)*
 - [ ] Language-tag side table
 - [ ] Runtime predicate registry (Slice H)
 
