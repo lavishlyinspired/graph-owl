@@ -1,5 +1,14 @@
 # Scripts
 
+One script, one URL: **http://localhost:8080**. There is no second port and no
+second console.
+
+An earlier `dev.sh` ran Vite on `:5173` alongside the server for hot reload.
+It served the same `ui/src/`, but a second origin is a second everything —
+notably `localStorage`, so the theme toggle on one port had no effect on the
+other and the two could sit on different themes indefinitely. A faster edit
+loop is not worth being unable to answer "which one am I looking at". Removed.
+
 ## `./scripts/demo.sh`
 
 Everything from nothing: Postgres, the seeded bank estate, the console build,
@@ -15,12 +24,14 @@ the server, and a catalogue run. One command.
 `core_banking`). Use them as `Authorization: Bearer <token>` to see the same
 search return different results.
 
-## `./scripts/dev.sh`
+### Changing the console
 
-Frontend work with hot reload. The server runs on `:8080`, Vite on `:5173` with
-`/api` proxied. Save a `.tsx` and the console reloads.
+The console is embedded in the binary by `rust-embed`, so a `.tsx` edit needs
+`demo.sh` again to rebuild the bundle and relink. Slower than hot reload; the
+tradeoff is that what you are looking at is always what ships.
 
-**Why a separate script**: the console is embedded in the binary via
-`rust-embed`, so the `demo.sh` path needs a full Rust rebuild to see a frontend
-change. `dev.sh` bypasses the embed entirely. Run `demo.sh` first to seed
-Postgres, then `dev.sh` alongside it.
+### Theme
+
+Light by default. The header toggle switches to dark and the choice persists.
+`?theme=dark` / `?theme=light` overrides it, which is what makes a screenshot
+reproducible from its URL.

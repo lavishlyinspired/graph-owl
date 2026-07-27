@@ -106,15 +106,26 @@ function writeParam(name: string, value: string | null) {
   window.history.replaceState(null, "", query ? `?${query}` : window.location.pathname);
 }
 
+// Versioned, because the key is the reset mechanism. A preference persisted by
+// an older build — a dark theme left behind by a screenshot session, say — is
+// not worth migrating, and asking someone to clear site data to get their
+// background back is not an answer. Bumping the suffix retires the old value.
+const THEME_KEY = "graphowl.theme.v2";
+
+// The retired key is inert once nothing reads it, but leaving it behind means
+// the next person to open devtools finds two theme keys and has to work out
+// which one is live.
+localStorage.removeItem("theme");
+
 function useTheme() {
   // Light by default, persisted, and overridable from the URL. The URL matters
   // beyond convenience: it makes a theme deep-linkable, so a screenshot in a
   // bug report can be reproduced exactly.
   const [dark, setDark] = useState(
-    () => (readParam("theme") ?? localStorage.getItem("theme")) === "dark",
+    () => (readParam("theme") ?? localStorage.getItem(THEME_KEY)) === "dark",
   );
   useEffect(() => {
-    localStorage.setItem("theme", dark ? "dark" : "light");
+    localStorage.setItem(THEME_KEY, dark ? "dark" : "light");
   }, [dark]);
   return { dark, toggle: () => setDark((d) => !d) };
 }
