@@ -54,13 +54,32 @@ impl EntityVersion {
 
     /// # Errors
     ///
-    /// Returns `()` for anything that is not `<u32>.<u32>`.
-    pub fn parse(value: &str) -> Result<Self, ()> {
-        let (major, minor) = value.split_once('.').ok_or(())?;
+    /// Returns [`MalformedVersion`] for anything that is not `<u32>.<u32>`.
+    pub fn parse(value: &str) -> Result<Self, MalformedVersion> {
+        let malformed = || MalformedVersion {
+            got: value.to_string(),
+        };
+        let (major, minor) = value.split_once('.').ok_or_else(malformed)?;
         Ok(Self {
-            major: major.parse().map_err(|_| ())?,
-            minor: minor.parse().map_err(|_| ())?,
+            major: major.parse().map_err(|_| malformed())?,
+            minor: minor.parse().map_err(|_| malformed())?,
         })
+    }
+}
+
+/// Echoes what was received, so a client sees its own typo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedVersion {
+    pub got: String,
+}
+
+impl fmt::Display for MalformedVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "`{}` is not a version; expected <major>.<minor>",
+            self.got
+        )
     }
 }
 
@@ -144,9 +163,9 @@ impl ChangeDescription {
         }
 
         for (field, before_value) in before {
+            // Absent and explicit-null are the same outcome: the field is gone.
             let removed = match after.get(field) {
-                None => !before_value.is_null(),
-                Some(serde_json::Value::Null) => !before_value.is_null(),
+                None | Some(serde_json::Value::Null) => !before_value.is_null(),
                 Some(_) => false,
             };
             if removed {

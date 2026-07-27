@@ -95,12 +95,14 @@ impl AssetKind {
 
     /// # Errors
     ///
-    /// Returns `()` for a string outside the vocabulary.
-    pub fn parse(value: &str) -> Result<Self, ()> {
+    /// Returns [`UnknownAssetKind`] for a string outside the vocabulary.
+    pub fn parse(value: &str) -> Result<Self, UnknownAssetKind> {
         AssetKind::ALL
             .into_iter()
             .find(|k| k.as_str() == value)
-            .ok_or(())
+            .ok_or_else(|| UnknownAssetKind {
+                got: value.to_string(),
+            })
     }
 
     /// What may contain this kind. `None` for a root.
@@ -128,6 +130,18 @@ impl AssetKind {
             depth += 1;
         }
         depth
+    }
+}
+
+/// Echoes what was received, so a client sees its own typo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownAssetKind {
+    pub got: String,
+}
+
+impl std::fmt::Display for UnknownAssetKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`{}` is not an asset kind", self.got)
     }
 }
 
@@ -173,7 +187,7 @@ mod asset_kind_tests {
 
     #[test]
     fn an_unknown_kind_is_rejected() {
-        assert_eq!(AssetKind::parse("view"), Err(()));
+        assert!(AssetKind::parse("view").is_err());
     }
 }
 

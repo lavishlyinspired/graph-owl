@@ -487,7 +487,7 @@ struct AssetSearchQuery {
 
 fn parse_kind(raw: Option<&str>) -> Result<Option<AssetKind>, AppError> {
     raw.map(|value| {
-        AssetKind::parse(value).map_err(|()| {
+        AssetKind::parse(value).map_err(|_| {
             AppError::Validation(vec![FieldError::new(
                 "kind",
                 FieldErrorCode::Type,
