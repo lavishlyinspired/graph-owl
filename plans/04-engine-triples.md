@@ -1,7 +1,7 @@
 # Plan: Triple Storage & Time-Travel (Epic 4) ★
 
 **Branch**: feat/engine-triples
-**Status**: Not started
+**Status**: Slices A and B complete (see *Implementation findings* below). C–H not started
 **Depends on**: Epic 3 (four entity types with an envelope to project)
 **Unblocks**: Epics 5, 6, 7, 8, 9, and the time-travel differentiator
 **Crates**: `graph-owl-engine` (port), `graph-owl-engine-postgres` (adapter)
@@ -324,6 +324,68 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with `td
 **RED**: Cardinality test asserting `one` rejects a second assertion and `many` accepts. A test asserting a core predicate cannot be redefined. Mutator watch: an unenforced cardinality must fail; a mutable core predicate must fail.
 **GREEN**: registry table, trait, seed migration, cache.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+## Implementation findings (Slices A–B)
+
+Four things this plan got wrong, found by building it. Recorded here rather than
+silently fixed, because each was a *stated* design decision above.
+
+### 1. `SMALLINT` cannot hold a namespace code
+
+The schema above declares `namespace_s SMALLINT`. Postgres `SMALLINT` is signed
+`i16`, maximum 32767; `Sid.namespace_code` is `u16`, maximum 65535. Every
+runtime-allocated code above 32767 — half the range this plan assigns to the
+predicate registry — would overflow.
+
+**Now**: `INTEGER` with `CHECK (x BETWEEN 0 AND 65535)`. The two extra bytes are
+noise next to the `TEXT` sid columns that dominate all four indexes.
+
+### 2. A batch assert is not one statement
+
+"Batch assert of 1,000 flakes is one statement" understates the constraint. The
+Postgres wire protocol carries its parameter count as an `int16`, so **one
+statement binds at most 65535 values** — about 3,200 flakes at twenty columns
+each. Past that the driver refuses outright. The acceptance criterion's 1,000
+happens to sit under the ceiling, so it would have passed while leaving the
+defect in place; the 100k-flake load in Slice B is what exposed it.
+
+**Now**: chunked at `MAX_BIND_PARAMETERS / COLUMNS_PER_FLAKE`, with the whole
+batch in one transaction so chunking does not cost atomicity. A large
+projection is all-or-nothing, as it must be for Slice G's reconciler to be safe.
+
+### 3. SPOT and the identity index are the same index
+
+Idempotency needs a unique index over the fact identity, which necessarily
+leads with subject-then-predicate. A separate SPOT is therefore a strict prefix
+of it: redundant for lookups and paid for on every write. The planner settled
+it — given both, it never chose SPOT.
+
+**Now**: one `UNIQUE` index named `idx_flakes_spot` doing both jobs. Still four
+indexes, still one per ordering, one fewer to maintain.
+
+### 4. `(s, p, ?)` is served by PSOT, not SPOT
+
+Slice B's criteria name SPOT for this shape. Both SPOT and PSOT bind subject and
+predicate completely, and PSOT is the narrower row, so the planner prefers it —
+correctly. The criterion asserted the planner's cost arithmetic rather than
+anything about this schema.
+
+**Now**: that shape asserts an index scan on *either*, plus no sequential scan.
+The test still fails if both indexes disappear, which is the regression that
+matters.
+
+### Also settled while building
+
+- **`FlakeValue::Duration` holds `i64` seconds**, not `chrono::Duration`.
+  Postgres `INTERVAL` carries months, which have no fixed length — "30 days"
+  and "1 month" must not compare equal.
+- **`value_key`**, a deterministic text encoding of the object, is stored
+  alongside the typed columns. It gives the identity index something comparable
+  for every value type, and lets POST serve object lookups for *any* literal
+  rather than only for strings.
+- **The two migration runners** (storage and engine) share a database, so the
+  engine's uses its own history table. Refinery's default would make each
+  runner treat the other's migrations as unknown and refuse to run.
 
 ## Explicitly deferred (with destination)
 

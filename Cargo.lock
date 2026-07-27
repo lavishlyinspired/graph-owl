@@ -846,13 +846,17 @@ name = "graph-owl-engine-postgres"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "graph-owl-core",
  "graph-owl-engine",
  "refinery",
+ "serde_json",
  "sqlx",
+ "testcontainers-modules",
  "thiserror 2.0.19",
  "tokio",
  "tokio-postgres",
+ "uuid",
 ]
 
 [[package]]

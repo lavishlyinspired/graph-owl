@@ -1,4 +1,5 @@
 pub mod envelope;
+pub mod flake;
 pub mod fqn;
 pub mod page;
 pub mod relationship_type;
