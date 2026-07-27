@@ -596,3 +596,73 @@ async fn a_reference_object_is_findable_by_the_node_it_points_at() {
     );
     assert_eq!(pointing_at_team[0].p.id, "owner");
 }
+
+/// The wall-clock → logical-`t` mapping that makes as-of queries askable.
+///
+/// Covered end-to-end by the server's time-travel tests, but those live in
+/// another crate, so a mutation run scoped to this adapter never executes
+/// them — and `time_at` was in fact returning a constant under mutation with
+/// nothing here to notice.
+#[tokio::test]
+async fn time_at_resolves_the_newest_transaction_at_or_before_an_instant() {
+    let (store, _container) = store().await;
+
+    // Nothing has happened yet: the graph is younger than any question.
+    assert_eq!(
+        store
+            .time_at(Utc.timestamp_opt(1_700_000_000, 0).unwrap())
+            .await
+            .expect("resolve"),
+        None,
+        "before any transaction there is no state to return"
+    );
+
+    let first = store.next_time().await.expect("clock");
+    // Postgres records `at` with now(); a real gap keeps the two instants
+    // distinguishable rather than colliding inside one clock tick.
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    let between = Utc::now();
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    let second = store.next_time().await.expect("clock");
+
+    assert_eq!(
+        store.time_at(between).await.expect("resolve"),
+        Some(first),
+        "an instant between two transactions resolves to the earlier one"
+    );
+
+    let after_both = Utc::now() + chrono::Duration::seconds(1);
+    assert_eq!(
+        store.time_at(after_both).await.expect("resolve"),
+        Some(second),
+        "the newest at or before, not the oldest"
+    );
+    assert_ne!(first, second, "the clock must have advanced");
+}
+
+/// A transaction time must never exist without the instant it happened at, or
+/// an as-of query can never resolve to it.
+#[tokio::test]
+async fn every_reserved_transaction_time_is_recorded_with_its_instant() {
+    let (store, _container) = store().await;
+
+    for _ in 0..5 {
+        store.next_time().await.expect("clock");
+    }
+
+    let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM graph_transactions")
+        .fetch_one(store.pool())
+        .await
+        .expect("count");
+    assert_eq!(recorded, 5, "each next_time must leave a row behind");
+
+    let clock: i64 = sqlx::query_scalar("SELECT t FROM graph_clock")
+        .fetch_one(store.pool())
+        .await
+        .expect("clock row");
+    let newest: i64 = sqlx::query_scalar("SELECT MAX(t) FROM graph_transactions")
+        .fetch_one(store.pool())
+        .await
+        .expect("max");
+    assert_eq!(clock, newest, "the clock and its record must not diverge");
+}

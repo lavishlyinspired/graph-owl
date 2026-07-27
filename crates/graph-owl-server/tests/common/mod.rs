@@ -40,7 +40,12 @@ async fn build_app(secret: Option<&str>) -> (axum::Router, ContainerAsync<Postgr
     let storage = PostgresStorage::connect(&connection_string)
         .await
         .expect("failed to connect and migrate");
-    let catalog = Catalog::new(Arc::new(storage));
+    // The graph engine, wired the same way the composition root wires it —
+    // otherwise the tests would exercise a catalog shape that never ships.
+    let graph = graph_owl_engine_postgres::PostgresTripleStore::connect(&connection_string)
+        .await
+        .expect("failed to connect the graph engine");
+    let catalog = Catalog::new(Arc::new(storage)).with_graph(Arc::new(graph));
 
     (graph_owl_server::app(catalog), container, connection_string)
 }

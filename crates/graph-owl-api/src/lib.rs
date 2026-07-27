@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use graph_owl_authz::{AccessPredicate, MetadataOperation, Policy, Subject, compile};
 use graph_owl_core::projection;
 use graph_owl_core::{
@@ -213,6 +213,54 @@ impl Catalog {
     pub fn with_graph(mut self, graph: Arc<dyn TripleStore>) -> Self {
         self.graph = Some(graph);
         self
+    }
+
+    /// The asset as it stood at a past instant.
+    ///
+    /// Reconstructed from the graph rather than read from a snapshot table:
+    /// history recoverable *by construction* is the whole claim of the flake
+    /// model, and a parallel snapshot table is exactly the thing that can
+    /// drift from the facts it claims to summarise.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the asset did not exist at that instant — including when
+    /// the graph is younger than the question. `Unexpected` if no graph is
+    /// configured, because silently answering a time-travel question from
+    /// current state would be a wrong answer rather than a missing feature.
+    pub async fn get_asset_as_of(
+        &self,
+        id: Uuid,
+        at: DateTime<Utc>,
+    ) -> Result<Asset, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let t = graph
+            .time_at(at)
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?
+            // Nothing had happened yet. Distinct from "the entity did not
+            // exist", but indistinguishable to a caller asking about one id —
+            // and both are honestly a 404 for that id at that instant.
+            .ok_or(CatalogError::NotFound)?;
+
+        let flakes = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                s: Some(graph_owl_core::flake::Sid::new(
+                    graph_owl_core::flake::namespace::DSC,
+                    id.to_string(),
+                )),
+                as_of: Some(t),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        projection::asset_from_flakes(id, &flakes).ok_or(CatalogError::NotFound)
     }
 
     /// Project an asset's new state into the graph, after the relational write
@@ -1801,6 +1849,13 @@ mod projection_isolation_tests {
                 return self.refuse();
             }
             Ok(1)
+        }
+
+        async fn time_at(
+            &self,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Option<i64>, EngineError> {
+            Ok(Some(1))
         }
     }
 

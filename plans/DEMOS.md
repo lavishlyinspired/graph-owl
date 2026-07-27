@@ -14,7 +14,7 @@
 |---|---|---|---|
 | **1** | A source becomes a browsable catalog | 1, 2, 15, 39 (partial) | **Shipped** |
 | **2** | A governed catalog people can trust | +3, 8, 10, 11, 12, 13 | **Shipped** (gaps named per epic) |
-| **3** ★ | It is a graph engine | +4, 7, 7a, 40 | **In progress** — Epic 4 slices A–D |
+| **3** ★ | It is a graph engine | +4, 7, 7a, 40 | **In progress** — Epic 4 A–D, F, G-core |
 | **4** | It reasons, and it validates | +5, 6, 41 | |
 | **5** ★ | Agents can use it | +14, 31, 32, 43 | |
 | **6** | It fills itself | +16, 17, 18, 19, 20, 21 | |
@@ -209,10 +209,12 @@ predicate has to reach it before any graph query is exposed to a real user.
 - [~] Namespace code registry — constants allocated and range-tested; **gap**: runtime allocation and persistence is Slice H
 - [x] Four index orderings: SPOT, PSOT, POST, OPST — each verified by `EXPLAIN` naming the index over a 100k-flake table *(Slice B)*
 - [x] `op = false` is a retraction, not a delete — assert/retract/assert/retract verified in both directions, scoped by value, predicate and graph; the assertion row survives *(Slice C)*
-- [~] Entity → flake projection — `asset_to_flakes` and `asset_update_flakes` are pure and tested, including retract-old-assert-new on one `t` *(Slice D)*; **gap**: nothing calls them yet, so the catalog is not yet projected. Reified relationships are Slice E
-- [ ] As-of query API
-- [ ] Reconciliation job and drift metric
+- [x] Entity → flake projection — wired into both write paths; a catalogue run of the 124-asset estate produces 1,234 flakes over 124 subjects *(Slices D, G)*
+- [~] Reified relationships — **not started** (Slice E). Assets project; relationships do not, so the graph currently has hierarchy edges and no lineage edges
+- [x] **As-of query API** — `GET /assets/{id}?asOf=<rfc3339>` reconstructs the entity from flakes; 5 HTTP tests *(Slice F)*
+- [~] Reconciliation job and drift metric — **gap**: a projection failure is logged and lost. No pending queue, no reconciler, no drift metric, and therefore nothing enforcing the one-directionality invariant (Slice G remainder)
 - [ ] Language-tag side table
+- [ ] Runtime predicate registry (Slice H)
 
 ### Epic 7 — SPARQL subset ★
 - [ ] Parser for BGP, FILTER, OPTIONAL, UNION, MINUS, (NOT) EXISTS, paths

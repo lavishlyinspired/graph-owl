@@ -644,12 +644,42 @@ async fn search_assets(
     })))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AsOfQuery {
+    /// RFC 3339. Absent means now.
+    as_of: Option<String>,
+}
+
 async fn get_asset(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
     Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<AsOfQuery>,
 ) -> Result<Json<Asset>, AppError> {
-    Ok(Json(catalog.get_asset_for(&principal, id).await?))
+    let Some(raw) = query.as_of else {
+        return Ok(Json(catalog.get_asset_for(&principal, id).await?));
+    };
+
+    let at = chrono::DateTime::parse_from_rfc3339(&raw)
+        .map_err(|e| {
+            AppError::Validation(vec![FieldError::new(
+                "asOf",
+                FieldErrorCode::Type,
+                format!("`{raw}` is not an RFC 3339 timestamp: {e}"),
+            )])
+        })?
+        .with_timezone(&chrono::Utc);
+
+    // Authorization is resolved against the *current* relational state, never
+    // against the projection (`04-engine-triples.md` decision 7). Flakes lag
+    // by design, so a permission revoked in that window would still be honoured
+    // if the check read from them. Establishing visibility first and only then
+    // reading history is what keeps time-travel from becoming a way to read
+    // what you are no longer allowed to see.
+    catalog.get_asset_for(&principal, id).await?;
+
+    Ok(Json(catalog.get_asset_as_of(id, at).await?))
 }
 
 async fn list_roots(

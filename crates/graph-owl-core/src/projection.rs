@@ -409,6 +409,138 @@ mod projection_tests {
         );
     }
 
+    // ---- reconstruction ----
+
+    /// The round trip that the whole flake model exists for: project an entity
+    /// out, read it back, get the same entity.
+    #[test]
+    fn an_asset_survives_projection_and_reconstruction() {
+        let original = table();
+        let flakes = asset_to_flakes(&original, 1);
+
+        let rebuilt = asset_from_flakes(original.id, &flakes).expect("should reconstruct");
+
+        assert_eq!(rebuilt.id, original.id);
+        assert_eq!(rebuilt.kind, original.kind);
+        assert_eq!(rebuilt.name, original.name);
+        assert_eq!(rebuilt.fully_qualified_name, original.fully_qualified_name);
+        assert_eq!(rebuilt.parent_id, original.parent_id);
+        assert_eq!(rebuilt.description, original.description);
+        assert_eq!(rebuilt.version, original.version);
+        assert_eq!(rebuilt.updated_by, original.updated_by);
+        assert_eq!(rebuilt.deleted, original.deleted);
+        assert_eq!(rebuilt.created_at, original.created_at);
+        assert_eq!(rebuilt.updated_at, original.updated_at);
+    }
+
+    #[test]
+    fn every_asset_kind_round_trips() {
+        for kind in AssetKind::ALL {
+            let mut asset = table();
+            asset.kind = kind;
+            if kind.parent_kind().is_none() {
+                asset.parent_id = None;
+            }
+            let rebuilt = asset_from_flakes(asset.id, &asset_to_flakes(&asset, 1))
+                .unwrap_or_else(|| panic!("{kind} should reconstruct"));
+            assert_eq!(rebuilt.kind, kind);
+            assert_eq!(
+                rebuilt.parent_id, asset.parent_id,
+                "{kind} lost its parent — the predicate is typed by parent kind"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tombstoned_asset_reconstructs_as_deleted() {
+        let mut asset = table();
+        asset.deleted = true;
+        asset.deleted_at = Some(Utc.timestamp_opt(1_700_001_000, 0).unwrap());
+
+        let rebuilt = asset_from_flakes(asset.id, &asset_to_flakes(&asset, 1)).expect("rebuild");
+        assert!(rebuilt.deleted);
+        assert_eq!(rebuilt.deleted_at, asset.deleted_at);
+    }
+
+    /// A subject with no flakes did not exist at that transaction time. An
+    /// asset synthesised from nothing would be a state the catalog was never
+    /// in, which is precisely the lie time-travel must not tell.
+    #[test]
+    fn a_subject_with_no_flakes_reconstructs_to_nothing() {
+        assert!(asset_from_flakes(Uuid::from_u128(1), &[]).is_none());
+    }
+
+    /// Flakes about *other* subjects must not contribute. Reading the graph
+    /// at a past time returns many subjects' flakes at once, and a
+    /// reconstruction that ignored the subject would blend them.
+    #[test]
+    fn flakes_belonging_to_another_subject_are_ignored() {
+        let mine = table();
+        let mut theirs = table();
+        theirs.id = Uuid::from_u128(99);
+        theirs.name = "someone_elses_table".to_string();
+
+        let mut mixed = asset_to_flakes(&theirs, 1);
+        mixed.extend(asset_to_flakes(&mine, 1));
+
+        let rebuilt = asset_from_flakes(mine.id, &mixed).expect("rebuild");
+        assert_eq!(rebuilt.name, "upi_transactions", "blended two subjects");
+    }
+
+    /// An incomplete set is not an asset. Half a projection reconstructed into
+    /// a plausible-looking entity is worse than an honest absence.
+    #[test]
+    fn a_set_missing_identity_facts_reconstructs_to_nothing() {
+        let asset = table();
+        for required in ["type", "name", "fqn"] {
+            let partial: Vec<Flake> = asset_to_flakes(&asset, 1)
+                .into_iter()
+                .filter(|f| f.p.id != required)
+                .collect();
+            assert!(
+                asset_from_flakes(asset.id, &partial).is_none(),
+                "reconstructed an asset with no {required}"
+            );
+        }
+    }
+
+    /// Source properties are where a column's data type and nullability live,
+    /// so a reconstruction that dropped them would answer "what type was this
+    /// column before the migration" with silence — which is the single most
+    /// likely question anyone asks the time slider.
+    #[test]
+    fn properties_survive_reconstruction() {
+        let mut asset = table();
+        asset.kind = AssetKind::Column;
+        asset.properties = Some(serde_json::json!({ "dataType": "NUMERIC", "nullable": false }));
+
+        let rebuilt = asset_from_flakes(asset.id, &asset_to_flakes(&asset, 1)).expect("rebuild");
+        let properties = rebuilt.properties.expect("properties must come back");
+        assert_eq!(properties["dataType"], "NUMERIC");
+        assert_eq!(properties["nullable"], false);
+    }
+
+    #[test]
+    fn an_asset_without_properties_reconstructs_without_them() {
+        let asset = table();
+        assert!(asset.properties.is_none(), "fixture assumption");
+        let rebuilt = asset_from_flakes(asset.id, &asset_to_flakes(&asset, 1)).expect("rebuild");
+        assert!(
+            rebuilt.properties.is_none(),
+            "absent must stay absent, not become an empty object"
+        );
+    }
+
+    /// The reconstruction reads state, never the diff that produced it — the
+    /// change description belongs to the version row that recorded it, and
+    /// inventing one here would attribute a change to the wrong transaction.
+    #[test]
+    fn reconstruction_carries_no_change_description() {
+        let asset = table();
+        let rebuilt = asset_from_flakes(asset.id, &asset_to_flakes(&asset, 1)).expect("rebuild");
+        assert!(rebuilt.change_description.is_none());
+    }
+
     // ---- updates ----
 
     /// An update retracts the old value and asserts the new one, both at the
@@ -519,4 +651,92 @@ mod projection_tests {
             }
         }
     }
+}
+
+/// Reassemble an asset from the flakes visible at some transaction time.
+///
+/// The inverse of [`asset_to_flakes`], and the payoff of the whole flake
+/// model: given the flakes current *as of* a past `t`, this returns the entity
+/// as it stood then — reconstructed, not looked up in a snapshot table that
+/// could have drifted from the facts.
+///
+/// Returns `None` when the flakes do not describe an asset at all. That is the
+/// honest answer for a subject that did not exist yet: an asset synthesised
+/// from partial facts would be a state the catalog was never in.
+///
+/// # Errors
+///
+/// None — a malformed set yields `None` rather than a panic, because these
+/// flakes come from storage and a corrupt row must not take down a read.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn asset_from_flakes(id: uuid::Uuid, flakes: &[Flake]) -> Option<Asset> {
+    let subject = id.to_string();
+    let mine: Vec<&Flake> = flakes.iter().filter(|f| f.s.id == subject).collect();
+    if mine.is_empty() {
+        return None;
+    }
+
+    let find = |predicate: &str| -> Option<&FlakeValue> {
+        mine.iter().find(|f| f.p.id == predicate).map(|f| &f.o)
+    };
+    let text = |predicate: &str| -> Option<String> {
+        match find(predicate) {
+            Some(FlakeValue::String(s)) => Some(s.clone()),
+            _ => None,
+        }
+    };
+    let instant = |predicate: &str| -> Option<chrono::DateTime<chrono::Utc>> {
+        match find(predicate) {
+            Some(FlakeValue::Instant(dt)) => Some(*dt),
+            _ => None,
+        }
+    };
+
+    // Identity, name and kind are what make this an asset rather than an
+    // arbitrary bag of facts. Without all three there is nothing to return.
+    let kind = AssetKind::parse(&text("type")?).ok()?;
+    let name = text("name")?;
+    let fully_qualified_name = text("fqn")?;
+
+    let version = text("version")
+        .and_then(|raw| {
+            let (major, minor) = raw.split_once('.')?;
+            Some(crate::envelope::EntityVersion {
+                major: major.parse().ok()?,
+                minor: minor.parse().ok()?,
+            })
+        })
+        .unwrap_or_else(crate::envelope::EntityVersion::initial);
+
+    // The parent predicate is typed by the parent's kind, so the lookup has to
+    // ask for the one this kind would have written.
+    let parent_id = parent_predicate(kind).and_then(|predicate| match find(&predicate.id) {
+        Some(FlakeValue::Ref(reference)) => reference.id.parse().ok(),
+        _ => None,
+    });
+
+    Some(Asset {
+        id,
+        kind,
+        name,
+        fully_qualified_name,
+        parent_id,
+        description: text("description"),
+        properties: match find("properties") {
+            Some(FlakeValue::Json(raw)) => serde_json::from_str(raw).ok(),
+            _ => None,
+        },
+        version,
+        updated_by: text("updatedBy").unwrap_or_else(|| "system".to_string()),
+        // A historical read reconstructs *state*, not the diff that produced
+        // it. The change description belongs to the version row that recorded
+        // it, and inventing one here would attribute a change to the wrong
+        // transaction.
+        change_description: None,
+        deleted: matches!(find("deleted"), Some(FlakeValue::Boolean(true))),
+        deleted_at: instant("deletedAt"),
+        created_at: instant("createdAt").unwrap_or_else(chrono::Utc::now),
+        updated_at: instant("updatedAt").unwrap_or_else(chrono::Utc::now),
+    })
 }

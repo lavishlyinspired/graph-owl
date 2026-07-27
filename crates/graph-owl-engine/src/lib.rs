@@ -99,6 +99,17 @@ pub trait TripleStore: Send + Sync {
     ///
     /// [`EngineError::Backend`] if the clock cannot be advanced.
     async fn next_time(&self) -> Result<i64, EngineError>;
+
+    /// The newest transaction time at or before `at`.
+    ///
+    /// `None` means nothing had happened yet — which is a different answer
+    /// from "the entity did not exist yet", and callers must not collapse the
+    /// two: the first says the graph is younger than the question.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Backend`] if the lookup fails.
+    async fn time_at(&self, at: chrono::DateTime<chrono::Utc>) -> Result<Option<i64>, EngineError>;
 }
 
 /// Rejects a flake whose subject, predicate, graph or reference object carries

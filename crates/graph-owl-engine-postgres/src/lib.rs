@@ -365,11 +365,37 @@ impl TripleStore for PostgresTripleStore {
         // A single UPDATE ... RETURNING is atomic on its own row, so
         // concurrent callers serialize on it without an explicit lock and
         // neither can observe the other's t.
-        let row = sqlx::query("UPDATE graph_clock SET t = t + 1 WHERE only_row RETURNING t")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| EngineError::Backend(e.to_string()))?;
+        //
+        // The CTE writes the wall clock in the same statement, so a `t` can
+        // never exist without the instant it happened at. Two statements would
+        // leave a window in which a crash produces a transaction time that no
+        // as-of query can ever resolve to.
+        let row = sqlx::query(
+            "WITH advanced AS (
+                 UPDATE graph_clock SET t = t + 1 WHERE only_row RETURNING t
+             ), recorded AS (
+                 INSERT INTO graph_transactions (t) SELECT t FROM advanced RETURNING t
+             )
+             SELECT t FROM recorded",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| EngineError::Backend(e.to_string()))?;
         Ok(row.get("t"))
+    }
+
+    async fn time_at(&self, at: chrono::DateTime<chrono::Utc>) -> Result<Option<i64>, EngineError> {
+        // <= not <: as-of exactly a transaction's instant must include that
+        // transaction, or "the state right after the migration" is
+        // unaskable.
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT t FROM graph_transactions WHERE at <= $1 ORDER BY at DESC, t DESC LIMIT 1",
+        )
+        .bind(at)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| EngineError::Backend(e.to_string()))?;
+        Ok(row.map(|(t,)| t))
     }
 }
 
