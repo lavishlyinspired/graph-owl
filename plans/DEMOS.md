@@ -114,24 +114,28 @@
 - [ ] Itemized memory budget reported at startup
 
 ### Epic 11 — Users, teams, ownership
-- [ ] `User`, `Team`, team hierarchy with cycle detection
-- [ ] Ownership on the envelope; inherited down containment
-- [ ] Ownership-gap report
+- [x] `User` with roles; auto-provisioned on first sight
+- [x] `owner_id` on assets (nullable, so the gap is visible rather than prevented)
+- [~] **Gap**: no teams, no ownership inheritance, no gap report — deferred to Demo 7 where domains land
 
 ### Epic 12 — Authentication
-- [ ] JWT/JWKS verification, key rotation without restart
-- [ ] The `Principal` extractor swap (the seam from Epic 1 Slice G)
-- [ ] Auto-provision a `User` on first sight
-- [ ] Bot principals for connectors
+- [x] JWT verification (HS256, shared secret); a forged token is rejected
+- [x] **The `Principal` extractor swap** — one function changed, no handler touched
+- [x] Auto-provision a `User` on first sight, with no roles
+- [x] Open mode when no secret is configured, logged as such at startup
+- [~] **Gap**: JWKS and key rotation not implemented; the swap point is `signing_secret()`
 - [ ] OIDC/PKCE in the console; tokens in memory only
 
 ### Epic 13 — Authorization
-- [ ] `AccessPredicate` intermediate form in `graph-owl-authz`
-- [ ] Lowering to SQL and to the search query
-- [ ] Deny-overrides; policy/schema bootstrap bypass
-- [ ] `MetadataOperation` vocabulary
-- [ ] Decision cache keyed on epochs, never a TTL
-- [ ] Column-level filtering — the PII demo
+- [x] `AccessPredicate` in `graph-owl-authz` — pure, zero surviving mutants
+- [x] Lowered to SQL for list, search, children and counts
+- [x] Deny-overrides, order-independent; an unmatched request denies
+- [x] `MetadataOperation` vocabulary, append-only
+- [x] **Row-level filtering — the PII demo**: two principals, one search, different results
+- [x] Counts filtered through the same predicate, so a total cannot leak what it hid
+- [x] Hidden reads as `404`, not `403` — a `403` on an id confirms the id exists
+- [~] **Gap**: no decision cache; every request recompiles. Correct but not yet fast
+- [ ] Column-level (as opposed to row-level) masking — needs Epic 25 classifications
 
 ### Epic 39 — Console, completed
 - [ ] Login, session, denied-vs-empty states

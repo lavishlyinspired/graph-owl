@@ -8,6 +8,8 @@ license.workspace = true
 graph-owl-api.workspace = true
 graph-owl-connectors.workspace = true
 graph-owl-ui.workspace = true
+graph-owl-authz.workspace = true
+jsonwebtoken = "9"
 graph-owl-core.workspace = true
 graph-owl-storage.workspace = true
 graph-owl-storage-postgres.workspace = true
@@ -18,6 +20,7 @@ serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+jsonwebtoken = "9"
 sqlx.workspace = true
 tower.workspace = true
 testcontainers-modules.workspace = true

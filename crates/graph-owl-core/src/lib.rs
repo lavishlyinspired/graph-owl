@@ -244,6 +244,13 @@ pub struct Principal {
     pub id: String,
     pub name: String,
     pub kind: PrincipalKind,
+    /// Roles carry policies. Resolved once when the principal is built, so
+    /// every downstream check reads the same set — a per-check lookup would
+    /// let permissions change mid-request.
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub is_admin: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,6 +276,10 @@ impl Principal {
             id: "system".to_string(),
             name: "system".to_string(),
             kind: PrincipalKind::System,
+            roles: Vec::new(),
+            // The internal identity: migrations, reconciliation, scheduled
+            // jobs. Not obtainable from a request.
+            is_admin: true,
         }
     }
 }

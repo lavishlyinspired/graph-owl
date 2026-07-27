@@ -9,6 +9,23 @@ use testcontainers_modules::{
 };
 
 pub async fn test_app() -> (axum::Router, ContainerAsync<Postgres>, String) {
+    build_app(None).await
+}
+
+/// Same, with JWT verification enabled. The secret is process-wide because it
+/// is read from the environment, which is where a deployment supplies it.
+#[allow(dead_code)]
+pub async fn test_app_with_secret(
+    secret: &str,
+) -> (axum::Router, ContainerAsync<Postgres>, String) {
+    build_app(Some(secret)).await
+}
+
+async fn build_app(secret: Option<&str>) -> (axum::Router, ContainerAsync<Postgres>, String) {
+    match secret {
+        Some(secret) => unsafe { std::env::set_var("GRAPH_OWL_JWT_SECRET", secret) },
+        None => unsafe { std::env::remove_var("GRAPH_OWL_JWT_SECRET") },
+    }
     let container = Postgres::default()
         .start()
         .await

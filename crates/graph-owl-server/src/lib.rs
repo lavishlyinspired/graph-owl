@@ -183,17 +183,72 @@ async fn delete_relationship(
 /// is the entire point of threading it through handlers now.
 struct Auth(Principal);
 
+/// Verified claims. Deliberately minimal: an identity and a display name.
+/// Roles come from the catalog's own user record, not from the token — a token
+/// that carries its own authorisation makes revocation impossible until it
+/// expires.
+#[derive(serde::Deserialize)]
+struct Claims {
+    sub: String,
+    #[serde(default)]
+    name: Option<String>,
+    exp: usize,
+}
+
+/// The signing secret. Read once at startup.
+///
+/// HS256 with a shared secret is the demo posture; Epic 12's JWKS path replaces
+/// this function and nothing else, which is the payoff of the seam.
+fn signing_secret() -> Option<String> {
+    std::env::var("GRAPH_OWL_JWT_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// **The single place a `Principal` is constructed from a request.**
+///
+/// With no secret configured the server is open and every request is the system
+/// principal — which is the Demo 1 posture and is *logged as such at startup*,
+/// because a server that is accidentally open must say so rather than look
+/// identical to a secured one.
 impl<S> FromRequestParts<S> for Auth
 where
     S: Send + Sync,
+    Catalog: axum::extract::FromRef<S>,
 {
     type Rejection = AppError;
 
     async fn from_request_parts(
-        _parts: &mut axum::http::request::Parts,
-        _state: &S,
+        parts: &mut axum::http::request::Parts,
+        state: &S,
     ) -> Result<Self, Self::Rejection> {
-        Ok(Auth(Principal::system()))
+        let Some(secret) = signing_secret() else {
+            return Ok(Auth(Principal::system()));
+        };
+
+        let token = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .ok_or(AppError::Unauthenticated)?;
+
+        let claims = jsonwebtoken::decode::<Claims>(
+            token,
+            &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
+            &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256),
+        )
+        .map_err(|_| AppError::Unauthenticated)?
+        .claims;
+        let _ = claims.exp;
+
+        let catalog = <Catalog as axum::extract::FromRef<S>>::from_ref(state);
+        let name = claims.name.unwrap_or_else(|| claims.sub.clone());
+        catalog
+            .resolve_principal(&claims.sub, &name)
+            .await
+            .map(Auth)
+            .map_err(AppError::from)
     }
 }
 
@@ -278,6 +333,8 @@ enum AppError {
     },
     Internal(String),
     NotFound,
+    /// No credential, or one that does not verify.
+    Unauthenticated,
     /// The triple is well-formed and meaningless. Its own identity because a
     /// client fixes it by choosing a different relationship, not a value.
     IllegalRelationship {
@@ -304,6 +361,7 @@ impl AppError {
             } => "relationship-conflict",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
+            AppError::Unauthenticated => "unauthenticated",
             AppError::IllegalRelationship { .. } => "illegal-relationship",
         }
     }
@@ -324,6 +382,7 @@ impl AppError {
             } => "Relationship already exists",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
+            AppError::Unauthenticated => "Authentication required",
             AppError::IllegalRelationship { .. } => "Illegal relationship",
         }
     }
@@ -336,6 +395,7 @@ impl AppError {
             AppError::Conflict { .. } => StatusCode::CONFLICT,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::Unauthenticated => StatusCode::UNAUTHORIZED,
         }
     }
 
@@ -357,6 +417,9 @@ impl AppError {
                 ..
             } => format!("the relationship '{detail}' already exists"),
             AppError::NotFound => "the requested resource does not exist".to_string(),
+            AppError::Unauthenticated => {
+                "a valid bearer token is required for this request".to_string()
+            }
             AppError::IllegalRelationship {
                 from,
                 relationship,
@@ -533,62 +596,73 @@ async fn upsert_asset(
 
 async fn list_assets(
     State(catalog): State<Catalog>,
+    Auth(principal): Auth,
     AppQuery(query): AppQuery<AssetListQuery>,
 ) -> Result<Json<Page<Asset>>, AppError> {
     let kind = parse_kind(query.kind.as_deref())?;
     let page = PageRequest::new(query.limit, query.after.as_deref())?;
-    Ok(Json(catalog.list_assets(kind, &page).await?))
+    Ok(Json(
+        catalog.list_assets_for(&principal, kind, &page).await?,
+    ))
 }
 
 async fn search_assets(
     State(catalog): State<Catalog>,
+    Auth(principal): Auth,
     AppQuery(query): AppQuery<AssetSearchQuery>,
 ) -> Result<Json<Page<Asset>>, AppError> {
     let kind = parse_kind(query.kind.as_deref())?;
     let page = PageRequest::new(query.limit, query.after.as_deref())?;
-    Ok(Json(catalog.search_assets(&query.q, kind, &page).await?))
+    Ok(Json(
+        catalog
+            .search_assets_for(&principal, &query.q, kind, &page)
+            .await?,
+    ))
 }
 
 async fn get_asset(
     State(catalog): State<Catalog>,
+    Auth(principal): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Asset>, AppError> {
-    catalog
-        .get_asset(id)
-        .await?
-        .map(Json)
-        .ok_or(AppError::NotFound)
+    Ok(Json(catalog.get_asset_for(&principal, id).await?))
 }
 
-async fn list_roots(State(catalog): State<Catalog>) -> Result<Json<Vec<Asset>>, AppError> {
-    Ok(Json(catalog.list_children(None).await?))
+async fn list_roots(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<Vec<Asset>>, AppError> {
+    Ok(Json(catalog.list_children_for(&principal, None).await?))
 }
 
 async fn list_asset_children(
     State(catalog): State<Catalog>,
+    Auth(principal): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Asset>>, AppError> {
     // A missing parent is a 404, not an empty list: "this has no children" and
-    // "this does not exist" are different answers and a client acts on them
-    // differently.
-    if catalog.get_asset(id).await?.is_none() {
-        return Err(AppError::NotFound);
-    }
-    Ok(Json(catalog.list_children(Some(id)).await?))
+    // "this does not exist" are different answers. A parent hidden by policy
+    // takes the same path, because 403 on a specific id confirms it exists.
+    catalog.get_asset_for(&principal, id).await?;
+    Ok(Json(catalog.list_children_for(&principal, Some(id)).await?))
 }
 
 async fn asset_ancestors(
     State(catalog): State<Catalog>,
+    Auth(principal): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Asset>>, AppError> {
-    if catalog.get_asset(id).await?.is_none() {
-        return Err(AppError::NotFound);
-    }
+    catalog.get_asset_for(&principal, id).await?;
     Ok(Json(catalog.ancestors_of(id).await?))
 }
 
-async fn asset_stats(State(catalog): State<Catalog>) -> Result<Json<serde_json::Value>, AppError> {
-    let counts = catalog.count_assets_by_kind().await?;
+async fn asset_stats(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Counted through the same predicate as the rows: a total computed before
+    // filtering leaks the existence of what it filtered out.
+    let counts = catalog.count_assets_by_kind_for(&principal).await?;
     Ok(Json(json!({
         "byKind": counts
             .into_iter()

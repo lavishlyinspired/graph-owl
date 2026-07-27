@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use graph_owl_authz::{AccessPredicate, MetadataOperation, Policy, Subject, compile};
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
     envelope::EntityVersion,
@@ -8,7 +9,7 @@ use graph_owl_core::{
     page::{Page, PageRequest},
     relationship_type::{EntityKind, RelationshipType, is_legal},
 };
-use graph_owl_storage::{ConflictKind, Storage, StorageError};
+use graph_owl_storage::{ConflictKind, Storage, StorageError, StoredUser};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -176,6 +177,14 @@ impl From<StorageError> for CatalogError {
                 CatalogError::Storage(StorageError::Unexpected(message))
             }
         }
+    }
+}
+
+fn subject_of(principal: &Principal) -> Subject {
+    Subject {
+        id: principal.id.clone(),
+        roles: principal.roles.clone(),
+        is_admin: principal.is_admin,
     }
 }
 
@@ -449,6 +458,165 @@ impl Catalog {
         Ok(self.storage.get_asset_by_fqn(fqn).await?)
     }
 
+    /// Resolves a principal's policies once per request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn policies_for(&self, principal: &Principal) -> Result<Vec<Policy>, CatalogError> {
+        if principal.is_admin {
+            return Ok(Vec::new());
+        }
+        Ok(self.storage.policies_for_roles(&principal.roles).await?)
+    }
+
+    async fn predicate_for(
+        &self,
+        principal: &Principal,
+        operation: MetadataOperation,
+    ) -> Result<AccessPredicate, CatalogError> {
+        let policies = self.policies_for(principal).await?;
+        Ok(compile(&subject_of(principal), operation, &policies))
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn list_assets_for(
+        &self,
+        principal: &Principal,
+        kind: Option<AssetKind>,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, CatalogError> {
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+        Ok(self
+            .storage
+            .list_assets_visible(kind, page, &predicate)
+            .await?)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn search_assets_for(
+        &self,
+        principal: &Principal,
+        query: &str,
+        kind: Option<AssetKind>,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, CatalogError> {
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+        Ok(self
+            .storage
+            .search_assets_visible(query, kind, page, &predicate)
+            .await?)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn list_children_for(
+        &self,
+        principal: &Principal,
+        parent_id: Option<Uuid>,
+    ) -> Result<Vec<Asset>, CatalogError> {
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+        Ok(self
+            .storage
+            .list_children_visible(parent_id, &predicate)
+            .await?)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn count_assets_by_kind_for(
+        &self,
+        principal: &Principal,
+    ) -> Result<Vec<(AssetKind, i64)>, CatalogError> {
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+        Ok(self
+            .storage
+            .count_assets_by_kind_visible(&predicate)
+            .await?)
+    }
+
+    /// Reads one asset, or `NotFound` if policy hides it.
+    ///
+    /// **Hidden reads as missing, deliberately.** A `403` on a specific id
+    /// confirms that id exists, which is exactly what the policy was meant to
+    /// conceal.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the asset does not exist or is not visible.
+    pub async fn get_asset_for(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<Asset, CatalogError> {
+        let asset = self
+            .storage
+            .get_asset(id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+        if predicate.admits(&asset.fully_qualified_name) {
+            Ok(asset)
+        } else {
+            Err(CatalogError::NotFound)
+        }
+    }
+
+    /// Auto-provisions a user on first sight, so ownership works without a
+    /// directory sync (`12-13-security.md` decision 7).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn resolve_principal(
+        &self,
+        id: &str,
+        display_name: &str,
+    ) -> Result<Principal, CatalogError> {
+        let user = match self.storage.find_user(id).await? {
+            Some(user) => user,
+            None => {
+                let user = StoredUser {
+                    id: id.to_string(),
+                    display_name: display_name.to_string(),
+                    email: None,
+                    is_admin: false,
+                    is_bot: false,
+                    roles: Vec::new(),
+                };
+                self.storage.upsert_user(&user).await?;
+                user
+            }
+        };
+        Ok(Principal {
+            id: user.id,
+            name: user.display_name,
+            kind: if user.is_bot {
+                graph_owl_core::PrincipalKind::Service
+            } else {
+                graph_owl_core::PrincipalKind::User
+            },
+            roles: user.roles,
+            is_admin: user.is_admin,
+        })
+    }
+
     /// # Errors
     /// Returns an error if the underlying storage fails.
     pub async fn list_assets(
@@ -629,6 +797,8 @@ mod tests {
     struct InMemoryStorage {
         assets: Mutex<Vec<Asset>>,
         versions: Mutex<Vec<AssetVersion>>,
+        users: Mutex<Vec<StoredUser>>,
+        policies: Mutex<Vec<Policy>>,
         inserted: Mutex<Vec<Table>>,
         relationships: Mutex<Vec<Relationship>>,
     }
@@ -856,6 +1026,100 @@ mod tests {
                 affected += 1;
             }
             Ok(affected)
+        }
+
+        // The fake applies the *same* AccessPredicate::admits used by the real
+        // adapter's reference semantics, so a lowering bug shows as a
+        // disagreement rather than passing here and failing in Postgres.
+        async fn find_user(&self, id: &str) -> Result<Option<StoredUser>, StorageError> {
+            Ok(self
+                .users
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|u| u.id == id)
+                .cloned())
+        }
+
+        async fn upsert_user(&self, user: &StoredUser) -> Result<(), StorageError> {
+            let mut users = self.users.lock().unwrap();
+            if let Some(existing) = users.iter_mut().find(|u| u.id == user.id) {
+                *existing = user.clone();
+            } else {
+                users.push(user.clone());
+            }
+            Ok(())
+        }
+
+        async fn policies_for_roles(&self, roles: &[String]) -> Result<Vec<Policy>, StorageError> {
+            let _ = roles;
+            Ok(self.policies.lock().unwrap().clone())
+        }
+
+        async fn list_assets_visible(
+            &self,
+            kind: Option<AssetKind>,
+            page: &PageRequest,
+            predicate: &AccessPredicate,
+        ) -> Result<Page<Asset>, StorageError> {
+            let all = self.list_assets(kind, page).await?;
+            let visible: Vec<Asset> = all
+                .data
+                .into_iter()
+                .filter(|a| predicate.admits(&a.fully_qualified_name))
+                .collect();
+            Ok(Page::from_overfetch(visible, page.limit, |a: &Asset| {
+                Cursor::new(a.fully_qualified_name.clone(), a.id)
+            }))
+        }
+
+        async fn search_assets_visible(
+            &self,
+            query: &str,
+            kind: Option<AssetKind>,
+            page: &PageRequest,
+            predicate: &AccessPredicate,
+        ) -> Result<Page<Asset>, StorageError> {
+            let all = self.search_assets(query, kind, page).await?;
+            let visible: Vec<Asset> = all
+                .data
+                .into_iter()
+                .filter(|a| predicate.admits(&a.fully_qualified_name))
+                .collect();
+            Ok(Page::from_overfetch(visible, page.limit, |a: &Asset| {
+                Cursor::new(a.fully_qualified_name.clone(), a.id)
+            }))
+        }
+
+        async fn list_children_visible(
+            &self,
+            parent_id: Option<Uuid>,
+            predicate: &AccessPredicate,
+        ) -> Result<Vec<Asset>, StorageError> {
+            Ok(self
+                .list_children(parent_id)
+                .await?
+                .into_iter()
+                .filter(|a| predicate.admits(&a.fully_qualified_name))
+                .collect())
+        }
+
+        async fn count_assets_by_kind_visible(
+            &self,
+            predicate: &AccessPredicate,
+        ) -> Result<Vec<(AssetKind, i64)>, StorageError> {
+            let assets = self.assets.lock().unwrap();
+            Ok(AssetKind::ALL
+                .into_iter()
+                .map(|kind| {
+                    let n = assets
+                        .iter()
+                        .filter(|a| a.kind == kind && predicate.admits(&a.fully_qualified_name))
+                        .count();
+                    (kind, i64::try_from(n).unwrap_or(i64::MAX))
+                })
+                .filter(|(_, n)| *n > 0)
+                .collect())
         }
 
         async fn insert_table(&self, table: Table) -> Result<Table, StorageError> {

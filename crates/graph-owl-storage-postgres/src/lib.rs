@@ -1,10 +1,11 @@
 use async_trait::async_trait;
+use graph_owl_authz::{AccessPredicate, Policy};
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
     envelope::{ChangeDescription, EntityVersion, classify},
     page::{Cursor, Page, PageRequest},
 };
-use graph_owl_storage::{ConflictKind, Storage, StorageError};
+use graph_owl_storage::{ConflictKind, Storage, StorageError, StoredUser};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
@@ -600,7 +601,261 @@ impl Storage for PostgresStorage {
 
         Ok(result.rows_affected())
     }
+
+    // ---- identity and policy (Epics 11-13) ----
+
+    async fn find_user(&self, id: &str) -> Result<Option<StoredUser>, StorageError> {
+        let row = sqlx::query(
+            "SELECT u.id, u.display_name, u.email, u.is_admin, u.is_bot,
+                    COALESCE(array_agg(r.role) FILTER (WHERE r.role IS NOT NULL), '{}') AS roles
+             FROM users u LEFT JOIN user_roles r ON r.user_id = u.id
+             WHERE u.id = $1
+             GROUP BY u.id",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(row.map(|row| StoredUser {
+            id: row.get("id"),
+            display_name: row.get("display_name"),
+            email: row.get("email"),
+            is_admin: row.get("is_admin"),
+            is_bot: row.get("is_bot"),
+            roles: row.get("roles"),
+        }))
+    }
+
+    async fn upsert_user(&self, user: &StoredUser) -> Result<(), StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO users (id, display_name, email, is_admin, is_bot)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (id) DO UPDATE SET
+                 display_name = EXCLUDED.display_name,
+                 email = EXCLUDED.email,
+                 is_admin = EXCLUDED.is_admin,
+                 is_bot = EXCLUDED.is_bot",
+        )
+        .bind(&user.id)
+        .bind(&user.display_name)
+        .bind(&user.email)
+        .bind(user.is_admin)
+        .bind(user.is_bot)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        for role in &user.roles {
+            sqlx::query("INSERT INTO roles (name) VALUES ($1) ON CONFLICT DO NOTHING")
+                .bind(role)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            sqlx::query(
+                "INSERT INTO user_roles (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(&user.id)
+            .bind(role)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    async fn policies_for_roles(&self, roles: &[String]) -> Result<Vec<Policy>, StorageError> {
+        if roles.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT DISTINCT p.name, p.rules
+             FROM policies p JOIN role_policies rp ON rp.policy = p.name
+             WHERE rp.role = ANY($1)",
+        )
+        .bind(roles)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(Policy {
+                    name: row.get("name"),
+                    rules: serde_json::from_value(row.get("rules")).ok()?,
+                })
+            })
+            .collect())
+    }
+
+    async fn list_assets_visible(
+        &self,
+        kind: Option<AssetKind>,
+        page: &PageRequest,
+        predicate: &AccessPredicate,
+    ) -> Result<Page<Asset>, StorageError> {
+        let Some((allow, deny)) = lower(predicate) else {
+            // Nothing visible. An empty page, not an error — "you may see
+            // nothing here" is a legitimate answer, and 403 would leak that
+            // something exists.
+            return Ok(Page::from_overfetch(Vec::new(), page.limit, |a: &Asset| {
+                Cursor::new(a.fully_qualified_name.clone(), a.id)
+            }));
+        };
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let sql = format!(
+            "SELECT {ASSET_COLUMNS} FROM assets
+             WHERE NOT deleted
+               AND ($1::text IS NULL OR kind = $1)
+               AND ($2::text IS NULL OR (fully_qualified_name, id) > ($2, $3))
+               {VISIBILITY}
+             ORDER BY fully_qualified_name, id
+             LIMIT $4"
+        );
+        let query = sqlx::query(&sql)
+            .bind(kind.map(AssetKind::as_str))
+            .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
+            .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
+            .bind(overfetch)
+            .bind(&allow)
+            .bind(&deny);
+        self.asset_page(query, page).await
+    }
+
+    async fn search_assets_visible(
+        &self,
+        query: &str,
+        kind: Option<AssetKind>,
+        page: &PageRequest,
+        predicate: &AccessPredicate,
+    ) -> Result<Page<Asset>, StorageError> {
+        let Some((allow, deny)) = lower(predicate) else {
+            return Ok(Page::from_overfetch(Vec::new(), page.limit, |a: &Asset| {
+                Cursor::new(a.fully_qualified_name.clone(), a.id)
+            }));
+        };
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let pattern = format!("%{}%", query.to_lowercase());
+        let sql = format!(
+            "SELECT {ASSET_COLUMNS} FROM assets
+             WHERE NOT deleted
+               AND (lower(name) LIKE $1 OR lower(fully_qualified_name) LIKE $1)
+               AND ($2::text IS NULL OR kind = $2)
+               AND ($3::text IS NULL OR (fully_qualified_name, id) > ($3, $4))
+               {VISIBILITY_SEARCH}
+             ORDER BY fully_qualified_name, id
+             LIMIT $5"
+        );
+        let q = sqlx::query(&sql)
+            .bind(pattern)
+            .bind(kind.map(AssetKind::as_str))
+            .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
+            .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
+            .bind(overfetch)
+            .bind(&allow)
+            .bind(&deny);
+        self.asset_page(q, page).await
+    }
+
+    async fn list_children_visible(
+        &self,
+        parent_id: Option<Uuid>,
+        predicate: &AccessPredicate,
+    ) -> Result<Vec<Asset>, StorageError> {
+        let Some((allow, deny)) = lower(predicate) else {
+            return Ok(Vec::new());
+        };
+        let rows = sqlx::query(&format!(
+            "SELECT {ASSET_COLUMNS} FROM assets
+             WHERE NOT deleted
+               AND (($1::uuid IS NULL AND parent_id IS NULL) OR parent_id = $1)
+               AND (fully_qualified_name LIKE ANY($2))
+               AND NOT (fully_qualified_name LIKE ANY($3))
+             ORDER BY name"
+        ))
+        .bind(parent_id)
+        .bind(&allow)
+        .bind(&deny)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(asset_from_row).collect())
+    }
+
+    async fn count_assets_by_kind_visible(
+        &self,
+        predicate: &AccessPredicate,
+    ) -> Result<Vec<(AssetKind, i64)>, StorageError> {
+        let Some((allow, deny)) = lower(predicate) else {
+            return Ok(Vec::new());
+        };
+        // Counted through the same predicate as the rows. A total computed
+        // before filtering says "47 results" above 12 rows, which leaks the
+        // existence of 35 assets the reader may not see.
+        let rows = sqlx::query(
+            "SELECT kind, count(*) AS n FROM assets
+             WHERE NOT deleted
+               AND (fully_qualified_name LIKE ANY($1))
+               AND NOT (fully_qualified_name LIKE ANY($2))
+             GROUP BY kind",
+        )
+        .bind(&allow)
+        .bind(&deny)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                AssetKind::parse(row.get::<&str, _>("kind"))
+                    .ok()
+                    .map(|kind| (kind, row.get::<i64, _>("n")))
+            })
+            .collect())
+    }
 }
+
+/// The one place `AccessPredicate` becomes SQL.
+///
+/// Returns `None` for "nothing visible", which callers must answer with an
+/// empty result rather than a broader query — the alternative is a predicate
+/// that silently matches everything.
+fn lower(predicate: &AccessPredicate) -> Option<(Vec<String>, Vec<String>)> {
+    match predicate {
+        AccessPredicate::Nothing => None,
+        // `%` matches every FQN. An empty deny array is correct rather than a
+        // sentinel: `x LIKE ANY('{}')` is false, so `NOT (...)` is true and
+        // every row passes the deny check. A NUL sentinel would have been both
+        // unnecessary and rejected — Postgres text cannot contain NUL.
+        AccessPredicate::All => Some((vec!["%".to_string()], Vec::new())),
+        AccessPredicate::Fqn {
+            allow_prefixes,
+            deny_prefixes,
+        } => Some((
+            allow_prefixes.iter().map(|p| format!("{p}%")).collect(),
+            deny_prefixes.iter().map(|p| format!("{p}%")).collect(),
+        )),
+    }
+}
+
+const VISIBILITY: &str =
+    "AND (fully_qualified_name LIKE ANY($5)) AND NOT (fully_qualified_name LIKE ANY($6))";
+const VISIBILITY_SEARCH: &str =
+    "AND (fully_qualified_name LIKE ANY($6)) AND NOT (fully_qualified_name LIKE ANY($7))";
 
 fn asset_from_row(row: PgRow) -> Asset {
     Asset {

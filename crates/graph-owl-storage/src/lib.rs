@@ -1,9 +1,22 @@
 use async_trait::async_trait;
+use graph_owl_authz::{AccessPredicate, Policy};
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
     page::{Page, PageRequest},
 };
 use thiserror::Error;
+
+/// A user as stored. Distinct from `Principal`, which is the request-scoped
+/// view: this is the record, that is the claim about who is asking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredUser {
+    pub id: String,
+    pub display_name: String,
+    pub email: Option<String>,
+    pub is_admin: bool,
+    pub is_bot: bool,
+    pub roles: Vec<String>,
+}
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,4 +116,44 @@ pub trait Storage: Send + Sync {
 
     /// Lifts the tombstone from the asset and its subtree.
     async fn restore_asset(&self, id: Uuid, restored_by: &str) -> Result<u64, StorageError>;
+
+    // ---- identity and policy (Epics 11-13) ----
+
+    /// Looks up a user with their roles. `None` means unknown, which the
+    /// facade turns into an auto-provision (`12-13-security.md` decision 7).
+    async fn find_user(&self, id: &str) -> Result<Option<StoredUser>, StorageError>;
+    async fn upsert_user(&self, user: &StoredUser) -> Result<(), StorageError>;
+    /// Every policy attached to any of these roles, deduplicated.
+    async fn policies_for_roles(&self, roles: &[String]) -> Result<Vec<Policy>, StorageError>;
+
+    /// Lists assets visible under `predicate`.
+    ///
+    /// Separate from `list_assets` so the unfiltered path cannot be reached by
+    /// accident from a request handler — a filtered call site that forgets the
+    /// predicate is a leak, and this makes forgetting a compile error.
+    async fn list_assets_visible(
+        &self,
+        kind: Option<AssetKind>,
+        page: &PageRequest,
+        predicate: &AccessPredicate,
+    ) -> Result<Page<Asset>, StorageError>;
+
+    async fn search_assets_visible(
+        &self,
+        query: &str,
+        kind: Option<AssetKind>,
+        page: &PageRequest,
+        predicate: &AccessPredicate,
+    ) -> Result<Page<Asset>, StorageError>;
+
+    async fn list_children_visible(
+        &self,
+        parent_id: Option<Uuid>,
+        predicate: &AccessPredicate,
+    ) -> Result<Vec<Asset>, StorageError>;
+
+    async fn count_assets_by_kind_visible(
+        &self,
+        predicate: &AccessPredicate,
+    ) -> Result<Vec<(AssetKind, i64)>, StorageError>;
 }
