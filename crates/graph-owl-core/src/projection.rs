@@ -1,0 +1,522 @@
+//! Projection of entities into flakes.
+//!
+//! Pure — a function from an entity to a `Vec<Flake>`, with no I/O. That is
+//! deliberate and load-bearing: this is the highest-traffic transformation in
+//! the engine, it runs on every write, and being pure is what makes it
+//! exhaustively testable without a database.
+//!
+//! Relational is the source of truth and flakes are the graph *view* of it
+//! (`plans/04-engine-triples.md` decision 1). Nothing here ever reads back.
+
+use crate::flake::{Flake, FlakeValue, Sid, namespace};
+use crate::{Asset, AssetKind};
+
+/// The predicate naming an asset's container, by the *parent's* kind:
+/// `dsc:parentSchema` on a table, `dsc:parentTable` on a column.
+///
+/// Typed rather than a single `dsc:parent` because "every table in this
+/// schema" and "every column in this table" would otherwise be the same query,
+/// and a traversal could not tell one level of the hierarchy from another.
+#[must_use]
+pub fn parent_predicate(kind: AssetKind) -> Option<Sid> {
+    kind.parent_kind().map(|parent| {
+        let name = parent.as_str();
+        let mut capitalized = name.chars();
+        let head = capitalized.next().map(|c| c.to_ascii_uppercase());
+        Sid::dsc(format!(
+            "parent{}{}",
+            head.unwrap_or_default(),
+            capitalized.as_str()
+        ))
+    })
+}
+
+/// The node an asset occupies in the graph.
+#[must_use]
+pub fn asset_sid(asset: &Asset) -> Sid {
+    Sid::new(namespace::DSC, asset.id.to_string())
+}
+
+/// Every field of an asset, as flakes sharing one transaction time.
+///
+/// The pairs are built once and reused by [`asset_update_flakes`], so a field
+/// added here is diffed there automatically — the alternative, two lists that
+/// must be kept in step, drifts the first time someone adds a field in a hurry.
+fn fields(asset: &Asset) -> Vec<(Sid, FlakeValue)> {
+    let mut out = vec![
+        (
+            Sid::dsc("type"),
+            FlakeValue::String(asset.kind.as_str().to_string()),
+        ),
+        (Sid::dsc("name"), FlakeValue::String(asset.name.clone())),
+        (
+            Sid::dsc("fqn"),
+            FlakeValue::String(asset.fully_qualified_name.clone()),
+        ),
+        (
+            // An ordered pair rendered as text, so `0.10` and `0.1` are
+            // different values. A float would make them equal.
+            Sid::dsc("version"),
+            FlakeValue::String(format!("{}.{}", asset.version.major, asset.version.minor)),
+        ),
+        (
+            Sid::dsc("updatedBy"),
+            FlakeValue::String(asset.updated_by.clone()),
+        ),
+        // Always asserted, never omitted: absence of `deleted` would be
+        // ambiguous between "live" and "not yet projected".
+        (Sid::dsc("deleted"), FlakeValue::Boolean(asset.deleted)),
+        (Sid::dsc("createdAt"), FlakeValue::Instant(asset.created_at)),
+        (Sid::dsc("updatedAt"), FlakeValue::Instant(asset.updated_at)),
+    ];
+
+    // Optional fields emit nothing when absent. A null assertion would make
+    // "nobody wrote one" indistinguishable from "someone cleared it".
+    if let Some(description) = &asset.description {
+        out.push((
+            Sid::dsc("description"),
+            FlakeValue::String(description.clone()),
+        ));
+    }
+    if let Some(properties) = &asset.properties {
+        out.push((
+            Sid::dsc("properties"),
+            FlakeValue::Json(properties.to_string()),
+        ));
+    }
+    if let Some(deleted_at) = asset.deleted_at {
+        out.push((Sid::dsc("deletedAt"), FlakeValue::Instant(deleted_at)));
+    }
+    if let (Some(parent), Some(predicate)) = (asset.parent_id, parent_predicate(asset.kind)) {
+        // A Ref, not a string: OPST is reference-only, so a text endpoint
+        // would be unreachable by reverse traversal.
+        out.push((
+            predicate,
+            FlakeValue::Ref(Sid::new(namespace::DSC, parent.to_string())),
+        ));
+    }
+    out
+}
+
+/// Project an asset into the graph.
+#[must_use]
+pub fn asset_to_flakes(asset: &Asset, t: i64) -> Vec<Flake> {
+    let subject = asset_sid(asset);
+    fields(asset)
+        .into_iter()
+        .map(|(predicate, value)| Flake::assert(subject.clone(), predicate, value, t))
+        .collect()
+}
+
+/// The flakes that turn `before` into `after`.
+///
+/// A changed field produces a retraction of the old value *and* an assertion
+/// of the new one, at the same `t`. Asserting without retracting would leave
+/// two current values for a single-valued predicate; retracting without
+/// asserting would blank the field. An unchanged field produces nothing at
+/// all, which is what makes a nightly connector re-run safe.
+#[must_use]
+pub fn asset_update_flakes(before: &Asset, after: &Asset, t: i64) -> Vec<Flake> {
+    let subject = asset_sid(after);
+    let old = fields(before);
+    let new = fields(after);
+
+    let mut out = Vec::new();
+
+    for (predicate, was) in &old {
+        match new.iter().find(|(p, _)| p == predicate) {
+            // Unchanged: nothing to say.
+            Some((_, is)) if is == was => {}
+            // Changed or cleared: withdraw what was stored. The retraction
+            // carries the *old* value — one naming the new value would match
+            // no stored fact and withdraw nothing.
+            _ => out.push(Flake {
+                op: false,
+                ..Flake::assert(subject.clone(), predicate.clone(), was.clone(), t)
+            }),
+        }
+    }
+
+    for (predicate, is) in &new {
+        let unchanged = old.iter().any(|(p, was)| p == predicate && was == is);
+        if !unchanged {
+            out.push(Flake::assert(
+                subject.clone(),
+                predicate.clone(),
+                is.clone(),
+                t,
+            ));
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use crate::envelope::EntityVersion;
+    use crate::flake::{FlakeValue, Sid, namespace};
+    use crate::{Asset, AssetKind};
+    use chrono::{TimeZone, Utc};
+    use uuid::Uuid;
+
+    fn table() -> Asset {
+        Asset {
+            id: Uuid::from_u128(1),
+            kind: AssetKind::Table,
+            name: "upi_transactions".to_string(),
+            fully_qualified_name: "hdfc-core.postgres.payments.upi_transactions".to_string(),
+            parent_id: Some(Uuid::from_u128(2)),
+            description: Some("UPI transaction ledger".to_string()),
+            properties: None,
+            version: EntityVersion { major: 0, minor: 1 },
+            updated_by: "asha".to_string(),
+            change_description: None,
+            deleted: false,
+            deleted_at: None,
+            created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            updated_at: Utc.timestamp_opt(1_700_000_500, 0).unwrap(),
+        }
+    }
+
+    fn value_of<'a>(flakes: &'a [crate::flake::Flake], predicate: &str) -> Option<&'a FlakeValue> {
+        flakes.iter().find(|f| f.p.id == predicate).map(|f| &f.o)
+    }
+
+    #[test]
+    fn every_populated_envelope_field_becomes_one_flake() {
+        let flakes = asset_to_flakes(&table(), 7);
+
+        assert_eq!(
+            value_of(&flakes, "name"),
+            Some(&FlakeValue::String("upi_transactions".into()))
+        );
+        assert_eq!(
+            value_of(&flakes, "fqn"),
+            Some(&FlakeValue::String(
+                "hdfc-core.postgres.payments.upi_transactions".into()
+            ))
+        );
+        assert_eq!(
+            value_of(&flakes, "description"),
+            Some(&FlakeValue::String("UPI transaction ledger".into()))
+        );
+        assert_eq!(
+            value_of(&flakes, "type"),
+            Some(&FlakeValue::String("table".into()))
+        );
+        assert_eq!(
+            value_of(&flakes, "updatedBy"),
+            Some(&FlakeValue::String("asha".into()))
+        );
+        assert_eq!(
+            value_of(&flakes, "deleted"),
+            Some(&FlakeValue::Boolean(false))
+        );
+        assert_eq!(
+            value_of(&flakes, "version"),
+            Some(&FlakeValue::String("0.1".into())),
+            "a version is an ordered pair, and `0.10` must not equal `0.1`"
+        );
+    }
+
+    /// Absence is not a null assertion. Emitting `description = null` would
+    /// make "nobody has written one" indistinguishable from "someone
+    /// deliberately cleared it", and the graph would then answer a question
+    /// the catalog cannot actually answer.
+    #[test]
+    fn an_absent_field_produces_no_flake_at_all() {
+        let mut asset = table();
+        asset.description = None;
+        let flakes = asset_to_flakes(&asset, 7);
+
+        assert!(
+            value_of(&flakes, "description").is_none(),
+            "a None description must produce no flake, not a null one"
+        );
+    }
+
+    #[test]
+    fn every_flake_shares_the_transaction_time_it_was_given() {
+        let flakes = asset_to_flakes(&table(), 42);
+        assert!(!flakes.is_empty());
+        assert!(
+            flakes.iter().all(|f| f.t == 42),
+            "one logical change is one t — otherwise 'the state after change N' \
+             is not well defined"
+        );
+    }
+
+    #[test]
+    fn every_flake_is_an_assertion_about_the_entity_itself() {
+        let asset = table();
+        let expected = Sid::new(namespace::DSC, asset.id.to_string());
+        let flakes = asset_to_flakes(&asset, 1);
+
+        assert!(flakes.iter().all(|f| f.s == expected), "wrong subject");
+        assert!(flakes.iter().all(|f| f.op), "projection asserts");
+        assert!(
+            flakes.iter().all(|f| f.cx.is_none()),
+            "catalog facts belong in the default graph, not a named one"
+        );
+    }
+
+    /// The parent predicate names the parent's *kind*, so `dsc:parentSchema`
+    /// on a table and `dsc:parentTable` on a column. A single `dsc:parent`
+    /// would make "every table in this schema" and "every column in this
+    /// table" the same query, which they are not.
+    #[test]
+    fn the_hierarchy_projects_as_a_typed_reference_to_the_parent() {
+        let parent = Uuid::from_u128(2);
+
+        let table_flakes = asset_to_flakes(&table(), 1);
+        assert_eq!(
+            value_of(&table_flakes, "parentSchema"),
+            Some(&FlakeValue::Ref(Sid::new(
+                namespace::DSC,
+                parent.to_string()
+            ))),
+            "a table's parent is a schema"
+        );
+
+        let mut column = table();
+        column.kind = AssetKind::Column;
+        let column_flakes = asset_to_flakes(&column, 1);
+        assert_eq!(
+            value_of(&column_flakes, "parentTable"),
+            Some(&FlakeValue::Ref(Sid::new(
+                namespace::DSC,
+                parent.to_string()
+            ))),
+            "a column's parent is a table"
+        );
+    }
+
+    /// A `Ref`, never a string. OPST is a reference-only index, so an endpoint
+    /// stored as text is unreachable by reverse traversal — the query "what is
+    /// in this schema" would degrade to a scan.
+    #[test]
+    fn the_parent_is_a_reference_not_a_string() {
+        let flakes = asset_to_flakes(&table(), 1);
+        let parent = value_of(&flakes, "parentSchema").expect("parent flake");
+        assert!(
+            parent.is_reference(),
+            "{parent:?} must be a Ref for OPST reverse traversal to reach it"
+        );
+    }
+
+    #[test]
+    fn a_root_has_no_parent_flake() {
+        let mut service = table();
+        service.kind = AssetKind::Service;
+        service.parent_id = None;
+        let flakes = asset_to_flakes(&service, 1);
+
+        assert!(
+            !flakes.iter().any(|f| f.p.id.starts_with("parent")),
+            "a service is a root and has nothing to point at"
+        );
+    }
+
+    /// Timestamps project as `Instant`, not as formatted strings — a string
+    /// date cannot be range-queried, and "every table updated since Monday" is
+    /// the whole reason the field is in the graph.
+    #[test]
+    fn timestamps_project_as_instants() {
+        let flakes = asset_to_flakes(&table(), 1);
+        assert_eq!(
+            value_of(&flakes, "createdAt"),
+            Some(&FlakeValue::Instant(
+                Utc.timestamp_opt(1_700_000_000, 0).unwrap()
+            ))
+        );
+        assert_eq!(
+            value_of(&flakes, "updatedAt"),
+            Some(&FlakeValue::Instant(
+                Utc.timestamp_opt(1_700_000_500, 0).unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_tombstoned_asset_projects_its_deletion() {
+        let mut asset = table();
+        asset.deleted = true;
+        asset.deleted_at = Some(Utc.timestamp_opt(1_700_001_000, 0).unwrap());
+        let flakes = asset_to_flakes(&asset, 1);
+
+        assert_eq!(
+            value_of(&flakes, "deleted"),
+            Some(&FlakeValue::Boolean(true))
+        );
+        assert_eq!(
+            value_of(&flakes, "deletedAt"),
+            Some(&FlakeValue::Instant(
+                Utc.timestamp_opt(1_700_001_000, 0).unwrap()
+            )),
+            "when it was tombstoned is the fact a retention policy needs"
+        );
+    }
+
+    #[test]
+    fn a_live_asset_asserts_deleted_false_and_no_deleted_at() {
+        let flakes = asset_to_flakes(&table(), 1);
+        assert_eq!(
+            value_of(&flakes, "deleted"),
+            Some(&FlakeValue::Boolean(false)),
+            "deleted is always asserted — its absence would be ambiguous"
+        );
+        assert!(value_of(&flakes, "deletedAt").is_none());
+    }
+
+    /// Free-form source properties are `Json`, so a warehouse's own vocabulary
+    /// survives into the graph without this project having to normalise it.
+    #[test]
+    fn properties_project_as_json_when_present() {
+        let mut asset = table();
+        asset.properties = Some(serde_json::json!({ "dataType": "NUMERIC" }));
+        let flakes = asset_to_flakes(&asset, 1);
+
+        match value_of(&flakes, "properties") {
+            Some(FlakeValue::Json(raw)) => {
+                assert!(raw.contains("NUMERIC"), "got {raw}");
+            }
+            other => panic!("expected Json, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_predicate_is_emitted_twice() {
+        let flakes = asset_to_flakes(&table(), 1);
+        let mut predicates: Vec<&str> = flakes.iter().map(|f| f.p.id.as_str()).collect();
+        let total = predicates.len();
+        predicates.sort_unstable();
+        predicates.dedup();
+        assert_eq!(
+            predicates.len(),
+            total,
+            "a duplicated predicate makes cardinality-one meaningless"
+        );
+    }
+
+    #[test]
+    fn every_predicate_is_in_this_projects_vocabulary() {
+        let flakes = asset_to_flakes(&table(), 1);
+        assert!(
+            flakes.iter().all(|f| f.p.namespace_code == namespace::DSC),
+            "catalog predicates are dsc:, and namespace 0 would be unqueryable"
+        );
+    }
+
+    // ---- updates ----
+
+    /// An update retracts the old value and asserts the new one, both at the
+    /// same `t`. Asserting without retracting would leave two current values
+    /// for a single-valued predicate; retracting without asserting would blank
+    /// the field.
+    #[test]
+    fn an_update_retracts_the_old_value_and_asserts_the_new_one() {
+        let before = table();
+        let mut after = before.clone();
+        after.description = Some("UPI ledger, NPCI-settled".to_string());
+
+        let changes = asset_update_flakes(&before, &after, 9);
+
+        let retractions: Vec<_> = changes.iter().filter(|f| !f.op).collect();
+        let assertions: Vec<_> = changes.iter().filter(|f| f.op).collect();
+
+        assert_eq!(retractions.len(), 1, "got {retractions:?}");
+        assert_eq!(
+            retractions[0].o,
+            FlakeValue::String("UPI transaction ledger".into()),
+            "the retraction must name the value being withdrawn"
+        );
+        assert_eq!(assertions.len(), 1, "got {assertions:?}");
+        assert_eq!(
+            assertions[0].o,
+            FlakeValue::String("UPI ledger, NPCI-settled".into())
+        );
+        assert!(
+            changes.iter().all(|f| f.t == 9),
+            "both halves of one change share its t"
+        );
+    }
+
+    /// The property that makes a nightly connector safe: re-projecting an
+    /// unchanged entity must write nothing at all.
+    #[test]
+    fn an_update_that_changes_nothing_produces_no_flakes() {
+        let before = table();
+        let after = before.clone();
+        assert!(
+            asset_update_flakes(&before, &after, 9).is_empty(),
+            "an unchanged entity must not inflate history"
+        );
+    }
+
+    /// Clearing a field is a retraction with no matching assertion — which is
+    /// exactly how the graph represents "this no longer has a description".
+    #[test]
+    fn clearing_a_field_retracts_without_asserting() {
+        let before = table();
+        let mut after = before.clone();
+        after.description = None;
+
+        let changes = asset_update_flakes(&before, &after, 9);
+        assert_eq!(changes.len(), 1);
+        assert!(!changes[0].op);
+        assert_eq!(changes[0].p.id, "description");
+    }
+
+    /// And setting a field that was empty is an assertion with nothing to
+    /// retract.
+    #[test]
+    fn setting_a_previously_absent_field_asserts_without_retracting() {
+        let mut before = table();
+        before.description = None;
+        let after = table();
+
+        let changes = asset_update_flakes(&before, &after, 9);
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].op);
+        assert_eq!(changes[0].p.id, "description");
+    }
+
+    /// A rename changes both the name and the FQN, and the FQN change must be
+    /// projected too — otherwise a time-travel query would show the new name
+    /// under the old path.
+    #[test]
+    fn a_rename_projects_both_the_name_and_the_fully_qualified_name() {
+        let before = table();
+        let mut after = before.clone();
+        after.name = "upi_txn".to_string();
+        after.fully_qualified_name = "hdfc-core.postgres.payments.upi_txn".to_string();
+
+        let changed: Vec<&str> = asset_update_flakes(&before, &after, 9)
+            .iter()
+            .map(|f| f.p.id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|s| Box::leak(s.into_boxed_str()) as &str)
+            .collect();
+
+        assert_eq!(changed, vec!["fqn", "name"]);
+    }
+
+    /// Every retraction must be paired against the value that was actually
+    /// stored. A retraction naming the *new* value would withdraw nothing,
+    /// leaving both values current.
+    #[test]
+    fn retractions_carry_the_old_value_never_the_new_one() {
+        let before = table();
+        let mut after = before.clone();
+        after.name = "renamed".to_string();
+
+        for flake in asset_update_flakes(&before, &after, 9) {
+            if !flake.op && flake.p.id == "name" {
+                assert_eq!(flake.o, FlakeValue::String("upi_transactions".into()));
+            }
+        }
+    }
+}

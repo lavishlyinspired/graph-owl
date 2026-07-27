@@ -1,7 +1,7 @@
 # Plan: Triple Storage & Time-Travel (Epic 4) ★
 
 **Branch**: feat/engine-triples
-**Status**: Slices A and B complete (see *Implementation findings* below). C–H not started
+**Status**: Slices A–D complete (see *Implementation findings* below). E–H not started
 **Depends on**: Epic 3 (four entity types with an envelope to project)
 **Unblocks**: Epics 5, 6, 7, 8, 9, and the time-travel differentiator
 **Crates**: `graph-owl-engine` (port), `graph-owl-engine-postgres` (adapter)

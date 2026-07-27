@@ -196,59 +196,18 @@ impl PostgresTripleStore {
             .collect::<Vec<_>>()
             .join("\n"))
     }
-}
 
-fn flake_from_row(row: &PgRow) -> Result<Flake, EngineError> {
-    let object = value::from_columns(
-        row.get("value_type"),
-        row.get("value_ref_ns"),
-        row.get("value_ref_id"),
-        row.get("value_str"),
-        row.get("value_bool"),
-        row.get("value_int"),
-        row.get("value_float"),
-        row.get("value_inst"),
-        row.get("value_json"),
-        row.get("value_bytes"),
-        row.get("value_uuid"),
-    )
-    .map_err(EngineError::Backend)?;
-
-    let namespace = |column: &str| -> Result<u16, EngineError> {
-        let raw: i32 = row.get(column);
-        u16::try_from(raw)
-            .map_err(|_| EngineError::Backend(format!("{column} = {raw} is outside u16")))
-    };
-
-    let cx_namespace: Option<i32> = row.get("cx_namespace");
-    let cx = match cx_namespace {
-        None => None,
-        Some(raw) => {
-            let ns = u16::try_from(raw).map_err(|_| {
-                EngineError::Backend(format!("cx_namespace = {raw} is outside u16"))
-            })?;
-            Some(Sid::new(ns, row.get::<String, _>("cx_id")))
-        }
-    };
-
-    Ok(Flake {
-        s: Sid::new(namespace("namespace_s")?, row.get::<String, _>("sid_s")),
-        p: Sid::new(namespace("namespace_p")?, row.get::<String, _>("sid_p")),
-        o: object,
-        cx,
-        t: row.get("t"),
-        op: row.get("op"),
-    })
-}
-
-#[async_trait]
-impl TripleStore for PostgresTripleStore {
-    async fn assert_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError> {
+    /// The one place a flake row is written.
+    ///
+    /// `op` comes from the calling verb, never from the flake: an assertion
+    /// and a retraction differ only in that flag, and letting the caller's
+    /// struct decide it would make `retract_flakes(&[some_assertion])` write
+    /// an assertion — silently doubling the fact instead of withdrawing it.
+    async fn write(&self, flakes: &[Flake], op: bool) -> Result<(), EngineError> {
         reject_unset_namespaces(flakes)?;
         if flakes.is_empty() {
             return Ok(());
         }
-
         // Encoded up front so a malformed value fails before any row is
         // written, rather than leaving a partial batch behind.
         let encoded = flakes
@@ -303,7 +262,7 @@ impl TripleStore for PostgresTripleStore {
                     .push_bind(flake.cx.as_ref().map(|cx| i32::from(cx.namespace_code)))
                     .push_bind(flake.cx.as_ref().map(|cx| cx.id.clone()))
                     .push_bind(flake.t)
-                    .push_bind(flake.op);
+                    .push_bind(op);
             });
             // Re-asserting an identical fact at the same t converges rather
             // than duplicating, so a retried projection is safe to run again.
@@ -321,6 +280,60 @@ impl TripleStore for PostgresTripleStore {
             .await
             .map_err(|e| EngineError::Backend(e.to_string()))?;
         Ok(())
+    }
+}
+
+fn flake_from_row(row: &PgRow) -> Result<Flake, EngineError> {
+    let object = value::from_columns(
+        row.get("value_type"),
+        row.get("value_ref_ns"),
+        row.get("value_ref_id"),
+        row.get("value_str"),
+        row.get("value_bool"),
+        row.get("value_int"),
+        row.get("value_float"),
+        row.get("value_inst"),
+        row.get("value_json"),
+        row.get("value_bytes"),
+        row.get("value_uuid"),
+    )
+    .map_err(EngineError::Backend)?;
+
+    let namespace = |column: &str| -> Result<u16, EngineError> {
+        let raw: i32 = row.get(column);
+        u16::try_from(raw)
+            .map_err(|_| EngineError::Backend(format!("{column} = {raw} is outside u16")))
+    };
+
+    let cx_namespace: Option<i32> = row.get("cx_namespace");
+    let cx = match cx_namespace {
+        None => None,
+        Some(raw) => {
+            let ns = u16::try_from(raw).map_err(|_| {
+                EngineError::Backend(format!("cx_namespace = {raw} is outside u16"))
+            })?;
+            Some(Sid::new(ns, row.get::<String, _>("cx_id")))
+        }
+    };
+
+    Ok(Flake {
+        s: Sid::new(namespace("namespace_s")?, row.get::<String, _>("sid_s")),
+        p: Sid::new(namespace("namespace_p")?, row.get::<String, _>("sid_p")),
+        o: object,
+        cx,
+        t: row.get("t"),
+        op: row.get("op"),
+    })
+}
+
+#[async_trait]
+impl TripleStore for PostgresTripleStore {
+    async fn assert_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError> {
+        self.write(flakes, true).await
+    }
+
+    async fn retract_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError> {
+        self.write(flakes, false).await
     }
 
     async fn query_pattern(&self, pattern: &TriplePattern) -> Result<Vec<Flake>, EngineError> {
@@ -364,40 +377,24 @@ impl TripleStore for PostgresTripleStore {
 mod chunking_tests {
     use super::{COLUMNS_PER_FLAKE, MAX_BIND_PARAMETERS, MAX_FLAKES_PER_STATEMENT};
 
-    /// The chunk must fit inside one statement. Past this the driver does not
-    /// slow down, it refuses.
+    /// Every property here is decidable at compile time, so all three are
+    /// `const` blocks: a violation should fail the build rather than wait for
+    /// someone to run the tests, and there is no input that could make one of
+    /// them true on one run and false on the next.
     #[test]
-    fn a_full_chunk_fits_within_the_bind_parameter_ceiling() {
-        assert!(
-            MAX_FLAKES_PER_STATEMENT * COLUMNS_PER_FLAKE <= MAX_BIND_PARAMETERS,
-            "{MAX_FLAKES_PER_STATEMENT} flakes x {COLUMNS_PER_FLAKE} columns exceeds \
-             the {MAX_BIND_PARAMETERS}-parameter ceiling"
-        );
-    }
+    fn the_chunk_size_is_the_largest_one_statement_can_carry() {
+        // Fits. Past the ceiling the driver does not slow down, it refuses.
+        const { assert!(MAX_FLAKES_PER_STATEMENT * COLUMNS_PER_FLAKE <= MAX_BIND_PARAMETERS) };
 
-    /// And it must be the *largest* chunk that fits.
-    ///
-    /// Without this, any smaller divisor is still correct — every flake lands,
-    /// in one transaction, and every behavioural test passes — while a wide
-    /// table's projection silently costs hundreds of round trips instead of
-    /// one. Correct-but-pathological is exactly the failure that only a
-    /// property like this catches.
-    #[test]
-    fn the_chunk_is_the_largest_that_fits() {
-        assert!(
-            (MAX_FLAKES_PER_STATEMENT + 1) * COLUMNS_PER_FLAKE > MAX_BIND_PARAMETERS,
-            "one more flake would still fit — {MAX_FLAKES_PER_STATEMENT} is not the \
-             ceiling but an arbitrary smaller number"
-        );
-    }
+        // And is maximal. Without this, any smaller divisor is still correct —
+        // every flake lands, in one transaction, every behavioural test passes
+        // — while a wide table's projection silently costs hundreds of round
+        // trips instead of one. Correct-but-pathological is exactly the failure
+        // only a property like this catches.
+        const { assert!((MAX_FLAKES_PER_STATEMENT + 1) * COLUMNS_PER_FLAKE > MAX_BIND_PARAMETERS) };
 
-    /// A thousand-flake projection — a wide table — must be a single
-    /// statement, which is the promise `assert_flakes` documents.
-    #[test]
-    fn a_realistic_wide_table_projection_is_one_statement() {
-        assert!(
-            MAX_FLAKES_PER_STATEMENT >= 1_000,
-            "a 1000-flake projection would be split across statements"
-        );
+        // And is big enough to matter: a thousand-flake projection is one wide
+        // table, and that is the promise `assert_flakes` documents.
+        const { assert!(MAX_FLAKES_PER_STATEMENT >= 1_000) };
     }
 }

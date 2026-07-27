@@ -47,6 +47,28 @@ pub trait TripleStore: Send + Sync {
     /// [`EngineError::Backend`] if the write fails.
     async fn assert_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError>;
 
+    /// Withdraw facts, by writing a retraction row for each.
+    ///
+    /// **Never a delete.** The asserting row stays, which is the entire reason
+    /// history here is recoverable by construction rather than reconstructed
+    /// from a parallel audit table that can drift.
+    ///
+    /// `op` is forced to `false` on every flake regardless of what it carries,
+    /// so a caller can hand this the original assertion and get that fact's
+    /// retraction — which is exactly what a projection update does.
+    ///
+    /// Retracting a fact that was never asserted is a no-op, not an error: a
+    /// reconciler re-projecting an entity cannot know which facts the previous
+    /// projection managed to write.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::UnsetNamespace`] if any flake carries namespace 0 — a
+    /// retraction that names no valid fact would withdraw nothing while
+    /// reporting success;
+    /// [`EngineError::Backend`] if the write fails.
+    async fn retract_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError>;
+
     /// Flakes matching the pattern, in current state unless the pattern names
     /// an `as_of`. Retracted facts are excluded; the rows recording them are
     /// not deleted.
