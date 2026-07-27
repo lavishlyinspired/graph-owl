@@ -46,6 +46,19 @@ export interface AssetVersion {
   updatedAt: string;
 }
 
+/** One facet bucket. `count` is over the *visible* set — the server computes
+ *  facets after authorization, so a bucket never reveals a schema the reader
+ *  may not see, nor how big it is. */
+export interface Facet {
+  value: string;
+  count: number;
+}
+
+export interface SearchFacets {
+  kind: Facet[];
+  schema: Facet[];
+}
+
 export interface Page<T> {
   data: T[];
   paging: { after: string | null };
@@ -87,7 +100,7 @@ export const api = {
   children: (id: string) => request<Asset[]>(`/assets/${id}/children`),
   ancestors: (id: string) => request<Asset[]>(`/assets/${id}/ancestors`),
   search: (q: string, kind?: AssetKind) =>
-    request<Page<Asset>>(
+    request<Page<Asset> & { facets: SearchFacets }>(
       `/assets/search?q=${encodeURIComponent(q)}${kind ? `&kind=${kind}` : ""}&limit=50`,
     ),
   stats: () => request<{ byKind: { kind: AssetKind; count: number }[] }>("/assets/stats"),

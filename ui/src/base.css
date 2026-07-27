@@ -1,5 +1,6 @@
 /* antd owns component styling. This is what antd does not own. */
 @import "@fontsource-variable/inter";
+@import "@fontsource-variable/sora";
 @import "@fontsource/jetbrains-mono/400.css";
 
 body {
@@ -19,3 +20,14 @@ code, .fqn {
 
 /* Panes scroll independently; the page itself never does. */
 #root { height: 100vh; }
+
+/* The keyboard cursor in a result list.
+ *
+ * An outline rather than only a background tint: a tint alone is a colour-only
+ * signal, and the row underneath may already be tinted by hover or by the
+ * zebra striping. The outline is drawn inset so it does not shift the row. */
+.gowl-row-cursor > td {
+  background: var(--gowl-cursor-bg, rgba(3, 167, 173, 0.1)) !important;
+  box-shadow: inset 0 -1px 0 var(--gowl-cursor-line, #03a7ad),
+              inset 0 1px 0 var(--gowl-cursor-line, #03a7ad);
+}

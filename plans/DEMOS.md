@@ -14,7 +14,7 @@
 |---|---|---|---|
 | **1** | A source becomes a browsable catalog | 1, 2, 15, 39 (partial) | **Shipped** |
 | **2** | A governed catalog people can trust | +3, 8, 10, 11, 12, 13 | **Shipped** (gaps named per epic) |
-| **3** ★ | It is a graph engine | +4, 7, 7a, 40 | |
+| **3** ★ | It is a graph engine | +4, 7, 7a, 40 | **In progress** — Epic 4 slices A–B |
 | **4** | It reasons, and it validates | +5, 6, 41 | |
 | **5** ★ | Agents can use it | +14, 31, 32, 43 | |
 | **6** | It fills itself | +16, 17, 18, 19, 20, 21 | |
@@ -81,11 +81,15 @@
 
 ---
 
-## Demo 2 — A governed catalog people can trust · **NEXT**
+## Demo 2 — A governed catalog people can trust · **SHIPPED**
 
 **The claim**: the catalog knows *who changed what, when, and why you should believe it* — and only shows you what you are allowed to see.
 
-**What you can show**: edit a table's description; see the version go `0.1 → 0.2` with a field-level diff and your name on it; soft-delete it and restore it; search `"upi"` and get ranked results with facets; log in as a risk analyst and watch PII columns disappear from the same search.
+**What you can show**: edit a table's description; see the version go `0.1 → 0.2` with a field-level diff and your name on it; soft-delete it and restore it; search `"upi"`; then run the same search as a risk analyst and watch the PII schema vanish from the results, the counts *and* the facets.
+
+**Status**: the demo moment below is verified live. Every epic below lists what
+shipped, what is still **pending** in that epic, and what was **deferred** with
+its destination — so "Demo 2 is done" never has to mean "Epic 13 is finished".
 
 ### Epic 3 — Envelope, versioning, soft delete, change events
 - [x] `EntityEnvelope` on every asset: version, `updatedAt`, `updatedBy`, `changeDescription`
@@ -95,15 +99,21 @@
 - [x] Soft delete cascading to the subtree, with restore; a connector re-run does not resurrect a tombstone
 - [x] `GET /assets/{id}/versions` — snapshot per version, newest first
 - [x] Console: trust bar shows version and last editor; History tab with a field-level diff timeline; inline description editing
-- [ ] `EventSink` port + `ChangeEvent` emission
-- [ ] `If-Match`/`412` optimistic concurrency
+
+**Pending in this epic**
+- `EventSink` port + `ChangeEvent` emission — nothing consumes change events yet, which is also what blocks Epic 8's incremental indexing
+- `If-Match`/`412` optimistic concurrency — two editors racing on one description currently last-write-wins silently
 
 ### Epic 8 — Search
 - [x] Facets by kind and schema, computed over the **visible** set
 - [x] Result counts consistent with authorization filtering
-- [~] **Gap**: still `LIKE` over name and FQN, not a real index. No BM25, no relevance ranking, no description search. Adequate at 124 assets, not at 100k — Demo 3's scale work is where this has to change
-- [ ] `TextIndex` port and event-driven incremental indexing
-- [ ] Vector index deferred; embeddings generated out of process (`00j`)
+
+**Pending in this epic**
+- Still `LIKE` over name and FQN, not a real index: no BM25, no relevance ranking, no description search. Adequate at 124 assets, not at 100k
+- `TextIndex` port and event-driven incremental indexing — blocked on Epic 3's `EventSink`
+
+**Deferred**
+- Vector index and embeddings → generated out of process, per `00j-language-boundaries.md`
 
 ### Epic 10 — Operability
 - [x] `/health` (checks nothing, so a dependency blip cannot restart-loop the fleet)
@@ -111,20 +121,30 @@
 - [x] Graceful shutdown draining in-flight requests
 - [x] Startup states its security posture — an accidentally-open server must not look identical to a secured one
 - [x] `BIND_ADDR` configurable
-- [~] **Gap**: no structured JSON logs, no request-id propagation, no `/metrics`, no memory budget report
+
+**Pending in this epic**
+- Structured JSON logs and request-id propagation
+- `/metrics`
+- Memory budget report (the input `00a`'s footprint claim needs to stay honest)
 
 ### Epic 11 — Users, teams, ownership
 - [x] `User` with roles; auto-provisioned on first sight
 - [x] `owner_id` on assets (nullable, so the gap is visible rather than prevented)
-- [~] **Gap**: no teams, no ownership inheritance, no gap report — deferred to Demo 7 where domains land
+
+**Deferred**
+- Teams, ownership inheritance, and the ownership gap report → Demo 7, where domains land and give inheritance something to inherit along
 
 ### Epic 12 — Authentication
 - [x] JWT verification (HS256, shared secret); a forged token is rejected
 - [x] **The `Principal` extractor swap** — one function changed, no handler touched
 - [x] Auto-provision a `User` on first sight, with no roles
 - [x] Open mode when no secret is configured, logged as such at startup
-- [~] **Gap**: JWKS and key rotation not implemented; the swap point is `signing_secret()`
-- [ ] OIDC/PKCE in the console; tokens in memory only
+
+**Pending in this epic**
+- JWKS and key rotation — the swap point is `signing_secret()`, so this is a function body, not a refactor
+
+**Deferred**
+- OIDC/PKCE in the console, tokens in memory only → paired with Epic 39's login, below; neither is useful without the other
 
 ### Epic 13 — Authorization
 - [x] `AccessPredicate` in `graph-owl-authz` — pure, zero surviving mutants
@@ -134,14 +154,29 @@
 - [x] **Row-level filtering — the PII demo**: two principals, one search, different results
 - [x] Counts filtered through the same predicate, so a total cannot leak what it hid
 - [x] Hidden reads as `404`, not `403` — a `403` on an id confirms the id exists
-- [~] **Gap**: no decision cache; every request recompiles. Correct but not yet fast
-- [ ] Column-level (as opposed to row-level) masking — needs Epic 25 classifications
 
-### Epic 39 — Console, completed
-- [ ] Login, session, denied-vs-empty states
-- [ ] Version history tab with the diff viewer
-- [ ] Search with facets and keyboard navigation
-- [ ] Owner and team display
+**Pending in this epic**
+- No decision cache; every request recompiles the predicate. Correct, and not yet fast
+
+**Deferred**
+- Column-level (as opposed to row-level) masking → needs Epic 25's classifications to know *which* columns carry what
+
+### Epic 39 — Console
+- [x] Hierarchy tree, asset detail, and the five-level service → column navigation
+- [x] Trust bar: version, last editor, and honest "not captured yet" for certification and lineage
+- [x] **Version history tab with the diff viewer** — field-level, before and after, newest first
+- [x] Inline description editing writing straight through `PATCH`
+- [x] Connectors catalogue page; Postgres available, the rest listed as unavailable rather than hidden
+- [x] Light/dark theme, light by default, deep-linkable via `?theme=`
+- [x] Search box over name and FQN
+
+**Pending in this epic**
+- **Facets are returned by the API and not rendered by the console** — `GET /assets/search` already computes them over the visible set (`graph-owl-server/src/lib.rs`), so this is a console-side gap only, and it is the cheapest visible win left in Demo 2
+- Keyboard navigation through results — `00f`'s non-negotiable, currently unmet
+
+**Deferred**
+- Login, session, and the denied-vs-empty distinction → blocked on Epic 12's OIDC/PKCE. The console currently runs against an open server or a token supplied out of band; "denied" and "empty" therefore look identical to it, which is exactly the state `00f` says is not acceptable to ship to a user
+- Owner and team display → blocked on Epic 11's teams
 
 **The demo moment — verified live against the 124-asset bank estate:**
 
@@ -156,6 +191,11 @@ Asha's rows, her counts, *and* her facets. `stats_total == listed` for both, so
 the count cannot leak what it hid. A hidden asset reads `404` for her and `200`
 for root: a `403` would have confirmed the id exists.
 
+**What Demo 2 does not claim.** Authorization is enforced in SQL on every read
+path listed above, and is *not* enforced over the flake projection — by design
+(`04-engine-triples.md` decision 7). Demo 3 adds that projection, so the
+predicate has to reach it before any graph query is exposed to a real user.
+
 ---
 
 ## Demo 3 — It is a graph engine ★
@@ -165,10 +205,10 @@ for root: a `403` would have confirmed the id exists.
 **What you can show**: open the explorer on `upi_transactions`, expand two hops, drag the time slider back to before a schema migration and watch a column reappear.
 
 ### Epic 4 — Triple storage & time travel ★
-- [ ] `Flake` in `graph-owl-core`; ten pinned `FlakeValue` variants
-- [ ] Namespace code registry
-- [ ] Four index orderings: SPOT, PSOT, POST, OPST
-- [ ] `op = false` is a retraction, not a delete
+- [x] `Flake` in `graph-owl-core`; ten pinned `FlakeValue` variants *(Slice A)*
+- [~] Namespace code registry — constants allocated and range-tested; **gap**: runtime allocation and persistence is Slice H
+- [x] Four index orderings: SPOT, PSOT, POST, OPST — each verified by `EXPLAIN` naming the index over a 100k-flake table *(Slice B)*
+- [~] `op = false` is a retraction, not a delete — the column, `retracted_at()` and outer-query filtering exist; **gap**: assert-retract-assert is untested until Slice C
 - [ ] Entity → flake projection; reified relationships
 - [ ] As-of query API
 - [ ] Reconciliation job and drift metric

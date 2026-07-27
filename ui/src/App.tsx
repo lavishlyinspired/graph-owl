@@ -48,11 +48,14 @@ import {
   type AssetKind,
   type AssetVersion,
   type ChangeDescription,
+  type Facet,
+  type SearchFacets,
   ApiError,
   api,
 } from "./api";
 import { brand, darkTheme, lightTheme, palette } from "./theme";
-import { GenericSourceMark, GraphOwlLockup, GraphOwlMark, PostgresMark } from "./icons";
+import { GenericSourceMark, PostgresMark } from "./icons";
+import watermarkImg from "./assets/watermark1.png";
 
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
@@ -189,6 +192,81 @@ function renderChange(change: ChangeDescription | null | undefined) {
         </Text>
       ))}
     </Space>
+  );
+}
+
+/** Facet buckets for one dimension, as toggles.
+ *
+ *  Counts come from the server, which computes them *after* authorization —
+ *  so a bucket can never disclose a schema the reader may not see, nor how
+ *  many assets are in it. That is the property Demo 2 demonstrates, and
+ *  rendering the counts unchanged is what makes it visible.
+ *
+ *  Selecting a bucket toggles rather than accumulates: with one active value
+ *  per dimension there is no way to build a filter whose result set is empty
+ *  for reasons the user cannot see. */
+function FacetGroup({
+  title,
+  buckets,
+  active,
+  onToggle,
+}: {
+  title: string;
+  buckets: Facet[];
+  active: string | null;
+  onToggle: (value: string | null) => void;
+}) {
+  if (buckets.length === 0) return null;
+  return (
+    <div>
+      <Text
+        type="secondary"
+        style={{ fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase" }}
+      >
+        {title}
+      </Text>
+      <Space direction="vertical" size={4} style={{ width: "100%", marginTop: 8 }}>
+        {buckets.map((bucket) => {
+          const selected = active === bucket.value;
+          return (
+            <Button
+              key={bucket.value}
+              size="small"
+              type={selected ? "primary" : "text"}
+              aria-pressed={selected}
+              onClick={() => onToggle(selected ? null : bucket.value)}
+              style={{
+                width: "100%",
+                textAlign: "left",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <span
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {bucket.value}
+              </span>
+              <Text
+                style={{
+                  fontSize: 12,
+                  fontVariantNumeric: "tabular-nums",
+                  color: selected ? "inherit" : undefined,
+                }}
+                type={selected ? undefined : "secondary"}
+              >
+                {bucket.count}
+              </Text>
+            </Button>
+          );
+        })}
+      </Space>
+    </div>
   );
 }
 
@@ -585,6 +663,16 @@ export default function App() {
   const [selected, setSelectedRaw] = useState<Asset | null>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Asset[] | null>(null);
+  const [facets, setFacets] = useState<SearchFacets | null>(null);
+  // Which facet bucket is narrowing the results, if any. Filtering happens on
+  // the client over the returned page: the server's facet counts are already
+  // authorization-filtered, so narrowing locally cannot reveal anything the
+  // server did not already send.
+  const [activeSchema, setActiveSchema] = useState<string | null>(null);
+  const [activeKind, setActiveKind] = useState<AssetKind | null>(null);
+  // -1 is "nothing focused". Keyboard navigation is a `00f` non-negotiable:
+  // a result list reachable only by mouse is not reachable by everyone.
+  const [cursor, setCursor] = useState(-1);
   const [stats, setStats] = useState<{ kind: AssetKind; count: number }[]>([]);
   const [nodes, setNodes] = useState<DataNode[]>([]);
   const [index, setIndex] = useState<Record<string, Asset>>({});
@@ -633,16 +721,78 @@ export default function App() {
   useEffect(() => {
     if (query.trim().length < 2) {
       setResults(null);
+      setFacets(null);
       return;
     }
     const timer = setTimeout(() => {
       api
         .search(query)
-        .then((page) => setResults(page.data))
-        .catch(() => setResults([]));
+        .then((page) => {
+          setResults(page.data);
+          setFacets(page.facets);
+          // A narrowing carried over from the previous query would silently
+          // hide results for the new one.
+          setActiveSchema(null);
+          setActiveKind(null);
+          setCursor(-1);
+        })
+        .catch(() => {
+          setResults([]);
+          setFacets(null);
+        });
     }, 150);
     return () => clearTimeout(timer);
   }, [query]);
+
+  /** The schema is the third FQN segment: service.database.schema.…
+   *  Deliberately the same rule the server uses to build the facet buckets —
+   *  if the two ever disagree, a bucket labelled `n` would filter to something
+   *  other than `n` rows, which reads as a broken count rather than a broken
+   *  parser. */
+  const schemaOf = (asset: Asset) => asset.fullyQualifiedName.split(".")[2];
+
+  const visibleResults = useMemo(
+    () =>
+      (results ?? []).filter(
+        (asset) =>
+          (activeKind === null || asset.kind === activeKind) &&
+          (activeSchema === null || schemaOf(asset) === activeSchema),
+      ),
+    [results, activeKind, activeSchema],
+  );
+
+  // Arrow keys move a cursor through the results and Enter opens one, so the
+  // list is operable without a pointer (`00f` non-negotiable). Bound at the
+  // document rather than the input because the cursor must survive the search
+  // box losing focus — otherwise Tab out of the box strands the selection.
+  useEffect(() => {
+    if (visibleResults.length === 0) return undefined;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        setCursor((c) => {
+          const next = event.key === "ArrowDown" ? c + 1 : c - 1;
+          // Clamp rather than wrap: wrapping past the end of a long result
+          // list silently moves the eye to the opposite end of the page.
+          return Math.max(0, Math.min(next, visibleResults.length - 1));
+        });
+      } else if (event.key === "Enter" && cursor >= 0) {
+        event.preventDefault();
+        // Guarded rather than indexed blind: a facet toggle can shrink the
+        // list between the keypress and this handler's closure, and opening
+        // `undefined` would blank the detail pane with no explanation.
+        const row = visibleResults[cursor];
+        if (row) {
+          setSelected(row);
+          setQuery("");
+        }
+      } else if (event.key === "Escape") {
+        setQuery("");
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [visibleResults, cursor, setSelected]);
 
   // Children are fetched on expand; loading the hierarchy whole would pull
   // every column of every table before showing anything.
@@ -681,13 +831,32 @@ export default function App() {
               flex: "0 0 auto",
             }}
           >
-            <Space size={9}>
-              <GraphOwlMark dark={dark} />
-              <Text style={{ fontSize: 16, fontWeight: 700, letterSpacing: "-0.01em" }}>
-                <span style={{ color: dark ? "#E6ECF8" : brand.navy900 }}>Graph</span>
-                <span style={{ color: dark ? "#2BC4C9" : brand.teal500 }}>Owl</span>
-              </Text>
-            </Space>
+            <div style={{ display: "flex", alignItems: "center" }}>
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 430 120" style={{ height: 52, width: "auto" }}>
+                <text x="10" y="85" fontFamily="Arial,Helvetica,sans-serif" fontSize="60" fontWeight="900" fill={dark ? "#FFFFFF" : "#0B1E5B"}>GRAPH</text>
+                <g transform="translate(262 60)">
+                  <path d="M-34 -6 Q-46 -24 -34 -36 Q-18 -26 -16 -6 Z" fill="#2F63D9" />
+                  <circle r="31" fill="#3A7BFF" />
+                  <ellipse cx="0" cy="2" rx="22" ry="20" fill="#FFF8EF" />
+                  <path d="M-18 -18 Q-8 -30 3 -18" fill="none" stroke="#F3D28A" strokeWidth="4" strokeLinecap="round" />
+                  <path d="M18 -18 Q8 -30 -3 -18" fill="none" stroke="#F3D28A" strokeWidth="4" strokeLinecap="round" />
+                  <circle cx="-10" cy="-2" r="10" fill="none" stroke="#20365E" strokeWidth="2.6" />
+                  <circle cx="10" cy="-2" r="10" fill="none" stroke="#20365E" strokeWidth="2.6" />
+                  <line x1="0" y1="-2" x2="0" y2="-2" stroke="#20365E" strokeWidth="2" />
+                  <circle cx="-10" cy="-2" r="6.5" fill="#23C5F6" />
+                  <circle cx="-10" cy="-2" r="3.5" fill="#111" />
+                  <circle cx="-8" cy="-4" r="1.4" fill="#FFF" />
+                  <circle cx="10" cy="-2" r="6.5" fill="#23C5F6" />
+                  <circle cx="10" cy="-2" r="3.5" fill="#111" />
+                  <circle cx="12" cy="-4" r="1.4" fill="#FFF" />
+                  <path d="M0 2 L7 9 Q0 18 -7 9 Z" fill="#F6A600" />
+                  <path d="M-5 9 Q0 15 5 9" fill="#D85C2C" />
+                  <path d="M-8 29 h6" stroke="#E09A21" strokeWidth="2" strokeLinecap="round" />
+                  <path d="M2 29 h6" stroke="#E09A21" strokeWidth="2" strokeLinecap="round" />
+                </g>
+                <text x="296" y="85" fontFamily="Arial,Helvetica,sans-serif" fontSize="60" fontWeight="900" fill="#14C3CF">WL</text>
+              </svg>
+            </div>
             <Input
               prefix={<SearchOutlined style={{ color: colors.textSubtle }} />}
               placeholder="Search assets, schemas, columns…"
@@ -794,23 +963,69 @@ export default function App() {
               {section === "connectors" ? (
                 <ConnectorsPage onDone={refresh} />
               ) : results !== null ? (
+                <Row gutter={24} style={{ width: "100%" }}>
+                  <Col flex="200px">
+                    <Space direction="vertical" size="large" style={{ width: "100%" }}>
+                      <FacetGroup
+                        title="Kind"
+                        buckets={facets?.kind ?? []}
+                        active={activeKind}
+                        onToggle={(v) => {
+                          setActiveKind(v as AssetKind | null);
+                          setCursor(-1);
+                        }}
+                      />
+                      <FacetGroup
+                        title="Schema"
+                        buckets={facets?.schema ?? []}
+                        active={activeSchema}
+                        onToggle={(v) => {
+                          setActiveSchema(v);
+                          setCursor(-1);
+                        }}
+                      />
+                    </Space>
+                  </Col>
+                  <Col flex="auto" style={{ minWidth: 0 }}>
                 <Space direction="vertical" style={{ width: "100%" }} size="middle">
                   <Title level={5} style={{ margin: 0, fontWeight: 600 }}>
-                    {results.length} result{results.length === 1 ? "" : "s"} for “{query}”
+                    {visibleResults.length} result{visibleResults.length === 1 ? "" : "s"} for “{query}”
+                    {(activeKind || activeSchema) && (
+                      <>
+                        {" "}
+                        <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}>
+                          filtered from {results.length}
+                        </Text>{" "}
+                        <Button
+                          size="small"
+                          type="link"
+                          style={{ padding: 0, fontSize: 13 }}
+                          onClick={() => {
+                            setActiveKind(null);
+                            setActiveSchema(null);
+                            setCursor(-1);
+                          }}
+                        >
+                          clear
+                        </Button>
+                      </>
+                    )}
                   </Title>
-                  {results.length === 0 ? (
+                  {visibleResults.length === 0 ? (
                     <Empty description="Nothing matched" />
                   ) : (
                     <Table
                       size="small"
                       rowKey="id"
-                      dataSource={results}
+                      dataSource={visibleResults}
                       pagination={{ pageSize: 15, size: "small" }}
-                      onRow={(row) => ({
+                      rowClassName={(_row, i) => (i === cursor ? "gowl-row-cursor" : "")}
+                      onRow={(row, i) => ({
                         onClick: () => {
                           setSelected(row);
                           setQuery("");
                         },
+                        onMouseEnter: () => setCursor(i ?? -1),
                         style: { cursor: "pointer" },
                       })}
                       columns={[
@@ -844,14 +1059,27 @@ export default function App() {
                     />
                   )}
                 </Space>
+                  </Col>
+                </Row>
               ) : selected ? (
                 <AssetDetail asset={selected} onChanged={setSelectedRaw} />
               ) : (
-                <Space direction="vertical" size="large" style={{ width: "100%" }}>
+                <div style={{ position: "relative", width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
                   {total === 0 && (
-                    <GraphOwlLockup width={280} />
+                    <img
+                      src={watermarkImg}
+                      alt=""
+                      style={{
+                        position: "absolute",
+                        bottom: 24,
+                        right: 24,
+                        width: 360,
+                        opacity: 0.25,
+                        pointerEvents: "none",
+                      }}
+                    />
                   )}
-                  <div>
+                  <div style={{ textAlign: "center", zIndex: 1 }}>
                     <Title level={4} style={{ marginBottom: 4, fontWeight: 600 }}>
                       {total === 0 ? "Nothing catalogued yet" : `${total} assets catalogued`}
                     </Title>
@@ -861,12 +1089,15 @@ export default function App() {
                         : "Pick something from the hierarchy, or search above."}
                     </Text>
                   </div>
-                  {/* The empty-database first run offers the next action rather
-                      than a blank page — 39-ui-foundation.md Slice F. */}
-                  <Button type="primary" icon={<PlusOutlined />} onClick={() => setSection("connectors")}>
+                  <Button
+                    type="primary"
+                    icon={<PlusOutlined />}
+                    onClick={() => setSection("connectors")}
+                    style={{ marginTop: 24, zIndex: 1 }}
+                  >
                     {total === 0 ? "Catalogue a source" : "Add another source"}
                   </Button>
-                </Space>
+                </div>
               )}
             </Content>
           </Layout>
