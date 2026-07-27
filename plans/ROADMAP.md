@@ -43,7 +43,23 @@ Full SPARQL 1.1, OWL 2 DL, and SHACL conformance is a multi-year project serving
 
 ## Where the project is
 
-**Table CRUD** and **Table↔Table relationships** — complete, tested, mutation-verified, 59 tests on real Postgres, 2,429 lines. A walking skeleton proving HTTP → facade → port → Postgres. The engine, collection, and activation layers do not exist.
+**Last verified: 28 July 2026 · 408 tests passing** (`cargo test --workspace -- --test-threads=2`), zero surviving mutants in every module tested.
+
+Phases 0–2 are largely shipped and **the engine exists**. Four demos run end to end against a 124-asset Indian-banking estate.
+
+| Layer | State |
+|---|---|
+| **Contract & model** (1–3) | Shipped. RFC 9457 errors, keyset pagination, entity envelope with versions and field-level diffs, soft delete with restore, `If-Match`/`412` |
+| **Engine** (4, 7a) | Flakes with four index orderings, retraction-not-delete, entity and relationship projection, **as-of time travel**, drift detection and reconciliation, runtime predicate registry. Bounded traversal: neighbours, subgraph, shortest path, all paths, cycles |
+| **Engine** (5, 6, 7, 7b–d, 8, 9, 9a) | **Not started.** No SPARQL, no SHACL, no reasoning, no RDF serialization, no property-graph front end |
+| **Governed** (10–13) | Authorization compiled to SQL and enforced on every read path including counts and facets; JWT; auto-provisioned users. **Gaps**: no `/metrics`, no structured logs, no decision cache |
+| **Collection** (15) | Postgres connector with convergent re-runs and deletion detection behind a threshold guard |
+| **Console** (39, 40, 93) | Discovery, entity pages, version history with diffs, search with facets, graph explorer, time control, Overview landing page |
+| **Everything else** | Not started |
+
+**The single largest remaining gap is Epic 7 (SPARQL).** It is the difference between "a graph you can traverse" and "a graph you can query", and Demo 3 cannot honestly close without it.
+
+`plans/DEMOS.md` is the per-slice tracker and is the authority on what is shipped; this table is the summary. `plans/00k-standards-conformance.md` states, per W3C specification, what is implemented and what is not.
 
 ## Sequencing principles
 
@@ -65,7 +81,8 @@ Full SPARQL 1.1, OWL 2 DL, and SHACL conformance is a multi-year project serving
 | **5 · Semantics & trust** | 22–30 | Business meaning and grounds for confidence |
 | **6 · Memory** ★ | 31–32 | **Why**, not just what — the differentiator |
 | **7 · Breadth** | 33–38 | Coverage, scale, portability, structural analytics |
-| **8 · Console** | 39–42 | **The differentiators become demonstrable** — see `00f-ui-architecture.md` |
+| **8 · Console** | 39–42, 93 | **The differentiators become demonstrable** — see `00f-ui-architecture.md` |
+| **9 · Standards depth** | 94–97 | Conformance the first pass deferred. **Not a phase you reach by finishing 8** — each epic here unblocks specific earlier ones and is scheduled by need, not by number |
 
 ## The epics
 
@@ -121,6 +138,11 @@ Full SPARQL 1.1, OWL 2 DL, and SHACL conformance is a multi-year project serving
 | 41 | Query workbench, governance & admin | UI | Dual-language query, violations as a workflow, memory, admin |
 | 42 | Semantic browse, review queues & agent activity | UI | Glossary/tags/domains as one browser, four review queues as one queue, agent audit |
 | 43 | Agent framework integrations | Context | LangChain retriever + LangGraph toolkit and checkpointer, in Python, outside the binary |
+| 93 | **Console overview** | UI | The landing page. Every tile a number the system can defend — **shipped** |
+| 94 | **RDF 1.2 alignment** | Engine | Emit `rdf:reifies` + triple terms; `rdf:dirLangString` for the language-tag hole |
+| 95 | **OWL 2 RL completion** | Engine | Property chains, functional/inverse-functional, `owl:hasKey` — the rules Epics 17 and 29 would otherwise hand-code |
+| 96 | **SHACL-SPARQL** | Engine | `sh:SPARQLConstraint`, constraint components, shapes-driven rules |
+| 97 | **Incremental & parallel reasoning** | Engine | DRed maintenance and multi-core derivation, when measurement demands them |
 
 ## Phase 1 · The engine
 
@@ -376,6 +398,22 @@ Match `15-connectors.md`:
 | — | `00h-ui-design-system.md` | **DONE** — tokens, chrome, the five reusable patterns, and a screen inventory mapping every epic to a surface or an explicit "no UI" |
 | 42 | `42-ui-semantic-surfaces.md` | **DONE** — the fifteen surfaces the inventory found unassigned, resolved into three patterns |
 | 43 | `43-framework-integrations.md` | **DONE** — we ship the integration, never the framework. Python, out of process, zero crate changes asserted |
+
+### Tier 6 · Standards depth
+
+Added 28 July 2026, after checking the four capability gaps against the
+published W3C documents rather than against recollection. Every file states the
+specification's maturity, because building against a Working Draft is a
+decision to accept churn and should be made knowingly.
+
+| Epic | File | Action |
+|---|---|---|
+| — | `00k-standards-conformance.md` | **DONE** — the single place that answers "do you support X", dated, with a per-capability state and the deliberate non-goals. Four epics each implemented "a subset of" a standard and each said so in its own words; nobody could state the product's overall conformance |
+| 93 | `93-console-overview.md` | **DONE and shipped** — the landing page, with the constraint that a tile which cannot be computed from real data does not ship |
+| 94 | `94-rdf12-alignment.md` | **DONE** — emit `rdf:reifies` and triple terms; `rdf:dirLangString` closes the language-tag hole with three components rather than two |
+| 95 | `95-owl-rl-completion.md` | **DONE** — property chains, IFP, `hasKey`; the rules Epics 17 and 29 would hand-code. Scoped by one line: facts here, contradictions in Epic 5 |
+| 96 | `96-shacl-sparql.md` | **DONE** — planned, explicitly *not scheduled* while the spec is Working Draft |
+| 97 | `97-incremental-parallel-reasoning.md` | **DONE** — DRed and parallel derivation, with entry conditions that are measurements rather than dates |
 | — | `00j-language-boundaries.md` | **DONE** — the process boundary is the language boundary. Reverses the Rust-connector decision; keeps MCP in Rust |
 
 ### Existing files that stay

@@ -57,6 +57,36 @@ Rather than a general rule engine plus an OWL encoding, the supported axioms are
 | `rdfs:range` | `(a p b), (p range C) ⟹ (b rdf:type C)` |
 | `owl:sameAs` | `(a sameAs b), (a p o) ⟹ (b p o)` — powers Epic 17 |
 
+### The eight are a subset, and the subset is the decision
+
+W3C OWL 2 RL specifies roughly eighty entailment rules. Eight are listed above.
+That is a deliberate choice, but the earlier version of this plan did not say
+so — it presented eight rules as though they were OWL 2 RL, and a reader
+comparing against the spec would reasonably conclude the plan had simply missed
+seventy of them.
+
+**What the eight cover**: class and property hierarchies, transitivity,
+symmetry, inversion, domain and range, and identity. On a metadata catalog that
+is close to all of the value, because a metadata ontology is mostly taxonomy
+and mostly shallow.
+
+**What is missing, and what each would buy:**
+
+| Missing | Buys | Verdict |
+|---|---|---|
+| `owl:propertyChainAxiom` | Derive a relationship from a composition — "column feeds column, column belongs to table ⟹ table feeds table" | **Wanted.** This is lineage rollup, which Epic 29 needs and would otherwise hand-code |
+| `owl:FunctionalProperty` / `owl:InverseFunctionalProperty` | Uniqueness, and identity inference from a key | **Wanted.** IFP is how Epic 17 resolves duplicates from a shared identifier without a bespoke matcher |
+| `owl:hasKey` | Key-based identity across sources | **Wanted**, same reason |
+| `owl:disjointWith` | Consistency checking — an asset that is two mutually exclusive things | **Wanted**, but as a *violation*, which is Epic 5's job, not a derivation |
+| `owl:someValuesFrom` / `owl:allValuesFrom` | Existential and universal restrictions | Deferred. Metadata ontologies rarely use them, and they are the rules most likely to derive surprising facts |
+| `owl:minCardinality` / `owl:maxCardinality` | Cardinality constraints | Deferred to Epic 5 — these are constraints people want *reported*, not silently materialised |
+
+The pattern in that table is the real decision: **rules that derive facts belong
+here; rules that detect contradictions belong in Epic 5.** OWL treats both as
+entailment. A catalog should not, because a user who declares two disjoint
+classes and an asset in both wants to be told, not to have the graph quietly
+become inconsistent.
+
 ### Pure reasoner → `graph-owl-reasoning`
 
 ```rust
@@ -225,7 +255,9 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 - **OWL 2 DL / tableau reasoning** → not planned, permanently (decision 1).
 - **Rule learning from data** (AnyBURL-style) → a research direction; the rule set is authored for now.
 - **ML link prediction** (embedding-based suggestion) → revisit after rule-based derivation proves itself; it would be a separate confidence band, not a rule.
-- **Incremental reasoning** (deriving only from changed facts) → full re-derivation is affordable at target scale. Revisit if Epic 37a shows otherwise; the delta machinery from semi-naive evaluation is the foundation.
+- **Incremental reasoning** (deriving only from changed facts) → full re-derivation is affordable at target scale. Revisit if Epic 37a shows otherwise; the delta machinery from semi-naive evaluation is the foundation. The established approach is **DRed** (delete/rederive): on retraction, over-delete everything that *might* have depended on the removed fact, then re-derive what still holds. Named here so the eventual implementation starts from a known algorithm rather than an invented one.
+- **Parallel derivation** → single-threaded until measured. Rule application across disjoint subjects is embarrassingly parallel and Rust makes it cheap, but a reasoner that is fast and wrong is worse than one that is slow, and the budget in `00a` is not currently threatened. Trigger: Epic 37a showing the reasoning pass dominating a run.
+- **SHACL rules as a second derivation engine** → `00k-standards-conformance.md` decision 4. Shapes-driven derivation overlaps this epic; if both ship, derived facts must record which engine produced them, or the explainability requirement in Slice D cannot be met for either.
 - **Reasoning over extraction graph** → off by default; enable per-deployment once extraction confidence is trusted.
 
 ## Pre-PR quality gate

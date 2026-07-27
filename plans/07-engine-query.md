@@ -18,7 +18,8 @@ Multi-hop query the REST surface fundamentally cannot express. "Every table feed
 4. **Authorization compiles into the query**, never post-filters. Post-filtering breaks `LIMIT` (a page of 25 becomes 3) and leaks existence through counts.
 5. **Filter pushdown to the index scan.** `FILTER(?conf < 0.5)` must reach the scan, not materialize a million bindings and discard them. Orders of magnitude, verified in reference implementations.
 6. **Cypher is a module lowering onto the same plan** — not a second engine. **No longer deferred**: Epic 7b (`07b-engine-cypher.md`) is scheduled, because Epic 7d's Bolt server cannot exist without it.
-7. **The subset is enumerated, not implied.** Every SPARQL pattern type appears in the completeness table below with a status. A pattern that is out of scope must produce a clear error naming it, never a silent misparse.
+7. **The target is SPARQL 1.1, and 1.2 changes nothing yet.** SPARQL 1.2 Federated Query is at Candidate Recommendation (7 April 2026); the Query Language, Protocol and Entailment documents are Working Drafts. Since federation is explicitly out of scope for this subset, the one part of 1.2 that is nearly stable is the one part this epic does not implement — so 1.1 is the target and there is no churn to accept. The 1.2 change that *would* matter is triple-term patterns, and it arrives with Epic 9's decision on emitting `rdf:reifies` (`00k-standards-conformance.md`).
+8. **The subset is enumerated, not implied.** Every SPARQL pattern type appears in the completeness table below with a status. A pattern that is out of scope must produce a clear error naming it, never a silent misparse.
 
 ## Implementation reference
 

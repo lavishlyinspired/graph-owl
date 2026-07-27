@@ -105,6 +105,7 @@ Read these before planning or implementing anything non-trivial:
 | `plans/00h-ui-design-system.md` | Design tokens, chrome, the five reusable UI patterns, and the epic → screen inventory |
 | `plans/00i-licensing.md` | **Clean-room rules binding on every implementation session** — what may be read, what may never be copied |
 | `plans/00j-language-boundaries.md` | Rust vs Python vs TypeScript — the process boundary is the language boundary; what is a component and what is a consumer |
+| `plans/00k-standards-conformance.md` | **What this product does and does not implement of each W3C standard, dated.** Read before claiming conformance of any kind |
 | `plans/ROADMAP.md` | All 43 epics in 9 phases, sequenced, with the plan-file work queue |
 
 ### Which `00*` docs bind which work
@@ -114,6 +115,7 @@ The `00*` documents are **standing reference, not per-epic reading** — they ar
 | Working on | Must read first |
 |---|---|
 | **Anything at all** | `00i` (licensing — before writing a line), `00a` (what this competes on) |
+| **Anything claiming a W3C standard** | `00k` — and update its verification date if you check a spec |
 | An engine epic (4–9a) | `00b` (layering, flake model, error model), `00c` (domain model, FQN, triple projection), `00e` (before creating any crate) |
 | An API surface (1, 2, 3, 16, 34) | `00d` (URL shape, status codes, error body, pagination, concurrency), `00c` |
 | A UI epic (39–42) | `00f` (stack, budgets, non-negotiables), `00h` (tokens, the five patterns, screen inventory), `00d` |

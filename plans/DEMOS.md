@@ -21,6 +21,7 @@
 | **7** | Business meaning and trust signals | +22–30, 42 | |
 | **8** | Property graph and open interop | +7b, 7c, 7d, 9, 9a | |
 | **9** | Breadth, scale, and the proof | +33–38, 36, 37a–c | |
+| **10** | Standards depth | +94–97 | Not started — see `00k-standards-conformance.md` |
 
 ★ = the demo that carries a differentiator. Cutting it is a positioning decision.
 
@@ -220,8 +221,9 @@ predicate has to reach it before any graph query is exposed to a real user.
 - [x] Reified relationships — each edge is a node of its own carrying `rdf:type`, both endpoints as `Ref` (so OPST reverse traversal reaches them), its type and both endpoint kinds; deleting an edge retracts every one of its flakes *(Slice E)*
 - [x] **As-of query API** — `GET /assets/{id}?asOf=<rfc3339>` reconstructs the entity from flakes; 5 HTTP tests *(Slice F)*
 - [x] Reconciliation and drift metric — drift computed by comparison rather than from a queue (a queue can be lost; comparison cannot miss); `POST /graph/reconcile` repairs and reports; one-directionality asserted structurally by a fake that panics on any relational write *(Slice G)*
-- [ ] Language-tag side table
-- [~] Runtime predicate registry — define/lookup/list, duplicate refused, core vocabulary seeded by migration and immutable, cardinality recorded per predicate *(Slice H)*; **gap**: cardinality is recorded but not yet *enforced* on write, and an unregistered predicate is not yet rejected
+- [~] Runtime predicate registry — define/lookup/list, duplicate refused, core vocabulary seeded by migration and immutable, cardinality recorded per predicate *(Slice H)*; **gap**: cardinality is recorded but not yet *enforced* on write (enforcement is a constraint → Epic 5), and an unregistered predicate is not yet rejected
+- [ ] `rdf:reifies` + triple terms → **Epic 94**. The reified edges already shipped *are* RDF 1.2's reifier shape; only the vocabulary is missing (`04-engine-triples.md` finding 5)
+- [ ] Language-tag side table → **Epic 94**, and it needs three components not two: `rdf:dirLangString` carries a base direction
 
 ### Epic 7 — SPARQL subset ★
 - [ ] Parser for BGP, FILTER, OPTIONAL, UNION, MINUS, (NOT) EXISTS, paths

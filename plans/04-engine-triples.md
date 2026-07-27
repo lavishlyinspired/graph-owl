@@ -374,6 +374,63 @@ anything about this schema.
 The test still fails if both indexes disappear, which is the regression that
 matters.
 
+### 5. RDF 1.2 reification is the shape this already has
+
+Checked against the W3C **RDF 1.2 Concepts** Candidate Recommendation (7 April
+2026) rather than against memory of RDF-star, and the earlier note in this plan
+— "reified relationships cover annotation at lower cost, and RDF 1.2 is still
+Candidate Recommendation" — framed the choice as a divergence from the
+standard. It is not one.
+
+RDF 1.2 defines:
+
+- a **triple term**: a triple used as the **object** of another triple, object
+  position only;
+- a **reifying triple**: `rdf:reifies` as predicate, a triple term as object;
+- a **reifier**: the *subject* of that triple, denoting a statement or belief
+  that the proposition holds.
+
+Decoupling the proposition from its assertion is the entire point, and it is
+what lets a graph carry a claim it does not itself assert.
+
+That is structurally what Slice E already builds. graph-owl's relationship node
+**is** a reifier: an identity of its own, carrying the endpoints and the
+predicate, with room for confidence and provenance hanging off it. The
+difference is vocabulary and packing, not model:
+
+```
+graph-owl today      (rel) rdf:type       dsc:Relationship
+                     (rel) dsc:fromEntity (a)
+                     (rel) dsc:toEntity   (b)
+                     (rel) dsc:relType    "feeds"
+
+RDF 1.2              (rel) rdf:reifies    << (a) dsc:feeds (b) >>
+```
+
+**Consequences, and they are all good news.** The migration is *additive* — emit
+`rdf:reifies` alongside what is already written, rather than restructuring. It
+needs exactly one new `FlakeValue` variant for the triple term, which the pinned
+`value_type` discriminant already makes an append-only change. And the two-hop
+traversal cost this plan accepted as the price of reification is a cost RDF 1.2
+pays too, so it was never a graph-owl-specific compromise.
+
+**What this does not settle**: whether to emit `rdf:reifies` by default or only
+on export (Epic 9). Emitting always doubles the flakes per edge; emitting on
+export keeps the store compact and the wire standard. Epic 9 decides, and it now
+has a real choice rather than a retrofit.
+
+### 6. The language-tag hole is three components, not two
+
+This plan's `flake_meta` side table was designed to hold a language tag. RDF
+1.2 adds **`rdf:dirLangString`**, whose value is a triple of *lexical form,
+language tag, and base direction* (`ltr`/`rtl`) — the direction exists so
+right-to-left text is visually ordered as intended rather than as the
+surrounding document happens to render it.
+
+So the side table needs two columns, not one. Sizing it for a language tag
+alone and adding direction later would migrate every multilingual label ever
+written. Cheap to get right now, expensive to get wrong.
+
 ### Also settled while building
 
 - **`FlakeValue::Duration` holds `i64` seconds**, not `chrono::Duration`.
@@ -393,9 +450,8 @@ matters.
 - **Content-addressed storage, binary columnar format, consensus** → not planned. Postgres handles persistence; single-node is the deployment model.
 - **Named graphs as a user-facing API** → internal in this epic; exposed when Epic 21 or 32 needs callers to select a graph.
 - **Spatial indexing** → not needed for metadata.
-- **RDF-star (statement-level annotation)** → reified relationships cover the need at lower cost. Revisit only if standards interop (Epic 9) demands it.
 - **Table partitioning** → start unpartitioned. `flakes` is `PARTITION BY LIST (namespace_s)`-ready because the column already exists and leads three of the four indexes. Trigger: **10M flakes**, measured by Epic 37a. Cross-partition SPARQL needs a UNION, so partitioning is not free — it buys partition pruning for namespace-scoped queries, which is the common shape.
-- **RDF-star** → reified relationships cover annotation at lower cost, and RDF 1.2 is still Candidate Recommendation. The extension point is a `FlakeValue::QuotedTriple(QuotedTriple)` variant; adding it later is additive because the `value_type` discriminant is already an open enum with a pinned numbering test.
+- **RDF 1.2 triple terms** → deferred, and the reason has changed. See *RDF 1.2 alignment* below: this is no longer "we chose a different model from the standard", it is "we already built the standard's model and have not yet emitted its vocabulary".
 - **Retention / pruning of retracted flakes** → history is unbounded until evidence says otherwise. This epic makes the storage cost visible, which is the input that decision needs.
 
 ## Pre-PR quality gate

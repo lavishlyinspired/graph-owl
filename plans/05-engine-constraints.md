@@ -202,6 +202,16 @@ Every slice runs the full RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR
 ## Explicitly deferred (with destination)
 
 - **SHACL-SPARQL constraints** (arbitrary query as a constraint) → needs Epic 7. Revisit once SPARQL exists and a real constraint cannot be expressed declaratively.
+
+  Published as **SHACL 1.2 SPARQL Extensions**, Working Draft, 24 July 2026. It carries three things, and this plan previously named only the first:
+  - `sh:SPARQLConstraint` — arbitrary SPARQL as a constraint. The escape hatch that stops every unusual rule becoming a feature request against this epic.
+  - SPARQL-based constraint **components** — parameterised and reusable, so the escape hatch does not become a pile of one-off queries.
+  - SPARQL-based **inference rules** — shapes-driven derivation. This one is out of scope for a *validation* epic and overlaps Epic 6; `00k-standards-conformance.md` decision 4 records how the two derivation engines coexist, and the short version is that a derived fact must say which engine produced it.
+
+  Building against a Working Draft is accepting churn, and that is the reason to wait rather than the spec being unavailable.
+
+- **Cardinality enforcement on write** → Epic 4 slice H records cardinality per predicate but does not enforce it. Enforcement is a constraint, not a registry feature, and belongs here: `owl:minCardinality`/`maxCardinality` are things a user wants *reported as violations*, not silently materialised (`06-engine-reasoning.md`).
+- **Disjointness as a violation** → `owl:disjointWith` detects a contradiction rather than deriving a fact, so it is this epic's rather than Epic 6's. An asset in two mutually exclusive classes should be told to someone, not quietly make the graph inconsistent.
 - **Automatic repair** → deliberately not planned (decision 3). Epic 20's declarative apply is the safe way to bulk-fix.
 - **Shape inference from data** ("what shape does this data actually have") → a research direction; revisit if authoring shapes proves to be the adoption barrier.
 - **Cross-entity constraints** (e.g. "every table in a certified schema must be certified") → expressible once Epic 6's reasoning exists; a rule, not a shape.
