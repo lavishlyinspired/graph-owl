@@ -593,3 +593,324 @@ async fn an_empty_seed_set_returns_an_empty_subgraph() {
 
     assert!(graph.nodes.is_empty() && graph.edges.is_empty() && !graph.truncated);
 }
+
+// ---- shortest_path ----
+
+#[tokio::test]
+async fn shortest_path_returns_the_route_not_just_its_length() {
+    let (store, _container) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "b", "feeds", 1));
+    flakes.extend(edge("r2", "b", "c", "feeds", 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let path = store
+        .shortest_path(
+            &node("a"),
+            &node("c"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 5,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk")
+        .expect("c is reachable from a");
+
+    assert_eq!(path.length, 2, "two logical edges");
+    let ids: Vec<&str> = path.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, vec!["a", "b", "c"], "the route itself, in order");
+}
+
+/// Unreachable is an answer, not an error. It is the commonest true result of
+/// asking, and making it exceptional would force every caller to treat the
+/// normal case as a failure.
+#[tokio::test]
+async fn an_unreachable_target_is_none_rather_than_an_error() {
+    let (store, _container) = store().await;
+    store
+        .assert_flakes(&edge("r1", "a", "b", "feeds", 1))
+        .await
+        .expect("write");
+
+    let path = store
+        .shortest_path(
+            &node("a"),
+            &node("elsewhere"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 5,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("not reaching something is not a failure");
+    assert!(path.is_none());
+}
+
+/// A node reaches itself in zero edges, by definition. Walking for it would
+/// make the answer depend on whether the node happens to sit on a cycle.
+#[tokio::test]
+async fn a_node_reaches_itself_in_zero_edges() {
+    let (store, _container) = store().await;
+    let path = store
+        .shortest_path(
+            &node("alone"),
+            &node("alone"),
+            Direction::Outgoing,
+            Bounds::default(),
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk")
+        .expect("a node always reaches itself");
+    assert_eq!(path.length, 0);
+    assert_eq!(path.nodes.len(), 1);
+}
+
+/// It must be the *shortest*, not merely a route.
+#[tokio::test]
+async fn shortest_path_prefers_the_shorter_of_two_routes() {
+    let (store, _container) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "b", "feeds", 1));
+    flakes.extend(edge("r2", "b", "z", "feeds", 1));
+    flakes.extend(edge("r3", "a", "x", "feeds", 1));
+    flakes.extend(edge("r4", "x", "y", "feeds", 1));
+    flakes.extend(edge("r5", "y", "z", "feeds", 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let path = store
+        .shortest_path(
+            &node("a"),
+            &node("z"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 6,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk")
+        .expect("reachable");
+    assert_eq!(path.length, 2, "the two-hop route, not the three-hop one");
+}
+
+/// Equal-length alternatives must resolve the same way every call. A tiebreak
+/// left to the planner is a result that changes between runs for no reason the
+/// caller can see.
+#[tokio::test]
+async fn equal_length_routes_resolve_deterministically() {
+    let (store, _container) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "via_m", "feeds", 1));
+    flakes.extend(edge("r2", "a", "via_k", "feeds", 1));
+    flakes.extend(edge("r3", "via_m", "z", "feeds", 1));
+    flakes.extend(edge("r4", "via_k", "z", "feeds", 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let path = store
+            .shortest_path(
+                &node("a"),
+                &node("z"),
+                Direction::Outgoing,
+                Bounds {
+                    max_hops: 4,
+                    max_nodes: 200,
+                },
+                &EdgeFilter::default(),
+            )
+            .await
+            .expect("walk")
+            .expect("reachable");
+        seen.push(path.nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>());
+    }
+    assert!(
+        seen.windows(2).all(|w| w[0] == w[1]),
+        "the same question gave different answers: {seen:?}"
+    );
+}
+
+/// **The filter test.** A short route through an excluded edge must not be
+/// used; the longer permitted one is returned instead. Applying the filter
+/// after selection would hand back a path the caller explicitly ruled out.
+#[tokio::test]
+async fn a_filtered_out_edge_is_not_used_even_when_it_would_be_shorter() {
+    let (store, _container) = store().await;
+    let mut flakes = Vec::new();
+    // Direct, but of a type the caller will exclude.
+    flakes.extend(edge("r1", "a", "z", "sameAs", 1));
+    // Longer, but permitted.
+    flakes.extend(edge("r2", "a", "b", "feeds", 1));
+    flakes.extend(edge("r3", "b", "z", "feeds", 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let path = store
+        .shortest_path(
+            &node("a"),
+            &node("z"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 5,
+                max_nodes: 200,
+            },
+            &EdgeFilter {
+                relationship_types: Some(vec!["feeds".to_string()]),
+                as_of: None,
+            },
+        )
+        .await
+        .expect("walk")
+        .expect("reachable through the permitted edges");
+
+    assert_eq!(path.length, 2, "the one-hop sameAs route was excluded");
+}
+
+// ---- all_paths ----
+
+#[tokio::test]
+async fn all_paths_enumerates_every_distinct_route() {
+    let (store, _container) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "b", "feeds", 1));
+    flakes.extend(edge("r2", "a", "c", "feeds", 1));
+    flakes.extend(edge("r3", "b", "z", "feeds", 1));
+    flakes.extend(edge("r4", "c", "z", "feeds", 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let set = store
+        .all_paths(
+            &node("a"),
+            &node("z"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 5,
+                max_nodes: 200,
+            },
+            100,
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(set.paths.len(), 2, "{:?}", set.paths);
+    assert!(!set.truncated);
+}
+
+/// The cap is a hard stop, not a hint. Path enumeration in a dense graph is
+/// exponential, and the alternative to capping is a query that runs until
+/// something else times out.
+#[tokio::test]
+async fn all_paths_caps_hard_and_reports_it() {
+    let (store, _container) = store().await;
+    let mut flakes = Vec::new();
+    // Six parallel routes a -> via_i -> z.
+    for i in 0..6 {
+        flakes.extend(edge(&format!("r{i}a"), "a", &format!("via{i}"), "feeds", 1));
+        flakes.extend(edge(&format!("r{i}b"), &format!("via{i}"), "z", "feeds", 1));
+    }
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let set = store
+        .all_paths(
+            &node("a"),
+            &node("z"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 4,
+                max_nodes: 200,
+            },
+            3,
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(set.paths.len(), 3, "the cap is honoured exactly");
+    assert!(set.truncated, "and reported");
+}
+
+// ---- detect_cycles ----
+
+/// One loop is one cycle. Without normalisation a 3-cycle reports three times,
+/// once per starting point, and a reader concludes the graph is three times as
+/// tangled as it is.
+#[tokio::test]
+async fn a_single_loop_is_reported_once() {
+    let (store, _container) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "b", "feeds", 1));
+    flakes.extend(edge("r2", "b", "c", "feeds", 1));
+    flakes.extend(edge("r3", "c", "a", "feeds", 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let cycles = store
+        .detect_cycles(
+            &node("a"),
+            Bounds {
+                max_hops: 6,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(cycles.len(), 1, "{cycles:?}");
+    let ids: Vec<&str> = cycles[0].nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, vec!["a", "b", "c"], "normalised so the smallest leads");
+}
+
+#[tokio::test]
+async fn a_dag_has_no_cycles() {
+    let (store, _container) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "b", "feeds", 1));
+    flakes.extend(edge("r2", "b", "c", "feeds", 1));
+    flakes.extend(edge("r3", "a", "c", "feeds", 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let cycles = store
+        .detect_cycles(
+            &node("a"),
+            Bounds {
+                max_hops: 6,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+    assert!(cycles.is_empty(), "a diamond is not a cycle: {cycles:?}");
+}
+
+/// A table that feeds itself through a recursive view. Length 1, and real.
+#[tokio::test]
+async fn a_self_loop_is_a_cycle_of_length_one() {
+    let (store, _container) = store().await;
+    store
+        .assert_flakes(&edge("r1", "a", "a", "feeds", 1))
+        .await
+        .expect("write");
+
+    let cycles = store
+        .detect_cycles(
+            &node("a"),
+            Bounds {
+                max_hops: 4,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(cycles.len(), 1, "{cycles:?}");
+    assert_eq!(cycles[0].nodes.len(), 1);
+}

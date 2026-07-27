@@ -87,6 +87,51 @@ pub struct EdgeRef {
     pub relationship: String,
 }
 
+/// A route through the graph.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Path {
+    /// Start to end inclusive, so `nodes.len()` is `length + 1`.
+    pub nodes: Vec<Sid>,
+    /// Logical edges, not stored hops.
+    pub length: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PathSet {
+    pub paths: Vec<Path>,
+    pub truncated: bool,
+    pub truncation_reason: Option<TruncationReason>,
+}
+
+/// A route that returns to where it started.
+///
+/// Normalised so rotations are one cycle, not several: `A→B→C→A` and
+/// `B→C→A→B` are the same loop, and reporting both would make a graph with one
+/// cycle look like a graph with as many cycles as it has nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cycle {
+    pub nodes: Vec<Sid>,
+}
+
+impl Cycle {
+    /// Rotate so the smallest node leads. Two rotations of one loop then
+    /// compare equal, which is what lets a caller deduplicate them.
+    #[must_use]
+    pub fn normalised(nodes: Vec<Sid>) -> Self {
+        if nodes.is_empty() {
+            return Self { nodes };
+        }
+        let pivot = nodes
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.cmp(b))
+            .map_or(0, |(i, _)| i);
+        let mut rotated = nodes[pivot..].to_vec();
+        rotated.extend_from_slice(&nodes[..pivot]);
+        Self { nodes: rotated }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Subgraph {
     pub nodes: Vec<Sid>,
@@ -176,6 +221,55 @@ pub trait TraversalEngine: Send + Sync {
         bounds: Bounds,
         filter: &EdgeFilter,
     ) -> Result<Subgraph, TraversalError>;
+
+    /// The fewest logical edges from `from` to `to`, or `None` if unreachable.
+    ///
+    /// `None` is an answer, not an error: "these are not connected" is the
+    /// commonest true result of asking, and making it an error would force
+    /// every caller to treat the normal case as exceptional.
+    ///
+    /// # Errors
+    ///
+    /// [`TraversalError::Backend`] if the walk fails.
+    async fn shortest_path(
+        &self,
+        from: &Sid,
+        to: &Sid,
+        direction: Direction,
+        bounds: Bounds,
+        filter: &EdgeFilter,
+    ) -> Result<Option<Path>, TraversalError>;
+
+    /// Every distinct route from `from` to `to`, capped.
+    ///
+    /// Path enumeration between two nodes in a dense graph is exponential, so
+    /// `max_paths` is a hard stop rather than a hint — the alternative is a
+    /// query that runs until something else times out.
+    ///
+    /// # Errors
+    ///
+    /// [`TraversalError::Backend`] if the walk fails.
+    async fn all_paths(
+        &self,
+        from: &Sid,
+        to: &Sid,
+        direction: Direction,
+        bounds: Bounds,
+        max_paths: usize,
+        filter: &EdgeFilter,
+    ) -> Result<PathSet, TraversalError>;
+
+    /// Cycles reachable from `start`, each reported once.
+    ///
+    /// # Errors
+    ///
+    /// [`TraversalError::Backend`] if the walk fails.
+    async fn detect_cycles(
+        &self,
+        start: &Sid,
+        bounds: Bounds,
+        filter: &EdgeFilter,
+    ) -> Result<Vec<Cycle>, TraversalError>;
 }
 
 #[cfg(test)]
@@ -260,6 +354,50 @@ mod subgraph_tests {
             ..Subgraph::default()
         };
         assert_eq!(graph.without_dangling_edges().edges.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+
+    fn nodes(ids: &[&str]) -> Vec<Sid> {
+        ids.iter().map(|id| Sid::dsc(*id)).collect()
+    }
+
+    /// The property that stops one loop being reported as many. Without it a
+    /// graph with a single 3-cycle reports three cycles, one per starting
+    /// point, and a reader concludes the graph is three times as tangled.
+    #[test]
+    fn rotations_of_one_loop_normalise_to_the_same_cycle() {
+        let abc = Cycle::normalised(nodes(&["a", "b", "c"]));
+        let bca = Cycle::normalised(nodes(&["b", "c", "a"]));
+        let cab = Cycle::normalised(nodes(&["c", "a", "b"]));
+
+        assert_eq!(abc, bca);
+        assert_eq!(bca, cab);
+        assert_eq!(abc.nodes, nodes(&["a", "b", "c"]), "smallest node leads");
+    }
+
+    /// Order within the loop is meaning, not presentation: `a→b→c` and
+    /// `a→c→b` are different cycles through the same nodes.
+    #[test]
+    fn a_reversed_loop_is_a_different_cycle() {
+        assert_ne!(
+            Cycle::normalised(nodes(&["a", "b", "c"])),
+            Cycle::normalised(nodes(&["a", "c", "b"]))
+        );
+    }
+
+    #[test]
+    fn a_self_loop_normalises_to_itself() {
+        let cycle = Cycle::normalised(nodes(&["a"]));
+        assert_eq!(cycle.nodes, nodes(&["a"]));
+    }
+
+    #[test]
+    fn an_empty_cycle_does_not_panic() {
+        assert_eq!(Cycle::normalised(Vec::new()).nodes, Vec::new());
     }
 }
 

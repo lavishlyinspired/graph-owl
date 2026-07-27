@@ -8,8 +8,8 @@
 use async_trait::async_trait;
 use graph_owl_core::flake::{Sid, namespace};
 use graph_owl_traversal::{
-    Bounds, Direction, EdgeFilter, EdgeRef, Reached, Subgraph, TraversalEngine, TraversalError,
-    TraversalResult, TruncationReason,
+    Bounds, Cycle, Direction, EdgeFilter, EdgeRef, Path, PathSet, Reached, Subgraph,
+    TraversalEngine, TraversalError, TraversalResult, TruncationReason,
 };
 use sqlx::{QueryBuilder, Row};
 
@@ -198,6 +198,170 @@ impl TraversalEngine for PostgresTripleStore {
             truncated: over_budget,
             truncation_reason: over_budget.then_some(TruncationReason::NodeBudget),
         })
+    }
+
+    async fn shortest_path(
+        &self,
+        from: &Sid,
+        to: &Sid,
+        direction: Direction,
+        bounds: Bounds,
+        filter: &EdgeFilter,
+    ) -> Result<Option<Path>, TraversalError> {
+        if from == to {
+            // A node reaches itself in zero edges. Walking would return the
+            // same answer only if the node happens to sit on a cycle, which
+            // would make "is this connected to itself" depend on graph shape
+            // rather than on definition.
+            return Ok(Some(Path {
+                nodes: vec![from.clone()],
+                length: 0,
+            }));
+        }
+
+        let mut builder = QueryBuilder::new("WITH RECURSIVE ");
+        push_live_flakes(&mut builder, filter.as_of);
+        push_logical_edges(&mut builder, filter);
+        push_frontier(
+            &mut builder,
+            std::slice::from_ref(&from.id),
+            direction,
+            bounds.max_hops,
+        );
+        // Shortest first, then lexicographically by route. The second key is
+        // what makes equal-length alternatives resolve the same way on every
+        // run — a tiebreak left to the planner is a result that changes
+        // between calls for no reason the caller can see.
+        builder.push(" SELECT path, depth FROM frontier WHERE node_id = ");
+        builder.push_bind(to.id.clone());
+        builder.push(" ORDER BY depth, path LIMIT 1");
+
+        let row = builder
+            .build()
+            .fetch_optional(self.pool())
+            .await
+            .map_err(|e| TraversalError::Backend(e.to_string()))?;
+
+        Ok(row.map(|row| {
+            let path: Vec<String> = row.get("path");
+            Path {
+                length: path.len().saturating_sub(1),
+                nodes: path
+                    .into_iter()
+                    .map(|id| Sid::new(namespace::DSC, id))
+                    .collect(),
+            }
+        }))
+    }
+
+    async fn all_paths(
+        &self,
+        from: &Sid,
+        to: &Sid,
+        direction: Direction,
+        bounds: Bounds,
+        max_paths: usize,
+        filter: &EdgeFilter,
+    ) -> Result<PathSet, TraversalError> {
+        let mut builder = QueryBuilder::new("WITH RECURSIVE ");
+        push_live_flakes(&mut builder, filter.as_of);
+        push_logical_edges(&mut builder, filter);
+        push_frontier(
+            &mut builder,
+            std::slice::from_ref(&from.id),
+            direction,
+            bounds.max_hops,
+        );
+        builder.push(" SELECT path, depth FROM frontier WHERE node_id = ");
+        builder.push_bind(to.id.clone());
+        builder.push(" ORDER BY depth, path LIMIT ");
+        // One past the cap, so hitting it is distinguishable from landing on it.
+        builder.push_bind(i64::try_from(max_paths.saturating_add(1)).unwrap_or(i64::MAX));
+
+        let rows = builder
+            .build()
+            .fetch_all(self.pool())
+            .await
+            .map_err(|e| TraversalError::Backend(e.to_string()))?;
+
+        let over_cap = rows.len() > max_paths;
+        let paths = rows
+            .iter()
+            .take(max_paths)
+            .map(|row| {
+                let path: Vec<String> = row.get("path");
+                Path {
+                    length: path.len().saturating_sub(1),
+                    nodes: path
+                        .into_iter()
+                        .map(|id| Sid::new(namespace::DSC, id))
+                        .collect(),
+                }
+            })
+            .collect();
+
+        Ok(PathSet {
+            paths,
+            truncated: over_cap,
+            truncation_reason: over_cap.then_some(TruncationReason::NodeBudget),
+        })
+    }
+
+    async fn detect_cycles(
+        &self,
+        start: &Sid,
+        bounds: Bounds,
+        filter: &EdgeFilter,
+    ) -> Result<Vec<Cycle>, TraversalError> {
+        // The frontier's per-path guard stops a walk *before* it revisits a
+        // node, so a cycle never appears inside `frontier` itself. It is found
+        // by taking each reached node and asking whether an edge runs from it
+        // back to somewhere already on its own path — the closing edge the
+        // guard refused to follow.
+        let mut builder = QueryBuilder::new("WITH RECURSIVE ");
+        push_live_flakes(&mut builder, filter.as_of);
+        push_logical_edges(&mut builder, filter);
+        // Outgoing only, and not a caller choice: a cycle is a route that
+        // returns to its own start, and `Both` makes every edge bidirectional
+        // — which would report every connected pair as a two-node cycle.
+        push_frontier(
+            &mut builder,
+            std::slice::from_ref(&start.id),
+            Direction::Outgoing,
+            bounds.max_hops,
+        );
+        builder.push(
+            " SELECT f.path, d.dst AS closes_at
+             FROM frontier f
+             JOIN directed d ON d.src = f.node_id
+             WHERE d.dst = ANY(f.path)",
+        );
+
+        let rows = builder
+            .build()
+            .fetch_all(self.pool())
+            .await
+            .map_err(|e| TraversalError::Backend(e.to_string()))?;
+
+        let mut cycles: Vec<Cycle> = Vec::new();
+        for row in &rows {
+            let path: Vec<String> = row.get("path");
+            let closes_at: String = row.get("closes_at");
+            // The loop is the tail of the path from where it closes onward.
+            // The prefix leading into the cycle is not part of it.
+            let Some(entry) = path.iter().position(|id| *id == closes_at) else {
+                continue;
+            };
+            let loop_nodes: Vec<Sid> = path[entry..]
+                .iter()
+                .map(|id| Sid::new(namespace::DSC, id.clone()))
+                .collect();
+            let cycle = Cycle::normalised(loop_nodes);
+            if !cycles.contains(&cycle) {
+                cycles.push(cycle);
+            }
+        }
+        Ok(cycles)
     }
 
     async fn subgraph(

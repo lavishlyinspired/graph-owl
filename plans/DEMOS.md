@@ -236,7 +236,7 @@ predicate has to reach it before any graph query is exposed to a real user.
 - [x] Budgeted, cycle-safe, truncation always visible and farthest-first
 - [x] Reified two-hop edges hidden — five logical edges reports distance five
 - [x] `as_of` on every walk, so time-travelling traversal is free
-- [ ] `shortest_path`, `all_paths`, `detect_cycles` *(Slices C, D)*
+- [x] `shortest_path`, `all_paths`, `detect_cycles` *(Slices C, D)* — deterministic tiebreak, hard path cap, cycles normalised so rotations are one cycle
 
 ### Epic 40 — Graph explorer ★
 - [x] Renderer-agnostic `GraphView` — the shape a Sigma canvas would consume unchanged
