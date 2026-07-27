@@ -47,6 +47,9 @@ pub enum StorageError {
 
 #[async_trait]
 pub trait Storage: Send + Sync {
+    /// Cheapest round trip that proves the backing store answers.
+    async fn ping(&self) -> Result<(), StorageError>;
+
     async fn insert_table(&self, table: Table) -> Result<Table, StorageError>;
     async fn get_table(&self, id: Uuid) -> Result<Option<Table>, StorageError>;
     async fn list_tables(&self, page: &PageRequest) -> Result<Page<Table>, StorageError>;

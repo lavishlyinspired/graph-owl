@@ -23,7 +23,6 @@ use uuid::Uuid;
 
 pub fn app(catalog: Catalog) -> Router {
     Router::new()
-        .route("/health", get(|| async { "ok" }))
         .route("/tables", post(create_table).get(list_tables))
         .route(
             "/tables/{id}",
@@ -39,6 +38,10 @@ pub fn app(catalog: Catalog) -> Router {
         .route("/assets/roots", get(list_roots))
         .route("/assets/stats", get(asset_stats))
         .route("/connectors/postgres/runs", post(run_postgres_connector))
+        // Unauthenticated by design: an orchestrator's probe must not depend
+        // on the identity provider being reachable.
+        .route("/health", get(health))
+        .route("/ready", get(ready))
         .route(
             "/assets/{id}",
             get(get_asset).patch(update_asset).delete(delete_asset),
@@ -610,14 +613,35 @@ async fn search_assets(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
     AppQuery(query): AppQuery<AssetSearchQuery>,
-) -> Result<Json<Page<Asset>>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     let kind = parse_kind(query.kind.as_deref())?;
     let page = PageRequest::new(query.limit, query.after.as_deref())?;
-    Ok(Json(
-        catalog
-            .search_assets_for(&principal, &query.q, kind, &page)
-            .await?,
-    ))
+    let page_result = catalog
+        .search_assets_for(&principal, &query.q, kind, &page)
+        .await?;
+
+    // Facets are computed over the *visible* set, like the counts. A facet
+    // showing "core_banking (12)" to someone who may not see core_banking
+    // leaks the schema's existence and its size.
+    let mut by_kind: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut by_schema: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for asset in &page_result.data {
+        *by_kind.entry(asset.kind.as_str()).or_default() += 1;
+        // The schema is the third FQN segment: service.database.schema.…
+        if let Some(schema) = asset.fully_qualified_name.split('.').nth(2) {
+            *by_schema.entry(schema.to_string()).or_default() += 1;
+        }
+    }
+
+    Ok(Json(json!({
+        "data": page_result.data,
+        "paging": page_result.paging,
+        "facets": {
+            "kind": by_kind.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
+            "schema": by_schema.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
+        }
+    })))
 }
 
 async fn get_asset(
@@ -799,4 +823,43 @@ async fn restore_asset(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let affected = catalog.restore_asset(&principal, id).await?;
     Ok(Json(json!({ "restored": affected })))
+}
+
+// ---- operability (Epic 10) ----
+
+/// Liveness. Deliberately checks nothing: a dependency outage must not
+/// trigger a restart loop across the whole fleet.
+async fn health() -> Json<serde_json::Value> {
+    Json(json!({ "status": "alive", "version": env!("CARGO_PKG_VERSION") }))
+}
+
+/// Readiness. Three-valued, not two.
+///
+/// A required dependency down is `503`. An *optional* one down is `200
+/// degraded`, because forcing that into "not ready" removes a healthy instance
+/// from the load balancer and turns a degraded feature into an outage.
+async fn ready(State(catalog): State<Catalog>) -> Response {
+    let database = catalog.ping().await;
+    let secured = signing_secret().is_some();
+
+    let (status, state) = if database.is_ok() {
+        (StatusCode::OK, if secured { "ready" } else { "degraded" })
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "unready")
+    };
+
+    (
+        status,
+        Json(json!({
+            "status": state,
+            "checks": {
+                "database": { "required": true, "ok": database.is_ok() },
+                // Running open is a legitimate posture for a local demo, but a
+                // server that is accidentally open must say so rather than look
+                // identical to a secured one.
+                "authentication": { "required": false, "ok": secured },
+            }
+        })),
+    )
+        .into_response()
 }

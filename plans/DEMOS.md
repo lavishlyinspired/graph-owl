@@ -13,7 +13,7 @@
 | Demo | Theme | Epics | State |
 |---|---|---|---|
 | **1** | A source becomes a browsable catalog | 1, 2, 15, 39 (partial) | **Shipped** |
-| **2** | A governed catalog people can trust | +3, 8, 10, 11, 12, 13 | Next |
+| **2** | A governed catalog people can trust | +3, 8, 10, 11, 12, 13 | **Shipped** (gaps named per epic) |
 | **3** ★ | It is a graph engine | +4, 7, 7a, 40 | |
 | **4** | It reasons, and it validates | +5, 6, 41 | |
 | **5** ★ | Agents can use it | +14, 31, 32, 43 | |
@@ -99,19 +99,19 @@
 - [ ] `If-Match`/`412` optimistic concurrency
 
 ### Epic 8 — Search
-- [ ] `TextIndex` port; lexical BM25 over name, FQN, description
-- [ ] Event-driven incremental indexing (never a dual write in the request path)
-- [ ] Facets by kind, schema, owner
-- [ ] Search result counts consistent with authorization filtering
+- [x] Facets by kind and schema, computed over the **visible** set
+- [x] Result counts consistent with authorization filtering
+- [~] **Gap**: still `LIKE` over name and FQN, not a real index. No BM25, no relevance ranking, no description search. Adequate at 124 assets, not at 100k — Demo 3's scale work is where this has to change
+- [ ] `TextIndex` port and event-driven incremental indexing
 - [ ] Vector index deferred; embeddings generated out of process (`00j`)
 
 ### Epic 10 — Operability
-- [ ] Typed config from environment, validated at startup
-- [ ] `/health` vs `/ready`, three-valued with required/optional checks
-- [ ] Structured JSON logs, request-id propagation
-- [ ] `/metrics` conforming to the observability contract
-- [ ] Graceful shutdown draining in-flight requests
-- [ ] Itemized memory budget reported at startup
+- [x] `/health` (checks nothing, so a dependency blip cannot restart-loop the fleet)
+- [x] `/ready`, three-valued: required vs optional checks, `200 degraded` when auth is off
+- [x] Graceful shutdown draining in-flight requests
+- [x] Startup states its security posture — an accidentally-open server must not look identical to a secured one
+- [x] `BIND_ADDR` configurable
+- [~] **Gap**: no structured JSON logs, no request-id propagation, no `/metrics`, no memory budget report
 
 ### Epic 11 — Users, teams, ownership
 - [x] `User` with roles; auto-provisioned on first sight
@@ -143,7 +143,18 @@
 - [ ] Search with facets and keyboard navigation
 - [ ] Owner and team display
 
-**The demo moment**: two logins, one search, different results — and the count is consistent, so the restricted user cannot infer what was hidden.
+**The demo moment — verified live against the 124-asset bank estate:**
+
+```
+        stats_total  listed  search 'customers'
+root         124       124          13
+asha          93        93           0
+```
+
+`core_banking` — the schema holding PAN, Aadhaar and CKYC — is absent from
+Asha's rows, her counts, *and* her facets. `stats_total == listed` for both, so
+the count cannot leak what it hid. A hidden asset reads `404` for her and `200`
+for root: a `403` would have confirmed the id exists.
 
 ---
 

@@ -458,6 +458,15 @@ impl Catalog {
         Ok(self.storage.get_asset_by_fqn(fqn).await?)
     }
 
+    /// Cheapest possible round trip to storage, for readiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if storage is unreachable.
+    pub async fn ping(&self) -> Result<(), CatalogError> {
+        self.storage.ping().await.map_err(Into::into)
+    }
+
     /// Resolves a principal's policies once per request.
     ///
     /// # Errors
@@ -805,6 +814,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Storage for InMemoryStorage {
+        async fn ping(&self) -> Result<(), StorageError> {
+            Ok(())
+        }
+
         // The fake honours the same identity rule as Postgres: the FQN is the
         // identity, so a re-upsert converges instead of duplicating.
         async fn upsert_asset(&self, asset: Asset) -> Result<Asset, StorageError> {

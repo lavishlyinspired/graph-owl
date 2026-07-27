@@ -72,6 +72,14 @@ impl PostgresStorage {
 
 #[async_trait]
 impl Storage for PostgresStorage {
+    async fn ping(&self) -> Result<(), StorageError> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
     async fn insert_table(&self, table: Table) -> Result<Table, StorageError> {
         let result = sqlx::query(
             "INSERT INTO tables (id, name, fully_qualified_name, description, created_at, updated_at)
