@@ -42,6 +42,34 @@ designed for; published results classify it in under a minute.
 Recorded because the deferral was reversed by new information about the use
 case, not by a change of opinion about the technology.
 
+## Evaluate `whelk-rs` before writing a line
+
+**An OWL EL reasoner in Rust already exists under BSD-3-Clause** — a permissive
+licence this project's `cargo deny` allowlist accepts. `whelk-rs` is a port of
+the Whelk reasoner, itself an implementation of the consequence-based rules this
+epic would otherwise implement from the papers.
+
+Writing a second one without evaluating it would be the exact failure `00l`
+exists to prevent. **This epic does not start until that evaluation is done**,
+and the evaluation asks four questions:
+
+1. Does it classify a known ontology correctly against published expected
+   output?
+2. Can it take a fact set we supply — already `as_of`-resolved and
+   authorization-filtered — rather than owning its own store? (`00l`'s pattern.)
+3. Does it report axioms outside EL, or silently ignore them? If it ignores
+   them, we wrap it with the detection from Epic 100 rather than trusting it.
+4. Can a subsumption be explained, or is explanation ours to add on top?
+
+**The likely outcome is adopt-and-wrap**: `whelk-rs` classifies, this crate owns
+the fact-set extraction, the profile gate, the budget and the explanation. That
+is a small crate around a good library rather than a reimplementation of one.
+
+If it is adopted, most of what follows becomes the wrapper's specification
+rather than an algorithm to build — and the acceptance criteria below are
+unchanged either way, because they are about *behaviour we promise*, not about
+who implements the classification.
+
 ## Resolved decisions
 
 1. **TBox only.** EL's value is *classification* — computing the class hierarchy

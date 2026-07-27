@@ -57,6 +57,34 @@ Rather than a general rule engine plus an OWL encoding, the supported axioms are
 | `rdfs:range` | `(a p b), (p range C) ⟹ (b rdf:type C)` |
 | `owl:sameAs` | `(a sameAs b), (a p o) ⟹ (b p o)` — powers Epic 17 |
 
+### Evaluate `reasonable` before writing the rule engine
+
+`reasonable` (BSD-3-Clause, permissive) implements OWL 2 RL as Datalog rules
+over a supplied graph, with published benchmarks well ahead of the Python
+implementations. `00l` sets the pattern that makes it usable despite this
+project's storage requirements: resolve flakes into a fact set **with `as_of`
+and the access predicate already applied**, hand that over, take derived facts
+back. The library never sees what the caller may not.
+
+Two things it does not give, and they are this epic's stated requirements:
+
+- **Derivation chains.** It returns triples. Slice D's explanation contract is
+  not in its output.
+- **Budgets.** Nothing surveyed bounds anything.
+
+So the shape is **adopt for bulk, re-derive for explanation**: materialise with
+the library, and when someone asks *why* a specific fact holds, re-derive that
+one fact locally with tracking on. That is not a compromise — explanation is
+rare and single-fact at human speed, materialisation is constant and
+whole-graph, and optimising them separately is correct.
+
+It also implements a *subset* of the RL rules, which makes it a candidate for
+the eight in this epic and not obviously one for Epic 95's completion. Evaluate
+against both.
+
+**Either way it is a differential-test oracle**, and that value does not depend
+on adopting it.
+
 ### Derived facts are subject to authorization, and that is not automatic
 
 Epic 4 decision 7 says authorization is never evaluated over the flake

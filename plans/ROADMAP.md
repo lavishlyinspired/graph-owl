@@ -414,6 +414,7 @@ decision to accept churn and should be made knowingly.
 
 | Epic | File | Action |
 |---|---|---|
+| — | `00l-build-vs-adopt.md` | **DONE** — which libraries to take and which to write, with licences checked. The answer is "adopt above the storage line, build below it", and it makes the build list much shorter than four epics implied |
 | — | `00k-standards-conformance.md` | **DONE** — the single place that answers "do you support X", dated, with a per-capability state and the deliberate non-goals. Four epics each implemented "a subset of" a standard and each said so in its own words; nobody could state the product's overall conformance |
 | 93 | `93-console-overview.md` | **DONE and shipped** — the landing page, with the constraint that a tile which cannot be computed from real data does not ship |
 | 94 | `94-rdf12-alignment.md` | **DONE** — emit `rdf:reifies` and triple terms; `rdf:dirLangString` closes the language-tag hole with three components rather than two |
