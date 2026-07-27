@@ -4,13 +4,16 @@ use chrono::Utc;
 use graph_owl_core::{
     Relationship, Table, TableUpdate,
     page::{Page, PageRequest},
+    relationship_type::{EntityKind, RelationshipType, is_legal},
 };
-use graph_owl_storage::{Storage, StorageError};
+use graph_owl_storage::{ConflictKind, Storage, StorageError};
 use serde::Deserialize;
 use uuid::Uuid;
 
 pub mod validation;
-use validation::{FieldError, FieldPath, ValidateBody, optional_string, require_non_empty_string};
+use validation::{
+    FieldError, FieldErrorCode, FieldPath, ValidateBody, optional_string, require_non_empty_string,
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,16 +71,52 @@ impl ValidateBody for CreateRelationship {
     }
 }
 
+/// One error taxonomy for the whole facade.
+///
+/// Replaces a per-operation error enum. Handlers now *map* a domain failure to
+/// a status code rather than each deciding what a failure means, which is what
+/// keeps a fifth endpoint from inventing a sixth notion of "not found".
 #[derive(Debug)]
-pub enum CreateRelationshipError {
-    InvalidRelationshipType,
-    TableNotFound,
+pub enum CatalogError {
+    /// The addressed entity does not exist.
+    NotFound,
+    /// A uniqueness constraint rejected the write.
+    Conflict {
+        detail: String,
+        existing_id: Option<Uuid>,
+        kind: ConflictKind,
+    },
+    /// A field-level failure that got past boundary validation, or one that
+    /// only the domain can detect.
+    Validation(Vec<FieldError>),
+    /// The `(from, type, to)` triple is not in the legality table. Distinct
+    /// from `Validation` because the *shape* is fine and the *meaning* is not —
+    /// a client fixes it by choosing a different relationship, not a different
+    /// value.
+    IllegalRelationship {
+        from: EntityKind,
+        relationship: RelationshipType,
+        to: EntityKind,
+    },
     Storage(StorageError),
 }
 
-impl From<StorageError> for CreateRelationshipError {
+impl From<StorageError> for CatalogError {
     fn from(error: StorageError) -> Self {
-        CreateRelationshipError::Storage(error)
+        match error {
+            StorageError::Conflict {
+                detail,
+                existing_id,
+                kind,
+            } => CatalogError::Conflict {
+                detail,
+                existing_id,
+                kind,
+            },
+            StorageError::Unexpected(message) => {
+                CatalogError::Storage(StorageError::Unexpected(message))
+            }
+        }
     }
 }
 
@@ -94,7 +133,7 @@ impl Catalog {
     /// # Errors
     ///
     /// Returns an error if the underlying storage fails, e.g. a duplicate `fully_qualified_name`.
-    pub async fn create_table(&self, request: CreateTable) -> Result<Table, StorageError> {
+    pub async fn create_table(&self, request: CreateTable) -> Result<Table, CatalogError> {
         let now = Utc::now();
         let table = Table {
             id: Uuid::new_v4(),
@@ -104,21 +143,21 @@ impl Catalog {
             created_at: now,
             updated_at: now,
         };
-        self.storage.insert_table(table).await
+        Ok(self.storage.insert_table(table).await?)
     }
 
     /// # Errors
     ///
     /// Returns an error if the underlying storage fails.
-    pub async fn get_table(&self, id: Uuid) -> Result<Option<Table>, StorageError> {
-        self.storage.get_table(id).await
+    pub async fn get_table(&self, id: Uuid) -> Result<Option<Table>, CatalogError> {
+        Ok(self.storage.get_table(id).await?)
     }
 
     /// # Errors
     ///
     /// Returns an error if the underlying storage fails.
-    pub async fn list_tables(&self, page: &PageRequest) -> Result<Page<Table>, StorageError> {
-        self.storage.list_tables(page).await
+    pub async fn list_tables(&self, page: &PageRequest) -> Result<Page<Table>, CatalogError> {
+        Ok(self.storage.list_tables(page).await?)
     }
 
     /// # Errors
@@ -128,45 +167,71 @@ impl Catalog {
         &self,
         id: Uuid,
         update: TableUpdate,
-    ) -> Result<Option<Table>, StorageError> {
-        self.storage.update_table(id, update).await
+    ) -> Result<Option<Table>, CatalogError> {
+        Ok(self.storage.update_table(id, update).await?)
     }
 
     /// # Errors
     ///
     /// Returns an error if the underlying storage fails.
-    pub async fn delete_table(&self, id: Uuid) -> Result<bool, StorageError> {
-        self.storage.delete_table(id).await
+    pub async fn delete_table(&self, id: Uuid) -> Result<bool, CatalogError> {
+        Ok(self.storage.delete_table(id).await?)
     }
 
     /// # Errors
     ///
-    /// Returns `CreateRelationshipError::InvalidRelationshipType` if `relationship_type` is
-    /// empty, `CreateRelationshipError::TableNotFound` if either table doesn't exist, or
-    /// `CreateRelationshipError::Storage` if the underlying storage fails (e.g. a duplicate
+    /// Returns `CatalogError::Validation` if `relationshipType` is not in the
+    /// vocabulary, `CatalogError::IllegalRelationship` if the triple is not in the
+    /// legality table, `CatalogError::NotFound` if either table doesn't exist, or
+    /// `CatalogError::Conflict` if storage rejects it (e.g. a duplicate
     /// relationship).
     pub async fn create_relationship(
         &self,
         from_table_id: Uuid,
         request: CreateRelationship,
-    ) -> Result<Relationship, CreateRelationshipError> {
-        if request.relationship_type.is_empty() {
-            return Err(CreateRelationshipError::InvalidRelationshipType);
+    ) -> Result<Relationship, CatalogError> {
+        // Vocabulary and legality are checked *before* existence, deliberately:
+        // an illegal triple between two nonexistent tables is a triple problem,
+        // and reporting 404 would send the client hunting for the wrong bug.
+        let relationship_type =
+            RelationshipType::parse(&request.relationship_type).map_err(|unknown| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "relationshipType",
+                    FieldErrorCode::Type,
+                    format!(
+                        "`{}` is not a relationship type; expected one of: {}",
+                        unknown.got,
+                        RelationshipType::ALL
+                            .iter()
+                            .map(|r| r.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )])
+            })?;
+
+        let (from, to) = (EntityKind::Table, EntityKind::Table);
+        if !is_legal(from, relationship_type, to) {
+            return Err(CatalogError::IllegalRelationship {
+                from,
+                relationship: relationship_type,
+                to,
+            });
         }
 
         if self.storage.get_table(from_table_id).await?.is_none() {
-            return Err(CreateRelationshipError::TableNotFound);
+            return Err(CatalogError::NotFound);
         }
         if self.storage.get_table(request.to_table_id).await?.is_none() {
-            return Err(CreateRelationshipError::TableNotFound);
+            return Err(CatalogError::NotFound);
         }
 
         let relationship = Relationship {
             id: Uuid::new_v4(),
-            from_entity_type: "table".to_string(),
+            from_entity_type: from.as_str().to_string(),
             from_entity_id: from_table_id,
-            relationship_type: request.relationship_type,
-            to_entity_type: "table".to_string(),
+            relationship_type: relationship_type.as_str().to_string(),
+            to_entity_type: to.as_str().to_string(),
             to_entity_id: request.to_table_id,
             created_at: Utc::now(),
         };
@@ -181,7 +246,7 @@ impl Catalog {
     pub async fn list_relationships_for_table(
         &self,
         table_id: Uuid,
-    ) -> Result<Option<Vec<Relationship>>, StorageError> {
+    ) -> Result<Option<Vec<Relationship>>, CatalogError> {
         if self.storage.get_table(table_id).await?.is_none() {
             return Ok(None);
         }
@@ -196,8 +261,8 @@ impl Catalog {
     /// # Errors
     ///
     /// Returns an error if the underlying storage fails.
-    pub async fn delete_relationship(&self, id: Uuid) -> Result<bool, StorageError> {
-        self.storage.delete_relationship(id).await
+    pub async fn delete_relationship(&self, id: Uuid) -> Result<bool, CatalogError> {
+        Ok(self.storage.delete_relationship(id).await?)
     }
 }
 
@@ -511,7 +576,7 @@ mod tests {
                 from.id,
                 CreateRelationship {
                     to_table_id: to.id,
-                    relationship_type: "derived_from".to_string(),
+                    relationship_type: "derivedFrom".to_string(),
                 },
             )
             .await
@@ -521,7 +586,7 @@ mod tests {
         assert_eq!(relationship.from_entity_id, from.id);
         assert_eq!(relationship.to_entity_type, "table");
         assert_eq!(relationship.to_entity_id, to.id);
-        assert_eq!(relationship.relationship_type, "derived_from");
+        assert_eq!(relationship.relationship_type, "derivedFrom");
     }
 
     #[tokio::test]
@@ -537,15 +602,12 @@ mod tests {
                 Uuid::new_v4(),
                 CreateRelationship {
                     to_table_id: to.id,
-                    relationship_type: "derived_from".to_string(),
+                    relationship_type: "derivedFrom".to_string(),
                 },
             )
             .await;
 
-        assert!(matches!(
-            result,
-            Err(CreateRelationshipError::TableNotFound)
-        ));
+        assert!(matches!(result, Err(CatalogError::NotFound)));
     }
 
     #[tokio::test]
@@ -561,20 +623,16 @@ mod tests {
                 from.id,
                 CreateRelationship {
                     to_table_id: Uuid::new_v4(),
-                    relationship_type: "derived_from".to_string(),
+                    relationship_type: "derivedFrom".to_string(),
                 },
             )
             .await;
 
-        assert!(matches!(
-            result,
-            Err(CreateRelationshipError::TableNotFound)
-        ));
+        assert!(matches!(result, Err(CatalogError::NotFound)));
     }
 
     #[tokio::test]
-    async fn creating_a_relationship_with_empty_relationship_type_returns_invalid_relationship_type()
-     {
+    async fn creating_a_relationship_with_an_empty_type_is_a_field_validation_error() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
         let from = catalog
             .create_table(mock_create_table_request())
@@ -595,10 +653,11 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(
-            result,
-            Err(CreateRelationshipError::InvalidRelationshipType)
-        ));
+        assert!(
+            matches!(result, Err(CatalogError::Validation(ref errors))
+                if errors.iter().any(|e| e.field == "relationshipType")),
+            "an empty type is now an unknown vocabulary member, reported per field"
+        );
     }
 
     #[tokio::test]
@@ -638,7 +697,7 @@ mod tests {
                 orders.id,
                 CreateRelationship {
                     to_table_id: customers.id,
-                    relationship_type: "derived_from".to_string(),
+                    relationship_type: "derivedFrom".to_string(),
                 },
             )
             .await
@@ -648,7 +707,7 @@ mod tests {
                 archive.id,
                 CreateRelationship {
                     to_table_id: orders.id,
-                    relationship_type: "derived_from".to_string(),
+                    relationship_type: "derivedFrom".to_string(),
                 },
             )
             .await
@@ -691,7 +750,7 @@ mod tests {
                 from.id,
                 CreateRelationship {
                     to_table_id: to.id,
-                    relationship_type: "derived_from".to_string(),
+                    relationship_type: "derivedFrom".to_string(),
                 },
             )
             .await

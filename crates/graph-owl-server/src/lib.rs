@@ -6,7 +6,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use graph_owl_api::{
-    Catalog, CreateRelationship, CreateRelationshipError, CreateTable,
+    Catalog, CatalogError, CreateRelationship, CreateTable,
     validation::{FieldError, FieldErrorCode, ValidateBody},
 };
 use graph_owl_core::{
@@ -170,6 +170,13 @@ enum AppError {
     },
     Internal(String),
     NotFound,
+    /// The triple is well-formed and meaningless. Its own identity because a
+    /// client fixes it by choosing a different relationship, not a value.
+    IllegalRelationship {
+        from: &'static str,
+        relationship: &'static str,
+        to: &'static str,
+    },
 }
 
 impl AppError {
@@ -189,6 +196,7 @@ impl AppError {
             } => "relationship-conflict",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
+            AppError::IllegalRelationship { .. } => "illegal-relationship",
         }
     }
 
@@ -208,12 +216,15 @@ impl AppError {
             } => "Relationship already exists",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
+            AppError::IllegalRelationship { .. } => "Illegal relationship",
         }
     }
 
     fn status(&self) -> StatusCode {
         match self {
-            AppError::MalformedBody(_) | AppError::Validation(_) => StatusCode::BAD_REQUEST,
+            AppError::MalformedBody(_)
+            | AppError::Validation(_)
+            | AppError::IllegalRelationship { .. } => StatusCode::BAD_REQUEST,
             AppError::Conflict { .. } => StatusCode::CONFLICT,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::NotFound => StatusCode::NOT_FOUND,
@@ -238,6 +249,11 @@ impl AppError {
                 ..
             } => format!("the relationship '{detail}' already exists"),
             AppError::NotFound => "the requested resource does not exist".to_string(),
+            AppError::IllegalRelationship {
+                from,
+                relationship,
+                to,
+            } => format!("`{from}` may not `{relationship}` a `{to}`"),
         }
     }
 }
@@ -284,18 +300,30 @@ impl From<StorageError> for AppError {
     }
 }
 
-impl From<CreateRelationshipError> for AppError {
-    fn from(error: CreateRelationshipError) -> Self {
+impl From<CatalogError> for AppError {
+    fn from(error: CatalogError) -> Self {
         match error {
-            CreateRelationshipError::InvalidRelationshipType => {
-                AppError::Validation(vec![FieldError::new(
-                    "relationshipType",
-                    FieldErrorCode::Empty,
-                    "`relationship_type` must not be empty",
-                )])
-            }
-            CreateRelationshipError::TableNotFound => AppError::NotFound,
-            CreateRelationshipError::Storage(storage_error) => storage_error.into(),
+            CatalogError::NotFound => AppError::NotFound,
+            CatalogError::Conflict {
+                detail,
+                existing_id,
+                kind,
+            } => AppError::Conflict {
+                detail,
+                existing_id,
+                kind,
+            },
+            CatalogError::Validation(errors) => AppError::Validation(errors),
+            CatalogError::IllegalRelationship {
+                from,
+                relationship,
+                to,
+            } => AppError::IllegalRelationship {
+                from: from.as_str(),
+                relationship: relationship.as_str(),
+                to: to.as_str(),
+            },
+            CatalogError::Storage(storage_error) => storage_error.into(),
         }
     }
 }

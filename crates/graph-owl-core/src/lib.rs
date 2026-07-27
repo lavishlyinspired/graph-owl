@@ -1,4 +1,5 @@
 pub mod page;
+pub mod relationship_type;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

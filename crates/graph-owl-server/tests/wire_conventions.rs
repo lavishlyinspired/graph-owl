@@ -76,8 +76,7 @@ async fn no_response_on_any_surface_carries_a_snake_case_key() {
                 ))
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({ "toTableId": to["id"], "relationshipType": "derived_from" })
-                        .to_string(),
+                    json!({ "toTableId": to["id"], "relationshipType": "derivedFrom" }).to_string(),
                 ))
                 .expect("request should build"),
         )
@@ -163,7 +162,7 @@ async fn an_fqn_conflict_and_a_relationship_conflict_are_different_problems() {
         .expect("request should be handled");
 
     let relationship_body =
-        json!({ "toTableId": to["id"], "relationshipType": "derived_from" }).to_string();
+        json!({ "toTableId": to["id"], "relationshipType": "derivedFrom" }).to_string();
     let uri = format!("/tables/{}/relationships", from["id"].as_str().expect("id"));
     for _ in 0..1 {
         let created = app

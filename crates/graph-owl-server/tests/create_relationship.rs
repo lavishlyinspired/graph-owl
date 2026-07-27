@@ -51,7 +51,7 @@ async fn post_relationships_with_valid_body_returns_201_with_created_relationshi
                 .body(Body::from(
                     json!({
                         "toTableId": to_id,
-                        "relationshipType": "derived_from"
+                        "relationshipType": "derivedFrom"
                     })
                     .to_string(),
                 ))
@@ -67,7 +67,7 @@ async fn post_relationships_with_valid_body_returns_201_with_created_relationshi
     assert_eq!(body["fromEntityId"], from_id);
     assert_eq!(body["toEntityType"], "table");
     assert_eq!(body["toEntityId"], to_id);
-    assert_eq!(body["relationshipType"], "derived_from");
+    assert_eq!(body["relationshipType"], "derivedFrom");
     assert!(body["createdAt"].is_string());
 }
 
@@ -85,7 +85,7 @@ async fn post_relationships_for_a_nonexistent_source_table_returns_404() {
                 .body(Body::from(
                     json!({
                         "toTableId": to_id,
-                        "relationshipType": "derived_from"
+                        "relationshipType": "derivedFrom"
                     })
                     .to_string(),
                 ))
@@ -111,7 +111,7 @@ async fn post_relationships_targeting_a_nonexistent_table_returns_404() {
                 .body(Body::from(
                     json!({
                         "toTableId": Uuid::new_v4(),
-                        "relationshipType": "derived_from"
+                        "relationshipType": "derivedFrom"
                     })
                     .to_string(),
                 ))
@@ -157,7 +157,7 @@ async fn post_relationships_with_duplicate_tuple_returns_409() {
     let to_id = create_table(&app, "warehouse.public.customers").await;
     let body = json!({
         "toTableId": to_id,
-        "relationshipType": "derived_from"
+        "relationshipType": "derivedFrom"
     })
     .to_string();
 
