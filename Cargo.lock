@@ -765,6 +765,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "graph-owl-authz",
+ "graph-owl-connectors",
  "graph-owl-core",
  "graph-owl-engine",
  "graph-owl-storage",
