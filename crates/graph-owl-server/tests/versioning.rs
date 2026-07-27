@@ -337,3 +337,150 @@ async fn a_blank_description_is_rejected_with_a_pointer_to_null() {
         "the error must say how to actually clear the field"
     );
 }
+
+async fn patch_with_if_match(
+    app: &axum::Router,
+    id: &str,
+    if_match: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("PATCH")
+        .uri(format!("/assets/{id}"))
+        .header("content-type", "application/json");
+    if let Some(value) = if_match {
+        builder = builder.header("if-match", value);
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            builder
+                .body(Body::from(body.to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    let status = response.status();
+    (status, json_body(response).await)
+}
+
+/// **The lost update this closes.** Two editors read v0.1; both write. Without
+/// a precondition the second silently discards the first, and neither is told.
+#[tokio::test]
+async fn a_stale_if_match_is_refused_rather_than_overwriting() {
+    let (app, _container, id) = fixture().await;
+
+    // Both editors saw v0.1.
+    let (status, first) = patch_with_if_match(
+        &app,
+        &id,
+        Some("\"0.1\""),
+        json!({ "description": "written by the first editor" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["version"], json!({ "major": 0, "minor": 2 }));
+
+    // The second editor is still holding v0.1.
+    let (status, body) = patch_with_if_match(
+        &app,
+        &id,
+        Some("\"0.1\""),
+        json!({ "description": "written by the second editor" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(
+        body["type"],
+        "https://graph-owl.dev/errors/version-conflict"
+    );
+    assert!(
+        body["detail"].as_str().expect("detail").contains("0.2"),
+        "the error must name the current version so the client can show what \
+         it was about to overwrite: {body}"
+    );
+
+    // And the first editor's write survived.
+    let (_, current) = send(&app, "GET", &format!("/assets/{id}"), None).await;
+    assert_eq!(current["description"], "written by the first editor");
+    assert_eq!(current["version"], json!({ "major": 0, "minor": 2 }));
+}
+
+#[tokio::test]
+async fn a_matching_if_match_is_applied() {
+    let (app, _container, id) = fixture().await;
+
+    let (status, updated) = patch_with_if_match(
+        &app,
+        &id,
+        Some("\"0.1\""),
+        json!({ "description": "UPI ledger" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["description"], "UPI ledger");
+}
+
+/// Absent the header, last-write-wins — the documented default (`00d`).
+/// Requiring the header would break every existing client.
+#[tokio::test]
+async fn no_if_match_header_still_means_last_write_wins() {
+    let (app, _container, id) = fixture().await;
+
+    let (status, _) = patch_with_if_match(&app, &id, None, json!({ "description": "a" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, updated) =
+        patch_with_if_match(&app, &id, None, json!({ "description": "b" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["description"], "b");
+}
+
+/// Quoted is the HTTP entity-tag convention; bare is accepted too. Refusing
+/// `0.2` would be pedantry that costs a round trip and teaches nothing.
+#[tokio::test]
+async fn if_match_is_accepted_quoted_or_bare() {
+    let (app, _container, id) = fixture().await;
+
+    let (status, _) =
+        patch_with_if_match(&app, &id, Some("0.1"), json!({ "description": "a" })).await;
+    assert_eq!(status, StatusCode::OK, "bare must be accepted");
+
+    let (status, _) =
+        patch_with_if_match(&app, &id, Some("\"0.2\""), json!({ "description": "b" })).await;
+    assert_eq!(status, StatusCode::OK, "quoted must be accepted");
+}
+
+#[tokio::test]
+async fn a_malformed_if_match_is_rejected_by_name() {
+    let (app, _container, id) = fixture().await;
+
+    let (status, body) = patch_with_if_match(
+        &app,
+        &id,
+        Some("\"yesterday\""),
+        json!({ "description": "a" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["errors"][0]["field"], "If-Match");
+}
+
+/// A precondition against an asset that does not exist is a 404, not a 412 —
+/// the version cannot be stale if there is nothing to be stale against.
+#[tokio::test]
+async fn if_match_on_a_missing_asset_is_a_404() {
+    let (app, _container, _id) = fixture().await;
+
+    let (status, _) = patch_with_if_match(
+        &app,
+        "00000000-0000-0000-0000-000000000000",
+        Some("\"0.1\""),
+        json!({ "description": "a" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

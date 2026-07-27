@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use graph_owl_authz::{AccessPredicate, Policy};
+use graph_owl_core::envelope::EntityVersion;
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
     page::{Page, PageRequest},
@@ -43,6 +44,20 @@ pub enum StorageError {
     },
     #[error("unexpected storage error: {0}")]
     Unexpected(String),
+}
+
+/// What an update did.
+///
+/// Three outcomes, not two: "the asset is gone" and "someone else edited it
+/// first" need different fixes from the caller, and collapsing them into
+/// `None` would make a lost update look like a deleted asset.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateOutcome {
+    Updated(Box<Asset>),
+    NotFound,
+    /// The guard did not match. Carries what the version actually is, so the
+    /// caller can show the reader what they were about to overwrite.
+    VersionMismatch(EntityVersion),
 }
 
 #[async_trait]
@@ -128,12 +143,25 @@ pub trait Storage: Send + Sync {
     /// Returns `Ok(None)` if the asset does not exist. A no-op update returns
     /// the asset unchanged at its current version — that is what makes a
     /// connector's convergence observable rather than merely claimed.
+    /// Apply a partial update, optionally guarded by the version the caller
+    /// believed it was editing.
+    ///
+    /// The guard must be evaluated under the same lock as the write. The
+    /// Postgres adapter already reads `FOR UPDATE` inside the transaction that
+    /// writes, so comparing there is atomic; an implementation that compared
+    /// outside a lock would reintroduce exactly the race the precondition
+    /// exists to close.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
     async fn update_asset(
         &self,
         id: Uuid,
         update: &AssetUpdate,
         updated_by: &str,
-    ) -> Result<Option<Asset>, StorageError>;
+        expected_version: Option<EntityVersion>,
+    ) -> Result<UpdateOutcome, StorageError>;
 
     async fn asset_versions(&self, id: Uuid) -> Result<Vec<AssetVersion>, StorageError>;
 

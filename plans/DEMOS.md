@@ -99,10 +99,10 @@ its destination — so "Demo 2 is done" never has to mean "Epic 13 is finished".
 - [x] Soft delete cascading to the subtree, with restore; a connector re-run does not resurrect a tombstone
 - [x] `GET /assets/{id}/versions` — snapshot per version, newest first
 - [x] Console: trust bar shows version and last editor; History tab with a field-level diff timeline; inline description editing
+- [x] `If-Match`/`412` optimistic concurrency — a stale precondition is refused and names the current version; absent the header, last-write-wins as documented
 
 **Pending in this epic**
 - `EventSink` port + `ChangeEvent` emission — nothing consumes change events yet, which is also what blocks Epic 8's incremental indexing
-- `If-Match`/`412` optimistic concurrency — two editors racing on one description currently last-write-wins silently
 
 ### Epic 8 — Search
 - [x] Facets by kind and schema, computed over the **visible** set

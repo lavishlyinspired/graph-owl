@@ -12,6 +12,7 @@ use graph_owl_api::{
     validation::{FieldError, FieldErrorCode, ValidateBody, require_non_empty_string},
 };
 use graph_owl_connectors::{Connector, DeletionPlan, RunScope, postgres::PostgresConnector};
+use graph_owl_core::envelope::EntityVersion;
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
     page::{Page, PageRequest, PageRequestError},
@@ -338,6 +339,10 @@ enum AppError {
     },
     Internal(String),
     NotFound,
+    /// `If-Match` named a version that is no longer current.
+    PreconditionFailed {
+        current: String,
+    },
     /// No credential, or one that does not verify.
     Unauthenticated,
     /// The triple is well-formed and meaningless. Its own identity because a
@@ -366,6 +371,7 @@ impl AppError {
             } => "relationship-conflict",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
+            AppError::PreconditionFailed { .. } => "version-conflict",
             AppError::Unauthenticated => "unauthenticated",
             AppError::IllegalRelationship { .. } => "illegal-relationship",
         }
@@ -387,6 +393,7 @@ impl AppError {
             } => "Relationship already exists",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
+            AppError::PreconditionFailed { .. } => "Version precondition failed",
             AppError::Unauthenticated => "Authentication required",
             AppError::IllegalRelationship { .. } => "Illegal relationship",
         }
@@ -400,6 +407,7 @@ impl AppError {
             AppError::Conflict { .. } => StatusCode::CONFLICT,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::PreconditionFailed { .. } => StatusCode::PRECONDITION_FAILED,
             AppError::Unauthenticated => StatusCode::UNAUTHORIZED,
         }
     }
@@ -422,6 +430,11 @@ impl AppError {
                 ..
             } => format!("the relationship '{detail}' already exists"),
             AppError::NotFound => "the requested resource does not exist".to_string(),
+            AppError::PreconditionFailed { current } => format!(
+                "this asset is now at version {current}; your `If-Match` named an \
+                 earlier one. Re-read it and re-apply your change — proceeding \
+                 would discard whatever was written in between"
+            ),
             AppError::Unauthenticated => {
                 "a valid bearer token is required for this request".to_string()
             }
@@ -480,6 +493,9 @@ impl From<CatalogError> for AppError {
     fn from(error: CatalogError) -> Self {
         match error {
             CatalogError::NotFound => AppError::NotFound,
+            CatalogError::PreconditionFailed { current } => AppError::PreconditionFailed {
+                current: format!("{}.{}", current.major, current.minor),
+            },
             CatalogError::Conflict {
                 detail,
                 existing_id,
@@ -970,13 +986,62 @@ async fn run_postgres_connector(
 
 // ---- envelope (Epic 3) ----
 
+/// Reads `If-Match: "0.2"` — the entity version the caller believed it was
+/// editing.
+///
+/// Absent, the update is last-write-wins, which is the documented default
+/// (`00d`). Present and stale, the write is refused rather than silently
+/// discarding whatever landed in between.
+fn if_match_version(headers: &axum::http::HeaderMap) -> Result<Option<EntityVersion>, AppError> {
+    let Some(raw) = headers.get(axum::http::header::IF_MATCH) else {
+        return Ok(None);
+    };
+    let raw = raw
+        .to_str()
+        .map_err(|_| {
+            AppError::Validation(vec![FieldError::new(
+                "If-Match",
+                FieldErrorCode::Type,
+                "the header is not valid text".to_string(),
+            )])
+        })?
+        // Quoted per the HTTP entity-tag convention, but accepted bare too:
+        // refusing `0.2` would be pedantry that costs a round trip and teaches
+        // nothing.
+        .trim()
+        .trim_matches('"');
+
+    let parsed = raw
+        .split_once('.')
+        .and_then(|(major, minor)| {
+            Some(EntityVersion {
+                major: major.parse().ok()?,
+                minor: minor.parse().ok()?,
+            })
+        })
+        .ok_or_else(|| {
+            AppError::Validation(vec![FieldError::new(
+                "If-Match",
+                FieldErrorCode::Type,
+                format!("`{raw}` is not a version of the form `major.minor`"),
+            )])
+        })?;
+    Ok(Some(parsed))
+}
+
 async fn update_asset(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
     Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
     AppJson(payload): AppJson<AssetUpdate>,
 ) -> Result<Json<Asset>, AppError> {
-    Ok(Json(catalog.update_asset(&principal, id, &payload).await?))
+    let expected = if_match_version(&headers)?;
+    Ok(Json(
+        catalog
+            .update_asset(&principal, id, &payload, expected)
+            .await?,
+    ))
 }
 
 async fn asset_versions(

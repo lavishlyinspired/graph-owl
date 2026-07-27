@@ -12,7 +12,7 @@ use graph_owl_core::{
     relationship_type::{EntityKind, RelationshipType, is_legal},
 };
 use graph_owl_engine::TripleStore;
-use graph_owl_storage::{ConflictKind, Storage, StorageError, StoredUser};
+use graph_owl_storage::{ConflictKind, Storage, StorageError, StoredUser, UpdateOutcome};
 use graph_owl_traversal::{Bounds, Direction, EdgeFilter, Subgraph, TraversalEngine};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -161,6 +161,12 @@ pub enum CatalogError {
         from: EntityKind,
         relationship: RelationshipType,
         to: EntityKind,
+    },
+    /// The caller sent `If-Match` naming a version that is no longer current.
+    /// Carries the current one, so a client can show what it was about to
+    /// overwrite rather than only that it failed.
+    PreconditionFailed {
+        current: EntityVersion,
     },
     Storage(StorageError),
 }
@@ -990,13 +996,20 @@ impl Catalog {
         principal: &Principal,
         id: Uuid,
         update: &AssetUpdate,
+        expected_version: Option<EntityVersion>,
     ) -> Result<Asset, CatalogError> {
         let before = self.storage.get_asset(id).await.unwrap_or(None);
-        let updated = self
+        let updated = match self
             .storage
-            .update_asset(id, update, &principal.id)
+            .update_asset(id, update, &principal.id, expected_version)
             .await?
-            .ok_or(CatalogError::NotFound)?;
+        {
+            UpdateOutcome::Updated(asset) => *asset,
+            UpdateOutcome::NotFound => return Err(CatalogError::NotFound),
+            UpdateOutcome::VersionMismatch(current) => {
+                return Err(CatalogError::PreconditionFailed { current });
+            }
+        };
 
         self.project(before, &updated).await;
         Ok(updated)
@@ -1350,13 +1363,21 @@ mod tests {
             id: Uuid,
             update: &AssetUpdate,
             updated_by: &str,
-        ) -> Result<Option<Asset>, StorageError> {
+            expected_version: Option<EntityVersion>,
+        ) -> Result<UpdateOutcome, StorageError> {
             use graph_owl_core::envelope::{ChangeDescription, ChangeKind, classify};
             let mut assets = self.assets.lock().unwrap();
             let Some(existing) = assets.iter_mut().find(|a| a.id == id) else {
-                return Ok(None);
+                return Ok(UpdateOutcome::NotFound);
             };
             let before = existing.clone();
+            // The fake enforces the precondition too. One that ignored it would
+            // let a lost-update bug pass here and fail only against Postgres.
+            if let Some(expected) = expected_version {
+                if before.version != expected {
+                    return Ok(UpdateOutcome::VersionMismatch(before.version));
+                }
+            }
             let mut after = before.clone();
             if let Some(description) = &update.description {
                 after.description = description.clone();
@@ -1367,7 +1388,7 @@ mod tests {
             );
             let kind = classify(&diff);
             if matches!(kind, ChangeKind::None) {
-                return Ok(Some(before));
+                return Ok(UpdateOutcome::Updated(Box::new(before)));
             }
             after.version = before.version.bump(kind);
             after.updated_by = updated_by.to_string();
@@ -1381,7 +1402,7 @@ mod tests {
                 updated_by: updated_by.to_string(),
                 updated_at: after.updated_at,
             });
-            Ok(Some(after))
+            Ok(UpdateOutcome::Updated(Box::new(after)))
         }
 
         async fn asset_versions(&self, id: Uuid) -> Result<Vec<AssetVersion>, StorageError> {
@@ -2215,6 +2236,7 @@ mod projection_isolation_tests {
                 &AssetUpdate {
                     description: Some(Some("core banking".to_string())),
                 },
+                None,
             )
             .await
             .expect("the update must land even though the graph refused");
@@ -2281,6 +2303,7 @@ mod projection_isolation_tests {
                 &AssetUpdate {
                     description: Some(Some("core banking".to_string())),
                 },
+                None,
             )
             .await
             .expect("update");

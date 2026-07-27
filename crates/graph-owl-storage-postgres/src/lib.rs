@@ -5,7 +5,7 @@ use graph_owl_core::{
     envelope::{ChangeDescription, EntityVersion, classify},
     page::{Cursor, Page, PageRequest},
 };
-use graph_owl_storage::{ConflictKind, Storage, StorageError, StoredUser};
+use graph_owl_storage::{ConflictKind, Storage, StorageError, StoredUser, UpdateOutcome};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
@@ -479,7 +479,8 @@ impl Storage for PostgresStorage {
         id: Uuid,
         update: &AssetUpdate,
         updated_by: &str,
-    ) -> Result<Option<Asset>, StorageError> {
+        expected_version: Option<EntityVersion>,
+    ) -> Result<UpdateOutcome, StorageError> {
         let mut tx = self
             .pool
             .begin()
@@ -495,9 +496,17 @@ impl Storage for PostgresStorage {
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
         let Some(before_row) = before_row else {
-            return Ok(None);
+            return Ok(UpdateOutcome::NotFound);
         };
         let before = asset_from_row(before_row);
+
+        // Compared under the row lock taken above, so no writer can slip
+        // between the check and the write.
+        if let Some(expected) = expected_version {
+            if before.version != expected {
+                return Ok(UpdateOutcome::VersionMismatch(before.version));
+            }
+        }
 
         // Absent means "not declared"; explicit null means clear. Collapsing
         // them would let a connector's null description blank what a human
@@ -518,7 +527,7 @@ impl Storage for PostgresStorage {
             tx.rollback()
                 .await
                 .map_err(|e| StorageError::Unexpected(e.to_string()))?;
-            return Ok(Some(before));
+            return Ok(UpdateOutcome::Updated(Box::new(before)));
         }
 
         let next = before.version.bump(kind);
@@ -563,7 +572,7 @@ impl Storage for PostgresStorage {
             .await
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-        Ok(Some(updated))
+        Ok(UpdateOutcome::Updated(Box::new(updated)))
     }
 
     async fn asset_versions(&self, id: Uuid) -> Result<Vec<AssetVersion>, StorageError> {
