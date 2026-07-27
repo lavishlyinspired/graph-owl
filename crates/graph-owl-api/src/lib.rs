@@ -198,6 +198,121 @@ fn subject_of(principal: &Principal) -> Subject {
     }
 }
 
+/// How much of the graph one query may touch.
+///
+/// **Nothing adopted enforces a budget** (`00l`), so this is the project's own
+/// and it is not optional: an unbounded query over a growing graph is an
+/// outage waiting for the estate to get large enough.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SparqlBudget {
+    pub max_facts: usize,
+}
+
+impl Default for SparqlBudget {
+    fn default() -> Self {
+        // 50k facts is roughly a 5,000-asset estate fully projected — large
+        // enough that no realistic catalog question is refused, small enough
+        // that the materialised set stays well inside the memory budget in
+        // `00a`. Raised deliberately per deployment, not per query, because a
+        // caller who could raise their own budget does not have one.
+        Self { max_facts: 50_000 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SparqlOutcome {
+    /// One map per solution: variable name to its bound term, rendered.
+    pub rows: Vec<std::collections::BTreeMap<String, String>>,
+    pub facts_scanned: usize,
+    /// The budget cut the fact set short, so the answer may be incomplete.
+    /// **Always reported** — a truncated answer presented as complete is the
+    /// failure mode this project refuses everywhere else.
+    pub truncated: bool,
+    /// The transaction time the answer was computed at, when one was asked for.
+    pub as_of: Option<i64>,
+}
+
+/// Keep only the facts this principal may see, up to the budget.
+///
+/// A flake is visible when its subject is a visible asset. A **relationship**
+/// node is not an asset, so it is visible only when *both* endpoints are —
+/// otherwise the existence of an edge would disclose the existence of the
+/// asset at its far end, which is precisely what the policy hid.
+fn scope_facts(
+    all: &[graph_owl_core::flake::Flake],
+    visible: &std::collections::HashSet<String>,
+    max_facts: usize,
+) -> (Vec<graph_owl_core::flake::Flake>, bool) {
+    use graph_owl_core::flake::FlakeValue;
+
+    // Which relationship nodes have both endpoints visible. Computed first,
+    // because a relationship's own flakes are spread across several rows and a
+    // single pass would have to decide before seeing them all.
+    //
+    // Tracked as (endpoints seen, endpoints permitted) rather than a
+    // from/to pair. The first version kept the two positions apart and then
+    // required both to be permitted — which made the branch deciding *which*
+    // position to record indistinguishable from its opposite, and a mutation
+    // run said so. Direction does not matter to this question; only "did we
+    // see both ends, and may the caller see each of them".
+    let mut endpoints: std::collections::HashMap<&str, (usize, usize)> =
+        std::collections::HashMap::new();
+    for flake in all {
+        if flake.p.id != "fromEntity" && flake.p.id != "toEntity" {
+            continue;
+        }
+        let FlakeValue::Ref(target) = &flake.o else {
+            continue;
+        };
+        let entry = endpoints.entry(flake.s.id.as_str()).or_insert((0, 0));
+        entry.0 += 1;
+        if visible.contains(&target.id) {
+            entry.1 += 1;
+        }
+    }
+    let visible_edges: std::collections::HashSet<&str> = endpoints
+        .iter()
+        // Both ends present *and* both permitted. Requiring `seen == 2` is what
+        // stops a half-written projection — an edge with only one endpoint
+        // recorded — from counting as fully permitted.
+        .filter(|(_, (seen, permitted))| *seen == 2 && seen == permitted)
+        .map(|(id, _)| *id)
+        .collect();
+
+    let permitted: Vec<_> = all
+        .iter()
+        .filter(|flake| {
+            visible.contains(&flake.s.id) || visible_edges.contains(flake.s.id.as_str())
+        })
+        .cloned()
+        .collect();
+
+    let truncated = permitted.len() > max_facts;
+    let mut kept = permitted;
+    kept.truncate(max_facts);
+    (kept, truncated)
+}
+
+fn collect(results: spareval::QueryResults<'_>) -> Vec<std::collections::BTreeMap<String, String>> {
+    match results {
+        spareval::QueryResults::Solutions(iter) => iter
+            .filter_map(Result::ok)
+            .map(|solution| {
+                solution
+                    .iter()
+                    .map(|(var, term)| (var.as_str().to_string(), term.to_string()))
+                    .collect()
+            })
+            .collect(),
+        // An ASK is one row with one column, so a caller reading `rows` gets a
+        // usable answer without branching on query form.
+        spareval::QueryResults::Boolean(answer) => {
+            vec![std::iter::once(("answer".to_string(), answer.to_string())).collect()]
+        }
+        spareval::QueryResults::Graph(_) => Vec::new(),
+    }
+}
+
 /// The landing page's answer.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -347,6 +462,96 @@ impl Catalog {
         }
     }
 
+    /// Answer a SPARQL query over the graph, scoped to what this principal may
+    /// see and to the transaction time asked for.
+    ///
+    /// **The ordering is the security property.** Visibility is resolved
+    /// against *relational* state, the fact set is filtered before it is built,
+    /// and only then does the evaluator run. The evaluator therefore never
+    /// holds a fact the caller may not see, so no amount of optimisation inside
+    /// it can surface one — decision 7 made structural rather than trusted.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the query does not parse. `Storage` if no graph engine
+    /// is configured, or if the scan fails.
+    pub async fn sparql(
+        &self,
+        principal: &Principal,
+        query: &str,
+        as_of: Option<DateTime<Utc>>,
+        budget: SparqlBudget,
+    ) -> Result<SparqlOutcome, CatalogError> {
+        let parsed = spargebra::SparqlParser::new()
+            .parse_query(query)
+            .map_err(|error| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "query",
+                    FieldErrorCode::Type,
+                    error.to_string(),
+                )])
+            })?;
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        // 1. Who can see what — from relational, never from the projection.
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+        let visible: std::collections::HashSet<String> = self
+            .storage
+            .list_assets_under_fqn("")
+            .await?
+            .into_iter()
+            .filter(|asset| predicate.admits(&asset.fully_qualified_name))
+            .map(|asset| asset.id.to_string())
+            .collect();
+
+        // 2. When.
+        let at = match as_of {
+            None => None,
+            Some(instant) => graph
+                .time_at(instant)
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?,
+        };
+
+        // 3. The facts, filtered before the evaluator exists.
+        let all = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                as_of: at,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        let (facts, truncated) = scope_facts(&all, &visible, budget.max_facts);
+
+        // 4. Evaluate.
+        let dataset = graph_owl_query::dataset::FlakeDataset::from_flakes(&facts)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        let results = spareval::QueryEvaluator::new()
+            .prepare(&parsed)
+            .execute(&dataset)
+            .map_err(|e| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "query",
+                    FieldErrorCode::Type,
+                    e.to_string(),
+                )])
+            })?;
+
+        Ok(SparqlOutcome {
+            rows: collect(results),
+            facts_scanned: facts.len(),
+            truncated,
+            as_of: at,
+        })
+    }
+
     /// Assets the graph does not represent.
     ///
     /// Deliberately computed by **comparison, not from a queue**. A queue of
@@ -370,14 +575,7 @@ impl Catalog {
         // Every asset the catalog holds, live or tombstoned: a tombstoned
         // asset still projects (with `dsc:deleted true`), so an unprojected
         // one is drift regardless of its state.
-        let all = self.storage.list_assets_under_fqn("").await?;
-        let roots = self.storage.list_children(None).await?;
-        let mut assets = all;
-        for root in roots {
-            if !assets.iter().any(|a| a.id == root.id) {
-                assets.push(root);
-            }
-        }
+        let assets = self.storage.list_assets_under_fqn("").await?;
 
         let mut drifted = Vec::new();
         for asset in assets {
@@ -1428,7 +1626,8 @@ mod tests {
                 .iter()
                 .filter(|a| {
                     !a.deleted
-                        && (a.fully_qualified_name == prefix
+                        && (prefix.is_empty()
+                            || a.fully_qualified_name == prefix
                             || a.fully_qualified_name.starts_with(&format!("{prefix}.")))
                 })
                 .cloned()
@@ -2197,6 +2396,126 @@ mod tests {
 }
 
 #[cfg(test)]
+mod scope_facts_tests {
+    use super::{SparqlBudget, scope_facts};
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+    use std::collections::HashSet;
+
+    fn visible(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|id| (*id).to_string()).collect()
+    }
+
+    fn about(subject: &str, predicate: &str, value: FlakeValue) -> Flake {
+        Flake::assert(Sid::dsc(subject), Sid::dsc(predicate), value, 1)
+    }
+
+    fn edge(id: &str, from: &str, to: &str) -> Vec<Flake> {
+        vec![
+            about(id, "fromEntity", FlakeValue::Ref(Sid::dsc(from))),
+            about(id, "toEntity", FlakeValue::Ref(Sid::dsc(to))),
+            about(id, "relType", FlakeValue::String("feeds".into())),
+        ]
+    }
+
+    #[test]
+    fn a_fact_about_a_visible_asset_is_kept() {
+        let (kept, truncated) = scope_facts(
+            &[about("a", "name", FlakeValue::String("visible".into()))],
+            &visible(&["a"]),
+            100,
+        );
+        assert_eq!(kept.len(), 1);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn a_fact_about_a_hidden_asset_is_dropped() {
+        let (kept, _) = scope_facts(
+            &[about("secret", "name", FlakeValue::String("pan".into()))],
+            &visible(&["a"]),
+            100,
+        );
+        assert!(kept.is_empty());
+    }
+
+    /// **The property this function exists for.** An edge is not an asset, so
+    /// its visibility is not its own — an edge whose far end is hidden would
+    /// disclose that the far end *exists*, which is exactly what the policy
+    /// concealed.
+    #[test]
+    fn an_edge_to_a_hidden_asset_is_dropped_entirely() {
+        let mut flakes = edge("r1", "a", "secret");
+        flakes.push(about("a", "name", FlakeValue::String("visible".into())));
+
+        let (kept, _) = scope_facts(&flakes, &visible(&["a"]), 100);
+
+        assert_eq!(kept.len(), 1, "only the visible asset's own fact: {kept:?}");
+        assert!(
+            !kept.iter().any(|f| f.s.id == "r1"),
+            "no part of the edge may survive — not even its relType, which \
+             would still prove an edge exists"
+        );
+    }
+
+    #[test]
+    fn an_edge_between_two_visible_assets_is_kept_whole() {
+        let (kept, _) = scope_facts(&edge("r1", "a", "b"), &visible(&["a", "b"]), 100);
+        assert_eq!(kept.len(), 3, "every flake of the edge: {kept:?}");
+    }
+
+    /// Direction must not matter. Checking only one endpoint would leak in one
+    /// direction and not the other, which is worse than leaking in both because
+    /// nobody would find it.
+    #[test]
+    fn an_edge_from_a_hidden_asset_is_dropped_too() {
+        let (kept, _) = scope_facts(&edge("r1", "secret", "b"), &visible(&["b"]), 100);
+        assert!(kept.is_empty(), "{kept:?}");
+    }
+
+    /// A relationship node with no endpoint flakes at all — a half-written
+    /// projection — must not be assumed visible. Absence of evidence is not
+    /// permission.
+    #[test]
+    fn an_edge_with_no_endpoints_is_not_assumed_visible() {
+        let orphan = vec![about("r1", "relType", FlakeValue::String("feeds".into()))];
+        let (kept, _) = scope_facts(&orphan, &visible(&["a", "b"]), 100);
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn exceeding_the_budget_truncates_and_says_so() {
+        let flakes: Vec<Flake> = (0..10)
+            .map(|i| about("a", &format!("p{i}"), FlakeValue::Int(i)))
+            .collect();
+        let (kept, truncated) = scope_facts(&flakes, &visible(&["a"]), 4);
+        assert_eq!(kept.len(), 4);
+        assert!(truncated, "a truncated answer must never look complete");
+    }
+
+    /// Landing exactly on the budget is not truncation. Reporting it as such
+    /// would make every full-budget answer look unreliable.
+    #[test]
+    fn landing_exactly_on_the_budget_is_not_truncation() {
+        let flakes: Vec<Flake> = (0..4)
+            .map(|i| about("a", &format!("p{i}"), FlakeValue::Int(i)))
+            .collect();
+        let (kept, truncated) = scope_facts(&flakes, &visible(&["a"]), 4);
+        assert_eq!(kept.len(), 4);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn the_default_budget_is_bounded_and_useful() {
+        let budget = SparqlBudget::default();
+        assert!(
+            budget.max_facts >= 10_000,
+            "too small to answer real questions"
+        );
+        assert!(budget.max_facts <= 1_000_000, "not a budget");
+    }
+}
+
+#[cfg(test)]
 mod projection_isolation_tests {
     use super::*;
     use async_trait::async_trait;
@@ -2210,6 +2529,8 @@ mod projection_isolation_tests {
         fail: bool,
         asserted: Mutex<Vec<Flake>>,
         retracted: Mutex<Vec<Flake>>,
+        clock: std::sync::atomic::AtomicI64,
+        at_resolves_to: std::sync::atomic::AtomicI64,
     }
 
     impl RecordingGraph {
@@ -2218,6 +2539,8 @@ mod projection_isolation_tests {
                 fail: false,
                 asserted: Mutex::new(Vec::new()),
                 retracted: Mutex::new(Vec::new()),
+                clock: std::sync::atomic::AtomicI64::new(0),
+                at_resolves_to: std::sync::atomic::AtomicI64::new(i64::MAX),
             })
         }
 
@@ -2226,6 +2549,8 @@ mod projection_isolation_tests {
                 fail: true,
                 asserted: Mutex::new(Vec::new()),
                 retracted: Mutex::new(Vec::new()),
+                clock: std::sync::atomic::AtomicI64::new(0),
+                at_resolves_to: std::sync::atomic::AtomicI64::new(i64::MAX),
             })
         }
 
@@ -2258,8 +2583,18 @@ mod projection_isolation_tests {
             Ok(())
         }
 
-        async fn query_pattern(&self, _: &TriplePattern) -> Result<Vec<Flake>, EngineError> {
-            Ok(Vec::new())
+        /// Serves back what was asserted, honouring `as_of`.
+        ///
+        /// A double that always returned nothing would make `Catalog::sparql`
+        /// untestable here — every query would answer zero rows whether the
+        /// code worked or not, which is the shape of a test that cannot fail.
+        async fn query_pattern(&self, pattern: &TriplePattern) -> Result<Vec<Flake>, EngineError> {
+            let asserted = self.asserted.lock().expect("lock");
+            Ok(asserted
+                .iter()
+                .filter(|f| pattern.as_of.is_none_or(|t| f.t <= t))
+                .cloned()
+                .collect())
         }
 
         /// Answers from what was actually asserted.
@@ -2279,18 +2614,28 @@ mod projection_isolation_tests {
                 .count() as u64)
         }
 
+        /// A real advancing clock, so successive writes land at different `t`.
+        /// A double that returned a constant would make `as_of` unobservable —
+        /// every fact would sit at the same instant and no historical query
+        /// could differ from a present one.
         async fn next_time(&self) -> Result<i64, EngineError> {
             if self.fail {
                 return Self::refuse();
             }
-            Ok(1)
+            Ok(self.clock.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1)
         }
 
+        /// Resolves any instant to whatever `at_resolves_to` says, so a test
+        /// can ask for a specific point in history without inventing wall
+        /// clocks.
         async fn time_at(
             &self,
             _: chrono::DateTime<chrono::Utc>,
         ) -> Result<Option<i64>, EngineError> {
-            Ok(Some(1))
+            Ok(Some(
+                self.at_resolves_to
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ))
         }
     }
 
@@ -2391,6 +2736,117 @@ mod projection_isolation_tests {
         );
     }
 
+    /// **Regression test.** `list_assets_under_fqn("")` used to match nothing —
+    /// `fqn LIKE '.%'` is false for every real FQN — so drift detection scanned
+    /// an empty set and reported no drift. A detector that always says "all
+    /// clear" is worse than none, because it is believed.
+    ///
+    /// The original test passed because its only asset was a *root*, which a
+    /// separate `list_children(None)` call happened to cover. A nested asset
+    /// was invisible.
+    #[tokio::test]
+    async fn drift_detection_sees_nested_assets_not_only_roots() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let broken = Catalog::new(storage.clone()).with_graph(RecordingGraph::broken());
+
+        let root = broken
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("root");
+        broken
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Database,
+                    name: "postgres".to_string(),
+                    parent_id: Some(root.id),
+                    description: None,
+                    properties: None,
+                },
+            )
+            .await
+            .expect("nested");
+
+        let repaired =
+            Catalog::new(storage).with_graph(RecordingGraph::working() as Arc<dyn TripleStore>);
+        let drifted = repaired.projection_drift().await.expect("drift");
+
+        assert_eq!(
+            drifted.len(),
+            2,
+            "both the root and the nested asset are unprojected: {:?}",
+            drifted
+                .iter()
+                .map(|a| &a.fully_qualified_name)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Drift must report only what is *actually* missing. The per-subject
+    /// pattern is what makes that possible — a scan that ignored the subject
+    /// would count every `fqn` flake in the graph and conclude nothing is
+    /// drifted, which is the answer a broken detector gives.
+    #[tokio::test]
+    async fn drift_reports_only_the_unprojected_assets() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+
+        // One asset projected properly.
+        let working =
+            Catalog::new(storage.clone()).with_graph(graph.clone() as Arc<dyn TripleStore>);
+        working
+            .upsert_asset(&Principal::system(), service("projected"))
+            .await
+            .expect("projected");
+
+        // One written while the graph was down.
+        let broken = Catalog::new(storage.clone()).with_graph(RecordingGraph::broken());
+        broken
+            .upsert_asset(&Principal::system(), service("unprojected"))
+            .await
+            .expect("unprojected");
+
+        let drifted = working.projection_drift().await.expect("drift");
+
+        assert_eq!(drifted.len(), 1, "{drifted:?}");
+        assert_eq!(drifted[0].name, "unprojected");
+    }
+
+    /// A **half-projected** asset is drift too. Drift asks specifically whether
+    /// the `fqn` flake is present, not whether the subject has any flakes at
+    /// all — an asset carrying a few fields and missing its identity is exactly
+    /// the state a failed projection leaves behind, and the looser check would
+    /// call it healthy.
+    #[tokio::test]
+    async fn an_asset_projected_without_its_fqn_is_still_drift() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog =
+            Catalog::new(storage.clone()).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let asset = catalog
+            .upsert_asset(&Principal::system(), service("half"))
+            .await
+            .expect("create");
+
+        // Simulate a projection that wrote some fields and lost the rest.
+        {
+            let mut asserted = graph.asserted.lock().expect("lock");
+            asserted.retain(|f| f.p.id != "fqn");
+            assert!(
+                asserted.iter().any(|f| f.s.id == asset.id.to_string()),
+                "the subject still has other flakes, which is the point"
+            );
+        }
+
+        let drifted = catalog.projection_drift().await.expect("drift");
+        assert_eq!(
+            drifted.len(),
+            1,
+            "an asset without its fqn is not projected: {drifted:?}"
+        );
+    }
+
     /// No graph configured is not drift. Reporting every asset as drifted on a
     /// deployment that never wanted a graph would make the number meaningless.
     #[tokio::test]
@@ -2401,6 +2857,97 @@ mod projection_isolation_tests {
             .await
             .expect("create");
         assert!(catalog.projection_drift().await.expect("drift").is_empty());
+    }
+
+    /// A SPARQL answer must actually contain rows. `collect` returning an
+    /// empty vec is otherwise indistinguishable from a query that matched
+    /// nothing — and the HTTP tests that cover this live in another crate,
+    /// which a mutation run scoped to this one never executes.
+    #[tokio::test]
+    async fn sparql_returns_rows_from_the_graph() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let created = catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("create");
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?n WHERE { ?s <https://graph-owl.dev/ns/catalog#name> ?n }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(outcome.rows.len(), 1, "{:?}", outcome.rows);
+        assert!(
+            outcome.rows[0]["n"].contains("hdfc-core"),
+            "{:?}",
+            outcome.rows
+        );
+        assert!(outcome.facts_scanned > 0);
+        assert!(!outcome.truncated);
+        let _ = created;
+    }
+
+    /// `as_of` must reach the scan.
+    ///
+    /// Dropping the field would silently answer every historical question with
+    /// present-day facts — the one failure that makes time travel worse than
+    /// not having it, because the answer looks right.
+    ///
+    /// Observable only because the double's clock advances: the first asset
+    /// lands at `t = 1`, the second at `t = 2`, and a query resolved to `t = 1`
+    /// must not see the second.
+    #[tokio::test]
+    async fn sparql_honours_as_of_by_reaching_the_scan() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        catalog
+            .upsert_asset(&Principal::system(), service("first"))
+            .await
+            .expect("first");
+        catalog
+            .upsert_asset(&Principal::system(), service("second"))
+            .await
+            .expect("second");
+
+        let query = "SELECT ?n WHERE { ?s <https://graph-owl.dev/ns/catalog#name> ?n }";
+
+        let now = catalog
+            .sparql(&Principal::system(), query, None, SparqlBudget::default())
+            .await
+            .expect("query");
+        assert_eq!(now.rows.len(), 2, "both exist now: {:?}", now.rows);
+
+        // Resolve any instant to t = 1 — before the second write.
+        graph
+            .at_resolves_to
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let earlier = catalog
+            .sparql(
+                &Principal::system(),
+                query,
+                Some(Utc::now()),
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(earlier.as_of, Some(1), "the resolved t must be reported");
+        assert_eq!(
+            earlier.rows.len(),
+            1,
+            "the second asset did not exist at t=1: {:?}",
+            earlier.rows
+        );
     }
 
     /// **Decision 6, asserted rather than promised.** Failing an entity write

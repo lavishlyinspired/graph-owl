@@ -444,9 +444,14 @@ impl Storage for PostgresStorage {
         // match: `hdfc-core` must not also match a service called
         // `hdfc-core-archive`, which a plain LIKE would sweep into the scope
         // and then delete.
+        //
+        // The empty prefix is special-cased to mean *everything*. Left to the
+        // general form it becomes `fqn LIKE '.%'`, which is false for every
+        // real FQN — so "no restriction" would silently return nothing.
         sqlx::query(&format!(
             "SELECT {ASSET_COLUMNS} FROM assets
-             WHERE deleted = FALSE AND (fully_qualified_name = $1
+             WHERE deleted = FALSE AND ($1 = ''
+                                        OR fully_qualified_name = $1
                                         OR fully_qualified_name LIKE $1 || '.%')"
         ))
         .bind(prefix)

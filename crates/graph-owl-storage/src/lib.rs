@@ -124,6 +124,13 @@ pub trait Storage: Send + Sync {
     ) -> Result<Page<Asset>, StorageError>;
     /// Every **live** asset whose FQN is `prefix` or sits beneath it.
     ///
+    /// An **empty prefix means every asset**. Without that case the natural
+    /// reading — "no prefix, no restriction" — silently matches nothing,
+    /// because `fqn LIKE '.%'` is false for every real FQN. That is exactly the
+    /// bug it caused: `projection_drift` scanned an empty set and reported no
+    /// drift, which is the most dangerous possible answer from a drift
+    /// detector.
+    ///
     /// Unpaged on purpose: the caller is a connector run reconciling its whole
     /// scope, and a paged answer would let an asset slip between pages while
     /// the run writes — which would then read as "the source no longer reports

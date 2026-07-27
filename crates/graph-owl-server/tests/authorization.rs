@@ -430,3 +430,130 @@ async fn documentation_coverage_counts_real_descriptions_only() {
         "a real description must move the number"
     );
 }
+
+async fn sparql(app: &axum::Router, subject: &str, query: &str) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/sparql")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", token(subject)))
+                .body(Body::from(json!({ "query": query }).to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    let status = response.status();
+    (status, json_body(response).await)
+}
+
+const DSC: &str = "https://graph-owl.dev/ns/catalog#";
+
+/// **The demo moment, in SPARQL.** The same query, two principals, different
+/// answers — and the difference is structural: the analyst's evaluator never
+/// receives the denied facts, so no optimisation inside it could surface them.
+#[tokio::test]
+async fn two_principals_running_the_same_sparql_get_different_results() {
+    let (app, _container) = fixture().await;
+    let query = format!("SELECT ?name WHERE {{ ?t <{DSC}type> \"table\" . ?t <{DSC}name> ?name }}");
+
+    let (status, admin) = sparql(&app, "root", &query).await;
+    assert_eq!(status, StatusCode::OK, "{admin}");
+    let (_, analyst) = sparql(&app, "asha", &query).await;
+
+    let names = |body: &Value| -> Vec<String> {
+        body["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter_map(|row| {
+                row["name"]
+                    .as_str()
+                    .map(|s| s.trim_matches('"').to_string())
+            })
+            .collect()
+    };
+
+    let admin_names = names(&admin);
+    let analyst_names = names(&analyst);
+
+    assert!(
+        admin_names.iter().any(|n| n == "customers"),
+        "the admin must see the PII table: {admin_names:?}"
+    );
+    assert!(
+        !analyst_names.iter().any(|n| n == "customers"),
+        "the analyst must not: {analyst_names:?}"
+    );
+    assert!(
+        !analyst_names.is_empty(),
+        "and must still see everything else"
+    );
+}
+
+/// A denied asset must not be reachable through a *join* either. Filtering the
+/// rows would still have let the join traverse it.
+#[tokio::test]
+async fn a_denied_asset_is_not_reachable_through_a_join() {
+    let (app, _container) = fixture().await;
+    let (_, analyst) = sparql(
+        &app,
+        "asha",
+        &format!("SELECT ?fqn WHERE {{ ?c <{DSC}parentTable> ?t . ?t <{DSC}fqn> ?fqn }}"),
+    )
+    .await;
+
+    let body = analyst.to_string();
+    assert!(
+        !body.contains("core_banking"),
+        "a join reached into the denied schema: {body}"
+    );
+}
+
+/// The freshness stamp and the truncation flag are always present — a caller
+/// must never have to infer either from the row count.
+#[tokio::test]
+async fn a_sparql_answer_states_its_own_completeness() {
+    let (app, _container) = fixture().await;
+    let (status, body) = sparql(
+        &app,
+        "root",
+        &format!("SELECT ?n WHERE {{ ?t <{DSC}name> ?n }}"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truncated"], false);
+    assert!(body["factsScanned"].as_u64().expect("factsScanned") > 0);
+    assert!(body.get("asOf").is_some(), "the stamp must be present");
+}
+
+#[tokio::test]
+async fn a_malformed_query_is_a_400_naming_the_field() {
+    let (app, _container) = fixture().await;
+    let (status, body) = sparql(&app, "root", "SELECT ?x WHERE { not sparql").await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["errors"][0]["field"], "query");
+}
+
+#[tokio::test]
+async fn an_unauthenticated_sparql_request_is_rejected() {
+    let (app, _container) = fixture().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/sparql")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "query": "SELECT ?x WHERE { ?x ?p ?o }" }).to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

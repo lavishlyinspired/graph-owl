@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+use graph_owl_api::SparqlBudget;
 use graph_owl_api::{
     Catalog, CatalogError, CreateRelationship, CreateTable, UpsertAsset,
     validation::{FieldError, FieldErrorCode, ValidateBody, require_non_empty_string},
@@ -40,6 +41,7 @@ pub fn app(catalog: Catalog) -> Router {
         .route("/assets/stats", get(asset_stats))
         .route("/overview", get(overview))
         .route("/graph/reconcile", post(reconcile_projection))
+        .route("/sparql", post(sparql))
         .route("/connectors/postgres/runs", post(run_postgres_connector))
         // Unauthenticated by design: an orchestrator's probe must not depend
         // on the identity provider being reachable.
@@ -820,6 +822,70 @@ async fn asset_ancestors(
 ) -> Result<Json<Vec<Asset>>, AppError> {
     catalog.get_asset_for(&principal, id).await?;
     Ok(Json(catalog.ancestors_of(id).await?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SparqlRequest {
+    query: String,
+    /// RFC 3339. Absent means now.
+    as_of: Option<String>,
+}
+
+impl ValidateBody for SparqlRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("query"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// SPARQL over the graph.
+///
+/// `POST` rather than `GET`, deliberately: a query is a body, not a URL. The
+/// GET form the SPARQL protocol also allows would put a whole query — often
+/// with literal values from the estate — into request logs and browser history.
+async fn sparql(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<SparqlRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let as_of = match payload.as_of {
+        None => None,
+        Some(raw) => Some(
+            chrono::DateTime::parse_from_rfc3339(&raw)
+                .map_err(|e| {
+                    AppError::Validation(vec![FieldError::new(
+                        "asOf",
+                        FieldErrorCode::Type,
+                        format!("`{raw}` is not an RFC 3339 timestamp: {e}"),
+                    )])
+                })?
+                .with_timezone(&chrono::Utc),
+        ),
+    };
+
+    // The budget is the server's, not the caller's. A client that could raise
+    // its own limit does not have one.
+    let outcome = catalog
+        .sparql(&principal, &payload.query, as_of, SparqlBudget::default())
+        .await?;
+
+    Ok(Json(json!({
+        "rows": outcome.rows,
+        "factsScanned": outcome.facts_scanned,
+        // Always present, never inferred from row count. A truncated answer
+        // that looks complete is the failure this project refuses everywhere.
+        "truncated": outcome.truncated,
+        // The freshness stamp (`04-engine-triples.md` decision 8): an
+        // eventually-consistent answer presented as current is this design's
+        // failure mode, and the stamp is what makes it honest instead.
+        "asOf": outcome.as_of,
+    })))
 }
 
 /// Re-project whatever the graph is missing, and report the drift either way.

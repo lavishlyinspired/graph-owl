@@ -11,6 +11,9 @@ graph-owl-authz.workspace = true
 graph-owl-engine.workspace = true
 graph-owl-traversal.workspace = true
 graph-owl-connectors.workspace = true
+graph-owl-query = { path = "../graph-owl-query" }
+spareval = "0.2"
+spargebra = "0.4"
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

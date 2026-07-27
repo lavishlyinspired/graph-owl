@@ -207,7 +207,7 @@ predicate has to reach it before any graph query is exposed to a real user.
 **What you can show**: open the Graph tab on `upi_transactions`, switch between 1/2/3 hops and watch the neighbourhood grow; set the time chip to before an edit and see the asset come back at its older version with its older description.
 
 **What this demo cannot yet show**, stated plainly:
-- **No SPARQL yet.** Epic 7 is not started. Its scope collapsed on 28 July 2026 — the evaluator is adopted and only the flake-side dataset is ours — so this is now the nearest large win rather than the largest remaining build.
+- **SPARQL works** — `POST /sparql`, authorization-scoped and budgeted. What is *not* done is pattern pushdown: the scan materialises the permitted fact set rather than narrowing per pattern, which is fine at demo scale and will not be at 100k assets.
 - **The time control moves the asset read and the graph walk, not the tree or search.** `?asOf=` is answered per asset and per traversal; the hierarchy and the search index still show the present.
 - **Nothing declares lineage yet.** The graph is real, but its edges are the hierarchy plus any relationship a client creates by hand — no connector infers `feeds`.
 
@@ -235,11 +235,11 @@ from permissively-licensed crates. What this epic builds is the
 no library can supply actually live.
 
 - [x] **`QueryableDataset` over flakes** — the whole of this epic's own content *(Slice A)*. Real SPARQL runs: BGP, two-hop join, numeric FILTER, OPTIONAL, ASK, named-graph isolation
-- [ ] Index selection across the four orderings, inside the scan
-- [ ] `as_of` — the dataset is constructed at a transaction time
-- [ ] Authorization compiled into the scan, so the evaluator only ever sees permitted rows
-- [ ] Resource tracking (`Tracker`) — **nothing adopted enforces budgets; this is ours**
-- [ ] Freshness stamping on the result (Epic 4 decision 8)
+- [ ] Index selection across the four orderings — the scan currently materialises the permitted set rather than pushing patterns down
+- [x] `as_of` — the dataset is constructed at a transaction time *(Slice B)*
+- [x] Authorization applied before the dataset exists, so the evaluator only ever sees permitted rows; edges hidden unless *both* endpoints are visible *(Slice B)*
+- [x] Fact budget — **nothing adopted enforces budgets; this is ours**. 50k facts, server-side, truncation always reported *(Slice B)*
+- [x] Freshness stamping on the result (Epic 4 decision 8) *(Slice B)*
 - [x] ~~Parser~~ — `spargebra`, full SPARQL 1.1 *(adopted)*
 - [x] ~~Planner / execution~~ — `spareval` *(adopted)*
 - [ ] Verify: does `sparopt`'s generic rewriting fight index selection? Measure before trusting
