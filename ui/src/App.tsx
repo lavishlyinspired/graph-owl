@@ -51,8 +51,8 @@ import {
   ApiError,
   api,
 } from "./api";
-import { darkTheme, lightTheme, palette } from "./theme";
-import { GenericSourceMark, PostgresMark } from "./icons";
+import { brand, darkTheme, lightTheme, palette } from "./theme";
+import { GenericSourceMark, GraphOwlLockup, GraphOwlMark, PostgresMark } from "./icons";
 
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
@@ -67,11 +67,14 @@ const KIND_ICON: Record<AssetKind, React.ReactNode> = {
   column: <TagOutlined />,
 };
 
+/** Kind colours walk the logo's own gradient — navy through blue and indigo to
+ *  teal — so depth in the hierarchy reads as a colour progression rather than
+ *  five unrelated hues. */
 const KIND_COLOR: Record<AssetKind, string> = {
-  service: "blue",
-  database: "geekblue",
-  schema: "purple",
-  table: "green",
+  service: brand.navy800,
+  database: brand.blue600,
+  schema: brand.indigo400,
+  table: brand.teal500,
   column: "default",
 };
 
@@ -667,9 +670,12 @@ export default function App() {
               flex: "0 0 auto",
             }}
           >
-            <Space size={8}>
-              <ApartmentOutlined style={{ color: "#1570ef", fontSize: 18 }} />
-              <Text style={{ fontSize: 15, fontWeight: 600 }}>graph-owl</Text>
+            <Space size={9}>
+              <GraphOwlMark dark={dark} />
+              <Text style={{ fontSize: 16, fontWeight: 700, letterSpacing: "-0.01em" }}>
+                <span style={{ color: dark ? "#E6ECF8" : brand.navy900 }}>Graph</span>
+                <span style={{ color: dark ? "#2BC4C9" : brand.teal500 }}>Owl</span>
+              </Text>
             </Space>
             <Input
               prefix={<SearchOutlined style={{ color: colors.textSubtle }} />}
@@ -686,7 +692,16 @@ export default function App() {
               {/* Time travel arrives with Epic 4, but the control belongs in the
                   chrome from the start — it is a session-wide property. */}
               <Tooltip title="Time travel arrives with the graph engine">
-                <Tag color="cyan" icon={<ClockCircleOutlined />} style={{ marginInlineEnd: 0 }}>
+                <Tag
+                  icon={<ClockCircleOutlined />}
+                  style={{
+                    marginInlineEnd: 0,
+                    background: dark ? "#0C3B47" : "#E6F7F8",
+                    borderColor: dark ? brand.teal500 : brand.cyan400,
+                    color: dark ? "#2BC4C9" : brand.teal600,
+                    fontWeight: 500,
+                  }}
+                >
                   now
                 </Tag>
               </Tooltip>
@@ -822,6 +837,9 @@ export default function App() {
                 <AssetDetail asset={selected} onChanged={setSelectedRaw} />
               ) : (
                 <Space direction="vertical" size="large" style={{ width: "100%" }}>
+                  {total === 0 && (
+                    <GraphOwlLockup width={280} />
+                  )}
                   <div>
                     <Title level={4} style={{ marginBottom: 4, fontWeight: 600 }}>
                       {total === 0 ? "Nothing catalogued yet" : `${total} assets catalogued`}
