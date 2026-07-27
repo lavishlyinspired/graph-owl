@@ -22,3 +22,7 @@
 .claude/docs/graph-owl-engine.md
 .claude/docs/KGDOCS_to_GRAPHOWL_PLAN.md
 
+
+# Frontend build output and dependencies
+/ui/node_modules/
+/ui/dist/

@@ -1,0 +1,97 @@
+/* Semantic tokens only — 00h-ui-design-system.md.
+   Primitives are not exposed: a component reaching for --blue-600 is how a
+   374-variable palette happens. ~48 names, and that is the vocabulary. */
+:root {
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f7f8fa;
+  --surface-overlay: #ffffff;
+
+  --text: #14161a;
+  --text-muted: #5b6472;
+  --text-subtle: #8b95a5;
+  --text-inverse: #ffffff;
+
+  --border: #e3e7ee;
+  --border-strong: #c9d1de;
+  --border-subtle: #eef1f6;
+
+  /* Indigo, deliberately shifted from the category-standard azure: same
+     temperature so it reads as familiar, distinct enough to be its own. */
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-subtle: #eef2ff;
+
+  --success: #047857;
+  --success-subtle: #ecfdf5;
+  --warning: #b45309;
+  --warning-subtle: #fffbeb;
+  --danger: #b91c1c;
+  --danger-subtle: #fef2f2;
+
+  /* The twist: epistemic status is a visual primitive, not a badge.
+     `asserted` deliberately has no token — the default IS asserted, and
+     marking both states doubles the noise and halves the signal. */
+  --derived: #7c3aed;
+  --derived-subtle: #f5f3ff;
+
+  --confidence-high: var(--success);
+  --confidence-mid: var(--warning);
+  --confidence-low: var(--text-subtle);
+
+  /* The only token allowed to tint global chrome, spent on exactly one
+     thing: you are not looking at now. */
+  --temporal: #0f766e;
+  --temporal-subtle: #f0fdfa;
+
+  --radius-control: 6px;
+  --radius-card: 10px;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-6: 24px; --space-8: 32px; --space-12: 48px;
+  --shadow-raised: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-overlay: 0 8px 24px rgba(16, 24, 40, 0.12);
+  --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #0f1115;
+    --surface-raised: #161920;
+    --surface-sunken: #0b0d11;
+    --surface-overlay: #1a1e27;
+    --text: #e8eaf0;
+    --text-muted: #9aa4b5;
+    --text-subtle: #6b7488;
+    --border: #262b36;
+    --border-strong: #3a414f;
+    --border-subtle: #1c202a;
+    --accent: #818cf8;
+    --accent-hover: #a5b4fc;
+    --accent-subtle: #1e1b4b;
+    --success: #34d399; --success-subtle: #052e21;
+    --warning: #fbbf24; --warning-subtle: #2e1f05;
+    --danger: #f87171;  --danger-subtle: #2e0b0b;
+    --derived: #a78bfa; --derived-subtle: #241b45;
+    --temporal: #2dd4bf; --temporal-subtle: #042f2b;
+    --shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.5);
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: var(--font);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+/* FQNs are structured identifiers where character-level differences carry
+   meaning, and proportional type hides exactly those differences. */
+code, .fqn { font-family: var(--font-mono); font-size: 12px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

@@ -8,3 +8,6 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+axum.workspace = true
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess = "2"

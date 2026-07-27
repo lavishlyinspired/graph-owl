@@ -1,0 +1,136 @@
+.shell { display: flex; flex-direction: column; height: 100vh; }
+
+.topbar {
+  display: flex; align-items: center; gap: var(--space-4);
+  padding: 0 var(--space-4); height: 52px;
+  border-bottom: 1px solid var(--border); background: var(--surface-raised);
+}
+.brand { font-weight: 600; letter-spacing: -0.01em; color: var(--accent); }
+.search {
+  flex: 1; max-width: 520px; height: 32px; padding: 0 var(--space-3);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-control);
+  background: var(--surface); color: var(--text); font: inherit;
+}
+.now {
+  margin-left: auto; font-size: 12px; color: var(--temporal);
+  background: var(--temporal-subtle); border: 1px solid var(--temporal);
+  padding: 3px var(--space-2); border-radius: 999px;
+}
+
+.body { display: flex; flex: 1; min-height: 0; }
+
+.rail {
+  width: 300px; flex-shrink: 0; overflow-y: auto;
+  border-right: 1px solid var(--border); background: var(--surface-sunken);
+  padding: var(--space-4) 0;
+}
+.rail-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-subtle); margin: var(--space-4) var(--space-4) var(--space-2);
+}
+.rail-stats { display: flex; flex-wrap: wrap; gap: var(--space-2); padding: 0 var(--space-4); }
+.stat {
+  display: flex; flex-direction: column; padding: var(--space-2) var(--space-3);
+  background: var(--surface-raised); border: 1px solid var(--border);
+  border-radius: var(--radius-card); min-width: 62px;
+}
+.stat-n { font-size: 18px; font-weight: 600; line-height: 1.1; }
+.stat-k { font-size: 11px; color: var(--text-muted); }
+
+.tree { list-style: none; margin: 0; padding: 0; }
+.tree-row { display: flex; align-items: center; gap: 2px; }
+.tree-row:hover { background: var(--surface-raised); }
+.tree-row-selected { background: var(--accent-subtle); }
+.tree-toggle {
+  width: 18px; height: 24px; border: 0; background: none; cursor: pointer;
+  color: var(--text-subtle); font-size: 10px; padding: 0;
+}
+.tree-toggle:disabled { cursor: default; opacity: 0.4; }
+.tree-label {
+  flex: 1; text-align: left; border: 0; background: none; cursor: pointer;
+  padding: 3px 0; font: inherit; color: var(--text);
+  display: flex; align-items: center; gap: var(--space-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tree-glyph { color: var(--text-subtle); font-size: 11px; }
+
+.main { flex: 1; overflow-y: auto; padding: var(--space-8); }
+
+.breadcrumb { font-size: 12px; color: var(--text-muted); margin-bottom: var(--space-3); }
+.crumb-sep { margin: 0 var(--space-2); color: var(--text-subtle); }
+.crumb-current { color: var(--text); font-weight: 500; }
+
+.detail-head { display: flex; align-items: center; gap: var(--space-3); }
+.detail-head h1 { font-size: 24px; margin: 0; letter-spacing: -0.02em; }
+.detail .fqn { color: var(--text-muted); margin: var(--space-1) 0 var(--space-4); }
+.detail-description { color: var(--text-muted); max-width: 70ch; }
+.empty-inline { color: var(--text-subtle); font-style: italic; }
+
+.trust-bar {
+  display: flex; gap: var(--space-2); flex-wrap: wrap;
+  padding: var(--space-3); background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-card);
+  margin-bottom: var(--space-4);
+}
+.trust-item { font-size: 12px; }
+.trust-pending { color: var(--text-subtle); }
+
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; padding: 2px var(--space-2); border-radius: 999px;
+  border: 1px solid var(--border-strong); color: var(--text-muted);
+  background: var(--surface-raised); white-space: nowrap;
+}
+.badge-service { color: var(--accent); border-color: var(--accent); background: var(--accent-subtle); }
+.badge-table   { color: var(--success); border-color: var(--success); background: var(--success-subtle); }
+
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em;
+     color: var(--text-subtle); margin: var(--space-8) 0 var(--space-3); }
+.count { color: var(--text-subtle); font-weight: 400; }
+
+table { border-collapse: collapse; width: 100%; max-width: 900px; }
+th, td { text-align: left; padding: var(--space-2) var(--space-3);
+         border-bottom: 1px solid var(--border-subtle); font-size: 13px; }
+thead th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+           color: var(--text-subtle); border-bottom: 1px solid var(--border); }
+.props th { width: 180px; color: var(--text-muted); font-weight: 500; }
+
+.empty { max-width: 640px; }
+.empty h1 { font-size: 22px; margin: 0 0 var(--space-2); }
+.empty p { color: var(--text-muted); }
+
+.connector {
+  margin-top: var(--space-6); padding: var(--space-6);
+  border: 1px solid var(--border); border-radius: var(--radius-card);
+  background: var(--surface-raised); box-shadow: var(--shadow-raised);
+}
+.connector h2 { margin-top: 0; }
+.connector label { display: block; font-size: 12px; color: var(--text-muted);
+                   margin-bottom: var(--space-3); }
+.connector input {
+  display: block; width: 100%; margin-top: var(--space-1); height: 32px;
+  padding: 0 var(--space-3); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control); background: var(--surface);
+  color: var(--text); font-family: var(--font-mono); font-size: 12px;
+}
+button.primary {
+  height: 32px; padding: 0 var(--space-4); border: 0; cursor: pointer;
+  border-radius: var(--radius-control); background: var(--accent);
+  color: var(--text-inverse); font: inherit; font-weight: 500;
+}
+button.primary:hover { background: var(--accent-hover); }
+button.primary:disabled { opacity: 0.6; cursor: default; }
+.status { margin-bottom: 0; font-size: 13px; color: var(--success); }
+
+.results h1 { font-size: 18px; margin: 0 0 var(--space-4); font-weight: 500; }
+.result-list { list-style: none; margin: 0; padding: 0; }
+.result-list button {
+  display: flex; align-items: center; gap: var(--space-3); width: 100%;
+  text-align: left; border: 0; border-bottom: 1px solid var(--border-subtle);
+  background: none; cursor: pointer; padding: var(--space-3) var(--space-2);
+  font: inherit; color: var(--text);
+}
+.result-list button:hover { background: var(--surface-sunken); }
+.result-name { font-weight: 500; min-width: 160px; }
+.result-list .fqn { color: var(--text-subtle); margin-left: auto; }
+.muted { color: var(--text-subtle); }

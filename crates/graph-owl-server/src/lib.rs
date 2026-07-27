@@ -43,6 +43,10 @@ pub fn app(catalog: Catalog) -> Router {
         .route("/assets/{id}/children", get(list_asset_children))
         .route("/assets/{id}/ancestors", get(asset_ancestors))
         .with_state(catalog)
+        // Mounted LAST so the SPA fallback cannot swallow an unknown API path.
+        // A fallback registered first turns every mistyped endpoint into a 200
+        // text/html and the client sees a blank page instead of an error.
+        .merge(graph_owl_ui::router())
 }
 
 async fn create_table(
