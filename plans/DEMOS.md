@@ -88,11 +88,13 @@
 **What you can show**: edit a table's description; see the version go `0.1 → 0.2` with a field-level diff and your name on it; soft-delete it and restore it; search `"upi"` and get ranked results with facets; log in as a risk analyst and watch PII columns disappear from the same search.
 
 ### Epic 3 — Envelope, versioning, soft delete, change events
-- [ ] `EntityEnvelope` on every asset: version, `updatedAt`, `updatedBy`, `changeDescription`
+- [x] `EntityEnvelope` on every asset: version, `updatedAt`, `updatedBy`, `changeDescription`
 - [x] Major/Minor version arithmetic; a no-op update produces no version
 - [x] Field-level `ChangeDescription` diffs (added/updated/deleted); breaking-change classification
-- [ ] Soft delete with tombstone and restore
-- [ ] Version history endpoint and a diff viewer in the console
+- [x] `PATCH /assets/{id}` with server-computed diffs
+- [x] Soft delete cascading to the subtree, with restore; a connector re-run does not resurrect a tombstone
+- [x] `GET /assets/{id}/versions` — snapshot per version, newest first
+- [~] **Gap**: version history is served but the console has no diff viewer yet
 - [ ] `EventSink` port + `ChangeEvent` emission
 - [ ] `If-Match`/`412` optimistic concurrency
 

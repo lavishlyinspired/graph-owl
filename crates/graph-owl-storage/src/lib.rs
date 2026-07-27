@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use graph_owl_core::{
-    Asset, AssetKind, Relationship, Table, TableUpdate,
+    Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
     page::{Page, PageRequest},
 };
 use thiserror::Error;
@@ -81,4 +81,26 @@ pub trait Storage: Send + Sync {
         page: &PageRequest,
     ) -> Result<Page<Asset>, StorageError>;
     async fn count_assets_by_kind(&self) -> Result<Vec<(AssetKind, i64)>, StorageError>;
+
+    // ---- envelope (Epic 3) ----
+
+    /// Applies a partial update, computing the diff and advancing the version.
+    ///
+    /// Returns `Ok(None)` if the asset does not exist. A no-op update returns
+    /// the asset unchanged at its current version — that is what makes a
+    /// connector's convergence observable rather than merely claimed.
+    async fn update_asset(
+        &self,
+        id: Uuid,
+        update: &AssetUpdate,
+        updated_by: &str,
+    ) -> Result<Option<Asset>, StorageError>;
+
+    async fn asset_versions(&self, id: Uuid) -> Result<Vec<AssetVersion>, StorageError>;
+
+    /// Tombstones the asset and everything beneath it. Returns the count.
+    async fn soft_delete_asset(&self, id: Uuid, deleted_by: &str) -> Result<u64, StorageError>;
+
+    /// Lifts the tombstone from the asset and its subtree.
+    async fn restore_asset(&self, id: Uuid, restored_by: &str) -> Result<u64, StorageError>;
 }

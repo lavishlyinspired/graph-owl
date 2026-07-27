@@ -1005,6 +1005,7 @@ dependencies = [
  "graph-owl-core",
  "graph-owl-storage",
  "refinery",
+ "serde_json",
  "sqlx",
  "testcontainers-modules",
  "thiserror 2.0.19",

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use graph_owl_core::{
-    Asset, AssetKind, Relationship, Table, TableUpdate,
+    Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
+    envelope::{ChangeDescription, EntityVersion, classify},
     page::{Cursor, Page, PageRequest},
 };
 use graph_owl_storage::{ConflictKind, Storage, StorageError};
@@ -280,17 +281,22 @@ impl Storage for PostgresStorage {
         // COALESCE on description keeps human curation: a source reporting
         // NULL means "I have nothing to say", not "blank what a person wrote"
         // (15-connectors.md decision 3).
-        let row = sqlx::query(
-            "INSERT INTO assets (id, kind, name, fully_qualified_name, parent_id, description, properties, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        let row = sqlx::query(&format!(
+            "INSERT INTO assets (id, kind, name, fully_qualified_name, parent_id, description,
+                 properties, version_major, version_minor, updated_by, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 1, $10, $8, $9)
              ON CONFLICT (fully_qualified_name) DO UPDATE SET
                  name = EXCLUDED.name,
                  parent_id = EXCLUDED.parent_id,
                  description = COALESCE(EXCLUDED.description, assets.description),
                  properties = COALESCE(EXCLUDED.properties, assets.properties),
+                 updated_by = EXCLUDED.updated_by,
+                 -- A re-ingest of a live asset does not resurrect a tombstone:
+                 -- deletion is a governance decision and a connector must not
+                 -- silently reverse it.
                  updated_at = now()
-             RETURNING id, kind, name, fully_qualified_name, parent_id, description, properties, created_at, updated_at",
-        )
+             RETURNING {ASSET_COLUMNS}"
+        ))
         .bind(asset.id)
         .bind(asset.kind.as_str())
         .bind(&asset.name)
@@ -300,6 +306,7 @@ impl Storage for PostgresStorage {
         .bind(&asset.properties)
         .bind(asset.created_at)
         .bind(asset.updated_at)
+        .bind(&asset.updated_by)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
@@ -337,7 +344,8 @@ impl Storage for PostgresStorage {
             .saturating_add(1);
         let sql = format!(
             "SELECT {ASSET_COLUMNS} FROM assets
-             WHERE ($1::text IS NULL OR kind = $1)
+             WHERE NOT deleted
+               AND ($1::text IS NULL OR kind = $1)
                AND ($2::text IS NULL OR (fully_qualified_name, id) > ($2, $3))
              ORDER BY fully_qualified_name, id
              LIMIT $4"
@@ -353,7 +361,7 @@ impl Storage for PostgresStorage {
     async fn list_children(&self, parent_id: Option<Uuid>) -> Result<Vec<Asset>, StorageError> {
         let rows = sqlx::query(&format!(
             "SELECT {ASSET_COLUMNS} FROM assets
-             WHERE ($1::uuid IS NULL AND parent_id IS NULL) OR parent_id = $1
+             WHERE NOT deleted AND (($1::uuid IS NULL AND parent_id IS NULL) OR parent_id = $1)
              ORDER BY name"
         ))
         .bind(parent_id)
@@ -371,7 +379,9 @@ impl Storage for PostgresStorage {
                  SELECT {ASSET_COLUMNS}, 0 AS hops FROM assets WHERE id = $1
                  UNION ALL
                  SELECT a.id, a.kind, a.name, a.fully_qualified_name, a.parent_id,
-                        a.description, a.properties, a.created_at, a.updated_at, c.hops + 1
+                        a.description, a.properties, a.version_major, a.version_minor,
+                        a.updated_by, a.change_description, a.deleted, a.deleted_at,
+                        a.created_at, a.updated_at, c.hops + 1
                  FROM assets a JOIN chain c ON a.id = c.parent_id
              )
              SELECT {ASSET_COLUMNS} FROM chain ORDER BY hops DESC"
@@ -395,7 +405,8 @@ impl Storage for PostgresStorage {
         let pattern = format!("%{}%", query.to_lowercase());
         let sql = format!(
             "SELECT {ASSET_COLUMNS} FROM assets
-             WHERE (lower(name) LIKE $1 OR lower(fully_qualified_name) LIKE $1)
+             WHERE NOT deleted
+               AND (lower(name) LIKE $1 OR lower(fully_qualified_name) LIKE $1)
                AND ($2::text IS NULL OR kind = $2)
                AND ($3::text IS NULL OR (fully_qualified_name, id) > ($3, $4))
              ORDER BY fully_qualified_name, id
@@ -411,10 +422,11 @@ impl Storage for PostgresStorage {
     }
 
     async fn count_assets_by_kind(&self) -> Result<Vec<(AssetKind, i64)>, StorageError> {
-        let rows = sqlx::query("SELECT kind, count(*) AS n FROM assets GROUP BY kind")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let rows =
+            sqlx::query("SELECT kind, count(*) AS n FROM assets WHERE NOT deleted GROUP BY kind")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(rows
             .into_iter()
             .filter_map(|row| {
@@ -424,10 +436,184 @@ impl Storage for PostgresStorage {
             })
             .collect())
     }
+
+    // ---- envelope (Epic 3) ----
+
+    async fn update_asset(
+        &self,
+        id: Uuid,
+        update: &AssetUpdate,
+        updated_by: &str,
+    ) -> Result<Option<Asset>, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let before_row = sqlx::query(&format!(
+            "SELECT {ASSET_COLUMNS} FROM assets WHERE id = $1 FOR UPDATE"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let Some(before_row) = before_row else {
+            return Ok(None);
+        };
+        let before = asset_from_row(before_row);
+
+        // Absent means "not declared"; explicit null means clear. Collapsing
+        // them would let a connector's null description blank what a human
+        // wrote (15-connectors.md decision 3).
+        let mut after = before.clone();
+        if let Some(description) = &update.description {
+            after.description = description.clone();
+        }
+
+        let diff = ChangeDescription::between(
+            &serde_json::to_value(&before).unwrap_or_default(),
+            &serde_json::to_value(&after).unwrap_or_default(),
+        );
+        let kind = classify(&diff);
+        if matches!(kind, graph_owl_core::envelope::ChangeKind::None) {
+            // No version, no history row, no event. This is what makes a
+            // connector re-run over an unchanged source observable.
+            tx.rollback()
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            return Ok(Some(before));
+        }
+
+        let next = before.version.bump(kind);
+        let updated_row = sqlx::query(&format!(
+            "UPDATE assets SET description = $2, version_major = $3, version_minor = $4,
+                 updated_by = $5, change_description = $6, updated_at = now()
+             WHERE id = $1
+             RETURNING {ASSET_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(&after.description)
+        .bind(i32::try_from(next.major).unwrap_or(i32::MAX))
+        .bind(i32::try_from(next.minor).unwrap_or(i32::MAX))
+        .bind(updated_by)
+        .bind(serde_json::to_value(&diff).ok())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let updated = asset_from_row(updated_row);
+
+        // The snapshot is the state *after* the change, so replaying history
+        // never requires applying diffs forward from the beginning.
+        sqlx::query(
+            "INSERT INTO asset_versions
+                 (asset_id, version_major, version_minor, snapshot, change_description, updated_by, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(i32::try_from(next.major).unwrap_or(i32::MAX))
+        .bind(i32::try_from(next.minor).unwrap_or(i32::MAX))
+        .bind(serde_json::to_value(&updated).unwrap_or_default())
+        .bind(serde_json::to_value(&diff).ok())
+        .bind(updated_by)
+        .bind(updated.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(Some(updated))
+    }
+
+    async fn asset_versions(&self, id: Uuid) -> Result<Vec<AssetVersion>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT version_major, version_minor, snapshot, change_description, updated_by, updated_at
+             FROM asset_versions WHERE asset_id = $1
+             ORDER BY version_major DESC, version_minor DESC",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(AssetVersion {
+                    version: EntityVersion {
+                        major: u32::try_from(row.get::<i32, _>("version_major")).ok()?,
+                        minor: u32::try_from(row.get::<i32, _>("version_minor")).ok()?,
+                    },
+                    snapshot: serde_json::from_value(row.get("snapshot")).ok()?,
+                    change_description: row
+                        .get::<Option<serde_json::Value>, _>("change_description")
+                        .and_then(|v| serde_json::from_value(v).ok()),
+                    updated_by: row.get("updated_by"),
+                    updated_at: row.get("updated_at"),
+                })
+            })
+            .collect())
+    }
+
+    async fn soft_delete_asset(&self, id: Uuid, deleted_by: &str) -> Result<u64, StorageError> {
+        // Cascades down the subtree: a live column under a tombstoned table is
+        // reachable by search and addresses an asset that no longer exists.
+        let result = sqlx::query(
+            "WITH RECURSIVE subtree AS (
+                 SELECT id FROM assets WHERE id = $1
+                 UNION ALL
+                 SELECT a.id FROM assets a JOIN subtree s ON a.parent_id = s.id
+             )
+             UPDATE assets SET deleted = TRUE, deleted_at = now(), updated_by = $2, updated_at = now()
+             WHERE id IN (SELECT id FROM subtree) AND NOT deleted",
+        )
+        .bind(id)
+        .bind(deleted_by)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(result.rows_affected())
+    }
+
+    async fn restore_asset(&self, id: Uuid, restored_by: &str) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "WITH RECURSIVE subtree AS (
+                 SELECT id FROM assets WHERE id = $1
+                 UNION ALL
+                 SELECT a.id FROM assets a JOIN subtree s ON a.parent_id = s.id
+             )
+             UPDATE assets SET deleted = FALSE, deleted_at = NULL, updated_by = $2, updated_at = now()
+             WHERE id IN (SELECT id FROM subtree) AND deleted",
+        )
+        .bind(id)
+        .bind(restored_by)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(result.rows_affected())
+    }
 }
 
 fn asset_from_row(row: PgRow) -> Asset {
     Asset {
+        version: EntityVersion {
+            major: u32::try_from(row.get::<i32, _>("version_major")).unwrap_or(0),
+            minor: u32::try_from(row.get::<i32, _>("version_minor")).unwrap_or(1),
+        },
+        updated_by: row.get("updated_by"),
+        change_description: row
+            .get::<Option<serde_json::Value>, _>("change_description")
+            .and_then(|v| serde_json::from_value(v).ok()),
+        deleted: row.get("deleted"),
+        deleted_at: row.get("deleted_at"),
         id: row.get("id"),
         kind: AssetKind::parse(row.get::<&str, _>("kind")).unwrap_or(AssetKind::Table),
         name: row.get("name"),
@@ -440,7 +626,7 @@ fn asset_from_row(row: PgRow) -> Asset {
     }
 }
 
-const ASSET_COLUMNS: &str = "id, kind, name, fully_qualified_name, parent_id, description, properties, created_at, updated_at";
+const ASSET_COLUMNS: &str = "id, kind, name, fully_qualified_name, parent_id, description, properties, version_major, version_minor, updated_by, change_description, deleted, deleted_at, created_at, updated_at";
 
 impl PostgresStorage {
     async fn asset_page(

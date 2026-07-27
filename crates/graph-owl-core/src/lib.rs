@@ -4,6 +4,7 @@ pub mod page;
 pub mod relationship_type;
 
 use chrono::{DateTime, Utc};
+use envelope::{ChangeDescription, EntityVersion};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -59,8 +60,49 @@ pub struct Asset {
     /// and normalising it prematurely loses information the catalog is for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub properties: Option<serde_json::Value>,
+    // ---- envelope (Epic 3) ----
+    pub version: EntityVersion,
+    pub updated_by: String,
+    /// What changed to produce this version. `None` on the initial version:
+    /// there was nothing before it to diff against, and an empty diff would
+    /// read as "nothing changed" rather than "this is where it began".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_description: Option<ChangeDescription>,
+    pub deleted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A past state of an asset, with what produced it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetVersion {
+    pub version: EntityVersion,
+    pub snapshot: Asset,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_description: Option<ChangeDescription>,
+    pub updated_by: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A partial update. Absent means "not declared"; explicit `null` means clear.
+/// The distinction is what stops a connector's null description from blanking
+/// what a human wrote (`15-connectors.md` decision 3).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetUpdate {
+    #[serde(default, deserialize_with = "double_option")]
+    pub description: Option<Option<String>>,
+}
+
+fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use graph_owl_core::{
-    Asset, AssetKind, Principal, Relationship, Table, TableUpdate, fqn,
+    Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
+    envelope::EntityVersion,
+    fqn,
     page::{Page, PageRequest},
     relationship_type::{EntityKind, RelationshipType, is_legal},
 };
@@ -90,6 +92,27 @@ impl ValidateBody for TableUpdate {
             require_non_empty_string(value, &FieldPath::root().key("name"), &mut errors);
         }
         optional_string(value, &FieldPath::root().key("description"), &mut errors);
+        errors
+    }
+}
+
+/// PATCH: absence is never an error. But a description the client *did* send
+/// must be usable — a blank string is a request to clear a field, and explicit
+/// null is how that is expressed.
+impl ValidateBody for AssetUpdate {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        if value
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|d| d.trim().is_empty())
+        {
+            errors.push(FieldError::new(
+                "description",
+                FieldErrorCode::Empty,
+                "`description` must not be blank; send null to clear it",
+            ));
+        }
         errors
     }
 }
@@ -400,6 +423,14 @@ impl Catalog {
                 parent_id: request.parent_id,
                 description: request.description,
                 properties: request.properties,
+                version: EntityVersion::initial(),
+                updated_by: principal.id.clone(),
+                // No diff on the initial version: there was nothing before it,
+                // and an empty diff would read as "nothing changed" rather than
+                // "this is where it began".
+                change_description: None,
+                deleted: false,
+                deleted_at: None,
                 created_at: now,
                 updated_at: now,
             })
@@ -510,18 +541,94 @@ impl Catalog {
         )
         .await
     }
+
+    // ---- envelope (Epic 3) ----
+
+    /// Applies a partial update, advancing the version by the size of the change.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the asset does not exist.
+    pub async fn update_asset(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        update: &AssetUpdate,
+    ) -> Result<Asset, CatalogError> {
+        self.storage
+            .update_asset(id, update, &principal.id)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the asset does not exist.
+    pub async fn asset_versions(&self, id: Uuid) -> Result<Vec<AssetVersion>, CatalogError> {
+        if self.storage.get_asset(id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self.storage.asset_versions(id).await?)
+    }
+
+    /// Tombstones the asset and its subtree, returning how many were affected.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the asset does not exist.
+    pub async fn soft_delete_asset(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<u64, CatalogError> {
+        if self.storage.get_asset(id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self.storage.soft_delete_asset(id, &principal.id).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the asset does not exist.
+    pub async fn restore_asset(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<u64, CatalogError> {
+        if self.storage.get_asset(id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self.storage.restore_asset(id, &principal.id).await?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use graph_owl_core::page::Cursor;
+
+    /// An asset and everything beneath it. Used by the fake's cascade, which
+    /// must match Postgres's recursive CTE or a cascade bug passes here.
+    fn descendants(assets: &[Asset], root: Uuid) -> Vec<Uuid> {
+        let mut found = vec![root];
+        let mut frontier = vec![root];
+        while let Some(parent) = frontier.pop() {
+            for child in assets.iter().filter(|a| a.parent_id == Some(parent)) {
+                if !found.contains(&child.id) {
+                    found.push(child.id);
+                    frontier.push(child.id);
+                }
+            }
+        }
+        found
+    }
     use graph_owl_storage::Storage;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     struct InMemoryStorage {
         assets: Mutex<Vec<Asset>>,
+        versions: Mutex<Vec<AssetVersion>>,
         inserted: Mutex<Vec<Table>>,
         relationships: Mutex<Vec<Relationship>>,
     }
@@ -662,6 +769,93 @@ mod tests {
                 })
                 .filter(|(_, n)| *n > 0)
                 .collect())
+        }
+
+        // The fake honours the same envelope contract as Postgres, including
+        // the no-op rule: a fake that always bumped would let a version-inflation
+        // bug pass here and fail only against a real database.
+        async fn update_asset(
+            &self,
+            id: Uuid,
+            update: &AssetUpdate,
+            updated_by: &str,
+        ) -> Result<Option<Asset>, StorageError> {
+            use graph_owl_core::envelope::{ChangeDescription, ChangeKind, classify};
+            let mut assets = self.assets.lock().unwrap();
+            let Some(existing) = assets.iter_mut().find(|a| a.id == id) else {
+                return Ok(None);
+            };
+            let before = existing.clone();
+            let mut after = before.clone();
+            if let Some(description) = &update.description {
+                after.description = description.clone();
+            }
+            let diff = ChangeDescription::between(
+                &serde_json::to_value(&before).unwrap_or_default(),
+                &serde_json::to_value(&after).unwrap_or_default(),
+            );
+            let kind = classify(&diff);
+            if matches!(kind, ChangeKind::None) {
+                return Ok(Some(before));
+            }
+            after.version = before.version.bump(kind);
+            after.updated_by = updated_by.to_string();
+            after.change_description = Some(diff.clone());
+            after.updated_at = Utc::now();
+            *existing = after.clone();
+            self.versions.lock().unwrap().push(AssetVersion {
+                version: after.version,
+                snapshot: after.clone(),
+                change_description: Some(diff),
+                updated_by: updated_by.to_string(),
+                updated_at: after.updated_at,
+            });
+            Ok(Some(after))
+        }
+
+        async fn asset_versions(&self, id: Uuid) -> Result<Vec<AssetVersion>, StorageError> {
+            let mut versions: Vec<AssetVersion> = self
+                .versions
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|v| v.snapshot.id == id)
+                .cloned()
+                .collect();
+            versions.sort_by(|a, b| b.version.cmp(&a.version));
+            Ok(versions)
+        }
+
+        async fn soft_delete_asset(&self, id: Uuid, deleted_by: &str) -> Result<u64, StorageError> {
+            let mut assets = self.assets.lock().unwrap();
+            let subtree = descendants(&assets, id);
+            let mut affected = 0;
+            for asset in assets
+                .iter_mut()
+                .filter(|a| subtree.contains(&a.id) && !a.deleted)
+            {
+                asset.deleted = true;
+                asset.deleted_at = Some(Utc::now());
+                asset.updated_by = deleted_by.to_string();
+                affected += 1;
+            }
+            Ok(affected)
+        }
+
+        async fn restore_asset(&self, id: Uuid, restored_by: &str) -> Result<u64, StorageError> {
+            let mut assets = self.assets.lock().unwrap();
+            let subtree = descendants(&assets, id);
+            let mut affected = 0;
+            for asset in assets
+                .iter_mut()
+                .filter(|a| subtree.contains(&a.id) && a.deleted)
+            {
+                asset.deleted = false;
+                asset.deleted_at = None;
+                asset.updated_by = restored_by.to_string();
+                affected += 1;
+            }
+            Ok(affected)
         }
 
         async fn insert_table(&self, table: Table) -> Result<Table, StorageError> {

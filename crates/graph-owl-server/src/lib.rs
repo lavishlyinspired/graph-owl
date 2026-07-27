@@ -13,7 +13,7 @@ use graph_owl_api::{
 };
 use graph_owl_connectors::{Connector, RunScope, postgres::PostgresConnector};
 use graph_owl_core::{
-    Asset, AssetKind, Principal, Relationship, Table, TableUpdate,
+    Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
     page::{Page, PageRequest, PageRequestError},
 };
 use graph_owl_storage::{ConflictKind, StorageError};
@@ -39,7 +39,12 @@ pub fn app(catalog: Catalog) -> Router {
         .route("/assets/roots", get(list_roots))
         .route("/assets/stats", get(asset_stats))
         .route("/connectors/postgres/runs", post(run_postgres_connector))
-        .route("/assets/{id}", get(get_asset))
+        .route(
+            "/assets/{id}",
+            get(get_asset).patch(update_asset).delete(delete_asset),
+        )
+        .route("/assets/{id}/versions", get(asset_versions))
+        .route("/assets/{id}/restore", post(restore_asset))
         .route("/assets/{id}/children", get(list_asset_children))
         .route("/assets/{id}/ancestors", get(asset_ancestors))
         .with_state(catalog)
@@ -681,4 +686,43 @@ async fn run_postgres_connector(
         "failed": failures.len(),
         "failures": failures,
     })))
+}
+
+// ---- envelope (Epic 3) ----
+
+async fn update_asset(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<AssetUpdate>,
+) -> Result<Json<Asset>, AppError> {
+    Ok(Json(catalog.update_asset(&principal, id, &payload).await?))
+}
+
+async fn asset_versions(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<AssetVersion>>, AppError> {
+    Ok(Json(catalog.asset_versions(id).await?))
+}
+
+async fn delete_asset(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Reports the cascade count. A delete that silently tombstoned 400 columns
+    // and returned 204 would leave an operator unable to tell whether it did
+    // what they meant.
+    let affected = catalog.soft_delete_asset(&principal, id).await?;
+    Ok(Json(json!({ "deleted": affected })))
+}
+
+async fn restore_asset(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let affected = catalog.restore_asset(&principal, id).await?;
+    Ok(Json(json!({ "restored": affected })))
 }
