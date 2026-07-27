@@ -133,7 +133,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   roots: () => request<Asset[]>("/assets/roots"),
-  asset: (id: string) => request<Asset>(`/assets/${id}`),
+  /** `asOf` is an RFC 3339 instant. The server reconstructs the entity from
+   *  the graph at that transaction time — it is not a snapshot lookup. */
+  asset: (id: string, asOf?: string | null) =>
+    request<Asset>(
+      `/assets/${id}${asOf ? `?asOf=${encodeURIComponent(asOf)}` : ""}`,
+    ),
   children: (id: string) => request<Asset[]>(`/assets/${id}/children`),
   ancestors: (id: string) => request<Asset[]>(`/assets/${id}/ancestors`),
   search: (q: string, kind?: AssetKind) =>

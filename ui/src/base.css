@@ -27,7 +27,32 @@ code, .fqn {
  * signal, and the row underneath may already be tinted by hover or by the
  * zebra striping. The outline is drawn inset so it does not shift the row. */
 .gowl-row-cursor > td {
-  background: var(--gowl-cursor-bg, rgba(3, 167, 173, 0.1)) !important;
-  box-shadow: inset 0 -1px 0 var(--gowl-cursor-line, #03a7ad),
-              inset 0 1px 0 var(--gowl-cursor-line, #03a7ad);
+  background: var(--gowl-cursor-bg, rgba(20, 195, 207, 0.1)) !important;
+  box-shadow: inset 0 -1px 0 var(--gowl-cursor-line, #14C3CF),
+              inset 0 1px 0 var(--gowl-cursor-line, #14C3CF);
+}
+
+/* Tree node text: single line, icon + label side by side, truncate with ellipsis */
+.ant-tree .ant-tree-node-content-wrapper {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+.ant-tree .ant-tree-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.ant-tree .ant-tree-iconEle {
+  flex-shrink: 0;
+}
+
+/* Empty state: clean background, no warm cast */
+.ant-empty-description {
+  color: inherit;
+}
+.ant-empty-image svg {
+  opacity: 0.45;
 }

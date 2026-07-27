@@ -13,6 +13,7 @@ import {
   Input,
   Layout,
   Menu,
+  Popover,
   Row,
   Space,
   Statistic,
@@ -24,6 +25,7 @@ import {
   Tree,
   Typography,
 } from "antd";
+import { theme as antdTheme } from "antd";
 import type { DataNode } from "antd/es/tree";
 import ApartmentOutlined from "@ant-design/icons/es/icons/ApartmentOutlined";
 import ArrowLeftOutlined from "@ant-design/icons/es/icons/ArrowLeftOutlined";
@@ -195,6 +197,102 @@ function renderChange(change: ChangeDescription | null | undefined) {
         </Text>
       ))}
     </Space>
+  );
+}
+
+/** The time control.
+ *
+ *  Reads as a chip saying "now" until a moment is chosen, then names the
+ *  moment. That labelling is the honest part: a console silently showing
+ *  historical data would be indistinguishable from one showing stale data,
+ *  and the whole value of reconstructing a past state is knowing that is what
+ *  you are looking at.
+ *
+ *  Scope is stated rather than implied. `?asOf=` is currently answered for a
+ *  single asset read, so the *detail* pane time-travels and the tree and
+ *  search do not. Pretending otherwise would be worse than the limitation. */
+function TimeControl({
+  asOf,
+  onChange,
+  colors,
+}: {
+  asOf: string | null;
+  onChange: (value: string | null) => void;
+  colors: (typeof palette)["light"];
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  const chip = (
+    <Tag
+      icon={<ClockCircleOutlined />}
+      onClick={() => {
+        setDraft(asOf ?? new Date().toISOString().slice(0, 16));
+        setOpen((o) => !o);
+      }}
+      style={{
+        marginInlineEnd: 0,
+        cursor: "pointer",
+        background: asOf ? colors.warning : colors.selected,
+        borderColor: asOf ? colors.warning : colors.primary,
+        color: asOf ? "#0F172A" : colors.primary,
+        fontWeight: 500,
+      }}
+    >
+      {asOf ? new Date(asOf).toLocaleString() : "now"}
+    </Tag>
+  );
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={setOpen}
+      trigger="click"
+      placement="bottomRight"
+      content={
+        <Space direction="vertical" size="small" style={{ width: 280 }}>
+          <Text strong>View the catalog as it was</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            The selected asset is reconstructed from the graph at that instant.
+            The hierarchy and search still show the present.
+          </Text>
+          <Input
+            type="datetime-local"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <Flex gap={8}>
+            <Button
+              type="primary"
+              size="small"
+              disabled={draft.length === 0}
+              onClick={() => {
+                // `datetime-local` yields a local wall time with no zone; the
+                // API takes RFC 3339, so the browser's own offset is what
+                // makes "3pm" mean the user's 3pm rather than UTC's.
+                onChange(new Date(draft).toISOString());
+                setOpen(false);
+              }}
+            >
+              Go to this moment
+            </Button>
+            {asOf && (
+              <Button
+                size="small"
+                onClick={() => {
+                  onChange(null);
+                  setOpen(false);
+                }}
+              >
+                Back to now
+              </Button>
+            )}
+          </Flex>
+        </Space>
+      }
+    >
+      {chip}
+    </Popover>
   );
 }
 
@@ -567,6 +665,7 @@ function ConnectorRunForm({
   onBack: () => void;
   onDone: () => void;
 }) {
+  const { token } = antdTheme.useToken();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ created: number; failed: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -634,7 +733,7 @@ function ConnectorRunForm({
       {result && (
         <Card size="small">
           <Space>
-            <CheckCircleFilled style={{ color: "#059669", fontSize: 18 }} />
+            <CheckCircleFilled style={{ color: token.colorSuccess, fontSize: 18 }} />
             <Text style={{ fontWeight: 500 }}>
               Catalogued {result.created} assets
               {result.failed > 0 ? `, ${result.failed} failed` : ""}.
@@ -721,6 +820,9 @@ export default function App() {
   // the single most misleading thing this console can do: it tells someone
   // their estate is empty when in fact they are simply not signed in.
   const [refused, setRefused] = useState(false);
+  // Null is now. Deep-linkable, so a screenshot of a past state carries the
+  // instant it was taken at rather than being unreproducible.
+  const [asOf, setAsOf] = useState<string | null>(() => readParam("asOf"));
   const [facets, setFacets] = useState<SearchFacets | null>(null);
   // Which facet bucket is narrowing the results, if any. Filtering happens on
   // the client over the returned page: the server's facet counts are already
@@ -779,8 +881,34 @@ export default function App() {
 
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("asset");
-    if (id) api.asset(id).then(setSelectedRaw).catch(() => undefined);
-  }, []);
+    if (id) {
+      api
+        .asset(id, asOf)
+        .then(setSelectedRaw)
+        .catch(() => undefined);
+    }
+    // Deliberately depends on `asOf` too: moving the clock must re-read the
+    // open asset. Without it the chip would say "March" over data from today,
+    // which is exactly the confusion the chip exists to prevent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asOf]);
+
+  // Re-read the *selected* asset when the moment changes. A selection made by
+  // clicking the tree carries current data; the chip has to be able to pull it
+  // backwards without the user re-clicking.
+  useEffect(() => {
+    if (!selected) return;
+    api
+      .asset(selected.id, asOf)
+      .then(setSelectedRaw)
+      .catch(() => {
+        // The asset did not exist at that instant. Honest: keep the chip where
+        // the user put it and say so, rather than silently snapping to now.
+        setSelectedRaw(null);
+      });
+    // Keyed on the id, not the object, or writing the result would re-trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asOf, selected?.id]);
 
   useEffect(() => {
     if (query.trim().length < 2) {
@@ -933,22 +1061,14 @@ export default function App() {
               allowClear
             />
             <Space style={{ marginLeft: "auto" }} size={12}>
-              {/* Time travel arrives with Epic 4, but the control belongs in the
-                  chrome from the start — it is a session-wide property. */}
-              <Tooltip title="Time travel arrives with the graph engine">
-                <Tag
-                  icon={<ClockCircleOutlined />}
-                  style={{
-                    marginInlineEnd: 0,
-                    background: dark ? "#0C3B47" : "#E6F7F8",
-                    borderColor: dark ? brand.teal500 : brand.cyan400,
-                    color: dark ? "#2BC4C9" : brand.teal600,
-                    fontWeight: 500,
-                  }}
-                >
-                  now
-                </Tag>
-              </Tooltip>
+              <TimeControl
+                asOf={asOf}
+                colors={colors}
+                onChange={(value) => {
+                  setAsOf(value);
+                  writeParam("asOf", value);
+                }}
+              />
               {/* Only when a token is in play. On an open server there is no
                   identity to drop, and an inert control implying otherwise is
                   worse than no control. Switching principals is Demo 2's whole
@@ -1160,7 +1280,28 @@ export default function App() {
                   </Col>
                 </Row>
               ) : selected ? (
-                <AssetDetail asset={selected} onChanged={setSelectedRaw} />
+                <>
+                  {asOf && (
+                    <Card
+                      size="small"
+                      style={{
+                        marginBottom: 16,
+                        borderColor: colors.warning,
+                        background: colors.fillSubtle,
+                      }}
+                    >
+                      <Space>
+                        <ClockCircleOutlined style={{ color: colors.warning }} />
+                        <Text style={{ fontSize: 13 }}>
+                          Showing this asset as it stood at{" "}
+                          <Text strong>{new Date(asOf).toLocaleString()}</Text>,
+                          reconstructed from the graph.
+                        </Text>
+                      </Space>
+                    </Card>
+                  )}
+                  <AssetDetail asset={selected} onChanged={setSelectedRaw} />
+                </>
               ) : (
                 <div style={{ position: "relative", width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
                   {total === 0 && (
