@@ -11,7 +11,27 @@ Multi-hop query the REST surface fundamentally cannot express. "Every table feed
 
 ## Resolved decisions
 
-1. **A subset, sized to metadata.** BGP, `FILTER`, `OPTIONAL`, `UNION`, `MINUS`, `(NOT) EXISTS`, property paths, `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`, `SELECT`/`ASK`/`CONSTRUCT`. Not in v1: federation (`SERVICE`), entailment regimes, aggregates, `GROUP BY`, subqueries — the last three promoted to v2, see the deferred section. A reference implementation's SPARQL layer is ~29,000 lines; the subset that answers metadata questions is a fraction.
+0. **Full SPARQL 1.1 is the target. The subset is a delivery order, not a scope.**
+
+   This reverses the framing the plan opened with. It previously described a
+   permanent subset "sized to metadata"; it is now a **complete implementation
+   delivered in stages**, and the difference is not cosmetic:
+
+   - A permanent subset means every unimplemented construct is a **decision to
+     defend**, forever, to every user who hits one.
+   - A staged complete implementation means every unimplemented construct is a
+     **queue position**, and the honest answer is "not yet, and here is where it
+     sits" rather than "no, and here is why you do not really want it".
+
+   Two things make this affordable now. Parsing is free and total (decision 8
+   below), so no construct costs language work. And the algebra is a closed set:
+   "full SPARQL" is not an open-ended commitment but a finite list of node types
+   with a completion table.
+
+   What does *not* change: each stage ships tested, authorization-filtered and
+   budgeted. A fast wrong answer is not progress toward a complete right one.
+
+1. **The delivery order, sized to metadata.** BGP, `FILTER`, `OPTIONAL`, `UNION`, `MINUS`, `(NOT) EXISTS`, property paths, `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`, `SELECT`/`ASK`/`CONSTRUCT`. Later stages: aggregates, `GROUP BY`, `HAVING` and subqueries (v2); `SERVICE` (**Epic 101**); entailment regimes (v3, and they need Epics 6/98/99 to entail anything against). Every one is scheduled — none is refused. A reference implementation's SPARQL layer is ~29,000 lines; the subset that answers metadata questions is a fraction.
 2. **Property paths are in scope, not deferred.** They are the reason to have SPARQL at all — `?t (dsc:feeds)+ ?u` is the lineage query, and without them REST endpoints are strictly better.
 2a. **Traversal moved to Epic 7a, which therefore ships *before* this epic** despite sorting after it — see `ROADMAP.md`'s build-order table. Property paths (`p+`, `p*`) call `graph-owl-traversal`; this crate does not implement its own BFS. `shortest_path`, `all_paths`, `detect_cycles`, and `subgraph` are not expressible as property paths and live there.
 3. **BGP matching is homomorphism-based, per spec.** Variables may bind to the same node. This is *not* subgraph isomorphism; getting it wrong produces subtly missing results.

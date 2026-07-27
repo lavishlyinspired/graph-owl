@@ -143,13 +143,13 @@ that was never read.
 | Recommendation | Why not | Reverses when |
 |---|---|---|
 | Full SPARQL **evaluation** | Parsing is now full SPARQL 1.1 via `spargebra` (`07` decision 8); only evaluation is subset. "Do you support SPARQL" is answered per algebra node, not yes/no | Per node, as each is evaluated — no longer an all-or-nothing decision |
-| `SERVICE` federated query | No user has asked to join against an external endpoint | One does |
+| ~~`SERVICE`~~ | **Reversed 28 Jul 2026 — now Epic 101.** Cheap (the parser handles it; SPARQL 1.2 Federated Query is at CR) and the epic is really about three dangers: outbound calls from inside a query, bindings leaving the process, and unattributable remote results | Already reversed |
 | ~~Aggregates, `GROUP BY`, subqueries~~ | **Reversed 28 Jul 2026.** Epic 93's Overview computes counts-by-kind and coverage in hand-written SQL precisely because SPARQL cannot — the project is itself the user that needed them | Already reversed; promoted to Epic 7 v2 |
 | A second triple-store backend | See *An embedded RDF store as a backend* below — the deferral in `00e` is right but its stated reason is the weak one | Only under the conditions named there |
-| OWL 2 EL | Metadata ontologies are thousands of classes; EL exists for hundreds of thousands | An ontology past ~50k classes |
-| OWL 2 QL | Query rewriting hides the derivation, and explainability is a requirement | Virtual integration over an external database becomes a goal |
+| ~~OWL 2 EL~~ | **Reversed 28 Jul 2026 — now Epic 98.** The deferral assumed metadata ontologies only; the stated use includes medical ontologies, and SNOMED CT at 400k+ classes is exactly what EL exists for | Already reversed by new information about the use case |
+| ~~OWL 2 QL~~ | **Reversed 28 Jul 2026 — now Epic 99**, with a correction: QL gives a *different* explanation (the rewritten query), not none. It does however **forbid** property chains, keys and functional properties, so it cannot replace RL for Epics 17 and 29 | Already reversed |
 | RDF/XML | Nothing new emits it | Never, plausibly |
-| Split read/write partitions (main + delta) | An architecture for stores an order of magnitude past this one's target; it would add a merge path to a system whose write volume does not need one | Epic 37a shows write amplification dominating |
+| Split read/write partitions | **Now Epic 102 — planned, entry condition unchanged.** The design is recorded so it can be built correctly; the trigger is still a measurement, because building it early adds a merge path, a second read path and a compaction schedule for a problem not yet observed here | Epic 37a shows index maintenance exceeding the ingestion budget |
 | Bulk-load path distinct from the API | Already effectively met — Epic 4 batches at the bind-parameter ceiling inside one transaction | A load arrives that the batching path cannot absorb |
 
 ### An embedded RDF store as a backend, examined properly
@@ -210,10 +210,10 @@ Recorded so nobody re-proposes them as oversights.
 
 | Not doing | Why |
 |---|---|
-| Full SPARQL 1.1 or 1.2 | The subset in Epic 7 is chosen against the queries a metadata catalog actually receives. Full conformance is a project, and the tail of it — entailment regimes, service descriptions — serves tooling this product does not target |
-| `SERVICE` federated query | Revisit when a user wants to join graph-owl against an external endpoint. Nobody has |
-| OWL 2 EL | Polynomial classification for very large taxonomies. Metadata ontologies are thousands of classes, not the hundreds of thousands EL exists for |
-| OWL 2 QL | Query rewriting instead of materialisation. Epic 6 materialises deliberately, because explainability is a requirement and rewriting hides the derivation |
+| ~~Full SPARQL~~ | **No longer a non-goal.** `07` decision 0: full SPARQL 1.1 is the target, delivered in stages. Parsing is already total; the algebra is a closed set, so completion is a finite list rather than an open commitment |
+| ~~`SERVICE`~~ | **Now Epic 101** |
+| ~~OWL 2 EL~~ | **Now Epic 98**, on the medical-ontology requirement |
+| ~~OWL 2 QL~~ | **Now Epic 99.** Its explanation is the rewritten query, which is a different shape rather than an absence |
 | RDF/XML | Nothing new emits it. Turtle and JSON-LD cover interoperation |
 | Being a general-purpose triple store | The scope decision in `00a`. Flakes exist to make *this catalog* a graph, not to compete with a store whose only job is triples |
 
