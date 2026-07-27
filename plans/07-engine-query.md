@@ -11,7 +11,7 @@ Multi-hop query the REST surface fundamentally cannot express. "Every table feed
 
 ## Resolved decisions
 
-1. **A subset, sized to metadata.** BGP, `FILTER`, `OPTIONAL`, `UNION`, `MINUS`, `(NOT) EXISTS`, property paths, `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`, `SELECT`/`ASK`/`CONSTRUCT`. Not: federation (`SERVICE`), entailment regimes, aggregates in the first cut, `GROUP BY`, subqueries. A reference implementation's SPARQL layer is ~29,000 lines; the subset that answers metadata questions is a fraction.
+1. **A subset, sized to metadata.** BGP, `FILTER`, `OPTIONAL`, `UNION`, `MINUS`, `(NOT) EXISTS`, property paths, `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`, `SELECT`/`ASK`/`CONSTRUCT`. Not in v1: federation (`SERVICE`), entailment regimes, aggregates, `GROUP BY`, subqueries — the last three promoted to v2, see the deferred section. A reference implementation's SPARQL layer is ~29,000 lines; the subset that answers metadata questions is a fraction.
 2. **Property paths are in scope, not deferred.** They are the reason to have SPARQL at all — `?t (dsc:feeds)+ ?u` is the lineage query, and without them REST endpoints are strictly better.
 2a. **Traversal moved to Epic 7a, which therefore ships *before* this epic** despite sorting after it — see `ROADMAP.md`'s build-order table. Property paths (`p+`, `p*`) call `graph-owl-traversal`; this crate does not implement its own BFS. `shortest_path`, `all_paths`, `detect_cycles`, and `subgraph` are not expressible as property paths and live there.
 3. **BGP matching is homomorphism-based, per spec.** Variables may bind to the same node. This is *not* subgraph isomorphism; getting it wrong produces subtly missing results.
@@ -19,7 +19,50 @@ Multi-hop query the REST surface fundamentally cannot express. "Every table feed
 5. **Filter pushdown to the index scan.** `FILTER(?conf < 0.5)` must reach the scan, not materialize a million bindings and discard them. Orders of magnitude, verified in reference implementations.
 6. **Cypher is a module lowering onto the same plan** — not a second engine. **No longer deferred**: Epic 7b (`07b-engine-cypher.md`) is scheduled, because Epic 7d's Bolt server cannot exist without it.
 7. **The target is SPARQL 1.1, and 1.2 changes nothing yet.** SPARQL 1.2 Federated Query is at Candidate Recommendation (7 April 2026); the Query Language, Protocol and Entailment documents are Working Drafts. Since federation is explicitly out of scope for this subset, the one part of 1.2 that is nearly stable is the one part this epic does not implement — so 1.1 is the target and there is no churn to accept. The 1.2 change that *would* matter is triple-term patterns, and it arrives with Epic 9's decision on emitting `rdf:reifies` (`00k-standards-conformance.md`).
-8. **The subset is enumerated, not implied.** Every SPARQL pattern type appears in the completeness table below with a status. A pattern that is out of scope must produce a clear error naming it, never a silent misparse.
+8. **Parse everything; evaluate a subset. Do not write the parser.**
+
+   This reverses the earlier plan, which had Slice A hand-writing a
+   recursive-descent parser for the subset. That is the wrong split, and the
+   reason is what it does to a client.
+
+   A hand-written subset parser rejects unsupported SPARQL **at the door, as a
+   syntax error**. A tool connects, sends a perfectly valid standard query, and
+   is told its syntax is wrong. That is a lie, and it is the worst possible
+   first impression: the user concludes the endpoint is broken rather than
+   partial.
+
+   `spargebra` (Apache-2.0/MIT, the parser Oxigraph is built on, published
+   standalone) parses **full SPARQL 1.1 Query and Update** — and SPARQL 1.2
+   behind a feature flag — and emits the standard SPARQL 1.1 Query Algebra. It
+   does no evaluation, which is exactly the division of labour this project
+   wants: parsing is the commodity, evaluation over flakes is the part with
+   value in it.
+
+   So:
+
+   ```
+   query → spargebra (full SPARQL 1.1) → algebra → OUR planner → OUR executor
+                                             │
+                                             └─ unsupported node → precise error
+                                                naming the construct
+   ```
+
+   Three consequences, all improvements:
+
+   - **Every valid SPARQL query parses.** An unsupported one gets "MINUS is not
+     supported yet", naming the algebra node — not "syntax error at 14".
+   - **The subset stops being all-or-nothing.** Full parsing arrives on day one;
+     evaluation grows node by node without ever touching the front end. "Do we
+     support SPARQL" becomes a table of algebra nodes rather than a yes/no.
+   - **The planner works on the standard algebra**, so the optimizer literature
+     applies directly and a future contributor reads familiar shapes.
+
+   The licence is permissive, so `00i` permits it. What this project does *not*
+   take is the evaluator — the flake store, four index orderings and the
+   compiled access predicate are the engine, and no external library knows about
+   any of them.
+
+9. **The subset is enumerated, not implied.** Every SPARQL pattern type appears in the completeness table below with a status. A pattern that is out of scope must produce a clear error naming it, never a silent misparse.
 
 ## Implementation reference
 
@@ -228,7 +271,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 ### Slice A: Parse the subset (pure)
 
 **Value**: The front end, fully testable with no database.
-**Path**: hand-written recursive-descent parser producing `QueryAst`.
+**Path**: `spargebra` for parsing (decision 8); this slice is the *mapping* from its algebra into `LogicalPlan`, plus the unsupported-node error. No parser is written.
 **Acceptance criteria**:
 - `SELECT`, `ASK`, `CONSTRUCT` parse.
 - BGP with 1, 2, and 3 patterns; `;` and `,` abbreviations.
@@ -240,7 +283,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 - Literals: string with language tag, typed literal, integer, decimal, boolean.
 - A syntax error reports **line and column**.
 - Unsupported constructs (`SERVICE`, `GROUP BY`) → a *specific* "unsupported" error, not a generic parse failure.
-**RED**: A corpus of ~50 queries with expected ASTs, plus a corpus of malformed queries with expected error positions. The unsupported-construct tests matter: a user writing `GROUP BY` deserves "not supported" rather than "syntax error at 14". Mutator watch: a parser accepting `SERVICE` must fail; off-by-one error positions must fail the position assertions.
+**RED**: A corpus of ~50 queries asserting the mapping to `LogicalPlan`, plus malformed queries with expected error positions. **The unsupported-construct tests are the point of this slice**: a valid query using a node we do not evaluate must return "`MINUS` is not supported yet", naming the construct — never a syntax error, because the syntax was fine. Mutator watch: a parser accepting `SERVICE` must fail; off-by-one error positions must fail the position assertions.
 **GREEN**: parser.
 **REFACTOR**: assess hand-written vs. a parser-generator dependency. Hand-written for the subset — the grammar is small, and a generator's error messages are worse, which matters because error position is an acceptance criterion.
 **Done when**: criteria met, mutation report reviewed, commit approved.
@@ -331,7 +374,11 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 
 ## Explicitly deferred (with destination)
 
-- **Aggregates and `GROUP BY`** → the first real reporting query that needs them. Metadata questions are mostly existential.
+- **Aggregates and `GROUP BY`** → **promoted to v2, not deferred indefinitely.** The earlier reason — "metadata questions are mostly existential" — does not survive contact with this project's own console: the Overview page (Epic 93) computes counts by kind, documentation coverage and a recent-changes list, and every one of those is `COUNT` + `GROUP BY` written by hand in SQL because SPARQL cannot express it. "How many columns per schema", "how many undocumented tables per owner" are the questions a data steward opens a catalog to ask.
+
+  Cheaper than it looks now that parsing is free (decision 8): `spargebra` already parses `GROUP BY`, `HAVING` and the aggregate functions into standard algebra nodes. What remains is evaluating a grouping operator over a result stream, which is a fold — not a language feature.
+
+  Sequenced after the v1 patterns because an aggregate over a wrong join is confidently wrong, and joins have to be right first.
 - **Subqueries, `VALUES`, `BIND`** → v2 per the pattern-completeness table; `VALUES` is wanted by the Epic 41 workbench and is the likeliest of the three to be pulled forward.
 - **`SERVICE` / federation** → not planned. Cross-instance query is Epic 37b's export territory.
 - **Entailment regimes** → Epic 6's overlay is opt-in per query via `GRAPH graph:reasoning`; formal regimes are not planned.

@@ -142,9 +142,9 @@ that was never read.
 
 | Recommendation | Why not | Reverses when |
 |---|---|---|
-| Full SPARQL 1.1 / 1.2 | The subset is sized to the queries a catalog receives; the tail serves tooling this product does not target | Someone points a SPARQL client or Protégé-class tool at graph-owl |
+| Full SPARQL **evaluation** | Parsing is now full SPARQL 1.1 via `spargebra` (`07` decision 8); only evaluation is subset. "Do you support SPARQL" is answered per algebra node, not yes/no | Per node, as each is evaluated — no longer an all-or-nothing decision |
 | `SERVICE` federated query | No user has asked to join against an external endpoint | One does |
-| Aggregates, `GROUP BY`, subqueries | Already deferred by `07` decision 1 as "not in the first cut" — a scheduling decision, not a rejection | Epic 7 ships and a real query needs them |
+| ~~Aggregates, `GROUP BY`, subqueries~~ | **Reversed 28 Jul 2026.** Epic 93's Overview computes counts-by-kind and coverage in hand-written SQL precisely because SPARQL cannot — the project is itself the user that needed them | Already reversed; promoted to Epic 7 v2 |
 | A second triple-store backend | See *An embedded RDF store as a backend* below — the deferral in `00e` is right but its stated reason is the weak one | Only under the conditions named there |
 | OWL 2 EL | Metadata ontologies are thousands of classes; EL exists for hundreds of thousands | An ontology past ~50k classes |
 | OWL 2 QL | Query rewriting hides the derivation, and explainability is a requirement | Virtual integration over an external database becomes a goal |
