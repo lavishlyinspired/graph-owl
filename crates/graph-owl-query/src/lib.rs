@@ -12,4 +12,5 @@
 //! transaction time the scan already resolved.
 
 pub mod dataset;
+pub mod pushdown;
 pub mod term;

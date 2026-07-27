@@ -235,14 +235,14 @@ from permissively-licensed crates. What this epic builds is the
 no library can supply actually live.
 
 - [x] **`QueryableDataset` over flakes** — the whole of this epic's own content *(Slice A)*. Real SPARQL runs: BGP, two-hop join, numeric FILTER, OPTIONAL, ASK, named-graph isolation
-- [ ] Index selection across the four orderings — the scan currently materialises the permitted set rather than pushing patterns down
+- [x] **Pattern pushdown** — the query's patterns become narrowed flake scans; a one-predicate query reads 124 facts instead of 1,234 on the demo estate. A property path or an unrecognised algebra node forces a full scan rather than a guess *(Slice C)*
 - [x] `as_of` — the dataset is constructed at a transaction time *(Slice B)*
 - [x] Authorization applied before the dataset exists, so the evaluator only ever sees permitted rows; edges hidden unless *both* endpoints are visible *(Slice B)*
 - [x] Fact budget — **nothing adopted enforces budgets; this is ours**. 50k facts, server-side, truncation always reported *(Slice B)*
 - [x] Freshness stamping on the result (Epic 4 decision 8) *(Slice B)*
 - [x] ~~Parser~~ — `spargebra`, full SPARQL 1.1 *(adopted)*
 - [x] ~~Planner / execution~~ — `spareval` *(adopted)*
-- [ ] Verify: does `sparopt`'s generic rewriting fight index selection? Measure before trusting
+- [ ] `sparopt` is not yet in the path — pushdown reads the parsed algebra directly. Adding the optimizer is a measurement question, not a gap
 
 ### Epic 7a — Traversal
 - [x] One frontier primitive (recursive CTE, one statement); `neighbours` and `subgraph` over it *(Slices A, B, E)*

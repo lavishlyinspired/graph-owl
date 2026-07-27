@@ -520,14 +520,32 @@ impl Catalog {
                 .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?,
         };
 
-        // 3. The facts, filtered before the evaluator exists.
-        let all = graph
-            .query_pattern(&graph_owl_core::flake::TriplePattern {
-                as_of: at,
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        // 3. The facts, narrowed by the query and filtered before the
+        //    evaluator exists.
+        //
+        //    Pushdown turns "read the estate and let the evaluator filter" into
+        //    "read what the question names". `None` means the query could not
+        //    be bounded — a property path reaches an unknown number of hops —
+        //    and a full scan is then the only correct answer, never a guess.
+        let scans = graph_owl_query::pushdown::scans_for(&parsed)
+            .unwrap_or_else(|| vec![graph_owl_core::flake::TriplePattern::default()]);
+
+        let mut all = Vec::new();
+        for mut scan in scans {
+            scan.as_of = at;
+            all.extend(
+                graph
+                    .query_pattern(&scan)
+                    .await
+                    .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?,
+            );
+        }
+        // Patterns overlap — `?s dsc:name ?n` and `?s ?p ?o` both return the
+        // name flakes. A duplicate quad would make the evaluator emit a
+        // solution twice, so the union has to be a set.
+        all.sort_by(|a, b| (&a.s.id, &a.p.id, a.t).cmp(&(&b.s.id, &b.p.id, b.t)));
+        all.dedup();
+
         let (facts, truncated) = scope_facts(&all, &visible, budget.max_facts);
 
         // 4. Evaluate.
