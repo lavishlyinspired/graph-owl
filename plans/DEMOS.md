@@ -234,14 +234,14 @@ from permissively-licensed crates. What this epic builds is the
 `QueryableDataset` implementation over flakes — which is where the three things
 no library can supply actually live.
 
-- [ ] **`QueryableDataset` over flakes** — the whole of this epic's own content
+- [x] **`QueryableDataset` over flakes** — the whole of this epic's own content *(Slice A)*. Real SPARQL runs: BGP, two-hop join, numeric FILTER, OPTIONAL, ASK, named-graph isolation
 - [ ] Index selection across the four orderings, inside the scan
 - [ ] `as_of` — the dataset is constructed at a transaction time
 - [ ] Authorization compiled into the scan, so the evaluator only ever sees permitted rows
 - [ ] Resource tracking (`Tracker`) — **nothing adopted enforces budgets; this is ours**
 - [ ] Freshness stamping on the result (Epic 4 decision 8)
-- [ ] ~~Parser~~ — `spargebra`, full SPARQL 1.1
-- [ ] ~~Planner / execution~~ — `sparopt` + `spareval`
+- [x] ~~Parser~~ — `spargebra`, full SPARQL 1.1 *(adopted)*
+- [x] ~~Planner / execution~~ — `spareval` *(adopted)*
 - [ ] Verify: does `sparopt`'s generic rewriting fight index selection? Measure before trusting
 
 ### Epic 7a — Traversal

@@ -89,6 +89,70 @@ pub mod namespace {
     pub const NOT_FOUND: u16 = 65535;
 }
 
+/// The IRI a namespace code stands for.
+///
+/// A `Sid` is a compact internal address; an IRI is what leaves the system.
+/// This is the one mapping between them, so a code cannot mean one IRI on
+/// export and another in a query.
+///
+/// Returns `None` for a code with no assigned IRI — including [`namespace::UNSET`].
+/// A `Sid` that cannot be expressed as an IRI must fail loudly rather than
+/// serialize as a bare local name, which would silently drop the vocabulary it
+/// belongs to (`plans/09-engine-rdf-io.md`).
+#[must_use]
+pub fn namespace_iri(code: u16) -> Option<&'static str> {
+    Some(match code {
+        namespace::DSC => "https://graph-owl.dev/ns/catalog#",
+        namespace::RDF => "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        namespace::RDFS => "http://www.w3.org/2000/01/rdf-schema#",
+        namespace::XSD => "http://www.w3.org/2001/XMLSchema#",
+        namespace::OWL => "http://www.w3.org/2002/07/owl#",
+        namespace::SHACL => "http://www.w3.org/ns/shacl#",
+        namespace::SCHEMA => "https://schema.org/",
+        namespace::DCTERMS => "http://purl.org/dc/terms/",
+        _ => return None,
+    })
+}
+
+impl Sid {
+    /// The full IRI this identifier denotes.
+    ///
+    /// # Errors
+    ///
+    /// `None` when the namespace has no assigned IRI.
+    #[must_use]
+    pub fn to_iri(&self) -> Option<String> {
+        namespace_iri(self.namespace_code).map(|base| format!("{base}{}", self.id))
+    }
+
+    /// The inverse: split a full IRI back into a namespace code and local name.
+    ///
+    /// Longest-prefix wins, which matters because two vocabulary IRIs could in
+    /// principle share a prefix — matching the first would silently attribute a
+    /// term to the wrong vocabulary.
+    #[must_use]
+    pub fn from_iri(iri: &str) -> Option<Self> {
+        [
+            namespace::DSC,
+            namespace::RDF,
+            namespace::RDFS,
+            namespace::XSD,
+            namespace::OWL,
+            namespace::SHACL,
+            namespace::SCHEMA,
+            namespace::DCTERMS,
+        ]
+        .into_iter()
+        .filter_map(|code| {
+            let base = namespace_iri(code)?;
+            iri.strip_prefix(base)
+                .map(|local| (base.len(), code, local))
+        })
+        .max_by_key(|(len, _, _)| *len)
+        .map(|(_, code, local)| Sid::new(code, local))
+    }
+}
+
 /// The object position of a flake.
 ///
 /// The discriminants returned by [`FlakeValue::value_type`] are a **wire
@@ -384,6 +448,64 @@ mod namespace_tests {
             total,
             "two vocabularies sharing a code rewrites the meaning of stored flakes"
         );
+    }
+}
+
+#[cfg(test)]
+mod iri_tests {
+    use super::*;
+
+    #[test]
+    fn a_sid_round_trips_through_its_iri() {
+        for sid in [
+            Sid::dsc("parentTable"),
+            Sid::new(namespace::RDF, "type"),
+            Sid::new(namespace::XSD, "dateTime"),
+        ] {
+            let iri = sid.to_iri().expect("has an IRI");
+            assert_eq!(Sid::from_iri(&iri), Some(sid.clone()), "{iri}");
+        }
+    }
+
+    #[test]
+    fn the_catalog_vocabulary_has_the_iri_the_domain_model_states() {
+        assert_eq!(
+            Sid::dsc("name").to_iri().as_deref(),
+            Some("https://graph-owl.dev/ns/catalog#name")
+        );
+    }
+
+    /// A `Sid` that cannot be expressed as an IRI must fail rather than
+    /// serialize as a bare local name, which would drop the vocabulary it
+    /// belongs to and make the term unresolvable.
+    #[test]
+    fn an_unassigned_namespace_has_no_iri() {
+        assert!(Sid::new(namespace::UNSET, "x").to_iri().is_none());
+        assert!(Sid::new(9999, "x").to_iri().is_none());
+    }
+
+    #[test]
+    fn an_unknown_iri_does_not_resolve_to_a_sid() {
+        assert!(Sid::from_iri("https://example.org/thing").is_none());
+    }
+
+    /// Longest-prefix wins. Matching the first prefix found would silently
+    /// attribute a term to whichever vocabulary happened to be checked first.
+    #[test]
+    fn the_longest_matching_prefix_wins() {
+        // `rdf:` and `rdfs:` do not nest, but the property must hold anyway —
+        // it is what makes the mapping safe to extend.
+        let rdfs = Sid::new(namespace::RDFS, "label");
+        let iri = rdfs.to_iri().expect("iri");
+        assert_eq!(Sid::from_iri(&iri), Some(rdfs));
+    }
+
+    #[test]
+    fn a_local_name_containing_the_separator_survives() {
+        // FQNs appear as local names and contain dots.
+        let sid = Sid::dsc("hdfc-core.postgres.payments.upi_transactions");
+        let iri = sid.to_iri().expect("iri");
+        assert_eq!(Sid::from_iri(&iri), Some(sid));
     }
 }
 

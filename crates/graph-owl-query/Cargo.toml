@@ -10,4 +10,8 @@ workspace = true
 [dependencies]
 graph-owl-core = { path = "../graph-owl-core" }
 graph-owl-engine = { path = "../graph-owl-engine" }
+oxrdf = "0.3.3"
+spareval = "0.2"
+spargebra = "0.4"
 thiserror.workspace = true
+chrono.workspace = true

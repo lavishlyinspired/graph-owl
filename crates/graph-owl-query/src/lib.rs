@@ -1,6 +1,15 @@
-//! SPARQL subset: parse, plan, execute (pure)
+//! SPARQL over the flake store.
 //!
-//! **Status**: placeholder. Implemented by Epic 7 — see `plans/`.
+//! **Most of SPARQL is adopted, not built** (`plans/00l-build-vs-adopt.md`):
+//! `spargebra` parses, `sparopt` optimises, `spareval` evaluates, `sparesults`
+//! serialises — all permissively licensed.
 //!
-//! No production code lands here except through the TDD cycle
-//! (RED -> GREEN -> MUTATE -> KILL MUTANTS -> REFACTOR) defined in `CLAUDE.md`.
+//! What lives here is the one thing no library could supply: a
+//! [`spareval::QueryableDataset`] over flakes. That is where index selection,
+//! `as_of` resolution and the compiled access predicate live, and it is why
+//! adopting an evaluator costs none of this project's differentiators — the
+//! evaluator only ever sees rows the scan already permitted, at the one
+//! transaction time the scan already resolved.
+
+pub mod dataset;
+pub mod term;
