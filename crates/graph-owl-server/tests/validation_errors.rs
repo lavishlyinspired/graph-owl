@@ -25,7 +25,7 @@ async fn post_tables(app: axum::Router, body: String) -> axum::response::Respons
 /// one round trip, not one per retry.
 #[tokio::test]
 async fn two_independent_violations_are_both_reported() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = post_tables(
         app,
@@ -63,7 +63,7 @@ async fn two_independent_violations_are_both_reported() {
 
 #[tokio::test]
 async fn each_error_entry_carries_field_code_and_detail() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = post_tables(app, json!({ "fullyQualifiedName": "" }).to_string()).await;
     let body = json_body(response).await;
@@ -93,7 +93,7 @@ async fn each_error_entry_carries_field_code_and_detail() {
 
 #[tokio::test]
 async fn a_wrong_typed_field_is_a_validation_error_not_a_parse_failure() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = post_tables(
         app,
@@ -116,7 +116,7 @@ async fn a_wrong_typed_field_is_a_validation_error_not_a_parse_failure() {
 
 #[tokio::test]
 async fn syntactically_broken_json_stays_a_malformed_body() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = post_tables(app, "{ not json".to_string()).await;
 
@@ -134,7 +134,7 @@ async fn syntactically_broken_json_stays_a_malformed_body() {
 
 #[tokio::test]
 async fn a_valid_body_still_succeeds() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = post_tables(
         app,

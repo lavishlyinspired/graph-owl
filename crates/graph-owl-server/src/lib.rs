@@ -8,11 +8,12 @@ use axum::{
     routing::{delete, get, post},
 };
 use graph_owl_api::{
-    Catalog, CatalogError, CreateRelationship, CreateTable,
-    validation::{FieldError, FieldErrorCode, ValidateBody},
+    Catalog, CatalogError, CreateRelationship, CreateTable, UpsertAsset,
+    validation::{FieldError, FieldErrorCode, ValidateBody, require_non_empty_string},
 };
+use graph_owl_connectors::{Connector, RunScope, postgres::PostgresConnector};
 use graph_owl_core::{
-    Principal, Relationship, Table, TableUpdate,
+    Asset, AssetKind, Principal, Relationship, Table, TableUpdate,
     page::{Page, PageRequest, PageRequestError},
 };
 use graph_owl_storage::{ConflictKind, StorageError};
@@ -33,6 +34,14 @@ pub fn app(catalog: Catalog) -> Router {
             post(create_relationship).get(list_relationships_for_table),
         )
         .route("/relationships/{id}", delete(delete_relationship))
+        .route("/assets", post(upsert_asset).get(list_assets))
+        .route("/assets/search", get(search_assets))
+        .route("/assets/roots", get(list_roots))
+        .route("/assets/stats", get(asset_stats))
+        .route("/connectors/postgres/runs", post(run_postgres_connector))
+        .route("/assets/{id}", get(get_asset))
+        .route("/assets/{id}/children", get(list_asset_children))
+        .route("/assets/{id}/ancestors", get(asset_ancestors))
         .with_state(catalog)
 }
 
@@ -451,4 +460,221 @@ impl IntoResponse for AppError {
         );
         response
     }
+}
+
+// ---- asset hierarchy (Epic 2) ----
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssetListQuery {
+    kind: Option<String>,
+    limit: Option<usize>,
+    after: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssetSearchQuery {
+    q: String,
+    kind: Option<String>,
+    limit: Option<usize>,
+    after: Option<String>,
+}
+
+fn parse_kind(raw: Option<&str>) -> Result<Option<AssetKind>, AppError> {
+    raw.map(|value| {
+        AssetKind::parse(value).map_err(|()| {
+            AppError::Validation(vec![FieldError::new(
+                "kind",
+                FieldErrorCode::Type,
+                format!(
+                    "`{value}` is not an asset kind; expected one of: {}",
+                    AssetKind::ALL
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )])
+        })
+    })
+    .transpose()
+}
+
+async fn upsert_asset(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<UpsertAsset>,
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::HeaderName, String); 1],
+        Json<Asset>,
+    ),
+    AppError,
+> {
+    let asset = catalog.upsert_asset(&principal, payload).await?;
+    let location = format!("/assets/{}", asset.id);
+    Ok((
+        StatusCode::CREATED,
+        [(axum::http::header::LOCATION, location)],
+        Json(asset),
+    ))
+}
+
+async fn list_assets(
+    State(catalog): State<Catalog>,
+    AppQuery(query): AppQuery<AssetListQuery>,
+) -> Result<Json<Page<Asset>>, AppError> {
+    let kind = parse_kind(query.kind.as_deref())?;
+    let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    Ok(Json(catalog.list_assets(kind, &page).await?))
+}
+
+async fn search_assets(
+    State(catalog): State<Catalog>,
+    AppQuery(query): AppQuery<AssetSearchQuery>,
+) -> Result<Json<Page<Asset>>, AppError> {
+    let kind = parse_kind(query.kind.as_deref())?;
+    let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    Ok(Json(catalog.search_assets(&query.q, kind, &page).await?))
+}
+
+async fn get_asset(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Asset>, AppError> {
+    catalog
+        .get_asset(id)
+        .await?
+        .map(Json)
+        .ok_or(AppError::NotFound)
+}
+
+async fn list_roots(State(catalog): State<Catalog>) -> Result<Json<Vec<Asset>>, AppError> {
+    Ok(Json(catalog.list_children(None).await?))
+}
+
+async fn list_asset_children(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<Asset>>, AppError> {
+    // A missing parent is a 404, not an empty list: "this has no children" and
+    // "this does not exist" are different answers and a client acts on them
+    // differently.
+    if catalog.get_asset(id).await?.is_none() {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.list_children(Some(id)).await?))
+}
+
+async fn asset_ancestors(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<Asset>>, AppError> {
+    if catalog.get_asset(id).await?.is_none() {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.ancestors_of(id).await?))
+}
+
+async fn asset_stats(State(catalog): State<Catalog>) -> Result<Json<serde_json::Value>, AppError> {
+    let counts = catalog.count_assets_by_kind().await?;
+    Ok(Json(json!({
+        "byKind": counts
+            .into_iter()
+            .map(|(kind, n)| json!({ "kind": kind.as_str(), "count": n }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+// ---- connector runs (Epic 15) ----
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RunPostgresConnector {
+    connection_string: String,
+    service_name: String,
+    #[serde(default)]
+    include_schemas: Vec<String>,
+}
+
+impl ValidateBody for RunPostgresConnector {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("connectionString"),
+            &mut errors,
+        );
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("serviceName"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+async fn run_postgres_connector(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<RunPostgresConnector>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let connector = PostgresConnector::connect(&payload.connection_string, &payload.service_name)
+        .await
+        .map_err(|error| {
+            AppError::Validation(vec![FieldError::new(
+                "connectionString",
+                FieldErrorCode::Type,
+                error.to_string(),
+            )])
+        })?;
+
+    let scope = RunScope {
+        include_schemas: payload.include_schemas,
+    };
+    let records = connector
+        .fetch(&scope)
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+
+    // Per-record failure does not abort the run (15-connectors.md Slice B): a
+    // single unreadable table must not cost the other nine hundred.
+    let mut created = 0;
+    let mut failures: Vec<serde_json::Value> = Vec::new();
+    for record in records {
+        let path = record.path.join(".");
+        match catalog
+            .ingest_record(
+                &principal,
+                record.kind,
+                &record.path,
+                record.description,
+                record.properties,
+            )
+            .await
+        {
+            Ok(_) => created += 1,
+            // A run that reports only a count tells an operator something is
+            // wrong and nothing about what. Each failure names the record and
+            // the reason.
+            Err(error) => {
+                let app_error = AppError::from(error);
+                let mut failure = json!({ "path": path, "reason": app_error.detail() });
+                if let AppError::Validation(errors) = &app_error {
+                    failure["errors"] = json!(errors);
+                }
+                failures.push(failure);
+            }
+        }
+    }
+
+    Ok(Json(json!({
+        "connector": connector.type_name(),
+        "serviceName": payload.service_name,
+        "created": created,
+        "failed": failures.len(),
+        "failures": failures,
+    })))
 }

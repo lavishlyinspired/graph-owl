@@ -8,7 +8,7 @@ use testcontainers_modules::{
     testcontainers::{ContainerAsync, runners::AsyncRunner},
 };
 
-pub async fn test_app() -> (axum::Router, ContainerAsync<Postgres>) {
+pub async fn test_app() -> (axum::Router, ContainerAsync<Postgres>, String) {
     let container = Postgres::default()
         .start()
         .await
@@ -25,7 +25,7 @@ pub async fn test_app() -> (axum::Router, ContainerAsync<Postgres>) {
         .expect("failed to connect and migrate");
     let catalog = Catalog::new(Arc::new(storage));
 
-    (graph_owl_server::app(catalog), container)
+    (graph_owl_server::app(catalog), container, connection_string)
 }
 
 pub async fn json_body(response: axum::response::Response) -> Value {

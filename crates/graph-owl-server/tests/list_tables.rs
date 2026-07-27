@@ -28,7 +28,7 @@ async fn create_table(app: &axum::Router, name: &str, fqn: &str) -> Value {
 
 #[tokio::test]
 async fn get_tables_with_no_rows_returns_an_empty_array() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = app
         .oneshot(
@@ -48,7 +48,7 @@ async fn get_tables_with_no_rows_returns_an_empty_array() {
 
 #[tokio::test]
 async fn get_tables_returns_all_created_tables() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let first = create_table(&app, "customers", "warehouse.public.customers").await;
     let second = create_table(&app, "orders", "warehouse.public.orders").await;
 

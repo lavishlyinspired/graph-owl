@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn get_table_by_id_returns_the_previously_created_table() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let create_response = app
         .clone()
@@ -52,7 +52,7 @@ async fn get_table_by_id_returns_the_previously_created_table() {
 
 #[tokio::test]
 async fn get_table_by_id_for_nonexistent_id_returns_404() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = app
         .oneshot(

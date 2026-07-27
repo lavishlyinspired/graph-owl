@@ -60,7 +60,7 @@ async fn create_table(app: &axum::Router, name: &str, fqn: &str) -> Value {
 
 #[tokio::test]
 async fn no_response_on_any_surface_carries_a_snake_case_key() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let from = create_table(&app, "orders", "warehouse.public.orders").await;
     let to = create_table(&app, "customers", "warehouse.public.customers").await;
     assert_no_snake_case(&from, "POST /tables");
@@ -106,7 +106,7 @@ async fn no_response_on_any_surface_carries_a_snake_case_key() {
 
 #[tokio::test]
 async fn error_bodies_are_camel_case_too() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     // A validation failure names fields, so it is the response most likely to
     // leak an internal Rust identifier.
@@ -141,7 +141,7 @@ async fn error_bodies_are_camel_case_too() {
 /// resolving one does something different from a client resolving the other.
 #[tokio::test]
 async fn an_fqn_conflict_and_a_relationship_conflict_are_different_problems() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let from = create_table(&app, "orders", "warehouse.public.orders").await;
     let to = create_table(&app, "customers", "warehouse.public.customers").await;
 

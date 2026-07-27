@@ -38,7 +38,7 @@ async fn create_table(app: &axum::Router, fully_qualified_name: &str) -> String 
 
 #[tokio::test]
 async fn post_relationships_with_valid_body_returns_201_with_created_relationship() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let from_id = create_table(&app, "warehouse.public.orders").await;
     let to_id = create_table(&app, "warehouse.public.customers").await;
 
@@ -73,7 +73,7 @@ async fn post_relationships_with_valid_body_returns_201_with_created_relationshi
 
 #[tokio::test]
 async fn post_relationships_for_a_nonexistent_source_table_returns_404() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let to_id = create_table(&app, "warehouse.public.customers").await;
 
     let response = app
@@ -99,7 +99,7 @@ async fn post_relationships_for_a_nonexistent_source_table_returns_404() {
 
 #[tokio::test]
 async fn post_relationships_targeting_a_nonexistent_table_returns_404() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let from_id = create_table(&app, "warehouse.public.orders").await;
 
     let response = app
@@ -125,7 +125,7 @@ async fn post_relationships_targeting_a_nonexistent_table_returns_404() {
 
 #[tokio::test]
 async fn post_relationships_with_empty_relationship_type_returns_400() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let from_id = create_table(&app, "warehouse.public.orders").await;
     let to_id = create_table(&app, "warehouse.public.customers").await;
 
@@ -152,7 +152,7 @@ async fn post_relationships_with_empty_relationship_type_returns_400() {
 
 #[tokio::test]
 async fn post_relationships_with_duplicate_tuple_returns_409() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let from_id = create_table(&app, "warehouse.public.orders").await;
     let to_id = create_table(&app, "warehouse.public.customers").await;
     let body = json!({

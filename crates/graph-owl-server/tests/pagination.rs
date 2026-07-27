@@ -47,7 +47,7 @@ async fn seed(app: &axum::Router, count: usize) {
 
 #[tokio::test]
 async fn a_client_can_walk_every_page_using_only_the_returned_cursor() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     seed(&app, 25).await;
 
     let mut seen = Vec::new();
@@ -79,7 +79,7 @@ async fn a_client_can_walk_every_page_using_only_the_returned_cursor() {
 
 #[tokio::test]
 async fn the_default_limit_applies_when_none_is_given() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     seed(&app, 30).await;
 
     let body = json_body(get(&app, "/tables").await).await;
@@ -96,7 +96,7 @@ async fn the_default_limit_applies_when_none_is_given() {
 
 #[tokio::test]
 async fn a_limit_above_the_maximum_is_rejected_rather_than_clamped() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = get(&app, "/tables?limit=1001").await;
 
@@ -113,7 +113,7 @@ async fn a_limit_above_the_maximum_is_rejected_rather_than_clamped() {
 
 #[tokio::test]
 async fn the_maximum_limit_itself_is_accepted() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     // The boundary is inclusive; rejecting 1000 as well would be off by one.
     assert_eq!(
@@ -124,7 +124,7 @@ async fn the_maximum_limit_itself_is_accepted() {
 
 #[tokio::test]
 async fn a_handcrafted_cursor_is_a_400_never_a_500_or_a_panic() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     seed(&app, 3).await;
 
     for bogus in [
@@ -147,7 +147,7 @@ async fn a_handcrafted_cursor_is_a_400_never_a_500_or_a_panic() {
 
 #[tokio::test]
 async fn a_zero_limit_is_rejected() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = get(&app, "/tables?limit=0").await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);

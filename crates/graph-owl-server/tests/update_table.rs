@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn patch_table_updates_description_and_advances_updated_at() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let create_response = app
         .clone()
@@ -59,7 +59,7 @@ async fn patch_table_updates_description_and_advances_updated_at() {
 
 #[tokio::test]
 async fn patch_table_for_nonexistent_id_returns_404() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = app
         .oneshot(

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 graph-owl-api.workspace = true
+graph-owl-connectors.workspace = true
 graph-owl-core.workspace = true
 graph-owl-storage.workspace = true
 graph-owl-storage-postgres.workspace = true
@@ -16,6 +17,7 @@ serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+sqlx.workspace = true
 tower.workspace = true
 testcontainers-modules.workspace = true
 

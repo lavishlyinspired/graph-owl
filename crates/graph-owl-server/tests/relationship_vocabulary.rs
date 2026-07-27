@@ -51,7 +51,7 @@ async fn relate(
 
 #[tokio::test]
 async fn every_legal_table_to_table_type_is_accepted() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let from = create_table(&app, "orders", "warehouse.public.orders").await;
     let to = create_table(&app, "customers", "warehouse.public.customers").await;
     let (from_id, to_id) = (from["id"].as_str().unwrap(), to["id"].as_str().unwrap());
@@ -75,7 +75,7 @@ async fn every_legal_table_to_table_type_is_accepted() {
 
 #[tokio::test]
 async fn an_unknown_type_is_rejected_and_the_response_lists_the_vocabulary() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let from = create_table(&app, "orders", "warehouse.public.orders").await;
     let to = create_table(&app, "customers", "warehouse.public.customers").await;
 
@@ -106,7 +106,7 @@ async fn an_unknown_type_is_rejected_and_the_response_lists_the_vocabulary() {
 /// which is why the legality table exists.
 #[tokio::test]
 async fn a_legal_type_in_an_illegal_position_is_rejected_distinctly() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let from = create_table(&app, "orders", "warehouse.public.orders").await;
     let to = create_table(&app, "customers", "warehouse.public.customers").await;
 
@@ -132,7 +132,7 @@ async fn a_legal_type_in_an_illegal_position_is_rejected_distinctly() {
 /// tables that were never the problem.
 #[tokio::test]
 async fn an_illegal_triple_between_nonexistent_tables_reports_the_triple_not_a_404() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = relate(
         &app,
@@ -156,7 +156,7 @@ async fn an_illegal_triple_between_nonexistent_tables_reports_the_triple_not_a_4
 
 #[tokio::test]
 async fn a_legal_triple_between_nonexistent_tables_is_still_a_404() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = relate(
         &app,

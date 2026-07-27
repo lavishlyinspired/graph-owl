@@ -29,3 +29,4 @@ graph-owl-core = { path = "crates/graph-owl-core" }
 graph-owl-storage = { path = "crates/graph-owl-storage" }
 graph-owl-storage-postgres = { path = "crates/graph-owl-storage-postgres" }
 graph-owl-api = { path = "crates/graph-owl-api" }
+graph-owl-connectors = { path = "crates/graph-owl-connectors" }

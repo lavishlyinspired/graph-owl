@@ -65,7 +65,7 @@ async fn create_relationship(app: &axum::Router, from_id: &str, to_id: &str) -> 
 
 #[tokio::test]
 async fn delete_relationship_removes_it_and_it_no_longer_appears_in_listings() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let from_id = create_table(&app, "warehouse.public.orders").await;
     let to_id = create_table(&app, "warehouse.public.customers").await;
     let relationship_id = create_relationship(&app, &from_id, &to_id).await;
@@ -99,7 +99,7 @@ async fn delete_relationship_removes_it_and_it_no_longer_appears_in_listings() {
 
 #[tokio::test]
 async fn delete_relationship_for_nonexistent_id_returns_404() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = app
         .oneshot(

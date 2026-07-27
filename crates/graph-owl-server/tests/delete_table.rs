@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn delete_table_removes_it_and_subsequent_get_returns_404() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let create_response = app
         .clone()
@@ -62,7 +62,7 @@ async fn delete_table_removes_it_and_subsequent_get_returns_404() {
 
 #[tokio::test]
 async fn delete_table_for_nonexistent_id_returns_404() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = app
         .oneshot(

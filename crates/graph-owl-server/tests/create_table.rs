@@ -10,7 +10,7 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn post_tables_with_valid_body_returns_201_with_created_table() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = app
         .oneshot(
@@ -41,7 +41,7 @@ async fn post_tables_with_valid_body_returns_201_with_created_table() {
 
 #[tokio::test]
 async fn post_tables_missing_name_returns_400() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = app
         .oneshot(
@@ -62,7 +62,7 @@ async fn post_tables_missing_name_returns_400() {
 
 #[tokio::test]
 async fn post_tables_with_duplicate_fully_qualified_name_returns_409() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let body = json!({
         "name": "customers",
         "fullyQualifiedName": "warehouse.public.customers"

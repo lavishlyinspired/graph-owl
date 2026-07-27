@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use graph_owl_core::{
-    Relationship, Table, TableUpdate,
+    Asset, AssetKind, Relationship, Table, TableUpdate,
     page::{Cursor, Page, PageRequest},
 };
 use graph_owl_storage::{ConflictKind, Storage, StorageError};
@@ -269,5 +269,192 @@ impl Storage for PostgresStorage {
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    // ---- asset hierarchy ----
+
+    async fn upsert_asset(&self, asset: Asset) -> Result<Asset, StorageError> {
+        // ON CONFLICT on the FQN, because the FQN *is* the identity: a
+        // connector re-run supplies a fresh Uuid every time, and treating that
+        // as a new entity would duplicate the whole warehouse nightly.
+        // COALESCE on description keeps human curation: a source reporting
+        // NULL means "I have nothing to say", not "blank what a person wrote"
+        // (15-connectors.md decision 3).
+        let row = sqlx::query(
+            "INSERT INTO assets (id, kind, name, fully_qualified_name, parent_id, description, properties, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (fully_qualified_name) DO UPDATE SET
+                 name = EXCLUDED.name,
+                 parent_id = EXCLUDED.parent_id,
+                 description = COALESCE(EXCLUDED.description, assets.description),
+                 properties = COALESCE(EXCLUDED.properties, assets.properties),
+                 updated_at = now()
+             RETURNING id, kind, name, fully_qualified_name, parent_id, description, properties, created_at, updated_at",
+        )
+        .bind(asset.id)
+        .bind(asset.kind.as_str())
+        .bind(&asset.name)
+        .bind(&asset.fully_qualified_name)
+        .bind(asset.parent_id)
+        .bind(&asset.description)
+        .bind(&asset.properties)
+        .bind(asset.created_at)
+        .bind(asset.updated_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(asset_from_row(row))
+    }
+
+    async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, StorageError> {
+        let row = sqlx::query(&format!("SELECT {ASSET_COLUMNS} FROM assets WHERE id = $1"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(asset_from_row))
+    }
+
+    async fn get_asset_by_fqn(&self, fqn: &str) -> Result<Option<Asset>, StorageError> {
+        let row = sqlx::query(&format!(
+            "SELECT {ASSET_COLUMNS} FROM assets WHERE fully_qualified_name = $1"
+        ))
+        .bind(fqn)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(asset_from_row))
+    }
+
+    async fn list_assets(
+        &self,
+        kind: Option<AssetKind>,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, StorageError> {
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let sql = format!(
+            "SELECT {ASSET_COLUMNS} FROM assets
+             WHERE ($1::text IS NULL OR kind = $1)
+               AND ($2::text IS NULL OR (fully_qualified_name, id) > ($2, $3))
+             ORDER BY fully_qualified_name, id
+             LIMIT $4"
+        );
+        let query = sqlx::query(&sql)
+            .bind(kind.map(AssetKind::as_str))
+            .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
+            .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
+            .bind(overfetch);
+        self.asset_page(query, page).await
+    }
+
+    async fn list_children(&self, parent_id: Option<Uuid>) -> Result<Vec<Asset>, StorageError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {ASSET_COLUMNS} FROM assets
+             WHERE ($1::uuid IS NULL AND parent_id IS NULL) OR parent_id = $1
+             ORDER BY name"
+        ))
+        .bind(parent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(asset_from_row).collect())
+    }
+
+    async fn ancestors_of(&self, id: Uuid) -> Result<Vec<Asset>, StorageError> {
+        // Recursive CTE walking parent_id upward, then reversed so callers get
+        // root-first — which is the order a breadcrumb renders in.
+        let rows = sqlx::query(&format!(
+            "WITH RECURSIVE chain AS (
+                 SELECT {ASSET_COLUMNS}, 0 AS hops FROM assets WHERE id = $1
+                 UNION ALL
+                 SELECT a.id, a.kind, a.name, a.fully_qualified_name, a.parent_id,
+                        a.description, a.properties, a.created_at, a.updated_at, c.hops + 1
+                 FROM assets a JOIN chain c ON a.id = c.parent_id
+             )
+             SELECT {ASSET_COLUMNS} FROM chain ORDER BY hops DESC"
+        ))
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(asset_from_row).collect())
+    }
+
+    async fn search_assets(
+        &self,
+        query: &str,
+        kind: Option<AssetKind>,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, StorageError> {
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let pattern = format!("%{}%", query.to_lowercase());
+        let sql = format!(
+            "SELECT {ASSET_COLUMNS} FROM assets
+             WHERE (lower(name) LIKE $1 OR lower(fully_qualified_name) LIKE $1)
+               AND ($2::text IS NULL OR kind = $2)
+               AND ($3::text IS NULL OR (fully_qualified_name, id) > ($3, $4))
+             ORDER BY fully_qualified_name, id
+             LIMIT $5"
+        );
+        let q = sqlx::query(&sql)
+            .bind(pattern)
+            .bind(kind.map(AssetKind::as_str))
+            .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
+            .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
+            .bind(overfetch);
+        self.asset_page(q, page).await
+    }
+
+    async fn count_assets_by_kind(&self) -> Result<Vec<(AssetKind, i64)>, StorageError> {
+        let rows = sqlx::query("SELECT kind, count(*) AS n FROM assets GROUP BY kind")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                AssetKind::parse(row.get::<&str, _>("kind"))
+                    .ok()
+                    .map(|kind| (kind, row.get::<i64, _>("n")))
+            })
+            .collect())
+    }
+}
+
+fn asset_from_row(row: PgRow) -> Asset {
+    Asset {
+        id: row.get("id"),
+        kind: AssetKind::parse(row.get::<&str, _>("kind")).unwrap_or(AssetKind::Table),
+        name: row.get("name"),
+        fully_qualified_name: row.get("fully_qualified_name"),
+        parent_id: row.get("parent_id"),
+        description: row.get("description"),
+        properties: row.get("properties"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+const ASSET_COLUMNS: &str = "id, kind, name, fully_qualified_name, parent_id, description, properties, created_at, updated_at";
+
+impl PostgresStorage {
+    async fn asset_page(
+        &self,
+        query: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, StorageError> {
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let assets: Vec<Asset> = rows.into_iter().map(asset_from_row).collect();
+        Ok(Page::from_overfetch(assets, page.limit, |asset| {
+            Cursor::new(asset.fully_qualified_name.clone(), asset.id)
+        }))
     }
 }

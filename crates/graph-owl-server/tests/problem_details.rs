@@ -39,7 +39,7 @@ async fn create_table(app: &axum::Router, name: &str, fqn: &str) -> serde_json::
 
 #[tokio::test]
 async fn duplicate_fqn_returns_409_problem_json_naming_the_conflicting_entity() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let existing = create_table(&app, "customers", "warehouse.public.customers").await;
 
     let response = app
@@ -77,7 +77,7 @@ async fn duplicate_fqn_returns_409_problem_json_naming_the_conflicting_entity() 
 
 #[tokio::test]
 async fn malformed_body_returns_400_problem_json() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = app
         .oneshot(
@@ -102,7 +102,7 @@ async fn malformed_body_returns_400_problem_json() {
 
 #[tokio::test]
 async fn missing_table_returns_404_problem_json() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = app
         .oneshot(
@@ -126,7 +126,7 @@ async fn missing_table_returns_404_problem_json() {
 
 #[tokio::test]
 async fn invalid_relationship_type_returns_400_problem_json() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let from = create_table(&app, "orders", "warehouse.public.orders").await;
     let to = create_table(&app, "customers", "warehouse.public.customers").await;
 
@@ -167,7 +167,7 @@ async fn invalid_relationship_type_returns_400_problem_json() {
 /// variants against each other catches it.
 #[tokio::test]
 async fn each_error_variant_carries_a_distinct_type_uri() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     create_table(&app, "customers", "warehouse.public.customers").await;
 
     let conflict = app
@@ -254,7 +254,7 @@ async fn each_error_variant_carries_a_distinct_type_uri() {
 /// which value collided, which field failed to parse, is exactly what it loses.
 #[tokio::test]
 async fn detail_carries_the_specifics_of_this_occurrence() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     create_table(&app, "customers", "warehouse.public.customers").await;
 
     let conflict = app

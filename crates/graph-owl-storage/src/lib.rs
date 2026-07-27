@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use graph_owl_core::{
-    Relationship, Table, TableUpdate,
+    Asset, AssetKind, Relationship, Table, TableUpdate,
     page::{Page, PageRequest},
 };
 use thiserror::Error;
@@ -53,4 +53,32 @@ pub trait Storage: Send + Sync {
         entity_id: Uuid,
     ) -> Result<Vec<Relationship>, StorageError>;
     async fn delete_relationship(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    // ---- asset hierarchy (Epic 2) ----
+
+    /// Inserts, or updates in place if the FQN is already known.
+    ///
+    /// Upsert rather than insert because a connector re-run must converge
+    /// (`15-connectors.md` decision 3): the second run over an unchanged source
+    /// has to be a no-op, not a wall of conflicts.
+    async fn upsert_asset(&self, asset: Asset) -> Result<Asset, StorageError>;
+    async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, StorageError>;
+    async fn get_asset_by_fqn(&self, fqn: &str) -> Result<Option<Asset>, StorageError>;
+    async fn list_assets(
+        &self,
+        kind: Option<AssetKind>,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, StorageError>;
+    /// Direct children, name-ordered. `None` parent lists roots.
+    async fn list_children(&self, parent_id: Option<Uuid>) -> Result<Vec<Asset>, StorageError>;
+    /// Root-to-self chain, for breadcrumbs and for cascade decisions.
+    async fn ancestors_of(&self, id: Uuid) -> Result<Vec<Asset>, StorageError>;
+    /// Case-insensitive substring match over name and FQN.
+    async fn search_assets(
+        &self,
+        query: &str,
+        kind: Option<AssetKind>,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, StorageError>;
+    async fn count_assets_by_kind(&self) -> Result<Vec<(AssetKind, i64)>, StorageError>;
 }

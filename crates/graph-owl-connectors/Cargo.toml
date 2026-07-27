@@ -8,8 +8,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-graph-owl-core = { path = "../graph-owl-core" }
+graph-owl-core.workspace = true
 async-trait.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
+tokio.workspace = true

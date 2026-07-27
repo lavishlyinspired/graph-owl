@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use graph_owl_core::{
-    Principal, Relationship, Table, TableUpdate,
+    Asset, AssetKind, Principal, Relationship, Table, TableUpdate, fqn,
     page::{Page, PageRequest},
     relationship_type::{EntityKind, RelationshipType, is_legal},
 };
@@ -32,6 +32,42 @@ impl ValidateBody for CreateTable {
             &FieldPath::root().key("fullyQualifiedName"),
             &mut errors,
         );
+        optional_string(value, &FieldPath::root().key("description"), &mut errors);
+        errors
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertAsset {
+    pub kind: AssetKind,
+    pub name: String,
+    pub parent_id: Option<Uuid>,
+    pub description: Option<String>,
+    pub properties: Option<serde_json::Value>,
+}
+
+impl ValidateBody for UpsertAsset {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(value, &FieldPath::root().key("kind"), &mut errors);
+        if let Some(kind) = value.get("kind").and_then(serde_json::Value::as_str) {
+            if AssetKind::parse(kind).is_err() {
+                errors.push(FieldError::new(
+                    "kind",
+                    FieldErrorCode::Type,
+                    format!(
+                        "`{kind}` is not an asset kind; expected one of: {}",
+                        AssetKind::ALL
+                            .iter()
+                            .map(|k| k.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+        }
+        require_non_empty_string(value, &FieldPath::root().key("name"), &mut errors);
         optional_string(value, &FieldPath::root().key("description"), &mut errors);
         errors
     }
@@ -286,6 +322,194 @@ impl Catalog {
         let _ = principal;
         Ok(self.storage.delete_relationship(id).await?)
     }
+
+    // ---- asset hierarchy (Epic 2) ----
+
+    /// Creates or converges an asset, deriving its FQN from the parent chain.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the FQN cannot be derived or the parent is the wrong
+    /// kind; `NotFound` if the parent does not exist.
+    pub async fn upsert_asset(
+        &self,
+        principal: &Principal,
+        request: UpsertAsset,
+    ) -> Result<Asset, CatalogError> {
+        let _ = principal;
+
+        // Containment is checked against the *actual* parent, not a claim in
+        // the request: a column under a schema is a hierarchy corruption every
+        // later traversal has to cope with.
+        let parent = match request.parent_id {
+            Some(parent_id) => {
+                let parent = self
+                    .storage
+                    .get_asset(parent_id)
+                    .await?
+                    .ok_or(CatalogError::NotFound)?;
+                if request.kind.parent_kind() != Some(parent.kind) {
+                    return Err(CatalogError::Validation(vec![FieldError::new(
+                        "parentId",
+                        FieldErrorCode::Type,
+                        format!(
+                            "a `{}` is contained by a `{}`, not a `{}`",
+                            request.kind,
+                            request
+                                .kind
+                                .parent_kind()
+                                .map_or_else(|| "nothing".to_string(), |k| k.to_string()),
+                            parent.kind
+                        ),
+                    )]));
+                }
+                Some(parent)
+            }
+            None => {
+                if request.kind.parent_kind().is_some() {
+                    return Err(CatalogError::Validation(vec![FieldError::new(
+                        "parentId",
+                        FieldErrorCode::Required,
+                        format!("a `{}` requires a parent", request.kind),
+                    )]));
+                }
+                None
+            }
+        };
+
+        let fully_qualified_name = match &parent {
+            Some(parent) => fqn::child_of(&parent.fully_qualified_name, &request.name),
+            None => fqn::derive(&[&request.name]),
+        }
+        .map_err(|error| {
+            CatalogError::Validation(vec![FieldError::new(
+                "name",
+                FieldErrorCode::Type,
+                error.to_string(),
+            )])
+        })?;
+
+        let now = Utc::now();
+        Ok(self
+            .storage
+            .upsert_asset(Asset {
+                id: Uuid::new_v4(),
+                kind: request.kind,
+                name: request.name,
+                fully_qualified_name,
+                parent_id: request.parent_id,
+                description: request.description,
+                properties: request.properties,
+                created_at: now,
+                updated_at: now,
+            })
+            .await?)
+    }
+
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, CatalogError> {
+        Ok(self.storage.get_asset(id).await?)
+    }
+
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn get_asset_by_fqn(&self, fqn: &str) -> Result<Option<Asset>, CatalogError> {
+        Ok(self.storage.get_asset_by_fqn(fqn).await?)
+    }
+
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn list_assets(
+        &self,
+        kind: Option<AssetKind>,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, CatalogError> {
+        Ok(self.storage.list_assets(kind, page).await?)
+    }
+
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn list_children(&self, parent_id: Option<Uuid>) -> Result<Vec<Asset>, CatalogError> {
+        Ok(self.storage.list_children(parent_id).await?)
+    }
+
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn ancestors_of(&self, id: Uuid) -> Result<Vec<Asset>, CatalogError> {
+        Ok(self.storage.ancestors_of(id).await?)
+    }
+
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn search_assets(
+        &self,
+        query: &str,
+        kind: Option<AssetKind>,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, CatalogError> {
+        Ok(self.storage.search_assets(query, kind, page).await?)
+    }
+
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn count_assets_by_kind(&self) -> Result<Vec<(AssetKind, i64)>, CatalogError> {
+        Ok(self.storage.count_assets_by_kind().await?)
+    }
+
+    /// Writes one connector record, resolving its path to a parent id.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the record's parent has not been written yet — which is a
+    /// connector contract violation, since `Connector::fetch` promises parents
+    /// before children.
+    pub async fn ingest_record(
+        &self,
+        principal: &Principal,
+        kind: AssetKind,
+        path: &[String],
+        description: Option<String>,
+        properties: Option<serde_json::Value>,
+    ) -> Result<Asset, CatalogError> {
+        let parent_id = if path.len() > 1 {
+            let parent_fqn = fqn::derive(
+                &path[..path.len() - 1]
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|error| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "path",
+                    FieldErrorCode::Type,
+                    error.to_string(),
+                )])
+            })?;
+            Some(
+                self.storage
+                    .get_asset_by_fqn(&parent_fqn)
+                    .await?
+                    .ok_or(CatalogError::NotFound)?
+                    .id,
+            )
+        } else {
+            None
+        };
+
+        let name = path.last().cloned().unwrap_or_default();
+        self.upsert_asset(
+            principal,
+            UpsertAsset {
+                kind,
+                name,
+                parent_id,
+                description,
+                properties,
+            },
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -297,12 +521,149 @@ mod tests {
 
     #[derive(Default)]
     struct InMemoryStorage {
+        assets: Mutex<Vec<Asset>>,
         inserted: Mutex<Vec<Table>>,
         relationships: Mutex<Vec<Relationship>>,
     }
 
     #[async_trait::async_trait]
     impl Storage for InMemoryStorage {
+        // The fake honours the same identity rule as Postgres: the FQN is the
+        // identity, so a re-upsert converges instead of duplicating.
+        async fn upsert_asset(&self, asset: Asset) -> Result<Asset, StorageError> {
+            let mut assets = self.assets.lock().unwrap();
+            if let Some(existing) = assets
+                .iter_mut()
+                .find(|a| a.fully_qualified_name == asset.fully_qualified_name)
+            {
+                existing.name = asset.name;
+                existing.parent_id = asset.parent_id;
+                existing.description = asset.description.or(existing.description.clone());
+                existing.properties = asset.properties.or(existing.properties.clone());
+                existing.updated_at = asset.updated_at;
+                return Ok(existing.clone());
+            }
+            assets.push(asset.clone());
+            Ok(asset)
+        }
+
+        async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, StorageError> {
+            Ok(self
+                .assets
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| a.id == id)
+                .cloned())
+        }
+
+        async fn get_asset_by_fqn(&self, fqn: &str) -> Result<Option<Asset>, StorageError> {
+            Ok(self
+                .assets
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| a.fully_qualified_name == fqn)
+                .cloned())
+        }
+
+        async fn list_assets(
+            &self,
+            kind: Option<AssetKind>,
+            page: &PageRequest,
+        ) -> Result<Page<Asset>, StorageError> {
+            let mut assets: Vec<Asset> = self
+                .assets
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|a| kind.is_none_or(|k| a.kind == k))
+                .cloned()
+                .collect();
+            assets.sort_by(|a, b| {
+                a.fully_qualified_name
+                    .cmp(&b.fully_qualified_name)
+                    .then(a.id.cmp(&b.id))
+            });
+            if let Some(cursor) = &page.after {
+                assets.retain(|a| {
+                    (a.fully_qualified_name.as_str(), a.id) > (cursor.sort_key.as_str(), cursor.id)
+                });
+            }
+            assets.truncate(page.limit + 1);
+            Ok(Page::from_overfetch(assets, page.limit, |a| {
+                Cursor::new(a.fully_qualified_name.clone(), a.id)
+            }))
+        }
+
+        async fn list_children(&self, parent_id: Option<Uuid>) -> Result<Vec<Asset>, StorageError> {
+            let mut children: Vec<Asset> = self
+                .assets
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|a| a.parent_id == parent_id)
+                .cloned()
+                .collect();
+            children.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(children)
+        }
+
+        async fn ancestors_of(&self, id: Uuid) -> Result<Vec<Asset>, StorageError> {
+            let assets = self.assets.lock().unwrap().clone();
+            let mut chain = Vec::new();
+            let mut current = assets.iter().find(|a| a.id == id).cloned();
+            while let Some(asset) = current {
+                current = asset
+                    .parent_id
+                    .and_then(|pid| assets.iter().find(|a| a.id == pid).cloned());
+                chain.push(asset);
+            }
+            chain.reverse();
+            Ok(chain)
+        }
+
+        async fn search_assets(
+            &self,
+            query: &str,
+            kind: Option<AssetKind>,
+            page: &PageRequest,
+        ) -> Result<Page<Asset>, StorageError> {
+            let needle = query.to_lowercase();
+            let mut assets: Vec<Asset> = self
+                .assets
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|a| {
+                    (a.name.to_lowercase().contains(&needle)
+                        || a.fully_qualified_name.to_lowercase().contains(&needle))
+                        && kind.is_none_or(|k| a.kind == k)
+                })
+                .cloned()
+                .collect();
+            assets.sort_by(|a, b| a.fully_qualified_name.cmp(&b.fully_qualified_name));
+            assets.truncate(page.limit + 1);
+            Ok(Page::from_overfetch(assets, page.limit, |a| {
+                Cursor::new(a.fully_qualified_name.clone(), a.id)
+            }))
+        }
+
+        async fn count_assets_by_kind(&self) -> Result<Vec<(AssetKind, i64)>, StorageError> {
+            let assets = self.assets.lock().unwrap();
+            Ok(AssetKind::ALL
+                .into_iter()
+                .map(|kind| {
+                    (
+                        kind,
+                        i64::try_from(assets.iter().filter(|a| a.kind == kind).count())
+                            .unwrap_or(i64::MAX),
+                    )
+                })
+                .filter(|(_, n)| *n > 0)
+                .collect())
+        }
+
         async fn insert_table(&self, table: Table) -> Result<Table, StorageError> {
             self.inserted.lock().unwrap().push(table.clone());
             Ok(table)

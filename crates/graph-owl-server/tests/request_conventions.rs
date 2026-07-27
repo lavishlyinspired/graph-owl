@@ -37,7 +37,7 @@ fn location(response: &axum::response::Response) -> String {
 
 #[tokio::test]
 async fn creating_a_table_returns_a_location_pointing_at_the_created_table() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = post_table(&app, "orders", "warehouse.public.orders").await;
     assert_eq!(response.status(), StatusCode::CREATED);
@@ -56,7 +56,7 @@ async fn creating_a_table_returns_a_location_pointing_at_the_created_table() {
 
 #[tokio::test]
 async fn the_location_header_actually_resolves() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let created = post_table(&app, "orders", "warehouse.public.orders").await;
     let header = location(&created);
@@ -83,7 +83,7 @@ async fn the_location_header_actually_resolves() {
 
 #[tokio::test]
 async fn creating_a_relationship_returns_a_location_too() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
     let from = json_body(post_table(&app, "orders", "warehouse.public.orders").await).await;
     let to = json_body(post_table(&app, "customers", "warehouse.public.customers").await).await;
 
@@ -120,7 +120,7 @@ async fn creating_a_relationship_returns_a_location_too() {
 /// never applied, and nothing in the response says otherwise.
 #[tokio::test]
 async fn an_unknown_query_parameter_is_rejected_and_named() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     let response = app
         .oneshot(
@@ -145,7 +145,7 @@ async fn an_unknown_query_parameter_is_rejected_and_named() {
 
 #[tokio::test]
 async fn every_documented_query_parameter_is_still_accepted() {
-    let (app, _container) = test_app().await;
+    let (app, _container, _connection_string) = test_app().await;
 
     for uri in ["/tables", "/tables?limit=5", "/tables?limit=5&after="] {
         let response = app

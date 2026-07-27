@@ -780,8 +780,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "graph-owl-core",
+ "serde",
+ "serde_json",
  "sqlx",
- "thiserror 2.0.19",
  "tokio",
 ]
 
@@ -946,11 +947,13 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "graph-owl-api",
+ "graph-owl-connectors",
  "graph-owl-core",
  "graph-owl-storage",
  "graph-owl-storage-postgres",
  "serde",
  "serde_json",
+ "sqlx",
  "testcontainers-modules",
  "tokio",
  "tower",
