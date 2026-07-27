@@ -14,7 +14,7 @@
 |---|---|---|---|
 | **1** | A source becomes a browsable catalog | 1, 2, 15, 39 (partial) | **Shipped** |
 | **2** | A governed catalog people can trust | +3, 8, 10, 11, 12, 13 | **Shipped** (gaps named per epic) |
-| **3** ★ | It is a graph engine | +4, 7, 7a, 40 | **In progress** — Epic 4 A–G (G partial); 7/7a/40 not started |
+| **3** ★ | It is a graph engine | +4, 7, 7a, 40 | **Mostly shipped** — Epic 4 A–G, 7a core, 40 core. **Epic 7 (SPARQL) not started** |
 | **4** | It reasons, and it validates | +5, 6, 41 | |
 | **5** ★ | Agents can use it | +14, 31, 32, 43 | |
 | **6** | It fills itself | +16, 17, 18, 19, 20, 21 | |
@@ -202,7 +202,12 @@ predicate has to reach it before any graph query is exposed to a real user.
 
 **The claim**: this is not a catalog with a lineage feature. It is a graph with time travel, and you can see the estate as it stood on any past date.
 
-**What you can show**: open the explorer on `upi_transactions`, expand two hops, drag the time slider back to before a schema migration and watch a column reappear.
+**What you can show**: open the Graph tab on `upi_transactions`, switch between 1/2/3 hops and watch the neighbourhood grow; set the time chip to before an edit and see the asset come back at its older version with its older description.
+
+**What this demo cannot yet show**, stated plainly:
+- **No SPARQL.** Epic 7 is not started, so the graph is queryable through traversal and `?asOf=` but not through a query language.
+- **The time control moves the asset read and the graph walk, not the tree or search.** `?asOf=` is answered per asset and per traversal; the hierarchy and the search index still show the present.
+- **Nothing declares lineage yet.** The graph is real, but its edges are the hierarchy plus any relationship a client creates by hand — no connector infers `feeds`. "Watch a column reappear after a migration" needs Epic 15's deletion detection to remove it in the first place.
 
 ### Epic 4 — Triple storage & time travel ★
 - [x] `Flake` in `graph-owl-core`; ten pinned `FlakeValue` variants *(Slice A)*
