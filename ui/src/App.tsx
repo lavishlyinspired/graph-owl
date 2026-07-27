@@ -4,6 +4,7 @@ import {
   Breadcrumb,
   Button,
   Card,
+  Col,
   ConfigProvider,
   Descriptions,
   Empty,
@@ -11,28 +12,40 @@ import {
   Form,
   Input,
   Layout,
+  Menu,
+  Row,
   Space,
   Statistic,
   Table,
   Tag,
+  Tooltip,
   Tree,
   Typography,
 } from "antd";
 import type { DataNode } from "antd/es/tree";
 import ApartmentOutlined from "@ant-design/icons/es/icons/ApartmentOutlined";
+import ArrowLeftOutlined from "@ant-design/icons/es/icons/ArrowLeftOutlined";
+import BulbOutlined from "@ant-design/icons/es/icons/BulbOutlined";
+import CheckCircleFilled from "@ant-design/icons/es/icons/CheckCircleFilled";
 import ClockCircleOutlined from "@ant-design/icons/es/icons/ClockCircleOutlined";
 import CloudServerOutlined from "@ant-design/icons/es/icons/CloudServerOutlined";
+import CompassOutlined from "@ant-design/icons/es/icons/CompassOutlined";
 import DatabaseOutlined from "@ant-design/icons/es/icons/DatabaseOutlined";
 import FolderOutlined from "@ant-design/icons/es/icons/FolderOutlined";
+import PlusOutlined from "@ant-design/icons/es/icons/PlusOutlined";
 import SafetyCertificateOutlined from "@ant-design/icons/es/icons/SafetyCertificateOutlined";
 import SearchOutlined from "@ant-design/icons/es/icons/SearchOutlined";
 import TableOutlined from "@ant-design/icons/es/icons/TableOutlined";
 import TagOutlined from "@ant-design/icons/es/icons/TagOutlined";
+import ThunderboltOutlined from "@ant-design/icons/es/icons/ThunderboltOutlined";
 import { type Asset, type AssetKind, ApiError, api } from "./api";
-import { darkTheme, lightTheme } from "./theme";
+import { darkTheme, lightTheme, palette } from "./theme";
+import { GenericSourceMark, PostgresMark } from "./icons";
 
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
+
+type Section = "explore" | "connectors";
 
 const KIND_ICON: Record<AssetKind, React.ReactNode> = {
   service: <CloudServerOutlined />,
@@ -50,25 +63,63 @@ const KIND_COLOR: Record<AssetKind, string> = {
   column: "default",
 };
 
+/** The connector catalogue. Postgres is implemented; the rest are listed as
+ *  unavailable rather than hidden, because a buyer's first question is "do you
+ *  support X" and an empty list answers it wrongly. */
+const CONNECTORS = [
+  { id: "postgres", name: "PostgreSQL", blurb: "Schemas, tables, views and columns via information_schema.", available: true },
+  { id: "mysql", name: "MySQL", blurb: "Relational metadata from the MySQL catalog.", available: false },
+  { id: "snowflake", name: "Snowflake", blurb: "Databases, schemas, tables and column types.", available: false },
+  { id: "bigquery", name: "BigQuery", blurb: "Datasets, tables and partitioning metadata.", available: false },
+  { id: "kafka", name: "Kafka", blurb: "Topics, partitions and registered schemas.", available: false },
+  { id: "airflow", name: "Airflow", blurb: "DAGs, tasks and pipeline lineage.", available: false },
+];
+
 function Fqn({ children }: { children: string }) {
-  return (
-    <Text code style={{ fontSize: 12 }}>
-      {children}
-    </Text>
-  );
+  return <Text code>{children}</Text>;
 }
 
-function useDarkMode() {
+function readParam(name: string): string | null {
+  return new URLSearchParams(window.location.search).get(name);
+}
+
+function writeParam(name: string, value: string | null) {
+  const params = new URLSearchParams(window.location.search);
+  if (value === null) params.delete(name);
+  else params.set(name, value);
+  const query = params.toString();
+  window.history.replaceState(null, "", query ? `?${query}` : window.location.pathname);
+}
+
+function useTheme() {
+  // Light by default, persisted, and overridable from the URL. The URL matters
+  // beyond convenience: it makes a theme deep-linkable, so a screenshot in a
+  // bug report can be reproduced exactly.
   const [dark, setDark] = useState(
-    () => window.matchMedia("(prefers-color-scheme: dark)").matches,
+    () => (readParam("theme") ?? localStorage.getItem("theme")) === "dark",
   );
   useEffect(() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = (e: MediaQueryListEvent) => setDark(e.matches);
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
-  return dark;
+    localStorage.setItem("theme", dark ? "dark" : "light");
+  }, [dark]);
+  return { dark, toggle: () => setDark((d) => !d) };
+}
+
+function TrustBar() {
+  return (
+    <Card size="small" styles={{ body: { padding: "8px 14px" } }}>
+      <Space size="large" wrap>
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          <ClockCircleOutlined /> no version history yet
+        </Text>
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          <SafetyCertificateOutlined /> uncertified
+        </Text>
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          <ApartmentOutlined /> lineage not captured
+        </Text>
+      </Space>
+    </Card>
+  );
 }
 
 function AssetDetail({ asset }: { asset: Asset }) {
@@ -88,7 +139,7 @@ function AssetDetail({ asset }: { asset: Asset }) {
       <Breadcrumb items={ancestors.map((a) => ({ title: a.name }))} />
 
       <Flex align="center" gap={12} wrap>
-        <Title level={3} style={{ margin: 0 }}>
+        <Title level={3} style={{ margin: 0, fontWeight: 600 }}>
           {asset.name}
         </Title>
         <Tag color={KIND_COLOR[asset.kind]} icon={KIND_ICON[asset.kind]}>
@@ -97,25 +148,12 @@ function AssetDetail({ asset }: { asset: Asset }) {
       </Flex>
       <Fqn>{asset.fullyQualifiedName}</Fqn>
 
-      {/* States what it does not know yet rather than rendering a confident
-          blank. Epic 3 fills version, Epic 26 certification, Epic 29 lineage. */}
-      <Card size="small" styles={{ body: { padding: "10px 16px" } }}>
-        <Space size="large" wrap>
-          <Text type="secondary">
-            <ClockCircleOutlined /> no version history yet
-          </Text>
-          <Text type="secondary">
-            <SafetyCertificateOutlined /> uncertified
-          </Text>
-          <Text type="secondary">
-            <ApartmentOutlined /> lineage not captured
-          </Text>
-        </Space>
-      </Card>
+      <TrustBar />
 
       <Paragraph
         type={asset.description ? undefined : "secondary"}
         italic={!asset.description}
+        style={{ marginBottom: 0 }}
       >
         {asset.description ??
           "No description. A connector reported this asset structurally; nobody has described it."}
@@ -147,7 +185,12 @@ function AssetDetail({ asset }: { asset: Asset }) {
             dataSource={children}
             pagination={false}
             columns={[
-              { title: "Name", dataIndex: "name", key: "name" },
+              {
+                title: "Name",
+                dataIndex: "name",
+                key: "name",
+                render: (name: string) => <Text style={{ fontWeight: 500 }}>{name}</Text>,
+              },
               {
                 title: "Kind",
                 dataIndex: "kind",
@@ -158,13 +201,11 @@ function AssetDetail({ asset }: { asset: Asset }) {
               {
                 title: "Type",
                 key: "type",
-                width: 240,
+                width: 230,
                 render: (_: unknown, row: Asset) => (
                   <Text code>
                     {String(
-                      row.properties?.["dataType"] ??
-                        row.properties?.["tableType"] ??
-                        "—",
+                      row.properties?.["dataType"] ?? row.properties?.["tableType"] ?? "—",
                     )}
                   </Text>
                 ),
@@ -190,61 +231,160 @@ function AssetDetail({ asset }: { asset: Asset }) {
   );
 }
 
-function ConnectorCard({ onDone }: { onDone: () => void }) {
+function ConnectorRunForm({
+  onBack,
+  onDone,
+}: {
+  onBack: () => void;
+  onDone: () => void;
+}) {
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
+  const [result, setResult] = useState<{ created: number; failed: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const run = async (values: { connectionString: string; serviceName: string }) => {
     setBusy(true);
-    setStatus(null);
+    setError(null);
+    setResult(null);
     try {
-      const result = await api.runPostgresConnector(values);
-      setStatus(
-        `Catalogued ${result.created} assets${result.failed ? `, ${result.failed} failed` : ""}.`,
-      );
+      setResult(await api.runPostgresConnector(values));
       onDone();
-    } catch (error) {
-      setStatus(error instanceof ApiError ? error.problem.detail : String(error));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.problem.detail : String(e));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <Card title="Catalog a Postgres source" size="small" style={{ maxWidth: 640 }}>
-      <Form
-        layout="vertical"
-        onFinish={run}
-        initialValues={{
-          connectionString: "postgres://postgres:postgres@localhost:55432/postgres",
-          serviceName: "hdfc-core",
-        }}
-      >
-        <Form.Item
-          label="Connection string"
-          name="connectionString"
-          rules={[{ required: true }]}
+    <Space direction="vertical" size="middle" style={{ width: "100%", maxWidth: 720 }}>
+      <Button type="text" icon={<ArrowLeftOutlined />} onClick={onBack} style={{ paddingLeft: 0 }}>
+        All connectors
+      </Button>
+      <Flex align="center" gap={12}>
+        <PostgresMark size={36} />
+        <div>
+          <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+            PostgreSQL
+          </Title>
+          <Text type="secondary">Read schemas, tables, views and columns.</Text>
+        </div>
+      </Flex>
+
+      <Card size="small" title="Connection">
+        <Form
+          layout="vertical"
+          onFinish={run}
+          initialValues={{
+            connectionString: "postgres://postgres:postgres@localhost:55432/postgres",
+            serviceName: "hdfc-core",
+          }}
         >
-          <Input style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }} />
-        </Form.Item>
-        <Form.Item label="Service name" name="serviceName" rules={[{ required: true }]}>
-          <Input />
-        </Form.Item>
-        <Button type="primary" htmlType="submit" loading={busy}>
-          Run connector
-        </Button>
-        {status && (
-          <Paragraph style={{ marginTop: 12, marginBottom: 0 }} type="success">
-            {status}
-          </Paragraph>
-        )}
-      </Form>
-    </Card>
+          <Form.Item
+            label="Connection string"
+            name="connectionString"
+            rules={[{ required: true, message: "A connection string is required" }]}
+            extra="Credentials are used for this run only and are not stored."
+          >
+            <Input style={{ fontFamily: "JetBrains Mono, ui-monospace, monospace", fontSize: 12 }} />
+          </Form.Item>
+          <Form.Item
+            label="Service name"
+            name="serviceName"
+            rules={[{ required: true, message: "A service name is required" }]}
+            extra="The root of the hierarchy. One server can be catalogued as two logical services."
+          >
+            <Input />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" loading={busy} icon={<ThunderboltOutlined />}>
+            Run connector
+          </Button>
+        </Form>
+      </Card>
+
+      {result && (
+        <Card size="small">
+          <Space>
+            <CheckCircleFilled style={{ color: "#059669", fontSize: 18 }} />
+            <Text style={{ fontWeight: 500 }}>
+              Catalogued {result.created} assets
+              {result.failed > 0 ? `, ${result.failed} failed` : ""}.
+            </Text>
+          </Space>
+        </Card>
+      )}
+      {error && (
+        <Card size="small">
+          <Text type="danger">{error}</Text>
+        </Card>
+      )}
+    </Space>
+  );
+}
+
+function ConnectorsPage({ onDone }: { onDone: () => void }) {
+  const [chosen, setChosen] = useState<string | null>(null);
+
+  if (chosen === "postgres") {
+    return <ConnectorRunForm onBack={() => setChosen(null)} onDone={onDone} />;
+  }
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <div>
+        <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+          Connectors
+        </Title>
+        <Text type="secondary">Choose a source to catalogue.</Text>
+      </div>
+      <Row gutter={[16, 16]}>
+        {CONNECTORS.map((connector) => (
+          <Col key={connector.id} xs={24} sm={12} lg={8} xl={6}>
+            <Tooltip title={connector.available ? undefined : "Not implemented yet"}>
+              <Card
+                size="small"
+                hoverable={connector.available}
+                onClick={() => connector.available && setChosen(connector.id)}
+                style={{ height: "100%", opacity: connector.available ? 1 : 0.55 }}
+                styles={{ body: { padding: 16 } }}
+              >
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Flex align="center" gap={10}>
+                    {connector.id === "postgres" ? (
+                      <PostgresMark />
+                    ) : (
+                      <GenericSourceMark />
+                    )}
+                    <Text style={{ fontWeight: 600, fontSize: 15 }}>{connector.name}</Text>
+                  </Flex>
+                  <Text type="secondary" style={{ fontSize: 13 }}>
+                    {connector.blurb}
+                  </Text>
+                  {connector.available ? (
+                    <Tag color="green">available</Tag>
+                  ) : (
+                    <Tag>planned</Tag>
+                  )}
+                </Space>
+              </Card>
+            </Tooltip>
+          </Col>
+        ))}
+      </Row>
+    </Space>
   );
 }
 
 export default function App() {
-  const dark = useDarkMode();
+  const { dark, toggle } = useTheme();
+  const colors = dark ? palette.dark : palette.light;
+  const [section, setSectionRaw] = useState<Section>(
+    () => (readParam("section") === "connectors" ? "connectors" : "explore"),
+  );
+  const setSection = useCallback((next: Section) => {
+    setSectionRaw(next);
+    writeParam("section", next === "explore" ? null : next);
+  }, []);
   const [selected, setSelectedRaw] = useState<Asset | null>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Asset[] | null>(null);
@@ -307,7 +447,7 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [query]);
 
-  // Children are fetched on expand. Loading the hierarchy whole would pull
+  // Children are fetched on expand; loading the hierarchy whole would pull
   // every column of every table before showing anything.
   const loadChildren = useCallback(
     async (node: DataNode) => {
@@ -329,81 +469,124 @@ export default function App() {
   );
 
   const total = useMemo(() => stats.reduce((sum, s) => sum + s.count, 0), [stats]);
-  const borderColor = dark ? "#262b36" : "#eef1f6";
 
   return (
     <ConfigProvider theme={dark ? darkTheme : lightTheme}>
       <AntApp>
-        <Layout style={{ minHeight: "100vh" }}>
+        <Layout style={{ height: "100vh" }}>
           <Header
             style={{
               display: "flex",
               alignItems: "center",
-              gap: 24,
-              padding: "0 20px",
-              borderBottom: `1px solid ${borderColor}`,
+              gap: 20,
+              padding: "0 16px",
+              borderBottom: `1px solid ${colors.border}`,
+              flex: "0 0 auto",
             }}
           >
             <Space size={8}>
               <ApartmentOutlined style={{ color: "#1570ef", fontSize: 18 }} />
-              <Text strong style={{ fontSize: 15 }}>
-                graph-owl
-              </Text>
+              <Text style={{ fontSize: 15, fontWeight: 600 }}>graph-owl</Text>
             </Space>
             <Input
-              prefix={<SearchOutlined />}
+              prefix={<SearchOutlined style={{ color: colors.textSubtle }} />}
               placeholder="Search assets, schemas, columns…"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              style={{ maxWidth: 520 }}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                if (e.target.value) setSection("explore");
+              }}
+              style={{ maxWidth: 480 }}
               allowClear
             />
-            {/* Time travel arrives with Epic 4, but the control belongs in the
-                chrome from the start — it is a session-wide property. */}
-            <Tag color="cyan" style={{ marginLeft: "auto" }} icon={<ClockCircleOutlined />}>
-              now
-            </Tag>
+            <Space style={{ marginLeft: "auto" }} size={12}>
+              {/* Time travel arrives with Epic 4, but the control belongs in the
+                  chrome from the start — it is a session-wide property. */}
+              <Tooltip title="Time travel arrives with the graph engine">
+                <Tag color="cyan" icon={<ClockCircleOutlined />} style={{ marginInlineEnd: 0 }}>
+                  now
+                </Tag>
+              </Tooltip>
+              <Tooltip title={dark ? "Switch to light" : "Switch to dark"}>
+                <Button type="text" icon={<BulbOutlined />} onClick={toggle} aria-label="Toggle theme" />
+              </Tooltip>
+            </Space>
           </Header>
 
-          <Layout>
+          <Layout style={{ minHeight: 0 }}>
+            {/* Navigation and the hierarchy are different things. The rail is
+                where you are in the product; the tree is where you are in the
+                data. Conflating them is why the tree previously had nowhere
+                for a second section to go. */}
             <Sider
-              width={300}
+              width={64}
               theme={dark ? "dark" : "light"}
-              style={{ borderRight: `1px solid ${borderColor}`, overflow: "auto" }}
+              style={{ borderRight: `1px solid ${colors.border}` }}
             >
-              <div style={{ padding: 16 }}>
-                <Flex gap={8} wrap style={{ marginBottom: 16 }}>
-                  {stats.map((s) => (
-                    <Card key={s.kind} size="small" styles={{ body: { padding: "6px 12px" } }}>
-                      <Statistic
-                        title={`${s.kind}s`}
-                        value={s.count}
-                        valueStyle={{ fontSize: 18, lineHeight: 1.2 }}
-                      />
-                    </Card>
-                  ))}
-                </Flex>
-                <Text type="secondary" style={{ fontSize: 11, letterSpacing: "0.06em" }}>
-                  HIERARCHY
-                </Text>
-                <Tree
-                  showIcon
-                  blockNode
-                  style={{ marginTop: 8, background: "transparent" }}
-                  treeData={nodes}
-                  loadData={loadChildren}
-                  onSelect={(keys) => {
-                    const asset = index[String(keys[0])];
-                    if (asset) setSelected(asset);
-                  }}
-                />
-              </div>
+              <Menu
+                mode="inline"
+                inlineCollapsed
+                selectedKeys={[section]}
+                onClick={({ key }) => setSection(key as Section)}
+                style={{ borderInlineEnd: 0, paddingTop: 8 }}
+                items={[
+                  { key: "explore", icon: <CompassOutlined />, label: "Explore" },
+                  { key: "connectors", icon: <PlusOutlined />, label: "Connectors" },
+                ]}
+              />
             </Sider>
 
+            {section === "explore" && (
+              <Sider
+                width={288}
+                theme={dark ? "dark" : "light"}
+                style={{ borderRight: `1px solid ${colors.border}`, overflow: "auto" }}
+              >
+                <div style={{ padding: 14 }}>
+                  <Flex gap={8} wrap style={{ marginBottom: 14 }}>
+                    {stats.map((s) => (
+                      <Card key={s.kind} size="small" styles={{ body: { padding: "4px 10px" } }}>
+                        <Statistic
+                          title={<span style={{ fontSize: 11 }}>{`${s.kind}s`}</span>}
+                          value={s.count}
+                          valueStyle={{ fontSize: 17, fontWeight: 600, lineHeight: 1.2 }}
+                        />
+                      </Card>
+                    ))}
+                  </Flex>
+                  <Text
+                    type="secondary"
+                    style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.06em" }}
+                  >
+                    HIERARCHY
+                  </Text>
+                  {nodes.length === 0 ? (
+                    <Paragraph type="secondary" style={{ marginTop: 12, fontSize: 13 }}>
+                      Nothing catalogued yet.
+                    </Paragraph>
+                  ) : (
+                    <Tree
+                      showIcon
+                      blockNode
+                      style={{ marginTop: 8, background: "transparent" }}
+                      treeData={nodes}
+                      loadData={loadChildren}
+                      onSelect={(keys) => {
+                        const asset = index[String(keys[0])];
+                        if (asset) setSelected(asset);
+                      }}
+                    />
+                  )}
+                </div>
+              </Sider>
+            )}
+
             <Content style={{ padding: 24, overflow: "auto" }}>
-              {results !== null ? (
+              {section === "connectors" ? (
+                <ConnectorsPage onDone={refresh} />
+              ) : results !== null ? (
                 <Space direction="vertical" style={{ width: "100%" }} size="middle">
-                  <Title level={5} style={{ margin: 0 }}>
+                  <Title level={5} style={{ margin: 0, fontWeight: 600 }}>
                     {results.length} result{results.length === 1 ? "" : "s"} for “{query}”
                   </Title>
                   {results.length === 0 ? (
@@ -413,7 +596,7 @@ export default function App() {
                       size="small"
                       rowKey="id"
                       dataSource={results}
-                      pagination={{ pageSize: 15 }}
+                      pagination={{ pageSize: 15, size: "small" }}
                       onRow={(row) => ({
                         onClick: () => {
                           setSelected(row);
@@ -427,7 +610,9 @@ export default function App() {
                           dataIndex: "name",
                           key: "name",
                           width: 220,
-                          render: (name: string) => <Text strong>{name}</Text>,
+                          render: (name: string) => (
+                            <Text style={{ fontWeight: 500 }}>{name}</Text>
+                          ),
                         },
                         {
                           title: "Kind",
@@ -455,7 +640,7 @@ export default function App() {
               ) : (
                 <Space direction="vertical" size="large" style={{ width: "100%" }}>
                   <div>
-                    <Title level={4} style={{ marginBottom: 4 }}>
+                    <Title level={4} style={{ marginBottom: 4, fontWeight: 600 }}>
                       {total === 0 ? "Nothing catalogued yet" : `${total} assets catalogued`}
                     </Title>
                     <Text type="secondary">
@@ -464,7 +649,11 @@ export default function App() {
                         : "Pick something from the hierarchy, or search above."}
                     </Text>
                   </div>
-                  <ConnectorCard onDone={refresh} />
+                  {/* The empty-database first run offers the next action rather
+                      than a blank page — 39-ui-foundation.md Slice F. */}
+                  <Button type="primary" icon={<PlusOutlined />} onClick={() => setSection("connectors")}>
+                    {total === 0 ? "Catalogue a source" : "Add another source"}
+                  </Button>
                 </Space>
               )}
             </Content>

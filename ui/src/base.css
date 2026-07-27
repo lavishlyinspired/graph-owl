@@ -1,10 +1,21 @@
-/* antd supplies component styling. This is only what antd does not own:
-   the document, and the monospace face for fully-qualified names, where
-   character-level differences carry meaning. */
+/* antd owns component styling. This is what antd does not own. */
+@import "@fontsource-variable/inter";
+@import "@fontsource/jetbrains-mono/400.css";
+
 body {
   margin: 0;
+  /* Both, deliberately: without the -moz rule the same weight renders heavier
+     on macOS Firefox than on Chrome, which is why text looked inconsistent. */
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
-code {
+
+/* FQNs are structured identifiers where character-level differences carry
+   meaning, and proportional type hides exactly those differences. */
+code, .fqn {
   font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
 }
+
+/* Panes scroll independently; the page itself never does. */
+#root { height: 100vh; }
