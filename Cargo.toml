@@ -29,6 +29,8 @@ graph-owl-core = { path = "crates/graph-owl-core" }
 graph-owl-storage = { path = "crates/graph-owl-storage" }
 graph-owl-storage-postgres = { path = "crates/graph-owl-storage-postgres" }
 graph-owl-authz = { path = "crates/graph-owl-authz" }
+graph-owl-engine = { path = "crates/graph-owl-engine" }
+graph-owl-engine-postgres = { path = "crates/graph-owl-engine-postgres" }
 graph-owl-api = { path = "crates/graph-owl-api" }
 graph-owl-ui = { path = "crates/graph-owl-ui" }
 graph-owl-connectors = { path = "crates/graph-owl-connectors" }

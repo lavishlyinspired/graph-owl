@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use graph_owl_authz::{AccessPredicate, MetadataOperation, Policy, Subject, compile};
+use graph_owl_core::projection;
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
     envelope::EntityVersion,
@@ -9,6 +10,7 @@ use graph_owl_core::{
     page::{Page, PageRequest},
     relationship_type::{EntityKind, RelationshipType, is_legal},
 };
+use graph_owl_engine::TripleStore;
 use graph_owl_storage::{ConflictKind, Storage, StorageError, StoredUser};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -191,11 +193,70 @@ fn subject_of(principal: &Principal) -> Subject {
 #[derive(Clone)]
 pub struct Catalog {
     storage: Arc<dyn Storage>,
+    /// The graph view of what `storage` holds. Optional because the catalog is
+    /// fully functional without it — that is decision 6 made structural rather
+    /// than promised: if the projection were required, a graph outage would be
+    /// a catalog outage.
+    graph: Option<Arc<dyn TripleStore>>,
 }
 
 impl Catalog {
     pub fn new(storage: Arc<dyn Storage>) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            graph: None,
+        }
+    }
+
+    /// The catalog, projecting into a graph as it writes.
+    #[must_use]
+    pub fn with_graph(mut self, graph: Arc<dyn TripleStore>) -> Self {
+        self.graph = Some(graph);
+        self
+    }
+
+    /// Project an asset's new state into the graph, after the relational write
+    /// has already succeeded.
+    ///
+    /// **Never propagates a failure.** Decision 6: relational is the source of
+    /// truth, and failing an entity write because its graph projection failed
+    /// would make the graph a single point of failure for the catalog. The
+    /// entity exists; the graph view catches up.
+    ///
+    /// `before` is read here rather than passed in, because the diff belongs
+    /// to the projection and not to the write path — a caller that had to
+    /// supply it would be doing the projection's bookkeeping for it, and would
+    /// eventually forget to.
+    async fn project(&self, before: Option<Asset>, after: &Asset) {
+        let Some(graph) = &self.graph else {
+            return;
+        };
+
+        let outcome = async {
+            let t = graph.next_time().await?;
+            let flakes = match &before {
+                Some(before) => projection::asset_update_flakes(before, after, t),
+                None => projection::asset_to_flakes(after, t),
+            };
+            // Retractions and assertions go through their own verbs; the flag
+            // is not carried on the struct.
+            let (retractions, assertions): (Vec<_>, Vec<_>) =
+                flakes.into_iter().partition(|f| !f.op);
+            graph.retract_flakes(&retractions).await?;
+            graph.assert_flakes(&assertions).await
+        }
+        .await;
+
+        if let Err(error) = outcome {
+            // Logged, not returned. A silent failure here would be a drift bug
+            // nobody could diagnose; a returned one would be decision 6
+            // violated. Epic 4 Slice G turns this into a queued reconciliation.
+            eprintln!(
+                "graph projection failed for asset {} ({}): {error}. The entity \
+                 is intact; the graph view is stale until reconciliation.",
+                after.id, after.fully_qualified_name
+            );
+        }
     }
 
     /// # Errors
@@ -422,7 +483,16 @@ impl Catalog {
         })?;
 
         let now = Utc::now();
-        Ok(self
+        // Read before the write so the projection can diff against it. A
+        // create has no prior state and projects its whole self; an upsert
+        // over an existing FQN is an update and must retract what it replaces.
+        let before = self
+            .storage
+            .get_asset_by_fqn(&fully_qualified_name)
+            .await
+            .unwrap_or(None);
+
+        let written = self
             .storage
             .upsert_asset(Asset {
                 id: Uuid::new_v4(),
@@ -443,7 +513,10 @@ impl Catalog {
                 created_at: now,
                 updated_at: now,
             })
-            .await?)
+            .await?;
+
+        self.project(before, &written).await;
+        Ok(written)
     }
 
     /// # Errors
@@ -732,10 +805,15 @@ impl Catalog {
         id: Uuid,
         update: &AssetUpdate,
     ) -> Result<Asset, CatalogError> {
-        self.storage
+        let before = self.storage.get_asset(id).await.unwrap_or(None);
+        let updated = self
+            .storage
             .update_asset(id, update, &principal.id)
             .await?
-            .ok_or(CatalogError::NotFound)
+            .ok_or(CatalogError::NotFound)?;
+
+        self.project(before, &updated).await;
+        Ok(updated)
     }
 
     /// # Errors
@@ -803,7 +881,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
-    struct InMemoryStorage {
+    pub(super) struct InMemoryStorage {
         assets: Mutex<Vec<Asset>>,
         versions: Mutex<Vec<AssetVersion>>,
         users: Mutex<Vec<StoredUser>>,
@@ -1645,5 +1723,222 @@ mod tests {
             .expect("delete_relationship should succeed");
 
         assert!(!deleted);
+    }
+}
+
+#[cfg(test)]
+mod projection_isolation_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use graph_owl_core::flake::{Flake, TriplePattern};
+    use graph_owl_engine::EngineError;
+    use std::sync::Mutex;
+    use tests::InMemoryStorage;
+
+    /// A graph that records what it was asked to do, and can be told to fail.
+    struct RecordingGraph {
+        fail: bool,
+        asserted: Mutex<Vec<Flake>>,
+        retracted: Mutex<Vec<Flake>>,
+    }
+
+    impl RecordingGraph {
+        fn working() -> Arc<Self> {
+            Arc::new(Self {
+                fail: false,
+                asserted: Mutex::new(Vec::new()),
+                retracted: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn broken() -> Arc<Self> {
+            Arc::new(Self {
+                fail: true,
+                asserted: Mutex::new(Vec::new()),
+                retracted: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn refuse<T>(&self) -> Result<T, EngineError> {
+            Err(EngineError::Backend("the graph is down".to_string()))
+        }
+    }
+
+    #[async_trait]
+    impl TripleStore for RecordingGraph {
+        async fn assert_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError> {
+            if self.fail {
+                return self.refuse();
+            }
+            self.asserted
+                .lock()
+                .expect("lock")
+                .extend_from_slice(flakes);
+            Ok(())
+        }
+
+        async fn retract_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError> {
+            if self.fail {
+                return self.refuse();
+            }
+            self.retracted
+                .lock()
+                .expect("lock")
+                .extend_from_slice(flakes);
+            Ok(())
+        }
+
+        async fn query_pattern(&self, _: &TriplePattern) -> Result<Vec<Flake>, EngineError> {
+            Ok(Vec::new())
+        }
+
+        async fn count(&self, _: &TriplePattern) -> Result<u64, EngineError> {
+            Ok(0)
+        }
+
+        async fn next_time(&self) -> Result<i64, EngineError> {
+            if self.fail {
+                return self.refuse();
+            }
+            Ok(1)
+        }
+    }
+
+    fn service(name: &str) -> UpsertAsset {
+        UpsertAsset {
+            kind: AssetKind::Service,
+            name: name.to_string(),
+            parent_id: None,
+            description: None,
+            properties: None,
+        }
+    }
+
+    /// **Decision 6, asserted rather than promised.** Failing an entity write
+    /// because its graph projection failed would make the graph a single point
+    /// of failure for the catalog — the exact coupling the split exists to
+    /// avoid.
+    #[tokio::test]
+    async fn an_entity_write_survives_a_graph_that_is_down() {
+        let catalog =
+            Catalog::new(Arc::new(InMemoryStorage::default())).with_graph(RecordingGraph::broken());
+
+        let created = catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("the entity must be written even though the graph refused");
+
+        assert_eq!(created.name, "hdfc-core");
+        assert_eq!(
+            catalog
+                .get_asset(created.id)
+                .await
+                .expect("readable")
+                .expect("the entity must still exist")
+                .name,
+            "hdfc-core",
+            "and must still be there afterwards"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_survives_a_graph_that_is_down() {
+        let catalog =
+            Catalog::new(Arc::new(InMemoryStorage::default())).with_graph(RecordingGraph::broken());
+        let created = catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("create");
+
+        let updated = catalog
+            .update_asset(
+                &Principal::system(),
+                created.id,
+                &AssetUpdate {
+                    description: Some(Some("core banking".to_string())),
+                },
+            )
+            .await
+            .expect("the update must land even though the graph refused");
+
+        assert_eq!(updated.description.as_deref(), Some("core banking"));
+    }
+
+    /// A catalog with no graph configured must behave exactly as before —
+    /// this is what makes the projection genuinely optional rather than
+    /// optional-until-something-touches-it.
+    #[tokio::test]
+    async fn a_catalog_with_no_graph_still_writes() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("no graph configured is not an error");
+    }
+
+    #[tokio::test]
+    async fn creating_an_asset_projects_its_fields() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let created = catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("create");
+
+        let asserted = graph.asserted.lock().expect("lock");
+        assert!(!asserted.is_empty(), "a create must project something");
+        assert!(
+            asserted.iter().all(|f| f.s.id == created.id.to_string()),
+            "every flake is about the asset just written"
+        );
+        assert!(
+            asserted.iter().any(|f| f.p.id == "name"),
+            "the name is the least a projection can carry: {asserted:?}"
+        );
+        assert!(
+            graph.retracted.lock().expect("lock").is_empty(),
+            "a create has nothing to retract"
+        );
+    }
+
+    /// The update path must withdraw what it replaces. Asserting the new value
+    /// without retracting the old leaves both current, and a single-valued
+    /// predicate then has two answers.
+    #[tokio::test]
+    async fn updating_an_asset_retracts_the_value_it_replaces() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+        let created = catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("create");
+
+        catalog
+            .update_asset(
+                &Principal::system(),
+                created.id,
+                &AssetUpdate {
+                    description: Some(Some("core banking".to_string())),
+                },
+            )
+            .await
+            .expect("update");
+
+        let retracted = graph.retracted.lock().expect("lock");
+        let asserted = graph.asserted.lock().expect("lock");
+        assert!(
+            asserted.iter().any(|f| f.p.id == "description"),
+            "the new description must be asserted"
+        );
+        // The version and updatedAt change on every edit, so there is always
+        // something to withdraw even when the edited field was previously
+        // absent.
+        assert!(
+            retracted.iter().any(|f| f.p.id == "version"),
+            "the superseded version must be withdrawn: {retracted:?}"
+        );
     }
 }

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use graph_owl_api::Catalog;
+use graph_owl_engine_postgres::PostgresTripleStore;
 use graph_owl_storage_postgres::PostgresStorage;
 
 #[tokio::main]
@@ -9,7 +10,17 @@ async fn main() {
     let storage = PostgresStorage::connect(&database_url)
         .await
         .expect("failed to connect to postgres");
-    let catalog = Catalog::new(Arc::new(storage));
+    // The graph view of the same database. Its own migrations, its own tables.
+    //
+    // A failure here is fatal at *startup* — refusing to boot with a broken
+    // graph is a different thing from failing a write when the graph goes down
+    // later, which decision 6 forbids. Booting into a silently graph-less
+    // catalog would make time-travel quietly return nothing, which is worse
+    // than not starting.
+    let graph = PostgresTripleStore::connect(&database_url)
+        .await
+        .expect("failed to connect the graph engine to postgres");
+    let catalog = Catalog::new(Arc::new(storage)).with_graph(Arc::new(graph));
 
     let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let listener = tokio::net::TcpListener::bind(&bind)
