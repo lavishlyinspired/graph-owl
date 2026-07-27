@@ -117,6 +117,46 @@ overlay (`graph:reasoning`) holds both. Epic 6's explainability requirement then
 covers both, because a derivation chain that cannot say which engine produced a
 step is not an explanation.
 
+## The recommendation ledger
+
+Both source analyses proposed concrete changes. Every one is accounted for
+below, because a recommendation silently dropped is indistinguishable from one
+that was never read.
+
+**Adopted** — went into a plan:
+
+| Recommendation | Where |
+|---|---|
+| Prioritise JSON-LD | `09` decision 3 — before Turtle, because the inputs are JSON-LD |
+| SHACL beyond Core | `05` deferred section + Epic 96 |
+| Design for RDF-star | Epic 94 — and the model understanding was corrected in the process |
+| Complete OWL 2 RL | Epic 95, scoped: facts here, contradictions in Epic 5 |
+| Incremental reasoning (DRed) | Epic 97, with a measured entry condition |
+| Parallel reasoning | Epic 97, same |
+| SHACL-SPARQL + rules | Epic 96, blocked on the spec leaving Working Draft |
+| Authorization-aware reasoning | `06` — derived facts inherit their least-visible premise |
+| Six index permutations | `04` finding 7 — decided *against* for now, with a trigger |
+| JSON-LD native vs compatible | `09` decision 5 — compatible, with the three failure modes named |
+
+**Declined** — with the condition that would reverse it:
+
+| Recommendation | Why not | Reverses when |
+|---|---|---|
+| Full SPARQL 1.1 / 1.2 | The subset is sized to the queries a catalog receives; the tail serves tooling this product does not target | Someone points a SPARQL client or Protégé-class tool at graph-owl |
+| `SERVICE` federated query | No user has asked to join against an external endpoint | One does |
+| Aggregates, `GROUP BY`, subqueries | Already deferred by `07` decision 1 as "not in the first cut" — a scheduling decision, not a rejection | Epic 7 ships and a real query needs them |
+| A second triple-store backend | `00e` already defers it: a second backend before the first is proven adds no information | The first is proven and a read-heavy deployment needs the other's profile |
+| OWL 2 EL | Metadata ontologies are thousands of classes; EL exists for hundreds of thousands | An ontology past ~50k classes |
+| OWL 2 QL | Query rewriting hides the derivation, and explainability is a requirement | Virtual integration over an external database becomes a goal |
+| RDF/XML | Nothing new emits it | Never, plausibly |
+| Split read/write partitions (main + delta) | An architecture for stores an order of magnitude past this one's target; it would add a merge path to a system whose write volume does not need one | Epic 37a shows write amplification dominating |
+| Bulk-load path distinct from the API | Already effectively met — Epic 4 batches at the bind-parameter ceiling inside one transaction | A load arrives that the batching path cannot absorb |
+
+**Not a recommendation, but worth recording**: the analyses' benchmark numbers
+(load times, p95 latencies) are from other systems on other hardware. They are
+not targets for this project, whose budgets live in `00a` and are stated
+against its own footprint claim.
+
 ## Deliberate non-goals
 
 Recorded so nobody re-proposes them as oversights.

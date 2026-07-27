@@ -419,6 +419,40 @@ on export (Epic 9). Emitting always doubles the flakes per edge; emitting on
 export keeps the store compact and the wire standard. Epic 9 decides, and it now
 has a real choice rather than a retrofit.
 
+### 7. Four orderings of six, and the two missing ones answer a real question
+
+Modern triple stores index all six permutations of subject/predicate/object so
+that *any* pattern is a sorted range scan. This plan specifies four, and
+presented them as covering the common shapes without saying which shapes are
+left out. They are:
+
+| Permutation | This project | Pattern it serves |
+|---|---|---|
+| SPO | `idx_flakes_spot` | `(s, ?, ?)`, `(s, p, ?)` |
+| PSO | `idx_flakes_psot` | `(?, p, ?)` |
+| POS | `idx_flakes_post` | `(?, p, o)` |
+| OPS | `idx_flakes_opst` (partial) | `(?, ?, o)` for references |
+| **SOP** | — | **`(s, ?, o)`** |
+| **OSP** | — | **`(s, ?, o)`** from the other side |
+
+`(s, ?, o)` is *"how are these two things related?"* — and that is not an
+exotic query for a metadata catalog. It is the question behind "why does this
+dashboard depend on that table", and Epic 40's explorer asks it every time
+someone clicks an edge.
+
+**Today it works and is not a seek.** SPOT binds the subject, then the object
+is a filter over that subject's flakes. For an asset with tens of predicates
+that is cheap; for a hub node with thousands it is a scan of the hub.
+
+**Deliberately not adding them now.** A fifth and sixth index is paid on every
+write, and the flake table is already the most write-amplified structure here.
+The trigger is measurement, not symmetry: **Epic 37a showing `(s, ?, o)` above
+the query budget on a realistic estate.** If it fires, SOP alone probably
+suffices — OSP serves the same pattern from the other side and matters only
+when the object is the more selective term.
+
+Recorded because "four of six" read as an oversight and is a decision.
+
 ### 6. The language-tag hole is three components, not two
 
 This plan's `flake_meta` side table was designed to hold a language tag. RDF

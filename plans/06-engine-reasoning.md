@@ -57,6 +57,39 @@ Rather than a general rule engine plus an OWL encoding, the supported axioms are
 | `rdfs:range` | `(a p b), (p range C) ⟹ (b rdf:type C)` |
 | `owl:sameAs` | `(a sameAs b), (a p o) ⟹ (b p o)` — powers Epic 17 |
 
+### Derived facts are subject to authorization, and that is not automatic
+
+Epic 4 decision 7 says authorization is never evaluated over the flake
+projection, because flakes lag relational and a stale tag could honour a
+permission that was revoked. Reasoning makes that harder, and this plan did not
+previously say how.
+
+**The problem.** A derived fact has no relational row behind it. `(a rdf:type
+DataAsset)` derived from a subclass axiom exists only in the overlay, so
+"resolve the policy input against relational" has nothing to resolve against.
+Worse, reasoning can derive a fact whose *premises* the reader may not see: if
+`a sameAs b` and `b` is in a denied schema, deriving `b`'s properties onto `a`
+leaks them.
+
+**The rule.** Derivation runs over the facts the reader is permitted to see,
+not over the whole graph and then filtered.
+
+1. Authorization scopes the **base** facts before the fixpoint runs.
+2. Only those facts derive.
+3. A derived fact inherits the visibility of the *least* visible premise in its
+   derivation chain — which the chain already records, for explainability.
+
+Post-filtering the output instead is the tempting shortcut and it is wrong: a
+derived fact can encode the existence of its premises even when the fact itself
+looks innocuous, and "how did the system know that" is exactly the question a
+derivation chain answers to the wrong person.
+
+**The cost, stated.** Reasoning is then per-principal-scope rather than global,
+so the overlay cannot be materialised once and served to everyone. Options are
+to materialise per policy-scope and cache, or to derive at query time within the
+budget. **Deferred to implementation, but not deferred as a question** — the
+wrong answer here is a data leak, so it is decided before Slice A, not after.
+
 ### The eight are a subset, and the subset is the decision
 
 W3C OWL 2 RL specifies roughly eighty entailment rules. Eight are listed above.
