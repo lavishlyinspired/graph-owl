@@ -225,16 +225,21 @@ predicate has to reach it before any graph query is exposed to a real user.
 - [ ] Fast-path routing for the five common shapes
 
 ### Epic 7a — Traversal
-- [ ] One frontier primitive; neighbours, shortest path, all paths, cycles, subgraph
-- [ ] Budgeted, cycle-safe, truncation always visible
+- [x] One frontier primitive (recursive CTE, one statement); `neighbours` and `subgraph` over it *(Slices A, B, E)*
+- [x] Budgeted, cycle-safe, truncation always visible and farthest-first
+- [x] Reified two-hop edges hidden — five logical edges reports distance five
+- [x] `as_of` on every walk, so time-travelling traversal is free
+- [ ] `shortest_path`, `all_paths`, `detect_cycles` *(Slices C, D)*
 
 ### Epic 40 — Graph explorer ★
-- [ ] Renderer-agnostic `GraphModel`
-- [ ] Sigma/WebGL exploration canvas, expand-on-click
+- [x] Renderer-agnostic `GraphView` — the shape a Sigma canvas would consume unchanged
+- [x] Graph tab with a deterministic radial layout, hop selector, truncation shown
+- [x] **Time control** — `?asOf=` on the walk and on the asset read
+- [x] Non-visual equivalent: the same neighbourhood as a keyboard-navigable table
+- [ ] Sigma/WebGL canvas with expand-on-click — the hand-drawn SVG is honest at demo scale and will not survive 10k nodes
 - [ ] React Flow + ELK lineage DAG
-- [ ] **Time slider and diff mode**
-- [ ] Derived edges visually distinct, not by colour alone
-- [ ] Non-visual keyboard-navigable equivalent
+- [ ] Diff mode (two instants side by side)
+- [ ] Derived edges visually distinct — nothing derives edges until Epic 6
 
 ---
 

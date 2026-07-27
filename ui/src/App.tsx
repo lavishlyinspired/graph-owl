@@ -51,6 +51,7 @@ import {
   type AssetVersion,
   type ChangeDescription,
   type Facet,
+  type GraphView,
   type SearchFacets,
   ApiError,
   api,
@@ -196,6 +197,229 @@ function renderChange(change: ChangeDescription | null | undefined) {
           {row.after != null && <> → {String(row.after)}</>}
         </Text>
       ))}
+    </Space>
+  );
+}
+
+/** The graph explorer.
+ *
+ *  A deterministic **radial** layout rather than a force simulation: rings by
+ *  distance from the seed. Two reasons. A force layout settles somewhere
+ *  slightly different on every run, so the same neighbourhood never looks the
+ *  same twice and nobody can point at "the node on the left". And distance
+ *  from the seed is the single most useful thing this picture can encode —
+ *  a physics simulation encodes it only incidentally.
+ *
+ *  Hand-drawn SVG rather than a graph library: the console is served under a
+ *  strict CSP from the binary itself, and rings-and-lines does not justify a
+ *  WebGL dependency. When a real estate outgrows this — Epic 40's Sigma canvas
+ *  — the `GraphView` shape it consumes is already the renderer-agnostic one.
+ */
+function GraphExplorer({
+  assetId,
+  asOf,
+  colors,
+}: {
+  assetId: string;
+  asOf: string | null;
+  colors: (typeof palette)["light"];
+}) {
+  const [hops, setHops] = useState(2);
+  const [view, setView] = useState<GraphView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setView(null);
+    setError(null);
+    api
+      .graph(assetId, hops, asOf)
+      .then(setView)
+      .catch((e: unknown) => {
+        setError(e instanceof ApiError ? e.problem.detail : "could not load the graph");
+      });
+  }, [assetId, hops, asOf]);
+
+  const layout = useMemo(() => {
+    if (!view) return null;
+    const width = 900;
+    const height = 460;
+    const centre = { x: width / 2, y: height / 2 };
+
+    // Distance is recovered from the edge set rather than requested from the
+    // server a second time: BFS over what was returned is cheap and cannot
+    // disagree with the picture being drawn.
+    const adjacency = new Map<string, string[]>();
+    for (const edge of view.edges) {
+      adjacency.set(edge.from, [...(adjacency.get(edge.from) ?? []), edge.to]);
+      adjacency.set(edge.to, [...(adjacency.get(edge.to) ?? []), edge.from]);
+    }
+    const depth = new Map<string, number>([[assetId, 0]]);
+    let frontier = [assetId];
+    while (frontier.length > 0) {
+      const next: string[] = [];
+      for (const node of frontier) {
+        for (const neighbour of adjacency.get(node) ?? []) {
+          if (!depth.has(neighbour)) {
+            depth.set(neighbour, (depth.get(node) ?? 0) + 1);
+            next.push(neighbour);
+          }
+        }
+      }
+      frontier = next;
+    }
+
+    const rings = new Map<number, string[]>();
+    for (const node of view.nodes) {
+      // A node with no path in the returned edges still belongs somewhere;
+      // the outer ring is honest about it being least connected.
+      const d = depth.get(node.id) ?? Math.max(1, hops);
+      rings.set(d, [...(rings.get(d) ?? []), node.id]);
+    }
+
+    const positions = new Map<string, { x: number; y: number }>();
+    const maxRing = Math.max(...[...rings.keys()], 1);
+    for (const [ring, ids] of rings) {
+      if (ring === 0) {
+        positions.set(ids[0] ?? assetId, centre);
+        continue;
+      }
+      const radius = (Math.min(width, height) / 2 - 60) * (ring / maxRing);
+      ids.forEach((id, i) => {
+        // Offset each ring so successive rings do not align spokes, which
+        // makes edges overlap and the picture read as fewer nodes than it has.
+        const angle = (2 * Math.PI * i) / ids.length + ring * 0.4;
+        positions.set(id, {
+          x: centre.x + radius * Math.cos(angle),
+          y: centre.y + radius * Math.sin(angle),
+        });
+      });
+    }
+    return { width, height, positions };
+  }, [view, assetId, hops]);
+
+  if (error) {
+    return <Empty description={error} />;
+  }
+  if (!view || !layout) {
+    return <Text type="secondary">Walking the graph…</Text>;
+  }
+
+  const byId = new Map(view.nodes.map((n) => [n.id, n]));
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Flex align="center" gap={12} wrap>
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          {view.nodes.length} nodes · {view.edges.length} edges
+        </Text>
+        <Space size={4}>
+          {[1, 2, 3].map((n) => (
+            <Button
+              key={n}
+              size="small"
+              type={hops === n ? "primary" : "default"}
+              onClick={() => setHops(n)}
+            >
+              {n} hop{n === 1 ? "" : "s"}
+            </Button>
+          ))}
+        </Space>
+        {view.truncated && (
+          <Tag color="warning">
+            truncated — the neighbourhood is larger than shown
+          </Tag>
+        )}
+        {asOf && <Tag color="warning">as of {new Date(asOf).toLocaleString()}</Tag>}
+      </Flex>
+
+      <div style={{ overflowX: "auto", border: `1px solid ${colors.border}`, borderRadius: 16 }}>
+        <svg
+          viewBox={`0 0 ${layout.width} ${layout.height}`}
+          style={{ width: "100%", minWidth: 640, display: "block", background: colors.raised }}
+          role="img"
+          aria-label={`Graph neighbourhood: ${view.nodes.length} nodes, ${view.edges.length} edges`}
+        >
+          {view.edges.map((edge, i) => {
+            const a = layout.positions.get(edge.from);
+            const b = layout.positions.get(edge.to);
+            if (!a || !b) return null;
+            return (
+              <line
+                key={`${edge.from}-${edge.to}-${i}`}
+                x1={a.x}
+                y1={a.y}
+                x2={b.x}
+                y2={b.y}
+                stroke={colors.border}
+                strokeWidth={1.5}
+              />
+            );
+          })}
+          {view.nodes.map((node) => {
+            const at = layout.positions.get(node.id);
+            if (!at) return null;
+            const isSeed = node.id === assetId;
+            const fill = isSeed
+              ? colors.primary
+              : node.kind
+                ? KIND_COLOR[node.kind] === "default"
+                  ? colors.textSubtle
+                  : KIND_COLOR[node.kind]
+                : colors.textDisabled;
+            return (
+              <g key={node.id}>
+                <circle
+                  cx={at.x}
+                  cy={at.y}
+                  r={isSeed ? 13 : 8}
+                  fill={fill}
+                  stroke={colors.raised}
+                  strokeWidth={2}
+                />
+                <text
+                  x={at.x}
+                  y={at.y - (isSeed ? 20 : 15)}
+                  textAnchor="middle"
+                  fontSize={11}
+                  fontWeight={isSeed ? 600 : 400}
+                  fill={colors.text}
+                >
+                  {node.name.length > 22 ? `${node.name.slice(0, 21)}…` : node.name}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* A picture is not an accessible interface on its own. The same data as
+          a list, so the neighbourhood is reachable by keyboard and by a screen
+          reader — `00f` treats this as a non-negotiable, not an extra. */}
+      <details>
+        <summary style={{ cursor: "pointer", color: colors.textMuted, fontSize: 13 }}>
+          The same neighbourhood as a list
+        </summary>
+        <Table
+          size="small"
+          style={{ marginTop: 12 }}
+          rowKey={(row) => `${row.from}-${row.to}-${row.relationship}`}
+          dataSource={view.edges}
+          pagination={{ pageSize: 10, size: "small" }}
+          columns={[
+            {
+              title: "From",
+              key: "from",
+              render: (_, row) => byId.get(row.from)?.name ?? row.from,
+            },
+            { title: "Relationship", dataIndex: "relationship", key: "rel" },
+            {
+              title: "To",
+              key: "to",
+              render: (_, row) => byId.get(row.to)?.name ?? row.to,
+            },
+          ]}
+        />
+      </details>
     </Space>
   );
 }
@@ -532,9 +756,13 @@ function DescriptionEditor({
 function AssetDetail({
   asset,
   onChanged,
+  asOf,
+  colors,
 }: {
   asset: Asset;
   onChanged: (a: Asset) => void;
+  asOf: string | null;
+  colors: (typeof palette)["light"];
 }) {
   const [ancestors, setAncestors] = useState<Asset[]>([]);
   const [children, setChildren] = useState<Asset[]>([]);
@@ -652,7 +880,22 @@ function AssetDetail({
             ),
             children: <VersionHistory assetId={asset.id} />,
           },
+          {
+            key: "graph",
+            label: (
+              <span>
+                <ApartmentOutlined /> Graph
+              </span>
+            ),
+            // Mounted only when the tab is opened. A traversal is a real query
+            // and running it for everyone who opens an asset would make the
+            // graph the cost of every page view.
+            children: (
+              <GraphExplorer assetId={asset.id} asOf={asOf} colors={colors} />
+            ),
+          },
         ]}
+        destroyOnHidden
       />
     </Space>
   );
@@ -1300,7 +1543,12 @@ export default function App() {
                       </Space>
                     </Card>
                   )}
-                  <AssetDetail asset={selected} onChanged={setSelectedRaw} />
+                  <AssetDetail
+                    asset={selected}
+                    onChanged={setSelectedRaw}
+                    asOf={asOf}
+                    colors={colors}
+                  />
                 </>
               ) : (
                 <div style={{ position: "relative", width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>

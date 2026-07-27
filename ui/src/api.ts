@@ -59,6 +59,29 @@ export interface SearchFacets {
   schema: Facet[];
 }
 
+export interface GraphNode {
+  id: string;
+  name: string;
+  /** Null when the reader may not see the node. It stays in the picture as a
+   *  bare node — removing it would claim a smaller neighbourhood than exists. */
+  kind: AssetKind | null;
+  fullyQualifiedName?: string;
+}
+
+export interface GraphEdge {
+  from: string;
+  to: string;
+  relationship: string;
+}
+
+export interface GraphView {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  /** The walk hit its bound. Always shown — a partial picture presented as
+   *  complete is the failure mode of every graph tool. */
+  truncated: boolean;
+}
+
 export interface Page<T> {
   data: T[];
   paging: { after: string | null };
@@ -144,6 +167,14 @@ export const api = {
   search: (q: string, kind?: AssetKind) =>
     request<Page<Asset> & { facets: SearchFacets }>(
       `/assets/search?q=${encodeURIComponent(q)}${kind ? `&kind=${kind}` : ""}&limit=50`,
+    ),
+  /** The neighbourhood around an asset. Labels are resolved server-side —
+   *  one statement per traversal is pointless if the client then makes one
+   *  request per node. */
+  graph: (id: string, hops: number, asOf?: string | null) =>
+    request<GraphView>(
+      `/assets/${id}/graph?hops=${hops}` +
+        (asOf ? `&asOf=${encodeURIComponent(asOf)}` : ""),
     ),
   stats: () => request<{ byKind: { kind: AssetKind; count: number }[] }>("/assets/stats"),
   versions: (id: string) => request<AssetVersion[]>(`/assets/${id}/versions`),
