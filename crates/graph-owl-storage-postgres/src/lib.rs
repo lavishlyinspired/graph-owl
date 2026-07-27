@@ -830,6 +830,61 @@ impl Storage for PostgresStorage {
         Ok(rows.into_iter().map(asset_from_row).collect())
     }
 
+    async fn count_documented_visible(
+        &self,
+        predicate: &AccessPredicate,
+    ) -> Result<(i64, i64), StorageError> {
+        let Some((allow, deny)) = lower(predicate) else {
+            return Ok((0, 0));
+        };
+        // Both counts in one statement. Two queries could observe different
+        // states and produce a coverage ratio above 1.
+        //
+        // `btrim(description) <> ''` rather than `IS NOT NULL`: whitespace is
+        // not documentation, and counting it would make the number reward
+        // someone typing a space into every field.
+        let row = sqlx::query(
+            "SELECT count(*) FILTER (WHERE description IS NOT NULL
+                                       AND btrim(description) <> '') AS described,
+                    count(*) AS total
+             FROM assets
+             WHERE NOT deleted
+               AND (fully_qualified_name LIKE ANY($1))
+               AND NOT (fully_qualified_name LIKE ANY($2))",
+        )
+        .bind(&allow)
+        .bind(&deny)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok((row.get("described"), row.get("total")))
+    }
+
+    async fn recently_changed_visible(
+        &self,
+        limit: i64,
+        predicate: &AccessPredicate,
+    ) -> Result<Vec<Asset>, StorageError> {
+        let Some((allow, deny)) = lower(predicate) else {
+            return Ok(Vec::new());
+        };
+        sqlx::query(&format!(
+            "SELECT {ASSET_COLUMNS} FROM assets
+             WHERE NOT deleted
+               AND (fully_qualified_name LIKE ANY($1))
+               AND NOT (fully_qualified_name LIKE ANY($2))
+             ORDER BY updated_at DESC, id DESC
+             LIMIT $3"
+        ))
+        .bind(&allow)
+        .bind(&deny)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(asset_from_row).collect())
+        .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
     async fn count_assets_by_kind_visible(
         &self,
         predicate: &AccessPredicate,

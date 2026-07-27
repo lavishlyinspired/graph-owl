@@ -178,6 +178,31 @@ pub trait Storage: Send + Sync {
         predicate: &AccessPredicate,
     ) -> Result<Vec<Asset>, StorageError>;
 
+    /// How many visible assets carry a **non-empty** description, and how many
+    /// there are in total.
+    ///
+    /// Non-empty, not non-null: a description of `"   "` is not documentation,
+    /// and counting it would make the coverage number reward whitespace.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn count_documented_visible(
+        &self,
+        predicate: &AccessPredicate,
+    ) -> Result<(i64, i64), StorageError>;
+
+    /// The most recently changed visible assets, newest first.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn recently_changed_visible(
+        &self,
+        limit: i64,
+        predicate: &AccessPredicate,
+    ) -> Result<Vec<Asset>, StorageError>;
+
     async fn count_assets_by_kind_visible(
         &self,
         predicate: &AccessPredicate,

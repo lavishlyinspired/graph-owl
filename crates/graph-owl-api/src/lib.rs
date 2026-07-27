@@ -192,6 +192,30 @@ fn subject_of(principal: &Principal) -> Subject {
     }
 }
 
+/// The landing page's answer.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Overview {
+    pub total: i64,
+    pub by_kind: Vec<(AssetKind, i64)>,
+    /// Assets carrying a non-empty description.
+    pub described: i64,
+    /// The denominator for `described`. Equal to `total`, carried separately so
+    /// a future coverage metric over a narrower scope does not have to redefine
+    /// what it is a fraction of.
+    pub documented_total: i64,
+    pub recently_changed: Vec<Asset>,
+    /// `None` when no graph engine is configured — distinct from a graph of
+    /// size zero, which is what a configured-but-empty projection looks like.
+    pub graph: Option<GraphSize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphSize {
+    pub flakes: u64,
+}
+
 #[derive(Clone)]
 pub struct Catalog {
     storage: Arc<dyn Storage>,
@@ -1004,6 +1028,63 @@ impl Catalog {
         Ok(self.storage.soft_delete_asset(id, &principal.id).await?)
     }
 
+    /// Everything the landing page needs, in one answer.
+    ///
+    /// One method rather than six: a dashboard that fans out to six endpoints
+    /// renders in six stages and shows a different partial truth in each. Every
+    /// number here goes through the same access predicate as list and search,
+    /// so a total cannot leak the size of what the reader may not see.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if any of the underlying queries fails.
+    pub async fn overview(&self, principal: &Principal) -> Result<Overview, CatalogError> {
+        // `ViewBasic`: the overview shows names and counts, not field contents.
+        // Asking for ViewDetails would hide an asset from the totals that the
+        // reader can legitimately see listed.
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+
+        let by_kind = self
+            .storage
+            .count_assets_by_kind_visible(&predicate)
+            .await?;
+        let (described, total) = self.storage.count_documented_visible(&predicate).await?;
+        // Ten is what fits above the fold without scrolling. A longer list is
+        // a worse answer to "what changed lately", not a more complete one.
+        let recently_changed = self
+            .storage
+            .recently_changed_visible(10, &predicate)
+            .await?;
+
+        // The graph's own size. Deliberately raw counts rather than a health
+        // score: a score would need a definition nothing here can defend.
+        //
+        // It doubles as the honest surface for projection lag — a node count
+        // trailing the asset total means the graph view is behind, and a
+        // number on the page beats a log line nobody reads.
+        let graph = match &self.graph {
+            Some(graph) => {
+                let flakes = graph
+                    .count(&graph_owl_core::flake::TriplePattern::default())
+                    .await
+                    .unwrap_or(0);
+                Some(GraphSize { flakes })
+            }
+            None => None,
+        };
+
+        Ok(Overview {
+            total: by_kind.iter().map(|(_, n)| n).sum(),
+            by_kind,
+            described,
+            documented_total: total,
+            recently_changed,
+            graph,
+        })
+    }
+
     /// Tombstone the assets under `service_fqn` that the source no longer
     /// reports.
     ///
@@ -1422,6 +1503,42 @@ mod tests {
                 .into_iter()
                 .filter(|a| predicate.admits(&a.fully_qualified_name))
                 .collect())
+        }
+
+        async fn count_documented_visible(
+            &self,
+            predicate: &AccessPredicate,
+        ) -> Result<(i64, i64), StorageError> {
+            let assets = self.assets.lock().unwrap();
+            let visible: Vec<_> = assets
+                .iter()
+                .filter(|a| !a.deleted && predicate.admits(&a.fully_qualified_name))
+                .collect();
+            let described = visible
+                .iter()
+                .filter(|a| {
+                    a.description
+                        .as_deref()
+                        .is_some_and(|d| !d.trim().is_empty())
+                })
+                .count();
+            Ok((described as i64, visible.len() as i64))
+        }
+
+        async fn recently_changed_visible(
+            &self,
+            limit: i64,
+            predicate: &AccessPredicate,
+        ) -> Result<Vec<Asset>, StorageError> {
+            let assets = self.assets.lock().unwrap();
+            let mut visible: Vec<Asset> = assets
+                .iter()
+                .filter(|a| !a.deleted && predicate.admits(&a.fully_qualified_name))
+                .cloned()
+                .collect();
+            visible.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(b.id.cmp(&a.id)));
+            visible.truncate(usize::try_from(limit).unwrap_or(0));
+            Ok(visible)
         }
 
         async fn count_assets_by_kind_visible(

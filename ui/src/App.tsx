@@ -34,6 +34,7 @@ import CheckCircleFilled from "@ant-design/icons/es/icons/CheckCircleFilled";
 import ClockCircleOutlined from "@ant-design/icons/es/icons/ClockCircleOutlined";
 import CloudServerOutlined from "@ant-design/icons/es/icons/CloudServerOutlined";
 import CompassOutlined from "@ant-design/icons/es/icons/CompassOutlined";
+import DashboardOutlined from "@ant-design/icons/es/icons/DashboardOutlined";
 import DatabaseOutlined from "@ant-design/icons/es/icons/DatabaseOutlined";
 import FolderOutlined from "@ant-design/icons/es/icons/FolderOutlined";
 import PlusOutlined from "@ant-design/icons/es/icons/PlusOutlined";
@@ -52,6 +53,7 @@ import {
   type ChangeDescription,
   type Facet,
   type GraphView,
+  type Overview,
   type SearchFacets,
   ApiError,
   api,
@@ -66,7 +68,7 @@ import watermarkImg from "./assets/watermark1.png";
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
 
-type Section = "explore" | "connectors";
+type Section = "overview" | "explore" | "connectors";
 
 const KIND_ICON: Record<AssetKind, React.ReactNode> = {
   service: <CloudServerOutlined />,
@@ -197,6 +199,222 @@ function renderChange(change: ChangeDescription | null | undefined) {
           {row.after != null && <> → {String(row.after)}</>}
         </Text>
       ))}
+    </Space>
+  );
+}
+
+/** The landing page.
+ *
+ *  Every tile is a number the system already knows and can defend. That
+ *  constraint is the design, not a limitation of it: a dashboard of
+ *  plausible-looking numbers nobody can act on is worse than a smaller one
+ *  that is true, and it is discovered by the first person who clicks a tile.
+ *
+ *  Certification, quality and lineage tiles are deliberately absent — they
+ *  need Epics 22–38, and rendering them over invented data would make the
+ *  console lie about the maturity of the product it fronts. */
+function OverviewPage({
+  colors,
+  onOpen,
+  onAddSource,
+}: {
+  colors: (typeof palette)["light"];
+  onOpen: (asset: Asset) => void;
+  onAddSource: () => void;
+}) {
+  const [data, setData] = useState<Overview | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    api
+      .overview()
+      .then(setData)
+      .catch(() => setFailed(true));
+  }, []);
+
+  if (failed) return <Empty description="Could not load the overview" />;
+  if (!data) return <Text type="secondary">Loading…</Text>;
+
+  const { assets, documentation, graph, recentlyChanged } = data;
+  const coverage =
+    documentation.total === 0
+      ? 0
+      : Math.round((documentation.described / documentation.total) * 100);
+
+  // A new deployment gets an action, not a chart of zeros.
+  if (assets.total === 0) {
+    return (
+      <Flex vertical align="center" justify="center" style={{ height: "100%" }} gap={16}>
+        <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+          Nothing catalogued yet
+        </Title>
+        <Text type="secondary">
+          graph-owl reads a source&apos;s structure and builds a browsable hierarchy from it.
+        </Text>
+        <Button type="primary" icon={<PlusOutlined />} onClick={onAddSource}>
+          Catalogue a source
+        </Button>
+      </Flex>
+    );
+  }
+
+  const tile = (label: string, value: React.ReactNode, hint?: React.ReactNode) => (
+    <Card size="small" style={{ height: "100%" }}>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        {label}
+      </Text>
+      <div style={{ fontSize: 26, fontWeight: 600, lineHeight: 1.2, marginTop: 4 }}>{value}</div>
+      {hint && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {hint}
+        </Text>
+      )}
+    </Card>
+  );
+
+  // Projection lag, surfaced. A node count trailing the asset total means the
+  // graph view is behind — a number on the page beats a log line nobody reads.
+  const graphHint =
+    graph === null
+      ? "no graph engine configured"
+      : `${graph.flakes.toLocaleString()} facts projected`;
+
+  return (
+    <Space direction="vertical" size="large" style={{ width: "100%" }}>
+      <div>
+        <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+          Overview
+        </Title>
+        <Text type="secondary">
+          Everything below is filtered to what you are allowed to see.
+        </Text>
+      </div>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} sm={12} lg={6}>
+          {tile("Assets", assets.total.toLocaleString(), "across every source")}
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
+          {tile(
+            "Documented",
+            <span style={{ color: coverage < 50 ? colors.warning : colors.success }}>
+              {coverage}%
+            </span>,
+            `${documentation.described.toLocaleString()} of ${documentation.total.toLocaleString()} have a description`,
+          )}
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
+          {tile("Graph", graph ? graph.flakes.toLocaleString() : "—", graphHint)}
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
+          {tile(
+            "Kinds",
+            assets.byKind.length,
+            assets.byKind.map((k) => k.kind).join(" · "),
+          )}
+        </Col>
+      </Row>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={10}>
+          <Card size="small" title="What is in the catalog">
+            <Space direction="vertical" size={10} style={{ width: "100%" }}>
+              {assets.byKind
+                .slice()
+                .sort((a, b) => b.count - a.count)
+                .map((row) => {
+                  const share = assets.total === 0 ? 0 : (row.count / assets.total) * 100;
+                  return (
+                    <div key={row.kind}>
+                      <Flex justify="space-between" style={{ marginBottom: 4 }}>
+                        {/* The label carries the meaning, not the bar colour —
+                            a reader who cannot distinguish the hues still gets
+                            the full answer. */}
+                        <Text style={{ fontSize: 13 }}>{row.kind}</Text>
+                        <Text style={{ fontSize: 13, fontVariantNumeric: "tabular-nums" }}>
+                          {row.count.toLocaleString()}
+                        </Text>
+                      </Flex>
+                      <div
+                        style={{
+                          height: 8,
+                          borderRadius: 4,
+                          background: colors.fill,
+                          overflow: "hidden",
+                        }}
+                        role="img"
+                        aria-label={`${row.kind}: ${row.count} of ${assets.total}`}
+                      >
+                        <div
+                          style={{
+                            width: `${share}%`,
+                            height: "100%",
+                            background:
+                              KIND_COLOR[row.kind] === "default"
+                                ? colors.textSubtle
+                                : KIND_COLOR[row.kind],
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+            </Space>
+          </Card>
+        </Col>
+
+        <Col xs={24} lg={14}>
+          <Card size="small" title="Recently changed">
+            {recentlyChanged.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No changes yet" />
+            ) : (
+              <Table
+                size="small"
+                rowKey="id"
+                dataSource={recentlyChanged}
+                pagination={false}
+                onRow={(row) => ({ onClick: () => onOpen(row), style: { cursor: "pointer" } })}
+                columns={[
+                  {
+                    title: "Name",
+                    dataIndex: "name",
+                    key: "name",
+                    render: (name: string, row: Asset) => (
+                      <Space size={6}>
+                        <Tag color={KIND_COLOR[row.kind]} icon={KIND_ICON[row.kind]}>
+                          {row.kind}
+                        </Tag>
+                        <Text style={{ fontWeight: 500 }}>{name}</Text>
+                      </Space>
+                    ),
+                  },
+                  {
+                    title: "Version",
+                    key: "version",
+                    width: 90,
+                    render: (_, row: Asset) => (
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        v{row.version.major}.{row.version.minor}
+                      </Text>
+                    ),
+                  },
+                  {
+                    title: "By",
+                    dataIndex: "updatedBy",
+                    key: "updatedBy",
+                    width: 120,
+                    render: (by: string) => (
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {by}
+                      </Text>
+                    ),
+                  },
+                ]}
+              />
+            )}
+          </Card>
+        </Col>
+      </Row>
     </Space>
   );
 }
@@ -1049,12 +1267,19 @@ function ConnectorsPage({ onDone }: { onDone: () => void }) {
 export default function App() {
   const { dark, toggle } = useTheme();
   const colors = dark ? palette.dark : palette.light;
-  const [section, setSectionRaw] = useState<Section>(
-    () => (readParam("section") === "connectors" ? "connectors" : "explore"),
-  );
+  // Overview answers "what is in here" without a click; Explore is where you
+  // go once you know what you are looking for. A deep link to an asset lands
+  // on Explore regardless, or the link would not open the thing it names.
+  const [section, setSectionRaw] = useState<Section>(() => {
+    const named = readParam("section");
+    if (named === "connectors" || named === "explore" || named === "overview") {
+      return named;
+    }
+    return readParam("asset") ? "explore" : "overview";
+  });
   const setSection = useCallback((next: Section) => {
     setSectionRaw(next);
-    writeParam("section", next === "explore" ? null : next);
+    writeParam("section", next === "overview" ? null : next);
   }, []);
   const [selected, setSelectedRaw] = useState<Asset | null>(null);
   const [query, setQuery] = useState("");
@@ -1358,17 +1583,17 @@ export default function App() {
                 data. Conflating them is why the tree previously had nowhere
                 for a second section to go. */}
             <Sider
-              width={64}
+              width={196}
               theme={dark ? "dark" : "light"}
               style={{ borderRight: `1px solid ${colors.border}` }}
             >
               <Menu
                 mode="inline"
-                inlineCollapsed
                 selectedKeys={[section]}
                 onClick={({ key }) => setSection(key as Section)}
                 style={{ borderInlineEnd: 0, paddingTop: 8 }}
                 items={[
+                  { key: "overview", icon: <DashboardOutlined />, label: "Overview" },
                   { key: "explore", icon: <CompassOutlined />, label: "Explore" },
                   { key: "connectors", icon: <PlusOutlined />, label: "Connectors" },
                 ]}
@@ -1421,7 +1646,16 @@ export default function App() {
             )}
 
             <Content style={{ padding: 24, overflow: "auto" }}>
-              {section === "connectors" ? (
+              {section === "overview" ? (
+                <OverviewPage
+                  colors={colors}
+                  onOpen={(asset) => {
+                    setSection("explore");
+                    setSelected(asset);
+                  }}
+                  onAddSource={() => setSection("connectors")}
+                />
+              ) : section === "connectors" ? (
                 <ConnectorsPage onDone={refresh} />
               ) : results !== null ? (
                 <Row gutter={24} style={{ width: "100%" }}>

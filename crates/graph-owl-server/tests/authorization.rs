@@ -344,3 +344,89 @@ async fn writes_are_attributed_to_the_authenticated_principal() {
          of threading the Principal seam through Epic 1"
     );
 }
+
+/// The landing page is subject to the same rule as every other count: a total
+/// that ignored policy would state the size of what the reader may not see —
+/// the exact leak the rest of this file exists to close.
+#[tokio::test]
+async fn the_overview_is_authorization_filtered_like_every_other_count() {
+    let (app, _container) = fixture().await;
+
+    let (_, admin) = call(&app, "/overview", Some("root")).await;
+    let (status, analyst) = call(&app, "/overview", Some("asha")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let admin_total = admin["assets"]["total"].as_i64().expect("total");
+    let analyst_total = analyst["assets"]["total"].as_i64().expect("total");
+    assert!(
+        admin_total > analyst_total,
+        "{admin_total} vs {analyst_total}"
+    );
+
+    // The documentation denominator has to be filtered too. A coverage
+    // percentage over an unfiltered total would quietly disclose the count of
+    // hidden assets through arithmetic.
+    assert_eq!(
+        analyst["documentation"]["total"].as_i64().expect("total"),
+        analyst_total,
+        "coverage is a fraction of what the reader can see"
+    );
+
+    // And nothing from the denied schema may appear in the recent list.
+    let recent = analyst["recentlyChanged"]
+        .as_array()
+        .expect("recentlyChanged");
+    assert!(
+        recent.iter().all(|a| !a["fullyQualifiedName"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("core_banking")),
+        "core_banking leaked into the analyst's recent list: {recent:?}"
+    );
+}
+
+/// Whitespace is not documentation. Counting it would make the coverage number
+/// reward someone typing a space into every field.
+#[tokio::test]
+async fn documentation_coverage_counts_real_descriptions_only() {
+    let (app, _container) = fixture().await;
+
+    let (_, found) = call(
+        &app,
+        "/assets/search?q=upi_transactions&kind=table",
+        Some("root"),
+    )
+    .await;
+    let id = found["data"][0]["id"].as_str().expect("id").to_string();
+
+    let (_, before) = call(&app, "/overview", Some("root")).await;
+    let described_before = before["documentation"]["described"]
+        .as_i64()
+        .expect("described");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/assets/{id}"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", token("root")))
+                .body(Body::from(
+                    json!({ "description": "UPI ledger" }).to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let (_, after) = call(&app, "/overview", Some("root")).await;
+    assert_eq!(
+        after["documentation"]["described"]
+            .as_i64()
+            .expect("described"),
+        described_before + 1,
+        "a real description must move the number"
+    );
+}

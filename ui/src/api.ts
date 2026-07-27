@@ -82,6 +82,15 @@ export interface GraphView {
   truncated: boolean;
 }
 
+export interface Overview {
+  assets: { total: number; byKind: { kind: AssetKind; count: number }[] };
+  documentation: { described: number; total: number };
+  /** Null when no graph engine is configured — distinct from a graph of size
+   *  zero, which is what a configured-but-empty projection looks like. */
+  graph: { flakes: number } | null;
+  recentlyChanged: Asset[];
+}
+
 export interface Page<T> {
   data: T[];
   paging: { after: string | null };
@@ -176,6 +185,9 @@ export const api = {
       `/assets/${id}/graph?hops=${hops}` +
         (asOf ? `&asOf=${encodeURIComponent(asOf)}` : ""),
     ),
+  /** One request for the whole landing page. Six would render in six stages
+   *  and show a different partial truth in each. */
+  overview: () => request<Overview>("/overview"),
   stats: () => request<{ byKind: { kind: AssetKind; count: number }[] }>("/assets/stats"),
   versions: (id: string) => request<AssetVersion[]>(`/assets/${id}/versions`),
   updateAsset: (id: string, update: { description: string | null }) =>

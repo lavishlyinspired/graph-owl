@@ -37,6 +37,7 @@ pub fn app(catalog: Catalog) -> Router {
         .route("/assets/search", get(search_assets))
         .route("/assets/roots", get(list_roots))
         .route("/assets/stats", get(asset_stats))
+        .route("/overview", get(overview))
         .route("/connectors/postgres/runs", post(run_postgres_connector))
         // Unauthenticated by design: an orchestrator's probe must not depend
         // on the identity provider being reachable.
@@ -802,6 +803,28 @@ async fn asset_ancestors(
 ) -> Result<Json<Vec<Asset>>, AppError> {
     catalog.get_asset_for(&principal, id).await?;
     Ok(Json(catalog.ancestors_of(id).await?))
+}
+
+/// Everything the landing page needs, in one request.
+async fn overview(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let overview = catalog.overview(&principal).await?;
+    Ok(Json(json!({
+        "assets": {
+            "total": overview.total,
+            "byKind": overview.by_kind.iter()
+                .map(|(kind, n)| json!({ "kind": kind.as_str(), "count": n }))
+                .collect::<Vec<_>>(),
+        },
+        "documentation": {
+            "described": overview.described,
+            "total": overview.documented_total,
+        },
+        "graph": overview.graph,
+        "recentlyChanged": overview.recently_changed,
+    })))
 }
 
 async fn asset_stats(
