@@ -1,6 +1,8 @@
 use axum::{
     Json, Router,
-    extract::{FromRequest, Path, Query, Request, State, rejection::JsonRejection},
+    extract::{
+        FromRequest, FromRequestParts, Path, Query, Request, State, rejection::JsonRejection,
+    },
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -10,7 +12,7 @@ use graph_owl_api::{
     validation::{FieldError, FieldErrorCode, ValidateBody},
 };
 use graph_owl_core::{
-    Relationship, Table, TableUpdate,
+    Principal, Relationship, Table, TableUpdate,
     page::{Page, PageRequest, PageRequestError},
 };
 use graph_owl_storage::{ConflictKind, StorageError};
@@ -36,13 +38,32 @@ pub fn app(catalog: Catalog) -> Router {
 
 async fn create_table(
     State(catalog): State<Catalog>,
+    Auth(principal): Auth,
     AppJson(payload): AppJson<CreateTable>,
-) -> Result<(StatusCode, Json<Table>), AppError> {
-    let table = catalog.create_table(payload).await?;
-    Ok((StatusCode::CREATED, Json(table)))
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::HeaderName, String); 1],
+        Json<Table>,
+    ),
+    AppError,
+> {
+    let table = catalog.create_table(&principal, payload).await?;
+    // Built from the returned id, never reassembled from the request — a client
+    // following the header must land on the thing that was actually created.
+    let location = format!("/tables/{}", table.id);
+    Ok((
+        StatusCode::CREATED,
+        [(axum::http::header::LOCATION, location)],
+        Json(table),
+    ))
 }
 
+/// `deny_unknown_fields` so a typo'd filter fails loudly. `GET /tables?ownr=x`
+/// silently returning the unfiltered collection is a data-leak-shaped bug: the
+/// client believes it applied a restriction that was never applied.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListQuery {
     limit: Option<usize>,
     after: Option<String>,
@@ -50,7 +71,7 @@ struct ListQuery {
 
 async fn list_tables(
     State(catalog): State<Catalog>,
-    Query(query): Query<ListQuery>,
+    AppQuery(query): AppQuery<ListQuery>,
 ) -> Result<Json<Page<Table>>, AppError> {
     let page = PageRequest::new(query.limit, query.after.as_deref())?;
     Ok(Json(catalog.list_tables(&page).await?))
@@ -69,11 +90,12 @@ async fn get_table(
 
 async fn update_table(
     State(catalog): State<Catalog>,
+    Auth(principal): Auth,
     Path(id): Path<Uuid>,
     AppJson(update): AppJson<TableUpdate>,
 ) -> Result<Json<Table>, AppError> {
     catalog
-        .update_table(id, update)
+        .update_table(&principal, id, update)
         .await?
         .map(Json)
         .ok_or(AppError::NotFound)
@@ -81,9 +103,10 @@ async fn update_table(
 
 async fn delete_table(
     State(catalog): State<Catalog>,
+    Auth(principal): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
-    if catalog.delete_table(id).await? {
+    if catalog.delete_table(&principal, id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(AppError::NotFound)
@@ -92,11 +115,24 @@ async fn delete_table(
 
 async fn create_relationship(
     State(catalog): State<Catalog>,
+    Auth(principal): Auth,
     Path(id): Path<Uuid>,
     AppJson(payload): AppJson<CreateRelationship>,
-) -> Result<(StatusCode, Json<Relationship>), AppError> {
-    let relationship = catalog.create_relationship(id, payload).await?;
-    Ok((StatusCode::CREATED, Json(relationship)))
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::HeaderName, String); 1],
+        Json<Relationship>,
+    ),
+    AppError,
+> {
+    let relationship = catalog.create_relationship(&principal, id, payload).await?;
+    let location = format!("/relationships/{}", relationship.id);
+    Ok((
+        StatusCode::CREATED,
+        [(axum::http::header::LOCATION, location)],
+        Json(relationship),
+    ))
 }
 
 async fn list_relationships_for_table(
@@ -112,12 +148,66 @@ async fn list_relationships_for_table(
 
 async fn delete_relationship(
     State(catalog): State<Catalog>,
+    Auth(principal): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
-    if catalog.delete_relationship(id).await? {
+    if catalog.delete_relationship(&principal, id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(AppError::NotFound)
+    }
+}
+
+/// The **only** place a `Principal` is constructed from a request.
+///
+/// Epic 12 replaces this body with token verification. Nothing else in the
+/// server may build a principal, so that swap stays a one-file change — which
+/// is the entire point of threading it through handlers now.
+struct Auth(Principal);
+
+impl<S> FromRequestParts<S> for Auth
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        _parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Auth(Principal::system()))
+    }
+}
+
+/// Wraps [`Query`] so a rejection becomes problem+json like every other error.
+///
+/// axum's own rejection is plain text, which would make query-parameter
+/// failures the one error shape a client cannot parse — and `deny_unknown_fields`
+/// makes this a path clients hit routinely, not an edge case.
+struct AppQuery<T>(T);
+
+impl<S, T> FromRequestParts<S> for AppQuery<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let Query(value) =
+            Query::<T>::from_request_parts(parts, state)
+                .await
+                .map_err(|rejection| {
+                    AppError::Validation(vec![FieldError::new(
+                        "query",
+                        FieldErrorCode::Type,
+                        rejection.body_text(),
+                    )])
+                })?;
+        Ok(AppQuery(value))
     }
 }
 

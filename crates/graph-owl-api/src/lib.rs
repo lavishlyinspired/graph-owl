@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use graph_owl_core::{
-    Relationship, Table, TableUpdate,
+    Principal, Relationship, Table, TableUpdate,
     page::{Page, PageRequest},
     relationship_type::{EntityKind, RelationshipType, is_legal},
 };
@@ -133,7 +133,15 @@ impl Catalog {
     /// # Errors
     ///
     /// Returns an error if the underlying storage fails, e.g. a duplicate `fully_qualified_name`.
-    pub async fn create_table(&self, request: CreateTable) -> Result<Table, CatalogError> {
+    pub async fn create_table(
+        &self,
+        principal: &Principal,
+        request: CreateTable,
+    ) -> Result<Table, CatalogError> {
+        // Epic 3 puts this on the envelope as `updated_by`. Until then the
+        // principal is threaded and observable, so Epic 12 changes an extractor
+        // rather than forty signatures.
+        let _ = principal;
         let now = Utc::now();
         let table = Table {
             id: Uuid::new_v4(),
@@ -165,16 +173,23 @@ impl Catalog {
     /// Returns an error if the underlying storage fails.
     pub async fn update_table(
         &self,
+        principal: &Principal,
         id: Uuid,
         update: TableUpdate,
     ) -> Result<Option<Table>, CatalogError> {
+        let _ = principal;
         Ok(self.storage.update_table(id, update).await?)
     }
 
     /// # Errors
     ///
     /// Returns an error if the underlying storage fails.
-    pub async fn delete_table(&self, id: Uuid) -> Result<bool, CatalogError> {
+    pub async fn delete_table(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<bool, CatalogError> {
+        let _ = principal;
         Ok(self.storage.delete_table(id).await?)
     }
 
@@ -187,9 +202,11 @@ impl Catalog {
     /// relationship).
     pub async fn create_relationship(
         &self,
+        principal: &Principal,
         from_table_id: Uuid,
         request: CreateRelationship,
     ) -> Result<Relationship, CatalogError> {
+        let _ = principal;
         // Vocabulary and legality are checked *before* existence, deliberately:
         // an illegal triple between two nonexistent tables is a triple problem,
         // and reporting 404 would send the client hunting for the wrong bug.
@@ -261,7 +278,12 @@ impl Catalog {
     /// # Errors
     ///
     /// Returns an error if the underlying storage fails.
-    pub async fn delete_relationship(&self, id: Uuid) -> Result<bool, CatalogError> {
+    pub async fn delete_relationship(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<bool, CatalogError> {
+        let _ = principal;
         Ok(self.storage.delete_relationship(id).await?)
     }
 }
@@ -396,7 +418,7 @@ mod tests {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
 
         let table = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
 
@@ -410,11 +432,11 @@ mod tests {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
 
         let first = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
         let second = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
 
@@ -425,7 +447,7 @@ mod tests {
     async fn getting_a_table_by_id_returns_the_stored_table() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
         let created = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
 
@@ -466,14 +488,17 @@ mod tests {
     async fn listing_tables_returns_all_created_tables() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
         let first = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
         let second = catalog
-            .create_table(CreateTable {
-                fully_qualified_name: "warehouse.public.orders".to_string(),
-                ..mock_create_table_request()
-            })
+            .create_table(
+                &Principal::system(),
+                CreateTable {
+                    fully_qualified_name: "warehouse.public.orders".to_string(),
+                    ..mock_create_table_request()
+                },
+            )
             .await
             .expect("create_table should succeed");
 
@@ -493,12 +518,13 @@ mod tests {
     async fn updating_a_table_changes_only_the_provided_fields() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
         let created = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
 
         let updated = catalog
             .update_table(
+                &Principal::system(),
                 created.id,
                 TableUpdate {
                     name: None,
@@ -519,7 +545,7 @@ mod tests {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
 
         let result = catalog
-            .update_table(Uuid::new_v4(), TableUpdate::default())
+            .update_table(&Principal::system(), Uuid::new_v4(), TableUpdate::default())
             .await
             .expect("update_table should succeed");
 
@@ -530,12 +556,12 @@ mod tests {
     async fn deleting_an_existing_table_removes_it_and_returns_true() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
         let created = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
 
         let deleted = catalog
-            .delete_table(created.id)
+            .delete_table(&Principal::system(), created.id)
             .await
             .expect("delete_table should succeed");
 
@@ -552,7 +578,7 @@ mod tests {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
 
         let deleted = catalog
-            .delete_table(Uuid::new_v4())
+            .delete_table(&Principal::system(), Uuid::new_v4())
             .await
             .expect("delete_table should succeed");
 
@@ -563,16 +589,17 @@ mod tests {
     async fn creating_a_relationship_between_two_existing_tables_succeeds() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
         let from = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
         let to = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
 
         let relationship = catalog
             .create_relationship(
+                &Principal::system(),
                 from.id,
                 CreateRelationship {
                     to_table_id: to.id,
@@ -593,12 +620,13 @@ mod tests {
     async fn creating_a_relationship_from_a_nonexistent_table_returns_table_not_found() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
         let to = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
 
         let result = catalog
             .create_relationship(
+                &Principal::system(),
                 Uuid::new_v4(),
                 CreateRelationship {
                     to_table_id: to.id,
@@ -614,12 +642,13 @@ mod tests {
     async fn creating_a_relationship_to_a_nonexistent_table_returns_table_not_found() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
         let from = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
 
         let result = catalog
             .create_relationship(
+                &Principal::system(),
                 from.id,
                 CreateRelationship {
                     to_table_id: Uuid::new_v4(),
@@ -635,16 +664,17 @@ mod tests {
     async fn creating_a_relationship_with_an_empty_type_is_a_field_validation_error() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
         let from = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
         let to = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
 
         let result = catalog
             .create_relationship(
+                &Principal::system(),
                 from.id,
                 CreateRelationship {
                     to_table_id: to.id,
@@ -664,7 +694,7 @@ mod tests {
     async fn listing_relationships_for_a_table_with_none_returns_an_empty_vec() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
         let table = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
 
@@ -681,19 +711,20 @@ mod tests {
     async fn listing_relationships_for_a_table_returns_relationships_from_either_side() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
         let orders = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
         let customers = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
         let archive = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
         catalog
             .create_relationship(
+                &Principal::system(),
                 orders.id,
                 CreateRelationship {
                     to_table_id: customers.id,
@@ -704,6 +735,7 @@ mod tests {
             .expect("create_relationship should succeed");
         catalog
             .create_relationship(
+                &Principal::system(),
                 archive.id,
                 CreateRelationship {
                     to_table_id: orders.id,
@@ -738,15 +770,16 @@ mod tests {
     async fn deleting_an_existing_relationship_removes_it_and_returns_true() {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
         let from = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
         let to = catalog
-            .create_table(mock_create_table_request())
+            .create_table(&Principal::system(), mock_create_table_request())
             .await
             .expect("create_table should succeed");
         let relationship = catalog
             .create_relationship(
+                &Principal::system(),
                 from.id,
                 CreateRelationship {
                     to_table_id: to.id,
@@ -757,7 +790,7 @@ mod tests {
             .expect("create_relationship should succeed");
 
         let deleted = catalog
-            .delete_relationship(relationship.id)
+            .delete_relationship(&Principal::system(), relationship.id)
             .await
             .expect("delete_relationship should succeed");
 
@@ -775,7 +808,7 @@ mod tests {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
 
         let deleted = catalog
-            .delete_relationship(Uuid::new_v4())
+            .delete_relationship(&Principal::system(), Uuid::new_v4())
             .await
             .expect("delete_relationship should succeed");
 
