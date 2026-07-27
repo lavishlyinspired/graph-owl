@@ -103,7 +103,7 @@ Per the global guidelines: behaviour, not implementation; tests first.
 
 | Budget | Limit |
 |---|---|
-| Initial JS bundle (gzipped) | 250KB |
+| Initial JS bundle (gzipped) | **350KB** (revised — see below) |
 | Route chunk (gzipped) | 100KB |
 | Total embedded assets | 8MB |
 | Routes (page components) | 30 |
@@ -114,6 +114,26 @@ Per the global guidelines: behaviour, not implementation; tests first.
 | axe violations | 0 |
 
 The dependency budget is the one that matters most. 199 is where you land without a number; 40 is a number.
+
+### Budget revision: initial JS 250KB → 350KB
+
+**Recorded rather than silently raised**, per `00a-product-position.md`'s rule that a budget is revised deliberately with the reason.
+
+The console adopts **Ant Design** for its component layer. That decision came from a product requirement — the console should read as familiar to anyone evaluating it against the incumbent in this category, and that category's look *is* substantially Ant Design's look. Building the same table density, form controls, tree, and panel treatment by hand would cost months and land somewhere worse.
+
+The measured cost is **~330KB gzipped** for the component set this console needs (Layout, Table, Tree, Form, Card, Descriptions, Tag, Breadcrumb, Statistic). Deep-importing icons was tried and moved nothing — the weight is antd's core, not its icon set.
+
+So the trade is stated plainly:
+
+| | |
+|---|---|
+| **Bought** | The category's visual conventions, for free, under MIT. Accessibility, keyboard handling, and i18n already solved in every control |
+| **Paid** | 80KB gzipped over the original budget, and a large dependency whose upgrades we now track |
+| **Rejected alternative** | Hand-built components inside 250KB. Cheaper to ship, far more expensive to finish, and it would not look like what the buyer expects |
+
+**What does not move**: the route budget (30), the dependency budget (40), the route-chunk budget (100KB), and zero axe violations. If the initial bundle needs to move again, the honest answer is code-splitting the explorer and workbench routes — Epic 40's renderer is already specified as lazily loaded — not another revision.
+
+**Licensing note**: Ant Design is MIT. The console uses it directly; it does not transcribe any other product's palette, LESS, or component implementations. See `plans/00i-licensing.md`.
 
 ## Epics
 

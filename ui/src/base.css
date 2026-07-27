@@ -1,0 +1,10 @@
+/* antd supplies component styling. This is only what antd does not own:
+   the document, and the monospace face for fully-qualified names, where
+   character-level differences carry meaning. */
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+code {
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}

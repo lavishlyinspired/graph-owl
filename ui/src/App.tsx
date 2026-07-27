@@ -1,168 +1,207 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  App as AntApp,
+  Breadcrumb,
+  Button,
+  Card,
+  ConfigProvider,
+  Descriptions,
+  Empty,
+  Flex,
+  Form,
+  Input,
+  Layout,
+  Space,
+  Statistic,
+  Table,
+  Tag,
+  Tree,
+  Typography,
+} from "antd";
+import type { DataNode } from "antd/es/tree";
+import ApartmentOutlined from "@ant-design/icons/es/icons/ApartmentOutlined";
+import ClockCircleOutlined from "@ant-design/icons/es/icons/ClockCircleOutlined";
+import CloudServerOutlined from "@ant-design/icons/es/icons/CloudServerOutlined";
+import DatabaseOutlined from "@ant-design/icons/es/icons/DatabaseOutlined";
+import FolderOutlined from "@ant-design/icons/es/icons/FolderOutlined";
+import SafetyCertificateOutlined from "@ant-design/icons/es/icons/SafetyCertificateOutlined";
+import SearchOutlined from "@ant-design/icons/es/icons/SearchOutlined";
+import TableOutlined from "@ant-design/icons/es/icons/TableOutlined";
+import TagOutlined from "@ant-design/icons/es/icons/TagOutlined";
 import { type Asset, type AssetKind, ApiError, api } from "./api";
-import "./tokens.css";
-import "./app.css";
+import { darkTheme, lightTheme } from "./theme";
 
-const KIND_GLYPH: Record<AssetKind, string> = {
-  service: "◈", database: "▣", schema: "▤", table: "▦", column: "▪",
+const { Header, Sider, Content } = Layout;
+const { Text, Title, Paragraph } = Typography;
+
+const KIND_ICON: Record<AssetKind, React.ReactNode> = {
+  service: <CloudServerOutlined />,
+  database: <DatabaseOutlined />,
+  schema: <FolderOutlined />,
+  table: <TableOutlined />,
+  column: <TagOutlined />,
 };
 
-function KindBadge({ kind }: { kind: AssetKind }) {
+const KIND_COLOR: Record<AssetKind, string> = {
+  service: "blue",
+  database: "geekblue",
+  schema: "purple",
+  table: "green",
+  column: "default",
+};
+
+function Fqn({ children }: { children: string }) {
   return (
-    <span className={`badge badge-${kind}`}>
-      <span aria-hidden="true">{KIND_GLYPH[kind]}</span> {kind}
-    </span>
+    <Text code style={{ fontSize: 12 }}>
+      {children}
+    </Text>
   );
 }
 
-/** A tree node that loads its children on expand. The catalog is a hierarchy,
- *  and loading it whole would fetch every column of every table up front. */
-function TreeNode({
-  asset, selectedId, onSelect, depth,
-}: {
-  asset: Asset;
-  selectedId: string | null;
-  onSelect: (a: Asset) => void;
-  depth: number;
-}) {
-  const [open, setOpen] = useState(depth < 2);
-  const [children, setChildren] = useState<Asset[] | null>(null);
-
+function useDarkMode() {
+  const [dark, setDark] = useState(
+    () => window.matchMedia("(prefers-color-scheme: dark)").matches,
+  );
   useEffect(() => {
-    if (open && children === null && asset.kind !== "column") {
-      api.children(asset.id).then(setChildren).catch(() => setChildren([]));
-    }
-  }, [open, children, asset.id, asset.kind]);
-
-  const expandable = asset.kind !== "column";
-  return (
-    <li>
-      <div
-        className={`tree-row${selectedId === asset.id ? " tree-row-selected" : ""}`}
-        style={{ paddingLeft: `${depth * 14 + 8}px` }}
-      >
-        <button
-          className="tree-toggle"
-          onClick={() => setOpen((o) => !o)}
-          aria-label={open ? `Collapse ${asset.name}` : `Expand ${asset.name}`}
-          disabled={!expandable}
-        >
-          {expandable ? (open ? "▾" : "▸") : "·"}
-        </button>
-        <button className="tree-label" onClick={() => onSelect(asset)}>
-          <span className="tree-glyph" aria-hidden="true">{KIND_GLYPH[asset.kind]}</span>
-          {asset.name}
-        </button>
-      </div>
-      {open && children && children.length > 0 && (
-        <ul className="tree">
-          {children.map((child) => (
-            <TreeNode key={child.id} asset={child} selectedId={selectedId}
-                      onSelect={onSelect} depth={depth + 1} />
-          ))}
-        </ul>
-      )}
-    </li>
-  );
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = (e: MediaQueryListEvent) => setDark(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return dark;
 }
 
-function Detail({ asset }: { asset: Asset }) {
+function AssetDetail({ asset }: { asset: Asset }) {
   const [ancestors, setAncestors] = useState<Asset[]>([]);
   const [children, setChildren] = useState<Asset[]>([]);
 
   useEffect(() => {
     api.ancestors(asset.id).then(setAncestors).catch(() => setAncestors([]));
-    if (asset.kind !== "column") {
-      api.children(asset.id).then(setChildren).catch(() => setChildren([]));
-    } else {
-      setChildren([]);
-    }
+    if (asset.kind === "column") setChildren([]);
+    else api.children(asset.id).then(setChildren).catch(() => setChildren([]));
   }, [asset.id, asset.kind]);
 
   const properties = Object.entries(asset.properties ?? {});
+
   return (
-    <article className="detail">
-      <nav className="breadcrumb" aria-label="Breadcrumb">
-        {ancestors.map((a, i) => (
-          <span key={a.id}>
-            {i > 0 && <span className="crumb-sep" aria-hidden="true">/</span>}
-            <span className={i === ancestors.length - 1 ? "crumb-current" : "crumb"}>{a.name}</span>
-          </span>
-        ))}
-      </nav>
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Breadcrumb items={ancestors.map((a) => ({ title: a.name }))} />
 
-      <header className="detail-head">
-        <h1>{asset.name}</h1>
-        <KindBadge kind={asset.kind} />
-      </header>
-      <p className="fqn">{asset.fullyQualifiedName}</p>
+      <Flex align="center" gap={12} wrap>
+        <Title level={3} style={{ margin: 0 }}>
+          {asset.name}
+        </Title>
+        <Tag color={KIND_COLOR[asset.kind]} icon={KIND_ICON[asset.kind]}>
+          {asset.kind}
+        </Tag>
+      </Flex>
+      <Fqn>{asset.fullyQualifiedName}</Fqn>
 
-      {/* The trust bar. Nothing populates it yet — Epic 3 brings versioning,
-          Epic 26 certification — so it says so rather than showing a
-          confident-looking blank. 39-ui-foundation.md decision 6. */}
-      <div className="trust-bar">
-        <span className="trust-item trust-pending">◷ no version history yet</span>
-        <span className="trust-item trust-pending">◐ confidence not scored</span>
-        <span className="trust-item trust-pending">⚑ uncertified</span>
-      </div>
+      {/* States what it does not know yet rather than rendering a confident
+          blank. Epic 3 fills version, Epic 26 certification, Epic 29 lineage. */}
+      <Card size="small" styles={{ body: { padding: "10px 16px" } }}>
+        <Space size="large" wrap>
+          <Text type="secondary">
+            <ClockCircleOutlined /> no version history yet
+          </Text>
+          <Text type="secondary">
+            <SafetyCertificateOutlined /> uncertified
+          </Text>
+          <Text type="secondary">
+            <ApartmentOutlined /> lineage not captured
+          </Text>
+        </Space>
+      </Card>
 
-      <p className="detail-description">
-        {asset.description ?? <span className="empty-inline">No description. A connector reported this asset structurally; nobody has described it.</span>}
-      </p>
+      <Paragraph
+        type={asset.description ? undefined : "secondary"}
+        italic={!asset.description}
+      >
+        {asset.description ??
+          "No description. A connector reported this asset structurally; nobody has described it."}
+      </Paragraph>
 
       {properties.length > 0 && (
-        <section>
-          <h2>Properties</h2>
-          <table className="props">
-            <tbody>
-              {properties.map(([key, value]) => (
-                <tr key={key}>
-                  <th scope="row">{key}</th>
-                  <td><code>{String(value)}</code></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
+        <Card size="small" title="Properties">
+          <Descriptions
+            column={1}
+            size="small"
+            bordered
+            items={properties.map(([key, value]) => ({
+              key,
+              label: key,
+              children: <Text code>{String(value)}</Text>,
+            }))}
+          />
+        </Card>
       )}
 
       {children.length > 0 && (
-        <section>
-          <h2>{children[0]!.kind === "column" ? "Columns" : "Contains"} <span className="count">{children.length}</span></h2>
-          <table className="children">
-            <thead>
-              <tr><th>Name</th><th>Kind</th><th>Type</th></tr>
-            </thead>
-            <tbody>
-              {children.map((child) => (
-                <tr key={child.id}>
-                  <td>{child.name}</td>
-                  <td><KindBadge kind={child.kind} /></td>
-                  <td><code>{String(child.properties?.["dataType"] ?? child.properties?.["tableType"] ?? "—")}</code></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
+        <Card
+          size="small"
+          title={`${children[0]!.kind === "column" ? "Columns" : "Contains"} (${children.length})`}
+        >
+          <Table
+            size="small"
+            rowKey="id"
+            dataSource={children}
+            pagination={false}
+            columns={[
+              { title: "Name", dataIndex: "name", key: "name" },
+              {
+                title: "Kind",
+                dataIndex: "kind",
+                key: "kind",
+                width: 120,
+                render: (kind: AssetKind) => <Tag color={KIND_COLOR[kind]}>{kind}</Tag>,
+              },
+              {
+                title: "Type",
+                key: "type",
+                width: 240,
+                render: (_: unknown, row: Asset) => (
+                  <Text code>
+                    {String(
+                      row.properties?.["dataType"] ??
+                        row.properties?.["tableType"] ??
+                        "—",
+                    )}
+                  </Text>
+                ),
+              },
+              {
+                title: "Nullable",
+                key: "nullable",
+                width: 110,
+                render: (_: unknown, row: Asset) =>
+                  row.properties?.["nullable"] === undefined ? (
+                    <Text type="secondary">—</Text>
+                  ) : row.properties["nullable"] ? (
+                    <Text type="secondary">yes</Text>
+                  ) : (
+                    <Tag>required</Tag>
+                  ),
+              },
+            ]}
+          />
+        </Card>
       )}
-    </article>
+    </Space>
   );
 }
 
-function ConnectorPanel({ onDone }: { onDone: () => void }) {
-  const [connectionString, setConnectionString] = useState(
-    "postgres://postgres:postgres@localhost:5432/postgres",
-  );
-  const [serviceName, setServiceName] = useState("warehouse");
-  const [status, setStatus] = useState<string | null>(null);
+function ConnectorCard({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
 
-  const run = async () => {
+  const run = async (values: { connectionString: string; serviceName: string }) => {
     setBusy(true);
     setStatus(null);
     try {
-      const result = await api.runPostgresConnector({ connectionString, serviceName });
-      setStatus(`Catalogued ${result.created} assets${result.failed ? `, ${result.failed} failed` : ""}.`);
+      const result = await api.runPostgresConnector(values);
+      setStatus(
+        `Catalogued ${result.created} assets${result.failed ? `, ${result.failed} failed` : ""}.`,
+      );
       onDone();
     } catch (error) {
       setStatus(error instanceof ApiError ? error.problem.detail : String(error));
@@ -172,139 +211,266 @@ function ConnectorPanel({ onDone }: { onDone: () => void }) {
   };
 
   return (
-    <div className="connector">
-      <h2>Catalog a Postgres source</h2>
-      <label>
-        Connection string
-        <input value={connectionString} onChange={(e) => setConnectionString(e.target.value)} />
-      </label>
-      <label>
-        Service name
-        <input value={serviceName} onChange={(e) => setServiceName(e.target.value)} />
-      </label>
-      <button className="primary" onClick={run} disabled={busy}>
-        {busy ? "Running…" : "Run connector"}
-      </button>
-      {status && <p className="status">{status}</p>}
-    </div>
+    <Card title="Catalog a Postgres source" size="small" style={{ maxWidth: 640 }}>
+      <Form
+        layout="vertical"
+        onFinish={run}
+        initialValues={{
+          connectionString: "postgres://postgres:postgres@localhost:55432/postgres",
+          serviceName: "hdfc-core",
+        }}
+      >
+        <Form.Item
+          label="Connection string"
+          name="connectionString"
+          rules={[{ required: true }]}
+        >
+          <Input style={{ fontFamily: "ui-monospace, monospace", fontSize: 12 }} />
+        </Form.Item>
+        <Form.Item label="Service name" name="serviceName" rules={[{ required: true }]}>
+          <Input />
+        </Form.Item>
+        <Button type="primary" htmlType="submit" loading={busy}>
+          Run connector
+        </Button>
+        {status && (
+          <Paragraph style={{ marginTop: 12, marginBottom: 0 }} type="success">
+            {status}
+          </Paragraph>
+        )}
+      </Form>
+    </Card>
   );
 }
 
 export default function App() {
-  const [roots, setRoots] = useState<Asset[] | null>(null);
+  const dark = useDarkMode();
   const [selected, setSelectedRaw] = useState<Asset | null>(null);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Asset[] | null>(null);
+  const [stats, setStats] = useState<{ kind: AssetKind; count: number }[]>([]);
+  const [nodes, setNodes] = useState<DataNode[]>([]);
+  const [index, setIndex] = useState<Record<string, Asset>>({});
 
-  // Selection lives in the URL so an asset can be pasted into a ticket.
   const setSelected = useCallback((asset: Asset | null) => {
     setSelectedRaw(asset);
-    const url = asset ? `?asset=${asset.id}` : window.location.pathname;
-    window.history.replaceState(null, "", url);
+    // Deep-linkable: an entity you cannot paste into a ticket is one nobody shares.
+    window.history.replaceState(
+      null,
+      "",
+      asset ? `?asset=${asset.id}` : window.location.pathname,
+    );
   }, []);
+
+  const toNode = useCallback(
+    (asset: Asset): DataNode => ({
+      key: asset.id,
+      title: asset.name,
+      icon: KIND_ICON[asset.kind],
+      isLeaf: asset.kind === "column",
+    }),
+    [],
+  );
+
+  const refresh = useCallback(() => {
+    api
+      .roots()
+      .then((roots) => {
+        setIndex((i) => ({ ...i, ...Object.fromEntries(roots.map((r) => [r.id, r])) }));
+        setNodes(roots.map(toNode));
+      })
+      .catch(() => setNodes([]));
+    api
+      .stats()
+      .then((s) => setStats(s.byKind))
+      .catch(() => setStats([]));
+  }, [toNode]);
+
+  useEffect(refresh, [refresh]);
 
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("asset");
     if (id) api.asset(id).then(setSelectedRaw).catch(() => undefined);
   }, []);
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<Asset[] | null>(null);
-  const [stats, setStats] = useState<{ kind: AssetKind; count: number }[]>([]);
-
-  const refresh = useCallback(() => {
-    api.roots().then(setRoots).catch(() => setRoots([]));
-    api.stats().then((s) => setStats(s.byKind)).catch(() => setStats([]));
-  }, []);
-
-  useEffect(refresh, [refresh]);
 
   useEffect(() => {
-    if (query.trim().length < 2) { setResults(null); return; }
+    if (query.trim().length < 2) {
+      setResults(null);
+      return;
+    }
     const timer = setTimeout(() => {
-      api.search(query).then((page) => setResults(page.data)).catch(() => setResults([]));
+      api
+        .search(query)
+        .then((page) => setResults(page.data))
+        .catch(() => setResults([]));
     }, 150);
     return () => clearTimeout(timer);
   }, [query]);
 
-  const total = stats.reduce((sum, s) => sum + s.count, 0);
+  // Children are fetched on expand. Loading the hierarchy whole would pull
+  // every column of every table before showing anything.
+  const loadChildren = useCallback(
+    async (node: DataNode) => {
+      const children = await api.children(String(node.key));
+      setIndex((i) => ({ ...i, ...Object.fromEntries(children.map((c) => [c.id, c])) }));
+      setNodes((current) => {
+        const attach = (list: DataNode[]): DataNode[] =>
+          list.map((n) =>
+            n.key === node.key
+              ? { ...n, children: children.map(toNode) }
+              : n.children
+                ? { ...n, children: attach(n.children) }
+                : n,
+          );
+        return attach(current);
+      });
+    },
+    [toNode],
+  );
+
+  const total = useMemo(() => stats.reduce((sum, s) => sum + s.count, 0), [stats]);
+  const borderColor = dark ? "#262b36" : "#eef1f6";
 
   return (
-    <div className="shell">
-      <header className="topbar">
-        <span className="brand">◈ graph-owl</span>
-        <input
-          className="search"
-          placeholder="Search assets…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          aria-label="Search assets"
-        />
-        {/* The time control. Inert until Epic 4 lands time travel — but it
-            lives in the chrome from the start, because that is where a
-            session-wide property belongs. 00h-ui-design-system.md. */}
-        <span className="now" title="Time travel arrives with Epic 4">◷ now</span>
-      </header>
+    <ConfigProvider theme={dark ? darkTheme : lightTheme}>
+      <AntApp>
+        <Layout style={{ minHeight: "100vh" }}>
+          <Header
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 24,
+              padding: "0 20px",
+              borderBottom: `1px solid ${borderColor}`,
+            }}
+          >
+            <Space size={8}>
+              <ApartmentOutlined style={{ color: "#1570ef", fontSize: 18 }} />
+              <Text strong style={{ fontSize: 15 }}>
+                graph-owl
+              </Text>
+            </Space>
+            <Input
+              prefix={<SearchOutlined />}
+              placeholder="Search assets, schemas, columns…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              style={{ maxWidth: 520 }}
+              allowClear
+            />
+            {/* Time travel arrives with Epic 4, but the control belongs in the
+                chrome from the start — it is a session-wide property. */}
+            <Tag color="cyan" style={{ marginLeft: "auto" }} icon={<ClockCircleOutlined />}>
+              now
+            </Tag>
+          </Header>
 
-      <div className="body">
-        <aside className="rail">
-          <div className="rail-stats">
-            {stats.map((s) => (
-              <div key={s.kind} className="stat">
-                <span className="stat-n">{s.count}</span>
-                <span className="stat-k">{s.kind}s</span>
+          <Layout>
+            <Sider
+              width={300}
+              theme={dark ? "dark" : "light"}
+              style={{ borderRight: `1px solid ${borderColor}`, overflow: "auto" }}
+            >
+              <div style={{ padding: 16 }}>
+                <Flex gap={8} wrap style={{ marginBottom: 16 }}>
+                  {stats.map((s) => (
+                    <Card key={s.kind} size="small" styles={{ body: { padding: "6px 12px" } }}>
+                      <Statistic
+                        title={`${s.kind}s`}
+                        value={s.count}
+                        valueStyle={{ fontSize: 18, lineHeight: 1.2 }}
+                      />
+                    </Card>
+                  ))}
+                </Flex>
+                <Text type="secondary" style={{ fontSize: 11, letterSpacing: "0.06em" }}>
+                  HIERARCHY
+                </Text>
+                <Tree
+                  showIcon
+                  blockNode
+                  style={{ marginTop: 8, background: "transparent" }}
+                  treeData={nodes}
+                  loadData={loadChildren}
+                  onSelect={(keys) => {
+                    const asset = index[String(keys[0])];
+                    if (asset) setSelected(asset);
+                  }}
+                />
               </div>
-            ))}
-          </div>
-          <h2 className="rail-title">Hierarchy</h2>
-          {roots === null ? (
-            <p className="muted">Loading…</p>
-          ) : roots.length === 0 ? (
-            <p className="muted">Nothing catalogued yet.</p>
-          ) : (
-            <ul className="tree">
-              {roots.map((root) => (
-                <TreeNode key={root.id} asset={root} selectedId={selected?.id ?? null}
-                          onSelect={setSelected} depth={0} />
-              ))}
-            </ul>
-          )}
-        </aside>
+            </Sider>
 
-        <main className="main">
-          {results !== null ? (
-            <section className="results">
-              <h1>{results.length} result{results.length === 1 ? "" : "s"} for “{query}”</h1>
-              {results.length === 0 && <p className="muted">Nothing matched.</p>}
-              <ul className="result-list">
-                {results.map((asset) => (
-                  <li key={asset.id}>
-                    <button onClick={() => { setSelected(asset); setQuery(""); }}>
-                      <span className="result-name">{asset.name}</span>
-                      <KindBadge kind={asset.kind} />
-                      <span className="fqn">{asset.fullyQualifiedName}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : selected ? (
-            <Detail asset={selected} />
-          ) : total === 0 ? (
-            /* The empty-database first run. It is the first thing an evaluator
-               sees and the last thing anyone tests — 39-ui-foundation.md
-               Slice F — so it offers the next action rather than a blank page. */
-            <section className="empty">
-              <h1>Nothing catalogued yet</h1>
-              <p>graph-owl reads a source's structure and builds a browsable hierarchy from it. Point it at a Postgres database to begin.</p>
-              <ConnectorPanel onDone={refresh} />
-            </section>
-          ) : (
-            <section className="empty">
-              <h1>{total} assets catalogued</h1>
-              <p>Pick something from the hierarchy, or search above.</p>
-              <ConnectorPanel onDone={refresh} />
-            </section>
-          )}
-        </main>
-      </div>
-    </div>
+            <Content style={{ padding: 24, overflow: "auto" }}>
+              {results !== null ? (
+                <Space direction="vertical" style={{ width: "100%" }} size="middle">
+                  <Title level={5} style={{ margin: 0 }}>
+                    {results.length} result{results.length === 1 ? "" : "s"} for “{query}”
+                  </Title>
+                  {results.length === 0 ? (
+                    <Empty description="Nothing matched" />
+                  ) : (
+                    <Table
+                      size="small"
+                      rowKey="id"
+                      dataSource={results}
+                      pagination={{ pageSize: 15 }}
+                      onRow={(row) => ({
+                        onClick: () => {
+                          setSelected(row);
+                          setQuery("");
+                        },
+                        style: { cursor: "pointer" },
+                      })}
+                      columns={[
+                        {
+                          title: "Name",
+                          dataIndex: "name",
+                          key: "name",
+                          width: 220,
+                          render: (name: string) => <Text strong>{name}</Text>,
+                        },
+                        {
+                          title: "Kind",
+                          dataIndex: "kind",
+                          key: "kind",
+                          width: 130,
+                          render: (kind: AssetKind) => (
+                            <Tag color={KIND_COLOR[kind]} icon={KIND_ICON[kind]}>
+                              {kind}
+                            </Tag>
+                          ),
+                        },
+                        {
+                          title: "Fully-qualified name",
+                          dataIndex: "fullyQualifiedName",
+                          key: "fqn",
+                          render: (fqn: string) => <Fqn>{fqn}</Fqn>,
+                        },
+                      ]}
+                    />
+                  )}
+                </Space>
+              ) : selected ? (
+                <AssetDetail asset={selected} />
+              ) : (
+                <Space direction="vertical" size="large" style={{ width: "100%" }}>
+                  <div>
+                    <Title level={4} style={{ marginBottom: 4 }}>
+                      {total === 0 ? "Nothing catalogued yet" : `${total} assets catalogued`}
+                    </Title>
+                    <Text type="secondary">
+                      {total === 0
+                        ? "graph-owl reads a source's structure and builds a browsable hierarchy from it."
+                        : "Pick something from the hierarchy, or search above."}
+                    </Text>
+                  </div>
+                  <ConnectorCard onDone={refresh} />
+                </Space>
+              )}
+            </Content>
+          </Layout>
+        </Layout>
+      </AntApp>
+    </ConfigProvider>
   );
 }
