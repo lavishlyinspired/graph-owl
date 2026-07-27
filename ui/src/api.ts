@@ -4,6 +4,23 @@
 
 export type AssetKind = "service" | "database" | "schema" | "table" | "column";
 
+export interface EntityVersion {
+  major: number;
+  minor: number;
+}
+
+export interface FieldChange {
+  field: string;
+  before: unknown;
+  after: unknown;
+}
+
+export interface ChangeDescription {
+  fieldsAdded: FieldChange[];
+  fieldsUpdated: FieldChange[];
+  fieldsDeleted: FieldChange[];
+}
+
 export interface Asset {
   id: string;
   kind: AssetKind;
@@ -12,7 +29,20 @@ export interface Asset {
   parentId: string | null;
   description: string | null;
   properties?: Record<string, unknown> | null;
+  version: EntityVersion;
+  updatedBy: string;
+  changeDescription?: ChangeDescription | null;
+  deleted: boolean;
+  deletedAt?: string | null;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface AssetVersion {
+  version: EntityVersion;
+  snapshot: Asset;
+  changeDescription?: ChangeDescription | null;
+  updatedBy: string;
   updatedAt: string;
 }
 
@@ -61,6 +91,9 @@ export const api = {
       `/assets/search?q=${encodeURIComponent(q)}${kind ? `&kind=${kind}` : ""}&limit=50`,
     ),
   stats: () => request<{ byKind: { kind: AssetKind; count: number }[] }>("/assets/stats"),
+  versions: (id: string) => request<AssetVersion[]>(`/assets/${id}/versions`),
+  updateAsset: (id: string, update: { description: string | null }) =>
+    request<Asset>(`/assets/${id}`, { method: "PATCH", body: JSON.stringify(update) }),
   runPostgresConnector: (body: {
     connectionString: string;
     serviceName: string;

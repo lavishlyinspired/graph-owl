@@ -18,6 +18,8 @@ import {
   Statistic,
   Table,
   Tag,
+  Timeline,
+  Tabs,
   Tooltip,
   Tree,
   Typography,
@@ -38,7 +40,17 @@ import SearchOutlined from "@ant-design/icons/es/icons/SearchOutlined";
 import TableOutlined from "@ant-design/icons/es/icons/TableOutlined";
 import TagOutlined from "@ant-design/icons/es/icons/TagOutlined";
 import ThunderboltOutlined from "@ant-design/icons/es/icons/ThunderboltOutlined";
-import { type Asset, type AssetKind, ApiError, api } from "./api";
+import EditOutlined from "@ant-design/icons/es/icons/EditOutlined";
+import HistoryOutlined from "@ant-design/icons/es/icons/HistoryOutlined";
+import UserOutlined from "@ant-design/icons/es/icons/UserOutlined";
+import {
+  type Asset,
+  type AssetKind,
+  type AssetVersion,
+  type ChangeDescription,
+  ApiError,
+  api,
+} from "./api";
 import { darkTheme, lightTheme, palette } from "./theme";
 import { GenericSourceMark, PostgresMark } from "./icons";
 
@@ -104,13 +116,27 @@ function useTheme() {
   return { dark, toggle: () => setDark((d) => !d) };
 }
 
-function TrustBar() {
+/** What the catalog knows about an asset's trustworthiness. Each item either
+ *  carries a fact or says plainly that nothing is known yet — a confident-
+ *  looking blank is worse than an admission. */
+function TrustBar({ asset }: { asset: Asset }) {
+  const version = `v${asset.version.major}.${asset.version.minor}`;
   return (
     <Card size="small" styles={{ body: { padding: "8px 14px" } }}>
       <Space size="large" wrap>
-        <Text type="secondary" style={{ fontSize: 13 }}>
-          <ClockCircleOutlined /> no version history yet
+        <Text style={{ fontSize: 13 }}>
+          <ClockCircleOutlined /> <Text strong>{version}</Text>{" "}
+          <Text type="secondary">
+            {asset.version.minor === 1 && asset.version.major === 0
+              ? "as catalogued"
+              : "edited"}
+          </Text>
         </Text>
+        <Text style={{ fontSize: 13 }}>
+          <UserOutlined /> <Text type="secondary">last change by</Text>{" "}
+          <Text strong>{asset.updatedBy}</Text>
+        </Text>
+        {asset.deleted && <Tag color="red">deleted</Tag>}
         <Text type="secondary" style={{ fontSize: 13 }}>
           <SafetyCertificateOutlined /> uncertified
         </Text>
@@ -122,7 +148,150 @@ function TrustBar() {
   );
 }
 
-function AssetDetail({ asset }: { asset: Asset }) {
+function renderChange(change: ChangeDescription | null | undefined) {
+  if (!change) return <Text type="secondary">created</Text>;
+  const rows = [
+    ...change.fieldsAdded.map((c) => ({ ...c, verb: "set" })),
+    ...change.fieldsUpdated.map((c) => ({ ...c, verb: "changed" })),
+    ...change.fieldsDeleted.map((c) => ({ ...c, verb: "cleared" })),
+  ];
+  if (rows.length === 0) return <Text type="secondary">no field changes</Text>;
+  return (
+    <Space direction="vertical" size={2}>
+      {rows.map((row) => (
+        <Text key={`${row.verb}-${row.field}`} style={{ fontSize: 13 }}>
+          <Text strong>{row.field}</Text> <Text type="secondary">{row.verb}</Text>
+          {/* Both sides, because an audit trail without the previous value
+              cannot answer "what did it say before". */}
+          {row.before != null && (
+            <>
+              {" "}
+              <Text delete type="secondary">
+                {String(row.before)}
+              </Text>
+            </>
+          )}
+          {row.after != null && <> → {String(row.after)}</>}
+        </Text>
+      ))}
+    </Space>
+  );
+}
+
+function VersionHistory({ assetId }: { assetId: string }) {
+  const [versions, setVersions] = useState<AssetVersion[] | null>(null);
+
+  useEffect(() => {
+    setVersions(null);
+    api.versions(assetId).then(setVersions).catch(() => setVersions([]));
+  }, [assetId]);
+
+  if (versions === null) return <Text type="secondary">Loading…</Text>;
+  if (versions.length === 0) {
+    return (
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description="No edits yet. This asset is exactly as the connector reported it."
+      />
+    );
+  }
+
+  return (
+    <Timeline
+      items={versions.map((v) => ({
+        children: (
+          <Space direction="vertical" size={2}>
+            <Space size={8}>
+              <Text strong>
+                v{v.version.major}.{v.version.minor}
+              </Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {new Date(v.updatedAt).toLocaleString()} · {v.updatedBy}
+              </Text>
+            </Space>
+            {renderChange(v.changeDescription)}
+          </Space>
+        ),
+      }))}
+    />
+  );
+}
+
+function DescriptionEditor({
+  asset,
+  onSaved,
+}: {
+  asset: Asset;
+  onSaved: (a: Asset) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(asset.description ?? "");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setDraft(asset.description ?? "");
+    setEditing(false);
+  }, [asset.id, asset.description]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      // Blank means clear, which the API expects as explicit null — absence
+      // would mean "not declared" and leave the old value in place.
+      onSaved(await api.updateAsset(asset.id, { description: draft.trim() || null }));
+      setEditing(false);
+    } catch {
+      /* surfaced by the disabled state; a fuller error path lands with Epic 39 */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <Flex align="flex-start" gap={8}>
+        <Paragraph
+          type={asset.description ? undefined : "secondary"}
+          italic={!asset.description}
+          style={{ marginBottom: 0, flex: 1 }}
+        >
+          {asset.description ??
+            "No description. A connector reported this asset structurally; nobody has described it."}
+        </Paragraph>
+        <Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(true)}>
+          Edit
+        </Button>
+      </Flex>
+    );
+  }
+
+  return (
+    <Space direction="vertical" style={{ width: "100%" }} size={8}>
+      <Input.TextArea
+        rows={3}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder="Describe what this asset holds and who relies on it."
+      />
+      <Space>
+        <Button type="primary" size="small" loading={busy} onClick={save}>
+          Save
+        </Button>
+        <Button size="small" onClick={() => setEditing(false)}>
+          Cancel
+        </Button>
+      </Space>
+    </Space>
+  );
+}
+
+function AssetDetail({
+  asset,
+  onChanged,
+}: {
+  asset: Asset;
+  onChanged: (a: Asset) => void;
+}) {
   const [ancestors, setAncestors] = useState<Asset[]>([]);
   const [children, setChildren] = useState<Asset[]>([]);
 
@@ -134,30 +303,9 @@ function AssetDetail({ asset }: { asset: Asset }) {
 
   const properties = Object.entries(asset.properties ?? {});
 
-  return (
+  const overview = (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      <Breadcrumb items={ancestors.map((a) => ({ title: a.name }))} />
-
-      <Flex align="center" gap={12} wrap>
-        <Title level={3} style={{ margin: 0, fontWeight: 600 }}>
-          {asset.name}
-        </Title>
-        <Tag color={KIND_COLOR[asset.kind]} icon={KIND_ICON[asset.kind]}>
-          {asset.kind}
-        </Tag>
-      </Flex>
-      <Fqn>{asset.fullyQualifiedName}</Fqn>
-
-      <TrustBar />
-
-      <Paragraph
-        type={asset.description ? undefined : "secondary"}
-        italic={!asset.description}
-        style={{ marginBottom: 0 }}
-      >
-        {asset.description ??
-          "No description. A connector reported this asset structurally; nobody has described it."}
-      </Paragraph>
+      <DescriptionEditor asset={asset} onSaved={onChanged} />
 
       {properties.length > 0 && (
         <Card size="small" title="Properties">
@@ -227,6 +375,41 @@ function AssetDetail({ asset }: { asset: Asset }) {
           />
         </Card>
       )}
+    </Space>
+  );
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Breadcrumb items={ancestors.map((a) => ({ title: a.name }))} />
+
+      <Flex align="center" gap={12} wrap>
+        <Title level={3} style={{ margin: 0, fontWeight: 600 }}>
+          {asset.name}
+        </Title>
+        <Tag color={KIND_COLOR[asset.kind]} icon={KIND_ICON[asset.kind]}>
+          {asset.kind}
+        </Tag>
+      </Flex>
+      <Fqn>{asset.fullyQualifiedName}</Fqn>
+
+      <TrustBar asset={asset} />
+
+      <Tabs
+        defaultActiveKey={readParam("tab") ?? "overview"}
+        onChange={(key) => writeParam("tab", key === "overview" ? null : key)}
+        items={[
+          { key: "overview", label: "Overview", children: overview },
+          {
+            key: "history",
+            label: (
+              <span>
+                <HistoryOutlined /> History
+              </span>
+            ),
+            children: <VersionHistory assetId={asset.id} />,
+          },
+        ]}
+      />
     </Space>
   );
 }
@@ -636,7 +819,7 @@ export default function App() {
                   )}
                 </Space>
               ) : selected ? (
-                <AssetDetail asset={selected} />
+                <AssetDetail asset={selected} onChanged={setSelectedRaw} />
               ) : (
                 <Space direction="vertical" size="large" style={{ width: "100%" }}>
                   <div>

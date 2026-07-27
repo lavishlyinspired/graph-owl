@@ -94,7 +94,7 @@
 - [x] `PATCH /assets/{id}` with server-computed diffs
 - [x] Soft delete cascading to the subtree, with restore; a connector re-run does not resurrect a tombstone
 - [x] `GET /assets/{id}/versions` — snapshot per version, newest first
-- [~] **Gap**: version history is served but the console has no diff viewer yet
+- [x] Console: trust bar shows version and last editor; History tab with a field-level diff timeline; inline description editing
 - [ ] `EventSink` port + `ChangeEvent` emission
 - [ ] `If-Match`/`412` optimistic concurrency
 
