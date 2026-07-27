@@ -81,14 +81,51 @@ export class ApiError extends Error {
 
 const BASE = import.meta.env.DEV ? "/api" : "";
 
+/** The stable `type` URI for an unauthenticated request. Branching on this
+ *  rather than on `status` keeps the client honest about *why* it was refused:
+ *  a 401 from a proxy and a 401 from graph-owl mean different things. */
+const UNAUTHENTICATED = "https://graph-owl.dev/errors/unauthenticated";
+
+export function isUnauthenticated(error: unknown): boolean {
+  return error instanceof ApiError && error.problem.type === UNAUTHENTICATED;
+}
+
+/** Where the bearer token lives.
+ *
+ *  `sessionStorage`, not `localStorage`: it is scoped to this tab and dies
+ *  with it, so a token cannot outlive the session that pasted it or leak into
+ *  another tab. `00f` says tokens live in memory only, and this is one step
+ *  weaker than that — chosen deliberately, because memory-only means a page
+ *  refresh silently logs you out, and a console that appears to forget you at
+ *  random is the kind of thing people work around by writing the token down.
+ *
+ *  This is a stopgap for the manual token a demo pastes. When Epic 12's
+ *  OIDC/PKCE lands, the token comes from the flow and this goes away. */
+const TOKEN_KEY = "graphowl.token";
+
+export function authToken(): string | null {
+  return sessionStorage.getItem(TOKEN_KEY);
+}
+
+export function setAuthToken(token: string | null) {
+  if (token === null) sessionStorage.removeItem(TOKEN_KEY);
+  else sessionStorage.setItem(TOKEN_KEY, token);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = authToken();
   const response = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...init?.headers },
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...init?.headers,
+    },
   });
   if (!response.ok) {
     // A denied or failed request must never surface as an empty result —
-    // that teaches the user the data does not exist.
+    // that teaches the user the data does not exist. Callers are responsible
+    // for honouring this; see `isUnauthenticated`.
     throw new ApiError((await response.json()) as Problem);
   }
   return (await response.json()) as T;

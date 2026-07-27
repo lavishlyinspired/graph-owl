@@ -52,6 +52,9 @@ import {
   type SearchFacets,
   ApiError,
   api,
+  authToken,
+  isUnauthenticated,
+  setAuthToken,
 } from "./api";
 import { brand, darkTheme, lightTheme, palette } from "./theme";
 import { GenericSourceMark, PostgresMark } from "./icons";
@@ -192,6 +195,57 @@ function renderChange(change: ChangeDescription | null | undefined) {
         </Text>
       ))}
     </Space>
+  );
+}
+
+/** What the console shows when the server refuses it.
+ *
+ *  This exists because the alternative is worse than useless: without it a
+ *  401 falls through to the empty-catalog state, and a signed-out user is
+ *  told their estate contains nothing. That is not a cosmetic bug — it is the
+ *  console asserting something false about the customer's data.
+ *
+ *  Pasting a bearer token is a stopgap, and is labelled as one. Epic 12's
+ *  OIDC/PKCE replaces this panel with a real flow; what does not change is
+ *  that "refused" and "empty" stay different screens. */
+function SignIn({ onToken }: { onToken: (token: string) => void }) {
+  const [value, setValue] = useState("");
+  return (
+    <Flex align="center" justify="center" style={{ height: "100%" }}>
+      <Card style={{ maxWidth: 460, width: "100%" }}>
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <div>
+            <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+              This server requires a token
+            </Title>
+            <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
+              graph-owl is running with authentication enabled, so it will not
+              answer until it knows who is asking. Your catalog is not empty —
+              this console simply has not been told who you are.
+            </Paragraph>
+          </div>
+          <Input.TextArea
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="Paste the bearer token printed by ./scripts/demo.sh --secure"
+            autoSize={{ minRows: 3, maxRows: 6 }}
+            style={{ fontFamily: "JetBrains Mono, ui-monospace, monospace", fontSize: 12 }}
+          />
+          <Flex justify="space-between" align="center">
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              Kept for this tab only — closing it discards the token.
+            </Text>
+            <Button
+              type="primary"
+              disabled={value.trim().length === 0}
+              onClick={() => onToken(value.trim())}
+            >
+              Use this token
+            </Button>
+          </Flex>
+        </Space>
+      </Card>
+    </Flex>
   );
 }
 
@@ -663,6 +717,10 @@ export default function App() {
   const [selected, setSelectedRaw] = useState<Asset | null>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Asset[] | null>(null);
+  // Distinct from "no data". A refused request rendered as an empty catalog is
+  // the single most misleading thing this console can do: it tells someone
+  // their estate is empty when in fact they are simply not signed in.
+  const [refused, setRefused] = useState(false);
   const [facets, setFacets] = useState<SearchFacets | null>(null);
   // Which facet bucket is narrowing the results, if any. Filtering happens on
   // the client over the returned page: the server's facet counts are already
@@ -701,10 +759,16 @@ export default function App() {
     api
       .roots()
       .then((roots) => {
+        setRefused(false);
         setIndex((i) => ({ ...i, ...Object.fromEntries(roots.map((r) => [r.id, r])) }));
         setNodes(roots.map(toNode));
       })
-      .catch(() => setNodes([]));
+      .catch((error: unknown) => {
+        // An auth failure is not an empty result. Anything else genuinely is
+        // a failure to load, and still must not claim the catalog is empty.
+        setRefused(isUnauthenticated(error));
+        setNodes([]);
+      });
     api
       .stats()
       .then((s) => setStats(s.byKind))
@@ -832,11 +896,11 @@ export default function App() {
             }}
           >
             <div style={{ display: "flex", alignItems: "center" }}>
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 430 120" style={{ height: 52, width: "auto" }}>
-                <text x="10" y="85" fontFamily="Arial,Helvetica,sans-serif" fontSize="60" fontWeight="900" fill={dark ? "#FFFFFF" : "#0B1E5B"}>GRAPH</text>
-                <g transform="translate(262 60)">
-                  <path d="M-34 -6 Q-46 -24 -34 -36 Q-18 -26 -16 -6 Z" fill="#2F63D9" />
-                  <circle r="31" fill="#3A7BFF" />
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 450 120" style={{ height: 52, width: "auto" }}>
+                <text x="10" y="85" fontFamily="Arial,Helvetica,sans-serif" fontSize="60" fontWeight="900" fill={dark ? "#FFFFFF" : "#000000"}>GRAPH</text>
+                <g transform="translate(268 60)">
+                  <path d="M-34 -6 Q-46 -24 -34 -36 Q-18 -26 -16 -6 Z" fill="#14C3CF" />
+                  <circle cx="0" cy="0" r="31" fill="#14C3CF" />
                   <ellipse cx="0" cy="2" rx="22" ry="20" fill="#FFF8EF" />
                   <path d="M-18 -18 Q-8 -30 3 -18" fill="none" stroke="#F3D28A" strokeWidth="4" strokeLinecap="round" />
                   <path d="M18 -18 Q8 -30 -3 -18" fill="none" stroke="#F3D28A" strokeWidth="4" strokeLinecap="round" />
@@ -854,7 +918,7 @@ export default function App() {
                   <path d="M-8 29 h6" stroke="#E09A21" strokeWidth="2" strokeLinecap="round" />
                   <path d="M2 29 h6" stroke="#E09A21" strokeWidth="2" strokeLinecap="round" />
                 </g>
-                <text x="296" y="85" fontFamily="Arial,Helvetica,sans-serif" fontSize="60" fontWeight="900" fill="#14C3CF">WL</text>
+                <text x="302" y="85" fontFamily="Arial,Helvetica,sans-serif" fontSize="60" fontWeight="900" fill="#14C3CF">WL</text>
               </svg>
             </div>
             <Input
@@ -885,6 +949,25 @@ export default function App() {
                   now
                 </Tag>
               </Tooltip>
+              {/* Only when a token is in play. On an open server there is no
+                  identity to drop, and an inert control implying otherwise is
+                  worse than no control. Switching principals is Demo 2's whole
+                  moment: the same search, two identities, different results. */}
+              {authToken() !== null && (
+                <Tooltip title="Discard this token and sign in as someone else">
+                  <Button
+                    type="text"
+                    icon={<UserOutlined />}
+                    aria-label="Sign out"
+                    onClick={() => {
+                      setAuthToken(null);
+                      refresh();
+                    }}
+                  >
+                    Sign out
+                  </Button>
+                </Tooltip>
+              )}
               <Tooltip title={dark ? "Switch to light" : "Switch to dark"}>
                 <Button type="text" icon={<BulbOutlined />} onClick={toggle} aria-label="Toggle theme" />
               </Tooltip>
@@ -892,6 +975,21 @@ export default function App() {
           </Header>
 
           <Layout style={{ minHeight: 0 }}>
+            {/* A refused request and an empty catalog are different
+                screens. Routing both to the same one tells a signed-out
+                user their estate is empty, which is a false statement
+                about their data rather than a cosmetic bug. */}
+            {refused ? (
+              <Content style={{ padding: 24 }}>
+                <SignIn
+                  onToken={(token) => {
+                    setAuthToken(token);
+                    refresh();
+                  }}
+                />
+              </Content>
+            ) : (
+              <>
             {/* Navigation and the hierarchy are different things. The rail is
                 where you are in the product; the tree is where you are in the
                 data. Conflating them is why the tree previously had nowhere
@@ -1100,6 +1198,8 @@ export default function App() {
                 </div>
               )}
             </Content>
+              </>
+            )}
           </Layout>
         </Layout>
       </AntApp>
