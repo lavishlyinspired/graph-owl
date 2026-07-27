@@ -112,6 +112,65 @@ pub trait TripleStore: Send + Sync {
     async fn time_at(&self, at: chrono::DateTime<chrono::Utc>) -> Result<Option<i64>, EngineError>;
 }
 
+/// A predicate's definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PredicateDef {
+    pub namespace: u16,
+    pub name: String,
+    /// Which [`graph_owl_core::flake::FlakeValue`] variant objects must be.
+    pub value_type: i16,
+    /// `false` = at most one value per subject.
+    ///
+    /// Cardinality belongs to the predicate, not the writer: `dsc:name` is
+    /// single-valued for everyone, and leaving it to each caller means the
+    /// first one that forgets gives a table two names with nothing to say
+    /// which is current.
+    pub many: bool,
+    /// Ships with the binary and cannot be redefined at runtime.
+    pub core: bool,
+}
+
+#[derive(Debug, Error)]
+pub enum RegistryError {
+    #[error("predicate {namespace}:{name} is already defined")]
+    Duplicate { namespace: u16, name: String },
+
+    /// Redefining a core predicate would not migrate the flakes already
+    /// written against it — it would make every one of them unreadable.
+    #[error("{namespace}:{name} is a core predicate and cannot be redefined")]
+    CoreImmutable { namespace: u16, name: String },
+
+    #[error("registry backend failed: {0}")]
+    Backend(String),
+}
+
+/// Predicates definable at runtime, so an organisation can extend the
+/// vocabulary without a release.
+#[async_trait]
+pub trait PredicateRegistry: Send + Sync {
+    /// # Errors
+    ///
+    /// [`RegistryError::Duplicate`] if `(namespace, name)` already exists;
+    /// [`RegistryError::CoreImmutable`] if it names a core predicate.
+    async fn define(&self, definition: &PredicateDef) -> Result<(), RegistryError>;
+
+    /// # Errors
+    ///
+    /// [`RegistryError::Backend`] if the lookup fails.
+    async fn lookup(
+        &self,
+        namespace: u16,
+        name: &str,
+    ) -> Result<Option<PredicateDef>, RegistryError>;
+
+    /// Every definition, or those in one namespace.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Backend`] if the query fails.
+    async fn list(&self, namespace: Option<u16>) -> Result<Vec<PredicateDef>, RegistryError>;
+}
+
 /// Rejects a flake whose subject, predicate, graph or reference object carries
 /// a namespace that was never set.
 ///

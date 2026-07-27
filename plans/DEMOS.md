@@ -213,7 +213,7 @@ predicate has to reach it before any graph query is exposed to a real user.
 
 ### Epic 4 — Triple storage & time travel ★
 - [x] `Flake` in `graph-owl-core`; ten pinned `FlakeValue` variants *(Slice A)*
-- [~] Namespace code registry — constants allocated and range-tested; **gap**: runtime allocation and persistence is Slice H
+- [x] Namespace code registry — constants allocated and range-tested; runtime namespaces persisted by the predicate registry *(Slice H)*
 - [x] Four index orderings: SPOT, PSOT, POST, OPST — each verified by `EXPLAIN` naming the index over a 100k-flake table *(Slice B)*
 - [x] `op = false` is a retraction, not a delete — assert/retract/assert/retract verified in both directions, scoped by value, predicate and graph; the assertion row survives *(Slice C)*
 - [x] Entity → flake projection — wired into both write paths; a catalogue run of the 124-asset estate produces 1,234 flakes over 124 subjects *(Slices D, G)*
@@ -221,7 +221,7 @@ predicate has to reach it before any graph query is exposed to a real user.
 - [x] **As-of query API** — `GET /assets/{id}?asOf=<rfc3339>` reconstructs the entity from flakes; 5 HTTP tests *(Slice F)*
 - [x] Reconciliation and drift metric — drift computed by comparison rather than from a queue (a queue can be lost; comparison cannot miss); `POST /graph/reconcile` repairs and reports; one-directionality asserted structurally by a fake that panics on any relational write *(Slice G)*
 - [ ] Language-tag side table
-- [ ] Runtime predicate registry (Slice H)
+- [~] Runtime predicate registry — define/lookup/list, duplicate refused, core vocabulary seeded by migration and immutable, cardinality recorded per predicate *(Slice H)*; **gap**: cardinality is recorded but not yet *enforced* on write, and an unregistered predicate is not yet rejected
 
 ### Epic 7 — SPARQL subset ★
 - [ ] Parser for BGP, FILTER, OPTIONAL, UNION, MINUS, (NOT) EXISTS, paths
