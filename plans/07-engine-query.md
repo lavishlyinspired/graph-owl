@@ -82,7 +82,55 @@ Multi-hop query the REST surface fundamentally cannot express. "Every table feed
    compiled access predicate are the engine, and no external library knows about
    any of them.
 
-9. **The subset is enumerated, not implied.** Every SPARQL pattern type appears in the completeness table below with a status. A pattern that is out of scope must produce a clear error naming it, never a silent misparse.
+9. **Adopt the evaluator too, not only the parser — `spareval` calls back into
+   a dataset we implement.**
+
+   Decision 8 stopped at "do not write the parser". That was half the finding.
+   The Oxigraph ecosystem is four separable, permissively-licensed crates:
+
+   ```
+   text → spargebra → algebra → sparopt → optimized
+                                              │
+                                              ▼
+                                        spareval ──calls──▶ QueryableDataset
+                                              │              (OURS, over flakes)
+                                              ▼
+                                        sparesults → wire format
+   ```
+
+   `spareval` owns no store. It evaluates against a **`QueryableDataset` trait
+   the caller implements** — so the scan, and everything that lives in it, stays
+   ours:
+
+   - **Index selection** across the four orderings — the pattern-to-index
+     decision is inside our scan, where it belongs.
+   - **`as_of`** — the dataset is constructed at a transaction time and only
+     ever exposes that resolved state.
+   - **The access predicate** — applied inside the scan, so the evaluator only
+     ever receives permitted rows. Post-filtering, the leak Demo 2 exists to
+     close, is structurally impossible here.
+   - **`SERVICE`** — `spareval` takes a `ServiceHandler`, which is where Epic
+     101's allow-list, timeout and outbound filtering live.
+
+   This is the largest single reduction in scope in this plan. Joins, expression
+   evaluation, aggregates, property paths and result serialisation are adopted;
+   what remains is the mapping onto flakes, which is the part no library could
+   have supplied.
+
+   **Three things to verify before committing**, and they are the reason this is
+   a decision rather than a foregone conclusion:
+
+   1. **Budgets.** Nothing surveyed bounds anything. A `QueryableDataset` can
+      count its own scans, but whether exceeding a limit yields clean truncation
+      or a mid-query error needs testing — `00a`'s budget is not optional, and
+      an unbounded query is worse than a missing feature.
+   2. **Freshness stamping** (Epic 4 decision 8) wraps the result rather than
+      living inside evaluation. Fine, but it must not be forgotten.
+   3. **Whether `sparopt`'s generic rewrites fight our index selection.** A
+      generic optimizer may reorder patterns in a way that is worse given which
+      orderings exist. Measure before trusting it; it is separable.
+
+10. **The subset is enumerated, not implied.** Every SPARQL pattern type appears in the completeness table below with a status. A pattern that is out of scope must produce a clear error naming it, never a silent misparse.
 
 ## Implementation reference
 
@@ -291,7 +339,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 ### Slice A: Parse the subset (pure)
 
 **Value**: The front end, fully testable with no database.
-**Path**: `spargebra` for parsing (decision 8); this slice is the *mapping* from its algebra into `LogicalPlan`, plus the unsupported-node error. No parser is written.
+**Path**: `spargebra` parses and `spareval` evaluates (decisions 8, 9). This slice is the **`QueryableDataset` implementation over flakes** — pattern-to-index selection, `as_of` resolution, and the access predicate applied inside the scan. No parser and no evaluator is written.
 **Acceptance criteria**:
 - `SELECT`, `ASK`, `CONSTRUCT` parse.
 - BGP with 1, 2, and 3 patterns; `;` and `,` abbreviations.

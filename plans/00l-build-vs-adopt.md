@@ -13,8 +13,15 @@ meant each epic implicitly answered it again. The short version:
 > **Adopt everything above the storage line. Build everything below it.**
 
 The line is not aesthetic. It is where this project's three differentiators
-live, and every library surveyed sits on the wrong side of it for those three
-things and the right side for everything else.
+live.
+
+**Corrected 28 July 2026.** The first version of this document claimed "every
+library takes a graph and returns a graph", and used that to argue the whole
+evaluator had to be built. That is true of `oxigraph::Store` and false of the
+component crates underneath it — `spareval` evaluates against a
+**`QueryableDataset` trait the caller implements**. The scan stays on our side
+of the line, so the differentiators are preserved *and* the evaluator is
+adopted. The line moved; it did not disappear.
 
 ## What is actually available
 
@@ -27,12 +34,15 @@ rejected by default** (`00i`).
 | Crate | Licence | Does | Verdict |
 |---|---|---|---|
 | `spargebra` | Apache-2.0 / MIT | Full SPARQL 1.1 + 1.2 parser → standard algebra | **Adopt** — `07` decision 8 |
+| `sparopt` | Apache-2.0 / MIT | Algebra optimizer | **Adopt** — generic rewrites we would otherwise write |
+| `spareval` | Apache-2.0 / MIT | **SPARQL evaluator over a caller-supplied `QueryableDataset`** — plus `ServiceHandler` for federation and custom aggregates | **Adopt — this is the finding that shrinks Epic 7** |
+| `sparesults` | Apache-2.0 / MIT | SPARQL results serialization (JSON, XML, CSV) | **Adopt** — the wire formats clients expect |
 | `oxrdf`, `oxttl`, `oxjsonld` | Apache-2.0 / MIT | RDF terms, Turtle/N-Triples, JSON-LD | **Adopt** — Epic 9 |
 | `oxsdatatypes` | Apache-2.0 / MIT | XSD datatypes | **Adopt** where `FlakeValue` needs XSD semantics |
 | `reasonable` | BSD-3-Clause | OWL 2 RL via Datalog, *subset* of rules, Python bindings | **Evaluate** — see below |
 | `whelk-rs` | BSD-3-Clause | **OWL EL reasoner** | **Evaluate seriously** — Epic 98 |
 | `oxigraph` | Apache-2.0 / MIT | Complete store + SPARQL engine | **Test oracle only** — owns storage |
-| `horned-owl` | **LGPL-3.0 / GPL-3.0** | OWL parsing and manipulation, 4 syntaxes | **Rejected by policy.** Would impose its terms on the binary |
+| `horned-owl` | **LGPL-3.0** | OWL parsing and manipulation — RDF/XML, OWL/XML, Functional, Manchester | **Adopt out of process.** See below — the earlier "rejected" was wrong about both the licence and the options |
 
 ### Python
 
@@ -50,6 +60,48 @@ only a separate service or an offline tool.
 run the same ontology through `OWL-RL` or `owlready2` and diff against
 graph-owl's derivations. That is a test asset, and a licence that would be a
 problem in the binary is not a problem in a test script that ships to nobody.
+
+## `spareval` changes what Epic 7 is
+
+The Oxigraph ecosystem is four separable crates, not one engine:
+
+```
+SPARQL text → spargebra → algebra → sparopt → optimized algebra
+                                                    │
+                                                    ▼
+                                              spareval  ──calls──▶  QueryableDataset
+                                                    │                (WE implement this)
+                                                    ▼
+                                              sparesults → wire format
+```
+
+`spareval` does not own a store. It calls back into a `QueryableDataset` the
+caller supplies. **That is the whole difference**, and it means:
+
+| We supply | And therefore keep |
+|---|---|
+| `QueryableDataset` over flakes | Index selection across the four orderings — the pattern-to-index decision is inside our scan |
+| A dataset constructed *at* an `as_of` | Time travel, because the dataset only ever exposes one resolved state |
+| The access predicate applied inside the scan | Authorization, because `spareval` only ever sees permitted rows |
+| A `ServiceHandler` | Epic 101's allow-list, budget and outbound filtering |
+
+**Nothing is given up.** The three differentiators live in the scan, and the
+scan is the trait we implement. What is adopted is parsing, optimisation, join
+execution, expression evaluation, aggregates and result serialisation — which
+is most of the ~29,000 lines a full SPARQL layer costs, and none of it is
+specific to this project.
+
+**What must still be checked before committing:**
+
+1. **Budgets.** Nothing surveyed bounds anything. A `QueryableDataset` can count
+   its own scans and refuse past a limit, but whether that yields a clean
+   truncation or a mid-query error needs testing. Epic 7's `Tracker` may have to
+   wrap rather than live inside.
+2. **Freshness stamping** (Epic 4 decision 8) is ours to add around the result,
+   which is fine — it is metadata, not evaluation.
+3. **Error quality.** `07` decision 8 promises "MINUS is not supported yet"
+   rather than a parse error. With a complete evaluator that message class
+   mostly disappears — a good problem.
 
 ## The storage line, precisely
 
@@ -99,6 +151,49 @@ The third works because explanation is **rare and single-fact** while
 materialisation is **constant and whole-graph**. Optimising them separately is
 correct rather than a compromise: a chain is needed for one fact at a time, at
 human speed.
+
+## `horned-owl` and LGPL — the earlier answer was wrong twice
+
+The first version of this document said "LGPL-3.0 / GPL-3.0 … rejected by
+policy. Would impose its terms on the binary." Both halves were wrong.
+
+**Wrong about the licence.** The published crate metadata says **LGPL-3.0**, not
+a GPL dual. That distinction is the whole point of the LGPL: unlike the GPL, it
+**explicitly permits linking from software under other licences**, including
+proprietary. It does not "impose its terms on the binary".
+
+**Wrong about the options.** The real friction is narrower: LGPL requires that a
+user be able to **relink** with a modified version of the library. Rust links
+statically by default, which makes that awkward — you would have to ship object
+files or otherwise enable substitution. That awkwardness, not infection, is why
+most Rust licence policies exclude LGPL wholesale, and it is why `00i`'s
+allowlist does.
+
+**But there is a clean, standard answer: a separate process.** LGPL obligations
+attach to linking. A distinct binary communicating over a pipe or socket is not
+linking, and the boundary is unambiguous — this is the ordinary way LGPL
+software is used from a differently-licensed program.
+
+`00j` already establishes out-of-process as this project's pattern for anything
+that "needs a library ecosystem Rust does not have". An OWL syntax parser is
+exactly that.
+
+**What it buys, and it is not small.** OWL ontologies ship in syntaxes nothing
+else in the permissive Rust ecosystem reads: the financial vocabulary is
+RDF/XML, and large medical ontologies are OWL Functional Syntax. Without
+`horned-owl` those parsers are ours to write, for four syntaxes, to import
+content this project does not otherwise need to understand deeply.
+
+**Recommendation**: an `graph-owl-owl-import` **sidecar binary** wrapping
+`horned-owl`, invoked for ontology import and emitting the project's own
+representation. Import is a batch operation at human cadence, so process
+overhead is irrelevant. The main binary stays permissive-only and `cargo deny`
+stays as strict as it is.
+
+**What this needs from a human**: `00i` is a licensing document with real
+consequences, and adding an LGPL component in *any* form is a decision to make
+deliberately rather than one an implementation session should take. The analysis
+is here; the choice is not mine.
 
 ## Decisions
 

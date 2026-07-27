@@ -10,11 +10,12 @@ Join graph-owl's graph against an external SPARQL endpoint in one query.
 
 ## Why it is cheaper than it looks, and more dangerous
 
-**Cheap**: `spargebra` already parses `SERVICE` into a standard algebra node
-(`07` decision 8), and SPARQL 1.2 Federated Query reached Candidate
-Recommendation on 7 April 2026 — the most stable part of the 1.2 suite. There is
-no language work. What remains is an executor for one node type: send a
-sub-query over HTTP, receive SPARQL Results, feed the bindings into the join.
+**Cheaper still than first written**: `spargebra` parses `SERVICE`, and
+`spareval` takes a **`ServiceHandler`** — so there is no executor to write
+either. What this epic supplies is one trait implementation, and everything
+below is *what that implementation must enforce*. SPARQL 1.2 Federated Query is
+at Candidate Recommendation (7 April 2026), the most stable part of the 1.2
+suite.
 
 **Dangerous**, in three ways that are the actual content of this epic:
 
