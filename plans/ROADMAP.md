@@ -19,14 +19,19 @@ This supersedes roadmaps scoped to a "metadata catalog" and then an "enterprise 
 | Metadata time-travel (its own epic) | **Native** — flake `t` + `op` give it by construction (Epic 4) |
 | Graph integrity & consistency | **Constraint validation** (Epic 5) |
 | Inference & derived facts | **OWL 2 RL reasoning overlay** (Epic 6) |
-| Graph API & multi-hop traversal | **SPARQL subset** (Epic 7) |
+| Graph API & multi-hop traversal | **SPARQL** (Epic 7) — full 1.1, delivered in stages |
 | Semantic search (as a bolt-on index) | **Engine vector index** (Epic 8) |
 
 Net epic count is unchanged; the structure is substantially better. Capabilities that were going to be built awkwardly on top of a relational catalog are now properties of the substrate.
 
 ## The scope decision that governs everything
 
-The engine implements **useful subsets, not specifications.**
+The engine implements **useful subsets, not specifications** — with one
+deliberate exception, added 28 July 2026. **SPARQL is now targeted in full**
+(`07` decision 0), because adopting `spargebra`/`sparopt`/`spareval` (`00l`)
+made completeness a finite list rather than an open commitment. The principle
+still governs everywhere else: a subset is chosen when implementing the whole
+would cost more than it returns, and it is *enumerated* wherever it applies.
 
 Measured against a production reference implementation in Rust: ~842,000 lines across 32 crates, of which the query engine alone is ~143,000, SPARQL ~29,000, the reasoner ~13,000, SHACL ~7,000. graph-owl today is 2,429 lines.
 
@@ -97,7 +102,7 @@ Phases 0–2 are largely shipped and **the engine exists**. Four demos run end t
 | 4 | **Triple storage & time-travel** ★ | Engine | Flakes, four indexes, entity projection, as-of query |
 | 5 | **Constraint validation** | Engine | Shapes over the graph; violations reported, not guessed |
 | 6 | **Reasoning overlay** | Engine | OWL 2 RL derived facts, queryable and explainable |
-| 7 | **Graph query (SPARQL subset)** ★ | Engine | Multi-hop query the REST surface cannot express |
+| 7 | **Graph query (SPARQL)** ★ | Engine | Multi-hop query the REST surface cannot express. Full 1.1, staged; evaluator adopted, the flake scan is ours |
 | 7a | **Graph traversal** | Engine | Shortest path, all paths, cycles, subgraph — what property paths cannot express |
 | 7b | **openCypher front end** | Engine | **Scheduled** (was optional). Lowers onto the same plan; no second engine |
 | 7c | **Labelled property graph** ★ | Engine | Bidirectional flake ⇄ LPG mapping; edge properties come nearly free from reified relationships |

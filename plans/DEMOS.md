@@ -22,6 +22,7 @@
 | **8** | Property graph and open interop | +7b, 7c, 7d, 9, 9a | |
 | **9** | Breadth, scale, and the proof | +33–38, 36, 37a–c | |
 | **10** | Standards depth | +94–97 | Not started — see `00k-standards-conformance.md` |
+| **11** | Full semantics | +98–102 | Not started — three OWL profiles, federation, storage split |
 
 ★ = the demo that carries a differentiator. Cutting it is a positioning decision.
 
@@ -206,7 +207,7 @@ predicate has to reach it before any graph query is exposed to a real user.
 **What you can show**: open the Graph tab on `upi_transactions`, switch between 1/2/3 hops and watch the neighbourhood grow; set the time chip to before an edit and see the asset come back at its older version with its older description.
 
 **What this demo cannot yet show**, stated plainly:
-- **No SPARQL.** Epic 7 is not started, so the graph is queryable through traversal and `?asOf=` but not through a query language.
+- **No SPARQL yet.** Epic 7 is not started. Its scope collapsed on 28 July 2026 — the evaluator is adopted and only the flake-side dataset is ours — so this is now the nearest large win rather than the largest remaining build.
 - **The time control moves the asset read and the graph walk, not the tree or search.** `?asOf=` is answered per asset and per traversal; the hierarchy and the search index still show the present.
 - **Nothing declares lineage yet.** The graph is real, but its edges are the hierarchy plus any relationship a client creates by hand — no connector infers `feeds`.
 
@@ -225,13 +226,23 @@ predicate has to reach it before any graph query is exposed to a real user.
 - [ ] `rdf:reifies` + triple terms → **Epic 94**. The reified edges already shipped *are* RDF 1.2's reifier shape; only the vocabulary is missing (`04-engine-triples.md` finding 5)
 - [ ] Language-tag side table → **Epic 94**, and it needs three components not two: `rdf:dirLangString` carries a base direction
 
-### Epic 7 — SPARQL subset ★
-- [ ] Parser for BGP, FILTER, OPTIONAL, UNION, MINUS, (NOT) EXISTS, paths
-- [ ] Planner with index selection and filter pushdown
-- [ ] Batched pull execution model
-- [ ] Authorization compiled into the query
-- [ ] Resource tracking (`Tracker`)
-- [ ] Fast-path routing for the five common shapes
+### Epic 7 — SPARQL ★
+
+**Scope changed 28 July 2026** (`07` decisions 8–9, `00l`). Parsing, optimisation,
+join execution, expressions, aggregates and result serialisation are **adopted**
+from permissively-licensed crates. What this epic builds is the
+`QueryableDataset` implementation over flakes — which is where the three things
+no library can supply actually live.
+
+- [ ] **`QueryableDataset` over flakes** — the whole of this epic's own content
+- [ ] Index selection across the four orderings, inside the scan
+- [ ] `as_of` — the dataset is constructed at a transaction time
+- [ ] Authorization compiled into the scan, so the evaluator only ever sees permitted rows
+- [ ] Resource tracking (`Tracker`) — **nothing adopted enforces budgets; this is ours**
+- [ ] Freshness stamping on the result (Epic 4 decision 8)
+- [ ] ~~Parser~~ — `spargebra`, full SPARQL 1.1
+- [ ] ~~Planner / execution~~ — `sparopt` + `spareval`
+- [ ] Verify: does `sparopt`'s generic rewriting fight index selection? Measure before trusting
 
 ### Epic 7a — Traversal
 - [x] One frontier primitive (recursive CTE, one statement); `neighbours` and `subgraph` over it *(Slices A, B, E)*

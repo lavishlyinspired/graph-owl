@@ -1,9 +1,10 @@
-# Plan: Graph Query — SPARQL Subset (Epic 7) ★
+# Plan: Graph Query — SPARQL (Epic 7) ★
 
 **Branch**: feat/engine-query
 **Status**: Not started
 **Depends on**: Epic 4 (triples), Epic 13 (authorization to compile into queries), **Epic 7a** (property-path evaluation calls `graph-owl-traversal`; this crate does not implement its own BFS — decision 2a)
-**Crate**: `graph-owl-query` (pure parse + plan; execution via `TripleStore`)
+**Crate**: `graph-owl-query`
+**Adopted** (`00l`): `spargebra` parse · `sparopt` optimize · `spareval` evaluate · `sparesults` serialize — all Apache-2.0/MIT. **This crate's own content is the `QueryableDataset` implementation over flakes**, which is where index selection, `as_of` and the access predicate live (decision 9).
 
 ## Goal
 
