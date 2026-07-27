@@ -5,6 +5,11 @@
 # Local reference material, not part of this project — never committed
 .claude/docs/
 
+# Local design workspace. Holds a branded dashboard mock that carries
+# third-party company logos in a "trusted by" strip; committing it to a public
+# repo would publish an endorsement claim that does not exist.
+.opencode/
+
 # Local-only Claude Code settings, not shared
 .claude/settings.local.json
 

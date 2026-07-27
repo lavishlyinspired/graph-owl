@@ -19,7 +19,7 @@ constraint is deliberate and it is the whole design:
 > **A tile that cannot be computed from real data does not ship, however good
 > the mock looks.**
 
-The reference mock (`.opencode/plans/dashboardimage.png`) shows Data Products,
+The reference mock (local only, not committed — see `.gitignore`) shows Data Products,
 Ontologies, Policies, Data Quality, Insights and Agents. Those are Epics 22–38.
 Rendering them now over invented numbers would make the console lie about the
 maturity of the product it fronts, and would be discovered by the first person
