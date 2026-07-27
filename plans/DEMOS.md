@@ -89,8 +89,8 @@
 
 ### Epic 3 — Envelope, versioning, soft delete, change events
 - [ ] `EntityEnvelope` on every asset: version, `updatedAt`, `updatedBy`, `changeDescription`
-- [ ] Major/Minor version arithmetic; a no-op update produces no version
-- [ ] Field-level `ChangeDescription` diffs (added/updated/deleted)
+- [x] Major/Minor version arithmetic; a no-op update produces no version
+- [x] Field-level `ChangeDescription` diffs (added/updated/deleted); breaking-change classification
 - [ ] Soft delete with tombstone and restore
 - [ ] Version history endpoint and a diff viewer in the console
 - [ ] `EventSink` port + `ChangeEvent` emission
