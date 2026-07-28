@@ -147,3 +147,77 @@ If none applies, it is a module.
 Split a crate when its dependency set genuinely diverges — when part of it needs something the rest should not compile. Merge two when neither has a distinct dependency set and neither is separately published.
 
 Record either in `plans/00b-architecture.md`'s decision log with the reasoning.
+
+## The multi-backend path, reviewed 28 July 2026
+
+A staged proposal was put: Postgres now → partitioning, background workers,
+incremental reasoning and caching next → a storage abstraction with
+Postgres / RocksDB / a native triple store only if measurement demands it. Plus
+the recommendation not to write a storage engine.
+
+**Endorsed, and mostly already done.** The abstraction is not something to adopt
+later; it shipped on day one and `00b` decision 3 records why — *"traits cost
+little and keep a second backend additive"*. Verified rather than assumed: the
+`TripleStore` port in `graph-owl-engine` mentions no `sqlx`, `Postgres`, `Pool`
+or `Transaction` anywhere in its signatures. It speaks `Flake`, `TriplePattern`,
+`Sid` and `EngineError` — domain terms only. **It is a real port, not a port in
+name**, which is the failure mode worth checking for and the reason this was
+checked rather than asserted.
+
+### One correction to the diagram
+
+The proposal draws Postgres, RocksDB and a native store as **alternatives** under
+one core. They are not, because of `00b` decision 12 — *relational source of
+truth, flakes as view*. Entity CRUD, FQN lookup, list and filter run against the
+relational store; the flake store is the graph view projected from it. So:
+
+```
+graph-owl-storage  (Storage port)      →  Postgres            entity CRUD, source of truth
+graph-owl-engine   (TripleStore port)  →  Postgres | RocksDB | native    the flake view
+```
+
+**A second backend sits beside Postgres, not instead of it.** Anyone reading the
+original diagram would plan a migration that removes Postgres, and that migration
+does not exist. Two ports, and only one of them has a plausible second adapter.
+
+### What already makes the swap possible, and it is not the trait
+
+The trait is necessary and insufficient. The thing that would actually block a
+second flake backend is an **atomicity assumption** — if flakes were written in
+the same database transaction as the relational rows, moving them to another
+store would break a guarantee the system depended on.
+
+That assumption was never made. Epic 4 slice G shipped **reconciliation and
+drift detection**, computing divergence by comparison rather than from a queue,
+with repair one-directional from relational. The two stores are already treated
+as eventually consistent with an explicit repair path. **The design that makes a
+second backend feasible is already built and was built for another reason** —
+which is the strongest form of readiness, because it is load-bearing today rather
+than speculative.
+
+The one genuine cross-backend constraint: `next_time()` and `time_at()` are a
+monotonic transaction clock. With two stores, **the relational store stays the
+clock authority** — it is the source of truth, so a `t` minted anywhere else
+could not be compared against it. Recorded now because it is invisible until the
+second adapter exists and expensive to discover then.
+
+### One note on the staging
+
+Stage 2's four items are not peers, and calling them one stage understates the
+third by a lot. Partitioning and background workers are Postgres configuration.
+Caching is a measurement question — and `00i` records that a cache-tier design
+was already reproduced near-verbatim once and reverted, so it is the item most
+likely to be added without evidence. **Incremental reasoning is Epic 97**, an
+entire epic carrying an algorithm choice (DRed, because retraction is how facts
+leave this store) and two resolved blockers. It is not a Stage-2 line item beside
+a config change.
+
+### Not writing a storage engine
+
+Endorsed without reservation, and it is already the stated policy rather than a
+new one. `00l-build-vs-adopt.md` draws the line at *flake scan, `as_of`, access
+predicate, derivation chains and budgets* — the query layer over storage. A
+B-tree, an LSM, crash recovery and compaction are all below that line and all
+adopted. Concurrency control and crash recovery are exactly the multi-year
+problems that argument names, and Postgres has solved them.
+
