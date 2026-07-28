@@ -64,12 +64,7 @@ async fn call(app: &axum::Router, uri: &str, subject: Option<&str>) -> (StatusCo
 }
 
 /// Sets up the estate, two users, and the policy that separates them.
-async fn fixture() -> (
-    axum::Router,
-    testcontainers_modules::testcontainers::ContainerAsync<
-        testcontainers_modules::postgres::Postgres,
-    >,
-) {
+async fn fixture() -> (axum::Router, common::TestDb) {
     let (app, container, connection_string) = test_app_with_secret(SECRET).await;
     seed_source(&connection_string).await;
 
@@ -96,6 +91,14 @@ async fn fixture() -> (
         .expect("request should be handled");
     assert_eq!(response.status(), StatusCode::OK, "catalogue must succeed");
 
+    // The database the catalog itself lives in, which the connector also
+    // catalogued — so it is the second segment of every FQN below.
+    let database = connection_string
+        .rsplit_once('/')
+        .expect("the connection string names a database")
+        .1
+        .to_string();
+
     let pool = sqlx::PgPool::connect(&connection_string)
         .await
         .expect("catalog connection");
@@ -120,7 +123,13 @@ async fn fixture() -> (
             "operations": ["viewBasic", "viewDetails"],
             "resources": {
                 "type": "fqnPrefix",
-                "value": "hdfc-core.postgres.core_banking"
+                // Derived, not hardcoded. The database name is a *component
+                // of the FQN* — `service.database.schema.table` — so a policy
+                // written against a literal `postgres` stops matching the
+                // moment each test gets its own database. That is the schema
+                // this policy denies, addressed the way the catalog addresses
+                // it.
+                "value": format!("hdfc-core.{database}.core_banking")
             }
         }
     ]);

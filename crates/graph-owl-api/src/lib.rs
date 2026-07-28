@@ -538,6 +538,7 @@ impl Catalog {
     ///
     /// `Validation` if the query does not parse. `Storage` if no graph engine
     /// is configured, or if the scan fails.
+    #[tracing::instrument(name = "catalog.sparql", skip_all)]
     pub async fn sparql(
         &self,
         principal: &Principal,
@@ -715,6 +716,7 @@ impl Catalog {
     /// the graph is younger than the question. `Unexpected` if no graph is
     /// configured, because silently answering a time-travel question from
     /// current state would be a wrong answer rather than a missing feature.
+    #[tracing::instrument(name = "catalog.get_asset_as_of", skip_all)]
     pub async fn get_asset_as_of(
         &self,
         id: Uuid,
@@ -969,6 +971,7 @@ impl Catalog {
     ///
     /// `Validation` if the FQN cannot be derived or the parent is the wrong
     /// kind; `NotFound` if the parent does not exist.
+    #[tracing::instrument(name = "catalog.upsert_asset", skip_all)]
     pub async fn upsert_asset(
         &self,
         principal: &Principal,
@@ -1091,6 +1094,7 @@ impl Catalog {
 
     /// # Errors
     /// Returns an error if the underlying storage fails.
+    #[tracing::instrument(name = "catalog.get_asset", skip_all)]
     pub async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, CatalogError> {
         Ok(self.storage.get_asset(id).await?)
     }
@@ -1128,6 +1132,7 @@ impl Catalog {
     /// compiled predicate is what every read path actually consumes and
     /// compiling it is the other half of the cost. Caching the policies alone
     /// would keep the round trip and pay the compile on every request.
+    #[tracing::instrument(name = "catalog.predicate_for", skip_all)]
     async fn predicate_for(
         &self,
         principal: &Principal,
@@ -1159,6 +1164,7 @@ impl Catalog {
     /// # Errors
     ///
     /// Returns an error if the underlying storage fails.
+    #[tracing::instrument(name = "catalog.list_assets_for", skip_all)]
     pub async fn list_assets_for(
         &self,
         principal: &Principal,
@@ -1177,6 +1183,7 @@ impl Catalog {
     /// # Errors
     ///
     /// Returns an error if the underlying storage fails.
+    #[tracing::instrument(name = "catalog.search_assets_for", skip_all)]
     pub async fn search_assets_for(
         &self,
         principal: &Principal,
@@ -1394,6 +1401,7 @@ impl Catalog {
     /// # Errors
     ///
     /// `NotFound` if the asset does not exist.
+    #[tracing::instrument(name = "catalog.update_asset", skip_all)]
     pub async fn update_asset(
         &self,
         principal: &Principal,
@@ -1443,6 +1451,7 @@ impl Catalog {
     /// # Errors
     ///
     /// `NotFound` if the asset does not exist.
+    #[tracing::instrument(name = "catalog.soft_delete_asset", skip_all)]
     pub async fn soft_delete_asset(
         &self,
         principal: &Principal,
@@ -1572,6 +1581,7 @@ impl Catalog {
     /// # Errors
     ///
     /// `NotFound` if the asset does not exist.
+    #[tracing::instrument(name = "catalog.restore_asset", skip_all)]
     pub async fn restore_asset(
         &self,
         principal: &Principal,

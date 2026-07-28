@@ -36,6 +36,7 @@ jsonwebtoken = "9"
 sqlx.workspace = true
 tower.workspace = true
 testcontainers-modules.workspace = true
+testcontainers.workspace = true
 
 [lints]
 workspace = true

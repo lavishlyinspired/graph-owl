@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+tracing.workspace = true
 graph-owl-core.workspace = true
 graph-owl-storage.workspace = true
 graph-owl-authz.workspace = true
@@ -20,6 +21,7 @@ tokio-postgres.workspace = true
 
 [dev-dependencies]
 testcontainers-modules.workspace = true
+testcontainers.workspace = true
 chrono.workspace = true
 
 [lints]

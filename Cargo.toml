@@ -24,7 +24,10 @@ async-trait = "0.1"
 tower = "0.5"
 refinery = { version = "0.8", features = ["tokio-postgres"] }
 tokio-postgres = "0.7"
+# `reusable-containers` is what lets the whole workspace share one Postgres
+# across test binaries *and* across runs, instead of starting one per test.
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
+testcontainers = { version = "0.23", features = ["reusable-containers"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

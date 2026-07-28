@@ -191,6 +191,27 @@ impl RequestPrincipal {
     }
 }
 
+/// The span every other span in a request hangs from.
+///
+/// `<subsystem>.<operation>`, per the observability contract, and it carries
+/// `request_id` so **every child inherits it** — which is the whole mechanism.
+/// Without a parent span the facade and adapter spans are roots, and a slow
+/// request is attributable to the process rather than to a layer, which is the
+/// thing the contract asks for.
+///
+/// `route` rather than the concrete path, for the same reason the metric label
+/// is: an entity id in a span field is an unbounded value reaching a tracing
+/// backend, and those cost money per unique series just as Prometheus does.
+#[must_use]
+pub fn request_span(request_id: &str, method: &str, route: &str) -> tracing::Span {
+    tracing::info_span!(
+        "http.request",
+        request_id = %request_id,
+        method = %method,
+        route = %route,
+    )
+}
+
 /// One log line and two metrics per request, and the id echoed back.
 ///
 /// Applied with `Router::layer` rather than `route_layer` so `MatchedPath` is
@@ -215,7 +236,13 @@ pub async fn observe(request: axum::extract::Request, next: axum::middleware::Ne
     request.extensions_mut().insert(principal.clone());
 
     let started = std::time::Instant::now();
-    let mut response = next.run(request).await;
+    // Everything the handler does happens inside this span, so the facade and
+    // adapter spans below it are children and inherit `request_id`.
+    let span = request_span(&id, &method, &route);
+    let mut response = {
+        use tracing::Instrument as _;
+        next.run(request).instrument(span).await
+    };
     let elapsed = started.elapsed();
     let status = response.status();
 
@@ -572,6 +599,105 @@ mod tests {
             slot.set("second");
 
             assert_eq!(slot.get(), Some("second".to_string()));
+        }
+    }
+
+    mod a_slow_request_is_attributable_to_a_layer {
+        use super::*;
+        use std::sync::{Arc, Mutex};
+        use tracing::subscriber::with_default;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        /// Records span names and their parentage, which is the thing the
+        /// contract is actually about — a flat list of spans says nothing about
+        /// which layer was slow.
+        #[derive(Default, Clone)]
+        struct Tree(Arc<Mutex<Vec<(String, Option<String>)>>>);
+
+        impl<S> tracing_subscriber::Layer<S> for Tree
+        where
+            S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+        {
+            fn on_new_span(
+                &self,
+                _: &tracing::span::Attributes<'_>,
+                id: &tracing::Id,
+                ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let span = ctx.span(id).expect("the span was just created");
+                let parent = span.parent().map(|p| p.name().to_string());
+                self.0
+                    .lock()
+                    .expect("lock")
+                    .push((span.name().to_string(), parent));
+            }
+        }
+
+        fn recorded(work: impl FnOnce()) -> Vec<(String, Option<String>)> {
+            let tree = Tree::default();
+            let subscriber = tracing_subscriber::registry().with(tree.clone());
+            with_default(subscriber, work);
+            let seen = tree.0.lock().expect("lock").clone();
+            seen
+        }
+
+        /// The request span carries the correlation id, so every child inherits
+        /// it. Without a parent span the facade and adapter spans are roots and
+        /// nothing ties them to the request that caused them.
+        #[test]
+        fn the_request_span_is_named_and_parents_the_work_beneath_it() {
+            let seen = recorded(|| {
+                let span = request_span("req-42", "GET", "/assets/{id}");
+                let _entered = span.enter();
+                tracing::info_span!("catalog.get_asset").in_scope(|| {
+                    tracing::info_span!("storage.get_asset").in_scope(|| {});
+                });
+            });
+
+            assert_eq!(
+                seen,
+                vec![
+                    ("http.request".to_string(), None),
+                    (
+                        "catalog.get_asset".to_string(),
+                        Some("http.request".to_string())
+                    ),
+                    (
+                        "storage.get_asset".to_string(),
+                        Some("catalog.get_asset".to_string())
+                    ),
+                ],
+                "the port boundaries have to nest, or a slow request is \
+                 attributable to the process rather than to a layer"
+            );
+        }
+
+        /// And the negative: work done *outside* the request span is a root,
+        /// which is what the `.instrument()` in the middleware exists to
+        /// prevent. Without it the assertion above would pass on a subscriber
+        /// that invented parentage.
+        #[test]
+        fn work_outside_the_request_span_has_no_parent() {
+            let seen = recorded(|| {
+                tracing::info_span!("catalog.get_asset").in_scope(|| {});
+            });
+
+            assert_eq!(seen, vec![("catalog.get_asset".to_string(), None)]);
+        }
+
+        /// `<subsystem>.<operation>`, per the contract. A name without the
+        /// subsystem cannot be grouped by layer, which is the one thing these
+        /// spans are for.
+        #[test]
+        fn the_request_span_follows_the_contracts_naming() {
+            let seen = recorded(|| {
+                let span = request_span("req-1", "GET", "/health");
+                let _entered = span.enter();
+            });
+
+            let (name, _) = &seen[0];
+            assert!(name.contains('.'), "{name} is not <subsystem>.<operation>");
+            assert!(name.starts_with("http."), "{name}");
         }
     }
 

@@ -118,6 +118,20 @@ One incident already occurred and was reverted during planning (a cache-tier tab
 
 - **The integration suite needs bounded parallelism.** `cargo test --workspace` at full parallelism intermittently fails with testcontainers' `PortNotExposed` — a different test each run. It is Docker container-startup contention, not a product bug: every one of those tests passes alone and the whole suite passes at `--test-threads=1`. The pressure roughly doubled when the graph engine landed, because each integration test now opens two Postgres connections (storage adapter + engine adapter) against its container. **Run `cargo test --workspace -- --test-threads=1`**, and do not spend time debugging a `PortNotExposed` failure as though it were real. The durable fix is fewer containers per run (a shared container per test binary, which needs per-test schema isolation to stay correct) — not yet done.
 
+  **Fixed 29 July 2026 — the durable fix landed, and the suite went 4m31s → 1m33s.** Three changes, in the order they mattered:
+
+  1. **One container per test *binary*, not per test.** Each test now gets its own **database** on a shared server: `CREATE DATABASE` costs milliseconds where a container costs ~3 seconds, and the isolation is the same — separate migrations, separate rows, no cross-talk.
+  2. **One container for the whole workspace, reused across runs.** A fixed name plus `ReuseDirective::Always` (feature `reusable-containers`) means the ~30 test binaries share one server, and the *second* `cargo test` of the day attaches to the container the first one started. Measured on one binary: 23.6s cold, **7.3s attached**.
+  3. **`--test-threads=1` is still required**, but for a smaller reason now: the remaining serialisation is per-test database creation, not container startup.
+
+  Delete the container by hand when you want a genuinely fresh one: `docker rm -f graph-owl-tests`.
+
+  **The trap that made every earlier measurement wrong.** Holding the container in a `static OnceCell` means its `Drop` never runs, so testcontainers never cleaned up — and containers accumulated *one per binary per run*. **146 were found running at once.** Docker degrades badly under that load, and it had silently inflated every timing taken while it was true: the same binary measured 7.9s on a clean daemon and 25.9s with the leftovers present. Reuse fixes it structurally, because a named container cannot accumulate — there is only ever the one. If timings ever look inexplicable again, `docker ps -q | wc -l` is the first thing to check.
+
+  **Rejected: raising `max_connections`.** Tried at 500 to head off pool exhaustion on the shared server; it made startup markedly slower (per-binary 7.9s → 32s) because Postgres allocates shared memory proportional to it. The pools are fine at the default — the exhaustion that prompted it was a symptom of the 146 stale containers, not of sharing.
+
+  **A latent flake this surfaced**, worth knowing rather than re-diagnosing: `table_repository`'s `updated_at > ` assertion compares a Rust-side `Utc::now()` against Postgres's `now()`. Faster tests shrink the gap between them, and host/container clock skew can make it negative. It is a test assumption, not a product bug.
+
   **Updated 28 July 2026**: `--test-threads=2` was sufficient on `postgres:11-alpine` and is not on `18-alpine` — the bigger image takes long enough to start that two concurrent starts exceed testcontainers' readiness timeout. Serial costs almost nothing: 591 tests in **4m31s at 20% CPU**, and that number is the tell — the suite is waiting on Docker, not computing, so the parallelism was never buying much. The image upgrade did not create the problem; it removed the headroom that was hiding it, which raises the priority of the durable fix above.
 
 - **Test organization:** `tests/common/mod.rs` (a subdirectory containing `mod.rs`) is treated by Cargo as a shared module importable from multiple integration test binaries in the same crate. A top-level `tests/common.rs` file, by contrast, becomes its own separate test target — not what you want for shared helpers.

@@ -1,5 +1,7 @@
 //! Epic 4 Slice H: predicates definable at runtime, and enforced on write.
 
+mod common;
+
 use graph_owl_core::flake::{Flake, FlakeValue, Sid};
 use graph_owl_engine::{EngineError, PredicateDef, PredicateRegistry, RegistryError, TripleStore};
 use graph_owl_engine_postgres::PostgresTripleStore;
@@ -8,30 +10,12 @@ use testcontainers_modules::{
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
 
-/// Pinned, not defaulted: `Postgres::default()` is `postgres:11-alpine`, which
-/// predates generated columns and every planner behaviour this project's design
-/// notes assume.
-///
-/// The **major** is pinned and the minor floats, so a security release arrives
-/// without a manual bump while a major upgrade stays a deliberate decision.
-/// See `plans/00g-operations.md`, "Supported PostgreSQL versions".
-const POSTGRES_IMAGE_TAG: &str = "18-alpine";
-
-async fn store() -> (PostgresTripleStore, ContainerAsync<Postgres>, String) {
-    let container = Postgres::default()
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .start()
-        .await
-        .expect("postgres should start");
-    let connection_string = format!(
-        "postgres://postgres:postgres@{}:{}/postgres",
-        container.get_host().await.expect("host"),
-        container.get_host_port_ipv4(5432).await.expect("port")
-    );
+async fn store() -> (PostgresTripleStore, common::TestDb, String) {
+    let (database, connection_string) = common::fresh_database().await;
     let store = PostgresTripleStore::connect(&connection_string)
         .await
         .expect("engine should connect and migrate");
-    (store, container, connection_string)
+    (store, database, connection_string)
 }
 
 fn custom(name: &str) -> PredicateDef {

@@ -10,6 +10,8 @@
 //! so a plan assertion on a small table would assert the planner's arithmetic
 //! rather than this schema's design.
 
+mod common;
+
 use graph_owl_core::flake::TriplePattern;
 use graph_owl_core::flake::{Flake, FlakeValue, Sid};
 use graph_owl_engine::TripleStore;
@@ -18,15 +20,6 @@ use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
-
-/// Pinned, not defaulted: `Postgres::default()` is `postgres:11-alpine`, which
-/// predates generated columns and every planner behaviour this project's design
-/// notes assume.
-///
-/// The **major** is pinned and the minor floats, so a security release arrives
-/// without a manual bump while a major upgrade stays a deliberate decision.
-/// See `plans/00g-operations.md`, "Supported PostgreSQL versions".
-const POSTGRES_IMAGE_TAG: &str = "18-alpine";
 
 const SUBJECTS: i64 = 10_000;
 /// 10 predicates x 10k subjects = 100k flakes, the size the plan's acceptance
@@ -44,17 +37,8 @@ const PREDICATES: [&str; 10] = [
     "confidence",
 ];
 
-async fn loaded_store() -> (PostgresTripleStore, ContainerAsync<Postgres>) {
-    let container = Postgres::default()
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .start()
-        .await
-        .expect("postgres should start");
-    let connection_string = format!(
-        "postgres://postgres:postgres@{}:{}/postgres",
-        container.get_host().await.expect("host"),
-        container.get_host_port_ipv4(5432).await.expect("port")
-    );
+async fn loaded_store() -> (PostgresTripleStore, common::TestDb) {
+    let (database, connection_string) = common::fresh_database().await;
     let store = PostgresTripleStore::connect(&connection_string)
         .await
         .expect("engine should connect and migrate");
@@ -93,7 +77,7 @@ async fn loaded_store() -> (PostgresTripleStore, ContainerAsync<Postgres>) {
         .await
         .expect("analyze");
 
-    (store, container)
+    (store, database)
 }
 
 fn assert_uses_index(plan: &str, expected: &str, shape: &str) {
@@ -110,7 +94,7 @@ fn assert_no_sequential_scan(plan: &str, shape: &str) {
     );
 }
 
-/// One container, one load, every shape — building 100k flakes per test would
+/// One database, one load, every shape — building 100k flakes per test would
 /// dominate the suite for no extra coverage.
 #[tokio::test]
 async fn every_pattern_shape_is_served_by_its_index() {

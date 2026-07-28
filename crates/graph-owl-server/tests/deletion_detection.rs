@@ -67,13 +67,7 @@ async fn live_count(app: &axum::Router) -> usize {
     listed["data"].as_array().expect("data").len()
 }
 
-async fn fixture() -> (
-    axum::Router,
-    testcontainers_modules::testcontainers::ContainerAsync<
-        testcontainers_modules::postgres::Postgres,
-    >,
-    String,
-) {
+async fn fixture() -> (axum::Router, common::TestDb, String) {
     let (app, container, connection_string) = test_app().await;
     execute(
         &connection_string,

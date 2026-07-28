@@ -54,13 +54,7 @@ async fn send(
     (status, json_body(response).await)
 }
 
-async fn fixture() -> (
-    axum::Router,
-    testcontainers_modules::testcontainers::ContainerAsync<
-        testcontainers_modules::postgres::Postgres,
-    >,
-    String,
-) {
+async fn fixture() -> (axum::Router, common::TestDb, String) {
     let (app, container, connection_string) = test_app().await;
     seed_source(&connection_string).await;
 

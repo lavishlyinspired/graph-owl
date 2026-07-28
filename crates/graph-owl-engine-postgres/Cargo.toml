@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+tracing.workspace = true
 graph-owl-core = { path = "../graph-owl-core" }
 graph-owl-engine = { path = "../graph-owl-engine" }
 graph-owl-traversal = { path = "../graph-owl-traversal" }
@@ -23,4 +24,5 @@ serde_json.workspace = true
 
 [dev-dependencies]
 testcontainers-modules.workspace = true
+testcontainers.workspace = true
 graph-owl-traversal = { path = "../graph-owl-traversal" }

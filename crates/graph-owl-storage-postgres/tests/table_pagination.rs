@@ -1,3 +1,5 @@
+mod common;
+
 use chrono::Utc;
 use graph_owl_core::{
     Table,
@@ -11,31 +13,12 @@ use testcontainers_modules::{
 };
 use uuid::Uuid;
 
-/// Pinned, not defaulted: `Postgres::default()` is `postgres:11-alpine`, which
-/// predates generated columns and every planner behaviour this project's design
-/// notes assume.
-///
-/// The **major** is pinned and the minor floats, so a security release arrives
-/// without a manual bump while a major upgrade stays a deliberate decision.
-/// See `plans/00g-operations.md`, "Supported PostgreSQL versions".
-const POSTGRES_IMAGE_TAG: &str = "18-alpine";
-
-async fn test_storage() -> (PostgresStorage, ContainerAsync<Postgres>) {
-    let container = Postgres::default()
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .start()
-        .await
-        .expect("failed to start postgres container");
-    let host = container.get_host().await.expect("failed to get host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("failed to get mapped port");
-    let connection_string = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+async fn test_storage() -> (PostgresStorage, common::TestDb) {
+    let (database, connection_string) = common::fresh_database().await;
     let storage = PostgresStorage::connect(&connection_string)
         .await
         .expect("failed to connect and migrate");
-    (storage, container)
+    (storage, database)
 }
 
 fn table_named(fqn: &str) -> Table {

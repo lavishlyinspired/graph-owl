@@ -401,6 +401,7 @@ fn flake_from_row(row: &PgRow) -> Result<Flake, EngineError> {
 
 #[async_trait]
 impl TripleStore for PostgresTripleStore {
+    #[tracing::instrument(name = "engine.assert_flakes", skip_all)]
     async fn assert_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError> {
         // Namespace validity first. An uninitialized predicate is not an
         // undefined one, and namespace 0 will never be in the registry — so
@@ -414,10 +415,12 @@ impl TripleStore for PostgresTripleStore {
         self.write(flakes, true).await
     }
 
+    #[tracing::instrument(name = "engine.retract_flakes", skip_all)]
     async fn retract_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError> {
         self.write(flakes, false).await
     }
 
+    #[tracing::instrument(name = "engine.query_pattern", skip_all)]
     async fn query_pattern(&self, pattern: &TriplePattern) -> Result<Vec<Flake>, EngineError> {
         let mut builder = Self::current_state_query(pattern, FLAKE_COLUMNS, "");
         let rows = builder
@@ -428,6 +431,7 @@ impl TripleStore for PostgresTripleStore {
         rows.iter().map(flake_from_row).collect()
     }
 
+    #[tracing::instrument(name = "engine.count", skip_all)]
     async fn count(&self, pattern: &TriplePattern) -> Result<u64, EngineError> {
         // The same subquery as query_pattern, counted rather than decoded.
         // Sharing the builder is the point: a count computed by a separate
@@ -443,6 +447,7 @@ impl TripleStore for PostgresTripleStore {
         u64::try_from(count).map_err(|_| EngineError::Backend(format!("negative count {count}")))
     }
 
+    #[tracing::instrument(name = "engine.next_time", skip_all)]
     async fn next_time(&self) -> Result<i64, EngineError> {
         // A single UPDATE ... RETURNING is atomic on its own row, so
         // concurrent callers serialize on it without an explicit lock and
@@ -466,6 +471,7 @@ impl TripleStore for PostgresTripleStore {
         Ok(row.get("t"))
     }
 
+    #[tracing::instrument(name = "engine.time_at", skip_all)]
     async fn time_at(&self, at: chrono::DateTime<chrono::Utc>) -> Result<Option<i64>, EngineError> {
         // <= not <: as-of exactly a transaction's instant must include that
         // transaction, or "the state right after the migration" is

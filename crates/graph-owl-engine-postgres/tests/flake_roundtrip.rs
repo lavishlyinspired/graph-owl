@@ -5,6 +5,8 @@
 //! whether the columns, the CHECK constraints and the identity index actually
 //! agree with that encoding — which is exactly what these cover.
 
+mod common;
+
 use chrono::{DateTime, TimeZone, Utc};
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, TriplePattern, namespace};
 use graph_owl_engine::{PredicateDef, PredicateRegistry, TripleStore};
@@ -14,33 +16,15 @@ use testcontainers_modules::{
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
 
-/// Pinned, not defaulted: `Postgres::default()` is `postgres:11-alpine`, which
-/// predates generated columns and every planner behaviour this project's design
-/// notes assume.
-///
-/// The **major** is pinned and the minor floats, so a security release arrives
-/// without a manual bump while a major upgrade stays a deliberate decision.
-/// See `plans/00g-operations.md`, "Supported PostgreSQL versions".
-const POSTGRES_IMAGE_TAG: &str = "18-alpine";
-
-/// The container handle must be returned and bound by the caller. If it is
+/// The database handle must be returned and bound by the caller. If it is
 /// dropped here, Docker tears the database down and the next query fails with
 /// a pool timeout that looks nothing like the actual cause.
-async fn store() -> (PostgresTripleStore, ContainerAsync<Postgres>) {
-    let container = Postgres::default()
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .start()
-        .await
-        .expect("postgres should start");
-    let connection_string = format!(
-        "postgres://postgres:postgres@{}:{}/postgres",
-        container.get_host().await.expect("host"),
-        container.get_host_port_ipv4(5432).await.expect("port")
-    );
+async fn store() -> (PostgresTripleStore, common::TestDb) {
+    let (database, connection_string) = common::fresh_database().await;
     let store = PostgresTripleStore::connect(&connection_string)
         .await
         .expect("engine should connect and migrate");
-    (store, container)
+    (store, database)
 }
 
 fn subject() -> Sid {

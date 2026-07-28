@@ -83,23 +83,23 @@ async fn table_id(app: &axum::Router) -> String {
         .to_string()
 }
 
-async fn fixture() -> (
-    axum::Router,
-    testcontainers_modules::testcontainers::ContainerAsync<
-        testcontainers_modules::postgres::Postgres,
-    >,
-    String,
-) {
-    let (app, container, connection_string) = test_app().await;
+/// The catalogued estate, plus the id under test.
+///
+/// Returns the connection string as well: with one database per test, a caller
+/// that needs to reach the source cannot reconstruct it from the container —
+/// and reconstructing it was how this fixture previously pointed at the
+/// *admin* database rather than the test's own.
+async fn fixture() -> (axum::Router, common::TestDb, String, String) {
+    let (app, database, connection_string) = test_app().await;
     seed_source(&connection_string).await;
     catalogue(&app, &connection_string).await;
     let id = table_id(&app).await;
-    (app, container, id)
+    (app, database, id, connection_string)
 }
 
 #[tokio::test]
 async fn a_freshly_catalogued_asset_starts_at_zero_one() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     let (status, asset) = send(&app, "GET", &format!("/assets/{id}"), None).await;
     assert_eq!(status, StatusCode::OK);
@@ -113,7 +113,7 @@ async fn a_freshly_catalogued_asset_starts_at_zero_one() {
 
 #[tokio::test]
 async fn editing_a_description_bumps_the_minor_and_records_the_diff() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     let (status, updated) = send(
         &app,
@@ -145,7 +145,7 @@ async fn editing_a_description_bumps_the_minor_and_records_the_diff() {
 /// `ChangeKind::None` is a real outcome rather than an absence.
 #[tokio::test]
 async fn a_patch_that_changes_nothing_does_not_bump_the_version() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     let (_, first) = send(
         &app,
@@ -181,7 +181,7 @@ async fn a_patch_that_changes_nothing_does_not_bump_the_version() {
 
 #[tokio::test]
 async fn version_history_lists_every_change_newest_first() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     for description in ["first", "second", "third"] {
         send(
@@ -210,7 +210,7 @@ async fn version_history_lists_every_change_newest_first() {
 
 #[tokio::test]
 async fn every_version_records_who_made_it() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     send(
         &app,
@@ -228,7 +228,7 @@ async fn every_version_records_who_made_it() {
 
 #[tokio::test]
 async fn a_soft_delete_tombstones_the_subtree_and_reports_the_count() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     let (_, before) = send(&app, "GET", &format!("/assets/{id}/children"), None).await;
     let column_count = before.as_array().expect("children").len();
@@ -254,7 +254,7 @@ async fn a_soft_delete_tombstones_the_subtree_and_reports_the_count() {
 /// would make tombstones invisible and restore undiscoverable.
 #[tokio::test]
 async fn a_tombstoned_asset_is_still_readable_and_marked_deleted() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
     send(&app, "DELETE", &format!("/assets/{id}"), None).await;
 
     let (status, asset) = send(&app, "GET", &format!("/assets/{id}"), None).await;
@@ -265,7 +265,7 @@ async fn a_tombstoned_asset_is_still_readable_and_marked_deleted() {
 
 #[tokio::test]
 async fn restore_lifts_the_tombstone_from_the_whole_subtree() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     let (_, deleted) = send(&app, "DELETE", &format!("/assets/{id}"), None).await;
     let (status, restored) = send(&app, "POST", &format!("/assets/{id}/restore"), None).await;
@@ -282,12 +282,7 @@ async fn restore_lifts_the_tombstone_from_the_whole_subtree() {
 
 #[tokio::test]
 async fn a_connector_rerun_does_not_resurrect_a_tombstoned_asset() {
-    let (app, container, id) = fixture().await;
-    let connection_string = format!(
-        "postgres://postgres:postgres@{}:{}/postgres",
-        container.get_host().await.expect("host"),
-        container.get_host_port_ipv4(5432).await.expect("port")
-    );
+    let (app, _database, id, connection_string) = fixture().await;
 
     send(&app, "DELETE", &format!("/assets/{id}"), None).await;
     catalogue(&app, &connection_string).await;
@@ -301,7 +296,7 @@ async fn a_connector_rerun_does_not_resurrect_a_tombstoned_asset() {
 
 #[tokio::test]
 async fn patching_a_nonexistent_asset_is_a_404() {
-    let (app, _container, _id) = fixture().await;
+    let (app, _database, _id, _connection_string) = fixture().await;
 
     let (status, body) = send(
         &app,
@@ -317,7 +312,7 @@ async fn patching_a_nonexistent_asset_is_a_404() {
 
 #[tokio::test]
 async fn a_blank_description_is_rejected_with_a_pointer_to_null() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     let (status, body) = send(
         &app,
@@ -368,7 +363,7 @@ async fn patch_with_if_match(
 /// a precondition the second silently discards the first, and neither is told.
 #[tokio::test]
 async fn a_stale_if_match_is_refused_rather_than_overwriting() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     // Both editors saw v0.1.
     let (status, first) = patch_with_if_match(
@@ -409,7 +404,7 @@ async fn a_stale_if_match_is_refused_rather_than_overwriting() {
 
 #[tokio::test]
 async fn a_matching_if_match_is_applied() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     let (status, updated) = patch_with_if_match(
         &app,
@@ -427,7 +422,7 @@ async fn a_matching_if_match_is_applied() {
 /// Requiring the header would break every existing client.
 #[tokio::test]
 async fn no_if_match_header_still_means_last_write_wins() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     let (status, _) = patch_with_if_match(&app, &id, None, json!({ "description": "a" })).await;
     assert_eq!(status, StatusCode::OK);
@@ -441,7 +436,7 @@ async fn no_if_match_header_still_means_last_write_wins() {
 /// `0.2` would be pedantry that costs a round trip and teaches nothing.
 #[tokio::test]
 async fn if_match_is_accepted_quoted_or_bare() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     let (status, _) =
         patch_with_if_match(&app, &id, Some("0.1"), json!({ "description": "a" })).await;
@@ -454,7 +449,7 @@ async fn if_match_is_accepted_quoted_or_bare() {
 
 #[tokio::test]
 async fn a_malformed_if_match_is_rejected_by_name() {
-    let (app, _container, id) = fixture().await;
+    let (app, _database, id, _connection_string) = fixture().await;
 
     let (status, body) = patch_with_if_match(
         &app,
@@ -472,7 +467,7 @@ async fn a_malformed_if_match_is_rejected_by_name() {
 /// the version cannot be stale if there is nothing to be stale against.
 #[tokio::test]
 async fn if_match_on_a_missing_asset_is_a_404() {
-    let (app, _container, _id) = fixture().await;
+    let (app, _database, _id, _connection_string) = fixture().await;
 
     let (status, _) = patch_with_if_match(
         &app,

@@ -292,6 +292,7 @@ impl Storage for PostgresStorage {
 
     // ---- asset hierarchy ----
 
+    #[tracing::instrument(name = "storage.upsert_asset", skip_all)]
     async fn upsert_asset(&self, asset: Asset) -> Result<Asset, StorageError> {
         // ON CONFLICT on the FQN, because the FQN *is* the identity: a
         // connector re-run supplies a fresh Uuid every time, and treating that
@@ -332,6 +333,7 @@ impl Storage for PostgresStorage {
         Ok(asset_from_row(row))
     }
 
+    #[tracing::instrument(name = "storage.get_asset", skip_all)]
     async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, StorageError> {
         let row = sqlx::query(&format!("SELECT {ASSET_COLUMNS} FROM assets WHERE id = $1"))
             .bind(id)
@@ -341,6 +343,7 @@ impl Storage for PostgresStorage {
         Ok(row.map(asset_from_row))
     }
 
+    #[tracing::instrument(name = "storage.get_asset_by_fqn", skip_all)]
     async fn get_asset_by_fqn(&self, fqn: &str) -> Result<Option<Asset>, StorageError> {
         let row = sqlx::query(&format!(
             "SELECT {ASSET_COLUMNS} FROM assets WHERE fully_qualified_name = $1"
@@ -482,6 +485,7 @@ impl Storage for PostgresStorage {
 
     // ---- envelope (Epic 3) ----
 
+    #[tracing::instrument(name = "storage.update_asset", skip_all)]
     async fn update_asset(
         &self,
         id: Uuid,
@@ -611,6 +615,7 @@ impl Storage for PostgresStorage {
             .collect())
     }
 
+    #[tracing::instrument(name = "storage.soft_delete_asset", skip_all)]
     async fn soft_delete_asset(&self, id: Uuid, deleted_by: &str) -> Result<u64, StorageError> {
         // Cascades down the subtree: a live column under a tombstoned table is
         // reachable by search and addresses an asset that no longer exists.
@@ -747,6 +752,7 @@ impl Storage for PostgresStorage {
             .collect())
     }
 
+    #[tracing::instrument(name = "storage.list_assets_visible", skip_all)]
     async fn list_assets_visible(
         &self,
         kind: Option<AssetKind>,
@@ -783,6 +789,7 @@ impl Storage for PostgresStorage {
         self.asset_page(query, page).await
     }
 
+    #[tracing::instrument(name = "storage.search_assets_visible", skip_all)]
     async fn search_assets_visible(
         &self,
         query: &str,
@@ -823,6 +830,7 @@ impl Storage for PostgresStorage {
         self.ranked_asset_page(q, page).await
     }
 
+    #[tracing::instrument(name = "storage.list_children_visible", skip_all)]
     async fn list_children_visible(
         &self,
         parent_id: Option<Uuid>,
