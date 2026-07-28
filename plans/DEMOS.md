@@ -166,10 +166,23 @@ its destination — so "Demo 2 is done" never has to mean "Epic 13 is finished".
 ### Epic 8 — Search
 - [x] Facets by kind and schema, computed over the **visible** set
 - [x] Result counts consistent with authorization filtering
+- [x] **Full-text, stemmed, prefix-matched and ranked** *(Slice A)* — a `GENERATED … STORED` `tsvector` on `assets` with a GIN index, weighted name (A) / FQN (B) / description (C). Identifiers are split on `._-` before tokenising, so `upi_transactions` is findable by either half and a description word is findable at all — neither was possible under `LIKE`
+- [x] **Relevance is asserted as an order, not as membership** — a name match outranks a description match, with *both* returned, so the test cannot pass on an unranked query
+- [x] **A user cannot reach the query language.** Everything outside `[A-Za-z0-9]` is a separator, so `!upi`, `a & b` and `x:*` are searches rather than syntax errors or inverted intent. A query with no searchable terms is an empty result, not a 500
+- [x] **The rank key *is* the pagination cursor**, inverted so descending relevance is ascending string order and the existing keyset comparison works unchanged
+
+**Decision, and the reason it is not a shortcut**: the `TextIndex` port and the
+event-driven indexer are **not built, and no longer blocked** — a generated
+column is written in the same transaction as the row it describes, so there is
+no derived store to drift, reindex or reconcile. Decisions 1–3 of
+`08-engine-search.md` were written assuming a detached engine and remain correct
+for one; they bind again when OpenSearch or a vector index lands. Epic 3's
+`EventSink` therefore has no subscriber, and that is now a fact about the design
+rather than a gap in it.
 
 **Pending in this epic**
-- Still `LIKE` over name and FQN, not a real index: no BM25, no relevance ranking, no description search. Adequate at 124 assets, not at 100k
-- `TextIndex` port and event-driven incremental indexing — blocked on Epic 3's `EventSink`
+- Decision 5's full relevance ordering (exact FQN > exact name > prefix > fuzzy > description > column names > tags) is three weights, not seven tiers. No fuzzy matching, no tag or column-name search, and `ts_rank_cd` is not BM25 → Slice D
+- Snippets: a hit shows the asset, not the matched fragment of its description
 
 **Deferred**
 - Vector index and embeddings → generated out of process, per `00j-language-boundaries.md`

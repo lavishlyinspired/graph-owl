@@ -1028,6 +1028,7 @@ dependencies = [
  "chrono",
  "graph-owl-authz",
  "graph-owl-core",
+ "graph-owl-search",
  "graph-owl-storage",
  "refinery",
  "serde_json",

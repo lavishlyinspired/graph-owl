@@ -417,26 +417,29 @@ impl Storage for PostgresStorage {
         kind: Option<AssetKind>,
         page: &PageRequest,
     ) -> Result<Page<Asset>, StorageError> {
+        let Some(terms) = graph_owl_search::tsquery(query) else {
+            return Ok(Self::empty_ranked_page(page));
+        };
         let overfetch = i64::try_from(page.limit)
             .unwrap_or(i64::MAX)
             .saturating_add(1);
-        let pattern = format!("%{}%", query.to_lowercase());
         let sql = format!(
-            "SELECT {ASSET_COLUMNS} FROM assets
+            "SELECT {ASSET_COLUMNS}, {RANK_KEY} AS sort_key
+             FROM assets, to_tsquery('english', $1) AS q (ts)
              WHERE NOT deleted
-               AND (lower(name) LIKE $1 OR lower(fully_qualified_name) LIKE $1)
+               AND assets.search_vector @@ q.ts
                AND ($2::text IS NULL OR kind = $2)
-               AND ($3::text IS NULL OR (fully_qualified_name, id) > ($3, $4))
-             ORDER BY fully_qualified_name, id
+               AND ($3::text IS NULL OR ({RANK_KEY}, id) > ($3, $4))
+             ORDER BY {RANK_KEY}, id
              LIMIT $5"
         );
         let q = sqlx::query(&sql)
-            .bind(pattern)
+            .bind(terms)
             .bind(kind.map(AssetKind::as_str))
             .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
             .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
             .bind(overfetch);
-        self.asset_page(q, page).await
+        self.ranked_asset_page(q, page).await
     }
 
     async fn list_assets_under_fqn(&self, prefix: &str) -> Result<Vec<Asset>, StorageError> {
@@ -792,29 +795,32 @@ impl Storage for PostgresStorage {
                 Cursor::new(a.fully_qualified_name.clone(), a.id)
             }));
         };
+        let Some(terms) = graph_owl_search::tsquery(query) else {
+            return Ok(Self::empty_ranked_page(page));
+        };
         let overfetch = i64::try_from(page.limit)
             .unwrap_or(i64::MAX)
             .saturating_add(1);
-        let pattern = format!("%{}%", query.to_lowercase());
         let sql = format!(
-            "SELECT {ASSET_COLUMNS} FROM assets
+            "SELECT {ASSET_COLUMNS}, {RANK_KEY} AS sort_key
+             FROM assets, to_tsquery('english', $1) AS q (ts)
              WHERE NOT deleted
-               AND (lower(name) LIKE $1 OR lower(fully_qualified_name) LIKE $1)
+               AND assets.search_vector @@ q.ts
                AND ($2::text IS NULL OR kind = $2)
-               AND ($3::text IS NULL OR (fully_qualified_name, id) > ($3, $4))
+               AND ($3::text IS NULL OR ({RANK_KEY}, id) > ($3, $4))
                {VISIBILITY_SEARCH}
-             ORDER BY fully_qualified_name, id
+             ORDER BY {RANK_KEY}, id
              LIMIT $5"
         );
         let q = sqlx::query(&sql)
-            .bind(pattern)
+            .bind(terms)
             .bind(kind.map(AssetKind::as_str))
             .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
             .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
             .bind(overfetch)
             .bind(&allow)
             .bind(&deny);
-        self.asset_page(q, page).await
+        self.ranked_asset_page(q, page).await
     }
 
     async fn list_children_visible(
@@ -958,6 +964,32 @@ const VISIBILITY: &str =
 const VISIBILITY_SEARCH: &str =
     "AND (fully_qualified_name LIKE ANY($6)) AND NOT (fully_qualified_name LIKE ANY($7))";
 
+/// The relevance score **and** the keyset cursor for a relevance-ordered page,
+/// in one expression.
+///
+/// `ts_rank_cd` weighs *cover density* — how close the matched terms sit to one
+/// another — which is what separates a table called `upi_transactions` from one
+/// whose description happens to mention UPI and transactions ten lines apart.
+/// Normalisation `32` is `rank / (rank + 1)`; bounded is the point, because an
+/// unbounded rank cannot be encoded into a fixed-width sort key.
+///
+/// One constant rather than a score and a key derived from it: `ORDER BY`, the
+/// keyset comparison and the emitted cursor must all be the same expression, and
+/// three call sites deriving it separately is three chances for a page boundary
+/// to drift.
+///
+/// `NNNN:fqn`, where `NNNN` is the rank **inverted** — `9999 - rank * 9999` — so
+/// that descending relevance is *ascending* string order. Every other list in
+/// this adapter paginates with `(sort_key, id) > ($n, $m)`, and inverting here
+/// means relevance ordering reuses that comparison unchanged instead of needing
+/// a second, differently-directed one.
+///
+/// Four digits because two documents whose normalised ranks differ by less than
+/// 1/10000 are not meaningfully differently relevant to a person, and the FQN
+/// suffix makes the ordering total regardless — so the digits only have to
+/// separate results a reader could actually tell apart.
+const RANK_KEY: &str = "lpad((9999 - (ts_rank_cd(assets.search_vector, q.ts, 32) * 9999)::int)::text, 4, '0') || ':' || assets.fully_qualified_name";
+
 fn asset_from_row(row: PgRow) -> Asset {
     Asset {
         version: EntityVersion {
@@ -998,5 +1030,51 @@ impl PostgresStorage {
         Ok(Page::from_overfetch(assets, page.limit, |asset| {
             Cursor::new(asset.fully_qualified_name.clone(), asset.id)
         }))
+    }
+
+    /// A relevance-ordered page, whose cursor is the rank key the query
+    /// computed rather than the FQN.
+    ///
+    /// Separate from [`Self::asset_page`] because the cursor has to reproduce
+    /// the ordering it came from. Reusing the FQN cursor here would page
+    /// through a relevance-ordered result as though it were alphabetical, and
+    /// the second page would silently skip and repeat rows.
+    ///
+    /// [`Self::asset_page`]: Self::asset_page
+    async fn ranked_asset_page(
+        &self,
+        query: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, StorageError> {
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let ranked: Vec<(Asset, String)> = rows
+            .into_iter()
+            .map(|row| {
+                let key: String = row.get("sort_key");
+                (asset_from_row(row), key)
+            })
+            .collect();
+        let page = Page::from_overfetch(ranked, page.limit, |(asset, key)| {
+            Cursor::new(key.clone(), asset.id)
+        });
+        Ok(Page {
+            data: page.data.into_iter().map(|(asset, _)| asset).collect(),
+            paging: page.paging,
+        })
+    }
+
+    /// A query with no searchable terms matches nothing.
+    ///
+    /// `to_tsquery('english', '')` raises a syntax error rather than returning
+    /// a query that matches nothing, so an all-punctuation search has to be
+    /// answered without asking Postgres. An empty result, not an error: the
+    /// user typed something unusable, which is not a fault to report.
+    fn empty_ranked_page(page: &PageRequest) -> Page<Asset> {
+        Page::from_overfetch(Vec::new(), page.limit, |a: &Asset| {
+            Cursor::new(a.fully_qualified_name.clone(), a.id)
+        })
     }
 }

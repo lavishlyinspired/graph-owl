@@ -9,6 +9,50 @@ A cross-reference of every plan file against a pair of mature reference implemen
 
 The common thread is that each belongs to no single epic. Data retention is not Epic 3's job or Epic 4's job; it is a property of the system that both must respect. Filing them under whichever epic happens to touch them first is how they get built three incompatible ways, so they live here and every epic conforms.
 
+## 0. Supported PostgreSQL versions
+
+*Added 28 July 2026, after a migration failure revealed the integration suite had
+been running against PostgreSQL 11 the whole time.*
+
+| | Version | Why |
+|---|---|---|
+| **Currently pinned** | **16-alpine** | What the suite has actually been run green against. |
+| **Target** | **18** (major pinned, minor floats) | Testing on an older major than a deployment would run means the tested plan is not the plan that runs. The minor floats so a security release arrives without a code change; the major stays a deliberate decision. |
+| **Minimum supported** | **14** | Set by what the design actually relies on, not by what is newest. |
+| **Not used** | 19 beta | A beta in CI turns an unrelated failure into upstream triage, and its on-disk format may change between betas. It is worth running *ahead* of a major release, on a scheduled job that is allowed to fail, never as the gate on a commit. |
+
+**Why the pin is 16 and not the target.** The bump to 18 is a one-constant
+change and was written, then backed out unverified: `docker pull` could not
+reach the registry from the environment the change was made in — a
+`hello-world` pull hung identically — so the suite could not be run against 18
+even once. Shipping an unverified pin to shared test infrastructure would break
+every integration test for the next person with a failure that looks like their
+own. The move is: pull `postgres:18-alpine`, change
+`POSTGRES_IMAGE_TAG` in the nine test fixtures, run
+`cargo test --workspace -- --test-threads=2`, and update this row.
+
+**What sets the floor of 14**, in the order the constraint binds:
+
+- **12** — `GENERATED … STORED` columns. Epic 8's search vector is one, which is
+  what makes the search index transactionally consistent with the row rather
+  than a derived store that can drift.
+- **13** — deduplication of B-tree index entries, which the four flake index
+  orderings depend on to stay proportionate: SPOT, PSOT, POST and OPST each
+  repeat the same subject or predicate across millions of rows.
+- **14** — bottom-up index deletion. `04-engine-triples.md`'s indexing review
+  reasons about it explicitly. Running the suite on 11 meant that reasoning was
+  an untested claim for as long as it stood.
+
+**How this was found, and the general lesson.** `testcontainers-modules`'
+`Postgres::default()` is `postgres:11-alpine`. Nothing in the suite had needed a
+post-11 feature until a generated column did, so eleven epics' worth of
+integration tests validated against a version three majors behind anything this
+project would deploy on — and, worse, three majors behind the version its own
+design notes cite. **A test dependency's default is a decision somebody else
+made about your product.** The image tag is now a named constant with a stated
+reason in every fixture, so the next person to read one is told what it is for
+rather than left to inherit it.
+
 ## 1. Schema migration and rollback
 
 Every epic from 2 onward ships a migration. No plan says what happens when one fails halfway, or when a release is rolled back after a migration has run.

@@ -1,6 +1,10 @@
 # Plan: Vector & Hybrid Search (Epic 8) ★
 **Branch**: feat/search
-**Status**: **In progress** — facets and discovery shipped (Demo 2). BM25 + HNSW + RRF fusion specified here, not yet built
+**Status**: **In progress** — Slice A shipped over Postgres full-text search:
+weighted `tsvector`, GIN, prefix-matched conjunctive terms, `ts_rank_cd`
+ordering, and a rank-keyed cursor (Demo 2). Facets and discovery shipped
+earlier. Decision 5's seven-tier relevance, fuzzy matching, snippets, HNSW and
+RRF fusion are specified here and not built.
 **Depends on**: Epic 3 (change events to subscribe to), Epic 2 (FQNs to rank on), Epic 25 (tags, for facets — soft: search ships before them and gains the facet later)
 **Unblocks**: Epic 34 (each new entity type indexes for free)
 **Crates**: **`graph-owl-search`** (new — VectorIndex/TextIndex ports) · **`graph-owl-search-hnsw`** (new — in-process adapter) · **`graph-owl-search-opensearch`** (new, deferred) · `graph-owl-api` · `graph-owl-server`
@@ -18,6 +22,33 @@ Let a consumer find an asset they did not know existed. Until this ships, the ca
 5. **Relevance ordering is explicit and tested**: exact FQN > exact name > name prefix > name fuzzy > description > column names > tags.
 6. **Lexical search only.** Semantic/vector search is a real later option, but lexical relevance must be good before embeddings are worth their operational cost.
 7. **graph-owl stores and searches vectors; it never produces them.** Embedding *generation* is model inference and lives out of process — a hosted API or a Python worker — feeding vectors in through the ingestion path. Loading a model into the binary would forfeit the `00a-product-position.md` footprint budget for a workload that is not on the read path, and would pin the deployment to one model's runtime. The index is in-process because *searching* a vector is on the read path; generating one is not. See `00j-language-boundaries.md`.
+
+8. **Postgres full-text search is the first adapter, not OpenSearch** *(28 July 2026, revising decisions 1–3 for the Postgres backend only)*. The search vector is a `GENERATED … STORED` column on `assets`, indexed with GIN, and queried with `to_tsquery` + `ts_rank_cd`.
+
+   This **removes** the problem decisions 1 and 2 were written to solve, rather than solving it. A generated column is written in the same transaction as the row it describes, so it cannot diverge, cannot be stale, and cannot be reindexed into agreement — there is no second store to disagree with the first. "Any divergence is repaired by reindexing" has nothing to repair, and "indexing is driven by change events" has nothing to drive.
+
+   Decisions 1–3 remain correct **for a detached engine**, and become binding again the moment one lands. What changed is that they were written assuming the first adapter would be detached, and the first adapter is not.
+
+9. **The `TextIndex` port is deliberately not built yet.** A port with exactly one implementation, whose entire contract is satisfied by a column definition, is a seam invented ahead of the second thing that would use it — and its shape would be guessed from one example rather than derived from two. `graph-owl-search` holds the one piece that genuinely must not live in an adapter: the translation from what a person typed into a query, because two adapters translating it differently would give one search box two meanings.
+
+10. **Every term is prefix-matched and terms are ANDed.** Prefix matching is what makes a search box usable while typing — `upi trans` has to find `upi_transactions` before the last character. ANDing is the narrowing behaviour people expect: a second word must shrink the result set, not grow it.
+
+    Everything outside `[A-Za-z0-9]` is a separator, which does three jobs at once. It splits identifiers, so a query typed as `upi_transactions` becomes the same two terms the index holds. It makes the output safe for `to_tsquery`, which raises a **syntax error** — surfacing to the user as a broken search rather than as no results — on a stray `&`, `|`, `!`, `(`, `)` or `:`. And it means the function cannot emit an operator at all, so parameter binding is not the only thing between a user's typing and the query language.
+
+11. **Ranking is `ts_rank_cd`, and its key is also the pagination cursor.** Cover density is what separates a table *called* `upi_transactions` from one whose description mentions UPI and transactions ten lines apart. Normalisation `32` (`rank / (rank + 1)`) bounds the score into `[0, 1)`, which is what lets it be encoded into a fixed-width keyset cursor; the rank is then **inverted** so descending relevance is ascending string order, and the existing `(sort_key, id) > (…)` comparison every other list uses works unchanged. One expression serves `ORDER BY`, the keyset comparison and the emitted cursor — three call sites deriving it separately is three chances for a page boundary to drift.
+
+## What is *not* claimed by this
+
+Decision 5's full ordering — exact FQN > exact name > name prefix > name fuzzy >
+description > column names > tags — is **not** implemented. What ships is three
+weights: name (A), FQN (B), description (C). D is left unused so Epic 24's
+glossary terms can rank below description without redefining the three that
+exist. Fuzzy matching, tag search and column-name search are absent, and BM25
+proper is not what `ts_rank_cd` computes.
+
+The honest summary: search is now full-text, stemmed, prefix-matched, ranked and
+transactionally consistent, over roughly a hundred thousand assets. It is not a
+search engine, and Slice D is where the difference gets closed.
 
 ## Hybrid ranking
 

@@ -1,6 +1,9 @@
 # Plan: Envelope, Versioning, Soft Delete & Change Events (Epic 3)
 **Branch**: feat/entity-envelope
-**Status**: **Shipped** — envelope, history, `If-Match`/412. Demo 2
+**Status**: **Shipped** — envelope, history, `If-Match`/412, and Slice J's
+`EventSink` with create / update / soft-delete / restore all announced. Demo 2.
+`HardDeleted` has no producer and will not get one here: assets are
+soft-deleted by design, and the kind exists for `00g`'s erasure path
 **Depends on**: Epic 2 (four entity types to apply the envelope to)
 **Unblocks**: Epics 4 (the envelope is what the triple projection projects), 7, 8, 12, 13
 **Crates**: `graph-owl-core` (EntityEnvelope, ChangeDescription, version arithmetic) · **`graph-owl-events`** (new — EventSink port) · `graph-owl-storage` · `graph-owl-storage-postgres` (history table) · `graph-owl-api` · `graph-owl-server`

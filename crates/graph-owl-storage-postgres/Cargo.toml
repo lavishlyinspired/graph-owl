@@ -8,6 +8,7 @@ license.workspace = true
 graph-owl-core.workspace = true
 graph-owl-storage.workspace = true
 graph-owl-authz.workspace = true
+graph-owl-search.workspace = true
 async-trait.workspace = true
 sqlx.workspace = true
 serde_json.workspace = true

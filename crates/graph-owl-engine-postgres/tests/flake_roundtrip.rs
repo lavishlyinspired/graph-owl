@@ -11,14 +11,24 @@ use graph_owl_engine::{PredicateDef, PredicateRegistry, TripleStore};
 use graph_owl_engine_postgres::PostgresTripleStore;
 use testcontainers_modules::{
     postgres::Postgres,
-    testcontainers::{ContainerAsync, runners::AsyncRunner},
+    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
+
+/// Pinned, not defaulted: `Postgres::default()` is `postgres:11-alpine`, which
+/// predates generated columns and every planner behaviour this project's design
+/// notes assume.
+///
+/// The **major** is pinned and the minor floats, so a security release arrives
+/// without a manual bump while a major upgrade stays a deliberate decision.
+/// See `plans/00g-operations.md`, "Supported PostgreSQL versions".
+const POSTGRES_IMAGE_TAG: &str = "16-alpine";
 
 /// The container handle must be returned and bound by the caller. If it is
 /// dropped here, Docker tears the database down and the next query fails with
 /// a pool timeout that looks nothing like the actual cause.
 async fn store() -> (PostgresTripleStore, ContainerAsync<Postgres>) {
     let container = Postgres::default()
+        .with_tag(POSTGRES_IMAGE_TAG)
         .start()
         .await
         .expect("postgres should start");
@@ -146,6 +156,7 @@ async fn every_value_variant_round_trips() {
 #[tokio::test]
 async fn instants_round_trip_at_microsecond_precision() {
     let (store, _container) = store().await;
+
     let micros: DateTime<Utc> = Utc.timestamp_opt(1_700_000_000, 123_456_000).unwrap();
 
     store

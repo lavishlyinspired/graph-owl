@@ -36,3 +36,4 @@ graph-owl-traversal = { path = "crates/graph-owl-traversal" }
 graph-owl-api = { path = "crates/graph-owl-api" }
 graph-owl-ui = { path = "crates/graph-owl-ui" }
 graph-owl-connectors = { path = "crates/graph-owl-connectors" }
+graph-owl-search = { path = "crates/graph-owl-search" }

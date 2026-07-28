@@ -7,12 +7,22 @@ use graph_owl_storage::Storage;
 use graph_owl_storage_postgres::PostgresStorage;
 use testcontainers_modules::{
     postgres::Postgres,
-    testcontainers::{ContainerAsync, runners::AsyncRunner},
+    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
 use uuid::Uuid;
 
+/// Pinned, not defaulted: `Postgres::default()` is `postgres:11-alpine`, which
+/// predates generated columns and every planner behaviour this project's design
+/// notes assume.
+///
+/// The **major** is pinned and the minor floats, so a security release arrives
+/// without a manual bump while a major upgrade stays a deliberate decision.
+/// See `plans/00g-operations.md`, "Supported PostgreSQL versions".
+const POSTGRES_IMAGE_TAG: &str = "16-alpine";
+
 async fn test_storage() -> (PostgresStorage, ContainerAsync<Postgres>) {
     let container = Postgres::default()
+        .with_tag(POSTGRES_IMAGE_TAG)
         .start()
         .await
         .expect("failed to start postgres container");
