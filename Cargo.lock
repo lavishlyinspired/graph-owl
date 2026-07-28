@@ -1016,6 +1016,7 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
+ "dotenvy",
  "graph-owl-api",
  "graph-owl-authz",
  "graph-owl-connectors",

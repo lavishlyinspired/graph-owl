@@ -251,10 +251,12 @@ test's scrape had already installed the recorder.
 - [x] **OIDC beats a shared secret when both are configured**, and the ambiguity is logged. Checking the cheaper secret first silently downgrades the one deployment where the downgrade is invisible: mid-migration, with the old secret still live
 - [x] **`GRAPH_OWL_ADMIN_SUBJECTS`** — without it the *first* sign-in renders an empty catalog, because identities auto-provision with no roles and authorization denies by default. Two correct decisions producing the one screen `00f` forbids. Applied after resolution and never written back, so removing the variable revokes it
 
+- [x] **Roles can come from the token** via `OIDC_ROLES_CLAIM` — opt-in and off by default, because a provider deciding what this catalog authorizes is a reasonable arrangement and a terrible default: it is invisible to anyone reading the policies
+- [x] **Verified against the live tenant** — discovery confirms the issuer carries a trailing slash (`iss` is an exact compare), the JWKS holds a two-key RS256 rotation pair, and the tenant advertises `plain` as a challenge method, so pinning S256 is load-bearing. An unknown `kid` returns `401 unknown KID`, which proves the fetch reaches Auth0; the **first** such request took 492 ms and the next three took 0.02 ms, which is the refetch floor measured rather than asserted
+
 **Pending in this epic**
-- The `principal` log field from `10-operability.md`'s contract. The request middleware runs outside the `Auth` extractor, so it has no identity to log — and "which identity made this request" is the first question of every authorization incident
-- Roles come from the catalog, not the token: Auth0 `permissions` and custom claims are ignored. Defensible (authorization is this product's model, not the IdP's) but it will surprise someone
-- A page refresh signs the user out. Both tokens are in memory and `offline_access` does not help, because the refresh token is in memory too. The fix is silent re-authentication (`prompt=none`) against the provider's session cookie
+- **A page refresh signs the user out**, and this one is deliberately unbuilt rather than merely undone. Silent re-authentication (`prompt=none` in an iframe) rides a **third-party** cookie on a default Auth0 domain, which Chrome and Safari block; it is reliable only behind a custom domain. Auth0's own SPA SDK moved to refresh-token rotation for that reason, and rotation means persisting a refresh token — the rule `00f` set. Custom domain, persisted tokens, or sessions that last as long as the tab: a real choice, not an omission, and half-building an iframe flow that works in some browsers would be worse than the honest current behaviour
+- The authorization redirect, consent and code exchange are **untested end to end** — they need a human at a browser. Everything up to "the server fetches keys from this tenant and rejects what it should" is confirmed
 
 ### Epic 13 — Authorization
 - [x] `AccessPredicate` in `graph-owl-authz` — pure, zero surviving mutants

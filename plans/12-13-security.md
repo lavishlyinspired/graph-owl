@@ -141,18 +141,98 @@ the request middleware does not have one because it runs outside the `Auth`
 extractor. Worth closing, because "which identity made this request" is the
 first question of every authorization incident.
 
+### Verified against the live tenant, 28 July 2026
+
+The dashboard itself could not be read — the browser automation runs its own
+logged-out session — but the tenant's public OIDC discovery and JWKS confirm
+every assumption the implementation makes:
+
+| Checked | Found | Why it matters |
+|---|---|---|
+| `issuer` | `https://dev-…us.auth0.com/` | **With the trailing slash.** `iss` is an exact string compare, so a configuration missing it rejects every token |
+| `jwks_uri` | `…/.well-known/jwks.json` | Exactly what `jwks_url()` builds after trimming that slash — the trailing-slash test is not hypothetical |
+| Keys | **two** RSA / RS256 / sig | A rotation pair, live. `an_ordinary_rotation_pair_keeps_both_keys_in_order` describes this tenant |
+| `code_challenge_methods_supported` | `["S256", "plain"]` | The tenant *would* accept `plain`, so pinning S256 is load-bearing rather than decorative |
+
+And against the running server, with `.env` supplying the configuration:
+
+- Startup logs `authentication="oidc"` and the issuer; the database URL is
+  redacted to `postgres://postgres:***@…`.
+- `/ready` reports `authentication.ok`.
+- No token → `401 unauthenticated`. Malformed token → `401 token-invalid`.
+- **An unknown `kid` → `401 unknown KID`, which proves the JWKS fetch reached
+  Auth0.**
+- **The refetch floor, measured**: the first unknown-`kid` request took
+  **492 ms** — the round trip to Auth0 — and the next three took **0.028 ms,
+  0.016 ms, 0.019 ms**. That four-orders-of-magnitude gap *is* the amplification
+  finding 4 removed: without the floor, every forged token costs one outbound
+  request to the identity provider.
+- `principal` appears in the access log, `"-"` for an unidentified request.
+- `/callback` returns the SPA, so the redirect lands.
+
+What remains untested is the part that needs a human at a browser: the
+authorization redirect, consent, and the code exchange. Everything up to and
+including "the server fetches keys from this tenant and rejects what it should"
+is confirmed.
+
+### The tenant's own settings, read 28 July 2026
+
+Read from the dashboard through a logged-in Chrome profile. Four correct, two
+that matter:
+
+| Setting | Found | |
+|---|---|---|
+| Application Type | **Single Page Application** | ✓ PKCE without a client secret |
+| API audience | `https://graph-owl.dev/api` | ✓ exact match with `OIDC_AUDIENCE` |
+| API signing algorithm | **RS256** | ✓ matches the pinned `Validation::new(RS256)` |
+| Allowed Callback URLs | `http://localhost:8080/callback` | ✓ for the binary; **missing `:5173`**, so `npm run dev` fails with "Callback URL mismatch" |
+| **Allow Offline Access** | **off** | ✗ Auth0 ignores the `offline_access` scope and issues **no refresh token** |
+| Enable RBAC | off | no `permissions` claim, which is why `OIDC_ROLES_CLAIM` defaults to unset |
+
+**Offline Access being off makes the entire refresh path dead code.**
+`refreshAccessToken` has no token to present, `tryRefresh` always returns false,
+and the 401-retry in `api.ts` degrades to a single failed attempt followed by
+the sign-in screen. The code is correct and unreachable — which is worse than
+broken, because nothing reports it. Turning the checkbox on is the whole fix.
+
+This is also the second half of the page-refresh problem below. With offline
+access on, a refresh token exists but lives in memory and dies with the tab
+anyway; with it off, there is not even a token to persist. Both have to change
+together, or neither is worth doing.
+
 ### What the review did not change
 
-- **Roles come from the catalog, not from the token.** Auth0 `permissions` and
-  custom claims are ignored. That is the right default — authorization is this
-  product's own model and an IdP claim is not a policy — but it means an
-  Auth0 role has no effect here, which will surprise someone.
-- **A page refresh signs the user out.** Both tokens are in memory, and
-  `offline_access` does not help because the refresh token is in memory too. The
-  standard fix is silent re-authentication (`prompt=none` in a hidden iframe)
-  against the provider's own session cookie. Not built.
-- **`/callback` is served by the SPA fallback**, so it works without a router.
-  The `react-router-dom` dependency is unused and should go.
+- **A page refresh still signs the user out**, and this is the one item left
+  deliberately unbuilt rather than merely undone. Both tokens are in memory and
+  `offline_access` does not help, because the refresh token is in memory too.
+
+  The textbook fix is silent re-authentication — `prompt=none` in a hidden
+  iframe, riding the provider's own session cookie. On a default Auth0 domain it
+  is a **third-party** cookie, which Chrome's and Safari's tracking protection
+  block; it works reliably only behind a custom domain on the application's own
+  registered domain. Auth0's own SPA SDK moved its default to refresh-token
+  rotation for exactly this reason, and that means persisting a refresh token —
+  which is the rule `00f` set.
+
+  So the choice is real and it is not this epic's to make quietly: a custom
+  domain, or persisted refresh tokens, or sign-in survives only as long as the
+  tab. Half-building an iframe flow that works in some browsers would be worse
+  than the current honest behaviour.
+
+Two items closed since the review:
+
+- **Roles can now come from the token**, via `OIDC_ROLES_CLAIM` — opt-in, and
+  off by default. An identity provider deciding what this catalog authorizes is
+  a reasonable arrangement and a terrible default, because it is invisible to
+  anyone reading the policies. Unset, the token contributes nothing and
+  behaviour is what shipped before.
+- **`principal` is in the access log.** The middleware runs outside the `Auth`
+  extractor and `next.run(request)` consumes the request, so a shared cell is
+  inserted before the handler and the extractor writes into it. `None` — not
+  `"anonymous"` — when nobody was identified, so a rejected token and a route
+  that never asked for one stay distinguishable.
+- **`react-router-dom` removed.** `/callback` is served by the SPA fallback and
+  the dependency was never imported.
 
 ## Acceptance criteria (feature level)
 

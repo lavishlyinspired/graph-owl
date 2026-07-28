@@ -30,6 +30,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false }
+dotenvy = "0.15"
 graph-owl-core = { path = "crates/graph-owl-core" }
 graph-owl-events = { path = "crates/graph-owl-events" }
 graph-owl-storage = { path = "crates/graph-owl-storage" }

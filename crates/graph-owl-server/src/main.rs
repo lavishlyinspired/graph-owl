@@ -6,6 +6,17 @@ use graph_owl_storage_postgres::PostgresStorage;
 
 #[tokio::main]
 async fn main() {
+    // Loaded before anything reads the environment, and **never overriding a
+    // variable that is already set** — which is `dotenvy`'s behaviour and the
+    // property that matters. A `.env` committed to a developer's machine must
+    // not be able to quietly beat what an orchestrator injected, or a
+    // production deployment inherits a laptop's database URL from a file
+    // somebody forgot was there.
+    //
+    // A missing file is not an error: production supplies real environment
+    // variables and has no `.env` at all.
+    let _ = dotenvy::dotenv();
+
     // Before anything that can fail, so a startup failure is itself structured
     // and correlatable rather than a bare panic on stderr.
     let _ = graph_owl_server::observability::install_logging();

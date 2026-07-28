@@ -235,6 +235,11 @@ struct Claims {
     name: Option<String>,
     #[allow(dead_code)]
     exp: usize,
+    /// Everything else the provider sent. Needed because the claim carrying
+    /// roles is named by configuration — Auth0 namespaces custom claims, so
+    /// there is no portable field to declare.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The signing secret. Read once at startup.
@@ -289,6 +294,44 @@ pub fn auth_mode(shared_secret: bool, oidc: bool) -> AuthMode {
         (false, true) => AuthMode::SharedSecret,
         (false, false) => AuthMode::Open,
     }
+}
+
+/// Roles carried by a token, from the claim `OIDC_ROLES_CLAIM` names.
+///
+/// **Opt-in, and off by default.** An identity provider's claim becoming a
+/// role here means the provider decides what this catalog authorizes — which is
+/// a reasonable arrangement and a terrible default, because it is invisible.
+/// With no claim configured the token contributes nothing and roles come from
+/// the catalog alone, which is what shipped before this existed.
+///
+/// The claim is a JSON array of strings; anything else contributes nothing. A
+/// provider that emits a bare string, an object, or numbers is not producing
+/// roles this understands, and inventing an interpretation would grant access
+/// on the strength of a guess.
+///
+/// Auth0 namespaces custom claims (`https://example.com/roles`), so the claim
+/// name is configuration rather than a constant — there is no portable name to
+/// hard-code.
+#[must_use]
+pub fn roles_from_claims(
+    extra: &serde_json::Map<String, serde_json::Value>,
+    claim: &str,
+) -> Vec<String> {
+    if claim.is_empty() {
+        return Vec::new();
+    }
+    extra
+        .get(claim)
+        .and_then(serde_json::Value::as_array)
+        .map(|roles| {
+            roles
+                .iter()
+                .filter_map(|role| role.as_str())
+                .filter(|role| !role.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Whether a subject is designated an administrator by deployment
@@ -384,6 +427,19 @@ async fn verify_jwks(
         .await
         .map_err(AppError::from)?;
 
+    // Merged, not replaced: a role granted in the catalog is not withdrawn
+    // because the provider did not also mention it. Deduplicated, because the
+    // same role from both sources is one role, and a repeated one would be
+    // looked up twice on every authorization decision.
+    for role in roles_from_claims(
+        &claims.extra,
+        &std::env::var("OIDC_ROLES_CLAIM").unwrap_or_default(),
+    ) {
+        if !principal.roles.contains(&role) {
+            principal.roles.push(role);
+        }
+    }
+
     // Applied after resolution, never written back. See `is_bootstrap_admin`.
     if is_bootstrap_admin(
         &claims.sub,
@@ -392,6 +448,18 @@ async fn verify_jwks(
         principal.is_admin = true;
     }
     Ok(Auth(principal))
+}
+
+/// Leave the identity where the access log can find it.
+///
+/// Called on every path that resolves one, including open mode — a log line
+/// naming `system` is what tells an operator the server is running unsecured,
+/// which is the same thing the startup warning says and the only place it is
+/// visible per-request.
+fn record_principal(parts: &axum::http::request::Parts, principal: &Principal) {
+    if let Some(slot) = parts.extensions.get::<observability::RequestPrincipal>() {
+        slot.set(&principal.id);
+    }
 }
 
 /// **The single place a `Principal` is constructed from a request.**
@@ -427,7 +495,9 @@ where
         if let Some(jwks) = parts.extensions.get::<std::sync::Arc<jwks::JwksClient>>() {
             let token = bearer_token(parts)?;
             let catalog = <Catalog as axum::extract::FromRef<S>>::from_ref(state);
-            return verify_jwks(token, jwks, &catalog).await;
+            let auth = verify_jwks(token, jwks, &catalog).await?;
+            record_principal(parts, &auth.0);
+            return Ok(auth);
         }
 
         // HS256 shared secret (legacy/demo).
@@ -443,15 +513,18 @@ where
 
             let catalog = <Catalog as axum::extract::FromRef<S>>::from_ref(state);
             let name = claims.name.unwrap_or_else(|| claims.sub.clone());
-            return catalog
+            let principal = catalog
                 .resolve_principal(&claims.sub, &name)
                 .await
-                .map(Auth)
-                .map_err(AppError::from);
+                .map_err(AppError::from)?;
+            record_principal(parts, &principal);
+            return Ok(Auth(principal));
         }
 
         // No secret and no OIDC — open mode.
-        Ok(Auth(Principal::system()))
+        let principal = Principal::system();
+        record_principal(parts, &principal);
+        Ok(Auth(principal))
     }
 }
 
@@ -1451,6 +1524,86 @@ mod auth_configuration {
         #[test]
         fn oidc_wins_when_both_are_configured_rather_than_the_cheaper_check() {
             assert_eq!(auth_mode(true, true), AuthMode::Oidc);
+        }
+    }
+
+    mod roles_the_provider_asserts {
+        use super::*;
+        use serde_json::json;
+
+        fn claims(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+            value.as_object().expect("an object").clone()
+        }
+
+        #[test]
+        fn a_configured_claim_contributes_its_roles() {
+            let extra = claims(json!({ "https://graph-owl.dev/roles": ["steward", "reader"] }));
+
+            assert_eq!(
+                roles_from_claims(&extra, "https://graph-owl.dev/roles"),
+                vec!["steward", "reader"]
+            );
+        }
+
+        /// **Off by default, and this is the test that keeps it off.** An
+        /// identity provider deciding what this catalog authorizes is a
+        /// reasonable arrangement and a terrible default, because it is
+        /// invisible to anyone reading the policies.
+        #[test]
+        fn no_configured_claim_contributes_nothing_however_many_roles_the_token_carries() {
+            let extra = claims(json!({
+                "roles": ["admin"],
+                "permissions": ["admin"],
+                "https://graph-owl.dev/roles": ["admin"]
+            }));
+
+            assert!(roles_from_claims(&extra, "").is_empty());
+        }
+
+        #[test]
+        fn a_claim_the_token_does_not_carry_contributes_nothing() {
+            let extra = claims(json!({ "sub": "auth0|abc" }));
+
+            assert!(roles_from_claims(&extra, "roles").is_empty());
+        }
+
+        /// A provider emitting something other than an array of strings is not
+        /// producing roles this understands. Inventing an interpretation would
+        /// grant access on the strength of a guess.
+        #[test]
+        fn a_claim_that_is_not_an_array_of_strings_contributes_nothing() {
+            for shape in [
+                json!("steward"),
+                json!({ "role": "steward" }),
+                json!(7),
+                json!(null),
+            ] {
+                let extra = claims(json!({ "roles": shape }));
+
+                assert!(
+                    roles_from_claims(&extra, "roles").is_empty(),
+                    "{shape} should contribute nothing"
+                );
+            }
+        }
+
+        #[test]
+        fn non_string_and_empty_entries_are_skipped_and_the_rest_survive() {
+            let extra = claims(json!({ "roles": ["steward", 7, "", null, "reader"] }));
+
+            assert_eq!(
+                roles_from_claims(&extra, "roles"),
+                vec!["steward", "reader"]
+            );
+        }
+
+        /// Exact claim name. A prefix match would let `roles_v2` satisfy a
+        /// configuration asking for `roles`.
+        #[test]
+        fn the_claim_name_is_matched_exactly() {
+            let extra = claims(json!({ "roles_v2": ["admin"] }));
+
+            assert!(roles_from_claims(&extra, "roles").is_empty());
         }
     }
 

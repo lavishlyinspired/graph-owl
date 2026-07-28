@@ -157,6 +157,40 @@ pub fn metrics_handle() -> &'static metrics_exporter_prometheus::PrometheusHandl
     })
 }
 
+/// Where the `Auth` extractor leaves the identity for the access log.
+///
+/// **The middleware cannot see the principal on its own.** `next.run(request)`
+/// consumes the request, so anything the extractor puts in its extensions goes
+/// with it and is unreachable by the time there is a response to log. A shared
+/// cell inserted *before* the handler runs is what lets one value travel back
+/// out.
+///
+/// It stays `None` for an unauthenticated request, a rejected one, and every
+/// route that takes no `Auth` — `/health`, `/ready`, `/metrics`. That is the
+/// honest answer in all three cases: nobody was identified. Substituting
+/// `"anonymous"` would make a failed authentication indistinguishable from a
+/// route that never asked for one.
+#[derive(Clone, Default)]
+pub struct RequestPrincipal(std::sync::Arc<std::sync::Mutex<Option<String>>>);
+
+impl RequestPrincipal {
+    /// Record who this request turned out to be.
+    ///
+    /// Last write wins. A request resolves a principal once, and a lock that
+    /// refused a second write would turn a duplicated extractor — legal, if
+    /// two arguments both ask for `Auth` — into a failure.
+    pub fn set(&self, id: &str) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(id.to_string());
+        }
+    }
+
+    #[must_use]
+    pub fn get(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|slot| slot.clone())
+    }
+}
+
 /// One log line and two metrics per request, and the id echoed back.
 ///
 /// Applied with `Router::layer` rather than `route_layer` so `MatchedPath` is
@@ -173,6 +207,12 @@ pub async fn observe(request: axum::extract::Request, next: axum::middleware::Ne
             .get::<axum::extract::MatchedPath>()
             .map(axum::extract::MatchedPath::as_str),
     );
+
+    // Inserted before the handler runs, so the extractor has somewhere to put
+    // the identity that this scope can still read afterwards.
+    let principal = RequestPrincipal::default();
+    let mut request = request;
+    request.extensions_mut().insert(principal.clone());
 
     let started = std::time::Instant::now();
     let mut response = next.run(request).await;
@@ -200,9 +240,15 @@ pub async fn observe(request: axum::extract::Request, next: axum::middleware::Ne
     // `duration_ms` in the log and seconds in the metric, deliberately: a human
     // reading one line wants milliseconds, and Prometheus wants base units.
     let duration_ms = duration_ms(elapsed);
+    // `principal` is the field `10-operability.md`'s log contract names, and
+    // "which identity made this request" is the first question of every
+    // authorization incident. Absent rather than `"anonymous"` when nobody was
+    // identified — see `RequestPrincipal`.
+    let who = principal.get();
     if is_server_fault(status) {
         tracing::error!(
             request_id = %id,
+            principal = who.as_deref().unwrap_or("-"),
             method = %method,
             route = %route,
             status = status.as_u16(),
@@ -212,6 +258,7 @@ pub async fn observe(request: axum::extract::Request, next: axum::middleware::Ne
     } else {
         tracing::info!(
             request_id = %id,
+            principal = who.as_deref().unwrap_or("-"),
             method = %method,
             route = %route,
             status = status.as_u16(),
@@ -475,6 +522,56 @@ mod tests {
                 !install_logging(),
                 "a second call must be a no-op, not a replacement"
             );
+        }
+    }
+
+    mod who_made_the_request {
+        use super::*;
+
+        /// The first question of every authorization incident, and the reason
+        /// the slot exists at all: `next.run(request)` consumes the request, so
+        /// the extractor's own extensions are unreachable by the time there is
+        /// a response to log.
+        #[test]
+        fn the_slot_carries_the_identity_back_to_the_logger() {
+            let slot = RequestPrincipal::default();
+            slot.set("auth0|abc");
+
+            assert_eq!(slot.get(), Some("auth0|abc".to_string()));
+        }
+
+        /// A clone shares the cell. The middleware keeps one and hands the
+        /// other to the request — two independent cells would leave the logger
+        /// reading the one nobody wrote to.
+        #[test]
+        fn a_clone_sees_what_the_original_was_told() {
+            let held = RequestPrincipal::default();
+            let handed_to_the_request = held.clone();
+
+            handed_to_the_request.set("auth0|abc");
+
+            assert_eq!(held.get(), Some("auth0|abc".to_string()));
+        }
+
+        /// Nobody identified stays `None`. Substituting `"anonymous"` would
+        /// make a *failed* authentication indistinguishable from a route that
+        /// never asked for one — `/health` and a rejected token would log the
+        /// same thing.
+        #[test]
+        fn an_unidentified_request_names_nobody() {
+            assert_eq!(RequestPrincipal::default().get(), None);
+        }
+
+        /// Last write wins. Two handler arguments may both ask for `Auth`,
+        /// which is legal, and a cell that refused the second write would turn
+        /// that into a failure.
+        #[test]
+        fn a_second_resolution_overwrites_rather_than_failing() {
+            let slot = RequestPrincipal::default();
+            slot.set("first");
+            slot.set("second");
+
+            assert_eq!(slot.get(), Some("second".to_string()));
         }
     }
 
