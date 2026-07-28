@@ -179,6 +179,17 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with `td
 - Events are emitted after the transaction commits, never before.
 **RED**: Facade tests with a recording sink asserting event type and payload per operation. A failing-sink test asserting the request still succeeds. Mutator watch: emitting before commit must fail a test that injects a commit failure and asserts no event; emitting on no-op must fail.
 **GREEN**: crate, trait, logging adapter, post-commit emission.
+
+**Part 1 shipped 28 July 2026** — `graph-owl-events` now carries `EventKind`, `EventSubject`, `ChangeEvent` and the `EventSink` trait. Two acceptance criteria are met **structurally**, which is stronger than meeting them by convention:
+
+- *No event on a no-op update* — `ChangeEvent::updated()` returns `Option<Self>` and yields `None` on an empty diff. A facade that forgot to check cannot emit an empty event, because there is none to emit.
+- *Emission failure does not fail the request* — `EventSink::emit()` returns `()`. There is no error for a caller to propagate by accident, so the rule holds without every call site remembering it.
+
+Soft delete and restore are their own `EventKind`s rather than updates carrying a flag: a subscriber's reaction differs categorically (a search index *removes* on one and *adds* on the other), and a flag inside `Updated` makes that difference something every consumer must remember to look for. They also carry an empty diff, so routing them through `updated()` would silently drop them — which is why they have their own constructors.
+
+9 tests, `fmt`/`clippy` clean, `cargo mutants` 6 mutants / 1 caught / 5 unviable / **0 survived**. The low mutant count is honest rather than reassuring: most of the file is struct construction, which `cargo mutants` cannot meaningfully mutate, so the score says little that the tests do not.
+
+**Still to do in this slice**: the facade does not call any of it, so no real mutation produces an event yet. That remainder is the half where ordering can be got wrong — emission must follow the commit, and the RED for it is the injected-commit-failure test asserting no event was emitted.
 **REFACTOR**: post-commit emission is easy to get subtly wrong. Assess whether emission belongs in the facade (has the domain context) or in a storage decorator (guaranteed post-commit). Facade, with the transaction boundary made explicit.
 **Done when**: acceptance criteria met, mutation report reviewed, commit approved.
 

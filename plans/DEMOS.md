@@ -135,7 +135,8 @@ its destination — so "Demo 2 is done" never has to mean "Epic 13 is finished".
 - [x] `If-Match`/`412` optimistic concurrency — a stale precondition is refused and names the current version; absent the header, last-write-wins as documented
 
 **Pending in this epic**
-- `EventSink` port + `ChangeEvent` emission — nothing consumes change events yet, which is also what blocks Epic 8's incremental indexing
+- [x] **`EventSink` port + `ChangeEvent`** — the port, the five event kinds, and the payload *(Slice J, part 1)*. Two rules are structural rather than a caller's duty: `updated()` returns `Option` and yields `None` on an empty diff, so a facade that forgot to check still cannot emit an empty event; and `emit()` returns `()`, so "emission failure must not fail the request" is enforced by the signature rather than by every call site remembering to swallow an error
+- [~] **Emission is not wired into the facade yet** — nothing calls these constructors, so no event is produced by a real mutation. Post-commit emission is the rest of Slice J, and it is the half where ordering can be got wrong (`03-versioning.md`: emitted after commit, never before)
 
 ### Epic 8 — Search
 - [x] Facets by kind and schema, computed over the **visible** set
