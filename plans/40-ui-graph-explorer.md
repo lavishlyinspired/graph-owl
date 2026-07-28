@@ -25,6 +25,28 @@ This is also the screen that decides evaluations. A graph engine with no graph v
 6. **Column-level lineage is a zoom level of the same view, not a separate screen.** Table-level and column-level are the same DAG at different granularity; splitting them into two screens forces the user to hold the mapping in their head.
 7. **The canvas has a non-visual equivalent, in this epic, not later.** A navigable tree/list of the same nodes and edges, keyboard-operable, screen-reader-labelled, deep-linkable. A WebGL canvas is otherwise entirely unusable to a screen reader, and "it's a graph" is not an exemption (`00f-ui-architecture.md` non-negotiable 7).
 
+8. **The WebGL renderer is the *last* thing Slice B needs, not the first.**
+
+   Decision 1 commits to Sigma.js for exploration and that stands — but it is a
+   commitment about which renderer handles which *shape*, not about build order.
+   The valuable half of Slice B is expand-on-click: seeding from an entity,
+   fetching neighbours, growing the picture. That is API and view-state work, and
+   it lands on the SVG canvas that already exists.
+
+   **No renderer makes a large graph legible.** At ten thousand visible nodes the
+   picture is unreadable whether it is SVG, WebGL, or anything else; what makes a
+   large graph readable is clustering and progressive disclosure, which are layout
+   and interaction problems. Swapping the renderer first buys the ability to draw
+   an illegible picture faster.
+
+   So the honest order inside this epic is: expansion and budgeting on the
+   existing canvas → the lineage DAG (a *different* problem — layered
+   left-to-right, not force-directed, and the one users ask for by name) → the
+   WebGL swap, when a real graph is measurably slow rather than theoretically
+   large. The current SVG is honest at demo scale and will not survive 10k nodes;
+   that is a real limit, and it is the third one to fix.
+
+
 ## Implementation reference
 
 ```

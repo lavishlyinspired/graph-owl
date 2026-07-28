@@ -131,7 +131,31 @@ Multi-hop query the REST surface fundamentally cannot express. "Every table feed
       generic optimizer may reorder patterns in a way that is worse given which
       orderings exist. Measure before trusting it; it is separable.
 
-10. **The subset is enumerated, not implied.** Every SPARQL pattern type appears in the completeness table below with a status. A pattern that is out of scope must produce a clear error naming it, never a silent misparse.
+10. **Join ordering is ours, and it is cheaper than reaching for an optimizer.**
+
+    `TripleStore::count()` already exists on the port and is implemented in the
+    Postgres adapter, and the query path does not use it. Ordering a BGP's
+    patterns most-selective-first is the highest-value planning change available
+    with **zero new dependencies**: a bad join order reads rows the answer never
+    needed, and the fix is a sort.
+
+    **But an exact `count()` is itself a scan**, so calling one per pattern
+    before scanning means paying a scan to decide how to scan. On a two-pattern
+    BGP that can cost more than it saves. So the order is:
+
+    1. **Static selectivity first, which is free.** Count bound terms per
+       pattern — three bound beats two beats one beats none — and order by that.
+       It resolves most real queries without touching storage.
+    2. **`count()` only to break ties**, and only when the tie is between
+       patterns whose static selectivity is equal. That bounds the extra scans
+       to the ambiguous cases rather than paying on every query.
+
+    This is separate from decision 9's third open question. That asks whether
+    `sparopt`'s *generic* rewrites fight our index selection; this is ordering
+    we do ourselves against selectivity we can see. The cheap one is worth doing
+    whichever way the `sparopt` measurement lands.
+
+11. **The subset is enumerated, not implied.** Every SPARQL pattern type appears in the completeness table below with a status. A pattern that is out of scope must produce a clear error naming it, never a silent misparse.
 
 ## Implementation reference
 

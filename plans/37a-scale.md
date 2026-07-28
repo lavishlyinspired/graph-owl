@@ -23,6 +23,33 @@ The deliverable is not a one-off benchmark report. It is a **corpus generator pl
 5. **Budgets are revised deliberately with the reason recorded** — never silently raised to make a build pass.
 6. **The generator is shared with Epic absorbed into 4's time-travel benchmarks**, built reusably there and extended here.
 
+7. **The scaling path is not swapping the storage engine, and this epic is what
+   proves it.** The reflex when a graph query is slow is to reach for a graph
+   database. That is the wrong first move here for a reason this epic can
+   *measure* rather than assert: at catalog scale the cost is almost never the
+   storage engine — it is an unbounded traversal, a missing index, a per-row
+   join, or a query plan nobody looked at. Each of those is fixable in place,
+   and each is cheaper than an operational dependency.
+
+   Concretely, the ladder is: **fix the query** (bounds, indexes, plans — the
+   acceptance criteria below) → **partition the flake table** (the trigger this
+   epic measures) → **add SOP/OSP orderings** if a real access pattern needs
+   them → **extract the subgraph in-process** (Epic 103) when the walk is deep
+   rather than the graph large. A second datastore sits below all four.
+
+8. **The one exception is depth, and it is answered in-process.** A recursive
+   CTE degrades on deep walks for a specific, verified reason: the per-path
+   cycle guard is `NOT dst = ANY(path)`, a linear array scan per candidate row.
+   That is a real ceiling and not a tuning problem. It is also not a reason to
+   run a second server — Epic 103 loads a bounded, already-authorized subgraph
+   into memory where the same test is a hash lookup.
+
+   **This epic sets the threshold.** Epic 103's routing rule needs a measured
+   crossover between CTE cost and extraction cost; without it, "deep queries go
+   in-process" is a guess with a plan attached. Measuring that crossover is an
+   acceptance criterion here.
+
+
 ## Targets
 
 The corpus, approximating a large organization:
@@ -46,6 +73,10 @@ The corpus, approximating a large organization:
 - [ ] A soak test shows no memory growth or connection leak over sustained load.
 - [ ] Connector throughput is measured against a 10,000-table source.
 - [ ] Results are recorded so trends are visible across releases.
+- [ ] **Traversal depth is swept, not sampled** — walk latency reported at
+      depths 1 through 8 on the power-law corpus, which is where the cycle
+      guard's cost shows up. A single mid-depth number would hide the curve
+      that decides Epic 103's routing threshold.
 - [ ] The **flake-table partitioning trigger is measured, not assumed**: index-only-scan ratio, index size against `shared_buffers`, and p99 pattern-query latency are reported at 1M / 5M / 10M flakes. Epic 4 says "start unpartitioned, partition by `namespace_s` at ~10M"; this epic is what turns that number from a guess into a measurement, and is licensed to move it.
 
 ## Slices

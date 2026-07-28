@@ -88,7 +88,7 @@ Phases 0–2 are largely shipped and **the engine exists**. Four demos run end t
 | **7 · Breadth** | 33–38 | Coverage, scale, portability, structural analytics |
 | **8 · Console** | 39–42, 93 | **The differentiators become demonstrable** — see `00f-ui-architecture.md` |
 | **9 · Standards depth** | 94–97 | Conformance the first pass deferred. **Not a phase you reach by finishing 8** — each epic here unblocks specific earlier ones and is scheduled by need, not by number |
-| **10 · Full semantics** | 98–102 | The three OWL profiles, federation, and storage separation. **98/99 need 100 first**, and 102 needs a measurement — the rest is sequencing, not gating |
+| **10 · Full semantics** | 98–103 | The three OWL profiles, federation, and storage separation. **98/99 need 100 first**, and 102 needs a measurement — the rest is sequencing, not gating |
 
 ## The epics
 
@@ -154,6 +154,7 @@ Phases 0–2 are largely shipped and **the engine exists**. Four demos run end t
 | 100 | **Profile detection & routing** | Engine | Which reasoner can handle this ontology, and what it would silently ignore. **Prerequisite for 98 and 99** |
 | 101 | **SPARQL federation (`SERVICE`)** | Engine | Join against external endpoints — allow-listed, budgeted, and bindings filtered *before* they leave |
 | 102 | **Read/write partition split** | Engine | Main + delta with online compaction. Planned; entry condition is a measurement |
+| 103 | **In-process traversal** | Engine | petgraph as the *execution* graph, extracted per query. A second `TraversalEngine` adapter, not a rewrite |
 
 ## Phase 1 · The engine
 
@@ -431,6 +432,8 @@ decision to accept churn and should be made knowingly.
 | 100 | `100-profile-detection-and-routing.md` | **DONE** — none of the profiles is a subset of another and W3C provides no detector, so this is real work and a prerequisite |
 | 101 | `101-sparql-federation.md` | **DONE** — the language work is free; the epic is the three dangers, and the test that matters captures the outbound request |
 | 102 | `102-read-write-partitions.md` | **DONE** — planned with an honest note that the problem has not been observed here |
+| 103 | `103-in-process-traversal.md` | **DONE** — petgraph as the algorithm engine and never the model; `DiGraph` not `StableDiGraph`, because a long-lived in-memory graph would break `as_of` and authorization at once |
+| — | **Sequencing note** | **Epic 37a comes before 102, 103 and the SOP/OSP indexes.** All three have entry conditions that are measurements, and without the measurement they are all guesses with plans attached |
 | — | `00j-language-boundaries.md` | **DONE** — the process boundary is the language boundary. Reverses the Rust-connector decision; keeps MCP in Rust |
 
 ### Existing files that stay
