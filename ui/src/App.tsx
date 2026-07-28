@@ -62,7 +62,7 @@ import {
   setAuthToken,
 } from "./api";
 import { type DiffEdge, diff } from "./graph/diff";
-import { type GraphModel, expand, seed } from "./graph/model";
+import { type GraphModel, expand, performedExpansions, replay, seed } from "./graph/model";
 import { brand, darkTheme, lightTheme, palette } from "./theme";
 import { GenericSourceMark, PostgresMark } from "./icons";
 import watermarkImg from "./assets/watermark1.png";
@@ -463,29 +463,44 @@ function GraphExplorer({
   // The earlier instant is fetched as its own walk from the same seed, at the
   // same depth. Diffing two walks taken at different depths would report the
   // depth difference as change in the estate.
+  //
+  // And at the same *expansions*. The picture on screen is a seed walk plus
+  // everything the reader opened; comparing it against a bare seed walk would
+  // report every expanded node as added no matter when it arrived — a diff
+  // that invents changes, which is worse than one that misses them.
+  const expansions = model ? performedExpansions(model) : null;
+  const expansionKey = expansions?.join(",") ?? null;
+
   useEffect(() => {
-    if (compareTo === null) {
+    if (compareTo === null || expansionKey === null) {
       setBaseline(null);
       return undefined;
     }
     let current = true;
     setBaseline(null);
-    api
-      .graph(assetId, hops, compareTo)
-      .then((view) => {
-        if (current) setBaseline(seed(assetId, view));
-      })
-      .catch((e: unknown) => {
-        if (current) {
-          setError(
-            e instanceof ApiError ? e.problem.detail : "could not load the earlier graph",
-          );
-        }
-      });
+    (async () => {
+      const seedView = await api.graph(assetId, hops, compareTo);
+      const steps = await Promise.all(
+        (expansionKey === "" ? [] : expansionKey.split(",")).map(async (id) => ({
+          id,
+          // A node the reader expanded today may not have existed then. That
+          // is an answer, not a failure: `null` skips the step, and the node
+          // is then correctly reported as added.
+          view: await api.graph(id, 1, compareTo).catch(() => null),
+        })),
+      );
+      if (current) setBaseline(replay(assetId, seedView, steps));
+    })().catch((e: unknown) => {
+      if (current) {
+        setError(
+          e instanceof ApiError ? e.problem.detail : "could not load the earlier graph",
+        );
+      }
+    });
     return () => {
       current = false;
     };
-  }, [assetId, hops, compareTo]);
+  }, [assetId, hops, compareTo, expansionKey]);
 
   useEffect(() => {
     let current = true;
