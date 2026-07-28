@@ -36,7 +36,7 @@
 
 | # | Capability | Status | Epic(s) | Plan File(s) |
 |---|-----------|--------|---------|-------------|
-| 14 | RDF Parser | ✅ COVERED | Epic 9 | Turtle, N-Triples/N-Quads, RDF/XML, JSON-LD, TriG via `rio_*` + `json-ld` |
+| 14 | RDF Parser | ✅ COVERED | Epic 9 | Turtle, N-Triples/N-Quads, RDF/XML, JSON-LD, TriG via `oxttl` + `oxjsonld` over `oxrdf` (corrected 28 Jul 2026 — this said `rio_*`, which `00l-build-vs-adopt.md` supersedes; `oxrdf` is already in the tree via `spargebra`/`spareval`) |
 | 15 | OWL Parser | ❌ NOT COVERED | — | No OWL/XML or OWL Functional Syntax parser; axioms stored as triples |
 | 16 | RDF Dataset Model | ✅ COVERED | Epic 4 | Named graphs via `cx` field; scoped graph model |
 | 17 | Triple Store | ✅ COVERED | Epic 4 | `TripleStore` port: assert/retract/query/count with four Postgres index orderings |

@@ -246,6 +246,27 @@ intact. The negative case matters as much: a plain string must not acquire a
 direction, or every literal in the catalog gains a meaningless `ltr`.
 **Done when**: criteria met, mutation report reviewed.
 
+**This slice does not end at the API — it has a console half, and without it the
+slice makes things worse.** A store that knows a label is right-to-left while the
+console renders it left-to-right is a system whose *screen* is less correct than
+its *database*, and it acquired that gap by learning the direction. So the
+direction must reach the DOM:
+
+- The API must expose direction wherever it exposes the label it belongs to —
+  a direction the client cannot read is a direction the client cannot honour.
+- Every component rendering a user-supplied label sets `dir` from it, defaulting
+  to `auto` rather than `ltr` when absent. `00h-ui-design-system.md` records this
+  as a **token-level primitive**, not a screen, because it applies everywhere a
+  name, description or tag is drawn.
+- **RED (console)**: an Arabic or Hebrew label renders right-to-left in the
+  entity header, in search results, and on a graph node — asserted with real
+  text, matching this slice's server-side rule. Mutator watch: dropping `dir`
+  must fail; hard-coding `ltr` must fail.
+
+This is the one correctness bug in the design system that is **invisible to a
+reviewer who reads only English**, which is why it is written into the slice
+rather than left to the UI epic to notice.
+
 ### Slice D: `rdf:reifies` at the query surface
 
 Implements decision 7. **Scheduled**: the product call was made — SPARQL is a

@@ -60,6 +60,20 @@ suite.
       test in this epic**: it is the only way to prove a leak did not happen,
       since a result-side assertion passes even when the data already left.
 - [ ] Results name their contributing endpoint.
+- [ ] **Console: the workbench result grid attributes every remote row to its
+      endpoint, and a silenced `SILENT` failure is visible in the result, not
+      only in a log.** This epic names unattributable remote results as one of
+      its three dangers; a grid that renders a remote row identically to a local
+      one *is* that danger, just rendered. A `SILENT` failure is worse on screen
+      than in an API response — an empty region of a result grid reads as "no
+      such data" rather than "we could not ask", which is the same
+      absence-versus-omission confusion `40-ui-graph-explorer.md` treats as its
+      most damaging bug.
+- [ ] **Console: the endpoint allow-list is an admin surface** with the same
+      dry-run treatment as Epic 13's policy editor — adding a federation
+      endpoint is granting the query engine permission to make outbound calls
+      with the caller's bindings, which is a policy decision wearing a
+      configuration costume.
 
 ## Explicitly deferred
 

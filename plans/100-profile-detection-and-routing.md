@@ -59,6 +59,19 @@ inferences than the ontology states, with nothing saying so.
       EL.
 - [ ] Reasoning over an ontology in no profile is refused, and the refusal names
       the first offending axiom.
+- [ ] **Console: the detected profile and the reasoner it routes to are shown
+      wherever reasoned facts are.** A profile badge on the ontology, and on the
+      explanation panel the reasoner that produced the derivation. Users ask
+      "which profile is this, and what could the reasoner therefore *not*
+      conclude" **before** trusting an answer, not after — and Epics 98 and 99
+      add reasoners with different completeness guarantees, so an unlabelled
+      conclusion is one whose strength cannot be assessed. `00f` non-negotiable
+      4 in a new place: a derived fact whose derivation strength is invisible is
+      not meaningfully explainable.
+- [ ] **Console: an out-of-profile ontology, and an override-permitted partial
+      result, are visibly marked as such** — not colour alone, per `00h`. A
+      partial reasoning result presented like a complete one is this epic's
+      worst outcome on a screen, exactly as it is in the API.
 - [ ] The override permits it and the result is **marked partial**, carrying
       what was ignored.
 - [ ] Detection over a 400k-axiom ontology completes in seconds — it is a

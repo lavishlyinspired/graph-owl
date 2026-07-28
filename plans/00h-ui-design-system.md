@@ -189,8 +189,36 @@ The completeness requirement: **every epic either has a named surface or an expl
 | 36 Reference apps | — | — | External |
 | 37 Scale / portability | Admin: export, restore, budgets | Form | 41 |
 | 38 Analytics | Governance reports: orphans, silos, blast radius | — | 41 |
+| 37a Scale validation | Admin: budget headroom against measured limits | Form | 41 |
+| 37b Backup & portability | Admin: export, restore, verify | Form | 41 |
+| 37c Embeddable library ★ | **Nothing** — the embedding host supplies its own UI; a library that shipped a console would be the opposite of embeddable | — | — |
+| 39 Console foundation | *is* the shell | All | 39 |
+| 40 Graph explorer ★ | *is* the graph surface | Graph | 40 |
+| 41 Workbench & governance | *is* the workbench | Review + Form | 41 |
+| 42 Semantic surfaces | *is* the vocabulary + review set | Vocabulary + Review | 42 |
+| 43 Framework integrations | — | — | External, like 36 — the consumer is someone else's agent framework |
+| 93 Console overview | *is* the landing surface | — | 93 |
+| 94 RDF 1.2 alignment | Export dialog gains `rdf:reifies`; **base-direction rendering is a foundation primitive, not a screen** — see below | Form + Tokens | **42** export, **39** direction |
+| 95 OWL RL completion | Extends the explanation panel — more axioms, same surface | Entity + Review | 41 |
+| 96 SHACL-SPARQL | Violations queue unchanged; the **constraint editor must accept SPARQL**, which makes it a second editor surface in the workbench | Review + — | 41 |
+| 97 Incremental & parallel reasoning | Admin: reasoning job state, **staleness of the overlay** — a derived fact whose age is invisible is a derived fact nobody can weigh | Form | 41 |
+| 98 OWL EL reasoning | **Nothing of its own** — a profile is a routing decision, surfaced by Epic 100 | — | via 100 |
+| 99 OWL QL reasoning | **Nothing of its own** — as above | — | via 100 |
+| 100 Profile detection & routing | **Ontology profile badge + which reasoner will run and why.** New surface: "what can this ontology support" is a question users ask before they trust an answer | Entity + Form | 41 |
+| 101 SPARQL federation | Workbench `SERVICE` support, and **remote results attributed in the result grid** — an unattributable remote row is the epic's own named danger | — + Tokens | 41 |
+| 102 Read/write partitions | Admin: partition health, replication lag | Form | 41 |
+| 103 In-process traversal | **Nothing** — a performance path with no user-visible behaviour change | — | — |
 
 **Epic 34 contributing no UI at all is the design working.** Entity expansion adds five entity families; if that required UI work, the composable entity page would have failed its purpose.
+
+### The 39–103 rows were missing, and two of them were real gaps
+
+The table above stopped at Epic 38 — every epic from the standards-depth and full-semantics phases was unassigned, which is the exact condition the completeness requirement exists to catch. Most resolve to "extends an existing surface", which is the five-pattern design working as intended. **Two do not, and would have shipped without a console:**
+
+- **Base direction (Epic 94 Slice C).** `rdf:dirLangString` carries a base direction, and a store that knows a label is right-to-left while the console renders it left-to-right has made the screen *less* correct than the database. This is a text-rendering primitive — every component that renders a user-supplied label must honour `dir`, which makes it Epic 39's concern and a token-level rule, not a screen. It is also the one place in this design system where a correctness bug is invisible to a reviewer who reads only English.
+- **Ontology profile and reasoner routing (Epic 100).** "Which profile is this ontology in, and therefore which reasoner ran and what could it not conclude" is a question asked *before* trusting an answer, not after. Epics 98 and 99 add reasoners with different completeness guarantees; without a surface naming which one ran, the console shows conclusions whose strength the user cannot assess — which is `00f` non-negotiable 4's problem in a new place.
+
+**No new epic.** Three surfaces do not justify one; Epic 42 exists because *fifteen* had no home. These attach to 39, 41 and 42 as slices, and the route budget below is unaffected because none of them is a new route.
 
 **Fifteen surfaces had no home** across Epics 39–41 — the vocabulary browsers, the review queues, agent activity, interchange, and the property-graph view. They are now **Epic 42**, not quietly appended to 41, because an epic that absorbs everything unassigned stops being estimable.
 

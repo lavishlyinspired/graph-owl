@@ -22,7 +22,9 @@
 | **8** | Property graph and open interop | +7b, 7c, 7d, 9, 9a | |
 | **9** | Breadth, scale, and the proof | +33–38, 36, 37a–c | |
 | **10** | Standards depth | +94–97 | Not started — see `00k-standards-conformance.md`. Epic 94 is a **vocabulary** change, not a model one: the reified edges already shipped *are* RDF 1.2's reifier shape, so the flake count must not move |
-| **11** | Full semantics | +98–102 | Not started — three OWL profiles, federation, storage split |
+| **11** | Full semantics | +98–103 | Not started — three OWL profiles, federation, storage split |
+
+**Every demo carries its console half.** A backend capability with no surface is a capability nobody can be shown, and `00a-product-position.md` sells differentiators that are seen rather than described. Where a demo line needs UI, it names the receiving UI epic in *(italics)*; where a capability deliberately has **no** UI, it says so with the reason, per `00h-ui-design-system.md`'s completeness requirement.
 
 ★ = the demo that carries a differentiator. Cutting it is a positioning decision.
 
@@ -398,6 +400,68 @@ no library can supply actually live.
 - [ ] **37b** Backup, export, restore
 - [ ] **37c** Embeddable library, `graph-owl-storage-memory` published
 - [ ] **38** Analytics: degree, components, orphans, silos
+
+---
+
+## Demo 10 — Standards depth
+
+**The claim**: the standards alignment survives inspection by someone who knows the standards.
+
+**What you can show**: export a lineage edge and point at `rdf:reifies << … >>` in the Turtle — then run the *same* query with the standard vocabulary in the workbench and get rows back, not zero. Add an Arabic-labelled term and watch it render right-to-left in the entity header, the search results and the graph node. Author a constraint in SPARQL rather than in the shape language and see it land in the same violations queue.
+
+### Epic 94 — RDF 1.2 alignment
+- [ ] **A** `FlakeValue::TripleTerm` at discriminant 10, pinning test extended
+- [ ] **B** `rdf:reifies` + triple term on export; store flake count unchanged
+- [ ] **C** `rdf:dirLangString` — lexical form, language tag, base direction in `flake_meta`
+- [ ] **C (console)** — every user-supplied label renders with `dir` from the data; asserted with real Arabic or Hebrew, not a placeholder. **Without this half, the slice makes the product worse**: the store would know a label is right-to-left while the screen renders it left-to-right
+- [ ] **D** `rdf:reifies` synthesised at the query surface, so the standard vocabulary returns rows rather than zero — store and flake count untouched
+- [ ] Slices B, C and D share one `oxrdf/rdf-12` feature gate — one decision, taken once for the workspace
+- [ ] Export dialog offers RDF 1.2 output and previews it *(UI → Epic 42)*
+
+### Epic 95 — OWL 2 RL completion
+- [ ] The remaining RL axioms beyond Epic 6's eight
+- [ ] Explanation panel extends to the new axioms — same surface, more rules *(UI → Epic 41)*
+
+### Epic 96 — SHACL-SPARQL
+- [ ] SPARQL-based constraint components
+- [ ] The violations workflow is unchanged; **authoring gains a second language**, so the constraint editor gains a second mode *(UI → Epic 41 Slice G)*
+
+### Epic 97 — Incremental & parallel reasoning
+- [ ] Incremental maintenance rather than full recomputation
+- [ ] **Overlay staleness is visible** — a derived fact whose age is invisible is a derived fact nobody can weigh *(UI → Epic 41 Slice G)*
+
+---
+
+## Demo 11 — Full semantics
+
+**The claim**: three OWL profiles, federation, and a storage split — with the console honest about which one answered and how completely.
+
+**What you can show**: load an ontology and watch the profile badge resolve to EL rather than RL, with the reasoner that will run named next to it. Load one in *no* profile and watch reasoning refuse, naming the offending axiom. Override it and watch the result come back **marked partial**. Then run a federated query and see each remote row attributed to the endpoint that produced it — and a `SILENT` failure appear *in the result* rather than only in a log.
+
+### Epic 98 / 99 — OWL EL and QL reasoning
+- [ ] EL and QL reasoners alongside RL
+- [ ] **No UI of their own** — which profile ran is a routing question, surfaced by Epic 100. This is the design working, like Epic 34
+
+### Epic 100 — Profile detection & routing
+- [ ] Detection across RL, EL, QL; incomparable profiles not reported as supersets
+- [ ] Out-of-profile reasoning refused, naming the first offending axiom
+- [ ] **Profile badge + the reasoner that produced each derivation** *(UI → Epic 41 Slice G)*. Epics 98 and 99 add reasoners with **different completeness guarantees**, so an unlabelled conclusion is one whose strength cannot be assessed
+- [ ] **Out-of-profile and override-partial results marked**, not by colour alone
+
+### Epic 101 — SPARQL federation
+- [ ] `SERVICE` against an allow-listed endpoint; unlisted refused by name
+- [ ] Bindings denied by policy never transmitted — asserted on the outbound request, the only way to prove a leak did not happen
+- [ ] **Remote rows attributed to their endpoint in the result grid** *(UI → Epic 41 Slice G)* — an unattributed remote row is this epic's own named danger, rendered
+- [ ] **A `SILENT` failure is visible in the result.** An empty region of a grid reads as "no such data" rather than "we could not ask"
+- [ ] **Allow-list admin with dry-run** — adding an endpoint lets the query engine make outbound calls carrying the caller's bindings, which is a policy decision in a configuration costume
+
+### Epic 102 — Read/write partition split
+- [ ] The split itself
+- [ ] Partition health and replication lag in admin *(UI → Epic 41 Slice G)*
+
+### Epic 103 — In-process traversal
+- [ ] The traversal path
+- [ ] **No UI** — a performance path with no user-visible behaviour change
 
 ---
 

@@ -110,6 +110,23 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: The secret round-trip test — asserting a configured credential never appears in any subsequent API response or DOM node. Second RED: the policy dry-run, because a policy saved without preview is a production access change made blind, and this is the one screen where a mistake is a security incident. Mutator watch: a masked-but-present secret in the response must fail; a dry-run evaluating as the admin rather than the target principal must fail a two-principal test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+### Slice G: The standards-depth surfaces (Epics 96, 97, 100, 101, 102)
+
+**Added 28 July 2026.** `00h-ui-design-system.md`'s screen inventory stopped at Epic 38, so every epic in the standards-depth and full-semantics phases was unassigned — the exact condition its completeness requirement exists to catch. Most extend surfaces this epic already owns, which is the five-pattern design working; they are gathered here rather than scattered so the work is estimable.
+
+**Acceptance criteria**:
+
+- **Reasoner routing is visible wherever reasoned facts are** (Epic 100) — the detected profile as a badge, and the reasoner that produced a derivation named in the explanation panel. Epics 98 and 99 add reasoners with *different completeness guarantees*, so an unlabelled conclusion is one whose strength cannot be assessed.
+- **An out-of-profile ontology, and an override-permitted partial result, are marked** — not by colour alone.
+- **Remote rows are attributed to their endpoint** in the result grid (Epic 101), and a `SILENT` failure is visible *in the result*. An empty region of a grid reads as "no such data" rather than "we could not ask" — the same absence-versus-omission confusion `40-ui-graph-explorer.md` calls its most damaging bug.
+- **The federation allow-list is an admin surface with dry-run**, like Slice F's policy editor. Adding an endpoint grants the query engine permission to make outbound calls carrying the caller's bindings; that is a policy decision in a configuration costume.
+- **The constraint editor accepts SPARQL** (Epic 96) — the violations workflow in Slice D is unchanged, but authoring gains a second language and therefore a second editor mode.
+- **Overlay staleness is shown** (Epic 97) — a derived fact whose age is invisible is a derived fact nobody can weigh. Incremental reasoning makes "when was this last recomputed" a real question with a real answer.
+- **Partition health and replication lag** (Epic 102) in admin.
+
+**RED**: The unattributed-remote-row test — a federated result rendered indistinguishably from a local one, which is Epic 101's own named danger arriving on a screen. Second RED: the silenced-failure test, since `SILENT` plus an empty grid region is the strongest available way to make a user conclude something false. Mutator watch: dropping the endpoint attribution must fail; rendering a partial reasoning result identically to a complete one must fail; a profile badge derived from the *requested* profile rather than the *detected* one must fail a mismatch fixture.
+**Done when**: criteria met, mutation report reviewed, commit approved.
+
 ## Explicitly deferred (with destination)
 
 - **Visual query builder** → a drag-and-drop query builder is a large product that produces worse queries than typing. Completion and plan display close most of the gap.
