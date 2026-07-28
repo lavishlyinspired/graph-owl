@@ -67,6 +67,43 @@ explainability is the feature. Parallelise *within* a round, synchronise
 *between* rounds, and assert that a parallel run derives exactly what a
 single-threaded run does — same facts, same chains.
 
+## Open: incremental maintenance meets time travel
+
+**Raised 28 July 2026 and not yet resolved.** This epic and Epic 4 are each
+sound alone and their intersection is unexamined — a search of this plan for
+`as_of` returns nothing, which is the tell.
+
+Two facts collide. Reasoning becomes **materialised and incrementally
+maintained** (this epic). And any query may specify **`as_of` any past
+instant** (Epic 4) — the product's headline differentiator. So: *what does the
+overlay mean at time `t`?* The maintained materialisation reflects **now**.
+
+Three options, none costless, and one must be chosen before Slice A:
+
+| Option | Cost |
+|---|---|
+| Re-derive per historical query | Defeats the point of materialising; a time-travel query becomes the slowest thing in the system |
+| Version the overlay alongside the base | Storage multiplies by the number of retained instants, over a set already the size of the base |
+| **Refuse reasoning on historical queries**, and say so | Cheapest and most honest, but weakens "reason over any past state" — which some will read as the differentiator's whole point |
+
+**Whichever is chosen, silence is the one unacceptable answer.** Returning the
+*current* overlay against a *historical* base would produce facts derived from
+premises that did not hold at `t` — a wrong answer wearing the provenance of a
+right one, which is precisely what `06`'s explainability contract exists to
+prevent.
+
+**DRed is not optional here, and the reason is structural.** DRed exists to
+handle *deletion* from a materialisation. In this store `op = false` is a
+retraction, so facts leaving is not an edge case — it is the normal way the
+graph changes, and it is how time travel works at all. An additions-only
+incremental scheme (semi-naive over new facts) is therefore insufficient by
+construction, not merely incomplete.
+
+**Sequencing note: incremental before parallel.** Parallelising a wholesale
+re-derivation optimises the work incremental maintenance is about to delete.
+The two are listed together in this epic's title; they are not equal, and the
+order is not interchangeable.
+
 ## Acceptance criteria
 
 - [ ] DRed under retraction produces the same fixpoint as full re-derivation.

@@ -73,6 +73,30 @@ to know which system to look at.
       principals, as Epic 13 does for search.
 - [ ] A SHACL rule's derived facts record that SHACL derived them.
 
+## Open: do SHACL-derived facts feed the OWL fixpoint?
+
+**Raised 28 July 2026, unresolved.** This epic adds a **second inference
+mechanism** producing facts into the same overlay as Epic 6's OWL rules, and the
+plans do not say how the two compose. Provenance is handled — a SHACL rule's
+output records that SHACL derived it — but provenance answers *where a fact came
+from*, not *what the fact set is*.
+
+Three orderings, giving three different answers:
+
+1. **OWL to fixpoint, then SHACL once** — SHACL sees every OWL inference; OWL
+   never sees SHACL's.
+2. **SHACL once, then OWL to fixpoint** — the reverse.
+3. **Both in one fixpoint** — the only order-independent option, and the only
+   one where a SHACL rule can trigger an OWL rule that re-triggers the SHACL
+   rule. It is also the one that can fail to terminate, since SHACL rules are
+   not restricted the way OWL 2 RL is.
+
+Option 3 is the semantically satisfying one and the one that needs a
+termination argument before it is chosen. Options 1 and 2 are defensible if
+**stated** — an order-dependent inference set that nobody documented is a system
+where the same data yields different conclusions depending on an implementation
+detail, and the explainability contract cannot survive that.
+
 ## Explicitly deferred
 
 - **SHACL Advanced Features beyond these three** → node expressions, target
