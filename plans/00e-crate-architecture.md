@@ -221,3 +221,71 @@ B-tree, an LSM, crash recovery and compaction are all below that line and all
 adopted. Concurrency control and crash recovery are exactly the multi-year
 problems that argument names, and Postgres has solved them.
 
+### The table-by-table split, reviewed 28 July 2026
+
+A follow-up proposal broke the storage question down per data category and
+recommended: Postgres remains the system of record for entities, ontology
+metadata, provenance, explanations, jobs and operational state; **base and
+inferred triples live behind the `TripleStore` abstraction**, with a
+Postgres adapter now and a specialised one later if a customer's scale demands
+it.
+
+**The split is right and is what this workspace already has.** Three of the six
+categories it lists need correcting, and two of the three point the same way:
+some data the proposal assigns to relational actually belongs *with* the flakes.
+
+| Category | Verdict |
+|---|---|
+| Base triples | ✅ `TripleStore` port. As designed |
+| Inferred triples | ✅ Already there — `graph:reasoning` is a named graph, so a derived fact **is** a flake with `cx` set. No new home needed |
+| Explanations | ❌ **Larger than the inferred set, not smaller** — see below |
+| Change log | ❌ **Already exists, and is the flake store** — see below |
+| Queue | ✅ Postgres is a good queue at this scale; no reason to add a broker |
+| Materialized views | ⚠️ **Not used, and deliberately so** — see below |
+
+**Explanations are the largest derived artefact, not a small relational side
+table.** The proposal reasons that an explanation is a compact relational row —
+*fact A came from rule R7 using facts B and C* — and is therefore smaller than
+the triples. `DerivedFact` in `06-engine-reasoning.md` carries
+`premises: Vec<Flake>` and `rule: Sid`, so a complete explanation is
+`O(derived × premises-per-derivation)` — **strictly larger than the derived set
+it explains**, since each derived fact contributes one row plus a link per
+premise. At 400M inferred triples the explanation data is the biggest thing in
+the system.
+
+That inverts the placement argument. Putting explanations in Postgres while
+inferred triples move to another backend creates a **cross-store join on the
+hottest explainability path** — `GET /reasoning/explain` would have to read
+premises from one store and their content from another. Explanations belong
+**with the derived facts**, on whichever backend holds them. This is the one
+place where the proposal's split, followed literally, would hurt.
+
+**A separate change log duplicates the central design.** `00b` states that
+`op = false` is a retraction rather than a delete, so the state at any past `t`
+is recoverable by construction — *"time travel is not a feature built on top of
+the store; it is a property of the store"*. The flake store **is** the change
+log. A second one would be a parallel audit trail that can drift from the thing
+it audits, which is exactly the failure `00i` records as already having been
+argued once. Operational logs (job runs, connector executions) are a different
+thing and do belong in Postgres.
+
+**Materialized views are not in use and were declined on purpose.** Nothing in
+the migrations creates one, and `07c-engine-lpg.md` decision 1 explicitly refuses
+a materialized property-graph projection because *"a materialized parallel
+property graph would be a second thing to keep consistent"*. The relational →
+flake projection is application-level with reconciliation, **not** a materialized
+view. Worth stating so nobody optimises a mechanism this system does not use.
+
+**On the inference multiplier.** The proposal estimates 100M base triples
+producing 400M inferred. The ratio is **ontology-dependent and unbounded in
+principle** — a transitive property over a deep hierarchy is quadratic in the
+worst case — so 4× is a plausible illustration and not a number to size hardware
+against. `00i` rule 4 applies: the figure that governs is the one in Epic 6's
+**budget**, because the budget is what actually bounds the derivation, and it is
+enforced rather than estimated.
+
+**The two-customer framing is the right one.** 20M triples: Postgres for
+everything. 10B: Postgres for metadata and governance, a specialised adapter for
+the graph. The engine does not change; the adapter does. That is precisely what
+the two ports already permit, and it is why `00b` decision 3 took them on day
+one.
