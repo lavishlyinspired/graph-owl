@@ -1,6 +1,6 @@
 # Plan: Envelope, Versioning, Soft Delete & Change Events (Epic 3)
 **Branch**: feat/entity-envelope
-**Status**: Not started
+**Status**: **Shipped** — envelope, history, `If-Match`/412. Demo 2
 **Depends on**: Epic 2 (four entity types to apply the envelope to)
 **Unblocks**: Epics 4 (the envelope is what the triple projection projects), 7, 8, 12, 13
 **Crates**: `graph-owl-core` (EntityEnvelope, ChangeDescription, version arithmetic) · **`graph-owl-events`** (new — EventSink port) · `graph-owl-storage` · `graph-owl-storage-postgres` (history table) · `graph-owl-api` · `graph-owl-server`

@@ -1,6 +1,6 @@
 # Plan: Operability & Resource Budget (Epic 10) ★
 **Branch**: feat/operability
-**Status**: Not started
+**Status**: **In progress** — shipped into Demo 2; admission control and cgroup-aware cache budget still open
 **Depends on**: Epic 1 (a server, an error model, and a contract to instrument)
 **Unblocks**: safe operation of every epic from 14 onward (async, multi-service failure modes)
 **Differentiator** — the resource budget makes operational simplicity measurable. See `plans/00a-product-position.md`.
@@ -88,6 +88,8 @@ Every line is an explicit configuration value with a stated default, and the sum
 - [ ] `SIGTERM` drains in-flight requests before exit.
 - [ ] `docker compose up` yields a working service plus Postgres.
 - [ ] The resource budget is asserted in CI and fails the build on regression.
+- [ ] **Index size and bloat are exposed as metrics** (added 28 July 2026, from an indexing review against Epic 4). The `flakes` table is append-only with retractions rather than deletes — `op = false` is the whole time-travel design — so its four indexes accumulate dead tuples that no ordinary delete pattern would produce. Nothing currently measures this. Emit per-index size alongside table size so bloat is visible before it is a problem, and document `REINDEX CONCURRENTLY` as a runbook rather than automating it: a rebuild is a heavy operation and the decision to run one belongs to an operator with context, not a threshold.
+- [ ] **Console: index and bloat metrics appear in the admin operability surface** *(UI → Epic 41)*, next to health and budgets. A metric that exists only in Prometheus is a metric the person running a single-binary deployment will not see.
 - [ ] The service runs with Postgres as its only required dependency.
 - [ ] An optional dependency failing yields `200 degraded`, never `503`.
 - [ ] Every metric emitted anywhere in the workspace conforms to the observability contract — asserted by a CI check over the metric registry, not by review.

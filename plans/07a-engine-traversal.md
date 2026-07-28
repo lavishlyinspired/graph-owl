@@ -1,7 +1,7 @@
 # Plan: Graph Traversal Engine (Epic 7a)
 
 **Branch**: feat/engine-traversal
-**Status**: Not started
+**Status**: **In progress** — core shipped (slices A–E): frontier primitive, `neighbours`/`subgraph`, `shortest_path`, `all_paths`, `detect_cycles`
 **Depends on**: Epic 4 (triples, SPOT/POST/OPST indexes)
 **Unblocks**: Epic 7 (property paths), Epic 29 (lineage), Epic 14 (subgraph for MCP)
 **Crates**: **`graph-owl-traversal`** (new — pure graph algorithms over the `TripleStore` port)

@@ -1,6 +1,6 @@
 # Plan: Authentication & Authorization (Epics 12–13)
 **Branch**: feat/authn (Epic 12), feat/authz (Epic 13 — authorization & policy)
-**Status**: Not started
+**Status**: **In progress** — console sign-in and authorization shipped (Demo 2); policy dry-run surface still open
 **Depends on**: Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to)
 **Unblocks**: multi-team production use
 **Crates**: **`graph-owl-authz`** (new — pure policy evaluator) · `graph-owl-core` (Principal) · `graph-owl-server` (JWT/JWKS middleware, extractor swap) · `graph-owl-api` (facade enforcement) · `graph-owl-storage-postgres` (predicate lowering to SQL)

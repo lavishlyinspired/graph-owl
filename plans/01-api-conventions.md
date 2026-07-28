@@ -1,6 +1,6 @@
 # Plan: API Conventions & Contract (Epic 1)
 **Branch**: feat/api-conventions
-**Status**: Not started
+**Status**: **Shipped** — slices A–C (RFC 9457 errors, all-violations-at-once validation, keyset pagination). Demo 1
 **Depends on**: nothing
 **Unblocks**: everything
 **Crates**: `graph-owl-core` (Principal, Page, RelationshipType) · `graph-owl-api` (CatalogError) · `graph-owl-server` (problem+json, OpenAPI, extractors)

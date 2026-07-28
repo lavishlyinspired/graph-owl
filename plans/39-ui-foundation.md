@@ -1,7 +1,7 @@
 # Plan: Console Foundation, Discovery & Entity Pages (Epic 39)
 
 **Branch**: feat/ui-foundation
-**Status**: Not started
+**Status**: **In progress** — shell, search, entity page and time control shipped; Slice E's trust components and the base-direction primitive still open
 **Depends on**: Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (authz)
 **Unblocks**: Epic 40 (graph explorer), Epic 41 (workbench & governance)
 **Crates**: **`graph-owl-ui`** (new — embeds and serves the built SPA) · `graph-owl-server` (mounts it) · frontend sources in **`ui/`**, outside `crates/`

@@ -1,6 +1,6 @@
 # Plan: Users, Teams & Ownership (Epic 11)
 **Branch**: feat/ownership
-**Status**: Not started
+**Status**: **In progress** — shipped into Demo 2
 **Depends on**: Epic 3 (envelope carries `owners`)
 **Unblocks**: Epic 24 (term reviewers), Epic 13 (roles attach to users/teams)
 **Crates**: `graph-owl-core` (User, Team, EntityReference, cycle detection) · `graph-owl-storage` · `graph-owl-storage-postgres` · `graph-owl-api` · `graph-owl-server`

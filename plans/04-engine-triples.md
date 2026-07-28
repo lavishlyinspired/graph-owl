@@ -511,6 +511,98 @@ written. Cheap to get right now, expensive to get wrong.
   engine's uses its own history table. Refinery's default would make each
   runner treat the other's migrations as unknown and refuse to run.
 
+## Indexing review, 28 July 2026 — what was proposed, and what survives
+
+An indexing analysis was reviewed against this schema. **Its headline
+recommendations were mostly already built, already planned, or resting on a
+misreading of the migration.** Recorded so the same proposals are not re-made,
+and so the two real findings are not lost among them.
+
+### Rejected: "dictionary-encode everything to integer IDs" as stated
+
+The premise is half true. Namespaces **are** already dictionary-encoded —
+`namespace_s`, `namespace_p`, `value_ref_ns` and `cx_namespace` are all
+`INTEGER CHECK (… BETWEEN 0 AND 65535)`, backed by the compile-time registry and
+the runtime one from Slice H. What is not encoded is the *local part*
+(`sid_s TEXT`).
+
+The proposed replacement — `flakes_encoded(s_id, p_id, o_id)` with every term a
+foreign key into one dictionary — **discards the namespace/local split**, and
+with it the namespace registry and the predicate registry that Slice H just made
+enforceable on write. That is a large regression sold as an optimisation. Its
+arithmetic is also wrong: it proposes `INTEGER` columns (4 bytes) and then claims
+"24 bytes (3 × 8-byte integers)".
+
+**What survives**: encoding the *local part* alone, leaving the namespace columns
+as they are, is a real and much smaller question. It is a **measurement**
+question for `37a-scale.md`, not a design one — at 1,234 flakes over 124 subjects
+the index width is not what limits anything, and the trigger is a measured index
+size or seek time at scale, not the observation that other stores do it.
+
+### Rejected on fact: "no full-text search, not planned"
+
+`08-engine-search.md` already specifies **BM25 lexical search, HNSW vector
+search, and Reciprocal Rank Fusion** to combine them. The analysis lists all
+three as missing and unplanned, then recommends them — including "RRF with
+k=60", where Epic 8 already specifies RRF *and gives the better reason*: BM25 and
+cosine scores are on incomparable scales, and any normalisation needs
+recalibrating whenever either ranker changes, so rank-only fusion is stable
+across the embedding-model swap that will happen.
+
+### Corrected: the POST index does not index `value_str`
+
+It indexes **`value_key`** — a deterministic text encoding of the object for
+*any* value type. The migration says why, in a comment written before the
+analysis was: indexing `value_str` alone "would leave an integer- or
+instant-valued object lookup on a sequential scan". The analysis describes as a
+gap the exact design this schema deliberately adopted to avoid it.
+
+Relatedly, its coverage matrix marks `(s, ?, o)` as "Scan". SPOT seeks on the
+subject and filters the object — a bounded walk of one subject's flakes, not a
+full table scan. The uncovered case is genuine but its cost is overstated, and
+overstating it is how an acceptable trade reads as a defect.
+
+### Rejected: fabricated performance targets
+
+The analysis presents a table captioned *"Performance Requirements (from
+`plans/00a-product-position.md`)"* containing `< 1ms/1000 flakes`, `< 5ms p50`
+and `< 20ms`. **None of those figures appears in that document.** A false
+citation is worse than an unsourced number, because it defeats the check that
+`00i-licensing.md` rule 4 exists to perform: a number with a stated source is
+supposed to be verifiable, and this one was designed to look as though it had
+been.
+
+### Accepted: two findings, both small
+
+1. **Index bloat monitoring is genuinely absent** — an append-only table with
+   retractions bloats indexes over time, and nothing measures it. Cheap, and it
+   belongs with the other operational surfaces → `10-operability.md`.
+2. **Statistics for join ordering are a real gap with an unstated dependency.**
+   The evaluator is adopted (`spareval`), and `07-engine-query.md` already
+   records that `sparopt` is not in the path. Statistics with no optimiser to
+   consume them is a table nobody reads, so they land **with** `sparopt` — which
+   `07` already frames as a measurement question rather than a gap.
+
+### The licensing problem, which is the most important part
+
+The analysis names both reference systems **explicitly and repeatedly**, and
+cites one of their architecture documents by filename. `CLAUDE.md` forbids
+naming them in any committed file; this plan therefore describes the patterns
+and not their sources.
+
+More seriously, one appendix is titled as an *adaptation* of a named
+reference's components — proposing to take its overlay pattern, its
+content-addressed storage and its statistics approach. `00i-licensing.md` rule 3
+forbids copying "including translated or **adapted**", and that reference is the
+source-available one with the non-compete. **This is the second occurrence of
+the failure mode `CLAUDE.md` warns about** — the first was a cache-tier table
+reproduced near-verbatim during planning, reverted at the time.
+
+None of those four items is adopted here. If any is ever wanted, it arrives the
+way `00i` rule 4 requires: from the specification or a licence-checked
+permissive implementation, justified by graph-owl's own measurements, and
+written from understanding rather than from the reference.
+
 ## Explicitly deferred (with destination)
 
 - **Interned `Sid` dictionary** → an optimization; revisit if Epic 37a's benchmarks show `(smallint, text)` indexes are the bottleneck.

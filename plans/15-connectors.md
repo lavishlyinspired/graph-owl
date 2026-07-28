@@ -1,6 +1,6 @@
 # Plan: Source Connectors (Epic 15)
 **Branch**: feat/connectors
-**Status**: Not started
+**Status**: **In progress** — Postgres connector and deletion detection shipped (Demo 1)
 **Depends on**: Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable)
 **Unblocks**: Epic 29 (connector-asserted lineage)
 **Crates**: **`graph-owl-connectors`** (new — `Connector` trait, run machinery, and the Rust Postgres reference connector; **not** a module per source — see decision 1) · `graph-owl-core` (SourceRecord) · `graph-owl-api` (bulk upsert) · `graph-owl-server` (bulk endpoints, run history)

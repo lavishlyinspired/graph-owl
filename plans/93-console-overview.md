@@ -1,6 +1,6 @@
 # Plan: Console Overview (Epic 93)
 
-**Status**: Not started
+**Status**: **In progress** — Overview shipped (Demo 3)
 **Depends on**: Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization)
 **Crates**: `graph-owl-server` (one endpoint), `ui/`
 

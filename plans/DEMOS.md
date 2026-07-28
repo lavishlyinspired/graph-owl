@@ -313,6 +313,11 @@ no library can supply actually live.
 - [ ] Write-back with agent authorship
 - [ ] Investigation and remediation proposals
 
+### Console half
+- [ ] **14** **Agent activity — sessions, reads, writes, webhooks** *(Epic 42)*. An agent writing to the catalog with no visible audit is the single scariest thing in this demo
+- [ ] **31** Memory panel and memory administration *(Epic 41)*
+- [ ] **32** Agent capabilities; **write-back audit** *(Epic 42)*
+
 ### Epic 43 — Framework integrations
 - [ ] LangChain retriever preserving provenance and confidence
 - [ ] LangGraph toolkit, manifest-parity with MCP
@@ -352,6 +357,13 @@ no library can supply actually live.
 - [ ] `source_hash` fingerprinting
 - [ ] Python connector protocol + one non-Postgres source
 
+
+### Console half
+- [ ] **16** Admin: ingestion tokens, batch job status *(Epic 41)*
+- [ ] **17** **Merge adjudication queue** *(Epic 42)* — a resolution decision made by a machine and never reviewed is a merge nobody can undo
+- [ ] **18, 19** Admin: webhook registry with deliveries; consumer lag and throughput *(Epic 41)*
+- [ ] **20** **Drift view — declared vs actual** *(Epic 42)*. Metadata-as-code without a drift screen means the repo and the catalog disagree silently, which is the failure the epic exists to prevent
+- [ ] **21** **Extraction review queue** *(Epic 42)* — extracted claims carry confidence, and a claim below the assert band that lands unreviewed is a guess wearing a fact's clothes
 ---
 
 ## Demo 7 — Business meaning and trust signals
@@ -387,6 +399,13 @@ no library can supply actually live.
 - [ ] **9** JSON-LD, Turtle, DCAT, PROV-O, OpenLineage
 - [ ] **9a** GraphML, bulk CSV, projection targets
 
+
+### Console half
+- [ ] **7b** Cypher in the workbench as a second language, same result surface *(Epic 41)*
+- [ ] **7c** **Triple ⇄ property-graph toggle** on the Knowledge tab *(Epic 42)* — the same facts in both shapes, because "is it RDF or a property graph" is the question this epic answers and a toggle answers it faster than prose
+- [ ] **7d** Admin: Bolt endpoint status, active sessions *(Epic 42)*
+- [ ] **9** **Export dialog** — format, scope, and a preview before download *(Epic 42)*. RDF 1.2 output lands here (Epic 94)
+- [ ] **9a** Same dialog; projection-target administration *(Epic 42)*
 ---
 
 ## Demo 9 — Breadth, scale, and the proof
@@ -401,6 +420,15 @@ no library can supply actually live.
 - [ ] **37c** Embeddable library, `graph-owl-storage-memory` published
 - [ ] **38** Analytics: degree, components, orphans, silos
 
+
+### Console half
+- [ ] **33** Vocabulary browser + pack install *(Epic 42)*. A pack annotates **meaning**, never flow — see `33-ontology-packs.md`
+- [ ] **34** **Nothing, deliberately** — the composable entity page absorbs five new entity families without UI work. If this needed a screen, Epic 39 decision 4 failed
+- [ ] **35** Threads and proposals *(Epic 42)*
+- [ ] **37a** Admin: budget headroom against measured limits *(Epic 41)*
+- [ ] **37b** Admin: export, restore, verify *(Epic 41)*
+- [ ] **37c** **Nothing** — a library that shipped a console would be the opposite of embeddable
+- [ ] **38** Governance reports: orphans, silos, blast radius *(Epic 41)*
 ---
 
 ## Demo 10 — Standards depth
@@ -466,6 +494,21 @@ no library can supply actually live.
 ---
 
 ## Rules for this tracer
+
+0. **This file is the single source of truth for what is built.** Per-epic
+   progress lives here, in the `[x]` / `[~]` / `[ ]` marks. Each plan's
+   `**Status**:` line is a *summary* of these marks and is derived from them —
+   never the other way round.
+
+   **Recorded because they had drifted badly.** On 28 July 2026, twelve plans
+   said "Not started" for epics this file marked shipped — including Epics 1, 2,
+   3, 15 and 39, whose work is demonstrable in Demo 1 and Demo 2, and Epic 7,
+   which had three slices in `git log`. Rule 4 below is why: this file is
+   updated in the same commit as the slice, and the status lines were not, so
+   they drifted exactly as rule 4 predicts a separately-updated tracker will.
+   The lines are corrected; the rule exists so the correction is not needed
+   again. **If the two disagree, this file is right and the status line is
+   stale** — the same relationship the `00*` documents have with the code.
 
 1. **Cumulative, always.** Demo N runs everything Demo N−1 ran. A regression in an earlier demo blocks the later one.
 2. **A demo is a runnable state**, not a checklist. If it cannot be shown end to end, it is not done regardless of how many boxes are ticked.

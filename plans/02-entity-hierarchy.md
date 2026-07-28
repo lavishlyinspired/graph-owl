@@ -1,6 +1,6 @@
 # Plan: Entity Hierarchy & Columns (Epic 2)
 **Branch**: feat/entity-hierarchy
-**Status**: Not started
+**Status**: **Shipped** — service → database → schema → table → column, 34 assets from the connector. Demo 1
 **Depends on**: Epic 1 (conventions, relationship taxonomy)
 **Unblocks**: Epics 24 (`24-business-semantics.md`), 7, 8
 **Crates**: `graph-owl-core` (service/database/schema/column types, FQN tokenizer) · `graph-owl-storage` (+ trait methods) · `graph-owl-storage-postgres` (migrations, cascade) · `graph-owl-api` · `graph-owl-server`

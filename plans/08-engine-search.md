@@ -1,6 +1,6 @@
 # Plan: Vector & Hybrid Search (Epic 8) ★
 **Branch**: feat/search
-**Status**: Not started
+**Status**: **In progress** — facets and discovery shipped (Demo 2). BM25 + HNSW + RRF fusion specified here, not yet built
 **Depends on**: Epic 3 (change events to subscribe to), Epic 2 (FQNs to rank on), Epic 25 (tags, for facets — soft: search ships before them and gains the facet later)
 **Unblocks**: Epic 34 (each new entity type indexes for free)
 **Crates**: **`graph-owl-search`** (new — VectorIndex/TextIndex ports) · **`graph-owl-search-hnsw`** (new — in-process adapter) · **`graph-owl-search-opensearch`** (new, deferred) · `graph-owl-api` · `graph-owl-server`
