@@ -20,6 +20,18 @@ pub enum EngineError {
     )]
     UnsetNamespace { position: &'static str },
 
+    /// A flake named a predicate the registry has never heard of.
+    ///
+    /// Refused rather than written, because a predicate is what makes a flake
+    /// readable: an undefined one has no datatype and no cardinality, so
+    /// nothing downstream can say what the value *means*. Time travel makes
+    /// that permanent — the row cannot be cleaned up later without deleting
+    /// history, which this store does not do.
+    #[error(
+        "predicate {namespace}:{name} is not defined; define it in the predicate registry before asserting it"
+    )]
+    UnregisteredPredicate { namespace: u16, name: String },
+
     #[error("engine backend failed: {0}")]
     Backend(String),
 }
@@ -41,10 +53,18 @@ pub trait TripleStore: Send + Sync {
     /// Re-asserting an identical flake at the same `t` is a no-op, so a
     /// retried projection converges rather than duplicating.
     ///
+    /// Every predicate must be defined in the [`PredicateRegistry`] first.
+    /// Retraction is deliberately not gated the same way — see
+    /// [`retract_flakes`].
+    ///
     /// # Errors
     ///
     /// [`EngineError::UnsetNamespace`] if any flake carries namespace 0;
+    /// [`EngineError::UnregisteredPredicate`] if any names an undefined
+    /// predicate, in which case **no** flake in the batch is written;
     /// [`EngineError::Backend`] if the write fails.
+    ///
+    /// [`retract_flakes`]: TripleStore::retract_flakes
     async fn assert_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError>;
 
     /// Withdraw facts, by writing a retraction row for each.
@@ -60,6 +80,13 @@ pub trait TripleStore: Send + Sync {
     /// Retracting a fact that was never asserted is a no-op, not an error: a
     /// reconciler re-projecting an entity cannot know which facts the previous
     /// projection managed to write.
+    ///
+    /// Unlike [`assert_flakes`], this is **not** gated on the predicate
+    /// registry. A retraction only ever withdraws a fact already in the graph;
+    /// refusing one because its predicate is no longer welcome would strand
+    /// that fact permanently — unwritable and equally un-take-back-able.
+    ///
+    /// [`assert_flakes`]: TripleStore::assert_flakes
     ///
     /// # Errors
     ///
@@ -195,11 +222,162 @@ pub fn reject_unset_namespaces(flakes: &[Flake]) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Rejects a flake naming a predicate that is not in `registered`.
+///
+/// Takes the known set rather than the registry itself so it stays pure and
+/// synchronous: the adapter owns *how* the set is obtained and cached, this
+/// owns what makes a batch acceptable. Lives here for the same reason
+/// [`reject_unset_namespaces`] does — every backend must refuse the same rows.
+///
+/// Only the predicate position is checked. Subjects and objects are data:
+/// `dsc:table-upi-transactions` is an entity nobody will ever define, and
+/// reaching into those positions would reject the whole catalog.
+///
+/// # Errors
+///
+/// [`EngineError::UnregisteredPredicate`] naming the first one not defined.
+pub fn reject_unregistered_predicates<S: std::hash::BuildHasher>(
+    flakes: &[Flake],
+    registered: &std::collections::HashSet<Sid, S>,
+) -> Result<(), EngineError> {
+    for flake in flakes {
+        if !registered.contains(&flake.p) {
+            return Err(EngineError::UnregisteredPredicate {
+                namespace: flake.p.namespace_code,
+                name: flake.p.id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn check(sid: &Sid, position: &'static str) -> Result<(), EngineError> {
     if sid.namespace_code == namespace::UNSET {
         return Err(EngineError::UnsetNamespace { position });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod unregistered_predicate_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn registered() -> HashSet<Sid> {
+        [Sid::dsc("name"), Sid::dsc("fqn")].into_iter().collect()
+    }
+
+    fn about(predicate: Sid) -> Flake {
+        Flake::assert(
+            Sid::dsc("table-upi-transactions"),
+            predicate,
+            FlakeValue::String("upi_transactions".into()),
+            1,
+        )
+    }
+
+    #[test]
+    fn a_registered_predicate_is_accepted() {
+        assert!(reject_unregistered_predicates(&[about(Sid::dsc("name"))], &registered()).is_ok());
+    }
+
+    /// Naming it is the whole point. "Unknown predicate" tells an operator
+    /// nothing they can act on; `1:rbiCircular` tells them exactly what to
+    /// define.
+    #[test]
+    fn an_unregistered_predicate_is_refused_and_named() {
+        let error =
+            reject_unregistered_predicates(&[about(Sid::dsc("rbiCircular"))], &registered())
+                .expect_err("an undefined predicate must be refused");
+
+        assert!(
+            matches!(
+                &error,
+                EngineError::UnregisteredPredicate { namespace, name }
+                    if *namespace == namespace::DSC && name == "rbiCircular"
+            ),
+            "the error must carry both halves of the identity: {error:?}"
+        );
+        assert!(
+            error.to_string().contains("rbiCircular"),
+            "and say it out loud: {error}"
+        );
+    }
+
+    /// `dsc:type` and `rdf:type` are different predicates that differ only in
+    /// namespace. A check that compared names alone would accept an
+    /// unregistered predicate whenever *any* namespace had defined that name.
+    #[test]
+    fn the_namespace_is_half_of_the_predicate_identity() {
+        let dsc_type: HashSet<Sid> = [Sid::dsc("type")].into_iter().collect();
+
+        let error =
+            reject_unregistered_predicates(&[about(Sid::new(namespace::RDF, "type"))], &dsc_type)
+                .expect_err("rdf:type is not dsc:type");
+        assert!(
+            matches!(&error, EngineError::UnregisteredPredicate { namespace, .. } if *namespace == namespace::RDF),
+            "got {error:?}"
+        );
+    }
+
+    /// A batch is written as one statement, so one undefined predicate
+    /// anywhere in it poisons the whole write — the scan cannot stop at the
+    /// first flake.
+    #[test]
+    fn an_unregistered_predicate_later_in_a_batch_is_still_caught() {
+        let batch = [
+            about(Sid::dsc("name")),
+            about(Sid::dsc("fqn")),
+            about(Sid::dsc("rbiCircular")),
+        ];
+        assert!(reject_unregistered_predicates(&batch, &registered()).is_err());
+    }
+
+    /// Subjects and objects are *data*. `dsc:table-upi-transactions` is an
+    /// entity, not vocabulary, and nothing will ever define it — a check that
+    /// reached into those positions would reject every flake in the catalog.
+    #[test]
+    fn only_the_predicate_position_is_vocabulary() {
+        let flake = Flake::assert(
+            Sid::dsc("some-entity-nobody-defined"),
+            Sid::dsc("name"),
+            FlakeValue::Ref(Sid::dsc("another-entity-nobody-defined")),
+            1,
+        );
+        assert!(reject_unregistered_predicates(&[flake], &registered()).is_ok());
+    }
+
+    /// Two undefined predicates in one batch report the *first*, so the
+    /// message an operator sees is stable across runs rather than depending on
+    /// iteration order.
+    #[test]
+    fn the_first_unregistered_predicate_is_the_one_reported() {
+        let batch = [
+            about(Sid::dsc("rbiCircular")),
+            about(Sid::dsc("dataResidency")),
+        ];
+        let error =
+            reject_unregistered_predicates(&batch, &registered()).expect_err("must be refused");
+        assert!(
+            matches!(&error, EngineError::UnregisteredPredicate { name, .. } if name == "rbiCircular"),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_batch_is_vacuously_valid() {
+        assert!(reject_unregistered_predicates(&[], &registered()).is_ok());
+    }
+
+    /// An empty registry is not a licence to write anything. It is what a
+    /// database with no migrations looks like, and asserting into it should
+    /// fail loudly rather than fill the graph with unreadable rows.
+    #[test]
+    fn an_empty_registry_admits_nothing() {
+        assert!(
+            reject_unregistered_predicates(&[about(Sid::dsc("name"))], &HashSet::new()).is_err()
+        );
+    }
 }
 
 #[cfg(test)]

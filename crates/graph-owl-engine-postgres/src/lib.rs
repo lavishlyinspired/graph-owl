@@ -12,8 +12,12 @@ pub mod value;
 
 use async_trait::async_trait;
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, TriplePattern};
-use graph_owl_engine::{EngineError, TripleStore, reject_unset_namespaces};
+use graph_owl_engine::{
+    EngineError, TripleStore, reject_unregistered_predicates, reject_unset_namespaces,
+};
 use sqlx::{PgPool, QueryBuilder, Row, postgres::PgRow};
+use std::collections::HashSet;
+use std::sync::{PoisonError, RwLock};
 
 mod embedded {
     refinery::embed_migrations!("migrations");
@@ -54,6 +58,18 @@ const MAX_FLAKES_PER_STATEMENT: usize = MAX_BIND_PARAMETERS / COLUMNS_PER_FLAKE;
 
 pub struct PostgresTripleStore {
     pool: PgPool,
+    /// The registered predicates, cached.
+    ///
+    /// Starts empty and is re-read whenever a batch names something it does
+    /// not hold, which is both the initial load and the invalidation — one
+    /// mechanism rather than two. Explicit invalidation on `define` would
+    /// cover only definitions made through *this* process; graph-owl runs as
+    /// more than one against one database, and a predicate another instance
+    /// defined a second ago is defined.
+    ///
+    /// Nothing is ever removed from the registry, so a cached entry cannot go
+    /// stale in the accepting direction — only a miss needs re-reading.
+    predicates: RwLock<HashSet<Sid>>,
 }
 
 impl PostgresTripleStore {
@@ -78,12 +94,67 @@ impl PostgresTripleStore {
             .await
             .map_err(|e| EngineError::Backend(e.to_string()))?;
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            predicates: RwLock::new(HashSet::new()),
+        })
     }
 
     #[must_use]
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Refuses a batch naming a predicate the registry has never heard of.
+    ///
+    /// A miss re-reads the registry before concluding absence: the cache is an
+    /// optimization, and an optimization that turns into a refusal is a bug
+    /// that only shows up on the second instance.
+    async fn reject_unregistered(&self, flakes: &[Flake]) -> Result<(), EngineError> {
+        if self.check_against_cache(flakes).is_ok() {
+            return Ok(());
+        }
+        self.reload_predicates().await?;
+        self.check_against_cache(flakes)
+    }
+
+    fn check_against_cache(&self, flakes: &[Flake]) -> Result<(), EngineError> {
+        // A poisoned lock means some thread panicked holding it. The contents
+        // are a cache of rows that are still in the database, so recovering
+        // the set is strictly better than propagating a panic into every
+        // subsequent write.
+        let cache = self
+            .predicates
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        reject_unregistered_predicates(flakes, &cache)
+    }
+
+    async fn reload_predicates(&self) -> Result<(), EngineError> {
+        let rows = sqlx::query("SELECT namespace, name FROM predicates")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| EngineError::Backend(e.to_string()))?;
+
+        let known = rows
+            .iter()
+            .map(|row| {
+                let namespace: i32 = row.get("namespace");
+                u16::try_from(namespace)
+                    .map(|ns| Sid::new(ns, row.get::<String, _>("name")))
+                    .map_err(|_| {
+                        EngineError::Backend(format!(
+                            "registered predicate namespace {namespace} is outside u16"
+                        ))
+                    })
+            })
+            .collect::<Result<HashSet<Sid>, _>>()?;
+
+        *self
+            .predicates
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = known;
+        Ok(())
     }
 
     /// Appends the pattern's bound terms as `AND` clauses.
@@ -331,6 +402,15 @@ fn flake_from_row(row: &PgRow) -> Result<Flake, EngineError> {
 #[async_trait]
 impl TripleStore for PostgresTripleStore {
     async fn assert_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError> {
+        // Namespace validity first. An uninitialized predicate is not an
+        // undefined one, and namespace 0 will never be in the registry — so
+        // the registry check would report `0:name is not defined`, which is
+        // true, useless, and points at the wrong repair.
+        //
+        // `write` checks again, because it is the one place a row is written
+        // and its guarantee should not depend on which caller reached it.
+        reject_unset_namespaces(flakes)?;
+        self.reject_unregistered(flakes).await?;
         self.write(flakes, true).await
     }
 

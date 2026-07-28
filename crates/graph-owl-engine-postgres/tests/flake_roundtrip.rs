@@ -7,7 +7,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, TriplePattern, namespace};
-use graph_owl_engine::TripleStore;
+use graph_owl_engine::{PredicateDef, PredicateRegistry, TripleStore};
 use graph_owl_engine_postgres::PostgresTripleStore;
 use testcontainers_modules::{
     postgres::Postgres,
@@ -39,6 +39,37 @@ fn subject() -> Sid {
 
 fn flake(predicate: &str, value: FlakeValue, t: i64) -> Flake {
     Flake::assert(subject(), Sid::dsc(predicate), value, t)
+}
+
+/// Where a test's own vocabulary goes.
+///
+/// The value-variant tests below need ten distinct predicates to tell ten
+/// variants apart, and the catalog vocabulary has no `Bytes`, `Uuid` or
+/// `Duration` predicate to borrow. Inventing them in the `dsc:` namespace
+/// would put runtime definitions in the range core migrations own; the
+/// runtime range is where an organisation's own terms belong, and defining
+/// them before use is the extension path Slice H exists to provide.
+const TEST_NS: u16 = namespace::RUNTIME_START;
+
+fn runtime_flake(predicate: &str, value: FlakeValue, t: i64) -> Flake {
+    Flake::assert(subject(), Sid::new(TEST_NS, predicate), value, t)
+}
+
+/// Defines each predicate with the value type it is actually used with, so
+/// the registry is not left describing a vocabulary the test contradicts.
+async fn define_test_vocabulary(store: &PostgresTripleStore, cases: &[(&str, FlakeValue)]) {
+    for (name, value) in cases {
+        store
+            .define(&PredicateDef {
+                namespace: TEST_NS,
+                name: (*name).to_string(),
+                value_type: value.value_type(),
+                many: false,
+                core: false,
+            })
+            .await
+            .unwrap_or_else(|e| panic!("define {name}: {e}"));
+    }
 }
 
 async fn all_for_subject(store: &PostgresTripleStore) -> Vec<Flake> {
@@ -85,12 +116,13 @@ async fn every_value_variant_round_trips() {
         ("freshnessSla", FlakeValue::Duration(86_400)),
     ];
 
+    define_test_vocabulary(&store, &cases).await;
     let flakes: Vec<Flake> = cases
         .iter()
         .enumerate()
         .map(|(i, (predicate, value))| {
             let t = i64::try_from(i).expect("index fits") + 1;
-            flake(predicate, value.clone(), t)
+            runtime_flake(predicate, value.clone(), t)
         })
         .collect();
     store.assert_flakes(&flakes).await.expect("write");
@@ -135,11 +167,17 @@ async fn instants_round_trip_at_microsecond_precision() {
 #[tokio::test]
 async fn non_finite_floats_survive_storage() {
     let (store, _container) = store().await;
+    let cases: Vec<(&str, FlakeValue)> = vec![
+        ("nan", FlakeValue::Float(f64::NAN)),
+        ("inf", FlakeValue::Float(f64::INFINITY)),
+        ("negInf", FlakeValue::Float(f64::NEG_INFINITY)),
+    ];
+    define_test_vocabulary(&store, &cases).await;
     store
         .assert_flakes(&[
-            flake("nan", FlakeValue::Float(f64::NAN), 1),
-            flake("inf", FlakeValue::Float(f64::INFINITY), 2),
-            flake("negInf", FlakeValue::Float(f64::NEG_INFINITY), 3),
+            runtime_flake("nan", FlakeValue::Float(f64::NAN), 1),
+            runtime_flake("inf", FlakeValue::Float(f64::INFINITY), 2),
+            runtime_flake("negInf", FlakeValue::Float(f64::NEG_INFINITY), 3),
         ])
         .await
         .expect("write");

@@ -1,7 +1,10 @@
 # Plan: Triple Storage & Time-Travel (Epic 4) ★
 
 **Branch**: feat/engine-triples
-**Status**: Slices A–D and F complete; G partial (projection wired and failure-isolated, reconciler not built). E and H not started. See *Implementation findings* below
+**Status**: Slices A–H complete, with two named carry-overs — cardinality and
+value type are recorded per predicate but not *enforced* on write (both are
+constraints, and go to Epic 5), and RDF 1.2 vocabulary goes to Epic 94. See
+*Implementation findings* below
 **Depends on**: Epic 3 (four entity types with an envelope to project)
 **Unblocks**: Epics 5, 6, 7, 8, 9, and the time-travel differentiator
 **Crates**: `graph-owl-engine` (port), `graph-owl-engine-postgres` (adapter)
@@ -324,6 +327,36 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with `td
 **RED**: Cardinality test asserting `one` rejects a second assertion and `many` accepts. A test asserting a core predicate cannot be redefined. Mutator watch: an unenforced cardinality must fail; a mutable core predicate must fail.
 **GREEN**: registry table, trait, seed migration, cache.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**Built.** Definition, lookup, listing, duplicate refusal, core immutability and
+enforcement-on-assert all landed. Three things the plan did not anticipate:
+
+1. **The cache invalidates itself by missing.** The plan asked for a cache
+   plus an invalidation on definition change; that is two mechanisms, and the
+   second one only ever covers definitions made through *this* process.
+   graph-owl runs as more than one process against one database, so a local
+   miss is not evidence of absence — it re-reads the registry before concluding
+   anything. That single rule is the initial load, the invalidation, and the
+   multi-instance case at once. Nothing is ever deleted from the registry, so a
+   cached entry cannot go stale in the accepting direction.
+
+2. **Retraction is not gated, and should not be.** The plan said "asserting a
+   flake with an unregistered predicate → error", and taking that literally is
+   correct: a retraction only ever withdraws a fact already in the graph.
+   Refusing one because its predicate is unwelcome would strand that fact
+   permanently — unwritable and equally un-take-back-able. The gate belongs on
+   the way in.
+
+3. **Error precedence had to be decided.** Namespace 0 will never be in the
+   registry, so the registry check would happily report `0:name is not
+   defined` — true, useless, and pointing at the wrong repair. The unset-
+   namespace check runs first so the caller hears that the field was never set.
+
+**Carried to Epic 5**: cardinality (`one` rejecting a second value) and value
+type are *recorded* per predicate and not *enforced*. Both are constraints
+evaluated against stored facts, which is Epic 5's subject and not a write-path
+concern — enforcing cardinality on write would also require reading current
+state on every assert, which is the cost the flake design exists to avoid.
 
 ## Implementation findings (Slices A–B)
 
