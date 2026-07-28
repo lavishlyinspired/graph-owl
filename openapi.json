@@ -881,6 +881,16 @@
               }
             },
             "description": "No such resource, or not visible to this principal"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "At the concurrency limit for this path; refused rather than queued. `Retry-After` names the interval"
           }
         },
         "security": [],
@@ -997,6 +1007,16 @@
               }
             },
             "description": "Authentication required"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "At the concurrency limit for this path; refused rather than queued. `Retry-After` names the interval"
           }
         },
         "security": [
@@ -1035,6 +1055,16 @@
               }
             },
             "description": "Authentication required"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "At the concurrency limit for this path; refused rather than queued. `Retry-After` names the interval"
           }
         },
         "security": [
@@ -1168,6 +1198,16 @@
               }
             },
             "description": "Authentication required"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "At the concurrency limit for this path; refused rather than queued. `Retry-After` names the interval"
           }
         },
         "security": [

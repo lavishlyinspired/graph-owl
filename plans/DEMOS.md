@@ -236,7 +236,8 @@ test's scrape had already installed the recorder.
 - [x] Invalid configuration is refused **naming the variable**, per this epic's first acceptance criterion, and a value large enough to overflow is refused rather than wrapping into a small budget that sails through the check
 
 **Pending in this epic**
-- Admission control — the bounded semaphore and fast `503` in the observability contract
+- [x] **Admission control** — a bounded semaphore per class fronting the expensive paths; a request that cannot get a permit is rejected **immediately** with `503` and `Retry-After`, never queued. An unbounded queue converts overload into latency collapse: everyone waits, everyone times out, everyone retries, and the queue grows. A fast `503` lets a well-behaved client back off while the requests already in flight finish at normal speed
+- [x] Permits available, held and rejections are exported per class, so "overloaded" and "broken" — which look identical from outside and demand opposite responses — are distinguishable
 - Spans across port boundaries: `tracing` is wired but the facade → storage and query → triple-store child spans are not, so a slow request is not yet attributable to a layer
 - `db_pool_connections{state}` and `catalog_entities_total{entity_type}` gauges (Slice D lists both; only the two HTTP series ship)
 

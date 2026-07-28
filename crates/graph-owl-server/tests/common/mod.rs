@@ -17,6 +17,7 @@ use testcontainers_modules::{
 /// See `plans/00g-operations.md`, "Supported PostgreSQL versions".
 const POSTGRES_IMAGE_TAG: &str = "18-alpine";
 
+#[allow(dead_code)]
 pub async fn test_app() -> (axum::Router, ContainerAsync<Postgres>, String) {
     build_app(None).await
 }
@@ -30,7 +31,29 @@ pub async fn test_app_with_secret(
     build_app(Some(secret)).await
 }
 
+/// Same, with admission limits the test chooses.
+///
+/// The caller keeps the `Arc`, which is what makes the rejection tests
+/// deterministic: a permit held directly by the test needs no second in-flight
+/// request and therefore no sleep, no timing window, and no flake.
+#[allow(dead_code)]
+pub async fn test_app_with_admission(
+    admission: &Arc<graph_owl_server::admission::Admission>,
+) -> (axum::Router, ContainerAsync<Postgres>, String) {
+    let (container, connection_string, catalog) = build_catalog(None).await;
+    (
+        graph_owl_server::app_with_admission(catalog, Arc::clone(admission)),
+        container,
+        connection_string,
+    )
+}
+
 async fn build_app(secret: Option<&str>) -> (axum::Router, ContainerAsync<Postgres>, String) {
+    let (container, connection_string, catalog) = build_catalog(secret).await;
+    (graph_owl_server::app(catalog), container, connection_string)
+}
+
+async fn build_catalog(secret: Option<&str>) -> (ContainerAsync<Postgres>, String, Catalog) {
     match secret {
         Some(secret) => unsafe { std::env::set_var("GRAPH_OWL_JWT_SECRET", secret) },
         None => unsafe { std::env::remove_var("GRAPH_OWL_JWT_SECRET") },
@@ -61,7 +84,7 @@ async fn build_app(secret: Option<&str>) -> (axum::Router, ContainerAsync<Postgr
         .with_graph(graph.clone())
         .with_traversal(graph);
 
-    (graph_owl_server::app(catalog), container, connection_string)
+    (container, connection_string, catalog)
 }
 
 #[allow(dead_code)]

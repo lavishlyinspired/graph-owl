@@ -404,7 +404,7 @@ fn problem(status: u16, title: &str) -> (String, Value) {
     )
 }
 
-/// The OpenAPI 3.1 document.
+/// The `OpenAPI` 3.1 document.
 ///
 /// # Panics
 ///
@@ -460,6 +460,19 @@ pub fn document() -> Value {
             let (code, value) = problem(
                 400,
                 "The request body is invalid; every violation is listed",
+            );
+            responses.insert(code, value);
+        }
+        // Asked of `admission` rather than restated here, so the contract
+        // cannot claim a `503` the middleware does not produce — or, worse,
+        // omit one it does. A generated client that has no branch for the
+        // refusal treats a shed request as a transport failure and retries it
+        // immediately, which is the storm admission control exists to end.
+        if crate::admission::class_of(route.path).is_some() {
+            let (code, value) = problem(
+                503,
+                "At the concurrency limit for this path; refused rather than queued. \
+                 `Retry-After` names the interval",
             );
             responses.insert(code, value);
         }

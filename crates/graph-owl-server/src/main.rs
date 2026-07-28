@@ -40,6 +40,27 @@ async fn main() {
         std::process::exit(78);
     }
 
+    // Read here for the same reason the budget is: a configuration fault is
+    // reported as a configuration fault, at startup, naming the variable —
+    // rather than surfacing later as a path that refuses every request for a
+    // reason nothing on the wire explains.
+    let admission =
+        match graph_owl_server::admission::Admission::from_env(|name| std::env::var(name).ok()) {
+            Ok(admission) => Arc::new(admission),
+            Err(error) => {
+                tracing::error!("{error}");
+                std::process::exit(78); // EX_CONFIG
+            }
+        };
+    for class in graph_owl_server::admission::Class::ALL {
+        tracing::info!(
+            class = class.label(),
+            permits = admission.limit(*class),
+            variable = class.env(),
+            "admission control: requests beyond this limit are refused, not queued"
+        );
+    }
+
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     // Redacted at every mention. `DATABASE_URL` is the one value that is both
     // routinely logged — it names what a startup failure is about — and
@@ -105,12 +126,15 @@ async fn main() {
         ),
     }
 
-    axum::serve(listener, graph_owl_server::app(catalog))
-        // Drains in-flight requests rather than cutting them mid-write.
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutdown signal received; draining in-flight requests");
-        })
-        .await
-        .expect("server error");
+    axum::serve(
+        listener,
+        graph_owl_server::app_with_admission(catalog, admission),
+    )
+    // Drains in-flight requests rather than cutting them mid-write.
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutdown signal received; draining in-flight requests");
+    })
+    .await
+    .expect("server error");
 }

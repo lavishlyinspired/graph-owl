@@ -1,3 +1,4 @@
+pub mod admission;
 pub mod budget;
 pub mod jwks;
 pub mod observability;
@@ -30,7 +31,22 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use uuid::Uuid;
 
+/// The router with default admission limits.
+///
+/// Kept as the one-argument function every test already calls. The composition
+/// root uses [`app_with_admission`], because config is read once at startup and
+/// an invalid value must refuse to start rather than be silently defaulted here.
 pub fn app(catalog: Catalog) -> Router {
+    app_with_admission(
+        catalog,
+        Arc::new(admission::Admission::with_limits(
+            &[],
+            admission::DEFAULT_RETRY_AFTER_SECONDS,
+        )),
+    )
+}
+
+pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>) -> Router {
     // Installed when the app is built, not on the first scrape. The `metrics`
     // facade drops every measurement taken before a recorder exists, so a
     // lazily-installed one loses everything up to the first request Prometheus
@@ -101,6 +117,11 @@ pub fn app(catalog: Catalog) -> Router {
     };
 
     router
+        // **Inside** the observability layer, so a shed request is still
+        // logged, still counted, and still gets its request id echoed back. A
+        // rejection that no metric records is an overload an operator finds out
+        // about from a customer.
+        .layer(axum::middleware::from_fn_with_state(admission, admit))
         // `layer`, not `route_layer`: this must run after routing so
         // `MatchedPath` is in the extensions and the metric label is the route
         // template rather than the concrete path.
@@ -127,6 +148,47 @@ pub fn app(catalog: Catalog) -> Router {
         // A fallback registered first turns every mistyped endpoint into a 200
         // text/html and the client sees a blank page instead of an error.
         .merge(graph_owl_ui::router())
+}
+
+/// Take a permit for the expensive paths, or refuse the request outright.
+///
+/// The permit is bound for the whole of `next.run` and dropped when this scope
+/// ends — releasing it any earlier would let the semaphore admit a second
+/// request while the first is still holding a connection, which is a limit that
+/// counts *arrivals* rather than concurrency and therefore no limit at all.
+///
+/// The route **template** decides, not the path: reading the concrete URI would
+/// mean `/assets/<uuid>/graph` matched nothing and the most expensive read in
+/// the API went uncontrolled.
+async fn admit(
+    State(admission): State<Arc<admission::Admission>>,
+    request: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(axum::extract::MatchedPath::as_str)
+        .map(ToString::to_string);
+
+    let Some(class) = route.as_deref().and_then(admission::class_of) else {
+        return next.run(request).await;
+    };
+
+    // `_permit`, not `_`. A binding named `_` drops at the end of the
+    // statement, which would release the permit before the handler had even
+    // started — a limit on arrivals rather than on concurrency, and one that
+    // still passes a naive test because the first request is always admitted.
+    // A leading underscore keeps it bound to the end of this scope.
+    let Some(_permit) = admission.try_admit(class) else {
+        return AppError::Overloaded {
+            class: class.label(),
+            retry_after_seconds: admission.retry_after_seconds(),
+        }
+        .into_response();
+    };
+
+    next.run(request).await
 }
 
 async fn create_table(
@@ -665,6 +727,14 @@ enum AppError {
         relationship: &'static str,
         to: &'static str,
     },
+    /// No permit was available on an admission-controlled path. The request is
+    /// **refused, not queued** — see `admission`. Distinct from every other
+    /// error here in that nothing about the request is wrong: it is the only
+    /// variant a client is told to simply send again.
+    Overloaded {
+        class: &'static str,
+        retry_after_seconds: u64,
+    },
 }
 
 impl AppError {
@@ -690,6 +760,7 @@ impl AppError {
             AppError::TokenExpired => "token-expired",
             AppError::TokenInvalid(_) => "token-invalid",
             AppError::IllegalRelationship { .. } => "illegal-relationship",
+            AppError::Overloaded { .. } => "overloaded",
         }
     }
 
@@ -715,6 +786,7 @@ impl AppError {
             AppError::TokenExpired => "Token expired",
             AppError::TokenInvalid(_) => "Token invalid",
             AppError::IllegalRelationship { .. } => "Illegal relationship",
+            AppError::Overloaded { .. } => "Server overloaded",
         }
     }
 
@@ -731,6 +803,7 @@ impl AppError {
                 StatusCode::UNAUTHORIZED
             }
             AppError::Forbidden => StatusCode::FORBIDDEN,
+            AppError::Overloaded { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -772,6 +845,18 @@ impl AppError {
                 relationship,
                 to,
             } => format!("`{from}` may not `{relationship}` a `{to}`"),
+            // Names the class, because "the server is busy" and "the *ingestion*
+            // path is busy" call for different responses: the first says stop,
+            // the second says this one endpoint is saturated and the rest of the
+            // catalog is still answering.
+            AppError::Overloaded {
+                class,
+                retry_after_seconds,
+            } => format!(
+                "the {class} path is at its concurrency limit and this request was refused \
+                 rather than queued. Retry after {retry_after_seconds}s — nothing about the \
+                 request itself is wrong"
+            ),
         }
     }
 }
@@ -880,6 +965,22 @@ impl IntoResponse for AppError {
             axum::http::header::CONTENT_TYPE,
             axum::http::HeaderValue::from_static("application/problem+json"),
         );
+
+        // `Retry-After` is the half of a `503` that makes it actionable. A
+        // rejection without one leaves every client to invent its own backoff,
+        // and the ones that invent "immediately" are what turn a shed load into
+        // a retry storm — the exact failure admission control exists to stop.
+        if let AppError::Overloaded {
+            retry_after_seconds,
+            ..
+        } = &self
+            && let Ok(value) = axum::http::HeaderValue::from_str(&retry_after_seconds.to_string())
+        {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+
         response
     }
 }
