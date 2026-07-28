@@ -1671,7 +1671,12 @@ function AppShell() {
     api
       .roots()
       .then((roots) => {
+        // Both cleared, not just `refused`. A reader who was denied and has
+        // since been granted a role would otherwise keep the denial screen
+        // until they reloaded — and reloading is the thing they were told the
+        // problem was not.
         setRefused(false);
+        setDenied(false);
         setIndex((i) => ({ ...i, ...Object.fromEntries(roots.map((r) => [r.id, r])) }));
         setNodes(roots.map(toNode));
       })
@@ -1688,7 +1693,22 @@ function AppShell() {
       .catch(() => setStats([]));
   }, [toNode]);
 
-  useEffect(refresh, [refresh]);
+  // **Gated on the sign-in having settled, and re-run when it does.**
+  //
+  // On the OIDC callback this component mounts *while the code is still being
+  // exchanged*, so a request fired now goes out with no token, comes back 401,
+  // and sets `refused`. Nothing cleared it: the exchange then succeeded, the
+  // token arrived, and the console kept showing the sign-in screen to a user
+  // who had just signed in — indistinguishable from the sign-in never having
+  // worked.
+  //
+  // Waiting through `loading` avoids the doomed request; depending on the
+  // status re-runs the load the moment the token exists.
+  const authStatus = auth.state.status;
+  useEffect(() => {
+    if (authStatus === "loading") return;
+    refresh();
+  }, [refresh, authStatus]);
 
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("asset");
