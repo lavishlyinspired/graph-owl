@@ -65,6 +65,34 @@ bigger than it is and restructuring something that is already right.**
    engine it has no relationship with. This epic depends on Epic 4 and Epic 9.
    Nothing else.
 
+7. **A SPARQL query using `rdf:reifies` is answered by synthesising the
+   reifying quad at the query surface — not by storing it, and not in
+   pushdown.** This epic owns the tie that `07-engine-query.md` decision 7 and
+   `09-engine-rdf-io.md` decision 4 were each deferring to the other.
+
+   **The problem is real.** `rdf:reifies` appears nowhere in `graph-owl-core`
+   or `graph-owl-query`; the store writes `dsc:fromEntity`, `dsc:toEntity`,
+   `dsc:relType`. So `?rel rdf:reifies << ?a ?p ?b >>` returns **zero rows**
+   today, which a caller cannot tell apart from an empty graph.
+
+   **Where it goes.** `FlakeDataset::from_flakes` (`dataset.rs`) is a 1:1
+   flake → quad projection and is the surface the evaluator scans. When it
+   meets a relationship node's predicate set it emits, *in addition to* the
+   existing quads, one `(rel) rdf:reifies << a p b >>` quad. Store unchanged,
+   flake count unchanged, decision 3 intact, and the pattern matches for real.
+
+   **Not in pushdown**, which is where this was first proposed. `pushdown.rs`
+   narrows *which flakes are fetched*; it cannot conjure a quad with no flake
+   behind it. Teaching pushdown about `rdf:reifies` without teaching the
+   dataset would narrow a scan for facts that do not exist — the same zero
+   rows, reached faster. Pushdown learns the pattern *after*, as a performance
+   concern, and only if measurement asks for it.
+
+   **First thing the slice must check**: whether `oxrdf 0.3`'s `Term` exposes
+   its triple variant under the features in use. If it does not, the honest
+   move is to refuse the pattern with an error naming why — never to return
+   zero rows, which is the failure this decision exists to remove.
+
 ## Implementation reference
 
 ```rust
@@ -94,6 +122,35 @@ Sparse by design: populated only for values that need it, joined only when a
 query asks for language or direction. Widening the flake row — the hottest,
 most-replicated structure in the system — to serve a minority of values is the
 wrong trade, and denying the need is worse than paying for it narrowly.
+
+## Rejected: storing `rdf:reifies` as a `Ref`
+
+Proposed as the cheap middle ground — one extra flake per relationship,
+`(rel) rdf:reifies (rel)` as an ordinary `Ref` rather than a
+`FlakeValue::TripleTerm`, avoiding the feared doubling. **It is unsound three
+times over, and recorded so it is not proposed again.**
+
+1. **It is not conformant RDF 1.2.** The specification is unambiguous: *"A
+   reifying triple is a triple where the predicate is `rdf:reifies` and the
+   object is a triple term."* An IRI in that position is not permitted
+   (verified at w3.org, 28 July 2026). The proposal writes a triple the
+   standard forbids, in an epic whose entire purpose is standards alignment.
+2. **It does not solve the problem it was proposed for.**
+   `?rel rdf:reifies << ?a ?p ?b >>` *still* returns zero rows, because the
+   stored object is an IRI and the pattern wants a triple term. Only
+   `?rel rdf:reifies ?x` matches — binding `?x` to the relationship node,
+   where any RDF 1.2-aware consumer expects a triple term.
+3. **Its export benefit does not exist.** The serializer must still
+   reconstruct `<< a p b >>` from `fromEntity` / `toEntity` / `relType`; the
+   stored row hands it nothing it did not already have.
+
+**And it inverts its own argument.** The case for acting was that zero rows are
+worse than wrong rows, because the caller concludes the graph is empty. This
+proposal converts an obvious zero into a *subtly wrong binding* — trading a
+loud failure for a silent one, which is the direction this project's documents
+consistently refuse. A "both options" combination inherits all of the above and
+reduces to decision 7 alone, since the stored row contributes nothing but
+non-conformant rows.
 
 ## What the change looks like end to end
 
@@ -189,6 +246,33 @@ intact. The negative case matters as much: a plain string must not acquire a
 direction, or every literal in the catalog gains a meaningless `ltr`.
 **Done when**: criteria met, mutation report reviewed.
 
+### Slice D: `rdf:reifies` at the query surface
+
+Implements decision 7. **Gated on a product call, not a technical one**: it is
+worth building when SPARQL is a first-class query interface for external
+consumers, and not worth it while SPARQL's job is export. That call has not
+been made — this slice is specified so it is ready when it is, not scheduled
+because it is possible.
+
+**Acceptance criteria**: `?rel rdf:reifies << ?a ?p ?b >>` binds against a
+reified relationship; the flake count is unchanged, asserted on the same
+catalogue run as the other slices; the synthesised quad carries the same
+`as_of` and access-predicate treatment as every other quad, because it is built
+from flakes that were already filtered; a relationship the principal may not
+see produces no reifying quad.
+
+**RED**: the zero-rows test — a query using the standard vocabulary against an
+estate that plainly contains relationships must not return an empty result.
+This is the whole reason the slice exists, and it is the one failure that looks
+like success. Second RED: the authorization test, since a synthesised quad is
+new surface area and a fact assembled *after* filtering could reintroduce an
+endpoint the filter removed. Mutator watch: emitting the reifying quad from
+unfiltered flakes must fail; dropping the triple-term object in favour of the
+relationship IRI must fail the pattern match, which is the rejected proposal
+above failing on contact.
+
+**Done when**: criteria met, mutation report reviewed, flake count unchanged.
+
 ## Explicitly deferred
 
 - **Nested triple terms beyond one level** → the `Box` admits them; nothing
@@ -196,5 +280,10 @@ direction, or every literal in the catalog gains a meaningless `ltr`.
 - **RDF 1.2 Turtle/TriG syntax** → those documents are Working Draft. Epic 9
   emits the RDF 1.1 syntaxes; the 1.2 surface syntax follows its own spec to
   Recommendation.
-- **`rdf:reifies` written into the store** → decision 3. The trigger is a SPARQL
-  query needing to match triple-term patterns.
+- **`rdf:reifies` written into the store** → decision 3, and **the trigger has
+  now been examined and did not fire**. It read "a SPARQL query needing to match
+  triple-term patterns", which decision 7 answers at the query surface instead —
+  same capability, no store change, no doubling. The remaining trigger for
+  storing it is narrower than it was: a query shape that must *scan* reifying
+  quads faster than they can be synthesised, which is a measurement nobody has
+  yet had cause to take.
