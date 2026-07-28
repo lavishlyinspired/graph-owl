@@ -106,6 +106,28 @@ pub struct PackOverride {                // extend-without-fork
 
 General-purpose packs ship first: permissively licensed, universally useful, and they prove the mechanism without licence complexity.
 
+### A pack vocabulary describes what data *means*, never how it *flows*
+
+A fourth distinction to add to the three in `CLAUDE.md` that keep getting conflated, because this one has now been proposed once and is the most plausible of the lot.
+
+**Business vocabulary and lineage vocabulary are different layers, and a pack only ever supplies the first.** FIBO is the clearest case: it is, in the EDM Council's own framing, a *business conceptual model* — as distinct from descriptions of data or IT implementations. It says what a loan, a counterparty, or a principal amount **is**. It says nothing about a table feeding a dashboard, and it should not, because that is plumbing rather than finance.
+
+So this is right, and is what a pack is for:
+
+```turtle
+:loan_portfolio.principal_amount  dsc:meaning  fibo-loan:PrincipalAmount .
+```
+
+And this is a layer error:
+
+```turtle
+:rel_001  rdf:reifies << :loan_portfolio  fibo:isDataFor  :risk_report >> .
+```
+
+`fibo:isDataFor` was invented for the example; FIBO defines no such property and would not. Mapping `dsc:feeds` onto a business ontology takes a lineage fact — asset A supplies asset B — and dresses it in a vocabulary that cannot express it. If a lineage predicate ever needs a standard name on the wire, the vocabularies that model provenance are the place to look (PROV-O's `prov:wasDerivedFrom` is the obvious candidate), and that is a decision for `29-lineage.md` and `09-engine-rdf-io.md`, not for a pack.
+
+The rule this protects is already stated above: **packs supply vocabulary, not schema** — and lineage is schema. A pack that could redefine what `dsc:feeds` means on export would let a vocabulary change the shape of the graph, which is exactly the coupling the override model exists to prevent.
+
 ## Acceptance criteria
 
 - [ ] A pack imports from a standard serialization into its own glossary.

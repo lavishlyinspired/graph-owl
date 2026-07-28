@@ -273,6 +273,8 @@ above failing on contact.
 
 **Done when**: criteria met, mutation report reviewed, flake count unchanged.
 
+**Not in this slice, and not anywhere yet: mapping the triple term's predicate to a domain vocabulary.** Emitting `<< :a fibo:isDataFor :b >>` instead of `<< :a dsc:feeds :b >>` has been proposed as a natural extension of the same translation. It is not one. `rdf:reifies` is a *structural* translation — the same fact, in the shape the standard defines — and swapping the predicate for a domain ontology's is a *semantic* one, which needs an owner, a mapping table, and a rule for what happens when no mapping exists. It is also the wrong vocabulary for the job: see `33-ontology-packs.md`, "A pack vocabulary describes what data means, never how it flows". Keeping the two apart is what lets this slice stay a serialization concern.
+
 ## Explicitly deferred
 
 - **Nested triple terms beyond one level** → the `Box` admits them; nothing
