@@ -71,6 +71,12 @@ Where an independent design lands on the same decomposition as a reference, that
 
 `cargo deny` in CI with an allowlist. Permissive licences only (MIT, Apache-2.0, BSD, ISC, Unicode, Zlib). **Copyleft and source-available dependencies are rejected by default** — a GPL crate would impose its terms on the binary, and a source-available one reintroduces exactly the non-compete this document exists to avoid.
 
+**The same allowlist binds `ui/`'s npm dependencies, and this needs saying because `cargo deny` cannot see them.** The console is built by Vite and **embedded into the binary** by `graph-owl-ui` (`00f-ui-architecture.md`, "Delivery"), so an npm package ships inside the exact artifact this rule protects — it just arrives by a path the Rust audit never inspects. Enforce it with a licence check over `ui/package-lock.json` in CI, on the same allowlist, and treat a failure the same way.
+
+This is not hypothetical. The renderer analysis for Epic 40 proposed `elkjs` for lineage layout; `elkjs` is **EPL-2.0**, which the allowlist rejects. Nothing caught it, because nothing was looking at that side of the build. EPL-2.0 is *file-level* weak copyleft and would not have forced this project's own code open — the point is that a copyleft dependency reached a recommendation without the policy ever being consulted, which is the failure the check exists to prevent. It was replaced with MIT-licensed `d3-dag` (`00f-ui-architecture.md`, revision of 28 Jul 2026).
+
+**When a needed frontend library is copyleft**, the order is the same as rule 4 below: find the permissive equivalent first, and only if none exists, document the exception here with its terms and its blast radius before adopting it. "Everyone ships it" is not an exception.
+
 ## On crate and protocol names
 
 **A generic technical term is not protectable, and near-universal Rust convention is not copying.** `core`, `api`, `server`, `query`, `cli`, `storage` are what every Rust workspace calls those crates. Independent projects converge on them because they are the obvious names.

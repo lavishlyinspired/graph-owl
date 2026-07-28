@@ -14,7 +14,7 @@
 |---|---|---|---|
 | **1** | A source becomes a browsable catalog | 1, 2, 15, 39 (partial) | **Shipped** — + deletion detection |
 | **2** | A governed catalog people can trust | +3, 8, 10, 11, 12, 13 | **Shipped** — + `If-Match`/412, console sign-in, facets (gaps named per epic) |
-| **3** ★ | It is a graph engine | +4, 7, 7a, 40, 93 | **Mostly shipped** — Epic 4 A–G, 7a core, 40 core, 93 Overview. **Epic 7 (SPARQL) not started** |
+| **3** ★ | It is a graph engine | +4, 7, 7a, 40, 93 | **Mostly shipped** — Epic 4 A–H, 7 A–C (SPARQL over flakes, pushdown), 7a core, 40 A/B/D, 93 Overview. Explorer is still SVG; lineage DAG not started |
 | **4** | It reasons, and it validates | +5, 6, 41 | |
 | **5** ★ | Agents can use it | +14, 31, 32, 43 | |
 | **6** | It fills itself | +16, 17, 18, 19, 20, 21 | |
@@ -252,13 +252,15 @@ no library can supply actually live.
 - [x] `shortest_path`, `all_paths`, `detect_cycles` *(Slices C, D)* — deterministic tiebreak, hard path cap, cycles normalised so rotations are one cycle
 
 ### Epic 40 — Graph explorer ★
-- [x] Renderer-agnostic `GraphView` — the shape a Sigma canvas would consume unchanged
+- [x] Renderer-agnostic `GraphView` — the shape a WebGL canvas will consume unchanged
 - [x] Graph tab with a deterministic radial layout, hop selector, truncation shown
 - [x] **Time control** — `?asOf=` on the walk and on the asset read
-- [x] Non-visual equivalent: the same neighbourhood as a keyboard-navigable table
-- [ ] Sigma/WebGL canvas with expand-on-click — the hand-drawn SVG is honest at demo scale and will not survive 10k nodes
-- [ ] React Flow + ELK lineage DAG
-- [ ] Diff mode (two instants side by side)
+- [x] Non-visual equivalent: the same neighbourhood as a keyboard-navigable table, expansion included
+- [x] **Expand-on-click** *(Slice B)* — one hop per click, budgeted server-side; dedup by node id and by `(from, to, relationship)`; truncation **sticky and per-node**, so the marker sits on the node hiding something; `?expand=` replays the expansions, so a pasted link restores the sender's picture
+- [x] **Diff mode** *(Slice D)* — two instants, `?compareTo=`. A node removed between them is **still drawn**, marked by sigil, strikethrough and dash pattern rather than colour alone. A truncated side marks the comparison `partial`, because a partial comparison shown as complete invents deletions that never happened
+- [~] Still SVG, not WebGL — honest at demo scale, will not survive 10k nodes. Every *interaction* the swap was expected to bring already works and is tested at the model layer, so what remains is scale alone
+- [~] Diff compares the seed walk at each instant, not the expanded model — expand while comparing and the new nodes read as added regardless of when they arrived
+- [ ] React Flow + d3-dag lineage DAG
 - [ ] Derived edges visually distinct — nothing derives edges until Epic 6
 
 ---

@@ -225,6 +225,10 @@ Every production change follows RED → GREEN → MUTATE (`cargo mutants`) → K
 | 14 | **Reasoning as a queryable overlay, never persisted** | Keeps the base clean, bounds reasoning cost, keeps derivations explainable | — |
 | 15 | **~14 crates, grown on demand** | A crate is a dependency boundary, not a topic label | A crate's dependency set genuinely diverges |
 | 16 | **Property-graph-with-triples, not RDF-native** | RDF is the interchange format; the internal model keeps transactional and authorization capability | A semantic-web toolchain becomes the primary consumer |
+| 17 | **Cytoscape.js for exploration, superseding Sigma.js** | Sigma was chosen for being the WebGL option; Cytoscape has shipped a WebGL renderer since v3.31, so the deciding property is now common to both. Cytoscape adds deterministic built-in layouts, which `00f` requires for testing and Sigma would make us hand-write. Both MIT | Cytoscape's WebGL renderer misses the 10k-node budget on a CI fixture — a measurement, not an assumption |
+| 18 | **d3-dag for lineage layout, not `elkjs`** | `elkjs` is EPL-2.0; `00i` rejects copyleft by default. d3-dag is MIT, TypeScript-first, and far smaller. ELK's edge-routing advantage is mostly unrealised in React Flow, which consumes node positions and draws its own edges | A measured legibility failure at a fork on a real lineage fixture that d3-dag cannot fix |
+| 19 | **Still exactly two graph renderers; the threshold-switching hybrid is rejected** | Two libraries for one graph *shape* is the accretion `00f` consequence 2 forbids, and a mid-session swap discards the layout exactly when the user's mental map is what keeps a large graph legible | A third graph *shape* appears that neither renderer handles |
+| 20 | **The npm allowlist is the crate allowlist, checked in CI** | The console is embedded in the binary, so an npm package ships in the artifact `cargo deny` protects — by a path `cargo deny` cannot see. Found via the `elkjs` near-miss in decision 18 | — |
 
 ## Reference research
 

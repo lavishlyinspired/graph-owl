@@ -36,12 +36,24 @@ Three consequences, all binding:
 | Routing | React Router | Deep-linkable entity URLs are a hard requirement (below) |
 | Forms | JSON-Schema-driven | Epic 1 already emits JSON Schema. Generating connector and custom-property forms from it, rather than hand-writing them, is the single biggest UI-code saving available and keeps forms correct as schemas evolve |
 | Editor | CodeMirror | SPARQL and Cypher editing with syntax highlighting; lighter than the alternative |
-| Lineage / DAG | React Flow + ELK layout | Lineage is a **DAG**. Layered layout is the correct answer and force-directed is actively wrong for it |
-| Graph exploration | Sigma.js + graphology | WebGL. Exploration is an arbitrary graph at 10k+ nodes; a DOM/SVG renderer stops being interactive an order of magnitude earlier |
+| Lineage / DAG | React Flow (`@xyflow/react`) + **d3-dag** layout | Lineage is a **DAG**. Layered layout is the correct answer and force-directed is actively wrong for it. d3-dag rather than ELK: see the licence note below |
+| Graph exploration | **Cytoscape.js**, WebGL renderer | Exploration is an arbitrary graph at 10k+ nodes; a DOM/SVG renderer stops being interactive an order of magnitude earlier. Deterministic `breadthfirst` layout is a config option, which is what the testing rule below needs |
 | Testing | Vitest browser mode + Testing Library, Playwright for journeys | Per the global guidelines |
 | i18n | Externalized strings from the first commit | Retrofitting i18n is a rewrite of every component; the cost now is a lint rule |
 
-**Two renderers, deliberately.** Lineage is a directed acyclic graph read left-to-right, where a layered layout is the whole point and node count is modest. Exploration is an arbitrary cyclic graph at large scale, where WebGL and force layout are the whole point and layered layout is meaningless. One library doing both does neither well. This is the boundary; a third renderer needs a third graph shape.
+**Two renderers, deliberately.** Lineage is a directed acyclic graph read left-to-right, where a layered layout is the whole point and node count is modest. Exploration is an arbitrary cyclic graph at large scale, where WebGL is the whole point and layered layout is meaningless. One library doing both does neither well. This is the boundary; a third renderer needs a third graph shape.
+
+### Revision, 28 Jul 2026: Cytoscape replaces Sigma.js, d3-dag replaces ELK
+
+Both rows above changed. The **rule** did not: still exactly two renderers, still one per shape.
+
+**Exploration: Cytoscape.js, not Sigma.js.** Sigma was chosen because it was the WebGL option and Cytoscape was Canvas-only. That distinction expired — Cytoscape ships a WebGL renderer from v3.31, so the one property that decided the original choice is now common to both. What is *not* common: Cytoscape has deterministic layouts built in (`breadthfirst`), and Sigma has no layouts at all — with Sigma the layout is code this project writes, owns, and tests. Since the testing rule below requires a deterministic layout, choosing Sigma means paying for that requirement in hand-written code in order to use a library whose advantage no longer exists. Both are MIT.
+
+**Lineage layout: d3-dag, not ELK.** `elkjs` is **EPL-2.0**, which is copyleft, and `00i-licensing.md` rejects copyleft dependencies by default. EPL-2.0 is *file-level* weak copyleft, so an unmodified `elkjs` used as a dependency would not force this project's own code open — it is a policy conflict, not a legal blocker, and adopting it would need a deliberate documented exception rather than a silent one. That exception is unnecessary: **d3-dag** is MIT, TypeScript-first, does layered Sugiyama layout, and is a fraction of `elkjs`'s size (`elkjs` is transpiled Java and carries that weight into a bundle this project embeds in its binary).
+
+ELK's genuine advantage over the simpler layered layouts is edge *routing* at fork points. That advantage is mostly unrealised in the standard React Flow integration, which maps ELK's **node positions** back and lets React Flow draw its own bezier edges — consuming ELK's bend points needs explicit port mapping and custom edge components on top. So the routing argument costs extra work before it pays anything, and it is not the reason to take a copyleft dependency into an embedded binary.
+
+**Rejected: a Cytoscape + Sigma hybrid switching at a node-count threshold.** Two libraries for *one* shape is the accretion consequence 2 exists to prevent, and a mid-session renderer swap discards the layout at the exact moment the user most needs it — their mental map of where things are is the main thing keeping a large graph legible. It also fails the "every magic number needs a stated reason" rule (`00i`): the proposed 10,000-node switch point is the *interactivity budget* below, not a measured Cytoscape limit, and a budget silently reused as a capability measurement is how a budget stops meaning anything. If Cytoscape's WebGL renderer misses the 10k budget on a CI fixture, that measurement is the trigger to revisit — not the assumption that it will.
 
 ## Non-negotiables
 
