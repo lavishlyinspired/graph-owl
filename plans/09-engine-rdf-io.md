@@ -46,7 +46,21 @@ pub trait VocabularyMapper {
 }
 ```
 
-Dependencies: `rio_turtle` / `rio_xml` for Turtle/N-Triples/RDF-XML, `json-ld` for expand/compact/frame. `Sid` ↔ IRI conversion uses the namespace registry from Epic 4 — a `Sid` with an unregistered namespace fails serialization loudly rather than emitting a bare local name.
+Dependencies: **`oxrdf` + `oxttl` + `oxjsonld`** — `00l-build-vs-adopt.md` names these and it is the authority on which libraries to take. This line previously said `rio_turtle` / `rio_xml` / `json-ld`; that was drift, corrected 28 July 2026. Beyond `00l`'s authority the reason is concrete: `oxrdf` is **already in the dependency tree**, pulled in by `spargebra` and `spareval`, and its `Term` is the type the query path speaks. Taking `rio` would put two RDF term representations in one codebase with a conversion layer between them, for no gain.
+
+`Sid` ↔ IRI conversion uses the namespace registry from Epic 4 — a `Sid` with an unregistered namespace fails serialization loudly rather than emitting a bare local name.
+
+**Serializing by hand-written text is not the alternative it looks like.** The acceptance criterion below requires `parse(serialize(x)) == x`, and the parser is `oxttl` regardless. Emitting text by hand while parsing with a library means owning escaping, IRI validation and literal canonicalisation on only one side of a round trip — the asymmetry is where such round trips fail, and subtly.
+
+**Consequence: Epic 94's Slices B, C and D share one feature gate.** Because this epic builds `oxrdf` terms rather than text:
+
+| Slice | Needs | Because |
+|---|---|---|
+| B — `rdf:reifies` on export | `oxrdf/rdf-12` | Emitting `<< a p b >>` means constructing `Term::Triple`, which exists only under the flag |
+| C — `rdf:dirLangString` | `oxrdf/rdf-12` | `BaseDirection` (`oxrdf/src/literal.rs:809`) is behind the same flag; without it a directional literal cannot be represented, only stored |
+| D — query-surface synthesis | `oxrdf/rdf-12` via `spargebra/sparql-12` + `spareval/sparql-12` | Both cascade to the same `oxrdf` feature |
+
+So it is **one decision, not three**, and it is taken once — for the workspace, at the point the first of the three lands. Slice C storing direction in `flake_meta` without the flag is possible but only gets it as far as the database; it could not serialize what it stored, which is not a finished slice.
 
 ### Vocabulary mappings
 

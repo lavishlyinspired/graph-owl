@@ -334,9 +334,27 @@ So "≈100 lines in `dataset.rs` only" is wrong on the file count regardless of
 the line count: `term.rs` changes too, and it changes first, because nothing
 compiles until it does.
 
-**Check before starting**: whether Slice B's serializer needs `rdf-12` too. If
-it emits Turtle as text it does not; if it builds `oxrdf` terms it does, and
-then export and query share the gate rather than merely neighbouring it.
+**Checked, 28 July 2026 — it does, and so does Slice C.** `graph-owl-rdf-io` is
+still a six-line placeholder with no RDF dependency, so this was an unmade
+decision rather than a discoverable fact. `00l-build-vs-adopt.md` settles it:
+**`oxrdf` + `oxttl` + `oxjsonld`**, so the serializer builds `oxrdf` terms.
+(`09-engine-rdf-io.md` had drifted to naming `rio_turtle`; corrected.) Emitting
+text by hand is not a real escape — the round-trip criterion means `oxttl`
+parses regardless, and owning escaping and canonicalisation on only one side of
+a round trip is where such round trips quietly fail.
+
+| Slice | Needs | Because |
+|---|---|---|
+| B — `rdf:reifies` on export | `oxrdf/rdf-12` | `Term::Triple` exists only under the flag |
+| C — `rdf:dirLangString` | `oxrdf/rdf-12` | `BaseDirection` (`oxrdf/src/literal.rs:809`) is behind the same flag |
+| D — query synthesis | same, via `spargebra`/`spareval` | Both cascade to `oxrdf/rdf-12` |
+
+**One decision, not three**, taken once for the workspace when the first of the
+three lands. This also revises the ordering argument above: C and D do not
+merely *share* a gate with each other — B does too, so the whole epic turns it
+on together. And Slice C without the flag is not a smaller Slice C: direction
+would reach `flake_meta` and never reach the wire, which is not a finished
+slice.
 
 **Not needed**: pinning the crates to exact versions as churn protection.
 `Cargo.lock` is committed, which already fixes the resolved versions for every
