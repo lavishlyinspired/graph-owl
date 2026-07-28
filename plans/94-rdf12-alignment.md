@@ -248,18 +248,71 @@ direction, or every literal in the catalog gains a meaningless `ltr`.
 
 ### Slice D: `rdf:reifies` at the query surface
 
-Implements decision 7. **Gated on a product call, not a technical one**: it is
-worth building when SPARQL is a first-class query interface for external
-consumers, and not worth it while SPARQL's job is export. That call has not
-been made — this slice is specified so it is ready when it is, not scheduled
-because it is possible.
+Implements decision 7. **Scheduled**: the product call was made — SPARQL is a
+first-class interface for external consumers, and Slice B's export is wanted
+alongside it, not instead of it. The two are complementary and share a
+dependency gate (below), so they are planned together.
+
+#### The gate is a compile-time Cargo feature, and it is not small
+
+**Measured, not assumed** (probed against the pinned versions on 28 July 2026):
+
+```
+spargebra 0.4.6, default features:
+  SELECT ?s ?t WHERE { ?rel <…/reifies> << ?s <…/feeds> ?t >> . }
+  → PARSE FAILED: "Reified triples are only available in SPARQL 1.2"
+```
+
+The query **does not parse**. It never reaches `dataset.rs`, so no amount of
+synthesis there helps. The chain is three crates deep and each link is
+`#[cfg]`, not runtime configuration:
+
+| Crate | Feature | Pulls in |
+|---|---|---|
+| `spargebra` | `sparql-12` | `oxrdf/rdf-12` |
+| `oxrdf` | `rdf-12` | `Term::Triple(Box<Triple>)` — the variant only exists under it |
+| `spareval` | `sparql-12` | `sparopt/sparql-12`, `sparesults/sparql-12` |
+
+So `oxrdf::Term` **does** have its triple variant — that was the open question,
+and the answer is "yes, behind the same switch". But it is the *third* gate, not
+the first, and finding the first required trying to parse rather than reading
+the type.
+
+**Turning the switch on is an Epic 7 scope decision, not an Epic 94
+implementation detail.** `sparql-12` is crate-wide: it enables the entire
+SPARQL 1.2 syntax surface at once — triple terms, reified-triple syntax, the
+`VERSION` declaration, double negation `!!`, `LANGDIR`, `STRLANGDIR`,
+`hasLang`, `hasLangDir`. `07-engine-query.md` decision 7 currently says the
+target is SPARQL 1.1; this slice moves the *parse* surface to 1.2 wholesale and
+cannot do otherwise. Two consequences that must be handled here rather than
+discovered later:
+
+1. **A new failure class: parses, then fails.** `STRLANGDIR(...)` and friends
+   will now parse cleanly and reach an evaluator that does not implement them.
+   Today they fail at parse with a clear message. The slice must decide what a
+   recognised-but-unimplemented 1.2 construct returns, and it must not be a
+   confusing evaluator-internal error.
+2. **`00k-standards-conformance.md` records SPARQL 1.2 Query Language as a
+   Working Draft**, and `00k` says building against a Working Draft is a
+   decision to accept churn. Taking this feature is exactly that decision, so
+   it is made here in the open and `00k`'s SPARQL row updates with it.
+
+**One thing it buys back**: `LANGDIR` / `STRLANGDIR` / `hasLangDir` arrive on the
+same switch, and those are the query-side counterpart of Slice C's
+`rdf:dirLangString`. Slices C and D share a gate, which is an argument for
+doing them adjacently rather than a coincidence to ignore.
+
+**Check before starting**: whether Slice B's serializer needs `rdf-12` too. If
+it emits Turtle as text it does not; if it builds `oxrdf` terms it does, and
+then export and query share the gate rather than merely neighbouring it.
 
 **Acceptance criteria**: `?rel rdf:reifies << ?a ?p ?b >>` binds against a
 reified relationship; the flake count is unchanged, asserted on the same
 catalogue run as the other slices; the synthesised quad carries the same
 `as_of` and access-predicate treatment as every other quad, because it is built
 from flakes that were already filtered; a relationship the principal may not
-see produces no reifying quad.
+see produces no reifying quad; a SPARQL 1.2 construct that parses but is not
+evaluated returns a named, documented refusal rather than an internal error.
 
 **RED**: the zero-rows test — a query using the standard vocabulary against an
 estate that plainly contains relationships must not return an empty result.
@@ -270,6 +323,19 @@ endpoint the filter removed. Mutator watch: emitting the reifying quad from
 unfiltered flakes must fail; dropping the triple-term object in favour of the
 relationship IRI must fail the pattern match, which is the rejected proposal
 above failing on contact.
+
+**Why the slice is authorization-safe — and the wrong reason for it.** It has
+been argued that a visible relationship with a hidden endpoint leaks the
+endpoint through `dsc:fromEntity` anyway, so synthesis adds no new surface.
+**That state cannot arise.** `graph-owl-api/src/lib.rs:238` makes a relationship
+node visible *only when both endpoints are*, tracked as (endpoints seen,
+endpoints permitted), with `an_edge_with_no_endpoints_is_not_assumed_visible`
+pinning the half-written case. The conclusion is right and the reasoning is
+not, which matters: it asserts a pre-existing leak that does not exist, and
+anyone who later relaxed the both-endpoints rule on the strength of it would
+create the leak the argument assumed. The real reason synthesis is safe is that
+it reads flakes the both-endpoints filter has already passed, so a synthesised
+quad cannot name an entity those flakes did not already name.
 
 **Done when**: criteria met, mutation report reviewed, flake count unchanged.
 
