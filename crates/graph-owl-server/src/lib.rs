@@ -1,5 +1,6 @@
 pub mod jwks;
 pub mod observability;
+pub mod openapi;
 
 use axum::{
     Json, Router,
@@ -63,6 +64,8 @@ pub fn app(catalog: Catalog) -> Router {
         // identity provider, or an auth outage blinds the monitoring that would
         // have shown it.
         .route("/metrics", get(observability::metrics_endpoint))
+        // The contract, served so a client never has to find the file.
+        .route("/openapi.json", get(openapi::endpoint))
         .route(
             "/assets/{id}",
             get(get_asset).patch(update_asset).delete(delete_asset),

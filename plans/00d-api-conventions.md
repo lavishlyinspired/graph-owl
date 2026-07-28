@@ -169,6 +169,32 @@ The URL is unversioned. Breaking changes are avoided by adding fields rather tha
 
 If a genuinely breaking change becomes unavoidable, it arrives as a `/v2` prefix with the previous version supported for two release cycles. There is no `/v1` prefix today precisely so that adding one later carries a clear signal.
 
+### The console shares this namespace, and that is the constraint
+
+*Clarified 28 July 2026, after a tracked "known issue" proposed prefixing the
+API and this document forbids it.*
+
+The SPA is served from the same origin and the same root as the API — one
+binary, no reverse proxy (`00f-ui-architecture.md`). So `/assets` is an API
+collection **and** a path the console could route on, and the API wins: it is
+mounted first, and the SPA fallback only sees what no route matched.
+
+The recorded fix was an `/api` or `/api/v1` prefix. That is rejected. A version
+prefix contradicts the rule directly above, and a bare `/api` prefix changes
+`/{collection}/{id}` — the URL shape this whole document is about — to buy
+nothing that is currently needed.
+
+**The actual constraint is one line: the console must not create a path route
+whose first segment is an API collection name.** It does not: selection,
+comparison, expansion and tab state all live in query parameters (`?asset=`,
+`?asOf=`, `?compareTo=`, `?expand=`, `?tab=`), which cannot collide with a
+route by construction. That is a property worth keeping deliberately rather
+than rediscovering.
+
+If the console ever needs real path routing, the cheap answer is a single
+reserved segment the API will never use — `/app/...` — not a prefix on every
+API path.
+
 ## Content types
 
 - Requests and responses: `application/json`.

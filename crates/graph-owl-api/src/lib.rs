@@ -25,7 +25,7 @@ use validation::{
     FieldError, FieldErrorCode, FieldPath, ValidateBody, optional_string, require_non_empty_string,
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTable {
     pub name: String,
@@ -47,7 +47,7 @@ impl ValidateBody for CreateTable {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertAsset {
     pub kind: AssetKind,
@@ -83,7 +83,7 @@ impl ValidateBody for UpsertAsset {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRelationship {
     pub to_table_id: Uuid,

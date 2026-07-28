@@ -16,7 +16,6 @@ revision (rule 0's corollary).*
 
 | Demo | Remaining | Blocks |
 |---|---|---|
-| 1 | **Epic 1 J** — OpenAPI generated from code, committed, diffed in CI. Carries the `/assets/{id}` namespace collision: any console route under it is unreachable, and prefixing the API is the fix | Epic 1 K, Epic 39's generated client |
 | 1 | **Epic 15** — scheduled runs, run-history persistence, `source_hash` fingerprinting to skip unchanged records | — |
 | 2 | **Epic 10** — memory budget report, admission control, cross-port spans, pool/entity gauges | — |
 | 3 | **Epic 40** — WebGL swap; SVG will not survive 10k nodes. Every *interaction* the swap was expected to bring already works and is tested at the model layer, so what remains is scale alone | — |
@@ -116,8 +115,8 @@ vector embeddings → out of process per `00j`.
 - [x] **G** `Principal` seam through every mutating handler
 - [x] **H** Unknown query parameters rejected and named
 - [x] **I** `Location` header on creates, asserted against the returned id
-- [ ] **J** OpenAPI generated from code, committed, diffed in CI
-- [ ] **K** Generated client round-trips against a running service
+- [x] **J** OpenAPI 3.1 generated from code, served at `/openapi.json`, committed and drift-guarded. **One route table, two consumers**: the spec is built from it and the router is asserted against it, so a route cannot be documented without existing *or* exist without being documented. Schemas are `ToSchema` derives on the domain types, so a field added to `Asset` reaches the contract without anyone remembering
+- [~] **K** The valuable half of it: a real request and a real error are checked **against the schema the contract promises** — required fields present, and no field the schema does not describe. That second half is what catches a spec that has fallen behind its type. What is *not* done is generating a client in another language and running it, which is what the slice literally says
 
 ### Epic 2 — Entity hierarchy & columns
 - [x] `Asset` + `AssetKind` for all five levels, one type not five
@@ -151,7 +150,7 @@ vector embeddings → out of process per `00j`.
 - [ ] Generated API client (blocked on Epic 1 Slice J)
 
 **Known issues carried forward**
-- `/assets/{id}` is an API namespace; any client-side route under it is unreachable. Prefixing the API is the fix, and belongs with Epic 1 Slice J.
+- ~~`/assets/{id}` is an API namespace; prefixing the API is the fix.~~ **Withdrawn 28 July 2026 — the proposed fix contradicts `00d-api-conventions.md`**, which keeps the URL unversioned and unprefixed *precisely so that adding a prefix later carries a signal*. Nothing is broken: the console routes entirely in query parameters (`?asset=`, `?asOf=`, `?compareTo=`, `?expand=`, `?tab=`), which cannot collide with an API route by construction. `00d` now states that as a constraint to keep rather than a coincidence to rediscover.
 - The trust bar is empty because Epic 3 has not landed.
 
 ---

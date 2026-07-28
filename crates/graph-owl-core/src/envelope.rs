@@ -12,7 +12,9 @@ use std::fmt;
 /// breaking change (a column dropped, a type changed, a rename). The split
 /// matters because a consumer can subscribe to Major alone and get exactly the
 /// changes that could break it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub struct EntityVersion {
     pub major: u32,
     pub minor: u32,
@@ -92,7 +94,7 @@ impl fmt::Display for EntityVersion {
 /// How much a change is worth. `None` is a real outcome, not an absence: a
 /// connector re-running against an unchanged source must produce no version and
 /// no event, and that is what makes its idempotency observable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
     None,
     Minor,
@@ -102,7 +104,7 @@ pub enum ChangeKind {
 /// One field's before and after. `None` on either side means the field was
 /// added or removed — distinct from changed, because a consumer reacts
 /// differently to a dropped column than to a retyped one.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldChange {
     pub field: String,
@@ -114,7 +116,7 @@ pub struct FieldChange {
 /// client. This is why PATCH stays DTO-shaped rather than JSON Patch: a state
 /// diff describes *effect*, a patch document describes *intent*, and an audit
 /// trail wants effect.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeDescription {
     pub fields_added: Vec<FieldChange>,

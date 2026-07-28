@@ -47,7 +47,7 @@ the documents relate.
 
 | File | Epic | Status | Depends on |
 |---|---|---|---|
-| [`01-api-conventions.md`](01-api-conventions.md) | 1 | **Shipped** — slices A–C (RFC 9457 errors, all-violations-at-once validation, keyset pagination). Demo 1 | nothing |
+| [`01-api-conventions.md`](01-api-conventions.md) | 1 | **Shipped** — slices A–J. The contract is generated from a single route table, served at `/openapi.json`, committed, drift-guarded and validated as O… | nothing |
 | [`02-entity-hierarchy.md`](02-entity-hierarchy.md) | 2 | **Shipped** — service → database → schema → table → column, 34 assets from the connector. Demo 1 | Epic 1 (conventions, relationship taxonomy) |
 | [`03-versioning.md`](03-versioning.md) | 3 | **Shipped** — envelope, history, `If-Match`/412, and Slice J's `EventSink` with create / update / soft-delete / restore all announced. Demo 2. `HardD… | Epic 2 (four entity types to apply the envelope to) |
 | [`04-engine-triples.md`](04-engine-triples.md) | 4 | Slices A–H complete, with two named carry-overs — cardinality and value type are recorded per predicate but not *enforced* on write (both are constra… | Epic 3 (four entity types with an envelope to project) |

@@ -10,7 +10,7 @@ use envelope::{ChangeDescription, EntityVersion};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Table {
     pub id: Uuid,
@@ -21,14 +21,14 @@ pub struct Table {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableUpdate {
     pub name: Option<String>,
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Relationship {
     pub id: Uuid,
@@ -47,7 +47,7 @@ pub struct Relationship {
 /// not the fields — and five structs would mean five repositories, five
 /// handlers and five UI pages for one concept (`01-api-conventions.md`
 /// decision 10, `39-ui-foundation.md` decision 4).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Asset {
     pub id: Uuid,
@@ -78,7 +78,7 @@ pub struct Asset {
 }
 
 /// A past state of an asset, with what produced it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetVersion {
     pub version: EntityVersion,
@@ -92,7 +92,7 @@ pub struct AssetVersion {
 /// A partial update. Absent means "not declared"; explicit `null` means clear.
 /// The distinction is what stops a connector's null description from blanking
 /// what a human wrote (`15-connectors.md` decision 3).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetUpdate {
     #[serde(default, deserialize_with = "double_option")]
@@ -107,7 +107,7 @@ where
     Deserialize::deserialize(deserializer).map(Some)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AssetKind {
     Service,

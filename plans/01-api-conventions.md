@@ -1,6 +1,9 @@
 # Plan: API Conventions & Contract (Epic 1)
 **Branch**: feat/api-conventions
-**Status**: **Shipped** — slices A–C (RFC 9457 errors, all-violations-at-once validation, keyset pagination). Demo 1
+**Status**: **Shipped** — slices A–J. The contract is generated from a single
+route table, served at `/openapi.json`, committed, drift-guarded and validated
+as OpenAPI 3.1. Slice K is partial: responses are checked against the promised
+schemas, but no client is generated in another language. Demo 1
 **Depends on**: nothing
 **Unblocks**: everything
 **Crates**: `graph-owl-core` (Principal, Page, RelationshipType) · `graph-owl-api` (CatalogError) · `graph-owl-server` (problem+json, OpenAPI, extractors)
@@ -202,6 +205,44 @@ Every slice runs RED → GREEN → MUTATE (`cargo mutants`) → KILL MUTANTS →
 **RED**: The round-trip test through the generated client. It fails whenever the spec and implementation diverge, which is precisely its purpose. Mutator watch: a spec with a wrong field type must fail deserialization in this test — verify by deliberately corrupting one field's type and confirming the test fails.
 **GREEN**: CI generation, integration test.
 **Done when**: acceptance criteria met, deliberate-corruption check verified, commit approved.
+
+## Slice J, as built (28 July 2026)
+
+**The route table is the single source.** `openapi::ROUTES` declares every
+operation; the document is generated from it and the router is asserted against
+it. A route in the spec that the router does not serve fails
+`every_documented_route_is_served_by_the_router`; a verb the table does not
+declare fails its negative. That is what makes "the spec cannot drift from the
+router" a property rather than a promise.
+
+**Not `#[utoipa::path]` on twenty-eight handlers.** Those macros restate the
+method, the path and the status codes beside the function, which is a second
+place for them to be wrong and a second place to forget. Schemas *are* derives —
+`ToSchema` on the domain types — because there the derive removes duplication
+instead of creating it: a field added to `Asset` reaches the contract without
+anybody remembering.
+
+**`servers` and `securitySchemes` were found by a validator, not by review.**
+Both were genuine omissions rather than lint noise: without `servers` a
+generator has no base URL, and without a security scheme the document says an
+endpoint can `401` while never saying how to avoid one — a generated client
+would have had no way to send a token at all. Each authenticated operation now
+carries `security: [{bearerAuth: []}]` and each open one carries `security: []`,
+which is **not** the same as omitting it: an empty array says *this endpoint
+takes no credential*, where omission inherits a document default.
+
+### What "fails CI" means here, honestly
+
+The slice says a PR changing the API without regenerating `openapi.json` fails
+CI. **This repository has no CI pipeline** — no workflows at all — so that
+sentence is aspirational in this slice and in every other one that uses it. What
+exists is `the_committed_contract_matches_the_code`, a test that fails
+`cargo test` and names the command to fix it. That is the gate this project
+actually enforces (`CLAUDE.md`: a slice is committable when the workspace suite
+is green), and it was verified by deliberately corrupting a field's type in the
+committed file and confirming the failure.
+
+Adding a pipeline is worth doing and is not this slice's work.
 
 ## Explicitly deferred (with destination)
 
