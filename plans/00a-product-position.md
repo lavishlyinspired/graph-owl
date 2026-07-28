@@ -80,11 +80,74 @@ The engine implements **useful subsets**, not specifications:
 | Capability | In scope | Out of scope |
 |---|---|---|
 | Query | SPARQL 1.1 subset: BGP, FILTER, OPTIONAL, UNION, property paths | Federation, entailment regimes, full algebra |
-| Reasoning | OWL 2 RL forward-chaining as a queryable overlay | Description-logic tableau reasoning, OWL 2 DL/Full |
+| Reasoning | **OWL 2 EL + RL + QL, profile-detected and routed, incrementally maintained** — see the position change below | Description-logic tableau reasoning, OWL 2 DL/Full |
 | Validation | SHACL-like node and property shapes | Full SHACL-SPARQL, advanced features |
 | Interop | JSON-LD, Turtle, N-Triples, RDF/XML at the boundary | RDF as the *only* model; RDF-star initially |
 
 This is the single most important scope decision in the project. A production reference implementation of these specifications runs to hundreds of thousands of lines; the subsets that serve enterprise metadata are a fraction of that. **A rule a steward cannot read, or an inference nobody can explain, is not worth its implementation cost.**
+
+
+## Position change, 28 July 2026: the engine framing is adopted
+
+**The architecture was already this; the positioning had not caught up.** The
+flake model with four index orderings, retraction-not-delete, time travel as a
+native property, authorization compiled into queries, and reasoning as a
+queryable overlay are not a catalog with a relationship table. They are a graph
+engine, and they always were. This document now says so.
+
+The consequence is that this project commits to **hosting and reasoning over
+large external ontologies** — FIBO, UMLS, SNOMED CT, RxNorm, DBpedia — rather
+than only annotating with them. `00n-large-ontology-reality.md` sets out what
+that costs. The reasoning row above changes with it: one profile becomes three,
+because SNOMED is an **EL** ontology and OWL 2 RL cannot classify it. RL and EL
+are incomparable, so an RL run over SNOMED returns a *wrong* hierarchy rather
+than a smaller one.
+
+**The dangerous middle was the real problem.** Claiming an engine while planning
+a catalog meant none of the necessary arguments could be made: why EL matters
+(RL was declared sufficient), why the reasoning budgets need re-deriving (100k
+facts was declared generous), why incremental maintenance matters (wholesale
+replacement was declared fine). Each follows immediately once the position is
+stated.
+
+### Delivered in three phases, and the epics are already sequenced for it
+
+| Phase | What ships | Entry condition |
+|---|---|---|
+| **1 — Catalog, honestly** | The catalog at ~1M flakes: RL reasoning (Epic 6), wholesale replacement, one profile. **Plus profile detection (Epic 100)** | Now |
+| **2 — Clinical and cross-domain ontologies** | EL (98), QL (99), incremental maintenance (97), alignment and UMLS ingestion (104) | Profile detection *refuses* an ontology, or one is scheduled to load |
+| **3 — Scale** | Partitioning (4, 37a), re-derived reasoning budgets (6), a second backend only if measured | The `37a` measurements, not a date |
+
+**Two corrections to the obvious phasing, both learned the hard way above.**
+
+**Epic 100 belongs in Phase 1, not Phase 2.** The tempting trigger for EL is
+"when a clinical ontology loads" — but by then it is too late: the first SNOMED
+load runs on RL and produces a wrong hierarchy *silently*, which is the exact
+failure this change exists to prevent. Profile detection is a **syntactic scan,
+cheap, and needs no reasoner**. It is what makes shipping Phase 1 with RL-only
+an honest position rather than a lucky one: an ontology outside RL is refused by
+name instead of quietly mis-reasoned. **Detection is the guard that makes the
+phasing safe, so it ships with the thing it guards.**
+
+**"Postgres only" survives; "operationally simple" is what erodes.** The
+required-services budget above still holds — Postgres with declarative
+partitioning reaches 10⁸–10⁹ flakes, and no second store is warranted until
+`37a` measures one. But `00a`'s operational-simplicity claim is a *positioning*
+claim, not just an architectural one, and a partitioned multi-hundred-million-row
+database with an incrementally maintained materialisation is not "one binary and
+a database" in the way this document sells it. The base store is not the binding
+constraint at that scale — **the maintained inference set is**, and it can
+approach the size of the base. That erosion is stated here rather than
+discovered later.
+
+### What is true today, so this change does not become its own dangerous middle
+
+The table above is **committed scope, not shipped state**. As of 28 July 2026,
+**Epic 6 has not started**: there is no reasoner of any profile in the codebase.
+Claiming "EL + RL + QL" as a capability would repeat the error this section
+corrects, pointing the other way. `plans/DEMOS.md` is the authority on what is
+built, and `00k-standards-conformance.md` states per-specification conformance
+with dates. **This row says what the engine is for. Those two say what it does.**
 
 ## What graph-owl refuses to compete on
 
