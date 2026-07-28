@@ -18,8 +18,6 @@ revision (rule 0's corollary).*
 |---|---|---|
 | 1 | **Epic 1 J** — OpenAPI generated from code, committed, diffed in CI. Carries the `/assets/{id}` namespace collision: any console route under it is unreachable, and prefixing the API is the fix | Epic 1 K, Epic 39's generated client |
 | 1 | **Epic 15** — scheduled runs, run-history persistence, `source_hash` fingerprinting to skip unchanged records | — |
-| 2 | **Epic 12 JWKS** and key rotation. The swap point is `signing_secret()`, so this is a function body | — |
-| 2 | **Epic 12 OIDC/PKCE + Epic 39 login** — paired; neither is useful alone, and until both land the console cannot tell "denied" from "empty", which `00f` says is not shippable | — |
 | 2 | **Epic 13** — no decision cache; every request recompiles the predicate. Correct, and not yet fast | — |
 | 2 | **Epic 10** — memory budget report, admission control, cross-port spans, pool/entity gauges | — |
 | 3 | **Epic 40** — WebGL swap; SVG will not survive 10k nodes. Every *interaction* the swap was expected to bring already works and is tested at the model layer, so what remains is scale alone | — |
@@ -247,11 +245,16 @@ test's scrape had already installed the recorder.
 - [x] Auto-provision a `User` on first sight, with no roles
 - [x] Open mode when no secret is configured, logged as such at startup
 
-**Pending in this epic**
-- JWKS and key rotation — the swap point is `signing_secret()`, so this is a function body, not a refactor
+- [x] **JWKS / RS256 against an OIDC issuer** — keys fetched from `{issuer}/.well-known/jwks.json`, cached an hour, refreshed on an unknown `kid`. Key rotation is what JWKS gives for free, so Slice B lands with Slice A
+- [x] **A heterogeneous JWKS does not break authentication** — keys are parsed loosely and narrowed after, so an EC key beside the RSA ones costs nothing. Parsing into a struct that required `n`/`e` failed the *whole* document, losing every usable key with the one that was not
+- [x] **The refetch an unknown `kid` triggers is rate-limited** — `kid` comes from the token, so without a floor a stream of forged ones becomes one outbound request to the identity provider per inbound request
+- [x] **OIDC beats a shared secret when both are configured**, and the ambiguity is logged. Checking the cheaper secret first silently downgrades the one deployment where the downgrade is invisible: mid-migration, with the old secret still live
+- [x] **`GRAPH_OWL_ADMIN_SUBJECTS`** — without it the *first* sign-in renders an empty catalog, because identities auto-provision with no roles and authorization denies by default. Two correct decisions producing the one screen `00f` forbids. Applied after resolution and never written back, so removing the variable revokes it
 
-**Deferred**
-- OIDC/PKCE in the console, tokens in memory only → paired with Epic 39's login, below; neither is useful without the other
+**Pending in this epic**
+- The `principal` log field from `10-operability.md`'s contract. The request middleware runs outside the `Auth` extractor, so it has no identity to log — and "which identity made this request" is the first question of every authorization incident
+- Roles come from the catalog, not the token: Auth0 `permissions` and custom claims are ignored. Defensible (authorization is this product's model, not the IdP's) but it will surprise someone
+- A page refresh signs the user out. Both tokens are in memory and `offline_access` does not help, because the refresh token is in memory too. The fix is silent re-authentication (`prompt=none`) against the provider's session cookie
 
 ### Epic 13 — Authorization
 - [x] `AccessPredicate` in `graph-owl-authz` — pure, zero surviving mutants
@@ -291,8 +294,9 @@ test's scrape had already installed the recorder.
 > rule 0 below now requires a check against the code, not against the previous
 > revision.
 
-**Deferred**
-- Login, session, and the denied-vs-empty distinction → blocked on Epic 12's OIDC/PKCE. The console currently runs against an open server or a token supplied out of band; "denied" and "empty" therefore look identical to it, which is exactly the state `00f` says is not acceptable to ship to a user
+- [x] **OIDC/PKCE sign-in**, S256 challenge, tokens in memory only. The state and verifier are parked in `sessionStorage` **because they must survive a full-page redirect** — holding them in memory made the callback's guard unsatisfiable and login could never complete. That is not a weakening of the token rule: a verifier is single-use, lives for seconds, and is worthless without the matching authorization code
+- [x] **Three outcomes, three screens** — signed out, denied (`403`, signed in without a role), and mid-exchange each render distinctly. A failed sign-in shows *why*, rather than returning silently to the panel the user just used
+- [x] The token has **one owner**. `api.ts` reads it through an injected source rather than holding a second copy; two modules each holding "the" token meant every request went out unauthenticated after a successful sign-in
 - Owner and team display → blocked on Epic 11's teams
 
 **The demo moment — verified live against the 124-asset bank estate:**

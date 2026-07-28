@@ -43,15 +43,37 @@ async fn main() {
     // A server running without authentication is a legitimate local posture and
     // an alarming production one. It says which it is at startup, because an
     // accidentally-open server must not look identical to a secured one.
-    if std::env::var("GRAPH_OWL_JWT_SECRET").is_ok_and(|s| !s.is_empty()) {
-        tracing::info!(%bind, database = %where_from, authentication = "enabled",
-                       "graph-owl listening");
-    } else {
+    //
+    // Resolved by the same function the request path uses, not by a second
+    // chain of `if`s. Two independent readings of the same environment are two
+    // things that can disagree — and the way they disagree is that the log says
+    // "oidc" while requests are verified against a shared secret.
+    let has_secret = std::env::var("GRAPH_OWL_JWT_SECRET").is_ok_and(|s| !s.is_empty());
+    let has_oidc = std::env::var("OIDC_ISSUER").is_ok_and(|s| !s.is_empty());
+
+    if graph_owl_server::is_ambiguous_auth_config(has_secret, has_oidc) {
         tracing::warn!(
+            "both GRAPH_OWL_JWT_SECRET and OIDC_ISSUER are set. OIDC is in use and the \
+             shared secret is ignored — but it is still a live credential anyone who \
+             holds it believes works. Remove GRAPH_OWL_JWT_SECRET."
+        );
+    }
+
+    match graph_owl_server::auth_mode(has_secret, has_oidc) {
+        graph_owl_server::AuthMode::Oidc => tracing::info!(
+            %bind, database = %where_from, authentication = "oidc",
+            issuer = %std::env::var("OIDC_ISSUER").unwrap_or_default(),
+            "graph-owl listening"
+        ),
+        graph_owl_server::AuthMode::SharedSecret => tracing::info!(
+            %bind, database = %where_from, authentication = "shared-secret",
+            "graph-owl listening"
+        ),
+        graph_owl_server::AuthMode::Open => tracing::warn!(
             %bind, database = %where_from, authentication = "disabled",
             "graph-owl listening with authentication DISABLED — every request runs as \
-             the system principal. Set GRAPH_OWL_JWT_SECRET to secure it."
-        );
+             the system principal. Set OIDC_ISSUER (or GRAPH_OWL_JWT_SECRET) to secure it."
+        ),
     }
 
     axum::serve(listener, graph_owl_server::app(catalog))

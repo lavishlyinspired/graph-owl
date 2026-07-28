@@ -12,7 +12,7 @@
 //! describes, written in the same transaction, so there is nothing to reindex,
 //! retry or reconcile. Introducing a port now would mean inventing a seam with
 //! exactly one implementation on either side of it. It becomes necessary when a
-//! detached engine lands (`08-engine-search.md` Slice A, OpenSearch; Epic 33's
+//! detached engine lands (`08-engine-search.md` Slice A, `OpenSearch`; Epic 33's
 //! vector index), and the shape it should take is knowable then rather than now.
 //!
 //! `VectorIndex` is likewise not here: embeddings are generated out of process
@@ -21,10 +21,10 @@
 
 /// Turn what a person typed into a Postgres `tsquery` expression.
 ///
-/// Every term is prefix-matched and the terms are ANDed. Prefix matching is what
+/// Every term is prefix-matched and the terms are `AND`ed. Prefix matching is what
 /// makes a search box feel like a search box: `upi trans` has to find
 /// `upi_transactions` while the user is still typing, and a full-word match
-/// would find nothing until the last character. ANDing rather than ORing is the
+/// would find nothing until the last character. `AND` rather than `OR` is the
 /// narrowing behaviour people expect — each word typed should shrink the result
 /// set, not grow it.
 ///

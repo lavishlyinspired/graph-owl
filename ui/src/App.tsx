@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   App as AntApp,
   Breadcrumb,
+  Alert,
   Button,
   Card,
   Col,
@@ -16,6 +17,7 @@ import {
   Popover,
   Row,
   Space,
+  Spin,
   Statistic,
   Table,
   Tag,
@@ -57,10 +59,11 @@ import {
   type SearchFacets,
   ApiError,
   api,
-  authToken,
   isUnauthenticated,
-  setAuthToken,
+  isForbidden,
+  setRefreshHandler,
 } from "./api";
+import { AuthProvider, useAuth, tryRefresh } from "./auth";
 import { type DiffEdge, diff } from "./graph/diff";
 import { type GraphModel, expand, performedExpansions, replay, seed } from "./graph/model";
 import { brand, darkTheme, lightTheme, palette } from "./theme";
@@ -1062,41 +1065,54 @@ function TimeControl({
  *  Pasting a bearer token is a stopgap, and is labelled as one. Epic 12's
  *  OIDC/PKCE replaces this panel with a real flow; what does not change is
  *  that "refused" and "empty" stay different screens. */
-function SignIn({ onToken }: { onToken: (token: string) => void }) {
-  const [value, setValue] = useState("");
+function SignIn({ onSignIn, error }: { onSignIn: () => void; error?: string | null }) {
+  return (
+    <Flex align="center" justify="center" style={{ height: "100%" }}>
+      <Card style={{ maxWidth: 460, width: "100%" }}>
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          {/* A sign-in that *failed* must not look like one that never
+              happened. Returning silently to this panel tells the user to try
+              the thing they just tried, with no hint that the provider
+              refused, that consent was declined, or that the callback could
+              not be verified. */}
+          {error && (
+            <Alert type="error" showIcon message="Sign-in did not complete" description={error} />
+          )}
+          <div>
+            <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+              Sign in to graph-owl
+            </Title>
+            <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
+              This server requires authentication. Sign in with your
+              organisation's identity provider to access the catalog — your
+              data is not empty, it is simply waiting for you to identify
+              yourself.
+            </Paragraph>
+          </div>
+          <Button type="primary" size="large" block onClick={onSignIn}>
+            Sign in with Auth0
+          </Button>
+        </Space>
+      </Card>
+    </Flex>
+  );
+}
+
+function Denied() {
   return (
     <Flex align="center" justify="center" style={{ height: "100%" }}>
       <Card style={{ maxWidth: 460, width: "100%" }}>
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <div>
             <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
-              This server requires a token
+              Access denied
             </Title>
             <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
-              graph-owl is running with authentication enabled, so it will not
-              answer until it knows who is asking. Your catalog is not empty —
-              this console simply has not been told who you are.
+              Your account is authenticated but you do not have permission to
+              access this catalog. Contact your administrator to request the
+              required role or scope.
             </Paragraph>
           </div>
-          <Input.TextArea
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="Paste the bearer token printed by ./scripts/demo.sh --secure"
-            autoSize={{ minRows: 3, maxRows: 6 }}
-            style={{ fontFamily: "JetBrains Mono, ui-monospace, monospace", fontSize: 12 }}
-          />
-          <Flex justify="space-between" align="center">
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              Kept for this tab only — closing it discards the token.
-            </Text>
-            <Button
-              type="primary"
-              disabled={value.trim().length === 0}
-              onClick={() => onToken(value.trim())}
-            >
-              Use this token
-            </Button>
-          </Flex>
         </Space>
       </Card>
     </Flex>
@@ -1579,7 +1595,16 @@ function ConnectorsPage({ onDone }: { onDone: () => void }) {
 }
 
 export default function App() {
+  return <AuthProvider><AppShell /></AuthProvider>;
+}
+
+function AppShell() {
   const { dark, toggle } = useTheme();
+  const auth = useAuth();
+
+  useEffect(() => {
+    setRefreshHandler(tryRefresh);
+  }, []);
   const colors = dark ? palette.dark : palette.light;
   // Overview answers "what is in here" without a click; Explore is where you
   // go once you know what you are looking for. A deep link to an asset lands
@@ -1602,6 +1627,9 @@ export default function App() {
   // the single most misleading thing this console can do: it tells someone
   // their estate is empty when in fact they are simply not signed in.
   const [refused, setRefused] = useState(false);
+  // 403 Forbidden while signed in. Distinct from refused (unauthenticated) —
+  // the user's credentials are valid but they lack a role/claim to do this.
+  const [denied, setDenied] = useState(false);
   // Null is now. Deep-linkable, so a screenshot of a past state carries the
   // instant it was taken at rather than being unreproducible.
   const [asOf, setAsOf] = useState<string | null>(() => readParam("asOf"));
@@ -1651,6 +1679,7 @@ export default function App() {
         // An auth failure is not an empty result. Anything else genuinely is
         // a failure to load, and still must not claim the catalog is empty.
         setRefused(isUnauthenticated(error));
+        setDenied(isForbidden(error));
         setNodes([]);
       });
     api
@@ -1855,16 +1884,13 @@ export default function App() {
                   identity to drop, and an inert control implying otherwise is
                   worse than no control. Switching principals is Demo 2's whole
                   moment: the same search, two identities, different results. */}
-              {authToken() !== null && (
-                <Tooltip title="Discard this token and sign in as someone else">
+              {auth.state.status === "authenticated" && (
+                <Tooltip title="Sign out and return to the login screen">
                   <Button
                     type="text"
                     icon={<UserOutlined />}
                     aria-label="Sign out"
-                    onClick={() => {
-                      setAuthToken(null);
-                      refresh();
-                    }}
+                    onClick={() => auth.logout()}
                   >
                     Sign out
                   </Button>
@@ -1880,15 +1906,28 @@ export default function App() {
             {/* A refused request and an empty catalog are different
                 screens. Routing both to the same one tells a signed-out
                 user their estate is empty, which is a false statement
-                about their data rather than a cosmetic bug. */}
-            {refused ? (
+                about their data rather than a cosmetic bug. A 403
+                (denied) is likewise separate — the user is signed in but
+                lacks a role, so telling them to sign in again is wrong. */}
+            {denied ? (
               <Content style={{ padding: 24 }}>
-                <SignIn
-                  onToken={(token) => {
-                    setAuthToken(token);
-                    refresh();
-                  }}
-                />
+                <Denied />
+              </Content>
+            ) : auth.state.status === "loading" ? (
+              /* Mid token-exchange. Without this the callback lands on a
+                 tokenless first render, the catalog 401s, and the user sees a
+                 flash of the sign-in screen they just came back from. */
+              <Content style={{ padding: 24 }}>
+                <Flex align="center" justify="center" style={{ height: "100%" }}>
+                  <Space direction="vertical" align="center" size="middle">
+                    <Spin size="large" />
+                    <Text type="secondary">Completing sign-in…</Text>
+                  </Space>
+                </Flex>
+              </Content>
+            ) : refused || auth.state.error ? (
+              <Content style={{ padding: 24 }}>
+                <SignIn onSignIn={() => auth.login()} error={auth.state.error} />
               </Content>
             ) : (
               <>

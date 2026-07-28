@@ -1,3 +1,4 @@
+pub mod jwks;
 pub mod observability;
 
 use axum::{
@@ -9,6 +10,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+use std::sync::Arc;
+
 use graph_owl_api::SparqlBudget;
 use graph_owl_api::{
     Catalog, CatalogError, CreateRelationship, CreateTable, UpsertAsset,
@@ -33,7 +36,7 @@ pub fn app(catalog: Catalog) -> Router {
     // operator most wants to see.
     observability::metrics_handle();
 
-    Router::new()
+    let router = Router::new()
         .route("/tables", post(create_table).get(list_tables))
         .route(
             "/tables/{id}",
@@ -69,7 +72,19 @@ pub fn app(catalog: Catalog) -> Router {
         .route("/assets/{id}/children", get(list_asset_children))
         .route("/assets/{id}/graph", get(asset_graph))
         .route("/assets/{id}/ancestors", get(asset_ancestors))
-        .with_state(catalog)
+        .with_state(catalog);
+
+    // OIDC JWKS client — inserted early so the `Auth` extractor can find it in
+    // request extensions. Only created when configured; without it the server
+    // falls through to HS256 or open mode.
+    let router = if let Some((issuer, audience)) = oidc_config() {
+        let jwks_client = Arc::new(jwks::JwksClient::new(issuer, audience));
+        router.layer(axum::Extension(jwks_client))
+    } else {
+        router
+    };
+
+    router
         // `layer`, not `route_layer`: this must run after routing so
         // `MatchedPath` is in the extensions and the metric label is the route
         // template rather than the concrete path.
@@ -218,6 +233,7 @@ struct Claims {
     sub: String,
     #[serde(default)]
     name: Option<String>,
+    #[allow(dead_code)]
     exp: usize,
 }
 
@@ -231,12 +247,168 @@ fn signing_secret() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Whether OIDC JWKS authentication is configured.
+fn oidc_config() -> Option<(String, String)> {
+    let issuer = std::env::var("OIDC_ISSUER")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let audience =
+        std::env::var("OIDC_AUDIENCE").unwrap_or_else(|_| "https://graph-owl.dev/api".to_string());
+    Some((issuer, audience))
+}
+
+/// How a request is authenticated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    /// RS256 against keys fetched from an OIDC issuer.
+    Oidc,
+    /// HS256 against a shared secret. Legacy, and a demo affordance.
+    SharedSecret,
+    /// Every request is the system principal.
+    Open,
+}
+
+/// Resolve the authentication mode from what is configured.
+///
+/// **OIDC wins when both are set, and that is the whole point of this being a
+/// function.** The natural implementation checks the shared secret first
+/// because it is cheaper, which silently downgrades exactly the deployment
+/// most at risk: one migrating to OIDC that has not yet removed
+/// `GRAPH_OWL_JWT_SECRET` from its environment. Nothing about that deployment
+/// looks wrong — OIDC is configured, the console signs in against the provider,
+/// and the server is quietly still trusting a shared secret that anyone who
+/// ever had it can still mint tokens with.
+///
+/// Refusing to start would be defensible, but it turns a stale environment
+/// variable into an outage. Preferring the stronger mode and saying so is the
+/// same protection without the outage.
+#[must_use]
+pub fn auth_mode(shared_secret: bool, oidc: bool) -> AuthMode {
+    match (oidc, shared_secret) {
+        (true, _) => AuthMode::Oidc,
+        (false, true) => AuthMode::SharedSecret,
+        (false, false) => AuthMode::Open,
+    }
+}
+
+/// Whether a subject is designated an administrator by deployment
+/// configuration.
+///
+/// **This exists because the first login otherwise looks broken.** A user
+/// arriving from an identity provider is auto-provisioned with no roles, and
+/// authorization denies by default, so a completely successful sign-in shows an
+/// empty catalog — which is the exact failure `00f` says the console must never
+/// present, delivered by the server instead. Granting the first role required
+/// direct SQL, which is not a workable answer for anyone's first run.
+///
+/// `GRAPH_OWL_ADMIN_SUBJECTS` is a comma-separated list of `sub` claims. It is
+/// deliberately **not** a database write: elevation is re-evaluated from the
+/// environment on every request, so removing the variable and restarting
+/// revokes it. A stored `is_admin` flag would outlive the configuration that
+/// created it and quietly stay true.
+///
+/// Matching is exact and whitespace-trimmed. An empty entry never matches
+/// anything — a trailing comma is a typo, not a grant of admin to the subject
+/// whose id is the empty string.
+#[must_use]
+pub fn is_bootstrap_admin(subject: &str, configured: &str) -> bool {
+    !subject.is_empty()
+        && configured
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .any(|entry| entry == subject)
+}
+
+/// Whether a configuration is one an operator should be warned about.
+///
+/// Both configured is not an error — the stronger one is used — but it is
+/// always a mistake, and a silent one. The secret is dead weight at best and a
+/// live credential someone believes is in use at worst.
+#[must_use]
+pub fn is_ambiguous_auth_config(shared_secret: bool, oidc: bool) -> bool {
+    shared_secret && oidc
+}
+
+/// Extract a bearer token from the Authorization header.
+fn bearer_token(parts: &axum::http::request::Parts) -> Result<&str, AppError> {
+    parts
+        .headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or(AppError::Unauthenticated)
+}
+
+/// Verify a token against the OIDC provider's JWKS and resolve the principal.
+async fn verify_jwks(
+    token: &str,
+    jwks: &jwks::JwksClient,
+    catalog: &Catalog,
+) -> Result<Auth, AppError> {
+    let header =
+        jsonwebtoken::decode_header(token).map_err(|e| AppError::TokenInvalid(e.to_string()))?;
+
+    let kid = header.kid.ok_or(AppError::TokenInvalid(
+        "token is missing the `kid` header".to_string(),
+    ))?;
+
+    let decoding_key = jwks
+        .decoding_key(&kid)
+        .await
+        .map_err(|e| AppError::TokenInvalid(e.to_string()))?;
+
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+    validation.set_issuer(&[jwks.issuer()]);
+    validation.set_audience(&[jwks.audience()]);
+    // Auth0 tokens include `iat` but jsonwebtoken does not require it by
+    // default. Keep that: missing `iat` is not a reason to reject.
+    validation.set_required_spec_claims(&["exp", "sub", "iss", "aud"]);
+
+    let claims = jsonwebtoken::decode::<Claims>(token, &decoding_key, &validation)
+        .map_err(|e| match e.kind() {
+            jsonwebtoken::errors::ErrorKind::ExpiredSignature => AppError::TokenExpired,
+            jsonwebtoken::errors::ErrorKind::InvalidIssuer => {
+                AppError::TokenInvalid("issuer does not match".to_string())
+            }
+            jsonwebtoken::errors::ErrorKind::InvalidAudience => {
+                AppError::TokenInvalid("audience does not match".to_string())
+            }
+            _ => AppError::TokenInvalid(e.to_string()),
+        })?
+        .claims;
+
+    let name = claims.name.unwrap_or_else(|| claims.sub.clone());
+    let mut principal = catalog
+        .resolve_principal(&claims.sub, &name)
+        .await
+        .map_err(AppError::from)?;
+
+    // Applied after resolution, never written back. See `is_bootstrap_admin`.
+    if is_bootstrap_admin(
+        &claims.sub,
+        &std::env::var("GRAPH_OWL_ADMIN_SUBJECTS").unwrap_or_default(),
+    ) {
+        principal.is_admin = true;
+    }
+    Ok(Auth(principal))
+}
+
 /// **The single place a `Principal` is constructed from a request.**
 ///
-/// With no secret configured the server is open and every request is the system
-/// principal — which is the Demo 1 posture and is *logged as such at startup*,
-/// because a server that is accidentally open must say so rather than look
-/// identical to a secured one.
+/// Authentication follows this precedence:
+///
+/// 1. `OIDC_ISSUER` — RS256 via JWKS from an OIDC provider.
+/// 2. `GRAPH_OWL_JWT_SECRET` — HS256 shared secret (legacy/demo).
+/// 3. Neither — open mode: every request is the system principal.
+///
+/// **OIDC first, deliberately** — see [`auth_mode`]. Checking the cheaper
+/// shared secret first silently downgrades a deployment that has configured
+/// OIDC but not yet removed its old secret, which is the one deployment where
+/// the downgrade is invisible and the old credential is still live.
+///
+/// Open mode is logged as a warning at startup because a server that is
+/// accidentally open must not look identical to a secured one.
 impl<S> FromRequestParts<S> for Auth
 where
     S: Send + Sync,
@@ -248,33 +420,38 @@ where
         parts: &mut axum::http::request::Parts,
         state: &S,
     ) -> Result<Self, Self::Rejection> {
-        let Some(secret) = signing_secret() else {
-            return Ok(Auth(Principal::system()));
-        };
+        // OIDC / JWKS — key material fetched from the issuer. Checked first
+        // because `auth_mode` prefers it: a deployment with a stale
+        // `GRAPH_OWL_JWT_SECRET` beside a configured issuer must not be
+        // silently downgraded to the shared secret.
+        if let Some(jwks) = parts.extensions.get::<std::sync::Arc<jwks::JwksClient>>() {
+            let token = bearer_token(parts)?;
+            let catalog = <Catalog as axum::extract::FromRef<S>>::from_ref(state);
+            return verify_jwks(token, jwks, &catalog).await;
+        }
 
-        let token = parts
-            .headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .ok_or(AppError::Unauthenticated)?;
+        // HS256 shared secret (legacy/demo).
+        if let Some(secret) = signing_secret() {
+            let token = bearer_token(parts)?;
+            let claims = jsonwebtoken::decode::<Claims>(
+                token,
+                &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
+                &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256),
+            )
+            .map_err(|_| AppError::Unauthenticated)?
+            .claims;
 
-        let claims = jsonwebtoken::decode::<Claims>(
-            token,
-            &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
-            &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256),
-        )
-        .map_err(|_| AppError::Unauthenticated)?
-        .claims;
-        let _ = claims.exp;
+            let catalog = <Catalog as axum::extract::FromRef<S>>::from_ref(state);
+            let name = claims.name.unwrap_or_else(|| claims.sub.clone());
+            return catalog
+                .resolve_principal(&claims.sub, &name)
+                .await
+                .map(Auth)
+                .map_err(AppError::from);
+        }
 
-        let catalog = <Catalog as axum::extract::FromRef<S>>::from_ref(state);
-        let name = claims.name.unwrap_or_else(|| claims.sub.clone());
-        catalog
-            .resolve_principal(&claims.sub, &name)
-            .await
-            .map(Auth)
-            .map_err(AppError::from)
+        // No secret and no OIDC — open mode.
+        Ok(Auth(Principal::system()))
     }
 }
 
@@ -365,6 +542,15 @@ enum AppError {
     },
     /// No credential, or one that does not verify.
     Unauthenticated,
+    /// Authenticated but not authorised — distinct from missing authentication.
+    /// Will be constructed by the authorization middleware (Epic 14 / roles).
+    #[allow(dead_code)]
+    Forbidden,
+    /// The bearer token has expired.
+    TokenExpired,
+    /// The bearer token is structurally invalid (wrong signature, issuer, or
+    /// audience).
+    TokenInvalid(String),
     /// The triple is well-formed and meaningless. Its own identity because a
     /// client fixes it by choosing a different relationship, not a value.
     IllegalRelationship {
@@ -393,6 +579,9 @@ impl AppError {
             AppError::NotFound => "not-found",
             AppError::PreconditionFailed { .. } => "version-conflict",
             AppError::Unauthenticated => "unauthenticated",
+            AppError::Forbidden => "forbidden",
+            AppError::TokenExpired => "token-expired",
+            AppError::TokenInvalid(_) => "token-invalid",
             AppError::IllegalRelationship { .. } => "illegal-relationship",
         }
     }
@@ -415,6 +604,9 @@ impl AppError {
             AppError::NotFound => "Resource not found",
             AppError::PreconditionFailed { .. } => "Version precondition failed",
             AppError::Unauthenticated => "Authentication required",
+            AppError::Forbidden => "Forbidden",
+            AppError::TokenExpired => "Token expired",
+            AppError::TokenInvalid(_) => "Token invalid",
             AppError::IllegalRelationship { .. } => "Illegal relationship",
         }
     }
@@ -428,7 +620,10 @@ impl AppError {
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::PreconditionFailed { .. } => StatusCode::PRECONDITION_FAILED,
-            AppError::Unauthenticated => StatusCode::UNAUTHORIZED,
+            AppError::Unauthenticated | AppError::TokenExpired | AppError::TokenInvalid(_) => {
+                StatusCode::UNAUTHORIZED
+            }
+            AppError::Forbidden => StatusCode::FORBIDDEN,
         }
     }
 
@@ -457,6 +652,13 @@ impl AppError {
             ),
             AppError::Unauthenticated => {
                 "a valid bearer token is required for this request".to_string()
+            }
+            AppError::Forbidden => {
+                "you do not have permission to perform this operation".to_string()
+            }
+            AppError::TokenExpired => "the bearer token has expired; refresh and retry".to_string(),
+            AppError::TokenInvalid(reason) => {
+                format!("the bearer token is invalid: {reason}")
             }
             AppError::IllegalRelationship {
                 from,
@@ -1192,7 +1394,7 @@ async fn health() -> Json<serde_json::Value> {
 /// from the load balancer and turns a degraded feature into an outage.
 async fn ready(State(catalog): State<Catalog>) -> Response {
     let database = catalog.ping().await;
-    let secured = signing_secret().is_some();
+    let secured = signing_secret().is_some() || oidc_config().is_some();
 
     let (status, state) = if database.is_ok() {
         (StatusCode::OK, if secured { "ready" } else { "degraded" })
@@ -1214,4 +1416,114 @@ async fn ready(State(catalog): State<Catalog>) -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod auth_configuration {
+    use super::*;
+
+    mod which_mode_a_configuration_selects {
+        use super::*;
+
+        #[test]
+        fn oidc_alone_is_oidc() {
+            assert_eq!(auth_mode(false, true), AuthMode::Oidc);
+        }
+
+        #[test]
+        fn a_shared_secret_alone_is_the_shared_secret() {
+            assert_eq!(auth_mode(true, false), AuthMode::SharedSecret);
+        }
+
+        #[test]
+        fn neither_is_open() {
+            assert_eq!(auth_mode(false, false), AuthMode::Open);
+        }
+
+        /// **The one that matters.** A deployment migrating to OIDC that has
+        /// not yet removed `GRAPH_OWL_JWT_SECRET` looks entirely healthy —
+        /// OIDC is configured, the console signs in against the provider — and
+        /// would be quietly verifying against a shared secret that anyone who
+        /// ever held it can still mint tokens with.
+        ///
+        /// Checking the cheaper secret first is the natural implementation and
+        /// the wrong one.
+        #[test]
+        fn oidc_wins_when_both_are_configured_rather_than_the_cheaper_check() {
+            assert_eq!(auth_mode(true, true), AuthMode::Oidc);
+        }
+    }
+
+    mod who_is_an_administrator_before_anyone_can_grant_a_role {
+        use super::*;
+
+        #[test]
+        fn a_listed_subject_is_an_administrator() {
+            assert!(is_bootstrap_admin("auth0|abc", "auth0|abc"));
+        }
+
+        #[test]
+        fn one_of_several_listed_subjects_matches() {
+            assert!(is_bootstrap_admin("auth0|b", "auth0|a,auth0|b,auth0|c"));
+        }
+
+        #[test]
+        fn surrounding_whitespace_is_not_part_of_a_subject() {
+            assert!(is_bootstrap_admin("auth0|b", "auth0|a, auth0|b , auth0|c"));
+        }
+
+        #[test]
+        fn an_unlisted_subject_is_not_an_administrator() {
+            assert!(!is_bootstrap_admin("auth0|intruder", "auth0|a,auth0|b"));
+        }
+
+        /// Matching is exact. A prefix or a substring granting admin would mean
+        /// `auth0|a` in the list elevates `auth0|attacker`.
+        #[test]
+        fn a_prefix_or_substring_does_not_match() {
+            assert!(!is_bootstrap_admin("auth0|abc", "auth0|ab"));
+            assert!(!is_bootstrap_admin("auth0|ab", "auth0|abc"));
+        }
+
+        /// The negatives that stop a trailing comma, or an unset variable,
+        /// becoming a grant. An empty entry must match nothing at all — not
+        /// "the subject whose id is the empty string", and certainly not
+        /// everyone.
+        #[test]
+        fn nothing_configured_elevates_nobody() {
+            for configured in ["", " ", ",", ",,", " , "] {
+                assert!(
+                    !is_bootstrap_admin("auth0|abc", configured),
+                    "{configured:?} must not elevate anyone"
+                );
+            }
+        }
+
+        #[test]
+        fn an_empty_subject_never_matches_even_an_empty_entry() {
+            assert!(!is_bootstrap_admin("", ""));
+            assert!(!is_bootstrap_admin("", "auth0|a,,auth0|b"));
+        }
+    }
+
+    mod what_an_operator_is_warned_about {
+        use super::*;
+
+        /// Both configured is not an error — the stronger one is used — but it
+        /// is always a mistake: the secret is dead weight at best, and a live
+        /// credential somebody believes is in use at worst.
+        #[test]
+        fn both_configured_is_ambiguous() {
+            assert!(is_ambiguous_auth_config(true, true));
+        }
+
+        /// And the negatives, so the warning cannot be implemented as "always
+        /// warn" — which is the same as never warning.
+        #[test]
+        fn a_single_configured_mode_is_not_ambiguous() {
+            assert!(!is_ambiguous_auth_config(true, false));
+            assert!(!is_ambiguous_auth_config(false, true));
+            assert!(!is_ambiguous_auth_config(false, false));
+        }
+    }
 }
