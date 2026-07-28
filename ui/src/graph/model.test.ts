@@ -71,6 +71,9 @@ describe("expansion", () => {
 
     expect(ids(twice)).toEqual(["a", "b", "c"]);
     expect(twice.edges).toHaveLength(2);
+    // And the record of what has been explored survives the repeat: losing it
+    // would offer the node for expansion again, forever.
+    expect([...twice.expanded].sort()).toEqual(["a", "b"]);
   });
 
   /** Identity is the node's id, never its position in the array — the same
@@ -134,6 +137,26 @@ describe("truncation", () => {
       truncated: true,
     });
     expect(model.truncatedAt).toContain("b");
+  });
+
+  /** A truncated *seed* hides something too. Marking only truncated
+   *  expansions would leave the opening view silently incomplete, which is
+   *  the state a reader is least likely to question. */
+  it("a truncated seed names the seed as hiding more", () => {
+    expect(seed("a", view({ truncated: true })).truncatedAt).toEqual(["a"]);
+  });
+
+  /** The marker belongs to the node, and a later complete expansion elsewhere
+   *  says nothing about the node that was truncated earlier. */
+  it("a later complete expansion does not clear an earlier node's marker", () => {
+    const truncated = expand(seed("a", view()), "b", {
+      nodes: [],
+      edges: [],
+      truncated: true,
+    });
+    const then = expand(truncated, "c", view());
+
+    expect(then.truncatedAt).toContain("b");
   });
 
   it("an untruncated graph is not marked", () => {

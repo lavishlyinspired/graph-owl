@@ -52,7 +52,7 @@ import {
   type AssetVersion,
   type ChangeDescription,
   type Facet,
-  type GraphView,
+  type GraphEdge,
   type Overview,
   type SearchFacets,
   ApiError,
@@ -61,6 +61,8 @@ import {
   isUnauthenticated,
   setAuthToken,
 } from "./api";
+import { type DiffEdge, diff } from "./graph/diff";
+import { type GraphModel, expand, seed } from "./graph/model";
 import { brand, darkTheme, lightTheme, palette } from "./theme";
 import { GenericSourceMark, PostgresMark } from "./icons";
 import watermarkImg from "./assets/watermark1.png";
@@ -443,22 +445,131 @@ function GraphExplorer({
   colors: (typeof palette)["light"];
 }) {
   const [hops, setHops] = useState(2);
-  const [view, setView] = useState<GraphView | null>(null);
+  const [model, setModel] = useState<GraphModel | null>(null);
+  const [expanding, setExpanding] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The second instant of a comparison. Null is "not comparing" — distinct
+  // from comparing against now, which is a real thing to ask for.
+  const [compareTo, setCompareToRaw] = useState<string | null>(() =>
+    readParam("compareTo"),
+  );
+  const [baseline, setBaseline] = useState<GraphModel | null>(null);
+
+  const setCompareTo = useCallback((value: string | null) => {
+    setCompareToRaw(value);
+    writeParam("compareTo", value);
+  }, []);
+
+  // The earlier instant is fetched as its own walk from the same seed, at the
+  // same depth. Diffing two walks taken at different depths would report the
+  // depth difference as change in the estate.
+  useEffect(() => {
+    if (compareTo === null) {
+      setBaseline(null);
+      return undefined;
+    }
+    let current = true;
+    setBaseline(null);
+    api
+      .graph(assetId, hops, compareTo)
+      .then((view) => {
+        if (current) setBaseline(seed(assetId, view));
+      })
+      .catch((e: unknown) => {
+        if (current) {
+          setError(
+            e instanceof ApiError ? e.problem.detail : "could not load the earlier graph",
+          );
+        }
+      });
+    return () => {
+      current = false;
+    };
+  }, [assetId, hops, compareTo]);
 
   useEffect(() => {
-    setView(null);
+    let current = true;
+    setModel(null);
     setError(null);
-    api
-      .graph(assetId, hops, asOf)
-      .then(setView)
-      .catch((e: unknown) => {
+    // Expansions are replayed from the URL, in order, on top of the seed —
+    // so a pasted link restores the picture the sender was looking at rather
+    // than the seed they started from.
+    const replay = (readParam("expand") ?? "").split(",").filter(Boolean);
+    (async () => {
+      let next = seed(assetId, await api.graph(assetId, hops, asOf));
+      for (const id of replay) {
+        next = expand(next, id, await api.graph(id, 1, asOf));
+      }
+      if (current) setModel(next);
+    })().catch((e: unknown) => {
+      if (current) {
         setError(e instanceof ApiError ? e.problem.detail : "could not load the graph");
-      });
+      }
+    });
+    return () => {
+      current = false;
+    };
   }, [assetId, hops, asOf]);
 
+  /** Epic 40 decision 2: the canvas grows by explicit expansion, never by
+   *  "show everything". One hop per click, budgeted server-side like every
+   *  other walk. */
+  const expandNode = useCallback(
+    (nodeId: string) => {
+      if (!model || model.expanded.includes(nodeId) || expanding) return;
+      setExpanding(nodeId);
+      api
+        .graph(nodeId, 1, asOf)
+        .then((view) => {
+          setModel((previous) => {
+            if (!previous) return previous;
+            const next = expand(previous, nodeId, view);
+            const grown = next.expanded.filter((id) => id !== next.seedId);
+            writeParam("expand", grown.length > 0 ? grown.join(",") : null);
+            return next;
+          });
+        })
+        .catch((e: unknown) => {
+          setError(e instanceof ApiError ? e.problem.detail : "could not expand that node");
+        })
+        .finally(() => setExpanding(null));
+    },
+    [model, expanding, asOf],
+  );
+
+  const view = model;
+
+  /** What changed between the two instants, or null when not comparing. */
+  const comparison = useMemo(
+    () => (baseline && model ? diff(baseline, model) : null),
+    [baseline, model],
+  );
+
+  /** The nodes and edges to draw. When comparing this is the *union* of both
+   *  instants — a node removed since the earlier one has to stay on the canvas
+   *  to be shown as removed, which is the entire point of the mode. */
+  const picture = useMemo(() => {
+    if (comparison) {
+      return {
+        nodes: comparison.nodes.map((node) => ({
+          id: node.id,
+          name: node.name,
+          kind: node.kind,
+        })),
+        edges: comparison.edges,
+      };
+    }
+    return model ? { nodes: model.nodes, edges: model.edges } : null;
+  }, [comparison, model]);
+
+  /** Change per node, for the canvas. Empty when not comparing. */
+  const changeOf = useMemo(
+    () => new Map((comparison?.nodes ?? []).map((node) => [node.id, node.change])),
+    [comparison],
+  );
+
   const layout = useMemo(() => {
-    if (!view) return null;
+    if (!picture) return null;
     const width = 900;
     const height = 460;
     const centre = { x: width / 2, y: height / 2 };
@@ -467,7 +578,7 @@ function GraphExplorer({
     // server a second time: BFS over what was returned is cheap and cannot
     // disagree with the picture being drawn.
     const adjacency = new Map<string, string[]>();
-    for (const edge of view.edges) {
+    for (const edge of picture.edges) {
       adjacency.set(edge.from, [...(adjacency.get(edge.from) ?? []), edge.to]);
       adjacency.set(edge.to, [...(adjacency.get(edge.to) ?? []), edge.from]);
     }
@@ -487,7 +598,7 @@ function GraphExplorer({
     }
 
     const rings = new Map<number, string[]>();
-    for (const node of view.nodes) {
+    for (const node of picture.nodes) {
       // A node with no path in the returned edges still belongs somewhere;
       // the outer ring is honest about it being least connected.
       const d = depth.get(node.id) ?? Math.max(1, hops);
@@ -513,16 +624,16 @@ function GraphExplorer({
       });
     }
     return { width, height, positions };
-  }, [view, assetId, hops]);
+  }, [picture, assetId, hops]);
 
   if (error) {
     return <Empty description={error} />;
   }
-  if (!view || !layout) {
+  if (!view || !layout || !picture) {
     return <Text type="secondary">Walking the graph…</Text>;
   }
 
-  const byId = new Map(view.nodes.map((n) => [n.id, n]));
+  const byId = new Map(picture.nodes.map((n) => [n.id, n]));
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -548,6 +659,61 @@ function GraphExplorer({
           </Tag>
         )}
         {asOf && <Tag color="warning">as of {new Date(asOf).toLocaleString()}</Tag>}
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {expanding ? "expanding…" : "click a node to expand it"}
+        </Text>
+      </Flex>
+
+      {/* Diff mode. Two instants, and what moved between them — the thing this
+          graph can show because `op = false` is a retraction rather than a
+          delete, and a store that overwrote could not answer it at all. */}
+      <Flex align="center" gap={12} wrap>
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          Compare with
+        </Text>
+        <input
+          type="datetime-local"
+          aria-label="Compare the graph with an earlier instant"
+          value={compareTo ? compareTo.slice(0, 16) : ""}
+          onChange={(e) =>
+            setCompareTo(
+              e.target.value ? new Date(e.target.value).toISOString() : null,
+            )
+          }
+          style={{
+            background: "transparent",
+            color: colors.text,
+            border: `1px solid ${colors.border}`,
+            borderRadius: 8,
+            padding: "2px 8px",
+            fontSize: 13,
+          }}
+        />
+        {compareTo && (
+          <Button size="small" onClick={() => setCompareTo(null)}>
+            Stop comparing
+          </Button>
+        )}
+        {comparison && (
+          <Space size={4}>
+            <Tag color="success">+{comparison.summary.added} added</Tag>
+            <Tag color="error">−{comparison.summary.removed} removed</Tag>
+            <Tag color="processing">~{comparison.summary.changed} changed</Tag>
+          </Space>
+        )}
+        {/* A partial comparison presented as complete would invent deletions
+            that never happened: a node "missing" at one instant may simply not
+            have been fetched. */}
+        {comparison?.partial && (
+          <Tag color="warning">
+            partial — one side was truncated, so an absence may be an omission
+          </Tag>
+        )}
+        {compareTo && !comparison && !error && (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            loading the earlier graph…
+          </Text>
+        )}
       </Flex>
 
       <div style={{ overflowX: "auto", border: `1px solid ${colors.border}`, borderRadius: 16 }}>
@@ -555,12 +721,17 @@ function GraphExplorer({
           viewBox={`0 0 ${layout.width} ${layout.height}`}
           style={{ width: "100%", minWidth: 640, display: "block", background: colors.raised }}
           role="img"
-          aria-label={`Graph neighbourhood: ${view.nodes.length} nodes, ${view.edges.length} edges`}
+          aria-label={
+            comparison
+              ? `Graph comparison: ${comparison.summary.added} added, ${comparison.summary.removed} removed, ${comparison.summary.changed} changed`
+              : `Graph neighbourhood: ${picture.nodes.length} nodes, ${picture.edges.length} edges`
+          }
         >
-          {view.edges.map((edge, i) => {
+          {picture.edges.map((edge, i) => {
             const a = layout.positions.get(edge.from);
             const b = layout.positions.get(edge.to);
             if (!a || !b) return null;
+            const change = "change" in edge ? edge.change : "unchanged";
             return (
               <line
                 key={`${edge.from}-${edge.to}-${i}`}
@@ -568,15 +739,24 @@ function GraphExplorer({
                 y1={a.y}
                 x2={b.x}
                 y2={b.y}
-                stroke={colors.border}
-                strokeWidth={1.5}
+                stroke={change === "unchanged" ? colors.border : colors.text}
+                strokeWidth={change === "unchanged" ? 1.5 : 2}
+                // Removed edges are dashed and added ones solid-but-heavier,
+                // so the distinction survives a greyscale print and a
+                // screenshot pasted into a ticket. Not colour alone — Epic 40
+                // decision 4.
+                strokeDasharray={change === "removed" ? "5 4" : undefined}
+                opacity={change === "removed" ? 0.6 : 1}
               />
             );
           })}
-          {view.nodes.map((node) => {
+          {picture.nodes.map((node) => {
             const at = layout.positions.get(node.id);
             if (!at) return null;
             const isSeed = node.id === assetId;
+            const isExpanded = view.expanded.includes(node.id);
+            const hidesMore = view.truncatedAt.includes(node.id);
+            const change = changeOf.get(node.id);
             const fill = isSeed
               ? colors.primary
               : node.kind
@@ -585,23 +765,64 @@ function GraphExplorer({
                   : KIND_COLOR[node.kind]
                 : colors.textDisabled;
             return (
-              <g key={node.id}>
+              <g
+                key={node.id}
+                onClick={() => expandNode(node.id)}
+                style={{ cursor: isExpanded ? "default" : "pointer" }}
+              >
                 <circle
                   cx={at.x}
                   cy={at.y}
                   r={isSeed ? 13 : 8}
-                  fill={fill}
-                  stroke={colors.raised}
+                  fill={change === "removed" ? "none" : fill}
+                  stroke={change === "removed" ? fill : colors.raised}
                   strokeWidth={2}
+                  strokeDasharray={change === "removed" ? "3 3" : undefined}
                 />
+                {/* An unexpanded node is drawn with a ring, so what is still
+                    unexplored is visible without hovering anything. Suppressed
+                    while comparing: two dashed treatments on one canvas would
+                    make "unexplored" and "removed" look like each other. */}
+                {!isExpanded && !comparison && (
+                  <circle
+                    cx={at.x}
+                    cy={at.y}
+                    r={isSeed ? 17 : 12}
+                    fill="none"
+                    stroke={fill}
+                    strokeWidth={1}
+                    strokeDasharray="2 3"
+                    opacity={0.7}
+                  />
+                )}
+                {/* Truncation is marked on the node that is hiding something,
+                    not only on the canvas — the shape of the omission is what
+                    tells someone which conclusion they may not draw. */}
+                {hidesMore && (
+                  <text
+                    x={at.x + (isSeed ? 15 : 11)}
+                    y={at.y - (isSeed ? 9 : 6)}
+                    fontSize={13}
+                    fontWeight={700}
+                    fill={colors.warning}
+                  >
+                    +
+                  </text>
+                )}
+                {/* The change is written into the label as a sigil, not
+                    signalled by colour. A reader who cannot distinguish the
+                    palette — or who printed the page — still gets the answer.
+                    Epic 40 decision 4. */}
                 <text
                   x={at.x}
-                  y={at.y - (isSeed ? 20 : 15)}
+                  y={at.y - (isSeed ? 24 : 19)}
                   textAnchor="middle"
                   fontSize={11}
-                  fontWeight={isSeed ? 600 : 400}
+                  fontWeight={isSeed || change === "added" ? 600 : 400}
                   fill={colors.text}
+                  textDecoration={change === "removed" ? "line-through" : undefined}
                 >
+                  {change === "added" ? "+ " : change === "removed" ? "− " : change === "changed" ? "~ " : ""}
                   {node.name.length > 22 ? `${node.name.slice(0, 21)}…` : node.name}
                 </text>
               </g>
@@ -612,7 +833,9 @@ function GraphExplorer({
 
       {/* A picture is not an accessible interface on its own. The same data as
           a list, so the neighbourhood is reachable by keyboard and by a screen
-          reader — `00f` treats this as a non-negotiable, not an extra. */}
+          reader — `00f` treats this as a non-negotiable, not an extra.
+          Expansion lives here too: a list that could only *read* the graph
+          while the canvas could grow it would be a summary, not an equivalent. */}
       <details>
         <summary style={{ cursor: "pointer", color: colors.textMuted, fontSize: 13 }}>
           The same neighbourhood as a list
@@ -620,8 +843,74 @@ function GraphExplorer({
         <Table
           size="small"
           style={{ marginTop: 12 }}
+          rowKey={(row) => row.id}
+          dataSource={[...picture.nodes]}
+          pagination={{ pageSize: 10, size: "small" }}
+          columns={[
+            {
+              title: "Node",
+              key: "name",
+              render: (_, row) => (
+                <Space size={6}>
+                  {row.name}
+                  {row.id === view.seedId && <Tag>seed</Tag>}
+                  {view.truncatedAt.includes(row.id) && (
+                    <Tag color="warning">more not shown</Tag>
+                  )}
+                </Space>
+              ),
+            },
+            {
+              title: "Kind",
+              key: "kind",
+              render: (_, row) => row.kind ?? "not visible to you",
+            },
+            // Present only while comparing, and carrying the same `change`
+            // the canvas draws — a list that omitted it would be a summary of
+            // the model rather than an equivalent of it.
+            ...(comparison
+              ? [
+                  {
+                    title: "Change",
+                    key: "change",
+                    render: (_: unknown, row: { id: string }) => {
+                      const node = comparison.nodes.find((n) => n.id === row.id);
+                      if (!node) return null;
+                      return (
+                        <Space size={4}>
+                          {node.change}
+                          {node.wasName !== undefined && (
+                            <Text type="secondary">was {node.wasName}</Text>
+                          )}
+                        </Space>
+                      );
+                    },
+                  },
+                ]
+              : []),
+            {
+              title: "Neighbours",
+              key: "expand",
+              render: (_, row) =>
+                view.expanded.includes(row.id) ? (
+                  <Text type="secondary">expanded</Text>
+                ) : (
+                  <Button
+                    size="small"
+                    onClick={() => expandNode(row.id)}
+                    disabled={expanding !== null}
+                  >
+                    Expand
+                  </Button>
+                ),
+            },
+          ]}
+        />
+        <Table
+          size="small"
+          style={{ marginTop: 12 }}
           rowKey={(row) => `${row.from}-${row.to}-${row.relationship}`}
-          dataSource={view.edges}
+          dataSource={[...picture.edges]}
           pagination={{ pageSize: 10, size: "small" }}
           columns={[
             {
@@ -635,6 +924,16 @@ function GraphExplorer({
               key: "to",
               render: (_, row) => byId.get(row.to)?.name ?? row.to,
             },
+            ...(comparison
+              ? [
+                  {
+                    title: "Change",
+                    key: "change",
+                    render: (_: unknown, row: GraphEdge | DiffEdge) =>
+                      "change" in row ? row.change : "unchanged",
+                  },
+                ]
+              : []),
           ]}
         />
       </details>
