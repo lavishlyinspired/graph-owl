@@ -87,6 +87,35 @@ One incident already occurred and was reverted during planning (a cache-tier tab
 
   What actually reduces mutation time: **fewer mutants** (`--file` scoping, which is already the practice) and **not re-running** (the ordering rule above). Background any run over ~30 mutants and keep working.
 
+- **Re-measured 29 July 2026, and the earlier advice was solving the wrong problem.** A 42-mutant run on `budget.rs` took **over an hour**. The per-mutant breakdown said why: **37s build + 59s test**, because the default invocation runs `cargo test -p graph-owl-server`, and that crate's tests are **integration tests that each start a Postgres container**. Every mutant paid for the whole container suite.
+
+  **The fix is `--cargo-test-arg --lib`**, which restricts the run to unit tests. Test time per mutant drops **59s → 0.8s**, and the same 42-mutant file finishes in **9 minutes instead of ~50**. Use it whenever the mutated code is covered by unit tests — which for pure decision logic it always should be.
+
+  Two consequences worth knowing:
+
+  - With `--lib`, the cost becomes **94% build**. Nothing about the tests matters any more; the whole run is `rustc` recompiling and relinking the mutated crate.
+  - cargo-mutants runs `cargo test` **without** `--test-threads=1`, so on this workspace its baseline hits the documented `PortNotExposed` contention and the run aborts with "cargo test failed in an unmutated tree". `--lib` avoids that too, by not starting containers at all.
+
+- **`-D/--in-diff <file>` is the largest remaining lever, and it was not being used.** It mutates only lines the diff touches. Measured on `openapi.rs`: **12 mutants for the whole file, 1 for the change that was actually made.** For an incremental edit to an existing file this is an order of magnitude, and it is the right default when re-verifying a small change:
+
+  ```
+  git diff HEAD -- path/to/file.rs > /tmp/change.diff
+  cargo mutants -p <crate> --in-diff /tmp/change.diff --cargo-test-arg --lib
+  ```
+
+  `--file` remains right for a *new* file, where the file and the diff are the same thing.
+
+- **`scripts/mutants.sh` bakes both in**, so the fast invocation is the default rather than something to remember:
+
+  ```
+  scripts/mutants.sh graph-owl-server crates/graph-owl-server/src/admission.rs
+  scripts/mutants.sh graph-owl-server --diff crates/graph-owl-server/src/budget.rs
+  ```
+
+- **Which crate the code lives in is a performance decision.** Measured per mutant: **`graph-owl-authz` 3.7s, `graph-owl-server` 9.2s** — 2.5×, and the reason is the build, not the tests (`graph-owl-server`'s test rlib is 63 MB). Pure logic placed in a leaf crate mutates several times faster than the same logic in the server crate. That is a second, independent argument for the split the architecture already prefers.
+
+- **Re-confirmed as *not* worth trying** (measured on an identical 3-mutant scope, 18 cores, 48 GB): `-j 6` is **2m15s vs 87s — 55% slower**, with system time 80s → 255s, so the I/O thrash finding still holds even now that tests are fast. `CARGO_PROFILE_DEV_DEBUG=0` gives 83s vs 87s (5%, inside noise). `--baseline skip` gives 81s vs 87s and removes the check that the tree was green before mutating — not a trade worth making.
+
 - **The integration suite needs bounded parallelism.** `cargo test --workspace` at full parallelism intermittently fails with testcontainers' `PortNotExposed` — a different test each run. It is Docker container-startup contention, not a product bug: every one of those tests passes alone and the whole suite passes at `--test-threads=1`. The pressure roughly doubled when the graph engine landed, because each integration test now opens two Postgres connections (storage adapter + engine adapter) against its container. **Run `cargo test --workspace -- --test-threads=1`**, and do not spend time debugging a `PortNotExposed` failure as though it were real. The durable fix is fewer containers per run (a shared container per test binary, which needs per-test schema isolation to stay correct) — not yet done.
 
   **Updated 28 July 2026**: `--test-threads=2` was sufficient on `postgres:11-alpine` and is not on `18-alpine` — the bigger image takes long enough to start that two concurrent starts exceed testcontainers' readiness timeout. Serial costs almost nothing: 591 tests in **4m31s at 20% CPU**, and that number is the tell — the suite is waiting on Docker, not computing, so the parallelism was never buying much. The image upgrade did not create the problem; it removed the headroom that was hiding it, which raises the priority of the durable fix above.
