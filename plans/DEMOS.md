@@ -8,6 +8,29 @@
 
 ---
 
+## What is left for Demos 1–3
+
+*Maintained in the same commit as the work, per rule 4. Each line is a gap in
+the code, checked against the code — not copied forward from the previous
+revision (rule 0's corollary).*
+
+| Demo | Remaining | Blocks |
+|---|---|---|
+| 1 | **Epic 1 J** — OpenAPI generated from code, committed, diffed in CI. Carries the `/assets/{id}` namespace collision: any console route under it is unreachable, and prefixing the API is the fix | Epic 1 K, Epic 39's generated client |
+| 1 | **Epic 15** — scheduled runs, run-history persistence, `source_hash` fingerprinting to skip unchanged records | — |
+| 2 | **Epic 12 JWKS** and key rotation. The swap point is `signing_secret()`, so this is a function body | — |
+| 2 | **Epic 12 OIDC/PKCE + Epic 39 login** — paired; neither is useful alone, and until both land the console cannot tell "denied" from "empty", which `00f` says is not shippable | — |
+| 2 | **Epic 13** — no decision cache; every request recompiles the predicate. Correct, and not yet fast | — |
+| 2 | **Epic 10** — memory budget report, admission control, cross-port spans, pool/entity gauges | — |
+| 3 | **Epic 40** — WebGL swap; SVG will not survive 10k nodes. Every *interaction* the swap was expected to bring already works and is tested at the model layer, so what remains is scale alone | — |
+| 3 | **Epic 40** — React Flow + d3-dag lineage DAG | Epic 29 (nothing declares lineage yet) |
+
+**Deferred *by design*, and not Demo 1–3 debt** — listing them as gaps would be
+scope confusion: `rdf:reifies` and the language-tag side table → Epic 94 ·
+non-database services → Epic 34 · derived edges drawn distinctly → Epic 6 ·
+column-level masking → Epic 25 · teams and ownership inheritance → Demo 7 ·
+vector embeddings → out of process per `00j`.
+
 ## Demo status
 
 | Demo | Theme | Epics | State |
@@ -105,7 +128,7 @@
 - [x] Containment rule in one place (`AssetKind::parent_kind`)
 - [x] Hierarchy endpoints: roots, children, ancestors, search, stats
 - [x] `PATCH /assets/{id}` and `DELETE /assets/{id}` (soft, cascading to the subtree) — shipped with Epic 3
-- [~] **Gap**: cascade delete is a DB constraint with no test of its own
+- [x] **Containment cascade characterised** — a hard delete takes the whole subtree, leaves ancestors alone, and does not reach a sibling branch; a soft delete removes no rows at all. Nothing hard-deletes an asset today, which is why it was untested; it gets a caller when `00g`'s erasure path lands, and a constraint found to be wrong *then* is found while deleting somebody's personal data
 - [ ] Non-database services (dashboard, pipeline, ML) → deferred to Epic 34
 
 ### Epic 15 — Source connectors
@@ -194,10 +217,22 @@ rather than a gap in it.
 - [x] Startup states its security posture — an accidentally-open server must not look identical to a secured one
 - [x] `BIND_ADDR` configurable
 
+- [x] **Structured logging and request-id propagation** *(Slice C)* — `tracing` with `LOG_LEVEL` and `LOG_FORMAT=json`; one line per request carrying `request_id`, `method`, `route`, `status`, `duration_ms`. A client-supplied `X-Request-Id` is **propagated**, not replaced, and echoed back on every response including error paths — the error path is where an operator most needs the correlation. A supplied id is validated first: it lands in a response header and in every log line, so an unvalidated one is header injection and log forging in the same field
+- [x] **`DATABASE_URL` is redacted wherever it is logged** — the password only, so the host, port, database and user that make the line worth logging survive. The rightmost `@` is the split point, because a password containing `@` split on the first one leaves its tail in the output, which is this function's whole failure mode delivered quietly
+- [x] **`/metrics`** *(Slice D)* — `graph_owl_http_requests_total{method,route,status}` and `graph_owl_http_request_duration_seconds{method,route}`, base units per the observability contract. Route labels are the **template**: three requests to three asset ids produce one series, and the test asserts no concrete id appears anywhere in the exposition. `/metrics` is excluded from its own counters
+- [x] Unauthenticated `/metrics`, for the same reason as `/health` — a scrape that depends on the identity provider goes blind during exactly the outage it should be reporting
+
+**Found by the tests, worth recording**: the recorder was installed lazily on
+first scrape, so every metric taken before Prometheus first polled was silently
+dropped — including the whole startup window. It is now installed when the app
+is built. The bug was invisible when tests ran in parallel, because another
+test's scrape had already installed the recorder.
+
 **Pending in this epic**
-- Structured JSON logs and request-id propagation
-- `/metrics`
 - Memory budget report (the input `00a`'s footprint claim needs to stay honest)
+- Admission control — the bounded semaphore and fast `503` in the observability contract
+- Spans across port boundaries: `tracing` is wired but the facade → storage and query → triple-store child spans are not, so a slow request is not yet attributable to a layer
+- `db_pool_connections{state}` and `catalog_entities_total{entity_type}` gauges (Slice D lists both; only the two HTTP series ship)
 
 ### Epic 11 — Users, teams, ownership
 - [x] `User` with roles; auto-provisioned on first sight
@@ -339,7 +374,7 @@ no library can supply actually live.
 - [x] **Expand-on-click** *(Slice B)* — one hop per click, budgeted server-side; dedup by node id and by `(from, to, relationship)`; truncation **sticky and per-node**, so the marker sits on the node hiding something; `?expand=` replays the expansions, so a pasted link restores the sender's picture
 - [x] **Diff mode** *(Slice D)* — two instants, `?compareTo=`. A node removed between them is **still drawn**, marked by sigil, strikethrough and dash pattern rather than colour alone. A truncated side marks the comparison `partial`, because a partial comparison shown as complete invents deletions that never happened
 - [~] Still SVG, not WebGL — honest at demo scale, will not survive 10k nodes. Every *interaction* the swap was expected to bring already works and is tested at the model layer, so what remains is scale alone
-- [~] Diff compares the seed walk at each instant, not the expanded model — expand while comparing and the new nodes read as added regardless of when they arrived
+- [x] **Diff compares the *expanded* model, not the seed walk** — the baseline replays the reader's expansions at the earlier instant. A node expanded today that did not exist then is skipped rather than treated as empty, and the skip does not mark the comparison `partial` (which would suppress the deletions the screen exists to show)
 - [ ] React Flow + d3-dag lineage DAG
 - [ ] Derived edges visually distinct — nothing derives edges until Epic 6
 
