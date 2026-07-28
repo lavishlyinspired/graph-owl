@@ -331,7 +331,8 @@ no library can supply actually live.
 - [ ] Severity classification; repair suggestions never auto-applied
 
 ### Epic 6 — Reasoning overlay
-- [ ] Eight OWL 2 RL axioms as built-in rules
+- [x] **Eight OWL 2 RL axioms as built-in rules** *(Slice A)* — subClassOf, subPropertyOf, transitive, symmetric, inverseOf, domain, range, sameAs. Eight named functions, not a rule interpreter. Iterates to fixpoint with dedup, so depth-3 chains resolve and a symmetric property terminates instead of ping-ponging. A derived fact carries the **max premise `t`**, so it can never be visible at an instant before the facts implying it. Retracted flakes derive nothing
+- [~] **Slice A only.** No budgets (Slice C), no provenance on the derived fact (Slice D), no `graph:reasoning` overlay write (Slice E) — `derive()` returns facts, and nothing persists them yet
 - [ ] Semi-naive fixpoint, `CappedReason` on every limit
 - [ ] Derived facts in `graph:reasoning`, never persisted into the base
 - [ ] `GET /reasoning/explain` derivation chains

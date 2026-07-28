@@ -1,7 +1,7 @@
 # Plan: Reasoning Overlay (Epic 6)
 
 **Branch**: feat/engine-reasoning
-**Status**: Not started
+**Status**: **In progress** — Slice A shipped 28 Jul 2026 (eight axioms, fixpoint, dedup). B's fixpoint/dedup landed with it because a symmetric property does not terminate without them; C–F not started
 **Depends on**: Epic 4 (triples), Epic 5 (ontology types)
 **Crate**: `graph-owl-reasoning` (pure logic)
 
