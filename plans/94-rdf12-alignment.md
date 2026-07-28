@@ -287,11 +287,20 @@ target is SPARQL 1.1; this slice moves the *parse* surface to 1.2 wholesale and
 cannot do otherwise. Two consequences that must be handled here rather than
 discovered later:
 
-1. **A new failure class: parses, then fails.** `STRLANGDIR(...)` and friends
-   will now parse cleanly and reach an evaluator that does not implement them.
-   Today they fail at parse with a clear message. The slice must decide what a
-   recognised-but-unimplemented 1.2 construct returns, and it must not be a
-   confusing evaluator-internal error.
+1. **A "parses, then fails" class exists but is small — smaller than first
+   written here.** Corrected after reading `spareval` rather than inferring from
+   the feature name: `spareval 0.2.6` *implements* the 1.2 functions under the
+   same flag — `Function::LangDir` (`expression.rs:527`),
+   `Function::StrLangDir` (`:1166`), `HasLang` (`:1248`). It also handles
+   `TermRef::Triple` throughout its dataset layer, correctly returning empty for
+   the subject and graph-name positions the standard forbids. **So triple-term
+   patterns are genuinely evaluated, not merely parsed**, and the adopted stack
+   carries more of this slice than the earlier reading assumed.
+
+   What remains is therefore a **measured** list, not an assumed one: enable the
+   flag, run the 1.2 constructs, record which actually fail. Build the named
+   refusal for that list. Designing a general `UnsupportedConstruct` mechanism
+   before knowing its members would be building an error type for an empty set.
 2. **`00k-standards-conformance.md` records SPARQL 1.2 Query Language as a
    Working Draft**, and `00k` says building against a Working Draft is a
    decision to accept churn. Taking this feature is exactly that decision, so
@@ -302,9 +311,37 @@ same switch, and those are the query-side counterpart of Slice C's
 `rdf:dirLangString`. Slices C and D share a gate, which is an argument for
 doing them adjacently rather than a coincidence to ignore.
 
+#### The real cross-file impact is a compile error, and it was planted on purpose
+
+`from_term` (`graph-owl-query/src/term.rs:92`) matches `oxrdf::Term`
+**exhaustively, with no wildcard**, and its comment says why:
+
+> *Named rather than caught by a wildcard, so when RDF 1.2 triple terms arrive
+> (Epic 94) this becomes a compile error rather than silently taking the
+> "unrepresentable" path they may not belong on.*
+
+Enabling `rdf-12` adds `Term::Triple` and that match stops compiling — **by
+design, as a checkpoint this codebase staked out in advance**. It is the most
+useful thing the feature flag does: it forces an explicit answer to a question
+synthesis alone would let us skip — *what does a triple term mean when
+converting a query term back into a flake value?* `from_term` feeds pattern
+matching, and a triple term has no `Sid` address in this store, so the honest
+answer is probably a named refusal on that path specifically. That is a much
+narrower refusal than a general unsupported-construct mechanism, and it is one
+the compiler will not let us forget.
+
+So "≈100 lines in `dataset.rs` only" is wrong on the file count regardless of
+the line count: `term.rs` changes too, and it changes first, because nothing
+compiles until it does.
+
 **Check before starting**: whether Slice B's serializer needs `rdf-12` too. If
 it emits Turtle as text it does not; if it builds `oxrdf` terms it does, and
 then export and query share the gate rather than merely neighbouring it.
+
+**Not needed**: pinning the crates to exact versions as churn protection.
+`Cargo.lock` is committed, which already fixes the resolved versions for every
+build; adding `=` pins to `Cargo.toml` would duplicate that and make routine
+patch upgrades a manual edit.
 
 **Acceptance criteria**: `?rel rdf:reifies << ?a ?p ?b >>` binds against a
 reified relationship; the flake count is unchanged, asserted on the same
