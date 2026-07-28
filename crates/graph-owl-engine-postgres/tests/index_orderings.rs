@@ -26,7 +26,7 @@ use testcontainers_modules::{
 /// The **major** is pinned and the minor floats, so a security release arrives
 /// without a manual bump while a major upgrade stays a deliberate decision.
 /// See `plans/00g-operations.md`, "Supported PostgreSQL versions".
-const POSTGRES_IMAGE_TAG: &str = "16-alpine";
+const POSTGRES_IMAGE_TAG: &str = "18-alpine";
 
 const SUBJECTS: i64 = 10_000;
 /// 10 predicates x 10k subjects = 100k flakes, the size the plan's acceptance

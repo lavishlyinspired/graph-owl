@@ -1,3 +1,5 @@
+pub mod observability;
+
 use axum::{
     Json, Router,
     extract::{
@@ -24,6 +26,13 @@ use serde_json::json;
 use uuid::Uuid;
 
 pub fn app(catalog: Catalog) -> Router {
+    // Installed when the app is built, not on the first scrape. The `metrics`
+    // facade drops every measurement taken before a recorder exists, so a
+    // lazily-installed one loses everything up to the first request Prometheus
+    // happens to make — silently, and exactly during the startup window an
+    // operator most wants to see.
+    observability::metrics_handle();
+
     Router::new()
         .route("/tables", post(create_table).get(list_tables))
         .route(
@@ -47,6 +56,10 @@ pub fn app(catalog: Catalog) -> Router {
         // on the identity provider being reachable.
         .route("/health", get(health))
         .route("/ready", get(ready))
+        // Unauthenticated for the same reason: a scrape must not depend on the
+        // identity provider, or an auth outage blinds the monitoring that would
+        // have shown it.
+        .route("/metrics", get(observability::metrics_endpoint))
         .route(
             "/assets/{id}",
             get(get_asset).patch(update_asset).delete(delete_asset),
@@ -57,6 +70,10 @@ pub fn app(catalog: Catalog) -> Router {
         .route("/assets/{id}/graph", get(asset_graph))
         .route("/assets/{id}/ancestors", get(asset_ancestors))
         .with_state(catalog)
+        // `layer`, not `route_layer`: this must run after routing so
+        // `MatchedPath` is in the extensions and the metric label is the route
+        // template rather than the concrete path.
+        .layer(axum::middleware::from_fn(observability::observe))
         // Mounted LAST so the SPA fallback cannot swallow an unknown API path.
         // A fallback registered first turns every mistyped endpoint into a 200
         // text/html and the client sees a blank page instead of an error.

@@ -15,7 +15,7 @@ use testcontainers_modules::{
 /// The **major** is pinned and the minor floats, so a security release arrives
 /// without a manual bump while a major upgrade stays a deliberate decision.
 /// See `plans/00g-operations.md`, "Supported PostgreSQL versions".
-const POSTGRES_IMAGE_TAG: &str = "16-alpine";
+const POSTGRES_IMAGE_TAG: &str = "18-alpine";
 
 pub async fn test_app() -> (axum::Router, ContainerAsync<Postgres>, String) {
     build_app(None).await
@@ -64,6 +64,7 @@ async fn build_app(secret: Option<&str>) -> (axum::Router, ContainerAsync<Postgr
     (graph_owl_server::app(catalog), container, connection_string)
 }
 
+#[allow(dead_code)]
 pub async fn json_body(response: axum::response::Response) -> Value {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await

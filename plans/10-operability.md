@@ -1,6 +1,10 @@
 # Plan: Operability & Resource Budget (Epic 10) ★
 **Branch**: feat/operability
-**Status**: **In progress** — shipped into Demo 2; admission control and cgroup-aware cache budget still open
+**Status**: **In progress** — Slices A, B, C, D and E shipped into Demo 2:
+typed config, three-valued readiness, graceful drain, structured logging with
+request-id propagation and redaction, and `/metrics` with templated route
+labels. Still open: admission control, the cgroup-aware cache budget, the pool
+and entity-count gauges, and cross-port spans
 **Depends on**: Epic 1 (a server, an error model, and a contract to instrument)
 **Unblocks**: safe operation of every epic from 14 onward (async, multi-service failure modes)
 **Differentiator** — the resource budget makes operational simplicity measurable. See `plans/00a-product-position.md`.

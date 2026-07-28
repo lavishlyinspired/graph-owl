@@ -21,7 +21,7 @@ use testcontainers_modules::{
 /// The **major** is pinned and the minor floats, so a security release arrives
 /// without a manual bump while a major upgrade stays a deliberate decision.
 /// See `plans/00g-operations.md`, "Supported PostgreSQL versions".
-const POSTGRES_IMAGE_TAG: &str = "16-alpine";
+const POSTGRES_IMAGE_TAG: &str = "18-alpine";
 
 /// The container handle must be returned and bound by the caller. If it is
 /// dropped here, Docker tears the database down and the next query fails with

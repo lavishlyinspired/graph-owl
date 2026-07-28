@@ -16,20 +16,26 @@ been running against PostgreSQL 11 the whole time.*
 
 | | Version | Why |
 |---|---|---|
-| **Currently pinned** | **16-alpine** | What the suite has actually been run green against. |
-| **Target** | **18** (major pinned, minor floats) | Testing on an older major than a deployment would run means the tested plan is not the plan that runs. The minor floats so a security release arrives without a code change; the major stays a deliberate decision. |
+| **Tested against** | **18-alpine** (major pinned, minor floats) | Testing on an older major than a deployment would run means the tested plan is not the plan that runs. The minor floats so a security release arrives without a code change; the major stays a deliberate decision. |
 | **Minimum supported** | **14** | Set by what the design actually relies on, not by what is newest. |
 | **Not used** | 19 beta | A beta in CI turns an unrelated failure into upstream triage, and its on-disk format may change between betas. It is worth running *ahead* of a major release, on a scheduled job that is allowed to fail, never as the gate on a commit. |
 
-**Why the pin is 16 and not the target.** The bump to 18 is a one-constant
-change and was written, then backed out unverified: `docker pull` could not
-reach the registry from the environment the change was made in — a
-`hello-world` pull hung identically — so the suite could not be run against 18
-even once. Shipping an unverified pin to shared test infrastructure would break
-every integration test for the next person with a failure that looks like their
-own. The move is: pull `postgres:18-alpine`, change
-`POSTGRES_IMAGE_TAG` in the nine test fixtures, run
-`cargo test --workspace -- --test-threads=2`, and update this row.
+**The upgrade cost one thing: the suite is now serial.** `--test-threads=2` was
+sufficient on `11-alpine` and is not on `18-alpine`. Two containers starting
+concurrently now exceed testcontainers' readiness timeout, and the failure
+arrives as `PortNotExposed` on a different test each run — the flake CLAUDE.md
+already warns not to debug as though it were real. Every one of those tests
+passes alone.
+
+**Run `cargo test --workspace -- --test-threads=1`.** 591 tests, 4m31s wall,
+20% CPU — which is the tell: the suite is not compute-bound, it is waiting on
+Docker. Serial costs almost nothing here because the parallelism was never
+buying much.
+
+This raises the priority of the durable fix CLAUDE.md already names — **one
+container per test binary rather than one per test**, which needs per-test
+schema isolation to stay correct. The image upgrade did not create that problem;
+it removed the headroom that was hiding it.
 
 **What sets the floor of 14**, in the order the constraint binds:
 
