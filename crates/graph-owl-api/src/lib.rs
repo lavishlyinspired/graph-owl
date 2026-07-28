@@ -2607,33 +2607,76 @@ mod projection_isolation_tests {
         fail: bool,
         asserted: Mutex<Vec<Flake>>,
         retracted: Mutex<Vec<Flake>>,
+        /// Every pattern this store was asked to answer. Some obligations —
+        /// narrowing a scan to one subject — change the *question* and not the
+        /// answer, and are unobservable from the result alone.
+        queried: Mutex<Vec<TriplePattern>>,
         clock: std::sync::atomic::AtomicI64,
         at_resolves_to: std::sync::atomic::AtomicI64,
     }
 
     impl RecordingGraph {
-        fn working() -> Arc<Self> {
+        fn with(fail: bool) -> Arc<Self> {
             Arc::new(Self {
-                fail: false,
+                fail,
                 asserted: Mutex::new(Vec::new()),
                 retracted: Mutex::new(Vec::new()),
+                queried: Mutex::new(Vec::new()),
                 clock: std::sync::atomic::AtomicI64::new(0),
                 at_resolves_to: std::sync::atomic::AtomicI64::new(i64::MAX),
             })
         }
 
+        fn working() -> Arc<Self> {
+            Self::with(false)
+        }
+
         fn broken() -> Arc<Self> {
-            Arc::new(Self {
-                fail: true,
-                asserted: Mutex::new(Vec::new()),
-                retracted: Mutex::new(Vec::new()),
-                clock: std::sync::atomic::AtomicI64::new(0),
-                at_resolves_to: std::sync::atomic::AtomicI64::new(i64::MAX),
-            })
+            Self::with(true)
         }
 
         fn refuse<T>() -> Result<T, EngineError> {
             Err(EngineError::Backend("the graph is down".to_string()))
+        }
+
+        /// The port's contract, in memory: bindings narrow, `as_of` bounds, and
+        /// each fact identity resolves to its newest row — which is dropped if
+        /// that row is a retraction.
+        ///
+        /// A double looser than the port lets production code that ignores the
+        /// contract pass, which is precisely how the `s` and `as_of` mutants on
+        /// `get_asset_as_of` survived: neither field changed what came back.
+        fn resolve(&self, pattern: &TriplePattern) -> Vec<Flake> {
+            let assertions = self.asserted.lock().expect("lock");
+            let retractions = self.retracted.lock().expect("lock");
+            let mut latest: std::collections::HashMap<String, &Flake> =
+                std::collections::HashMap::new();
+
+            for flake in assertions
+                .iter()
+                .chain(retractions.iter())
+                .filter(|f| pattern.as_of.is_none_or(|t| f.t <= t))
+                .filter(|f| pattern.s.as_ref().is_none_or(|s| &f.s == s))
+                .filter(|f| pattern.p.as_ref().is_none_or(|p| &f.p == p))
+                .filter(|f| pattern.o.as_ref().is_none_or(|o| &f.o == o))
+                .filter(|f| pattern.cx.as_ref().is_none_or(|cx| &f.cx == cx))
+            {
+                // Everything but `t` and `op` — the same fact identity the
+                // relational store groups by.
+                let identity = format!("{:?}|{:?}|{:?}|{:?}", flake.s, flake.p, flake.o, flake.cx);
+                match latest.get(&identity) {
+                    Some(seen) if seen.t >= flake.t => {}
+                    _ => {
+                        latest.insert(identity, flake);
+                    }
+                }
+            }
+
+            latest
+                .into_values()
+                .filter(|f| f.op)
+                .cloned()
+                .collect::<Vec<_>>()
         }
     }
 
@@ -2661,35 +2704,24 @@ mod projection_isolation_tests {
             Ok(())
         }
 
-        /// Serves back what was asserted, honouring `as_of`.
+        /// Serves back the resolved current state at the pattern's instant.
         ///
         /// A double that always returned nothing would make `Catalog::sparql`
         /// untestable here — every query would answer zero rows whether the
         /// code worked or not, which is the shape of a test that cannot fail.
         async fn query_pattern(&self, pattern: &TriplePattern) -> Result<Vec<Flake>, EngineError> {
-            let asserted = self.asserted.lock().expect("lock");
-            Ok(asserted
-                .iter()
-                .filter(|f| pattern.as_of.is_none_or(|t| f.t <= t))
-                .cloned()
-                .collect())
+            self.queried.lock().expect("lock").push(pattern.clone());
+            Ok(self.resolve(pattern))
         }
 
-        /// Answers from what was actually asserted.
+        /// Counted through the same resolution as the rows.
         ///
-        /// A double that always returned 0 would make every asset look
-        /// permanently drifted, so an idempotency test over it could never
-        /// pass — and, worse, a reconciler that repaired nothing would look
-        /// identical to one that worked.
+        /// A count computed by a separate path is a count that can disagree
+        /// with the rows, and the disagreement always surfaces far away from
+        /// here — the same reason the Postgres adapter shares one builder.
         async fn count(&self, pattern: &TriplePattern) -> Result<u64, EngineError> {
-            let asserted = self.asserted.lock().expect("lock");
-            Ok(asserted
-                .iter()
-                .filter(|f| {
-                    pattern.s.as_ref().is_none_or(|s| &f.s == s)
-                        && pattern.p.as_ref().is_none_or(|p| &f.p == p)
-                })
-                .count() as u64)
+            self.queried.lock().expect("lock").push(pattern.clone());
+            Ok(self.resolve(pattern).len() as u64)
         }
 
         /// A real advancing clock, so successive writes land at different `t`.
@@ -3026,6 +3058,193 @@ mod projection_isolation_tests {
             "the second asset did not exist at t=1: {:?}",
             earlier.rows
         );
+    }
+
+    /// Reconstruction reads the graph **at the instant asked for**, not the
+    /// present.
+    ///
+    /// Two edits land at different `t`. Asking as of the later one must return
+    /// the later value — which only holds if the store resolves each fact to
+    /// its newest row at or before `t`, and if `get_asset_as_of` passes the `t`
+    /// down at all. Drop `as_of` from the pattern and the whole history arrives
+    /// at once, so the answer depends on scan order rather than on time.
+    #[tokio::test]
+    async fn reconstruction_at_the_present_returns_the_latest_value() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let created = catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("create");
+
+        for text in ["the first description", "the corrected description"] {
+            catalog
+                .update_asset(
+                    &Principal::system(),
+                    created.id,
+                    &AssetUpdate {
+                        description: Some(Some(text.to_string())),
+                    },
+                    None,
+                )
+                .await
+                .expect("update");
+        }
+
+        let now = catalog
+            .get_asset_as_of(created.id, Utc::now())
+            .await
+            .expect("reconstruct");
+
+        assert_eq!(
+            now.description.as_deref(),
+            Some("the corrected description"),
+            "the newest value at that instant, not the oldest one written"
+        );
+    }
+
+    /// And the negative: as of an instant **before** the correction, the
+    /// original stands. Without this the test above is satisfied by a store
+    /// that ignores `as_of` and always answers with the present.
+    #[tokio::test]
+    async fn reconstruction_before_an_edit_returns_what_the_field_used_to_say() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let created = catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("create");
+
+        catalog
+            .update_asset(
+                &Principal::system(),
+                created.id,
+                &AssetUpdate {
+                    description: Some(Some("the first description".to_string())),
+                },
+                None,
+            )
+            .await
+            .expect("first edit");
+
+        let between = graph.clock.load(std::sync::atomic::Ordering::SeqCst);
+
+        catalog
+            .update_asset(
+                &Principal::system(),
+                created.id,
+                &AssetUpdate {
+                    description: Some(Some("the corrected description".to_string())),
+                },
+                None,
+            )
+            .await
+            .expect("second edit");
+
+        graph
+            .at_resolves_to
+            .store(between, std::sync::atomic::Ordering::SeqCst);
+
+        let historical = catalog
+            .get_asset_as_of(created.id, Utc::now())
+            .await
+            .expect("reconstruct");
+
+        assert_eq!(
+            historical.description.as_deref(),
+            Some("the first description"),
+            "history must be recoverable — this is the whole claim of the flake model"
+        );
+    }
+
+    /// A **retracted** fact must not come back. Clearing a description writes a
+    /// retraction, not a delete; a reconstruction that ignored `op` would keep
+    /// serving a value the catalog no longer holds — worse than a missing
+    /// field, because it looks authoritative.
+    #[tokio::test]
+    async fn reconstruction_does_not_resurrect_a_retracted_field() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let created = catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("create");
+
+        catalog
+            .update_asset(
+                &Principal::system(),
+                created.id,
+                &AssetUpdate {
+                    description: Some(Some("written then withdrawn".to_string())),
+                },
+                None,
+            )
+            .await
+            .expect("set");
+
+        catalog
+            .update_asset(
+                &Principal::system(),
+                created.id,
+                &AssetUpdate {
+                    description: Some(None),
+                },
+                None,
+            )
+            .await
+            .expect("clear");
+
+        let now = catalog
+            .get_asset_as_of(created.id, Utc::now())
+            .await
+            .expect("reconstruct");
+
+        assert_eq!(now.description, None, "the retraction must win");
+    }
+
+    /// Reconstructing one asset must **ask for one subject**.
+    ///
+    /// The returned value cannot catch this: `asset_from_flakes` filters by id
+    /// anyway, so an unbounded scan produces exactly the right answer — after
+    /// reading every fact in the graph. At 124 assets that is invisible; at
+    /// 100k it is the difference between a SPOT point lookup and a full scan.
+    /// The question asked is the only observable, so that is what is asserted.
+    #[tokio::test]
+    async fn reconstruction_asks_for_one_subject_not_the_whole_graph() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let mine = catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("create");
+        catalog
+            .upsert_asset(&Principal::system(), service("someone-else"))
+            .await
+            .expect("create");
+
+        graph.queried.lock().expect("lock").clear();
+        catalog
+            .get_asset_as_of(mine.id, Utc::now())
+            .await
+            .expect("reconstruct");
+
+        let queried = graph.queried.lock().expect("lock");
+        assert!(
+            queried.iter().all(|pattern| pattern
+                .s
+                .as_ref()
+                .is_some_and(|s| s.id == mine.id.to_string())),
+            "every scan must be bound to the subject asked for: {queried:?}"
+        );
+        assert!(!queried.is_empty(), "it must have asked something at all");
     }
 
     /// **Decision 6, asserted rather than promised.** Failing an entity write

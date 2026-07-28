@@ -701,7 +701,7 @@ written from understanding rather than from the reference.
 5. Performance smoke against the targets in `00a-product-position.md`: batch assert < 1ms/1000 flakes, pattern query < 5ms p50.
 6. Reconciliation one-directionality asserted, not assumed (Slice G).
 
-## Untested as-of pattern construction (found 28 July 2026, not yet fixed)
+## Untested as-of pattern construction (found 28 July 2026, **fixed 28 July 2026**)
 
 A mutation run scoped to another crate's change surfaced two survivors in
 `Catalog::get_asset_as_of` (`graph-owl-api/src/lib.rs`): deleting the `s` field
@@ -718,3 +718,43 @@ Recorded rather than fixed in the commit that found it, because it belongs to
 this epic and fixing it inside an unrelated change would hide it. **The fix is a
 test, not code**: an as-of read whose result must differ from the present read,
 and one that must not return another subject's flakes.
+
+### The root cause was the double, not the tests
+
+The covering tests already existed — in `graph-owl-server/tests/time_travel.rs`,
+which a mutation run scoped to `graph-owl-api` never executes. Inside
+`graph-owl-api` the only `TripleStore` was `RecordingGraph`, and **it was looser
+than the port it stood for**: it ignored `s`, `p`, `o` and `cx` entirely,
+returned every superseded value rather than resolving each fact identity to its
+newest row, and never applied retractions at all. Production code that ignored
+the contract therefore produced identical results, which is exactly what a
+surviving mutant means.
+
+So the fix was to make the double obey the port:
+
+- bindings narrow (`s`, `p`, `o`, `cx`),
+- `as_of` bounds,
+- each fact identity resolves to its newest row at or before `t`,
+- and that row is dropped if it is a retraction — mirroring the adapter's
+  `DISTINCT ON (fact_identity) … ORDER BY …, t DESC … WHERE op`.
+
+**The generalisable rule: a test double must be at least as strict as the port
+it substitutes for.** A looser double does not merely weaken one test; it makes
+a whole class of obligations unobservable in that crate, and the gap is invisible
+until something outside the crate happens to cover it — or does not.
+
+Four tests came out of it. Two are killed by the corrected double alone
+(latest-value-wins, retraction-does-not-resurrect). One is the negative that the
+project's mutation lesson demands (`before_an_edit` still returns the old value,
+so "return the present" cannot pass). The fourth asserts the *question* rather
+than the answer:
+
+> `reconstruction_asks_for_one_subject_not_the_whole_graph`
+
+because `asset_from_flakes` filters by id regardless, so an unbounded scan
+returns exactly the right asset after reading the entire graph. At 124 assets
+that is invisible; at 100k it is a SPOT point lookup versus a full scan. When
+correctness and cost diverge like this, the recorded pattern is the only
+observable — the same reason Slice B asserts on `EXPLAIN` output.
+
+Result: 5 mutants on `get_asset_as_of`, **4 caught, 1 unviable, 0 survived**.
