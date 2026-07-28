@@ -1,6 +1,6 @@
 # Plan: Operability & Resource Budget (Epic 10) ★
 **Branch**: feat/operability
-**Status**: **In progress** — Slices A, B, C, D and E shipped into Demo 2:
+**Status**: **In progress** — Slices A, B, C, D, E and the memory budget shipped into Demo 2:
 typed config, three-valued readiness, graceful drain, structured logging with
 request-id propagation and redaction, and `/metrics` with templated route
 labels. Still open: admission control, the cgroup-aware cache budget, the pool
@@ -81,6 +81,38 @@ Every line is an explicit configuration value with a stated default, and the sum
 **The reasoning and vector lines are the only two that scale with data**, and both refuse rather than grow: reasoning returns `CappedReason::Memory`, and the vector index reports required-versus-configured at startup and refuses to load a corpus that will not fit. Refusing at startup with a number is strictly better than being OOM-killed under load.
 
 **Container-aware as a guard, not as a sizing input.** The cgroup limit is read only to *check* the configured total against it and fail fast at startup if it exceeds. It never derives the budget — that would reintroduce the percentage model through the back door.
+
+### The budget, as built (29 July 2026)
+
+**Two totals, because five of the six lines budget for caches that do not
+exist.** Only Epic 13's decision cache is allocated by this build. A startup
+line claiming the table's full 1168 MB would tell an operator to size a
+container for memory nothing can reserve — so the report states 32 MB
+*allocated* and 1168 MB *planned*, and the difference is visible rather than
+implied. The `built` flag on each line is what carries that, and it moves to
+`true` as each epic ships.
+
+**The container guard checks the allocated number, and warns on the planned
+one.** Refusing to start because a future line item will not fit would block a
+deployment that works today; saying nothing would let an operator size a
+container that stops working the moment Epic 6 lands. Both are wrong, so the
+two cases are distinguished:
+
+| | Container too small for… | Response |
+|---|---|---|
+| `AllocatedExceedsLimit` | what this build reserves | **Refuse**, with both numbers, exit `78` (`EX_CONFIG`) |
+| `PlannedExceedsLimit` | what it will reserve | Warn, and start |
+
+**cgroup v1's unlimited sentinel is the trap worth naming.** v2 writes the word
+`max`, which is unmistakable. v1 writes a number near `u64::MAX`, which parses
+cleanly — and taking it literally makes every budget fit comfortably inside a
+nine-exabyte container. That is a guard that always passes, which is the one
+failure mode a guard must not have, and it fails silently. Anything at or above
+the sentinel is treated as no limit.
+
+Every decision here is a pure function taking an injected reader, so the cgroup
+paths and the environment are testable without a container and without mutating
+process globals that other tests would race against. 23 tests.
 
 ## Acceptance criteria (feature level)
 

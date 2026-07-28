@@ -22,6 +22,24 @@ async fn main() {
     let _ = graph_owl_server::observability::install_logging();
     graph_owl_server::observability::metrics_handle();
 
+    // Before the database connection, deliberately. A configuration fault
+    // should be reported as a configuration fault, not discovered after a
+    // connection attempt that may itself fail for unrelated reasons and hide
+    // it.
+    let budget = match graph_owl_server::budget::Budget::from_env(|name| std::env::var(name).ok()) {
+        Ok(budget) => budget,
+        Err(error) => {
+            tracing::error!("{error}");
+            std::process::exit(78); // EX_CONFIG
+        }
+    };
+    let limit =
+        graph_owl_server::budget::container_limit(|path| std::fs::read_to_string(path).ok());
+    if let Err(refusal) = graph_owl_server::budget::report(&budget, limit) {
+        tracing::error!("{refusal}");
+        std::process::exit(78);
+    }
+
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     // Redacted at every mention. `DATABASE_URL` is the one value that is both
     // routinely logged — it names what a startup failure is about — and

@@ -30,7 +30,7 @@ marks for it yet, which is a different thing from zero of them done.
 | **8** | [`08-engine-search.md`](08-engine-search.md) | In progress | 6/8 | Epic 3 (change events to subscribe to), Epic 2 (FQNs to rank on), Epic 25 (tags… |
 | **9** | [`09-engine-rdf-io.md`](09-engine-rdf-io.md) | Not started | — | Epic 4 (triples to serialize), Epic 7 (CONSTRUCT produces Turtle) |
 | **9a** | [`09a-lpg-interchange.md`](09a-lpg-interchange.md) | Not started | — | Epic 7c (LPG projection), Epic 9 (RDF I/O — shares the streaming-serializer sha… |
-| **10** | [`10-operability.md`](10-operability.md) | In progress | 9/13 | Epic 1 (a server, an error model, and a contract to instrument) |
+| **10** | [`10-operability.md`](10-operability.md) | In progress | 13/16 | Epic 1 (a server, an error model, and a contract to instrument) |
 | **11** | [`11-people-and-ownership.md`](11-people-and-ownership.md) | **Shipped** | 2/2 | Epic 3 (envelope carries `owners`) |
 | **12** | [`12-13-security.md`](12-13-security.md) | In progress | 13/15 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **13** | [`12-13-security.md`](12-13-security.md) | In progress | 9/10 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
@@ -194,7 +194,10 @@ marks for it yet, which is a different thing from zero of them done.
 - [x] `DATABASE_URL` is redacted wherever it is logged
 - [x] `/metrics`
 - [x] Unauthenticated `/metrics`, for the same reason as `/health` — a scrape that depends on 
-- [ ] Memory budget report (the input `00a`'s footprint claim needs to stay honest)
+- [x] Memory budget, itemized and defended
+- [x] Two totals, because only one cache exists.
+- [x] The cgroup limit is a guard, never a sizing input.
+- [x] Invalid configuration is refused **naming the variable**, per this epic's first acceptan
 - [ ] Admission control — the bounded semaphore and fast `503` in the observability contract
 - [ ] Spans across port boundaries: `tracing` is wired but the facade → storage and query → tr
 - [ ] `db_pool_connections{state}` and `catalog_entities_total{entity_type}` gauges (Slice D l

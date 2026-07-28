@@ -230,8 +230,12 @@ dropped — including the whole startup window. It is now installed when the app
 is built. The bug was invisible when tests ran in parallel, because another
 test's scrape had already installed the recorder.
 
+- [x] **Memory budget, itemized and defended** — six lines, each a `GRAPH_OWL_BUDGET_*` variable with a stated default, summed at startup and exported as `graph_owl_memory_budget_bytes{cache}`. Absolute, never a percentage: `00a` states a footprint, and "runs in 2 GB" cannot coexist with "takes 35% of whatever you give it"
+- [x] **Two totals, because only one cache exists.** 32 MB is *allocated* by this build (Epic 13's decisions); 1168 MB is *planned* when the other five land. Reporting the plan alone would tell an operator to size a container for memory nothing will use
+- [x] **The cgroup limit is a guard, never a sizing input.** Too small for what is allocated → refuse to start with both numbers and exit `78`. Too small for the plan → warn, because nothing is reserved yet and refusing over a future line item would block a deployment that works. cgroup v2 preferred, v1 fallback, and **v1's near-`u64::MAX` sentinel is treated as no-limit** — it parses cleanly, and taking it literally makes every budget fit a nine-exabyte container, which is a guard that always passes
+- [x] Invalid configuration is refused **naming the variable**, per this epic's first acceptance criterion, and a value large enough to overflow is refused rather than wrapping into a small budget that sails through the check
+
 **Pending in this epic**
-- Memory budget report (the input `00a`'s footprint claim needs to stay honest)
 - Admission control — the bounded semaphore and fast `503` in the observability contract
 - Spans across port boundaries: `tracing` is wired but the facade → storage and query → triple-store child spans are not, so a slow request is not yet attributable to a layer
 - `db_pool_connections{state}` and `catalog_entities_total{entity_type}` gauges (Slice D lists both; only the two HTTP series ship)

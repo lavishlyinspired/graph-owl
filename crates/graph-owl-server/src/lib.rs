@@ -1,3 +1,4 @@
+pub mod budget;
 pub mod jwks;
 pub mod observability;
 pub mod openapi;
