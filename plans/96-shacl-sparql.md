@@ -91,6 +91,38 @@ Three orderings, giving three different answers:
    rule. It is also the one that can fail to terminate, since SHACL rules are
    not restricted the way OWL 2 RL is.
 
+### Resolved by deferral, 28 July 2026
+
+**SHACL *rules* do not ship until the specification stabilises.** SHACL
+*constraints* ship first and raise no composition question at all, because they
+**validate** rather than derive — they write nothing into the overlay, so there
+is nothing for OWL's fixpoint to compose with. The question only becomes live
+when rules ship, and rules are not the first thing this epic delivers.
+
+The reason to wait is already in this plan: the specification is a Working Draft,
+and starting before Candidate Recommendation is a decision to accept rework.
+Here that cuts unusually sharply — **W3C may specify the composition ordering
+itself**, in which case implementing a choice now means implementing the wrong
+one and calling it a decision.
+
+**If forced to choose before then: OWL to fixpoint, then SHACL once.** OWL 2 RL
+is decidable in polynomial time and terminates; SHACL rules carry no such
+guarantee, so putting them inside the fixpoint puts a non-terminating construct
+inside a loop. It also gets the useful direction for free — a SHACL rule can
+validate and act on derived facts, whereas OWL axioms have no reason to depend on
+what a shape produced. The cost is order-dependence, which is acceptable *stated*
+and unacceptable *discovered*.
+
+**Revisit trigger**: the specification reaching Candidate Recommendation. At that
+point (1) check whether the spec fixes the ordering, (2) if not, implement OWL
+then SHACL, (3) record the choice here **and** in `06-engine-reasoning.md`, since
+it is a property of the combined inference set rather than of either engine.
+
+**Confirm before the trigger fires**: which W3C document actually owns rules.
+This epic is scoped to SPARQL Extensions, and rule constructs have historically
+lived in SHACL Advanced Features — a separate document on a separate track. A
+trigger watching the wrong document would fire late, or never.
+
 Option 3 is the semantically satisfying one and the one that needs a
 termination argument before it is chosen. Options 1 and 2 are defensible if
 **stated** — an order-dependent inference set that nobody documented is a system

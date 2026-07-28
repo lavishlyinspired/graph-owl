@@ -86,6 +86,54 @@ Three options, none costless, and one must be chosen before Slice A:
 | Version the overlay alongside the base | Storage multiplies by the number of retained instants, over a set already the size of the base |
 | **Refuse reasoning on historical queries**, and say so | Cheapest and most honest, but weakens "reason over any past state" — which some will read as the differentiator's whole point |
 
+### Resolved, 28 July 2026: refuse reasoning on historical queries
+
+**When `as_of` is set, the overlay is skipped.** The caller gets asserted facts
+at `t` and no inferences. Adopted because the alternatives are worse in ways
+that are not close: re-deriving per query makes a time-travel query the slowest
+thing in the system, and versioning the overlay multiplies storage over a set
+already the size of the base — *and* versioning derived data is a cache
+invalidation problem wearing a storage costume.
+
+**The differentiator survives the narrowing.** It becomes "time travel over
+asserted facts, with explainable inference on the current state" rather than
+"time travel over inferred facts". Nothing in `00a-product-position.md` or
+`40-ui-graph-explorer.md` ever claimed the latter — checked before adopting
+this, precisely because narrowing a claim nobody made is free and narrowing one
+already sold is not.
+
+**Revisit trigger**: a concrete request for *"what did the system believe at
+time T?"* — which is a genuinely different question from *"what were the
+asserted facts at time T?"* and does require a versioned overlay. A
+hypothetical does not qualify.
+
+#### Two refinements this resolution needs to be safe
+
+**1. The signal rides the freshness stamp, not a new flag.** Epic 4 decision 8
+already requires every flake-backed result to carry "the transaction time it was
+computed at and the current projection lag", for exactly this class of problem —
+*an eventually-consistent answer presented as current is the failure mode of this
+whole design*. "Reasoning was not applied" belongs in that stamp. A second,
+parallel mechanism would be two ways to say one thing, and the one a client
+forgets to read is the one that matters.
+
+It has to be **structural, not advisory**. A historical query that silently
+returns asserted-only results is the absence-versus-omission failure this project
+ranks worst: the caller sees fewer rows and concludes *the estate was smaller
+then*, when in fact the reasoner was skipped. That is the same bug as Epic 40's
+silent truncation and Epic 101's invisible `SILENT`, in a third place. Where a
+query could only be satisfied by inference, returning zero rows is not an
+acceptable answer.
+
+**2. Incremental maintenance introduces a *third* time, and it must be visible.**
+The resolution above handles two — the query's `as_of` and the base's `t`. A
+maintained overlay adds `maintained_to`: the base transaction time the inference
+set has been brought up to. **With incremental maintenance the overlay lags the
+base even at "now"**, so "current inferences" means *inferences current as of
+`maintained_to`*, which is not the same statement. Callers must be able to read
+it, and this epic owns it — the lag does not exist under wholesale replacement,
+so it arrives with this epic and must not arrive silently.
+
 **Whichever is chosen, silence is the one unacceptable answer.** Returning the
 *current* overlay against a *historical* base would produce facts derived from
 premises that did not hold at `t` — a wrong answer wearing the provenance of a

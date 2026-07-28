@@ -205,6 +205,31 @@ The catalog rules that currently exist as special cases in other epics, generali
 
 Epics 11 and 23 keep their query-time resolution for the read path (it is faster for a single entity); the rules make the same conclusions queryable in SPARQL and explainable. **Both must agree** — that is a test.
 
+## Two resolutions this engine inherits (28 July 2026)
+
+Both were open questions at the intersection of this epic and another; both are
+now decided, and they are recorded here because this is the crate that has to
+honour them.
+
+1. **Reasoning is not applied to historical queries.** When `as_of` is set, the
+   overlay is skipped and the caller receives asserted facts only. Deriving from
+   premises that did not hold at `t` would produce a wrong answer carrying the
+   provenance of a right one, which is exactly what this epic's explainability
+   contract exists to prevent. The "reasoning not applied" signal rides Epic 4
+   decision 8's **existing freshness stamp** rather than a new flag, and it is
+   structural: a historical query that silently returns asserted-only results is
+   the absence-versus-omission failure in a third place. Full reasoning and
+   revisit trigger in `97-incremental-parallel-reasoning.md`.
+
+2. **When SHACL rules eventually ship, they run *after* this engine reaches
+   fixpoint, not inside it.** OWL 2 RL terminates; SHACL rules carry no such
+   guarantee, and a non-terminating construct inside a fixpoint loop is a hang
+   rather than a slow answer. This is deferred until the specification
+   stabilises (`96-shacl-sparql.md`), but it constrains this engine's API now:
+   **the fixpoint must be reachable as a completed result** that another
+   producer can run after, not only as an internal loop. Designing it as a
+   closed loop would make the later composition a rewrite.
+
 ## Acceptance criteria (feature level)
 
 - [ ] Each OWL 2 RL axiom above derives correctly, tested in isolation.

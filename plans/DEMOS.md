@@ -36,6 +36,7 @@
 - [ ] **100** Profile detection reports EL for SNOMED and refuses RL routing, naming the first out-of-profile axiom
 - [ ] **98** EL classification via an adopted reasoner (`whelk-rs`, BSD-3 — `00l`), `StreptococcalPneumonia ⊑ BacterialPneumonia` derived
 - [ ] **97** Incremental maintenance — reclassifying SNOMED per write is a non-starter, which is why this trigger fired
+- [ ] **97** The overlay carries `maintained_to` — with incremental maintenance it **lags the base even at "now"**, so "current inferences" means current as of that watermark. A third time coordinate beside `as_of` and the projection lag, and it arrives with this epic
 - [ ] **99** QL query rewriting for a DBpedia-shaped ABox: vast instances, thin TBox, **do not materialise**
 - [ ] **104** UMLS RRF ingestion; CUI as a first-class identifier; SNOMED → RxNorm with **no computed matching**
 - [ ] **104** A computed alignment cannot assert `owl:equivalentClass` — refused by the type system, not by a validator
@@ -334,6 +335,7 @@ no library can supply actually live.
 - [ ] Semi-naive fixpoint, `CappedReason` on every limit
 - [ ] Derived facts in `graph:reasoning`, never persisted into the base
 - [ ] `GET /reasoning/explain` derivation chains
+- [ ] **Reasoning is skipped on historical queries** — `as_of` returns asserted facts only, and says so via Epic 4's freshness stamp. Inferring from premises that did not hold at `t` would be a wrong answer carrying right-looking provenance. The differentiator is time travel over *asserted* facts with explainable inference on the current state *(resolved 28 Jul 2026, `97`)*
 - [ ] Standard rule set: classification along lineage, ownership down containment
 
 ### Epic 41 — Workbench & governance
