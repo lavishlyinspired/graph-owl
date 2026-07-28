@@ -6,7 +6,7 @@ use graph_owl_connectors::DeletionPlan;
 use graph_owl_core::projection;
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
-    envelope::EntityVersion,
+    envelope::{ChangeDescription, EntityVersion},
     fqn,
     page::{Page, PageRequest},
     relationship_type::{EntityKind, RelationshipType, is_legal},
@@ -348,6 +348,26 @@ fn event_subject(asset: &Asset) -> EventSubject {
         id: asset.id.to_string(),
         fqn: asset.fully_qualified_name.clone(),
     }
+}
+
+/// The fields a re-ingest can actually move.
+///
+/// Deliberately **not** the whole serialized entity. `updatedAt` is rewritten on
+/// every upsert whether anything changed or not, so a whole-entity diff would
+/// report a change for every asset on every nightly connector run — and a search
+/// index told that everything changed reindexes everything, nightly.
+///
+/// The FQN is absent because it is the identity the upsert matched on: it cannot
+/// differ between the two sides. `id` is absent for the same reason in reverse —
+/// a connector supplies a fresh one each run and it is discarded on conflict, so
+/// including it would make every re-ingest look changed.
+fn syncable_fields(asset: &Asset) -> serde_json::Value {
+    serde_json::json!({
+        "name": asset.name,
+        "description": asset.description,
+        "parentId": asset.parent_id,
+        "properties": asset.properties,
+    })
 }
 
 #[derive(Clone)]
@@ -1033,7 +1053,32 @@ impl Catalog {
             })
             .await?;
 
-        self.project(before, &written).await;
+        self.project(before.clone(), &written).await;
+        // Past every early return above, so the write has committed.
+        //
+        // `upsert_asset` is create-or-update behind one method, and the caller
+        // never says which it meant — a connector supplies a fresh Uuid on
+        // every run and lets the FQN decide. Prior state is therefore the only
+        // honest signal: no `before` is a creation, a `before` is an update.
+        self.announce(match &before {
+            None => Some(ChangeEvent::created(
+                event_subject(&written),
+                written.version,
+                &principal.id,
+            )),
+            // Storage does not version or diff an upsert — a connector re-run
+            // is a mechanical sync, not a curated edit (`03-versioning.md`).
+            // The facade holds both states, so it computes the diff here, and
+            // `ChangeEvent::updated` drops the event when nothing moved.
+            Some(before) => ChangeEvent::updated(
+                event_subject(&written),
+                before.version,
+                written.version,
+                ChangeDescription::between(&syncable_fields(before), &syncable_fields(&written)),
+                &principal.id,
+            ),
+        });
+
         Ok(written)
     }
 
@@ -3416,6 +3461,111 @@ mod projection_isolation_tests {
             AssetUpdate {
                 description: Some(Some(text.to_string())),
             }
+        }
+
+        #[tokio::test]
+        async fn creating_an_asset_announces_a_creation() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let sink = Arc::new(Recording::default());
+            let catalog = Catalog::new(storage).with_events(sink.clone());
+
+            let created = catalog
+                .upsert_asset(&Principal::system(), service("hdfc-core"))
+                .await
+                .expect("created");
+
+            assert_eq!(sink.kinds(), vec![EventKind::Created]);
+            let events = sink.0.lock().expect("lock");
+            assert_eq!(events[0].subject.id, created.id.to_string());
+            assert_eq!(events[0].subject.fqn, created.fully_qualified_name);
+            assert_eq!(
+                events[0].previous_version, None,
+                "there was nothing before a creation"
+            );
+            assert_eq!(events[0].current_version, Some(created.version));
+        }
+
+        /// A connector re-run over an FQN that already exists is an **update**,
+        /// not a second creation. `upsert_asset` is one method serving both, so
+        /// the distinction has to be drawn from prior state rather than from
+        /// which method was called — and a search index told "created" twice
+        /// would hold two documents for one table.
+        #[tokio::test]
+        async fn a_re_ingest_that_changes_a_field_announces_an_update_not_a_creation() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let sink = Arc::new(Recording::default());
+            let catalog = Catalog::new(storage).with_events(sink.clone());
+
+            catalog
+                .upsert_asset(&Principal::system(), service("hdfc-core"))
+                .await
+                .expect("created");
+            sink.0.lock().expect("lock").clear();
+
+            let described = UpsertAsset {
+                description: Some("the core banking platform".to_string()),
+                ..service("hdfc-core")
+            };
+            catalog
+                .upsert_asset(&Principal::system(), described)
+                .await
+                .expect("re-ingested");
+
+            assert_eq!(sink.kinds(), vec![EventKind::Updated]);
+            assert!(
+                !sink.0.lock().expect("lock")[0].change.is_empty(),
+                "an update must say what moved"
+            );
+        }
+
+        /// **The negative that matters most.** A nightly connector re-run over
+        /// an unchanged estate must announce nothing at all. Without this, every
+        /// asset is republished every night and the event stream stops meaning
+        /// "something changed" — which is the only thing it is for.
+        #[tokio::test]
+        async fn a_re_ingest_that_changes_nothing_announces_nothing() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let sink = Arc::new(Recording::default());
+            let catalog = Catalog::new(storage).with_events(sink.clone());
+
+            catalog
+                .upsert_asset(&Principal::system(), service("hdfc-core"))
+                .await
+                .expect("created");
+            sink.0.lock().expect("lock").clear();
+
+            catalog
+                .upsert_asset(&Principal::system(), service("hdfc-core"))
+                .await
+                .expect("re-ingested");
+
+            assert!(
+                sink.kinds().is_empty(),
+                "an unchanged re-ingest is not a change: {:?}",
+                sink.kinds()
+            );
+        }
+
+        /// A create refused by validation never reached storage, so there is
+        /// nothing to announce. Emission sits past the early returns, which is
+        /// what makes this structural rather than a check.
+        #[tokio::test]
+        async fn a_refused_create_announces_nothing() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let sink = Arc::new(Recording::default());
+            let catalog = Catalog::new(storage).with_events(sink.clone());
+
+            let orphan = UpsertAsset {
+                kind: AssetKind::Table,
+                name: "customers".to_string(),
+                parent_id: None,
+                description: None,
+                properties: None,
+            };
+            let outcome = catalog.upsert_asset(&Principal::system(), orphan).await;
+
+            assert!(outcome.is_err(), "a table requires a parent");
+            assert!(sink.kinds().is_empty());
         }
 
         #[tokio::test]

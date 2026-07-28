@@ -104,7 +104,8 @@
 - [x] FQN derivation (`fqn::derive`, `fqn::child_of`, `parent`, `leaf`)
 - [x] Containment rule in one place (`AssetKind::parent_kind`)
 - [x] Hierarchy endpoints: roots, children, ancestors, search, stats
-- [~] **Gap**: no PATCH/DELETE on assets; cascade delete is a DB constraint with no test
+- [x] `PATCH /assets/{id}` and `DELETE /assets/{id}` (soft, cascading to the subtree) — shipped with Epic 3
+- [~] **Gap**: cascade delete is a DB constraint with no test of its own
 - [ ] Non-database services (dashboard, pipeline, ML) → deferred to Epic 34
 
 ### Epic 15 — Source connectors
@@ -158,7 +159,8 @@ its destination — so "Demo 2 is done" never has to mean "Epic 13 is finished".
 **Pending in this epic**
 - [x] **`EventSink` port + `ChangeEvent`** — the port, the five event kinds, and the payload *(Slice J, part 1)*. Two rules are structural rather than a caller's duty: `updated()` returns `Option` and yields `None` on an empty diff, so a facade that forgot to check still cannot emit an empty event; and `emit()` returns `()`, so "emission failure must not fail the request" is enforced by the signature rather than by every call site remembering to swallow an error
 - [x] **Emission wired into the facade** *(Slice J, part 2)* — `Catalog::with_events(sink)`; update, soft delete and restore announce after the write returns. Ordering is structural: every `announce` call sits past an early return on failure, so a change that did not commit cannot reach it. A no-op update emits nothing because `ChangeEvent::updated` returns `None`, not because the call site checks. A catalog with no sink still mutates — a missing subscriber is not an outage
-- [~] **Create and hard delete do not announce yet** — `upsert_asset` is create-or-update and needs the two paths distinguished before it can emit the right kind; hard delete has no facade method. Both are the rest of Slice J
+- [x] **Create and re-ingest announce** *(Slice J, part 3)* — `upsert_asset` is create-or-update behind one method and the caller never says which it meant, so prior state is the signal: no `before` is a `Created`, a `before` is an `Updated`. Storage neither versions nor diffs an upsert (a connector re-run is a mechanical sync, not a curated edit), so the facade computes the diff from `syncable_fields` — **name, description, parentId, properties and nothing else**. A whole-entity diff would include `updatedAt`, which is rewritten on every upsert whether or not anything moved, and would therefore republish the entire estate on every nightly run
+- [ ] **`HardDeleted` has no producer**, and this is not an oversight to close here: assets are soft-deleted by design (deletion is a governance decision, and a tombstone is what stops a connector re-run resurrecting one). The kind exists for the erasure path in `00g-operations.md` §data retention & erasure, which is not built. `delete_table` and `delete_relationship` are genuine hard deletes but their subjects are not `Asset`s, so `EventSubject` — which carries an `AssetKind` — does not describe them
 - [~] **Nothing subscribes.** The sink exists and the facade calls it; Epic 8's `TextIndex` is what should be listening
 
 ### Epic 8 — Search
@@ -227,9 +229,19 @@ its destination — so "Demo 2 is done" never has to mean "Epic 13 is finished".
 - [x] Light/dark theme, light by default, deep-linkable via `?theme=`
 - [x] Search box over name and FQN
 
+- [x] **Facet rail over kind and schema**, filtering the returned page client-side against the server's counts, with a visible "filtered from N" and a clear control
+- [x] **Keyboard navigation** — arrow keys move a cursor through the results and Enter opens one; the listener is on the document rather than the input, so the cursor survives the search box losing focus
+
 **Pending in this epic**
-- **Facets are returned by the API and not rendered by the console** — `GET /assets/search` already computes them over the visible set (`graph-owl-server/src/lib.rs`), so this is a console-side gap only, and it is the cheapest visible win left in Demo 2
-- Keyboard navigation through results — `00f`'s non-negotiable, currently unmet
+- Nothing outstanding that is not blocked on Epic 12's OIDC/PKCE, below.
+
+> **Tracker correction, 28 July 2026.** Facets and keyboard navigation were
+> listed here as pending until a check against `ui/src/App.tsx` found both
+> shipped (`FacetGroup`, and the `keydown` handler at the document level). The
+> same sweep confirmed `PATCH` and `DELETE` on assets exist, contradicting Epic
+> 2's gap line. Entries copied forward from a previous revision were the cause;
+> rule 0 below now requires a check against the code, not against the previous
+> revision.
 
 **Deferred**
 - Login, session, and the denied-vs-empty distinction → blocked on Epic 12's OIDC/PKCE. The console currently runs against an open server or a token supplied out of band; "denied" and "empty" therefore look identical to it, which is exactly the state `00f` says is not acceptable to ship to a user
@@ -564,6 +576,15 @@ no library can supply actually live.
    The lines are corrected; the rule exists so the correction is not needed
    again. **If the two disagree, this file is right and the status line is
    stale** — the same relationship the `00*` documents have with the code.
+
+   **Corollary, added 28 July 2026 after a second drift in the other
+   direction.** A pending item must be re-checked against the code before it is
+   worked on, not copied forward. Three entries here — Epic 39's facets, Epic
+   39's keyboard navigation, Epic 2's `PATCH`/`DELETE` — sat as gaps for
+   revisions after the code shipped, because each revision copied the previous
+   revision's list. This file is authoritative over the plans' status lines; it
+   is **not** authoritative over the code. Rule 4 keeps it true going forward,
+   and a grep keeps it honest when it has not been.
 
 1. **Cumulative, always.** Demo N runs everything Demo N−1 ran. A regression in an earlier demo blocks the later one.
 2. **A demo is a runnable state**, not a checklist. If it cannot be shown end to end, it is not done regardless of how many boxes are ticked.
