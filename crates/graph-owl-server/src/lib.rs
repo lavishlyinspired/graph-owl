@@ -65,6 +65,18 @@ pub fn app(catalog: Catalog) -> Router {
         // have shown it.
         .route("/metrics", get(observability::metrics_endpoint))
         // The contract, served so a client never has to find the file.
+        //
+        // **Kept as our own handler**, and Swagger UI is pointed at this URL
+        // rather than handed a parsed document. `SwaggerUi::url()` takes
+        // `utoipa::openapi::OpenApi`, and converting into it does not merely
+        // risk losing detail — it *fails*: utoipa 8 serializes OpenAPI 3.1's
+        // nullable form (`"type": ["string", "null"]`) which its own
+        // deserializer cannot read back, on the very schemas its derive
+        // produced. Handing the document through that round trip panics at
+        // startup.
+        //
+        // Pointing the UI at the URL keeps one source of truth and keeps
+        // `the_endpoint_serves_the_generated_document` true by construction.
         .route("/openapi.json", get(openapi::endpoint))
         .route(
             "/assets/{id}",
@@ -92,6 +104,24 @@ pub fn app(catalog: Catalog) -> Router {
         // `MatchedPath` is in the extensions and the metric label is the route
         // template rather than the concrete path.
         .layer(axum::middleware::from_fn(observability::observe))
+        // Interactive documentation over the same contract the API serves.
+        //
+        // **A plain path, with no wildcard.** The crate appends its own —
+        // `/docs` redirects to `/docs/`, `/docs/` is the page, and
+        // `/docs/{*rest}` serves its CSS and JS — so passing a wildcard here
+        // makes it register a conflicting pair and panic inside `app()`, which
+        // fails every test that builds a router rather than just this route.
+        //
+        // Configured with the *URL*, not with a parsed document. `SwaggerUi::url()`
+        // wants `utoipa::openapi::OpenApi`, and converting into it does not
+        // merely risk detail loss — it fails outright: utoipa serializes
+        // OpenAPI 3.1's nullable form (`"type": ["string", "null"]`) and cannot
+        // deserialize it, on the very schemas its own derive produced. Pointing
+        // at the URL keeps one source of truth for the contract.
+        .merge(
+            utoipa_swagger_ui::SwaggerUi::new("/docs")
+                .config(utoipa_swagger_ui::Config::new(["/openapi.json"])),
+        )
         // Mounted LAST so the SPA fallback cannot swallow an unknown API path.
         // A fallback registered first turns every mistyped endpoint into a 200
         // text/html and the client sees a blank page instead of an error.

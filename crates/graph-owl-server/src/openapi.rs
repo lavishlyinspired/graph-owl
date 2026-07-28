@@ -237,6 +237,15 @@ pub static ROUTES: &[Route] = &[
     ),
     route(
         "get",
+        "/docs/",
+        "Interactive documentation for this contract",
+        None,
+        None,
+        200,
+        false,
+    ),
+    route(
+        "get",
         "/assets/{id}",
         "Fetch an asset",
         None,

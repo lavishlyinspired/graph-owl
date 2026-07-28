@@ -8,6 +8,11 @@
 
 ---
 
+> **Per-epic status across all 62 epics** — slice counts, state and
+> dependencies — is generated into [`EPIC-STATUS.md`](EPIC-STATUS.md) *from this
+> file*, so it cannot disagree with it. Regenerate with
+> `python3 scripts/epic-status.py`.
+
 ## What is left for Demos 1–3
 
 *Maintained in the same commit as the work, per rule 4. Each line is a gap in
@@ -17,6 +22,7 @@ revision (rule 0's corollary).*
 | Demo | Remaining | Blocks |
 |---|---|---|
 | 1 | **Epic 15** — scheduled runs, run-history persistence, `source_hash` fingerprinting to skip unchanged records | — |
+| 1 | **Epic 1 K** — a client generated in another language and exercised. The valuable half — responses checked against the promised schemas — shipped | — |
 | 2 | **Epic 10** — memory budget report, admission control, cross-port spans, pool/entity gauges | — |
 | 3 | **Epic 40** — WebGL swap; SVG will not survive 10k nodes. Every *interaction* the swap was expected to bring already works and is tested at the model layer, so what remains is scale alone | — |
 | 3 | **Epic 40** — React Flow + d3-dag lineage DAG | Epic 29 (nothing declares lineage yet) |

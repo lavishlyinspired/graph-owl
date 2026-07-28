@@ -1007,6 +1007,18 @@
         "summary": "Catalogue a Postgres source"
       }
     },
+    "/docs/": {
+      "get": {
+        "operationId": "get_docs_",
+        "responses": {
+          "200": {
+            "description": "Interactive documentation for this contract"
+          }
+        },
+        "security": [],
+        "summary": "Interactive documentation for this contract"
+      }
+    },
     "/graph/reconcile": {
       "post": {
         "operationId": "post_graph_reconcile",
