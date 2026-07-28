@@ -231,6 +231,19 @@ carries `security: [{bearerAuth: []}]` and each open one carries `security: []`,
 which is **not** the same as omitting it: an empty array says *this endpoint
 takes no credential*, where omission inherits a document default.
 
+### Mutation report
+
+`cargo mutants --file crates/graph-owl-server/src/openapi.rs`: **12 mutants, 7
+caught, 5 unviable, 0 survived.**
+
+The high unviable count is the shape of the module rather than a gap. Most of it
+is `serde_json::json!` literals, and a mutation that replaces one with
+`Default::default()` does not typecheck — so cargo-mutants discards it rather
+than running it. What *is* mutable — the branches deciding whether an operation
+documents a `401`, a `404`, a `400`, or a request body — is covered, and those
+are the decisions worth testing: each one is a branch a generated client either
+grows or does not.
+
 ### What "fails CI" means here, honestly
 
 The slice says a PR changing the API without regenerating `openapi.json` fails
