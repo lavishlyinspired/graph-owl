@@ -1,6 +1,6 @@
 # Plan: Incremental & Parallel Reasoning (Epic 97)
 
-**Status**: Not started — **deliberately unscheduled until measurement demands it**
+**Status**: Not started — **the measurement now demands it (28 Jul 2026)**. A stated requirement of 10⁸–10⁹ triples makes `06`'s wholesale-replacement-per-run arithmetically unviable, so incremental maintenance moves from optional to prerequisite. See `00n-large-ontology-reality.md` §2.4
 **Depends on**: Epic 6 (semi-naive fixpoint), Epic 37a (the measurement)
 **Crates**: `graph-owl-reasoning`
 

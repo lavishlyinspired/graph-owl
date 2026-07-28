@@ -1,6 +1,6 @@
 # Plan: OWL 2 QL Reasoning (Epic 99)
 
-**Status**: Not started — **scheduled**
+**Status**: Not started — **scheduled, with a named consumer (28 Jul 2026)**. DBpedia is the QL shape — a vast ABox against a thin TBox, where materialising inference produces more data than the source. See `00n-large-ontology-reality.md` §2.3
 **Depends on**: Epic 7 (query algebra to rewrite), Epic 6 (explanation contract)
 **Crates**: **`graph-owl-reasoning-ql`** (new)
 

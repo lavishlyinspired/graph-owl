@@ -1,6 +1,6 @@
 # Plan: Ontology Profile Detection & Routing (Epic 100)
 
-**Status**: Not started — **prerequisite for Epics 98 and 99**
+**Status**: Not started — **prerequisite for Epics 98 and 99, and now load-bearing**. With SNOMED (EL), DBpedia (QL) and FIBO (constructs outside RL) all in scope, "which reasoner ran and what could it therefore not conclude" separates a trustworthy answer from a confident wrong one. See `00n-large-ontology-reality.md` §2.3
 **Depends on**: Epic 6 (RL engine), Epic 24 (ontologies as entities)
 **Crates**: `graph-owl-ontology`
 

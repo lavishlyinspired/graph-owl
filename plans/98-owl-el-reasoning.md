@@ -1,6 +1,6 @@
 # Plan: OWL 2 EL Reasoning (Epic 98)
 
-**Status**: Not started — **scheduled**, on the medical-ontology requirement
+**Status**: Not started — **scheduled, and the trigger has fired (28 Jul 2026)**. SNOMED CT was named as a required ontology; OWL 2 EL is the profile it was designed for, and OWL 2 RL **cannot classify it** — RL and EL are incomparable, so an RL run over SNOMED yields a *wrong* hierarchy, not a smaller one. See `00n-large-ontology-reality.md` §2.1
 **Depends on**: Epic 6 (overlay, budgets, explainability), Epic 24 (ontologies as entities)
 **Crates**: **`graph-owl-reasoning-el`** (new)
 

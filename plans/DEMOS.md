@@ -23,6 +23,25 @@
 | **9** | Breadth, scale, and the proof | +33–38, 36, 37a–c | |
 | **10** | Standards depth | +94–97 | Not started — see `00k-standards-conformance.md`. Epic 94 is a **vocabulary** change, not a model one: the reified edges already shipped *are* RDF 1.2's reifier shape, so the flake count must not move |
 | **11** | Full semantics | +98–103 | Not started — three OWL profiles, federation, storage split |
+| **12** | Large ontologies, honestly | +104, and the recalibration of 6/97/98/99/100 | Not started — **and it is a positioning fork, not a phase.** See `00n-large-ontology-reality.md` |
+
+**Demo 12 exists because a requirement was stated that the other eleven do not serve**: FIBO, UMLS, SNOMED CT, RxNorm and DBpedia at 10⁸–10⁹ triples. `00n-large-ontology-reality.md` is the honest assessment. The short version: **OWL 2 RL cannot classify SNOMED CT** — RL and EL are incomparable profiles, so an RL run yields a *wrong* hierarchy rather than a smaller one — and Demo 4's reasoning claim silently stops being true the moment a clinical ontology is loaded. Three epic triggers fired as a result (97, 98, 100), one epic was created (104), and the reasoning budgets in Epic 6 are calibrated three orders of magnitude below the stated requirement. **Taking this demo is a `00a-product-position.md` decision, not a scheduling one.**
+
+### Demo 12 — Large ontologies, honestly
+
+**The claim**: it loads a real clinical ontology, classifies it with a reasoner that can, and says which reasoner answered.
+
+**What you can show**: load SNOMED CT; watch profile detection report **EL, not RL**, and watch the RL engine *refuse* rather than produce a confidently wrong hierarchy. Classify with the EL reasoner. Ask for bacterial pneumonia and get streptococcal pneumonia patients back — the inference RL cannot draw. Then open the explanation and read which reasoner drew it, from which two asserted SNOMED axioms. Load UMLS and reach RxNorm from SNOMED through a curated CUI, with no matching algorithm having run.
+
+- [ ] **100** Profile detection reports EL for SNOMED and refuses RL routing, naming the first out-of-profile axiom
+- [ ] **98** EL classification via an adopted reasoner (`whelk-rs`, BSD-3 — `00l`), `StreptococcalPneumonia ⊑ BacterialPneumonia` derived
+- [ ] **97** Incremental maintenance — reclassifying SNOMED per write is a non-starter, which is why this trigger fired
+- [ ] **99** QL query rewriting for a DBpedia-shaped ABox: vast instances, thin TBox, **do not materialise**
+- [ ] **104** UMLS RRF ingestion; CUI as a first-class identifier; SNOMED → RxNorm with **no computed matching**
+- [ ] **104** A computed alignment cannot assert `owl:equivalentClass` — refused by the type system, not by a validator
+- [ ] **6** Reasoning budgets re-derived for this scale — 100k facts and 512MB were calibrated for a 1M-flake catalog
+- [ ] **4 / 37a** Partitioning trigger and write-path latency measured at 10M+ flakes
+- [ ] **Console**: profile badge, reasoner attribution on every derivation, alignment review queue *(Epics 41, 42)*
 
 **Every demo carries its console half.** A backend capability with no surface is a capability nobody can be shown, and `00a-product-position.md` sells differentiators that are seen rather than described. Where a demo line needs UI, it names the receiving UI epic in *(italics)*; where a capability deliberately has **no** UI, it says so with the reason, per `00h-ui-design-system.md`'s completeness requirement.
 
@@ -30,7 +49,7 @@
 
 ## Epic coverage index — all 60, checkable
 
-**Audited 28 July 2026: every epic with a plan file appears in a demo. None is orphaned.** This index exists because that was true but *not verifiable* — epics live under grouped headings (`### Epics 22–30`, `### Epics 18, 19`, `### Epic 98 / 99`), so a mechanical search for "Epic 19" finds nothing and coverage could only be confirmed by reading the whole file. The next epic added would have gone missing silently. **Add a row here when adding an epic; a plan file with no row is the thing this table is for.**
+**Audited 28 July 2026: every epic with a plan file appears in a demo. None is orphaned.** (Re-audited the same day when Epic 104 was created; it is in Demo 12.) This index exists because that was true but *not verifiable* — epics live under grouped headings (`### Epics 22–30`, `### Epics 18, 19`, `### Epic 98 / 99`), so a mechanical search for "Epic 19" finds nothing and coverage could only be confirmed by reading the whole file. The next epic added would have gone missing silently. **Add a row here when adding an epic; a plan file with no row is the thing this table is for.**
 
 | Demo | Epics covered |
 |---|---|
@@ -45,6 +64,7 @@
 | 9 | 33, 34, 35, 36, 37a, 37b, 37c, 38 |
 | 10 | 94, 95, 96, 97 |
 | 11 | 98, 99, 100, 101, 102, 103 |
+| 12 | 104, and the recalibration of 6, 97, 98, 99, 100 |
 
 **Epics deliberately carrying no demo moment of their own**, rather than being missing:
 
