@@ -120,11 +120,13 @@ The invariant that makes it safe: **relational wins.** Any divergence is repaire
 | Capability | Implemented | Not implemented |
 |---|---|---|
 | Query | SPARQL subset: BGP, FILTER, OPTIONAL, UNION, property paths | Federation, entailment regimes |
-| Reasoning | OWL 2 RL forward-chaining, as a queryable **overlay** | Tableau reasoning, OWL 2 DL/Full |
+| Reasoning | **OWL 2 EL + RL + QL, profile-detected and routed**, as a queryable **overlay** (`00a`, 28 Jul 2026) | Tableau reasoning, OWL 2 DL/Full |
 | Validation | Node and property shapes | Full SHACL-SPARQL |
 | Interop | JSON-LD, Turtle, N-Triples at the boundary | RDF as the sole internal model |
 
-Derived facts are an **overlay**: queryable, never persisted into the base. This keeps the base clean, keeps reasoning bounded, and makes "why do you believe this" answerable — every derived fact names the rule and the source facts that produced it.
+Derived facts are an **overlay**: queryable, never persisted into the base.
+
+**One clause of that changes at engine scale, and it is worth separating the two properties it bundles.** "Never persisted into the base" — derived facts stay distinguishable from asserted ones and are never confused with them — **holds, permanently**; it is what makes explanation possible. "Recomputed wholesale on every run" does **not** hold above ~10⁸ triples, where re-deriving a materialised closure is hours rather than seconds. Those are separable, and only the second gives way: the overlay becomes **incrementally maintained** (Epic 97) while remaining a separate named graph. `00n-large-ontology-reality.md` §2.4 has the arithmetic. This keeps the base clean, keeps reasoning bounded, and makes "why do you believe this" answerable — every derived fact names the rule and the source facts that produced it.
 
 ## Crate plan
 
