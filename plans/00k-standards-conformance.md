@@ -43,6 +43,16 @@ implementations passing each test in the suite. Everything else is Working
 Draft and may change. Building against a Working Draft is a decision to accept
 churn, not a decision to be early.
 
+**RDF 1.2 Concepts did not advance on schedule, and that is the useful fact.**
+Its CR snapshot stated it would not become a Recommendation earlier than
+**5 May 2026**. That date has passed; re-checked at w3.org on 28 July 2026, it
+is still a Candidate Recommendation Snapshot dated 7 April 2026. Recorded
+explicitly because "CR, 7 Apr 2026" read in late July invites the reasonable
+but wrong inference that it must have advanced by now. It has not, so
+`94-rdf12-alignment.md` decision 5 still binds: the claim is "aligned with
+RDF 1.2 CR of 7 April 2026", never "RDF 1.2 compliant". The earliest-possible
+date in a CR is a floor on the wait, not a forecast of it.
+
 OWL 2 RL is the exception and the reason Epic 6 targets it: it has been a
 Recommendation since 2012 and is not moving.
 

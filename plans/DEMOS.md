@@ -21,7 +21,7 @@
 | **7** | Business meaning and trust signals | +22–30, 42 | |
 | **8** | Property graph and open interop | +7b, 7c, 7d, 9, 9a | |
 | **9** | Breadth, scale, and the proof | +33–38, 36, 37a–c | |
-| **10** | Standards depth | +94–97 | Not started — see `00k-standards-conformance.md` |
+| **10** | Standards depth | +94–97 | Not started — see `00k-standards-conformance.md`. Epic 94 is a **vocabulary** change, not a model one: the reified edges already shipped *are* RDF 1.2's reifier shape, so the flake count must not move |
 | **11** | Full semantics | +98–102 | Not started — three OWL profiles, federation, storage split |
 
 ★ = the demo that carries a differentiator. Cutting it is a positioning decision.
@@ -224,7 +224,7 @@ predicate has to reach it before any graph query is exposed to a real user.
 - [x] Reconciliation and drift metric — drift computed by comparison rather than from a queue (a queue can be lost; comparison cannot miss); `POST /graph/reconcile` repairs and reports; one-directionality asserted structurally by a fake that panics on any relational write *(Slice G)*
 - [~] Runtime predicate registry — define/lookup/list, duplicate refused, core vocabulary seeded by migration and immutable, cardinality recorded per predicate; **an unregistered predicate is refused on assert and named**, so the vocabulary is a constraint rather than documentation. Retraction is deliberately not gated — refusing one would strand the fact it withdraws *(Slice H)*; **gap**: cardinality and value type are recorded but not yet *enforced* on write (both are constraints → Epic 5)
 - [ ] `rdf:reifies` + triple terms → **Epic 94**. The reified edges already shipped *are* RDF 1.2's reifier shape; only the vocabulary is missing (`04-engine-triples.md` finding 5)
-- [ ] Language-tag side table → **Epic 94**, and it needs three components not two: `rdf:dirLangString` carries a base direction
+- [ ] Language-tag side table → **Epic 94**, and it needs three components not two: `rdf:dirLangString` carries a base direction (the RDF-namespace datatype — there is no `xsd:langString`)
 
 ### Epic 7 — SPARQL ★
 
