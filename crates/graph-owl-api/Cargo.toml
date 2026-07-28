@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 graph-owl-core.workspace = true
+graph-owl-events.workspace = true
 graph-owl-storage.workspace = true
 graph-owl-authz.workspace = true
 graph-owl-engine.workspace = true

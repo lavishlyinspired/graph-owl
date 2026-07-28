@@ -700,3 +700,21 @@ written from understanding rather than from the reference.
 4. **Query plans verified by name for all six pattern shapes** (Slice B) — a missing index degrades silently and is the most expensive possible regression here.
 5. Performance smoke against the targets in `00a-product-position.md`: batch assert < 1ms/1000 flakes, pattern query < 5ms p50.
 6. Reconciliation one-directionality asserted, not assumed (Slice G).
+
+## Untested as-of pattern construction (found 28 July 2026, not yet fixed)
+
+A mutation run scoped to another crate's change surfaced two survivors in
+`Catalog::get_asset_as_of` (`graph-owl-api/src/lib.rs`): deleting the `s` field
+and deleting the `as_of` field from the `TriplePattern` it builds both leave
+every test passing.
+
+That is a real gap, not a mutation-testing artefact. **Dropping `as_of` from a
+time-travel query's pattern is precisely the bug this epic exists to prevent** —
+the query would silently answer from the present while the caller believes they
+asked about the past. Dropping `s` would widen the scan from one subject to all
+of them.
+
+Recorded rather than fixed in the commit that found it, because it belongs to
+this epic and fixing it inside an unrelated change would hide it. **The fix is a
+test, not code**: an as-of read whose result must differ from the present read,
+and one that must not return another subject's flakes.

@@ -26,6 +26,7 @@ refinery = { version = "0.8", features = ["tokio-postgres"] }
 tokio-postgres = "0.7"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 graph-owl-core = { path = "crates/graph-owl-core" }
+graph-owl-events = { path = "crates/graph-owl-events" }
 graph-owl-storage = { path = "crates/graph-owl-storage" }
 graph-owl-storage-postgres = { path = "crates/graph-owl-storage-postgres" }
 graph-owl-authz = { path = "crates/graph-owl-authz" }

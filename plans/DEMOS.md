@@ -157,7 +157,9 @@ its destination — so "Demo 2 is done" never has to mean "Epic 13 is finished".
 
 **Pending in this epic**
 - [x] **`EventSink` port + `ChangeEvent`** — the port, the five event kinds, and the payload *(Slice J, part 1)*. Two rules are structural rather than a caller's duty: `updated()` returns `Option` and yields `None` on an empty diff, so a facade that forgot to check still cannot emit an empty event; and `emit()` returns `()`, so "emission failure must not fail the request" is enforced by the signature rather than by every call site remembering to swallow an error
-- [~] **Emission is not wired into the facade yet** — nothing calls these constructors, so no event is produced by a real mutation. Post-commit emission is the rest of Slice J, and it is the half where ordering can be got wrong (`03-versioning.md`: emitted after commit, never before)
+- [x] **Emission wired into the facade** *(Slice J, part 2)* — `Catalog::with_events(sink)`; update, soft delete and restore announce after the write returns. Ordering is structural: every `announce` call sits past an early return on failure, so a change that did not commit cannot reach it. A no-op update emits nothing because `ChangeEvent::updated` returns `None`, not because the call site checks. A catalog with no sink still mutates — a missing subscriber is not an outage
+- [~] **Create and hard delete do not announce yet** — `upsert_asset` is create-or-update and needs the two paths distinguished before it can emit the right kind; hard delete has no facade method. Both are the rest of Slice J
+- [~] **Nothing subscribes.** The sink exists and the facade calls it; Epic 8's `TextIndex` is what should be listening
 
 ### Epic 8 — Search
 - [x] Facets by kind and schema, computed over the **visible** set

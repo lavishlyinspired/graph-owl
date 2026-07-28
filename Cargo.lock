@@ -768,6 +768,7 @@ dependencies = [
  "graph-owl-connectors",
  "graph-owl-core",
  "graph-owl-engine",
+ "graph-owl-events",
  "graph-owl-query",
  "graph-owl-storage",
  "graph-owl-traversal",

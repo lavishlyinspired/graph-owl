@@ -12,6 +12,7 @@ use graph_owl_core::{
     relationship_type::{EntityKind, RelationshipType, is_legal},
 };
 use graph_owl_engine::TripleStore;
+use graph_owl_events::{ChangeEvent, EventSink, EventSubject};
 use graph_owl_storage::{ConflictKind, Storage, StorageError, StoredUser, UpdateOutcome};
 use graph_owl_traversal::{Bounds, Direction, EdgeFilter, Subgraph, TraversalEngine};
 use serde::Deserialize;
@@ -337,6 +338,18 @@ pub struct GraphSize {
     pub flakes: u64,
 }
 
+/// An asset as an event names it.
+///
+/// Carried in full so a subscriber never reads the entity back — one that did
+/// would race the next write and index a version nobody told it about.
+fn event_subject(asset: &Asset) -> EventSubject {
+    EventSubject {
+        kind: asset.kind,
+        id: asset.id.to_string(),
+        fqn: asset.fully_qualified_name.clone(),
+    }
+}
+
 #[derive(Clone)]
 pub struct Catalog {
     storage: Arc<dyn Storage>,
@@ -350,6 +363,10 @@ pub struct Catalog {
     /// are genuinely separate contracts — a backend could reasonably implement
     /// one and not the other.
     traversal: Option<Arc<dyn TraversalEngine>>,
+    /// Where committed changes are announced. Optional for the same reason
+    /// `graph` is: a catalog with no subscriber is fully functional, and making
+    /// the sink required would turn "nothing is listening" into an outage.
+    events: Option<Arc<dyn EventSink>>,
 }
 
 impl Catalog {
@@ -358,6 +375,7 @@ impl Catalog {
             storage,
             graph: None,
             traversal: None,
+            events: None,
         }
     }
 
@@ -366,6 +384,24 @@ impl Catalog {
     pub fn with_graph(mut self, graph: Arc<dyn TripleStore>) -> Self {
         self.graph = Some(graph);
         self
+    }
+
+    /// Announce committed changes to `sink`.
+    #[must_use]
+    pub fn with_events(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.events = Some(sink);
+        self
+    }
+
+    /// Announce a change **after** the write that caused it has returned.
+    ///
+    /// Every call site sits past an early return on failure, so a mutation that
+    /// did not commit cannot reach here — the ordering is a property of where
+    /// this is called, not of a flag it checks.
+    fn announce(&self, event: Option<ChangeEvent>) {
+        if let (Some(sink), Some(event)) = (self.events.as_ref(), event) {
+            sink.emit(&event);
+        }
     }
 
     /// The traversal capability of the same backend.
@@ -1301,7 +1337,17 @@ impl Catalog {
             }
         };
 
-        self.project(before, &updated).await;
+        self.project(before.clone(), &updated).await;
+        // Past the early returns above, so the write has committed. `updated`
+        // returning `None` for a no-op is `ChangeEvent::updated`'s own rule, so
+        // a no-op emits nothing without this call site deciding anything.
+        self.announce(ChangeEvent::updated(
+            event_subject(&updated),
+            before.map_or(updated.version, |b| b.version),
+            updated.version,
+            updated.change_description.clone().unwrap_or_default(),
+            &principal.id,
+        ));
         Ok(updated)
     }
 
@@ -1325,10 +1371,17 @@ impl Catalog {
         principal: &Principal,
         id: Uuid,
     ) -> Result<u64, CatalogError> {
-        if self.storage.get_asset(id).await?.is_none() {
+        let Some(before) = self.storage.get_asset(id).await? else {
             return Err(CatalogError::NotFound);
-        }
-        Ok(self.storage.soft_delete_asset(id, &principal.id).await?)
+        };
+        let affected = self.storage.soft_delete_asset(id, &principal.id).await?;
+        self.announce(Some(ChangeEvent::soft_deleted(
+            event_subject(&before),
+            before.version,
+            before.version,
+            &principal.id,
+        )));
+        Ok(affected)
     }
 
     /// Everything the landing page needs, in one answer.
@@ -1447,10 +1500,17 @@ impl Catalog {
         principal: &Principal,
         id: Uuid,
     ) -> Result<u64, CatalogError> {
-        if self.storage.get_asset(id).await?.is_none() {
+        let Some(before) = self.storage.get_asset(id).await? else {
             return Err(CatalogError::NotFound);
-        }
-        Ok(self.storage.restore_asset(id, &principal.id).await?)
+        };
+        let affected = self.storage.restore_asset(id, &principal.id).await?;
+        self.announce(Some(ChangeEvent::restored(
+            event_subject(&before),
+            before.version,
+            before.version,
+            &principal.id,
+        )));
+        Ok(affected)
     }
 }
 
@@ -3096,5 +3156,132 @@ mod projection_isolation_tests {
             retracted.iter().any(|f| f.p.id == "version"),
             "the superseded version must be withdrawn: {retracted:?}"
         );
+    }
+    mod committed_changes_are_announced {
+        use super::*;
+        use graph_owl_events::{ChangeEvent, EventKind, EventSink};
+
+        #[derive(Default)]
+        struct Recording(Mutex<Vec<ChangeEvent>>);
+
+        impl EventSink for Recording {
+            fn emit(&self, event: &ChangeEvent) {
+                self.0.lock().expect("lock").push(event.clone());
+            }
+        }
+
+        impl Recording {
+            fn kinds(&self) -> Vec<EventKind> {
+                self.0
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .map(|e| e.kind)
+                    .collect()
+            }
+        }
+
+        async fn catalog_with_sink() -> (Catalog, Arc<Recording>, Uuid) {
+            let storage = Arc::new(InMemoryStorage::default());
+            let sink = Arc::new(Recording::default());
+            let catalog = Catalog::new(storage).with_events(sink.clone());
+            let asset = catalog
+                .upsert_asset(&Principal::system(), service("hdfc-core"))
+                .await
+                .expect("created");
+            sink.0.lock().expect("lock").clear();
+            (catalog, sink, asset.id)
+        }
+
+        fn describe(text: &str) -> AssetUpdate {
+            AssetUpdate {
+                description: Some(Some(text.to_string())),
+            }
+        }
+
+        #[tokio::test]
+        async fn an_update_announces_one_updated_event_naming_the_asset() {
+            let (catalog, sink, id) = catalog_with_sink().await;
+            catalog
+                .update_asset(&Principal::system(), id, &describe("now described"), None)
+                .await
+                .expect("updated");
+
+            assert_eq!(sink.kinds(), vec![EventKind::Updated]);
+            let events = sink.0.lock().expect("lock");
+            assert_eq!(events[0].subject.id, id.to_string());
+            assert_eq!(events[0].principal_id, Principal::system().id);
+        }
+
+        #[tokio::test]
+        async fn an_update_that_changes_nothing_announces_nothing() {
+            let (catalog, sink, id) = catalog_with_sink().await;
+            let _ = catalog
+                .update_asset(&Principal::system(), id, &AssetUpdate::default(), None)
+                .await;
+
+            assert!(sink.kinds().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_failed_update_announces_nothing_because_emission_follows_the_write() {
+            let (catalog, sink, _) = catalog_with_sink().await;
+
+            let outcome = catalog
+                .update_asset(&Principal::system(), Uuid::new_v4(), &describe("x"), None)
+                .await;
+
+            assert!(outcome.is_err());
+            assert!(
+                sink.kinds().is_empty(),
+                "a change that did not commit must not be announced"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_soft_delete_and_a_restore_are_distinct_kinds_not_updates() {
+            let (catalog, sink, id) = catalog_with_sink().await;
+            catalog
+                .soft_delete_asset(&Principal::system(), id)
+                .await
+                .expect("deleted");
+            catalog
+                .restore_asset(&Principal::system(), id)
+                .await
+                .expect("restored");
+
+            assert_eq!(
+                sink.kinds(),
+                vec![EventKind::SoftDeleted, EventKind::Restored]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_failed_delete_announces_nothing() {
+            let (catalog, sink, _) = catalog_with_sink().await;
+
+            assert!(
+                catalog
+                    .soft_delete_asset(&Principal::system(), Uuid::new_v4())
+                    .await
+                    .is_err()
+            );
+            assert!(sink.kinds().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_catalog_with_no_sink_still_mutates() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let catalog = Catalog::new(storage);
+            let asset = catalog
+                .upsert_asset(&Principal::system(), service("svc"))
+                .await
+                .expect("created");
+
+            catalog
+                .update_asset(&Principal::system(), asset.id, &describe("x"), None)
+                .await
+                .expect("a missing subscriber is not an outage");
+        }
     }
 }
