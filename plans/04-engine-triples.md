@@ -592,10 +592,64 @@ is how a system acquires complexity that pays for nothing** — here it would ad
 a buffer, a merge task, a compaction schedule, and a query path that must union
 base with novelty, in exchange for nothing.
 
-What is genuinely true about this workload is narrower and already handled
-above: retraction-not-delete means dead tuples accumulate in a pattern ordinary
-deletes would not produce, so the honest response is to **measure bloat**
-(`10-operability.md`) rather than to build a second write path.
+**Correction to the paragraph above, and it matters.** Bottom-up index deletion
+targets **version churn from `UPDATE`** — duplicate index entries for one
+logical row. This table is *append-only*: a retraction writes a **new** row with
+`op = false` rather than updating the old one. So there is little version churn
+here and bottom-up deletion has little to do. Citing it as reassurance was
+overreach. The append-only shape means the indexes **grow monotonically** rather
+than bloat, which is a different problem with a different answer — bloat
+monitoring still earns its place for the hard-delete and reconciliation paths,
+but growth is what scale actually brings.
+
+### So what *does* break at 100M or 1B flakes
+
+The "no rebuild" claim holds at any size — Postgres never rebuilds an index on
+write. But **"does not rebuild" is not "stays fast"**, and the honest failure
+curve is:
+
+1. **B-tree insert is `O(log n)`, and that is not the cliff.** Depth goes from
+   roughly 20 to 30 levels between 10⁶ and 10⁹ rows.
+2. **The cliff is the indexes no longer fitting in RAM.** Below it, the upper
+   tree levels sit in `shared_buffers` and an insert is cheap; above it, each of
+   the **four** index inserts becomes a random read *and* write against disk.
+   Four indexes means the amplification is paid four times.
+3. **This schema is *less* cache-friendly than a time-series table**, and it is
+   worth being clear-eyed about why. Every index here leads with
+   `namespace_s, sid_s` (or `namespace_p, sid_p`), so inserts **scatter across
+   the whole keyspace**. A monotonically time-ordered index appends to one hot
+   rightmost page and stays cached almost regardless of size; a scattered one
+   touches random pages as soon as it exceeds memory. The four orderings that
+   make reads fast are exactly what makes this write pattern scatter.
+4. **`VACUUM` and `ANALYZE` cost** grow with the table, independent of the above.
+
+### The answers are declarative, which is the point
+
+None of this argues back toward a hand-built novelty overlay. The Postgres-native
+responses are configuration, not machinery:
+
+- **Declarative partitioning**, which this project has already chosen: *"start
+  unpartitioned, partition by `namespace_s` at ~10M"*, with `37a-scale.md`
+  holding the measurement that turns that number into a decision. Partitioning is
+  what keeps per-partition indexes small enough to stay cached, keeps `VACUUM`
+  tractable, and makes old-partition archival cheap. It addresses points 2–4
+  together.
+- **BRIN on `t`, as a measured candidate** (new, 28 July 2026). All four indexes
+  carry `t DESC` as their final column, and `t` is *monotonically increasing on
+  an append-only table* — the textbook BRIN case, where a block-range index runs
+  on the order of a hundredth the size of the equivalent B-tree. It does not
+  replace the four orderings, which serve selective point lookups where B-tree
+  wins; it is a candidate for the **time-range** access that time travel makes
+  common. Added to `37a-scale.md`'s measurement list rather than adopted here,
+  because whether it helps depends on how correlated `t` is with physical row
+  order, and that is measurable rather than arguable.
+
+**Scope check, so the number stays honest.** `37a-scale.md` targets **100,000
+entities**, which on the observed ratio (124 assets → 1,234 flakes) is roughly
+**1M flakes**. A billion flakes is about 100M entities — a thousand times the
+stated target, and a positioning question for `00a-product-position.md` before
+it is a storage one. The architecture has a path there; this project has not
+claimed to have walked it.
 
 ### Accepted: two findings, both small
 
