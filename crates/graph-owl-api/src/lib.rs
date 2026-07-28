@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use graph_owl_authz::{AccessPredicate, MetadataOperation, Policy, Subject, compile};
+use graph_owl_authz::{
+    AccessPredicate, DecisionCache, DecisionKey, MetadataOperation, Policy, Subject, compile,
+};
 use graph_owl_connectors::DeletionPlan;
 use graph_owl_core::projection;
 use graph_owl_core::{
@@ -378,6 +380,10 @@ pub struct Catalog {
     /// than promised: if the projection were required, a graph outage would be
     /// a catalog outage.
     graph: Option<Arc<dyn TripleStore>>,
+    /// Compiled authorization predicates. `Arc` because `Catalog` is cloned per
+    /// request by axum's state extraction, and a cache cloned with it would be
+    /// a fresh empty cache on every request — present, warm to nobody.
+    decisions: Arc<DecisionCache>,
     /// The same backend seen through its traversal capability. Two fields
     /// rather than one combined trait, because storing flakes and walking them
     /// are genuinely separate contracts — a backend could reasonably implement
@@ -396,6 +402,7 @@ impl Catalog {
             graph: None,
             traversal: None,
             events: None,
+            decisions: Arc::new(DecisionCache::default()),
         }
     }
 
@@ -1115,13 +1122,38 @@ impl Catalog {
         Ok(self.storage.policies_for_roles(&principal.roles).await?)
     }
 
+    /// The predicate for one principal and operation, cached.
+    ///
+    /// The cache sits **here** rather than around `policies_for`, because the
+    /// compiled predicate is what every read path actually consumes and
+    /// compiling it is the other half of the cost. Caching the policies alone
+    /// would keep the round trip and pay the compile on every request.
     async fn predicate_for(
         &self,
         principal: &Principal,
         operation: MetadataOperation,
     ) -> Result<AccessPredicate, CatalogError> {
+        let subject = subject_of(principal);
+        let key = DecisionKey::new(&subject, operation);
+        if let Some(cached) = self.decisions.get(&key) {
+            return Ok(cached);
+        }
+
         let policies = self.policies_for(principal).await?;
-        Ok(compile(&subject_of(principal), operation, &policies))
+        let predicate = compile(&subject, operation, &policies);
+        self.decisions.insert(key, predicate.clone());
+        Ok(predicate)
+    }
+
+    /// Forget every cached authorization decision.
+    ///
+    /// Called by anything that changes what a decision was computed *from* — a
+    /// role assignment, a policy edit. **Invalidation is the only thing that
+    /// expires an entry**: there is no TTL, deliberately, because a TTL makes
+    /// staleness the normal case and the window in which a revoked role still
+    /// works is invisible to whoever revoked it.
+    pub fn invalidate_authorization(&self) {
+        self.decisions.invalidate();
     }
 
     /// # Errors
@@ -1587,13 +1619,18 @@ mod tests {
         assets: Mutex<Vec<Asset>>,
         versions: Mutex<Vec<AssetVersion>>,
         users: Mutex<Vec<StoredUser>>,
-        policies: Mutex<Vec<Policy>>,
+        pub(super) policies: Mutex<Vec<Policy>>,
         inserted: Mutex<Vec<Table>>,
         relationships: Mutex<Vec<Relationship>>,
         /// When armed, any relational write panics. Lets a test assert "this
         /// code path writes nothing" structurally instead of by reading it and
         /// believing what it says.
         writes_forbidden: std::sync::atomic::AtomicBool,
+        /// How many times policies were read from storage. The decision cache
+        /// is invisible in the *result* — a cached and an uncached predicate
+        /// are the same predicate — so the only observable is whether the
+        /// question reached storage at all.
+        pub(super) policy_reads: std::sync::atomic::AtomicUsize,
     }
 
     impl InMemoryStorage {
@@ -1890,9 +1927,29 @@ mod tests {
             Ok(())
         }
 
+        /// **Honours `roles`**, because the port does.
+        ///
+        /// The real adapter joins `role_policies` on the roles it was given, so
+        /// a principal holding no matching role gets no policy. A double that
+        /// returned every policy regardless made role-scoped authorization
+        /// unobservable in this crate — a decision cache keyed on the wrong
+        /// thing would have passed every test here.
+        ///
+        /// A policy is attached to the role of the same name. That is the
+        /// fake's convention, not the schema's, and it is enough to model the
+        /// one property that matters: different roles resolve different
+        /// policies.
         async fn policies_for_roles(&self, roles: &[String]) -> Result<Vec<Policy>, StorageError> {
-            let _ = roles;
-            Ok(self.policies.lock().unwrap().clone())
+            self.policy_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self
+                .policies
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|policy| roles.contains(&policy.name))
+                .cloned()
+                .collect())
         }
 
         async fn list_assets_visible(
@@ -3421,6 +3478,183 @@ mod projection_isolation_tests {
             "the superseded version must be withdrawn: {retracted:?}"
         );
     }
+    mod authorization_decisions_are_cached {
+        use super::*;
+        use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+
+        fn policy(prefix: &str) -> Policy {
+            Policy {
+                name: "analyst".to_string(),
+                rules: vec![Rule {
+                    name: "read-hdfc".to_string(),
+                    effect: Effect::Allow,
+                    operations: vec![MetadataOperation::ViewBasic],
+                    resources: ResourceMatcher::FqnPrefix(prefix.to_string()),
+                }],
+            }
+        }
+
+        fn analyst(roles: &[&str]) -> Principal {
+            Principal {
+                id: "asha".to_string(),
+                name: "Asha".to_string(),
+                kind: graph_owl_core::PrincipalKind::User,
+                roles: roles.iter().map(ToString::to_string).collect(),
+                is_admin: false,
+            }
+        }
+
+        async fn catalog_with_policy() -> (Catalog, Arc<InMemoryStorage>) {
+            let storage = Arc::new(InMemoryStorage::default());
+            storage.policies.lock().unwrap().push(policy("hdfc-core"));
+            let catalog = Catalog::new(storage.clone());
+            catalog
+                .upsert_asset(&Principal::system(), service("hdfc-core"))
+                .await
+                .expect("create");
+            (catalog, storage)
+        }
+
+        fn page() -> PageRequest {
+            PageRequest::new(None, None).expect("a default page")
+        }
+
+        fn reads(storage: &InMemoryStorage) -> usize {
+            storage
+                .policy_reads
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// The point of the cache: the second identical question does not go
+        /// back to storage. Invisible in the result — a cached and an uncached
+        /// predicate are the same predicate — so the read count is the only
+        /// observable.
+        #[tokio::test]
+        async fn a_repeated_question_does_not_reach_storage_twice() {
+            let (catalog, storage) = catalog_with_policy().await;
+            let asha = analyst(&["analyst"]);
+
+            catalog
+                .list_assets_for(&asha, None, &page())
+                .await
+                .expect("first");
+            let after_first = reads(&storage);
+            catalog
+                .list_assets_for(&asha, None, &page())
+                .await
+                .expect("second");
+
+            assert_eq!(
+                reads(&storage),
+                after_first,
+                "the second read was served from cache"
+            );
+            assert!(after_first > 0, "the first must actually have asked");
+        }
+
+        /// **The property that makes the cache safe to have.** Two principals
+        /// with different roles must never share a decision. A key that
+        /// ignored roles would hand one reader the other's visibility, which is
+        /// the worst failure this component can have and is silent.
+        #[tokio::test]
+        async fn a_different_role_set_is_a_different_decision() {
+            let (catalog, _storage) = catalog_with_policy().await;
+
+            let permitted = catalog
+                .list_assets_for(&analyst(&["analyst"]), None, &page())
+                .await
+                .expect("permitted");
+            let unpermitted = catalog
+                .list_assets_for(&analyst(&["nobody"]), None, &page())
+                .await
+                .expect("unpermitted");
+
+            assert_eq!(permitted.data.len(), 1, "the analyst role allows hdfc-core");
+            assert!(
+                unpermitted.data.is_empty(),
+                "a role with no policy sees nothing, cached or not: {:?}",
+                unpermitted.data
+            );
+        }
+
+        /// And an admin must not be served a non-admin's entry. `compile`
+        /// short-circuits on the flag, so the two differ even with identical
+        /// roles.
+        #[tokio::test]
+        async fn an_admin_is_not_served_a_non_admins_decision() {
+            let (catalog, _storage) = catalog_with_policy().await;
+
+            let restricted = catalog
+                .list_assets_for(&analyst(&["nobody"]), None, &page())
+                .await
+                .expect("restricted");
+            assert!(restricted.data.is_empty());
+
+            let mut admin = analyst(&["nobody"]);
+            admin.is_admin = true;
+            let full = catalog
+                .list_assets_for(&admin, None, &page())
+                .await
+                .expect("admin");
+
+            assert_eq!(full.data.len(), 1, "an admin bypasses policy");
+        }
+
+        /// Invalidation is what makes a revocation take effect. Without it the
+        /// cache is a window in which a withdrawn permission still works.
+        #[tokio::test]
+        async fn invalidation_sends_the_next_question_back_to_storage() {
+            let (catalog, storage) = catalog_with_policy().await;
+            let asha = analyst(&["analyst"]);
+            catalog
+                .list_assets_for(&asha, None, &page())
+                .await
+                .expect("first");
+            let after_first = reads(&storage);
+
+            catalog.invalidate_authorization();
+            catalog
+                .list_assets_for(&asha, None, &page())
+                .await
+                .expect("second");
+
+            assert!(
+                reads(&storage) > after_first,
+                "after invalidation the decision must be recomputed"
+            );
+        }
+
+        /// A revoked policy actually takes effect after invalidation — the
+        /// behaviour, not just the read count.
+        #[tokio::test]
+        async fn a_revoked_policy_stops_working_once_invalidated() {
+            let (catalog, storage) = catalog_with_policy().await;
+            let asha = analyst(&["analyst"]);
+            assert_eq!(
+                catalog
+                    .list_assets_for(&asha, None, &page())
+                    .await
+                    .expect("before")
+                    .data
+                    .len(),
+                1
+            );
+
+            storage.policies.lock().unwrap().clear();
+            catalog.invalidate_authorization();
+
+            assert!(
+                catalog
+                    .list_assets_for(&asha, None, &page())
+                    .await
+                    .expect("after")
+                    .data
+                    .is_empty(),
+                "the withdrawn policy must no longer admit anything"
+            );
+        }
+    }
+
     mod committed_changes_are_announced {
         use super::*;
         use graph_owl_events::{ChangeEvent, EventKind, EventSink};

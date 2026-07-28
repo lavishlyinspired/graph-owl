@@ -18,7 +18,6 @@ revision (rule 0's corollary).*
 |---|---|---|
 | 1 | **Epic 1 J** — OpenAPI generated from code, committed, diffed in CI. Carries the `/assets/{id}` namespace collision: any console route under it is unreachable, and prefixing the API is the fix | Epic 1 K, Epic 39's generated client |
 | 1 | **Epic 15** — scheduled runs, run-history persistence, `source_hash` fingerprinting to skip unchanged records | — |
-| 2 | **Epic 13** — no decision cache; every request recompiles the predicate. Correct, and not yet fast | — |
 | 2 | **Epic 10** — memory budget report, admission control, cross-port spans, pool/entity gauges | — |
 | 3 | **Epic 40** — WebGL swap; SVG will not survive 10k nodes. Every *interaction* the swap was expected to bring already works and is tested at the model layer, so what remains is scale alone | — |
 | 3 | **Epic 40** — React Flow + d3-dag lineage DAG | Epic 29 (nothing declares lineage yet) |
@@ -269,8 +268,11 @@ test's scrape had already installed the recorder.
 - [x] Counts filtered through the same predicate, so a total cannot leak what it hid
 - [x] Hidden reads as `404`, not `403` — a `403` on an id confirms the id exists
 
+- [x] **Decision cache** — compiled predicates held in a bounded LRU keyed by the **role set**, not the principal, so it scales with policy shape rather than headcount and a thousand analysts sharing one role warm the entry once between them. `is_admin` is part of the key because `compile` short-circuits on it
+- [x] **Invalidated by epoch, never by TTL** (`00g`). A TTL makes staleness the normal case: a revoked role keeps working until a clock says otherwise, and the window is invisible to whoever revoked it. `Catalog::invalidate_authorization()` is the trigger
+
 **Pending in this epic**
-- No decision cache; every request recompiles the predicate. Correct, and not yet fast
+- **`invalidate_authorization()` has no caller yet**, because no endpoint changes a role or a policy — they are seeded by migration and edited in SQL. An operator editing `role_policies` directly will not be noticed. The hook exists and is tested; wiring it is the job of whichever epic adds policy administration, and until then the honest statement is that the cache is correct for every mutation the API can perform and blind to the ones it cannot
 
 **Deferred**
 - Column-level (as opposed to row-level) masking → needs Epic 25's classifications to know *which* columns carry what

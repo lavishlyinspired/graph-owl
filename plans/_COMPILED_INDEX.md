@@ -1,286 +1,121 @@
-# Plan Index: Status, Dependencies & Relationships
+# Plan Index
 
-> Auto-compiled from all `plans/*.md`. Generated 28 Jul 2026.
+> **Generated** by `scripts/compile-plan-index.py`. Do not hand-edit —
+> every column is read from the plan's own `**Status**` /
+> `**Depends on**` / `**Unblocks**` header, so the index cannot
+> disagree with the file it points at. Re-run it after adding or
+> restatusing a plan.
 
----
+Rebuilt 28 July 2026, replacing a hand-written index in which **60 of
+the 86 files named did not exist** and the epic numbering was a
+different scheme entirely (`08-authorization.md` when Epic 8 is
+Search; `16-search.md` when Epic 16 is ingestion). An index that
+misroutes is worse than none, because it gets consulted instead of
+`ls`.
 
-## Standing Reference Documents
+**79 plan documents.** `DEMOS.md` remains the authority on
+what is *built* — this file is the authority on what *exists* and how
+the documents relate.
 
-| File | Status | Binds | Key Role |
-|------|--------|-------|----------|
-| `00a-product-position.md` | Standing reference | Everything | Differentiators, budgets, what this competes on |
-| `00b-architecture.md` | Standing reference | Everything | Layering, flake model, crate map, error model, decision log |
-| `00c-domain-model.md` | Standing reference | Everything | Entities, envelope, FQN, triple projection |
-| `00d-api-conventions.md` | Standing reference | API-surface epics | URL shape, status codes, pagination, concurrency |
-| `00e-crate-architecture.md` | Standing reference | Crate decisions | Which crates exist/rejected, growth trigger |
-| `00f-ui-architecture.md` | Standing reference | Console epics | Stack, budgets, two-renderer rule, non-negotiables |
-| `00g-operations.md` | Standing reference | Deploy, data lifecycle | Migration/rollback, DR, retention, runbooks |
-| `00h-ui-design-system.md` | Standing reference | UI epics | Design tokens, chrome, five patterns, screen inventory |
-| `00i-licensing.md` | Binding | Every session | Clean-room rules, reference-implementation discipline |
-| `00j-language-boundaries.md` | Standing decision | Multi-language | Rust in-binary, Python out-of-process, consumers vs components |
-| `00k-standards-conformance.md` | Standing reference | Epics 5, 6, 7, 9 | W3C subset conformance registry |
-| `00l-build-vs-adopt.md` | Standing reference | Engine epics | Permissive-lib adoption decisions (spargebra, spareval, etc.) |
-| `00m-capability-mapping.md` | Generated reference | All | 110-capability coverage map (78 covered, 16 partial, 16 missing) |
-| `00n-large-ontology-reality.md` | Standing reference | Scale epics | Fork analysis: catalog vs knowledge-graph product; epic 98 triggered |
-| `ROADMAP.md` | Active roadmap | Sequencing | 43 epics, 9 phases, ★ differentiators |
-| `DEMOS.md` | Demo tracer | All | 12 demos, cumulative, Indian banking domain |
+## Standing reference
 
----
+| File | Role |
+|---|---|
+| [`00a-product-position.md`](00a-product-position.md) | graph-owl — Product Position |
+| [`00b-architecture.md`](00b-architecture.md) | graph-owl — Architecture |
+| [`00c-domain-model.md`](00c-domain-model.md) | graph-owl — Domain Model |
+| [`00d-api-conventions.md`](00d-api-conventions.md) | graph-owl — API Conventions |
+| [`00e-crate-architecture.md`](00e-crate-architecture.md) | Plan: Crate Architecture |
+| [`00f-ui-architecture.md`](00f-ui-architecture.md) | Web Console Architecture |
+| [`00g-operations.md`](00g-operations.md) | graph-owl — Operations |
+| [`00h-ui-design-system.md`](00h-ui-design-system.md) | graph-owl — Console Design System |
+| [`00i-licensing.md`](00i-licensing.md) | graph-owl — Licensing & Clean-Room Rules |
+| [`00j-language-boundaries.md`](00j-language-boundaries.md) | graph-owl — Language Boundaries |
+| [`00k-standards-conformance.md`](00k-standards-conformance.md) | 00k — Standards Conformance |
+| [`00l-build-vs-adopt.md`](00l-build-vs-adopt.md) | 00l — Build vs Adopt |
+| [`00m-capability-mapping.md`](00m-capability-mapping.md) | Capability-to-Plan Mapping |
+| [`00n-large-ontology-reality.md`](00n-large-ontology-reality.md) | 00n — Large Ontologies at Scale: an honest assessment |
 
-## Phase 1: Walking Skeleton (Epics 1–3) — Shipped
+## Sequencing
 
-| Plan | Status | Depends On | Deferrals | Slices |
-|------|--------|------------|-----------|--------|
-| `01-catalog-core.md` | **Shipped** | None | MongoDB storage (Epic 34) | A–J |
-| `02-relationships.md` | **Shipped** | 01 | — | A–C |
-| `03-types.md` | **Shipped** | 02 | Sealed type system (Epic 99) | A–C |
+| File | Role |
+|---|---|
+| [`DEMOS.md`](DEMOS.md) | graph-owl — Demo Tracer |
+| [`ROADMAP.md`](ROADMAP.md) | graph-owl — End-to-End Roadmap |
 
-## Phase 2: Engine (Epics 4–9a) — In Progress
+## Epic plans
 
-| Plan | Status | Depends On | Deferrals | Slices |
-|------|--------|------------|-----------|--------|
-| `04-graph-engine.md` | **Building** | 03 | — | A–I (A–H shipped, I deferred) |
-| `04a-engine-exhaustion.md` | Planned | 04 | — | Companion |
-| `05-constraint-validation.md` | Planned | 04 | — | A–D |
-| `06-engine-reasoning.md` | Planned | 04 | OWL 2 EL → Epic 98; RL-only for now | — |
-| `07-sparql-query.md` | **Building** | 04, 09 | — | A–D (A–C shipped) |
-| `07a-graph-traversal.md` | Planned | 04 | — | A–C (core shipped) |
-| `07b-open-cypher.md` | Planned | 09a, 07 | — | — |
-| `07c-lpg-sql-access.md` | Planned | 07b | — | — |
-| `07d-gql-query.md` | Planned | 07b | — | — |
-| `08-authorization.md` | Planned | 03 | — | A–D |
-| `09-rdf-io.md` | Planned | 04 | — | — |
-| `09a-lpg-interchange.md` | Planned | 04 | — | — |
+| File | Epic | Status | Depends on |
+|---|---|---|---|
+| [`01-api-conventions.md`](01-api-conventions.md) | 1 | **Shipped** — slices A–C (RFC 9457 errors, all-violations-at-once validation, keyset pagination). Demo 1 | nothing |
+| [`02-entity-hierarchy.md`](02-entity-hierarchy.md) | 2 | **Shipped** — service → database → schema → table → column, 34 assets from the connector. Demo 1 | Epic 1 (conventions, relationship taxonomy) |
+| [`03-versioning.md`](03-versioning.md) | 3 | **Shipped** — envelope, history, `If-Match`/412, and Slice J's `EventSink` with create / update / soft-delete / restore all announced. Demo 2. `HardD… | Epic 2 (four entity types to apply the envelope to) |
+| [`04-engine-triples.md`](04-engine-triples.md) | 4 | Slices A–H complete, with two named carry-overs — cardinality and value type are recorded per predicate but not *enforced* on write (both are constra… | Epic 3 (four entity types with an envelope to project) |
+| [`05-engine-constraints.md`](05-engine-constraints.md) | 5 | Not started | Epic 4 (triples to validate) |
+| [`06-engine-reasoning.md`](06-engine-reasoning.md) | 6 | **In progress** — Slice A shipped 28 Jul 2026 (eight axioms, fixpoint, dedup). B's fixpoint/dedup landed with it because a symmetric property does no… | Epic 4 (triples), Epic 5 (ontology types) |
+| [`07-engine-query.md`](07-engine-query.md) | 7 | **In progress** — slices A–C shipped (SPARQL over flakes, HTTP surface, pattern pushdown). `sparopt` not in the path; triple-term patterns are Epic 9… | Epic 4 (triples), Epic 13 (authorization to compile into queries), **Epic 7a** (property-… |
+| [`07a-engine-traversal.md`](07a-engine-traversal.md) | 7a | **In progress** — core shipped (slices A–E): frontier primitive, `neighbours`/`subgraph`, `shortest_path`, `all_paths`, `detect_cycles` | Epic 4 (triples, SPOT/POST/OPST indexes) |
+| [`07b-engine-cypher.md`](07b-engine-cypher.md) | 7b | Not started — **scheduled** (was optional; see the status change below) | Epic 7 (SPARQL plan is the lowering target), Epic 7a (traversal), **Epic 7c (LPG projecti… |
+| [`07c-engine-lpg.md`](07c-engine-lpg.md) | 7c | Not started | Epic 4 (flakes), Epic 1 (relationship taxonomy) |
+| [`07d-engine-bolt.md`](07d-engine-bolt.md) | 7d | Not started | Epic 7b (Cypher), Epic 7c (LPG projection), Epic 12 (auth), Epic 13 (authorization) |
+| [`08-engine-search.md`](08-engine-search.md) | 8 | **In progress** — Slice A shipped over Postgres full-text search: weighted `tsvector`, GIN, prefix-matched conjunctive terms, `ts_rank_cd` ordering,… | Epic 3 (change events to subscribe to), Epic 2 (FQNs to rank on), Epic 25 (tags, for face… |
+| [`09-engine-rdf-io.md`](09-engine-rdf-io.md) | 9 | Not started | Epic 4 (triples to serialize), Epic 7 (CONSTRUCT produces Turtle) |
+| [`09a-lpg-interchange.md`](09a-lpg-interchange.md) | 9a | Not started | Epic 7c (LPG projection), Epic 9 (RDF I/O — shares the streaming-serializer shape) |
+| [`10-operability.md`](10-operability.md) | 10 | **In progress** — Slices A, B, C, D and E shipped into Demo 2: typed config, three-valued readiness, graceful drain, structured logging with request-… | Epic 1 (a server, an error model, and a contract to instrument) |
+| [`100-profile-detection-and-routing.md`](100-profile-detection-and-routing.md) | 100 | Not started — **prerequisite for Epics 98 and 99, and now load-bearing**. With SNOMED (EL), DBpedia (QL) and FIBO (constructs outside RL) all in scop… | Epic 6 (RL engine), Epic 24 (ontologies as entities) |
+| [`101-sparql-federation.md`](101-sparql-federation.md) | 101 | Not started — **scheduled** | Epic 7 (algebra and executor), Epic 13 (authorization) |
+| [`102-read-write-partitions.md`](102-read-write-partitions.md) | 102 | Not started — **planned, entry condition is a measurement** | Epic 4 (the flake table), Epic 37a (the measurement) |
+| [`103-in-process-traversal.md`](103-in-process-traversal.md) | 103 | Not started — **entry condition is a measurement (Epic 37a)** | Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger) |
+| [`104-ontology-alignment.md`](104-ontology-alignment.md) | 104 | Not started — **new, 28 July 2026**. Created because `00n-large-ontology-reality.md` §2.5 found it genuinely uncovered | Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detection), Epic… |
+| [`11-people-and-ownership.md`](11-people-and-ownership.md) | 11 | **In progress** — shipped into Demo 2 | Epic 3 (envelope carries `owners`) |
+| [`12-13-security.md`](12-13-security.md) | 12–13 | **In progress** — OIDC/PKCE against Auth0 with server-side JWKS RS256 shipped, reviewed and hardened (Slices A–C, and B's key rotation is what JWKS g… | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
+| [`14-mcp-activation.md`](14-mcp-activation.md) | 14 | Not started | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard gate**),… |
+| [`15-connectors.md`](15-connectors.md) | 15 | **In progress** — Postgres connector and deletion detection shipped (Demo 1) | Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable) |
+| [`16-ingestion-apis.md`](16-ingestion-apis.md) | 16 | Not started | Epic 1 (contract), Epic 15 (upsert semantics) |
+| [`17-entity-resolution.md`](17-entity-resolution.md) | 17 | Not started | Epic 4 (`sameAs` in the graph), Epic 15 + 16 (two write paths make this necessary) |
+| [`18-inbound-events.md`](18-inbound-events.md) | 18 | Not started | Epic 16 (ingestion contract), Epic 17 (resolution, so pushes do not duplicate) |
+| [`19-streaming.md`](19-streaming.md) | 19 | Not started | Epic 16 (ingestion contract), Epic 18 (dedup and ordering machinery) |
+| [`20-metadata-as-code.md`](20-metadata-as-code.md) | 20 | Not started | Epic 15 (idempotent upsert and reconciliation machinery) |
+| [`21-document-ingestion.md`](21-document-ingestion.md) | 21 | Not started | Epic 16 (ingestion), Epic 17 (mention resolution) |
+| [`22-custom-properties.md`](22-custom-properties.md) | 22 | Not started | Epic 3 (the envelope's `extension` field) |
+| [`23-domains.md`](23-domains.md) | 23 | Not started | Epic 11 (domains and products are owned) |
+| [`24-business-semantics.md`](24-business-semantics.md) | 24 | Not started | Epic 2 (FQN derivation and the hierarchy terms attach to), Epic 11 (term reviewers), Epic… |
+| [`25-classification.md`](25-classification.md) | 25 | Not started | Epic 3 (envelope carries `tags`), Epic 11 (term reviewers are users) |
+| [`26-lifecycle-certification.md`](26-lifecycle-certification.md) | 26 | Not started | Epic 11 (issuers are principals), Epic 24 (metrics are certifiable) |
+| [`27-contracts.md`](27-contracts.md) | 27 | Not started | Epic 2 (schemas to guarantee), Epic 3 (version diffs detect breakage) |
+| [`28-usage.md`](28-usage.md) | 28 | Not started | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
+| [`29-lineage.md`](29-lineage.md) | 29 | Not started | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage), **Epic 7a… |
+| [`30-quality-results.md`](30-quality-results.md) | 30 | Not started | Epic 29 (lineage, for propagating trust signals) |
+| [`31-memory.md`](31-memory.md) | 31 | Not started | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
+| [`32-agent-capabilities.md`](32-agent-capabilities.md) | 32 | Not started | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
+| [`33-ontology-packs.md`](33-ontology-packs.md) | 33 | Not started | Epic 24 (glossary and taxonomy model), Epic 9 (standards import) |
+| [`34-entity-expansion.md`](34-entity-expansion.md) | 34 | Not started | Epic 8 (each new type indexes for free — the property being demonstrated), Epic 3 (envelo… |
+| [`35-collaboration.md`](35-collaboration.md) | 35 | Not started | Epic 11 (users), Epic 12 (real identity on posts) |
+| [`36-reference-apps.md`](36-reference-apps.md) | 36 | Not started | Epic 14 (MCP), Epic 16 (SDKs), Epic 29 (graph API) |
+| [`37a-scale.md`](37a-scale.md) | 37a | Not started | Epic 34 (a realistic entity mix to generate) |
+| [`37b-portability.md`](37b-portability.md) | 37b | Not started | Epic 3 (history is part of what must survive) |
+| [`37c-embeddable.md`](37c-embeddable.md) | 37c | Not started | Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate against) |
+| [`38-graph-analytics.md`](38-graph-analytics.md) | 38 | Not started — **narrow scope, and a deliberate reversal** | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
+| [`39-ui-foundation.md`](39-ui-foundation.md) | 39 | **In progress** — shell, search, entity page and time control shipped; Slice E's trust components and the base-direction primitive still open | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (authz) |
+| [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | 40 | In progress — **differentiator**. Slices B and D shipped on the SVG canvas (28 Jul 2026); Slice A's model exists but not its `Sid`-derived identity;… | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes, time trav… |
+| [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | 41 | Not started | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5 (constrain… |
+| [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | 42 | Not started | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-driven forms) |
+| [`43-framework-integrations.md`](43-framework-integrations.md) | 43 | Not started | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK), Epic 7 (q… |
+| [`93-console-overview.md`](93-console-overview.md) | 93 | **In progress** — Overview shipped (Demo 3) | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
+| [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | 94 | Not started | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
+| [`95-owl-rl-completion.md`](95-owl-rl-completion.md) | 95 | Not started | Epic 6 (the eight rules and the fixpoint that runs them) |
+| [`96-shacl-sparql.md`](96-shacl-sparql.md) | 96 | Not started — **blocked on the specification stabilising** | Epic 5 (SHACL Core), Epic 7 (SPARQL) |
+| [`97-incremental-parallel-reasoning.md`](97-incremental-parallel-reasoning.md) | 97 | Not started — **the measurement now demands it (28 Jul 2026)**. A stated requirement of 10⁸–10⁹ triples makes `06`'s wholesale-replacement-per-run ar… | Epic 6 (semi-naive fixpoint), Epic 37a (the measurement) |
+| [`98-owl-el-reasoning.md`](98-owl-el-reasoning.md) | 98 | Not started — **scheduled, and the trigger has fired (28 Jul 2026)**. SNOMED CT was named as a required ontology; OWL 2 EL is the profile it was desi… | Epic 6 (overlay, budgets, explainability), Epic 24 (ontologies as entities) |
+| [`99-owl-ql-reasoning.md`](99-owl-ql-reasoning.md) | 99 | Not started — **scheduled, with a named consumer (28 Jul 2026)**. DBpedia is the QL shape — a vast ABox against a thin TBox, where materialising infe… | Epic 7 (query algebra to rewrite), Epic 6 (explanation contract) |
 
-## Phase 3: Operations & Security (Epics 10–13) — Shipped
+## Completed, kept as record
 
-| Plan | Status | Depends On | Deferrals | Slices |
-|------|--------|------------|-----------|--------|
-| `10-observability.md` | **Shipped** | None | Cross-port spans deferred to v2 | — |
-| `11-soft-delete.md` | **Shipped** | 02 | Recovery → Epic 23 | — |
-| `12-authentication.md` | **Planned** | 03 | JWKS rotation, OIDC/PKCE + console login | — |
-| `13-abac.md` | **Planned** | 03, 08 | Policy cache deferred | — |
+| File | Status |
+|---|---|
+| [`90-done-table-entity.md`](90-done-table-entity.md) | All slices (A-E) done — ready to close out |
+| [`91-done-relationships.md`](91-done-relationships.md) | All slices (A-C) done — ready to close out |
 
-## Phase 4: Agent Surface (Epics 14, 31–33) — Planned
+## Plans with no `**Status**` header
 
-| Plan | Status | Depends On | Notes |
-|------|--------|------------|-------|
-| `14-mcp.md` | Planned | 04, 07, 13 | MCP server, Rust SDK (`rmcp`) |
-| `31-agent-memory.md` | Planned | 14 | — |
-| `32-agent-writeback.md` | Planned | — | — |
-| `33-agent-eval.md` | Planned | — | ★ Differentiator |
-
-## Phase 5: Ingestion (Epics 15–21) — Planned
-
-| Plan | Status | Depends On | Notes |
-|------|--------|------------|-------|
-| `15-connectors.md` | **Building** | 02 | Scheduled runs deferred (Demo 1 gap) |
-| `16-search.md` | Planned | 04 | — |
-| `17-resolution.md` | Planned | 16, 15 | Entity linking |
-| `18-column-propagation.md` | Planned | 03 | — |
-| `19-data-quality.md` | Planned | 06 | — |
-| `20-classification.md` | Planned | 06, 03 | — |
-| `21-document-ingestion.md` | Planned | 15, 16 | OCR deferred; NER behind port per `00j` |
-
-## Phase 6: Business Meaning (Epics 22–30) — Planned
-
-| Plan | Status | Depends On | Notes |
-|------|--------|------------|-------|
-| `22-business-terms.md` | Planned | 06 | — |
-| `23-certifications.md` | Planned | 11, 06 | — |
-| `24-lifecycle.md` | Planned | 06 | — |
-| `25-masking.md` | Planned | 13 | Column-level masking deferred |
-| `26-sla.md` | Planned | 06 | — |
-| `27-cost.md` | Planned | 15 | — |
-| `28-external-refs.md` | Planned | 17, 09 | — |
-| `29-lineage.md` | Planned | 04 | Blocks console lineage DAG (Demo 3 gap) |
-| `30-export.md` | Planned | 09 | — |
-
-## Phase 7: Property Graph (Epics 7b–d, 9a) — Planned
-
-| Plan | Status | Depends On | Notes |
-|------|--------|------------|-------|
-| `07b-open-cypher.md` | Planned | 09a, 07 | — |
-| `07c-lpg-sql-access.md` | Planned | 07b | — |
-| `07d-gql-query.md` | Planned | 07b | — |
-| `09a-lpg-interchange.md` | Planned | 04 | Lossy projection, not storage |
-
-## Phase 8: Scale (Epics 34–38) — Planned
-
-| Plan | Status | Depends On | Notes |
-|------|--------|------------|-------|
-| `34-mongodb-storage.md` | Planned | 03 | Deferred from Epic 1 |
-| `35-plugins.md` | Planned | 14 | — |
-| `36-reference-agent.md` | Planned | 14, 31, 32 | Python per `00j` |
-| `37a-scale.md` | Planned | 04 | Partitioning, bulk load, performance budgets |
-| `37b-scale-validation.md` | Planned | 37a, 05 | — |
-| `37c-scale-authorization.md` | Planned | 37a, 13 | — |
-| `38-analytics.md` | Planned | 37a | Not traversal; whole-graph structural significance |
-
-## Phase 9: Console UI (Epics 39–42) — Planned
-
-| Plan | Status | Depends On | Notes |
-|------|--------|------------|-------|
-| `39-console-auth.md` | Planned | 12, 02 | Paired with OIDC/PKCE |
-| `40-console-explorer.md` | Planned | 04 | WebGL deferred to Demo 3; SVG gap; lineage DAG blocked on Epic 29 |
-| `41-console-governance.md` | Planned | 05, 06 | — |
-| `42-console-playbooks.md` | Planned | 03, 08 | — |
-
-## Phase 10: Standards Depth (Epics 94–97) — Not Started
-
-| Plan | Status | Depends On | Notes |
-|------|--------|------------|-------|
-| `94-rdf-reification.md` | Planned | 04 | Vocabulary change; reified edges already match RDF 1.2 shape |
-| `95-shacl-shape-expressions.md` | Planned | 05 | — |
-| `96-owl-axiom-support.md` | Planned | 06 | — |
-| `97-dcat-provo-odcs.md` | Planned | 09 | — |
-
-## Phase 11: Full Semantics (Epics 98–103) — Not Started
-
-| Plan | Status | Depends On | Notes |
-|------|--------|------------|-------|
-| `98-owl-el-reasoning.md` | **Triggered** | 06 | Triggered by medical-ontology requirement in `00n` |
-| `99-sealed-type-system.md` | Planned | 03, 98 | — |
-| `100-profile-detection.md` | Planned | 98, 06 | Required once multiple OWL profiles exist |
-| `101-federation.md` | Planned | 07 | — |
-| `102-storage-split.md` | Planned | 04 | — |
-| `103-tautology-detection.md` | Planned | 06 | — |
-
-## Phase 12: Large Ontologies (Epic 104) — Not Started
-
-| Plan | Status | Depends On | Notes |
-|------|--------|------------|-------|
-| `104-billion-triple-scale.md` | Planned | 37a, 98, 102 | Fork path per `00n` |
-
-## Auxiliary Plans
-
-| Plan | Status | Purpose |
-|------|--------|---------|
-| `43-console-discovery.md` | Planned | Epics 43 companion |
-| `90-done-table-entity.md` | Archived | Walking skeleton Epic 1, kept as record |
-| `91-done-relationships.md` | Archived | Relationship edge Epic 2, kept as record |
-| `92-done-types.md` | Planned? | Types epic 3 record? |
-| `93-graph-explorer-poc.md` | Planned | Overview POC for visualizer |
-
----
-
-## Dependency Graph (Simplified)
-
-```
-01 ──► 02 ──► 03 ──► 04 ──┬─► 05 ──► 06 ──┬─► 07 ──┬─► 07b ──► 07c ──► 07d
-                           │                │         └─► 09a
-                           │                ├─► 08 ──► 13
-                           │                ├─► 09
-                           │                ├─► 10
-                           │                └─► 11
-                           │
-                           ├─► 12 ──► 39
-                           ├─► 14 ──┬─► 31
-                           │        ├─► 32
-                           │        ├─► 33 ★
-                           │        └─► 35 ──► 36
-                           ├─► 15 ──┬─► 16 ──► 17
-                           │        ├─► 18
-                           │        ├─► 21
-                           │        └─► 27
-                           ├─► 19 ──► 20 ──► 22 ──► 23 ──► 24 ──► 25 ──► 26
-                           │                                  └─► 28
-                           ├─► 29 ──► 30
-                           ├─► 34 (deferred)
-                           ├─► 37a ──┬─► 37b
-                           │         ├─► 37c
-                           │         └─► 38
-                           ├─► 40
-                           ├─► 41
-                           ├─► 42
-                           ├─► 94─► 95─► 96─► 97
-                           ├─► 98 ──┬─► 99
-                           │        ├─► 100
-                           │        └─► 104
-                           ├─► 101
-                           └─► 102 ──► 103
-```
-
----
-
-## Deferrals & Exclusions
-
-| Deferred Item | Documented In | Reason |
-|--------------|---------------|--------|
-| MongoDB storage backend | `01-catalog-core.md`, `34-mongodb-storage.md` | Not needed for Postgres-only launch |
-| Sealed type system | `03-types.md`, `99-sealed-type-system.md` | Post-launch; adds immutability guarantees |
-| OWL 2 EL reasoning | `06-engine-reasoning.md`, `98-owl-el-reasoning.md` | **Now triggered** by medical-ontology requirement |
-| Web crawling/scraping | `00m-capability-mapping.md` | Out of scope (metadata-at-rest system) |
-| General-purpose NER | `21-document-ingestion.md`, `00j` | Behind `DocumentParser` port; domain-constrained |
-| Cross-port spans (observability) | `10-observability.md` | Deferred to v2 |
-| Column-level masking | `25-masking.md` | Deferred |
-| Teams & ownership inheritance | `DEMOS.md` | Demo 7 |
-| Vector embeddings | `DEMOS.md`, `00j` | Out of process |
-| Property graph as storage | `09a-lpg-interchange.md` | Lossy projection target, not storage location |
-| Analytics (vs traversal) | `38-analytics.md` | Whole-graph, not bounded walk |
-| MongoDB storage backend | `34-mongodb-storage.md` | Post-launch |
-
----
-
-## Demo Status (from DEMOS.md)
-
-| Demo | Theme | State |
-|------|-------|-------|
-| 1 | Source → browsable catalog (Epics 1, 2, 15, 39) | **Shipped** — gaps in OpenAPI gen, scheduled runs |
-| 2 | Governed catalog (Epics 3, 8, 10, 11, 12, 13) | **Shipped** — gaps in JWKS, OIDC, console sign-in, policy cache |
-| 3 ★ | Graph engine (Epics 4, 7, 7a, 40, 93) | **Mostly shipped** — SVG explorer gap, lineage DAG blocked |
-| 4 | Reason & validate (Epics 5, 6, 41) | Not started |
-| 5 ★ | Agent surface (Epics 14, 31, 32, 43) | Not started |
-| 6 | Self-filling (Epics 16–21) | Not started |
-| 7 | Business meaning (Epics 22–30, 42) | Not started |
-| 8 | Property graph & interop (Epics 7b, 7c, 7d, 9, 9a) | Not started |
-| 9 | Scale (Epics 33–38, 36, 37a–c) | Not started |
-| 10 | Standards depth (Epics 94–97) | Not started |
-| 11 | Full semantics (Epics 98–103) | Not started |
-| 12 | Large ontologies (Epic 104 + recalibration) | Not started; fork decision taken |
-
-**Key gaps in shipped demos** (from DEMOS.md):
-- Demo 1: OpenAPI generated from code; scheduled run persistence; `source_hash` fingerprinting
-- Demo 2: JWKS & key rotation; OIDC/PKCE + login; no decision cache (AuthZ); memory budget/admission control
-- Demo 3: WebGL (SVG won't survive 10k nodes); React Flow + d3-dag lineage DAG (blocked on Epic 29)
-
----
-
-## Coverage (from `00m-capability-mapping.md`)
-
-| Status | Count | % |
-|--------|-------|---|
-| COVERED | 78 | 71% |
-| PARTIALLY COVERED | 16 | 15% |
-| NOT COVERED | 16 | 15% |
-
-Top-level categories missing: web crawling/scraping, general NER, SLA alerting, cost forecasting, cross-port traces, custom plugins, property-graph export.
-
----
-
-## ★ Differentiators (from ROADMAP.md)
-
-| Epic | Description |
-|------|-------------|
-| 3 | Types |
-| 4 | Graph engine |
-| 7a | Graph traversal |
-| 8 | Authorization |
-| 33 | Agent evaluation |
-| 39 | Console |
-| 40 | Console explorer |
-
-These are marked ★ and described as "not optional polish" — cutting one is a positioning decision, not scope trimming.
-
----
-
-## Explicitly Not Implemented (from various plans)
-
-- Web crawling/scraping
-- Full-text search (→ Epic 16 search index)
-- General NER (domain-constrained only)
-- Property graph as primary storage
-- MongoDB storage (Epic 34, deferred)
-- Full OWL 2 DL (RL only; EL triggered per `00n`)
-- Analytics (Epic 38, separate from traversal)
-- Plugins (Epic 35, future)
+None — every epic plan states its status.
