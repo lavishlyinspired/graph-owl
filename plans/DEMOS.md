@@ -28,6 +28,35 @@
 
 ★ = the demo that carries a differentiator. Cutting it is a positioning decision.
 
+## Epic coverage index — all 60, checkable
+
+**Audited 28 July 2026: every epic with a plan file appears in a demo. None is orphaned.** This index exists because that was true but *not verifiable* — epics live under grouped headings (`### Epics 22–30`, `### Epics 18, 19`, `### Epic 98 / 99`), so a mechanical search for "Epic 19" finds nothing and coverage could only be confirmed by reading the whole file. The next epic added would have gone missing silently. **Add a row here when adding an epic; a plan file with no row is the thing this table is for.**
+
+| Demo | Epics covered |
+|---|---|
+| 1 | 1, 2, 15, 39 |
+| 2 | 3, 8, 10, 11, 12, 13 |
+| 3 ★ | 4, 7, 7a, 40, 93 |
+| 4 | 5, 6, 41 |
+| 5 ★ | 14, 31, 32, 43 |
+| 6 | 16, 17, 18, 19, 20, 21 |
+| 7 | 22, 23, 24, 25, 26, 27, 28, 29, 30, 42 |
+| 8 | 7b, 7c, 7d, 9, 9a |
+| 9 | 33, 34, 35, 36, 37a, 37b, 37c, 38 |
+| 10 | 94, 95, 96, 97 |
+| 11 | 98, 99, 100, 101, 102, 103 |
+
+**Epics deliberately carrying no demo moment of their own**, rather than being missing:
+
+| Epic | Why it has no demo beat |
+|---|---|
+| 34 Entity expansion | Adds five entity families and **no UI or demo step** — the composable entity page absorbs them. A demo beat here would mean Epic 39 decision 4 had failed |
+| 36 Reference apps | The demo *is* someone else's application; it is listed in Demo 9 but has no beat inside this console |
+| 43 Framework integrations | Same shape — the artefact runs in a user's repo, so the demo is external |
+| 103 In-process traversal | A performance path. Its success looks identical to its absence, which is why its entry condition is a measurement in `37a` |
+
+`90-` and `91-` are completed historical records, not epics, and are excluded by design.
+
 ---
 
 ## Demo 1 — A source becomes a browsable catalog · **SHIPPED**

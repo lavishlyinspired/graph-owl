@@ -572,6 +572,31 @@ citation is worse than an unsourced number, because it defeats the check that
 supposed to be verifiable, and this one was designed to look as though it had
 been.
 
+### Rejected: "incremental index updates", because Postgres already does them
+
+The proposal opens: *"Every write triggers full index rebuild (Postgres does
+this automatically)."* **Postgres does no such thing.** A B-tree index is
+maintained *per row* — an insert adds index tuples, and cleanup is incremental.
+Since PostgreSQL 14 it also performs **bottom-up index deletion**, targeted
+passes triggered by an anticipated version-churn page split, which for some
+workloads keeps an index from growing by even a single page under constant
+churn. There is no rebuild to avoid, so the optimisation removes a cost that
+does not exist.
+
+The idea is coherent in the system it came from, and that is the lesson worth
+keeping: a **log-structured** store that manages its own index segments really
+does batch writes into a novelty segment and merge periodically, because it has
+no other way to amortise segment rewrites. Postgres is a heap with B-trees and
+does not have that problem. **Importing an optimisation without its precondition
+is how a system acquires complexity that pays for nothing** — here it would add
+a buffer, a merge task, a compaction schedule, and a query path that must union
+base with novelty, in exchange for nothing.
+
+What is genuinely true about this workload is narrower and already handled
+above: retraction-not-delete means dead tuples accumulate in a pattern ordinary
+deletes would not produce, so the honest response is to **measure bloat**
+(`10-operability.md`) rather than to build a second write path.
+
 ### Accepted: two findings, both small
 
 1. **Index bloat monitoring is genuinely absent** — an append-only table with

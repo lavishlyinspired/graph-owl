@@ -64,7 +64,16 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 ### Slice B: Indexing follows change events
 
 **Value**: The index stays current without the write path depending on it — a search outage stops being a catalog outage.
-**Path**: an `EventSink` implementation subscribing to Epic 8 (`08-engine-search.md`) events, translating each to an index operation, running outside the request path.
+**Path**: an `EventSink` implementation subscribing to Epic 3's `ChangeEvent` stream, translating each to an index operation, running outside the request path.
+
+**"Incremental indexing" means this, and not the other thing** (clarified 28 July 2026, because an indexing review conflated them):
+
+| | What it means | Status |
+|---|---|---|
+| **Search index** — this epic | Keeping a *derived* index in step with entity changes without re-indexing the estate. The index lives outside the write transaction, so it can fall behind and must be told what changed | **Real, and the actual blocker is Epic 3's `EventSink`.** Nothing emits `ChangeEvent` yet, so there is nothing to subscribe to |
+| **Flake B-tree indexes** — Epic 4 | Batching index maintenance into segments merged later | **Not a thing to build.** Postgres maintains B-trees per row and since 14 does bottom-up index deletion; there is no rebuild to amortise. See `04-engine-triples.md`, "Indexing review" |
+
+The distinction matters because the first is a **consistency** problem — a derived store that can drift from its source — and the second is a **write-amplification** problem that this storage engine does not have. Solving the second would not help the first by even a little.
 **Acceptance criteria**:
 - Create → indexed. Update → reindexed with new content, old text no longer matching. Soft delete → removed. Restore → re-added. Hard delete → removed.
 - Index failure is logged and does **not** fail the catalog write.
