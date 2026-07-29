@@ -90,6 +90,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/policies/dry-run", post(dry_run_policy))
         .route("/users/{id}/roles", put(set_user_roles))
         .route("/teams", get(list_teams).post(upsert_team))
+        .route("/connectors/{connector}/schema", get(connector_schema))
         .route(
             "/connectors/configs",
             get(list_connector_configs).post(save_connector_config),
@@ -1410,6 +1411,28 @@ struct ConnectorConfigRequest {
 impl ValidateBody for ConnectorConfigRequest {
     fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
         Vec::new()
+    }
+}
+
+/// What a connector needs configured, as JSON Schema — Epic 41 Slice F.
+///
+/// **The connector declares its own shape**, so the console renders a form
+/// without knowing what a Postgres connection needs. A hundred connectors with
+/// hand-written screens is a hundred places for a field to go missing, and the
+/// one that goes missing is always the optional-looking one somebody needed.
+async fn connector_schema(
+    Auth(principal): Auth,
+    Path(connector): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    match connector.as_str() {
+        "postgres" => Ok(Json(PostgresConnector::describe_config())),
+        // A connector nobody has registered is a `404`, not an empty schema: an
+        // empty schema renders as a form with no fields, which reads as "this
+        // connector needs nothing" rather than "this connector does not exist".
+        _ => Err(AppError::NotFound),
     }
 }
 

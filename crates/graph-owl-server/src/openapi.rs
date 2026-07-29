@@ -353,6 +353,15 @@ pub static ROUTES: &[Route] = &[
         true,
     ),
     route(
+        "get",
+        "/connectors/{connector}/schema",
+        "What a connector needs configured, as JSON Schema",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
         "post",
         "/connectors/configs",
         "Save a connector configuration; the credential is write-only",

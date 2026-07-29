@@ -40,8 +40,46 @@ impl PostgresConnector {
 /// them buries real assets under hundreds of internal ones.
 const SYSTEM_SCHEMAS: [&str; 2] = ["pg_catalog", "information_schema"];
 
+impl PostgresConnector {
+    /// The config schema **without a connection**.
+    ///
+    /// An admin opening a form has nothing to connect to yet — the form is how
+    /// they supply the connection — so a schema reachable only through a
+    /// constructed connector would be unreachable exactly when it is needed.
+    #[must_use]
+    pub fn describe_config() -> serde_json::Value {
+        serde_json::json!({
+        "type": "object",
+        "properties": {
+            "host":     { "type": "string", "title": "Host" },
+            "port":     { "type": "integer", "title": "Port", "default": 5432 },
+            "database": { "type": "string", "title": "Database" },
+            "username": { "type": "string", "title": "Username" },
+            // JSON Schema's own vocabulary for "may be written, never read
+            // back". The console renders it as a password field and never
+            // populates it — there is nothing to populate from.
+            "password": { "type": "string", "title": "Password", "writeOnly": true },
+            "includeSchemas": {
+                "type": "array",
+                "title": "Schemas to include",
+                "items": { "type": "string" },
+                "description": "Empty includes every non-system schema."
+            }
+        },
+        "required": ["host", "database", "username"],
+        // An unrecognised field is refused rather than ignored: a setting
+        // silently dropped is one somebody will keep sending.
+        "additionalProperties": false
+        })
+    }
+}
+
 #[async_trait]
 impl Connector for PostgresConnector {
+    fn config_schema(&self) -> serde_json::Value {
+        Self::describe_config()
+    }
+
     fn type_name(&self) -> &'static str {
         "postgres"
     }

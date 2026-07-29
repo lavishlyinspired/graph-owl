@@ -175,6 +175,20 @@ pub trait Connector: Send + Sync {
     /// Stable type name, used in configuration and run history.
     fn type_name(&self) -> &'static str;
 
+    /// What this connector needs configured, as JSON Schema.
+    ///
+    /// **The connector declares its own shape**, so the admin console renders a
+    /// form without knowing what a Postgres connection needs — which is the
+    /// whole reason the console has one form renderer instead of one screen per
+    /// connector. A hundred connectors with hand-written forms is a hundred
+    /// places for a field to go missing.
+    ///
+    /// A property is marked secret with `"writeOnly": true`, which is JSON
+    /// Schema's own vocabulary for it. The console renders those as password
+    /// inputs and never populates them, because there is nothing to populate
+    /// from — `ConnectorConfig` has no field for a credential.
+    fn config_schema(&self) -> serde_json::Value;
+
     /// Fails fast with a typed error rather than surfacing at first fetch.
     async fn test_connection(&self) -> Result<(), ConnectorError>;
 

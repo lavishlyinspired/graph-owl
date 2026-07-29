@@ -1120,6 +1120,32 @@
         "summary": "Recent connector runs, newest first"
       }
     },
+    "/connectors/{connector}/schema": {
+      "get": {
+        "operationId": "get_connectors__connector__schema",
+        "responses": {
+          "200": {
+            "description": "What a connector needs configured, as JSON Schema"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "What a connector needs configured, as JSON Schema"
+      }
+    },
     "/docs/": {
       "get": {
         "operationId": "get_docs_",

@@ -1,6 +1,6 @@
 # Plan: In-Process Traversal (Epic 103)
 
-**Status**: Not started — **entry condition is a measurement (Epic 37a)**
+**Status**: **Not justified — the entry-condition measurement was run on 30 July 2026 and said no.** See "What the measurement found" below.
 **Depends on**: Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger)
 **Crates**: `graph-owl-traversal` (a second adapter)
 
@@ -9,6 +9,54 @@
 Make deep walks fast by extracting a bounded subgraph into memory and walking
 it there, instead of asking Postgres to recurse further than a recursive CTE
 does well.
+
+## What the measurement found (30 July 2026) — the gate said no
+
+The hypothesis below is that `NOT dst = ANY(path)` dominates, and that the win
+therefore **grows with depth**. It was tested directly, and it does not.
+
+A synthetic tree — branching factor 3, 60,000 edges, so the walk considers
+roughly `3^d` rows at depth *d* and each pays a scan proportional to its own
+path length. A tree deliberately, so the guard **never fires**: removing it
+changes the cost and not a single row, which makes the comparison controlled.
+
+| depth | with path tracking | without | ratio |
+|---|---|---|---|
+| 5 | 0.78ms | 0.66ms | 1.2× |
+| 7 | 5.72ms | 2.51ms | 2.3× |
+| 9 | 32.1ms | 18.8ms | 1.7× |
+| 11 | 86.7ms | 61.0ms | 1.4× |
+
+**The guard costs a ~1.5× constant factor, and the ratio does not grow with
+depth.** That is the finding, and it refutes the argument this epic rests on.
+
+Why the reasoning was wrong: the array is *short* at these depths, and `= ANY`
+over a handful of text elements is cheap next to the join and the tuple
+materialisation. What actually dominates is **row count** — `3^d` — and an
+in-memory walk pays that too, because it still has to visit every node. Moving
+the visit into a process does not make there be fewer of them.
+
+So petgraph would trade a 1.5× factor for maybe 1.2×, and buy in exchange: a
+memory budget for the extracted subgraph, an extraction step on every query, and
+the `as_of`/authorization hazard flagged below. Not worth it.
+
+**What would change the verdict**, stated so the next person does not re-argue
+it from first principles:
+
+- **Paths much longer than 11.** The scan is linear in path length, so the
+  constant grows with it. Catalog containment is 5 levels and lineage chains in
+  practice are single digits; a workload with depth-30 walks is a different
+  question.
+- **A genuinely cyclic graph**, where the guard *fires* rather than merely being
+  evaluated. Here it never fired, so this measures its evaluation cost and not
+  the work it saves. Lineage is asserted acyclic (Epic 29), which is why a tree
+  was the honest fixture.
+- **Epic 37a at 10M+ flakes**, if row counts at that scale shift the balance
+  between the join and the guard.
+
+The published case studies (one reports 103s → 600ms) are consistent with the
+first two conditions holding for *those* graphs. They were never targets, and
+the measurement is why that caution was right.
 
 ## Why this is an adapter and not a rewrite
 
