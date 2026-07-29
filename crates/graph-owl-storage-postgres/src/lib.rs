@@ -72,6 +72,102 @@ impl PostgresStorage {
 
 #[async_trait]
 impl Storage for PostgresStorage {
+    #[tracing::instrument(name = "storage.create_lineage_edge", skip_all)]
+    async fn create_lineage_edge(
+        &self,
+        edge: &graph_owl_core::lineage::LineageEdge,
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            "INSERT INTO lineage_edges
+                 (id, from_asset_id, to_asset_id, relationship, source, query, description, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(edge.id)
+        .bind(edge.from_asset_id)
+        .bind(edge.to_asset_id)
+        .bind(edge.relationship.as_str())
+        .bind(edge.details.source.as_str())
+        .bind(&edge.details.query)
+        .bind(&edge.details.description)
+        .bind(&edge.created_by)
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some(UNIQUE_VIOLATION) => {
+                Err(StorageError::Conflict {
+                    detail: format!(
+                        "{} already {} {} according to {}",
+                        edge.from_asset_id,
+                        edge.relationship.as_str(),
+                        edge.to_asset_id,
+                        edge.details.source.as_str()
+                    ),
+                    existing_id: None,
+                    kind: ConflictKind::Fqn,
+                })
+            }
+            Err(e) => Err(StorageError::Unexpected(e.to_string())),
+        }
+    }
+
+    #[tracing::instrument(name = "storage.delete_lineage_edge", skip_all)]
+    async fn delete_lineage_edge(&self, id: Uuid) -> Result<bool, StorageError> {
+        sqlx::query("DELETE FROM lineage_edges WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map(|done| done.rows_affected() > 0)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    #[tracing::instrument(name = "storage.lineage_edges_touching", skip_all)]
+    async fn lineage_edges_touching(
+        &self,
+        asset_ids: &[Uuid],
+    ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, from_asset_id, to_asset_id, relationship, source, query,
+                    description, created_at, created_by
+               FROM lineage_edges
+              WHERE from_asset_id = ANY($1) OR to_asset_id = ANY($1)",
+        )
+        .bind(asset_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let relationship: String = row.get("relationship");
+                let source: String = row.get("source");
+                Ok(graph_owl_core::lineage::LineageEdge {
+                    id: row.get("id"),
+                    from_asset_id: row.get("from_asset_id"),
+                    to_asset_id: row.get("to_asset_id"),
+                    // A row whose vocabulary this build does not know is a
+                    // storage error, not a silent skip: dropping it would make
+                    // a lineage graph quietly incomplete, which is the one
+                    // thing a lineage graph must never be.
+                    relationship: graph_owl_core::relationship_type::RelationshipType::parse(
+                        &relationship,
+                    )
+                    .map_err(|e| StorageError::Unexpected(format!("unknown relationship {e:?}")))?,
+                    details: graph_owl_core::lineage::LineageDetails {
+                        source: graph_owl_core::lineage::LineageSource::parse(&source).map_err(
+                            |e| StorageError::Unexpected(format!("unknown lineage source {e}")),
+                        )?,
+                        query: row.get("query"),
+                        description: row.get("description"),
+                    },
+                    created_at: row.get("created_at"),
+                    created_by: row.get("created_by"),
+                })
+            })
+            .collect()
+    }
+
     #[tracing::instrument(name = "storage.begin_run", skip_all)]
     async fn begin_run(&self, run: &graph_owl_storage::ConnectorRun) -> Result<(), StorageError> {
         sqlx::query(

@@ -1353,6 +1353,151 @@ impl Catalog {
     /// `NotFound` if the record's parent has not been written yet — which is a
     /// connector contract violation, since `Connector::fetch` promises parents
     /// before children.
+    /// Assert that one asset feeds another.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` when the relationship is not a lineage edge, when the kinds
+    /// may not carry it, or when the two endpoints are the same asset.
+    /// `NotFound` when either endpoint does not exist. `Storage` conflict when
+    /// the same source has already asserted this edge.
+    #[tracing::instrument(name = "catalog.assert_lineage", skip_all)]
+    pub async fn assert_lineage(
+        &self,
+        principal: &Principal,
+        from_asset_id: Uuid,
+        to_asset_id: Uuid,
+        relationship: graph_owl_core::relationship_type::RelationshipType,
+        details: graph_owl_core::lineage::LineageDetails,
+    ) -> Result<graph_owl_core::lineage::LineageEdge, CatalogError> {
+        // Checked before existence, deliberately, for the reason
+        // `create_relationship` gives: an illegal edge between two nonexistent
+        // assets is an edge problem, and a 404 sends the client hunting for the
+        // wrong bug.
+        if from_asset_id == to_asset_id {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "toAssetId",
+                FieldErrorCode::Type,
+                "an asset cannot feed itself; lineage is a directed acyclic graph \
+                 and a self-edge is a cycle of length one"
+                    .to_string(),
+            )]));
+        }
+
+        let from = self
+            .storage
+            .get_asset(from_asset_id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        let to = self
+            .storage
+            .get_asset(to_asset_id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+
+        if !graph_owl_core::lineage::is_legal_lineage(from.kind, relationship, to.kind) {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "relationship",
+                FieldErrorCode::Type,
+                format!(
+                    "a `{}` cannot `{}` a `{}`; lineage runs table-to-table or \
+                     column-to-column, never across levels",
+                    from.kind,
+                    relationship.as_str(),
+                    to.kind
+                ),
+            )]));
+        }
+
+        let edge = graph_owl_core::lineage::LineageEdge {
+            id: Uuid::new_v4(),
+            from_asset_id,
+            to_asset_id,
+            relationship,
+            details,
+            created_at: Utc::now(),
+            created_by: principal.id.clone(),
+        };
+        self.storage.create_lineage_edge(&edge).await?;
+        Ok(edge)
+    }
+
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn remove_lineage(&self, id: Uuid) -> Result<bool, CatalogError> {
+        Ok(self.storage.delete_lineage_edge(id).await?)
+    }
+
+    /// The lineage graph around one asset, bounded in both directions.
+    ///
+    /// **Both directions are first-class.** "What breaks if I change this" and
+    /// "where did this number come from" are the same graph read in opposite
+    /// directions, and a walk that only went one way would answer half the
+    /// questions lineage exists for.
+    ///
+    /// Breadth-first with a visited set, so a diamond (A→B, A→C, B→D, C→D)
+    /// yields D once with both inbound edges rather than twice — and so a cycle
+    /// asserted despite the acyclicity intent terminates instead of hanging.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    #[tracing::instrument(name = "catalog.lineage_graph", skip_all)]
+    pub async fn lineage_graph(
+        &self,
+        root: Uuid,
+        upstream: usize,
+        downstream: usize,
+    ) -> Result<(Vec<Asset>, Vec<graph_owl_core::lineage::LineageEdge>), CatalogError> {
+        let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        seen.insert(root);
+        let mut edges: std::collections::HashMap<Uuid, graph_owl_core::lineage::LineageEdge> =
+            std::collections::HashMap::new();
+
+        // One frontier per direction, walked to its own depth. Walking a merged
+        // frontier would let an upstream hop spend the downstream budget, so
+        // `upstream=1&downstream=3` would return something that is neither.
+        for (depth, forward) in [(upstream, false), (downstream, true)] {
+            let mut frontier = vec![root];
+            for _ in 0..depth {
+                if frontier.is_empty() {
+                    break;
+                }
+                let touching = self.storage.lineage_edges_touching(&frontier).await?;
+                let mut next = Vec::new();
+                for edge in touching {
+                    let (near, far) = if forward {
+                        (edge.from_asset_id, edge.to_asset_id)
+                    } else {
+                        (edge.to_asset_id, edge.from_asset_id)
+                    };
+                    // Only edges leaving the frontier in the direction being
+                    // walked. `lineage_edges_touching` returns both, because
+                    // one query serving both walks is cheaper than two.
+                    if !frontier.contains(&near) {
+                        continue;
+                    }
+                    edges.insert(edge.id, edge);
+                    if seen.insert(far) {
+                        next.push(far);
+                    }
+                }
+                frontier = next;
+            }
+        }
+
+        // Soft-deleted assets are *included*, so a lineage graph that runs into
+        // a deleted table shows the break rather than silently truncating —
+        // "nothing downstream" and "the downstream was deleted" are opposite
+        // conclusions.
+        let mut nodes = Vec::new();
+        for id in &seen {
+            if let Some(asset) = self.storage.get_asset(*id).await? {
+                nodes.push(asset);
+            }
+        }
+        Ok((nodes, edges.into_values().collect()))
+    }
+
     /// Open a run row before the work starts.
     ///
     /// # Errors
@@ -1720,6 +1865,7 @@ mod tests {
         pub(super) policy_reads: std::sync::atomic::AtomicUsize,
         source_hashes: Mutex<std::collections::HashMap<Uuid, Vec<u8>>>,
         runs: Mutex<Vec<graph_owl_storage::ConnectorRun>>,
+        lineage: Mutex<Vec<graph_owl_core::lineage::LineageEdge>>,
     }
 
     impl InMemoryStorage {
@@ -2028,6 +2174,53 @@ mod tests {
         /// fake's convention, not the schema's, and it is enough to model the
         /// one property that matters: different roles resolve different
         /// policies.
+        async fn create_lineage_edge(
+            &self,
+            edge: &graph_owl_core::lineage::LineageEdge,
+        ) -> Result<(), StorageError> {
+            let mut edges = self.lineage.lock().unwrap();
+            // Honours the port's uniqueness: `(from, to, relationship, source)`,
+            // not the triple. A double unique on the triple alone would make the
+            // "two sources coexist" test pass for the wrong reason.
+            if edges.iter().any(|existing| {
+                existing.from_asset_id == edge.from_asset_id
+                    && existing.to_asset_id == edge.to_asset_id
+                    && existing.relationship == edge.relationship
+                    && existing.details.source == edge.details.source
+            }) {
+                return Err(StorageError::Conflict {
+                    detail: "that source has already asserted this edge".to_string(),
+                    existing_id: None,
+                    kind: ConflictKind::Fqn,
+                });
+            }
+            edges.push(edge.clone());
+            Ok(())
+        }
+
+        async fn delete_lineage_edge(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut edges = self.lineage.lock().unwrap();
+            let before = edges.len();
+            edges.retain(|edge| edge.id != id);
+            Ok(edges.len() < before)
+        }
+
+        async fn lineage_edges_touching(
+            &self,
+            asset_ids: &[Uuid],
+        ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError> {
+            Ok(self
+                .lineage
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|edge| {
+                    asset_ids.contains(&edge.from_asset_id) || asset_ids.contains(&edge.to_asset_id)
+                })
+                .cloned()
+                .collect())
+        }
+
         async fn begin_run(
             &self,
             run: &graph_owl_storage::ConnectorRun,
@@ -3635,6 +3828,271 @@ mod projection_isolation_tests {
             "the superseded version must be withdrawn: {retracted:?}"
         );
     }
+    /// Lineage's decisions, tested where they live.
+    ///
+    /// The HTTP tests in `graph-owl-server` cover all of this end to end, and a
+    /// mutation run scoped to *this* crate cannot see them — the same
+    /// cross-crate gap that let two `get_asset_as_of` mutants survive. Logic
+    /// belongs to the crate it lives in.
+    mod lineage_decides_before_it_writes {
+        use super::*;
+        use graph_owl_core::lineage::{LineageDetails, LineageSource};
+        use graph_owl_core::relationship_type::RelationshipType;
+
+        async fn two_tables(catalog: &Catalog) -> (Uuid, Uuid) {
+            let service = catalog
+                .upsert_asset(&Principal::system(), service("hdfc-core"))
+                .await
+                .expect("service");
+            let mut ids = Vec::new();
+            for name in ["upstream", "downstream"] {
+                let table = catalog
+                    .upsert_asset(
+                        &Principal::system(),
+                        UpsertAsset {
+                            kind: AssetKind::Database,
+                            name: name.to_string(),
+                            parent_id: Some(service.id),
+                            description: None,
+                            properties: None,
+                        },
+                    )
+                    .await
+                    .expect("asset");
+                ids.push(table.id);
+            }
+            (ids[0], ids[1])
+        }
+
+        fn manual() -> LineageDetails {
+            LineageDetails {
+                source: LineageSource::Manual,
+                query: None,
+                description: None,
+            }
+        }
+
+        /// A database cannot feed a database — only tables and columns carry
+        /// lineage. This doubles as the legality check's own test.
+        #[tokio::test]
+        async fn a_kind_that_does_not_carry_lineage_is_refused() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let (from, to) = two_tables(&catalog).await;
+
+            let outcome = catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    from,
+                    to,
+                    RelationshipType::Feeds,
+                    manual(),
+                )
+                .await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::Validation(_))),
+                "a database does not feed a database"
+            );
+        }
+
+        /// **The self-edge.** A cycle of length one, and the check that catches
+        /// it must not be satisfiable by comparing the wrong way round.
+        #[tokio::test]
+        async fn an_asset_cannot_feed_itself() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let (from, _) = two_tables(&catalog).await;
+
+            let outcome = catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    from,
+                    from,
+                    RelationshipType::Feeds,
+                    manual(),
+                )
+                .await;
+
+            assert!(matches!(outcome, Err(CatalogError::Validation(_))));
+        }
+
+        /// And the negative that stops "refuse everything" passing: two
+        /// *different* assets of a kind that carries lineage are accepted.
+        #[tokio::test]
+        async fn two_distinct_tables_may_be_linked() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let service = catalog
+                .upsert_asset(&Principal::system(), service("hdfc-core"))
+                .await
+                .expect("service");
+            let mut tables = Vec::new();
+            for name in ["a", "b"] {
+                let db = catalog
+                    .upsert_asset(
+                        &Principal::system(),
+                        UpsertAsset {
+                            kind: AssetKind::Database,
+                            name: format!("db-{name}"),
+                            parent_id: Some(service.id),
+                            description: None,
+                            properties: None,
+                        },
+                    )
+                    .await
+                    .expect("db");
+                let schema = catalog
+                    .upsert_asset(
+                        &Principal::system(),
+                        UpsertAsset {
+                            kind: AssetKind::Schema,
+                            name: "s".to_string(),
+                            parent_id: Some(db.id),
+                            description: None,
+                            properties: None,
+                        },
+                    )
+                    .await
+                    .expect("schema");
+                let table = catalog
+                    .upsert_asset(
+                        &Principal::system(),
+                        UpsertAsset {
+                            kind: AssetKind::Table,
+                            name: format!("t-{name}"),
+                            parent_id: Some(schema.id),
+                            description: None,
+                            properties: None,
+                        },
+                    )
+                    .await
+                    .expect("table");
+                tables.push(table.id);
+            }
+
+            let edge = catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    tables[0],
+                    tables[1],
+                    RelationshipType::Feeds,
+                    manual(),
+                )
+                .await
+                .expect("a table may feed a table");
+
+            assert_eq!(edge.from_asset_id, tables[0]);
+            assert_eq!(edge.to_asset_id, tables[1]);
+        }
+
+        async fn chain(catalog: &Catalog, length: usize) -> Vec<Uuid> {
+            let service = catalog
+                .upsert_asset(&Principal::system(), service("hdfc-core"))
+                .await
+                .expect("service");
+            let db = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    UpsertAsset {
+                        kind: AssetKind::Database,
+                        name: "retail".into(),
+                        parent_id: Some(service.id),
+                        description: None,
+                        properties: None,
+                    },
+                )
+                .await
+                .expect("db");
+            let schema = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    UpsertAsset {
+                        kind: AssetKind::Schema,
+                        name: "payments".into(),
+                        parent_id: Some(db.id),
+                        description: None,
+                        properties: None,
+                    },
+                )
+                .await
+                .expect("schema");
+
+            let mut ids = Vec::new();
+            for n in 0..length {
+                let table = catalog
+                    .upsert_asset(
+                        &Principal::system(),
+                        UpsertAsset {
+                            kind: AssetKind::Table,
+                            name: format!("t{n}"),
+                            parent_id: Some(schema.id),
+                            description: None,
+                            properties: None,
+                        },
+                    )
+                    .await
+                    .expect("table");
+                ids.push(table.id);
+            }
+            for pair in ids.windows(2) {
+                catalog
+                    .assert_lineage(
+                        &Principal::system(),
+                        pair[0],
+                        pair[1],
+                        RelationshipType::Feeds,
+                        manual(),
+                    )
+                    .await
+                    .expect("edge");
+            }
+            ids
+        }
+
+        /// The walk returns something. A function that answered an empty graph
+        /// would look identical to an asset with no lineage — and "nothing
+        /// feeds this" is a conclusion people act on.
+        #[tokio::test]
+        async fn a_walk_returns_the_graph_it_found() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let ids = chain(&catalog, 3).await;
+
+            let (nodes, edges) = catalog.lineage_graph(ids[0], 0, 2).await.expect("walk");
+
+            assert_eq!(nodes.len(), 3, "the root and two downstream");
+            assert_eq!(edges.len(), 2);
+        }
+
+        /// **Direction is not decoration.** `lineage_edges_touching` returns
+        /// edges on both sides of the frontier, and the walk keeps only those
+        /// leaving it in the direction being walked. Without that filter a
+        /// downstream walk drags upstream nodes in, and "what breaks if I change
+        /// this" starts listing the things that feed it.
+        #[tokio::test]
+        async fn a_downstream_walk_does_not_wander_upstream() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let ids = chain(&catalog, 3).await;
+
+            let (nodes, _) = catalog.lineage_graph(ids[1], 0, 1).await.expect("walk");
+            let found: std::collections::HashSet<Uuid> =
+                nodes.iter().map(|asset| asset.id).collect();
+
+            assert!(found.contains(&ids[2]), "one downstream");
+            assert!(!found.contains(&ids[0]), "and never the upstream one");
+        }
+
+        #[tokio::test]
+        async fn an_upstream_walk_does_not_wander_downstream() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let ids = chain(&catalog, 3).await;
+
+            let (nodes, _) = catalog.lineage_graph(ids[1], 1, 0).await.expect("walk");
+            let found: std::collections::HashSet<Uuid> =
+                nodes.iter().map(|asset| asset.id).collect();
+
+            assert!(found.contains(&ids[0]), "one upstream");
+            assert!(!found.contains(&ids[2]), "and never the downstream one");
+        }
+    }
+
     mod authorization_decisions_are_cached {
         use super::*;
         use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};

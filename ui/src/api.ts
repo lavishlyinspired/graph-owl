@@ -57,6 +57,9 @@ export interface Facet {
   count: number;
 }
 
+export type { LineageGraph, LineageNode, LineageEdge } from "./graph/lineage";
+import type { LineageGraph } from "./graph/lineage";
+
 export interface ConnectorRun {
   id: string;
   connector: string;
@@ -260,4 +263,11 @@ export const api = {
    *  only half the feature — "did last night's sync work" has to be answerable
    *  without a database session. */
   connectorRuns: () => request<ConnectorRun[]>("/connectors/runs?limit=20"),
+  /** The lineage graph around an asset. Both directions, because "what breaks
+   *  if I change this" and "where did this number come from" are the same graph
+   *  read in opposite directions. */
+  lineage: (id: string, upstream: number, downstream: number) =>
+    request<LineageGraph>(
+      `/lineage/asset/${id}?upstream=${upstream}&downstream=${downstream}`,
+    ),
 };

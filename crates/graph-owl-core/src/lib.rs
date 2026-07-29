@@ -1,6 +1,7 @@
 pub mod envelope;
 pub mod flake;
 pub mod fqn;
+pub mod lineage;
 pub mod page;
 pub mod projection;
 pub mod relationship_type;

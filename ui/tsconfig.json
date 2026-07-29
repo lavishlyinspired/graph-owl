@@ -22,5 +22,10 @@
   },
   "include": [
     "src"
-  ]
+  ],
+  // Generated from `openapi.json` and run only by
+  // `scripts/verify-generated-client.sh`, which points it at a live server. It
+  // imports Node globals and a file that is not committed, so it is not part of
+  // the console's own typecheck.
+  "exclude": ["src/generated"]
 }

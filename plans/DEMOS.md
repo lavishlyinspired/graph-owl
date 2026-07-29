@@ -19,9 +19,8 @@
 the code, checked against the code — not copied forward from the previous
 revision (rule 0's corollary).*
 
-| Demo | Remaining | Blocks |
-|---|---|---|
-| 3 | **Epic 40** — React Flow + d3-dag lineage DAG | **Epic 29 Slice A**, and the blocker is narrower than "nothing declares lineage": `Feeds` is already in the relationship vocabulary, but `Catalog::create_relationship` is hardcoded to `(EntityKind::Table, EntityKind::Table)` — the pre-`Asset` entity. Lineage between the assets the catalog actually holds cannot be asserted at all, by a human or a connector |
+**Nothing.** Demos 1, 2 and 3 are complete — see the table below.
+
 
 **Deferred *by design*, and not Demo 1–3 debt** — listing them as gaps would be
 scope confusion: `rdf:reifies` and the language-tag side table → Epic 94 ·
@@ -35,7 +34,7 @@ vector embeddings → out of process per `00j`.
 |---|---|---|---|
 | **1** | A source becomes a browsable catalog | 1, 2, 15, 39 (partial) | **Complete** — deletion detection, `source_hash` skip, run history, and a generated client round-tripped against a live service |
 | **2** | A governed catalog people can trust | +3, 8, 10, 11, 12, 13 | **Complete** — `If-Match`/412, OIDC sign-in, ranked search, and Epic 10 at 17/17 (budget, admission control, spans, gauges) |
-| **3** ★ | It is a graph engine | +4, 7, 7a, 40, 93 | **Mostly shipped** — Epic 4 A–H, 7 A–C (SPARQL over flakes, pushdown), 7a core, 40 A/B/D, 93 Overview, and the explorer is now a Cytoscape/WebGL canvas. One item left: the lineage DAG, which needs Epic 29 Slice A — a **Demo 7** epic — before there is any lineage to draw |
+| **3** ★ | It is a graph engine | +4, 7, 7a, 40, 93, **29** | **Complete** — Epic 4 A–H, 7 A–C, 7a core, 40 A/B/D, 93 Overview, a Cytoscape/WebGL explorer, and the lineage DAG. **Epic 29 Slices A–C were pulled forward from Demo 7** to supply the lineage the DAG draws |
 | **4** | It reasons, and it validates | +5, 6, 41 | |
 | **5** ★ | Agents can use it | +14, 31, 32, 43 | |
 | **6** | It fills itself | +16, 17, 18, 19, 20, 21 | |
@@ -398,8 +397,24 @@ no library can supply actually live.
 - [x] **Cytoscape canvas, WebGL above 256 nodes** *(Slice A, renderer)* — the hand-drawn SVG is gone. `breadthfirst` rooted at the seed, `animate: false`, `maximal`/`grid` pinned: a force layout settles differently every run, so the same neighbourhood never looks the same twice and nobody can say "the node on the left". WebGL is chosen **once, at creation** — `00f` rejects a hybrid that swaps mid-session, because the swap discards the layout at the moment a reader most needs it
 - [x] **The model was untouched by the swap**, which is the payoff of `GraphView` having been renderer-agnostic from the start. Everything decidable — which elements exist, what classes they carry, whether the layout is deterministic — lives in `graph/cytoscape.ts` and is tested there; the component is mount, feed, listen
 - [x] **Diff compares the *expanded* model, not the seed walk** — the baseline replays the reader's expansions at the earlier instant. A node expanded today that did not exist then is skipped rather than treated as empty, and the skip does not mark the comparison `partial` (which would suppress the deletions the screen exists to show)
-- [ ] React Flow + d3-dag lineage DAG
+- [x] **Lineage DAG** — React Flow with a layered left-to-right layout, upstream and downstream from any table or column. `00f` keeps two renderers on purpose: exploration is an arbitrary cyclic graph at scale where WebGL is the point, lineage is a DAG of modest size where the *layering* is the point and a force layout is actively wrong for it
 - [ ] Derived edges visually distinct — nothing derives edges until Epic 6
+
+### Epic 29 — Lineage *(pulled forward from Demo 7)*
+
+Demo 3's lineage DAG had nothing to draw: `Feeds` was already in the
+relationship vocabulary, but `create_relationship` was hardcoded to the
+pre-`Asset` `EntityKind::Table`, so lineage between the assets the catalog
+actually holds could not be asserted at all.
+
+- [x] **A** `POST /lineage` and `DELETE /lineage/{id}` between assets, with the SQL that produced the edge. The **same pair asserted by a person and by a connector are two edges** — automation is often wrong about lineage a human knows, and a human is often out of date about what automation observes; collapsing them makes one silently overwrite the other with run order deciding the winner
+- [x] **A** Self-lineage refused (a cycle of length one), a missing endpoint is `404`, and lineage across levels is refused — table-to-table or column-to-column, never mixed, or "what is downstream of this table" returns a set whose members are not comparable
+- [x] **B** A bounded walk in both directions, each spending its **own** budget: a merged frontier would let an upstream hop spend the downstream allowance, so `upstream=1&downstream=3` would return something that is neither
+- [x] **B** A diamond yields the shared node once with both inbound edges; a tombstoned node stays in the picture, flagged, because "nothing downstream" and "the downstream was deleted" are opposite conclusions
+- [x] **C** A cycle terminates. The graph is called acyclic because it should be, not because anything stops somebody asserting otherwise
+- [ ] **D** Column-level lineage — the legality table already admits `column feeds column`; nothing asserts it yet
+- [ ] **E** Connector-asserted lineage reconciles with curated edges → the two-source model above is the foundation, the reconciliation is not built
+- [ ] **F** Lineage survives entity deletion → today a hard delete cascades the edge away; a tombstone keeps it
 
 ---
 

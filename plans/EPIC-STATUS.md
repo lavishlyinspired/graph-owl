@@ -49,7 +49,7 @@ marks for it yet, which is a different thing from zero of them done.
 | **26** | [`26-lifecycle-certification.md`](26-lifecycle-certification.md) | Not started | — | Epic 11 (issuers are principals), Epic 24 (metrics are certifiable) |
 | **27** | [`27-contracts.md`](27-contracts.md) | Not started | — | Epic 2 (schemas to guarantee), Epic 3 (version diffs detect breakage) |
 | **28** | [`28-usage.md`](28-usage.md) | Not started | — | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
-| **29** | [`29-lineage.md`](29-lineage.md) | Not started | — | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
+| **29** | [`29-lineage.md`](29-lineage.md) | In progress | 5/8 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
 | **30** | [`30-quality-results.md`](30-quality-results.md) | Not started | — | Epic 29 (lineage, for propagating trust signals) |
 | **31** | [`31-memory.md`](31-memory.md) | Not started | 0/3 | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
 | **32** | [`32-agent-capabilities.md`](32-agent-capabilities.md) | Not started | 0/2 | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
@@ -62,7 +62,7 @@ marks for it yet, which is a different thing from zero of them done.
 | **37c** | [`37c-embeddable.md`](37c-embeddable.md) | Not started | — | Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate again… |
 | **38** | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | — | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
 | **39** | [`39-ui-foundation.md`](39-ui-foundation.md) | In progress | 19/23 | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
-| **40** | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | In progress | 9/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
+| **40** | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | In progress | 10/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
 | **41** | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | Not started | 0/4 | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
 | **42** | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | Not started | 0/3 | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
 | **43** | [`43-framework-integrations.md`](43-framework-integrations.md) | Not started | 0/4 | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
@@ -311,6 +311,17 @@ marks for it yet, which is a different thing from zero of them done.
 - [ ] 29
 - [ ] 30
 
+### Epic 29 — Lineage
+
+- [x] A
+- [x] A
+- [x] B
+- [x] B
+- [x] C
+- [ ] D
+- [ ] E
+- [ ] F
+
 ### Epic 31 — Organizational Memory ★
 
 - [ ] Memory objects: kind, content, authorship, confidence, `as_of`
@@ -370,7 +381,7 @@ marks for it yet, which is a different thing from zero of them done.
 - [x] Cytoscape canvas, WebGL above 256 nodes
 - [x] The model was untouched by the swap
 - [x] Diff compares the *expanded* model, not the seed walk
-- [ ] React Flow + d3-dag lineage DAG
+- [x] Lineage DAG
 - [ ] Derived edges visually distinct — nothing derives edges until Epic 6
 
 ### Epic 41 — Query Workbench, Governance & Admin

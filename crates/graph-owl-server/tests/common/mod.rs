@@ -53,6 +53,13 @@ async fn shared() -> &'static Shared {
                 // ever the one.
                 .with_container_name(SHARED_CONTAINER)
                 .with_reuse(testcontainers::ReuseDirective::Always)
+                // Docker defaults `/dev/shm` to 64 MB. Postgres sizes parallel
+                // query and hash-join segments against it, and a shared server
+                // holding many databases exhausts it — surfacing as "could not
+                // resize shared memory segment... No space left on device" in
+                // whichever test happened to be running, which reads like a
+                // disk problem and is not one.
+                .with_shm_size(256 * 1024 * 1024)
                 .start()
                 .await
                 .expect("failed to start postgres container");
@@ -78,6 +85,43 @@ async fn shared() -> &'static Shared {
 pub struct TestDb {
     #[allow(dead_code)]
     name: String,
+}
+
+/// Drop databases left by earlier runs, once per process.
+///
+/// A reused container keeps its databases forever, and each test makes one.
+/// After a few hundred runs that is thousands of databases, and Postgres
+/// exhausts `/dev/shm` long before it exhausts disk — the failure arrives as
+/// "could not resize shared memory segment" in an unrelated test.
+///
+/// Only databases with **no active connections** are dropped, so a binary
+/// running concurrently cannot have its own database pulled out from under it.
+/// Failures are ignored: this is housekeeping, and a test suite that refused to
+/// run because it could not tidy up would be worse than an untidy server.
+async fn sweep_stale_databases(admin: &sqlx::PgPool) {
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    let mut should = false;
+    SWEPT.call_once(|| should = true);
+    if !should {
+        return;
+    }
+
+    let Ok(stale) = sqlx::query_scalar::<_, String>(
+        "SELECT datname FROM pg_database d
+          WHERE datname LIKE 't%'
+            AND NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = d.datname)",
+    )
+    .fetch_all(admin)
+    .await
+    else {
+        return;
+    };
+
+    for database in stale {
+        let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {database}"))
+            .execute(admin)
+            .await;
+    }
 }
 
 /// A fresh database on the shared server.

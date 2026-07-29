@@ -230,6 +230,29 @@ pub trait Storage: Send + Sync {
     /// Every policy attached to any of these roles, deduplicated.
     async fn policies_for_roles(&self, roles: &[String]) -> Result<Vec<Policy>, StorageError>;
 
+    /// Assert a lineage edge.
+    ///
+    /// # Errors
+    /// `Conflict` when the same `(from, to, relationship, source)` already
+    /// exists — the same pair from a *different* source is a distinct fact and
+    /// is accepted.
+    async fn create_lineage_edge(
+        &self,
+        edge: &graph_owl_core::lineage::LineageEdge,
+    ) -> Result<(), StorageError>;
+
+    async fn delete_lineage_edge(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Every edge touching any of these assets, in one round trip.
+    ///
+    /// A walk asks for one level at a time and would otherwise make one query
+    /// per node per level — the shape that turns a five-deep lineage graph into
+    /// hundreds of queries.
+    async fn lineage_edges_touching(
+        &self,
+        asset_ids: &[Uuid],
+    ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError>;
+
     /// Open a run row before the work starts.
     ///
     /// Written *before* rather than after, so a run that dies mid-flight leaves

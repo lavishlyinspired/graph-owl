@@ -69,6 +69,9 @@ import { type GraphModel, expand, performedExpansions, replay, seed } from "./gr
 import { brand, darkTheme, lightTheme, palette } from "./theme";
 import { GenericSourceMark, PostgresMark } from "./icons";
 import cytoscape from "cytoscape";
+import { Background, Controls, Position, ReactFlow } from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { type LineageGraph, positions } from "./graph/lineage";
 import {
   type Picture as CyPicture,
   layoutOptions,
@@ -428,6 +431,153 @@ function OverviewPage({
           </Card>
         </Col>
       </Row>
+    </Space>
+  );
+}
+
+/** Lineage, as a layered DAG read left to right.
+ *
+ *  A second renderer, deliberately (`00f`). Exploration is an arbitrary cyclic
+ *  graph at scale where WebGL is the point; lineage is a DAG of modest size
+ *  where the *layering* is the point, and a force layout is actively wrong for
+ *  it — it would place a source and a consumer wherever the physics settled and
+ *  destroy the one thing the picture is for.
+ *
+ *  Positions come from `graph/lineage.ts` and are tested there. This mounts
+ *  them.
+ */
+function LineageView({
+  assetId,
+  colors,
+}: {
+  assetId: string;
+  colors: (typeof palette)["light"];
+}) {
+  const [depth, setDepth] = useState(2);
+  const [graph, setGraph] = useState<LineageGraph | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let current = true;
+    setGraph(null);
+    setError(null);
+    api
+      .lineage(assetId, depth, depth)
+      .then((g) => {
+        if (current) setGraph(g);
+      })
+      .catch((e: unknown) => {
+        if (current) {
+          setError(e instanceof ApiError ? e.problem.detail : "could not load lineage");
+        }
+      });
+    return () => {
+      current = false;
+    };
+  }, [assetId, depth]);
+
+  const flow = useMemo(() => {
+    if (!graph) return null;
+    const placed = new Map(positions(graph).map((p) => [p.id, p]));
+    const nodes = graph.nodes.map((node) => {
+      const at = placed.get(node.id) ?? { x: 0, y: 0 };
+      const isRoot = node.id === graph.rootId;
+      return {
+        id: node.id,
+        position: { x: at.x, y: at.y },
+        data: { label: node.deleted ? `${node.name} (deleted)` : node.name },
+        // Source on the right, target on the left: the picture reads
+        // left-to-right and the handles have to agree with it, or every edge
+        // loops back on itself.
+        sourcePosition: Position.Right,
+        targetPosition: Position.Left,
+        style: {
+          padding: 8,
+          borderRadius: 8,
+          fontSize: 12,
+          width: 160,
+          border: `${isRoot ? 2 : 1}px solid ${isRoot ? colors.primary : colors.border}`,
+          // A tombstoned node is marked by pattern and opacity, not colour
+          // alone — a deletion shown only in red is invisible to a reader who
+          // cannot see red, and this view exists to show breaks.
+          borderStyle: node.deleted ? "dashed" : "solid",
+          opacity: node.deleted ? 0.55 : 1,
+          background: colors.raised,
+          color: colors.text,
+        },
+      };
+    });
+    const edges = graph.edges.map((edge) => ({
+      id: edge.id,
+      source: edge.fromAssetId,
+      target: edge.toAssetId,
+      animated: false,
+      label: edge.source === "connector" ? "observed" : "asserted",
+      labelStyle: { fontSize: 10, fill: colors.textMuted },
+      style: {
+        stroke: colors.border,
+        // Provenance and flow are different edges and must not look alike
+        // (`00c`): `derivedFrom` explains *how*, `feeds` says *that*.
+        strokeDasharray: edge.relationship === "derivedFrom" ? "4 3" : undefined,
+      },
+    }));
+    return { nodes, edges };
+  }, [graph, colors]);
+
+  if (error) return <Empty description={error} />;
+  if (!graph || !flow) return <Text type="secondary">Walking lineage…</Text>;
+
+  const only = graph.nodes.length <= 1;
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Flex align="center" gap={12} wrap="wrap">
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          Upstream feeds this asset; downstream depends on it.
+        </Text>
+        <Space.Compact>
+          {[1, 2, 3].map((n) => (
+            <Button key={n} size="small" type={depth === n ? "primary" : "default"} onClick={() => setDepth(n)}>
+              {n} hop{n === 1 ? "" : "s"}
+            </Button>
+          ))}
+        </Space.Compact>
+      </Flex>
+
+      {only ? (
+        // Not an empty canvas. "No lineage recorded" and "this asset is a leaf"
+        // are the same picture and different facts, and only one of them is a
+        // reason to go and record something.
+        <Empty
+          description={
+            <span>
+              No lineage recorded for this asset yet. Lineage is asserted through{" "}
+              <Text code>POST /lineage</Text>, by a person or by a connector.
+            </span>
+          }
+        />
+      ) : (
+        <div
+          style={{
+            height: 420,
+            border: `1px solid ${colors.border}`,
+            borderRadius: 16,
+            background: colors.raised,
+          }}
+        >
+          <ReactFlow
+            nodes={flow.nodes}
+            edges={flow.edges}
+            fitView
+            proOptions={{ hideAttribution: false }}
+            nodesDraggable={false}
+            nodesConnectable={false}
+          >
+            <Background color={colors.border} gap={16} />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+        </div>
+      )}
     </Space>
   );
 }
@@ -1416,6 +1566,24 @@ function AssetDetail({
               <GraphExplorer assetId={asset.id} asOf={asOf} colors={colors} />
             ),
           },
+          // Lineage only for the kinds that carry it. Offering the tab on a
+          // schema would promise an answer the model refuses to hold: lineage
+          // runs table-to-table or column-to-column, and a coarse edge standing
+          // in for the specific one is worse than none because it looks like an
+          // answer.
+          ...(asset.kind === "table" || asset.kind === "column"
+            ? [
+                {
+                  key: "lineage",
+                  label: (
+                    <span>
+                      <ApartmentOutlined /> Lineage
+                    </span>
+                  ),
+                  children: <LineageView assetId={asset.id} colors={colors} />,
+                },
+              ]
+            : []),
         ]}
         destroyOnHidden
       />

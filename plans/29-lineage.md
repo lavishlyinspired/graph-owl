@@ -1,6 +1,9 @@
 # Plan: Lineage (Epic 29)
 **Branch**: feat/lineage
-**Status**: Not started
+**Status**: **In progress** — Slices A, B and C shipped 29 Jul 2026, pulled
+forward from Demo 7 because Demo 3's lineage DAG had nothing to draw without
+them. D (column-level), E (connector reconciliation) and F (survives deletion)
+not started
 **Depends on**: Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage), **Epic 7a** (bounded, cycle-safe traversal — lineage does not implement its own walk)
 **Unblocks**: impact analysis workflows
 **Crates**: `graph-owl-core` (LineageDetails, ColumnMapping) · `graph-owl-query` (shared bounded traversal) · `graph-owl-engine` (edge patterns) · `graph-owl-storage-postgres` · `graph-owl-api` · `graph-owl-server`

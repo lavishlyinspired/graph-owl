@@ -74,6 +74,9 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/sparql", post(sparql))
         .route("/connectors/postgres/runs", post(run_postgres_connector))
         .route("/connectors/runs", get(list_connector_runs))
+        .route("/lineage", post(assert_lineage))
+        .route("/lineage/{id}", delete(remove_lineage))
+        .route("/lineage/asset/{id}", get(lineage_graph))
         // Unauthenticated by design: an orchestrator's probe must not depend
         // on the identity provider being reachable.
         .route("/health", get(health))
@@ -1601,6 +1604,159 @@ async fn list_connector_runs(
             .recent_runs(query.service_name.as_deref().unwrap_or_default(), limit)
             .await?,
     ))
+}
+
+// ---- lineage (Epic 29) ----
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AssertLineage {
+    from_asset_id: Uuid,
+    to_asset_id: Uuid,
+    /// `feeds` or `derivedFrom`. Defaulted to `feeds`, which is the edge people
+    /// mean when they say lineage; `derivedFrom` is provenance and is asked for
+    /// deliberately.
+    #[serde(default)]
+    relationship: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+impl ValidateBody for AssertLineage {
+    /// Nothing beyond the field types. The rules that matter here — the two
+    /// endpoints differ, the kinds may carry lineage, both exist — need the
+    /// *assets*, which only the facade can read. Restating them as shape checks
+    /// would put half the rule in one place and half in another.
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+async fn assert_lineage(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<AssertLineage>,
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::HeaderName, String); 1],
+        Json<graph_owl_core::lineage::LineageEdge>,
+    ),
+    AppError,
+> {
+    let relationship = graph_owl_core::relationship_type::RelationshipType::parse(
+        payload.relationship.as_deref().unwrap_or("feeds"),
+    )
+    .map_err(|unknown| {
+        AppError::Validation(vec![FieldError::new(
+            "relationship",
+            FieldErrorCode::Type,
+            format!("`{}` is not a relationship type", unknown.got),
+        )])
+    })?;
+
+    let source = graph_owl_core::lineage::LineageSource::parse(
+        payload.source.as_deref().unwrap_or("manual"),
+    )
+    .map_err(|unknown| {
+        AppError::Validation(vec![FieldError::new(
+            "source",
+            FieldErrorCode::Type,
+            format!("`{unknown}` is not a lineage source; expected manual or connector"),
+        )])
+    })?;
+
+    let edge = catalog
+        .assert_lineage(
+            &principal,
+            payload.from_asset_id,
+            payload.to_asset_id,
+            relationship,
+            graph_owl_core::lineage::LineageDetails {
+                source,
+                query: payload.query,
+                description: payload.description,
+            },
+        )
+        .await?;
+    let location = format!("/lineage/{}", edge.id);
+    Ok((
+        StatusCode::CREATED,
+        [(axum::http::header::LOCATION, location)],
+        Json(edge),
+    ))
+}
+
+async fn remove_lineage(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    let _ = principal;
+    if catalog.remove_lineage(id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LineageQuery {
+    upstream: Option<usize>,
+    downstream: Option<usize>,
+}
+
+/// How far a single request may walk.
+///
+/// Bounded because lineage graphs are the kind that surprise you: a warehouse
+/// with a hundred views over one table produces a fan-out nobody predicted, and
+/// an unbounded walk turns one click into a full-table read.
+const MAX_LINEAGE_DEPTH: usize = 10;
+
+async fn lineage_graph(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<LineageQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let _ = principal;
+    let upstream = query.upstream.unwrap_or(1);
+    let downstream = query.downstream.unwrap_or(1);
+    if upstream > MAX_LINEAGE_DEPTH || downstream > MAX_LINEAGE_DEPTH {
+        return Err(AppError::Validation(vec![FieldError::new(
+            "upstream",
+            FieldErrorCode::Type,
+            format!("depth may not exceed {MAX_LINEAGE_DEPTH}"),
+        )]));
+    }
+
+    // The root must exist. Answering an empty graph for a nonexistent asset
+    // would read as "nothing feeds this", which is a different and wrong
+    // statement.
+    if catalog.get_asset(id).await?.is_none() {
+        return Err(AppError::NotFound);
+    }
+
+    let (nodes, edges) = catalog.lineage_graph(id, upstream, downstream).await?;
+    Ok(Json(json!({
+        "rootId": id,
+        "nodes": nodes.iter().map(|asset| json!({
+            "id": asset.id,
+            "name": asset.name,
+            "kind": asset.kind.as_str(),
+            "fullyQualifiedName": asset.fully_qualified_name,
+            // Included rather than filtered: a lineage graph running into a
+            // deleted table must show the break. "Nothing downstream" and "the
+            // downstream was deleted" are opposite conclusions.
+            "deleted": asset.deleted,
+        })).collect::<Vec<_>>(),
+        "edges": edges,
+    })))
 }
 
 // ---- envelope (Epic 3) ----
