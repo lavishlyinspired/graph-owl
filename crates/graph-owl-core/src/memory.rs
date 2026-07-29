@@ -84,6 +84,11 @@ pub enum LinkRelation {
     Evidence,
     /// Another memory this one builds on.
     Follows,
+    /// Named in passing. **Deliberately weaker than `About`** and not an
+    /// anchor: a memory that mentions a table is not a memory about it, and
+    /// letting it anchor would make every incident report the primary answer
+    /// for every asset it happened to name.
+    Mentions,
 }
 
 /// One edge from a memory to something in the catalog.

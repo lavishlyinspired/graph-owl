@@ -1,7 +1,9 @@
 # Plan: Organizational Memory (Epic 31) ★
 
 **Branch**: feat/memory
-**Status**: Not started
+**Status**: **In progress** — the pure core of Slices A, C and D shipped 30 Jul 2026
+(`graph-owl-core::memory`, `graph-owl-core::recall`). Persistence, the HTTP
+surface, Slice B's supersede endpoint and Slice E's contradictions are open.
 **Depends on**: Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it)
 **Benefits from**: Epic 21 (extraction), Epic 30 (incidents)
 **Crates**: `graph-owl-core` (Memory, MemoryLink, Authorship, **pure ranking function**) · `graph-owl-search` (embeddings for the semantic term) · `graph-owl-storage-postgres` · `graph-owl-api` · `graph-owl-mcp` (recall tool)
@@ -115,6 +117,61 @@ Two memories linked `Contradicts`, or two `Decision` memories about the same ass
 ## Slices
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first.
+
+## Ranking weights and where each number comes from
+
+`00i` rule 4: every magic number must be derivable from a stated reason in a
+plan. These are the ranking defaults (`graph-owl-core::recall::Weights`), and the
+derivation is the tiering rather than the individual values.
+
+**Three tiers, and the tiering is the decision.**
+
+| Term | Weight | Why this tier |
+|---|---|---|
+| `anchor` | 3.0 | A memory explicitly `About` this asset is on-topic regardless of wording; every other term is a *guess* at topicality. Highest so no accumulation of weaker signals promotes a memory about a different asset above one about this one. |
+| `lexical` | 2.0 | Evidence of topic. |
+| `semantic` | 2.0 | The same job done better (Epic 8). Equal to `lexical` because it replaces it rather than adding to it. |
+| `staleness` | 2.0 | The anti-signal. **Set equal to `lexical` on purpose**: a stale memory matching the words perfectly is the confident, well-worded, wrong answer this feature exists to prevent, so being stale must be able to cancel a perfect match. |
+| `recency` | 1.0 | Qualifier — breaks ties among memories that are equally on-topic. |
+| `authorship` | 1.0 | Qualifier. |
+| `confidence` | 1.0 | Qualifier. |
+
+Within a tier the values are **equal because there is nothing to distinguish
+them**, and inventing a gap would be inventing precision. What is claimed is the
+ordering each term produces, not an exchange rate between terms — which is
+exactly why every acceptance test isolates one term and holds the rest equal.
+
+**The derived sub-values:**
+
+- `recency_half_life_days = 180`. A memory about a data asset written half a year
+  ago is worth about half one written today, because that is roughly the cadence
+  at which the pipelines, owners and column meanings this catalogs turn over.
+  Configurable precisely so an estate that moves faster says so.
+- Staleness multipliers: `Stale = 1.0` (full penalty, per the weight above);
+  `PossiblyStale = SubjectUnknown = 0.4`. **Derived from the same principle**:
+  possibly-stale should cancel a *marginal* lexical match but not a strong one,
+  and "marginal" is fewer than half the query's words — so the multiplier must
+  sit below `0.5`. `SubjectUnknown` shares it because there is no evidence the
+  memory is wrong, only no way to check; treating it as fully stale would condemn
+  every memory about an asset a connector stopped reporting.
+- Authorship: `Human = 1.0`, `Agent = 0.5`. An agent's claim is worth reviewing,
+  not trusting. Halving is the coarsest honest statement of "counts, but less";
+  anything finer is invented precision about how much less.
+- Anchor strengths `About 1.0 > Affects 0.6 > Evidence 0.5 > Follows 0.4 >
+  Mentions 0.2`. **Ordinal only.** `Affects` is causal so it sits just below
+  being about it; `Evidence` makes the subject proof *for* the memory rather than
+  its topic; `Follows` points at another memory, so the subject is rarely
+  something a person queries; `Mentions` is named in passing — real, and the
+  weakest thing that counts.
+
+**What mutation testing taught us about these weights**, worth keeping because it
+generalises to every weighted score in this codebase: `weight * term` and
+`weight + term` are **indistinguishable at any non-zero weight**, since adding a
+constant to every candidate reorders nothing. Only at zero does multiplication
+erase the term while addition passes it straight through. So the "zeroing a
+weight removes its effect" test is the *only* test that pins down **how** a
+weight is applied rather than merely that it is — and there must be one per
+weight. Three were missing on the first pass and mutation found all three.
 
 ### Slice A: Memory exists and links
 

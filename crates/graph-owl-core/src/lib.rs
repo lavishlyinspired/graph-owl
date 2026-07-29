@@ -5,6 +5,7 @@ pub mod lineage;
 pub mod memory;
 pub mod page;
 pub mod projection;
+pub mod recall;
 pub mod relationship_type;
 
 use chrono::{DateTime, Utc};
