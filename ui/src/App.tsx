@@ -1975,7 +1975,7 @@ function WorkbenchPage({ colors }: { colors: (typeof palette)["light"] }) {
               rowKey={(_, i) => String(i)}
               dataSource={rows.map((row, i) => ({ ...row, __i: i }))}
               pagination={{ pageSize: 25, size: "small" }}
-              columns={resultColumns(rows).map((name) => ({
+              columns={resultColumns(rows, result.variables).map((name) => ({
                 title: name,
                 dataIndex: name,
                 key: name,

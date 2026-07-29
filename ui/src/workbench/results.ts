@@ -22,8 +22,14 @@ export type Solution = Readonly<Record<string, string>>;
  *  Later solutions may bind variables the first did not — `OPTIONAL` does
  *  exactly that — so every solution is inspected, not just the first.
  */
-export function columns(solutions: readonly Solution[]): string[] {
-  const seen: string[] = [];
+export function columns(solutions: readonly Solution[], projected: readonly string[] = []): string[] {
+  // **The query's own order wins when it is known.** Solutions arrive as
+  // sorted maps — `SELECT ?s ?p ?o` becomes `o, p, s` — so first-appearance
+  // order recovers nothing here, and rendering the columns backwards is what
+  // a reader actually sees. Anything a solution binds that the projection did
+  // not name is still appended, because a column silently dropped is worse
+  // than one out of order.
+  const seen: string[] = [...projected];
   for (const solution of solutions) {
     for (const name of Object.keys(solution)) {
       if (!seen.includes(name)) seen.push(name);

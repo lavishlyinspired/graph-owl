@@ -37,6 +37,32 @@ describe("columns come from the solutions", () => {
   it("has no columns for no solutions", () => {
     expect(columns([])).toEqual([]);
   });
+
+  // **The query's own order wins.** Solutions arrive as sorted maps, so
+  // `SELECT ?s ?p ?o` reaches us as `o, p, s` — first-appearance order
+  // recovers nothing, and the reader sees the columns backwards. Found by
+  // looking at the workbench; no test over the rows could have caught it,
+  // because the information is not in them.
+  it("uses the projected order when the query supplied one", () => {
+    const sorted: Solution[] = [{ o: "c", p: "b", s: "a" }];
+
+    expect(columns(sorted, ["s", "p", "o"])).toEqual(["s", "p", "o"]);
+  });
+
+  // A column silently dropped is worse than one out of order: `SELECT *` and
+  // a `BIND` both produce variables the projection list may not name.
+  it("still shows a variable the projection did not name", () => {
+    const rows: Solution[] = [{ s: "a", extra: "x" }];
+
+    expect(columns(rows, ["s"])).toEqual(["s", "extra"]);
+  });
+
+  // A projected variable no solution binds is still a column. `OPTIONAL` that
+  // matched nothing is a column of `unbound`, not an absent column — dropping
+  // it hides that the query asked.
+  it("keeps a projected variable that nothing bound", () => {
+    expect(columns([{ s: "a" }], ["s", "owner"])).toEqual(["s", "owner"]);
+  });
 });
 
 describe("the graph view is offered only when it would be honest", () => {

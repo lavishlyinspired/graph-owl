@@ -246,6 +246,45 @@ pub struct SparqlOutcome {
     /// A **single `?s ?p ?o` entry means no pattern could be bounded** and the
     /// whole graph was read — which is correct, and is the thing worth seeing.
     pub plan: Vec<String>,
+    /// The variables the query projected, **in the order it named them**.
+    ///
+    /// A solution is returned as a `BTreeMap`, which sorts alphabetically —
+    /// so `SELECT ?s ?p ?o` arrives as `o, p, s` and the author's own ordering
+    /// is gone before any consumer sees it. Recovering it from the rows is
+    /// therefore impossible, which is why it is carried separately.
+    ///
+    /// Empty when the query form has no projection (`ASK`, `DESCRIBE`).
+    pub variables: Vec<String>,
+}
+
+/// The variables a `SELECT` names, in the order it names them.
+///
+/// Read from the parsed algebra rather than the results: the projection is a
+/// property of the *query*, and by the time solutions exist it has been
+/// flattened into a sorted map.
+fn projected_variables(query: &spargebra::Query) -> Vec<String> {
+    use spargebra::algebra::GraphPattern;
+
+    fn find(pattern: &GraphPattern) -> Option<Vec<String>> {
+        match pattern {
+            GraphPattern::Project { variables, .. } => {
+                Some(variables.iter().map(|v| v.as_str().to_string()).collect())
+            }
+            // The projection sits above the rest of the algebra, but modifiers
+            // — `ORDER BY`, `LIMIT`, `DISTINCT` — wrap it, so the walk has to
+            // descend rather than only check the root.
+            GraphPattern::Slice { inner, .. }
+            | GraphPattern::Distinct { inner }
+            | GraphPattern::Reduced { inner }
+            | GraphPattern::OrderBy { inner, .. } => find(inner),
+            _ => None,
+        }
+    }
+
+    match query {
+        spargebra::Query::Select { pattern, .. } => find(pattern).unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 /// Render one planned scan the way a reader thinks about it.
@@ -675,6 +714,7 @@ impl Catalog {
             truncated,
             as_of: at,
             plan,
+            variables: projected_variables(&parsed),
         })
     }
 
@@ -4706,6 +4746,73 @@ mod projection_isolation_tests {
         // the read is visible: narrowing on a subject and on a predicate cost
         // differently and must not render alike.
         assert!(outcome.plan[0].starts_with("? "), "{:?}", outcome.plan);
+    }
+
+    /// **The order the author wrote.** A solution is a `BTreeMap`, so
+    /// `SELECT ?s ?p ?o` arrives sorted as `o, p, s` and the query's own
+    /// ordering is gone before any consumer sees it. Found by looking at the
+    /// workbench, which rendered the columns backwards — no unit test over the
+    /// rows could have caught it, because the information is not in them.
+    #[tokio::test]
+    async fn sparql_reports_the_variables_in_the_order_the_query_named_them() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(outcome.variables, vec!["s", "p", "o"]);
+    }
+
+    /// And with the modifiers that wrap a projection — `LIMIT` and `ORDER BY`
+    /// sit *above* it in the algebra, so a walk that only checked the root
+    /// would find nothing exactly when a real query is being run.
+    #[tokio::test]
+    async fn the_projection_is_found_under_limit_and_ordering() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT DISTINCT ?name ?owner WHERE { ?s ?name ?owner } ORDER BY ?name LIMIT 5",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(outcome.variables, vec!["name", "owner"]);
+    }
+
+    /// A query form with no projection reports none, rather than inventing a
+    /// column order for an answer that has no columns.
+    #[tokio::test]
+    async fn a_query_with_no_projection_reports_no_variables() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "ASK { ?s ?p ?o }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert!(outcome.variables.is_empty(), "{:?}", outcome.variables);
     }
 
     /// **An unbounded query reports the full scan**, which is the entry worth

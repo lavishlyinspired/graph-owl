@@ -73,6 +73,9 @@ export interface SparqlResult {
   readonly asOf: number | null;
   /** What the engine decided to read, one entry per scan. */
   readonly plan: readonly string[];
+  /** The projected variables, **in the order the query named them**. Solutions
+   *  arrive as sorted maps, so this is the only place that order survives. */
+  readonly variables: readonly string[];
 }
 
 /** The stored violations queue, and the instant it reflects. */

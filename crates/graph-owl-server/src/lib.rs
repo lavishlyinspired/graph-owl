@@ -1327,6 +1327,9 @@ async fn sparql(
         // inherently expensive from one a single triple pattern away from
         // being cheap.
         "plan": outcome.plan,
+        // **The order the query named them.** Solutions are sorted maps, so
+        // this is the only place the author's own column order survives.
+        "variables": outcome.variables,
     })))
 }
 
