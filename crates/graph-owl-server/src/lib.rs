@@ -77,6 +77,10 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/lineage", post(assert_lineage))
         .route("/lineage/{id}", delete(remove_lineage))
         .route("/lineage/asset/{id}", get(lineage_graph))
+        .route("/reasoning/runs", post(run_reasoning))
+        .route("/reasoning/explain", get(explain_fact))
+        .route("/validation/runs", post(run_validation))
+        .route("/validation/report", get(validation_report))
         // Unauthenticated by design: an orchestrator's probe must not depend
         // on the identity provider being reachable.
         .route("/health", get(health))
@@ -1317,6 +1321,192 @@ async fn sparql(
         // failure mode, and the stamp is what makes it honest instead.
         "asOf": outcome.as_of,
     })))
+}
+
+/// Run a validation pass and replace the stored queue — Epic 5 Slice C.
+///
+/// Admin-only and `POST`, for the reasons the reasoning run is: a full pass
+/// over the estate is the cheapest way an unprivileged caller could load the
+/// database, and it replaces stored state.
+async fn run_validation(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<graph_owl_api::ValidationRun>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.run_validation().await?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReportQuery {
+    severity: Option<String>,
+    shape: Option<String>,
+    /// The asset panel's filter: everything wrong with one node.
+    focus_node: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+/// The violations queue — Epic 5 Slice E.
+///
+/// Reads stored results. A pass is triggered explicitly, so this endpoint is
+/// cheap enough for a view that polls it.
+async fn validation_report(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Query(query): Query<ReportQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // 50, matching the page size the rest of the API uses. A queue is worked
+    // from the top, so a larger default would ship rows nobody scrolls to.
+    let limit = query.limit.unwrap_or(50).min(200);
+    let filter = graph_owl_storage::ValidationFilter {
+        severity: query.severity,
+        shape: query.shape,
+        focus_node: query.focus_node,
+        limit,
+        offset: query.offset.unwrap_or(0),
+    };
+
+    let (findings, computed_at_t, total) = catalog.validation_report(&filter).await?;
+
+    Ok(Json(json!({
+        "data": findings.iter().map(|f| json!({
+            "id": f.id,
+            "shape": f.shape,
+            "focusNode": f.focus_node,
+            "path": f.path,
+            "constraint": f.constraint_kind,
+            "severity": f.severity,
+            "message": f.message,
+            "actual": f.actual,
+            "suggestion": f.suggestion,
+        })).collect::<Vec<_>>(),
+        // **The instant this reflects.** A validation report whose currency is
+        // unknown is unactionable: a steward cannot tell a queue that is clean
+        // from one that has not run since the data changed.
+        "computedAtT": computed_at_t,
+        "total": total,
+        "limit": filter.limit,
+        "offset": filter.offset,
+    })))
+}
+
+/// Run the reasoner and replace the overlay — Epic 6 Slice E.
+///
+/// `POST` because it writes, even though it derives nothing a caller supplied:
+/// the run replaces `graph:reasoning` wholesale, and a `GET` that rewrites a
+/// graph is a `GET` no cache, proxy or retry can treat correctly.
+///
+/// Admin-only, for the same reason reconciliation is: a full forward-chaining
+/// pass over the estate is the cheapest way an unprivileged caller could load
+/// the database.
+async fn run_reasoning(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<graph_owl_api::ReasoningReport>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    // The budget is the server's, not the caller's — the same rule SPARQL
+    // follows. A client that can raise its own limit does not have one.
+    let report = catalog
+        .run_reasoning(&graph_owl_reasoning::Budget::default())
+        .await?;
+    Ok(Json(report))
+}
+
+/// A triple, named the way flakes name one: `namespace:local` per position.
+#[derive(Debug, serde::Deserialize)]
+struct ExplainQuery {
+    s: String,
+    p: String,
+    o: String,
+}
+
+/// `ns:local` back into an identifier.
+///
+/// Split on the **first** colon: a local name may contain one — `graph:reasoning`
+/// is itself a local name in the `dsc` namespace — and splitting on the last
+/// would silently reattribute it to a different vocabulary.
+fn parse_sid(field: &str, raw: &str) -> Result<graph_owl_core::flake::Sid, AppError> {
+    let invalid = |detail: String| {
+        AppError::Validation(vec![FieldError::new(field, FieldErrorCode::Type, detail)])
+    };
+    let (namespace, local) = raw
+        .split_once(':')
+        .ok_or_else(|| invalid(format!("`{raw}` is not `namespace:name`")))?;
+    let code: u16 = namespace
+        .parse()
+        .map_err(|_| invalid(format!("`{namespace}` is not a namespace code")))?;
+    if local.is_empty() {
+        return Err(invalid(format!("`{raw}` names no local part")));
+    }
+    Ok(graph_owl_core::flake::Sid::new(code, local))
+}
+
+/// Why a fact holds — Epic 6 Slice D.
+///
+/// `404` when the fact is neither asserted nor implied, because "nothing
+/// supports this" and "this is supported by nothing" read alike and mean
+/// opposite things. `400` when an identifier does not parse, which tells the
+/// caller the difference between a mistake and a missing fact.
+async fn explain_fact(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Query(query): Query<ExplainQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let subject = parse_sid("s", &query.s)?;
+    let predicate = parse_sid("p", &query.p)?;
+    let object = parse_sid("o", &query.o)?;
+
+    let explanation = catalog
+        .explain_fact(
+            &subject,
+            &predicate,
+            &object,
+            &graph_owl_reasoning::Budget::default(),
+        )
+        .await?;
+    Ok(Json(explanation_body(&explanation)))
+}
+
+/// The explanation as a wire document.
+///
+/// Written out rather than derived from serde on the enum: the recursion is the
+/// point of this endpoint, and a reader consuming it needs one predictable
+/// discriminator at every level rather than serde's nesting for a tuple
+/// variant.
+fn explanation_body(explanation: &graph_owl_reasoning::Explanation) -> serde_json::Value {
+    use graph_owl_reasoning::Explanation;
+    match explanation {
+        Explanation::Asserted(fact) => json!({ "status": "asserted", "fact": flake_body(fact) }),
+        Explanation::Circular(fact) => json!({ "status": "circular", "fact": flake_body(fact) }),
+        Explanation::Unknown => json!({ "status": "unknown" }),
+        Explanation::Derived { chains } => json!({
+            "status": "derived",
+            "chains": chains
+                .iter()
+                .map(|chain| json!({
+                    "rule": chain.rule,
+                    "premises": chain.premises.iter().map(explanation_body).collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
+        }),
+    }
+}
+
+fn flake_body(flake: &graph_owl_core::flake::Flake) -> serde_json::Value {
+    json!({
+        "s": flake.s.to_string(),
+        "p": flake.p.to_string(),
+        "o": match &flake.o {
+            graph_owl_core::flake::FlakeValue::Ref(sid) => sid.to_string(),
+            other => format!("{other:?}"),
+        },
+        "t": flake.t,
+    })
 }
 
 /// Re-project whatever the graph is missing, and report the drift either way.

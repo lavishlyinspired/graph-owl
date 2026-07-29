@@ -58,7 +58,42 @@ export interface Facet {
 }
 
 export type { LineageGraph, LineageNode, LineageEdge } from "./graph/lineage";
+export type { Finding, Severity, Suggestion } from "./governance/queue";
+export type { Explanation } from "./governance/explanation";
+
+/** The stored violations queue, and the instant it reflects. */
+export interface ValidationReport {
+  readonly data: readonly import("./governance/queue").Finding[];
+  /** The graph instant this reflects. `0` means no pass has ever run — which
+   *  is a different statement from "nothing is wrong", and the only thing that
+   *  makes an empty queue trustworthy. */
+  readonly computedAtT: number;
+  readonly total: number;
+}
+
+/** What one validation pass found. */
+export interface ValidationRun {
+  readonly conforms: boolean;
+  readonly violations: number;
+  readonly warnings: number;
+  readonly info: number;
+  readonly shapes: number;
+  /** Shapes that could not be compiled. A pass over eighteen of twenty shapes
+   *  produces a clean-looking report for the two that did not run. */
+  readonly refusedShapes: number;
+  readonly computedAtT: number;
+}
+
+/** What one reasoning run concluded. */
+export interface ReasoningReport {
+  readonly derived: number;
+  readonly replaced: number;
+  readonly iterations: number;
+  readonly capped: string | null;
+  readonly durationMs: number;
+}
 import type { LineageGraph } from "./graph/lineage";
+import type { Explanation } from "./governance/explanation";
 
 export interface ConnectorRun {
   id: string;
@@ -269,5 +304,22 @@ export const api = {
   lineage: (id: string, upstream: number, downstream: number) =>
     request<LineageGraph>(
       `/lineage/asset/${id}?upstream=${upstream}&downstream=${downstream}`,
+    ),
+  /** The violations queue. Stored results, not a fresh pass — this is polled,
+   *  and recomputing a full-graph validation per poll would make the cheapest
+   *  client the most expensive query in the system. */
+  validationReport: (params: { focusNode?: string; severity?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.focusNode) query.set("focusNode", params.focusNode);
+    if (params.severity) query.set("severity", params.severity);
+    query.set("limit", "200");
+    return request<ValidationReport>(`/validation/report?${query}`);
+  },
+  runValidation: () => request<ValidationRun>("/validation/runs", { method: "POST" }),
+  runReasoning: () => request<ReasoningReport>("/reasoning/runs", { method: "POST" }),
+  /** Why a fact holds, all the way down to the assertions under it. */
+  explain: (s: string, p: string, o: string) =>
+    request<Explanation>(
+      `/reasoning/explain?s=${encodeURIComponent(s)}&p=${encodeURIComponent(p)}&o=${encodeURIComponent(o)}`,
     ),
 };

@@ -208,6 +208,147 @@ impl Storage for PostgresStorage {
         .map_err(|e| StorageError::Unexpected(e.to_string()))
     }
 
+    #[tracing::instrument(name = "storage.replace_validation_results", skip_all)]
+    async fn replace_validation_results(
+        &self,
+        computed_at_t: i64,
+        results: &[graph_owl_storage::ValidationFinding],
+    ) -> Result<(), StorageError> {
+        // One transaction, so a failed write leaves the previous results in
+        // place. The alternative — delete, then fail to insert — empties the
+        // queue and reads to a steward as "everything is fixed".
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        sqlx::query("DELETE FROM validation_results")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        for finding in results {
+            sqlx::query(
+                "INSERT INTO validation_results
+                     (id, computed_at_t, shape, focus_node, path,
+                      constraint_kind, severity, message, actual, suggestion)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            )
+            .bind(finding.id)
+            .bind(computed_at_t)
+            .bind(&finding.shape)
+            .bind(&finding.focus_node)
+            .bind(&finding.path)
+            .bind(&finding.constraint_kind)
+            .bind(&finding.severity)
+            .bind(&finding.message)
+            .bind(&finding.actual)
+            .bind(&finding.suggestion)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        // A pass that found nothing still records *when* it ran. Without this
+        // row an empty queue is ambiguous between "clean" and "never
+        // validated", and those call for opposite reactions.
+        if results.is_empty() {
+            sqlx::query(
+                "INSERT INTO validation_results
+                     (id, computed_at_t, shape, focus_node, constraint_kind,
+                      severity, message)
+                 VALUES ($1, $2, '', '', '', 'marker', '')",
+            )
+            .bind(Uuid::new_v4())
+            .bind(computed_at_t)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    #[tracing::instrument(name = "storage.validation_results", skip_all)]
+    async fn validation_results(
+        &self,
+        filter: &graph_owl_storage::ValidationFilter,
+    ) -> Result<(Vec<graph_owl_storage::ValidationFinding>, i64, usize), StorageError> {
+        // The marker row is bookkeeping, never a finding — it exists so a clean
+        // pass is distinguishable from no pass, and it must not appear in a
+        // queue as a violation of nothing.
+        let where_clause = "severity <> 'marker'
+              AND ($1::TEXT IS NULL OR severity = $1)
+              AND ($2::TEXT IS NULL OR shape = $2)
+              AND ($3::TEXT IS NULL OR focus_node = $3)";
+
+        let total: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM validation_results WHERE {where_clause}"
+        ))
+        .bind(&filter.severity)
+        .bind(&filter.shape)
+        .bind(&filter.focus_node)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // `computed_at_t` comes from any row including the marker, so a clean
+        // pass still reports its currency.
+        let computed_at_t: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(computed_at_t) FROM validation_results")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let rows = sqlx::query(&format!(
+            "SELECT id, shape, focus_node, path, constraint_kind, severity,
+                    message, actual, suggestion
+               FROM validation_results
+              WHERE {where_clause}
+              -- Worst first, then stable: a queue that reorders between polls
+              -- cannot be worked from the top.
+              ORDER BY CASE severity
+                         WHEN 'violation' THEN 0
+                         WHEN 'warning' THEN 1
+                         ELSE 2
+                       END,
+                       focus_node, shape, constraint_kind
+              LIMIT $4 OFFSET $5"
+        ))
+        .bind(&filter.severity)
+        .bind(&filter.shape)
+        .bind(&filter.focus_node)
+        .bind(i64::try_from(filter.limit).unwrap_or(i64::MAX))
+        .bind(i64::try_from(filter.offset).unwrap_or(0))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let findings = rows
+            .into_iter()
+            .map(|row| graph_owl_storage::ValidationFinding {
+                id: row.get("id"),
+                shape: row.get("shape"),
+                focus_node: row.get("focus_node"),
+                path: row.get("path"),
+                constraint_kind: row.get("constraint_kind"),
+                severity: row.get("severity"),
+                message: row.get("message"),
+                actual: row.get("actual"),
+                suggestion: row.get("suggestion"),
+            })
+            .collect();
+
+        Ok((
+            findings,
+            computed_at_t.unwrap_or(0),
+            usize::try_from(total).unwrap_or(0),
+        ))
+    }
+
     #[tracing::instrument(name = "storage.recent_runs", skip_all)]
     async fn recent_runs(
         &self,

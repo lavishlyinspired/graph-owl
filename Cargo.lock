@@ -840,10 +840,13 @@ dependencies = [
  "chrono",
  "graph-owl-authz",
  "graph-owl-connectors",
+ "graph-owl-constraint",
  "graph-owl-core",
  "graph-owl-engine",
  "graph-owl-events",
+ "graph-owl-ontology",
  "graph-owl-query",
+ "graph-owl-reasoning",
  "graph-owl-storage",
  "graph-owl-traversal",
  "serde",
@@ -898,6 +901,7 @@ version = "0.1.0"
 dependencies = [
  "graph-owl-core",
  "graph-owl-ontology",
+ "regex",
  "thiserror 2.0.19",
 ]
 
@@ -983,9 +987,11 @@ dependencies = [
 name = "graph-owl-ontology"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "graph-owl-core",
  "serde",
  "thiserror 2.0.19",
+ "uuid",
 ]
 
 [[package]]
@@ -1017,6 +1023,7 @@ version = "0.1.0"
 dependencies = [
  "graph-owl-core",
  "graph-owl-ontology",
+ "serde",
  "thiserror 2.0.19",
 ]
 
@@ -1072,7 +1079,9 @@ dependencies = [
  "graph-owl-authz",
  "graph-owl-connectors",
  "graph-owl-core",
+ "graph-owl-engine",
  "graph-owl-engine-postgres",
+ "graph-owl-reasoning",
  "graph-owl-storage",
  "graph-owl-storage-postgres",
  "graph-owl-traversal",

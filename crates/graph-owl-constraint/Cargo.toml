@@ -11,3 +11,4 @@ workspace = true
 graph-owl-core = { path = "../graph-owl-core" }
 graph-owl-ontology = { path = "../graph-owl-ontology" }
 thiserror.workspace = true
+regex.workspace = true

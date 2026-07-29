@@ -11,6 +11,7 @@ license.workspace = true
 utoipa.workspace = true
 base64.workspace = true
 graph-owl-api.workspace = true
+graph-owl-reasoning = { path = "../graph-owl-reasoning" }
 graph-owl-connectors.workspace = true
 graph-owl-ui.workspace = true
 graph-owl-authz.workspace = true
@@ -35,6 +36,7 @@ dotenvy.workspace = true
 utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
 
 [dev-dependencies]
+graph-owl-engine.workspace = true
 jsonwebtoken = "9"
 sqlx.workspace = true
 tower.workspace = true

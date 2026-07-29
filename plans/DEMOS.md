@@ -425,24 +425,30 @@ actually holds could not be asserted at all.
 **What you can show**: a SHACL-style shape says "every table in `regulatory` must have an owner and a retention tag"; the violations queue fills; classify one table as PII and watch the classification propagate along lineage as a *derived* fact, visibly marked, with its derivation chain.
 
 ### Epic 5 — Constraint validation
-- [ ] Shape and constraint types; six target kinds
-- [ ] Compile-once, evaluate-many
-- [ ] Continuous validation with violation reports, not write-time rejection
-- [ ] Severity classification; repair suggestions never auto-applied
+- [x] **Shape and constraint types; four target kinds** *(Slice A)* — twelve constraint components plus `not`/`and`/`or`, each with a conforming case and a violating one. `Class`, `Subjects`, `SubjectsOf`, `ObjectsOf`; `LiteralsOf` and `ImplicitClass` are not built — see below
+- [x] **Compile-once, evaluate-many** *(Slices A, D)* — regexes parsed at compile time, so a broken shape is refused before it meets data rather than failing halfway through a pass over a live estate. Cached on the newest `t` among the shape facts, which is exactly what a shape edit moves
+- [x] **Shapes compile from graph triples** *(Slice B)* — SHACL vocabulary, `graph:shapes`. A shape is data: versioned, time-travellable, auditable. **An unknown term is refused, never skipped** — a silently dropped constraint is a shape that looks like it checks something and does not
+- [x] **Continuous validation with violation reports, not write-time rejection** *(Slice C)* — `POST /validation/runs` reads, validates and writes *nothing* back to the graph
+- [x] **Severity classification; repair suggestions never auto-applied** *(Slices A, E)* — a warning does not fail conformance; `MinCount` suggests `AssertMissing`, `MaxCount` suggests `RetractExcess`, a wrong type suggests `RetypeValue`, and everything else suggests nothing rather than restating the violation
+- [x] **`GET /validation/report`** *(Slice E)* — paged, filterable by severity, shape and focus node, and **carrying the `t` it reflects**, because a queue whose currency is unknown is unactionable
+- [~] **Pending in this epic**: `LiteralsOf` and `ImplicitClass` targets; `sh:not`/`sh:and`/`sh:or` stated *as triples* (the validator implements all three, the encoding needs a shape-reference resolution pass); `sh:in` as an RDF list rather than a repeated predicate; the five seed shapes as a migration
 
 ### Epic 6 — Reasoning overlay
 - [x] **Eight OWL 2 RL axioms as built-in rules** *(Slice A)* — subClassOf, subPropertyOf, transitive, symmetric, inverseOf, domain, range, sameAs. Eight named functions, not a rule interpreter. Iterates to fixpoint with dedup, so depth-3 chains resolve and a symmetric property terminates instead of ping-ponging. A derived fact carries the **max premise `t`**, so it can never be visible at an instant before the facts implying it. Retracted flakes derive nothing
-- [~] **Slice A only.** No budgets (Slice C), no provenance on the derived fact (Slice D), no `graph:reasoning` overlay write (Slice E) — `derive()` returns facts, and nothing persists them yet
-- [ ] Semi-naive fixpoint, `CappedReason` on every limit
-- [ ] Derived facts in `graph:reasoning`, never persisted into the base
-- [ ] `GET /reasoning/explain` derivation chains
-- [ ] **Reasoning is skipped on historical queries** — `as_of` returns asserted facts only, and says so via Epic 4's freshness stamp. Inferring from premises that did not hold at `t` would be a wrong answer carrying right-looking provenance. The differentiator is time travel over *asserted* facts with explainable inference on the current state *(resolved 28 Jul 2026, `97`)*
-- [ ] Standard rule set: classification along lineage, ownership down containment
+- [x] **Semi-naive fixpoint, `CappedReason` on every limit** *(Slices B, C)* — each iteration joins against the previous one's output, proved by a join counter rather than asserted. Four limits, four reasons: `Facts`, `Duration`, `Iterations`, `Memory`, each stopping the run and returning what it had. **A new axiom widens the delta**, because a rule that needs a new axiom and an old fact is otherwise silently dropped — the completeness hole a naive reading of semi-naive evaluation leaves
+- [x] **Derived facts in `graph:reasoning`, never persisted into the base** *(Slice E)* — a run replaces the overlay wholesale and leaves the default graph byte-identical. Withdrawal precedes assertion at a strictly earlier `t`, or current-state resolution drops the fact and the overlay empties from the second run onwards
+- [x] **`GET /reasoning/explain` derivation chains** *(Slice D)* — recursive to the assertions underneath, every route when a fact follows more than one, `404` when nothing supports it. Confidence is the **minimum** of the premises, not the product
+- [x] **Reasoning is skipped on historical queries** — `as_of` reads the default graph specifically. Inferring from premises that did not hold at `t` would be a wrong answer carrying right-looking provenance
+- [~] **Pending in this epic**: the standard seeded rule set and the differential test against Epics 11 and 23 *(Slice F)*; classification propagation along `feeds` as an opt-in rule; certification invalidation on an upstream Major bump
 
 ### Epic 41 — Workbench & governance
+### Epic 41 — Workbench & governance
+- [x] **Violations queue** — grouped by asset rather than by finding, because forty rows about one table is one piece of work; worst-first and stable, so it can be worked from the top; each row carries the shape's own message, the offending value, and the suggested repair. The header states how far behind the graph the report is, which is the only thing that makes an empty queue trustworthy
+- [x] **Both engines triggerable from the console** — validation and reasoning, with the refused-shape count shown rather than hidden
 - [ ] SPARQL editor with plan display
 - [ ] Results as table ⇄ graph
-- [ ] Violations as an assignable workflow with waivers
+- [ ] Violations as an assignable **workflow** with waivers — the queue displays; assignment and waivers do not exist yet
+- [ ] The derivation chain rendered beside a derived fact — `explanation.ts` flattens it (100% mutation-tested) and the endpoint serves it; nothing renders it yet
 - [ ] Admin: policies with dry-run, connectors, jobs
 
 ---

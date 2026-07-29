@@ -15,6 +15,9 @@ graph-owl-engine.workspace = true
 graph-owl-traversal.workspace = true
 graph-owl-connectors.workspace = true
 graph-owl-query = { path = "../graph-owl-query" }
+graph-owl-reasoning = { path = "../graph-owl-reasoning" }
+graph-owl-constraint = { path = "../graph-owl-constraint" }
+graph-owl-ontology = { path = "../graph-owl-ontology" }
 spareval = "0.2"
 spargebra = "0.4"
 async-trait.workspace = true

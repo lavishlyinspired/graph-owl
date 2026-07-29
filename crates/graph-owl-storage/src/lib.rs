@@ -82,6 +82,35 @@ pub struct ConnectorRun {
     pub triggered_by: String,
 }
 
+/// One stored violation.
+///
+/// Flat strings rather than the validator's typed `Violation`: this crosses a
+/// database boundary, and `Sid` and `FlakeValue` are domain types with no
+/// storage encoding. Rendering here keeps the mapping in one place instead of
+/// spreading a serialisation decision across the adapter and the API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationFinding {
+    pub id: Uuid,
+    pub shape: String,
+    pub focus_node: String,
+    pub path: Option<String>,
+    pub constraint_kind: String,
+    pub severity: String,
+    pub message: String,
+    pub actual: Option<String>,
+    pub suggestion: Option<serde_json::Value>,
+}
+
+/// What slice of the queue a caller wants.
+#[derive(Debug, Clone, Default)]
+pub struct ValidationFilter {
+    pub severity: Option<String>,
+    pub shape: Option<String>,
+    pub focus_node: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
 /// Connection-pool occupancy, for the operational gauge.
 ///
 /// `idle` rather than `in_use`, because that is what a pool can report without
@@ -252,6 +281,34 @@ pub trait Storage: Send + Sync {
         &self,
         asset_ids: &[Uuid],
     ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError>;
+
+    /// Replace the stored validation results with a fresh pass.
+    ///
+    /// **Wholesale.** A violation that has been fixed must vanish, and merging
+    /// would leave it standing until something thought to delete it — a queue
+    /// that only ever grows is a queue nobody works. `computed_at_t` is the
+    /// graph instant the pass ran against, so a stale report is visibly stale
+    /// rather than silently so.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the replacement fails; it is one transaction, so a
+    /// failure leaves the previous results in place rather than an empty queue.
+    async fn replace_validation_results(
+        &self,
+        computed_at_t: i64,
+        results: &[ValidationFinding],
+    ) -> Result<(), StorageError>;
+
+    /// The current queue, worst first.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn validation_results(
+        &self,
+        filter: &ValidationFilter,
+    ) -> Result<(Vec<ValidationFinding>, i64, usize), StorageError>;
 
     /// Open a run row before the work starts.
     ///

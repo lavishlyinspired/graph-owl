@@ -11,10 +11,6 @@ use chrono::{DateTime, TimeZone, Utc};
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, TriplePattern, namespace};
 use graph_owl_engine::{PredicateDef, PredicateRegistry, TripleStore};
 use graph_owl_engine_postgres::PostgresTripleStore;
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
 
 /// The database handle must be returned and bound by the caller. If it is
 /// dropped here, Docker tears the database down and the next query fails with

@@ -35,6 +35,9 @@ metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false }
 dotenvy = "0.15"
 sha2 = "0.10"
+# Pattern constraints (Epic 5). MIT/Apache-2.0, and `00l-build-vs-adopt.md`
+# is unambiguous here: a regex engine is the canonical thing to adopt.
+regex = "1"
 utoipa = { version = "5", features = ["uuid", "chrono", "preserve_order"] }
 graph-owl-core = { path = "crates/graph-owl-core" }
 graph-owl-events = { path = "crates/graph-owl-events" }

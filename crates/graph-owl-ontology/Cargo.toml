@@ -11,3 +11,7 @@ workspace = true
 graph-owl-core = { path = "../graph-owl-core" }
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+uuid.workspace = true

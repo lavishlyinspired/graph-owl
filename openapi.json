@@ -1298,6 +1298,58 @@
         "summary": "Readiness"
       }
     },
+    "/reasoning/explain": {
+      "get": {
+        "operationId": "get_reasoning_explain",
+        "responses": {
+          "200": {
+            "description": "Why a fact holds, recursively, down to the assertions under it"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Why a fact holds, recursively, down to the assertions under it"
+      }
+    },
+    "/reasoning/runs": {
+      "post": {
+        "operationId": "post_reasoning_runs",
+        "responses": {
+          "200": {
+            "description": "Derive everything the asserted graph implies, replacing the overlay"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Derive everything the asserted graph implies, replacing the overlay"
+      }
+    },
     "/relationships/{id}": {
       "delete": {
         "operationId": "delete_relationships__id_",
@@ -1718,6 +1770,58 @@
           }
         ],
         "summary": "Relate two tables"
+      }
+    },
+    "/validation/report": {
+      "get": {
+        "operationId": "get_validation_report",
+        "responses": {
+          "200": {
+            "description": "Current constraint violations, worst first"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Current constraint violations, worst first"
+      }
+    },
+    "/validation/runs": {
+      "post": {
+        "operationId": "post_validation_runs",
+        "responses": {
+          "200": {
+            "description": "Validate the estate against every shape and replace the queue"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Validate the estate against every shape and replace the queue"
       }
     }
   },

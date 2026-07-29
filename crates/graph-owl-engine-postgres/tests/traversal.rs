@@ -11,10 +11,6 @@ use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
 use graph_owl_engine::TripleStore;
 use graph_owl_engine_postgres::PostgresTripleStore;
 use graph_owl_traversal::{Bounds, Direction, EdgeFilter, TraversalEngine};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
 
 async fn store() -> (PostgresTripleStore, common::TestDb) {
     let (database, connection_string) = common::fresh_database().await;

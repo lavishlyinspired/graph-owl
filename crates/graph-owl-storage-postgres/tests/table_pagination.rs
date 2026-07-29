@@ -7,10 +7,6 @@ use graph_owl_core::{
 };
 use graph_owl_storage::Storage;
 use graph_owl_storage_postgres::PostgresStorage;
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
 use uuid::Uuid;
 
 async fn test_storage() -> (PostgresStorage, common::TestDb) {

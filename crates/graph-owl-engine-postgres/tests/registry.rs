@@ -5,10 +5,6 @@ mod common;
 use graph_owl_core::flake::{Flake, FlakeValue, Sid};
 use graph_owl_engine::{EngineError, PredicateDef, PredicateRegistry, RegistryError, TripleStore};
 use graph_owl_engine_postgres::PostgresTripleStore;
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
 
 async fn store() -> (PostgresTripleStore, common::TestDb, String) {
     let (database, connection_string) = common::fresh_database().await;

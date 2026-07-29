@@ -1,10 +1,11 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use graph_owl_authz::{
     AccessPredicate, DecisionCache, DecisionKey, MetadataOperation, Policy, Subject, compile,
 };
 use graph_owl_connectors::DeletionPlan;
+use graph_owl_core::flake::Flake;
 use graph_owl_core::projection;
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
@@ -15,6 +16,7 @@ use graph_owl_core::{
 };
 use graph_owl_engine::TripleStore;
 use graph_owl_events::{ChangeEvent, EventSink, EventSubject};
+use graph_owl_reasoning as reasoning;
 use graph_owl_storage::{ConflictKind, Storage, StorageError, StoredUser, UpdateOutcome};
 use graph_owl_traversal::{Bounds, Direction, EdgeFilter, Subgraph, TraversalEngine};
 use serde::Deserialize;
@@ -393,6 +395,16 @@ pub struct Catalog {
     /// `graph` is: a catalog with no subscriber is fully functional, and making
     /// the sink required would turn "nothing is listening" into an outage.
     events: Option<Arc<dyn EventSink>>,
+    /// The last shape compilation, keyed on the newest `t` among the shape
+    /// facts. `Arc` for the same reason `decisions` is: axum clones `Catalog`
+    /// per request, and a cache cloned with it would be a fresh empty cache
+    /// every time — present, and warm to nobody.
+    ///
+    /// One entry, not a map. There is one set of shapes, it is replaced
+    /// wholesale, and an eviction policy over a single entry is a policy with
+    /// nothing to decide.
+    #[allow(clippy::type_complexity)]
+    shape_cache: Arc<Mutex<Option<(i64, Vec<graph_owl_constraint::CompiledShape>, usize)>>>,
 }
 
 impl Catalog {
@@ -403,6 +415,7 @@ impl Catalog {
             traversal: None,
             events: None,
             decisions: Arc::new(DecisionCache::default()),
+            shape_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -744,6 +757,13 @@ impl Catalog {
                     id.to_string(),
                 )),
                 as_of: Some(t),
+                // The default graph specifically, not "any graph". **Reasoning
+                // is skipped on historical queries**: a derived fact is a
+                // conclusion about the *current* rule set, and letting one into
+                // an `as_of` answer would report an inference that nobody could
+                // have drawn at that instant, carrying provenance that looks
+                // right. Time travel is over asserted facts.
+                cx: Some(None),
                 ..Default::default()
             })
             .await
@@ -1821,6 +1841,356 @@ impl Catalog {
         )));
         Ok(affected)
     }
+
+    // ----- Reasoning (Epic 6, slices D and E) -----
+
+    /// Everything the asserted graph implies, written to its own graph.
+    ///
+    /// **The asserted base is never touched.** Conclusions go to
+    /// `graph:reasoning`, and a run replaces that graph wholesale — which is
+    /// only safe *because* it is separate: the same replacement over a shared
+    /// graph would withdraw assertions nobody derived.
+    ///
+    /// Stored rows carry the run's transaction time rather than the derived
+    /// fact's own `t`. The two are different things and both are right: the
+    /// pure reasoner stamps a conclusion with the **maximum premise `t`**,
+    /// because that is the first instant at which the facts implied it, while
+    /// the row records when this run wrote it. Writing the row at the earlier
+    /// instant would put it before the retraction that withdrew the previous
+    /// run's copy, and current-state resolution would then drop the fact
+    /// entirely.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured, or if the read or either
+    /// write fails.
+    #[tracing::instrument(name = "catalog.run_reasoning", skip_all)]
+    pub async fn run_reasoning(
+        &self,
+        budget: &reasoning::Budget,
+    ) -> Result<ReasoningReport, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let base = Self::asserted_base(graph.as_ref()).await?;
+        let concluded = reasoning::derive_within(&base, budget);
+
+        // Withdraw the previous run's overlay before writing this one.
+        // Retracting what is *there* rather than re-deriving what was there
+        // last time: a rule change between runs would otherwise strand every
+        // conclusion the old rule set drew and the new one does not.
+        let previous = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(reasoning::reasoning_graph())),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        // **Two transaction times, withdrawal strictly before assertion.** A
+        // conclusion this run reaches again is retracted and re-asserted, and
+        // at one shared `t` the two rows are simultaneous — current-state
+        // resolution cannot order them, and the fact disappears. The first run
+        // looked right and every run after it emptied the overlay.
+        if !previous.is_empty() {
+            let withdrawn = graph
+                .next_time()
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            let withdrawals: Vec<Flake> = previous
+                .iter()
+                .map(|f| Flake {
+                    t: withdrawn,
+                    ..f.clone()
+                })
+                .collect();
+            graph
+                .retract_flakes(&withdrawals)
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        }
+
+        let t = graph
+            .next_time()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        let writes: Vec<Flake> = concluded
+            .facts
+            .iter()
+            .map(|d| Flake {
+                t,
+                ..d.fact.clone()
+            })
+            .collect();
+        if !writes.is_empty() {
+            graph
+                .assert_flakes(&writes)
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        }
+
+        Ok(ReasoningReport {
+            derived: concluded.facts.len(),
+            replaced: previous.len(),
+            iterations: concluded.iterations,
+            capped: concluded.capped,
+            duration_ms: u64::try_from(concluded.duration.as_millis()).unwrap_or(u64::MAX),
+        })
+    }
+
+    /// Why a fact holds, recursively, down to the assertions under it.
+    ///
+    /// **Re-derived rather than read back.** Provenance is not stored: the
+    /// overlay holds conclusions, not the chains that produced them. The trade
+    /// is a full derivation per call in exchange for an explanation that is
+    /// always about the graph *as it stands* — a stored chain goes stale the
+    /// moment a premise is retracted, and a stale explanation is worse than a
+    /// slow one because it is confidently wrong. Revisit when a measurement
+    /// shows the derivation dominating this endpoint.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured or the read fails.
+    /// `NotFound` if the fact is neither asserted nor implied.
+    #[tracing::instrument(name = "catalog.explain_fact", skip_all)]
+    pub async fn explain_fact(
+        &self,
+        subject: &graph_owl_core::flake::Sid,
+        predicate: &graph_owl_core::flake::Sid,
+        object: &graph_owl_core::flake::Sid,
+        budget: &reasoning::Budget,
+    ) -> Result<reasoning::Explanation, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let base = Self::asserted_base(graph.as_ref()).await?;
+        let concluded = reasoning::derive_within(&base, budget);
+        let target = Flake {
+            s: subject.clone(),
+            p: predicate.clone(),
+            o: graph_owl_core::flake::FlakeValue::Ref(object.clone()),
+            cx: None,
+            t: 0,
+            op: true,
+        };
+
+        match reasoning::explain(&concluded, &base, &target) {
+            reasoning::Explanation::Unknown => Err(CatalogError::NotFound),
+            explained => Ok(explained),
+        }
+    }
+
+    // ----- Constraint validation (Epic 5, slices C, D and E) -----
+
+    /// Validate the estate against every shape stated in the graph.
+    ///
+    /// **Never blocks a write, never writes to the graph.** The results go to
+    /// their own table; the facts are read and left alone. Rejecting writes
+    /// that violate a shape would make every shape change a potential outage
+    /// and make the catalog refuse to record the world as it is.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured, or if the read or the
+    /// result write fails. **A malformed shape is not an error** — it is
+    /// reported alongside the findings, because one bad shape must not stop the
+    /// other twenty running.
+    #[tracing::instrument(name = "catalog.run_validation", skip_all)]
+    pub async fn run_validation(&self) -> Result<ValidationRun, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let shape_facts = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(shapes_graph())),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let (compiled, refused) = self.compiled_shapes(&shape_facts);
+        let base = Self::asserted_base(graph.as_ref()).await?;
+        let report = graph_owl_constraint::validate(&compiled, &base);
+
+        // The instant this pass reflects. Read *after* the facts, so a report
+        // can only ever claim to be older than the graph it read — the safe
+        // direction to be wrong in, since it makes a fresh report look stale
+        // rather than a stale one look fresh.
+        let computed_at_t = graph
+            .next_time()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let findings: Vec<graph_owl_storage::ValidationFinding> = report
+            .violations
+            .iter()
+            .map(|violation| graph_owl_storage::ValidationFinding {
+                id: Uuid::new_v4(),
+                shape: violation.shape.to_string(),
+                focus_node: violation.focus_node.to_string(),
+                path: violation.path.as_ref().map(ToString::to_string),
+                constraint_kind: violation.constraint.clone(),
+                severity: format!("{:?}", violation.severity).to_lowercase(),
+                message: violation.message.clone(),
+                actual: violation.actual.as_ref().map(|value| format!("{value:?}")),
+                suggestion: violation.suggestion.as_ref().map(describe_repair),
+            })
+            .collect();
+
+        self.storage
+            .replace_validation_results(computed_at_t, &findings)
+            .await?;
+
+        Ok(ValidationRun {
+            conforms: report.conforms,
+            violations: report.count_of(graph_owl_ontology::Severity::Violation),
+            warnings: report.count_of(graph_owl_ontology::Severity::Warning),
+            info: report.count_of(graph_owl_ontology::Severity::Info),
+            shapes: compiled.len(),
+            refused_shapes: refused,
+            computed_at_t,
+        })
+    }
+
+    /// The stored queue, filtered and paged.
+    ///
+    /// Reads results rather than recomputing: this is polled by a queue view,
+    /// and a full-graph pass per poll makes the cheapest client the most
+    /// expensive query in the system.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    #[tracing::instrument(name = "catalog.validation_report", skip_all)]
+    pub async fn validation_report(
+        &self,
+        filter: &graph_owl_storage::ValidationFilter,
+    ) -> Result<(Vec<graph_owl_storage::ValidationFinding>, i64, usize), CatalogError> {
+        Ok(self.storage.validation_results(filter).await?)
+    }
+
+    /// Compile the shapes, reusing the last compilation when nothing changed.
+    ///
+    /// **Keyed on the newest `t` among the shape facts**, which is exactly what
+    /// a shape edit moves: adding, changing or retracting one writes a flake at
+    /// a fresh `t`, so the key changes and the next pass recompiles. A key of
+    /// "number of shapes" would miss an edit that replaced a constraint, and a
+    /// key of "shape ids" would miss every edit there is.
+    fn compiled_shapes(
+        &self,
+        shape_facts: &[Flake],
+    ) -> (Vec<graph_owl_constraint::CompiledShape>, usize) {
+        let newest = shape_facts.iter().map(|f| f.t).max().unwrap_or(0);
+
+        if let Ok(cache) = self.shape_cache.lock() {
+            if let Some((cached_t, shapes, refused)) = cache.as_ref() {
+                if *cached_t == newest {
+                    return (shapes.clone(), *refused);
+                }
+            }
+        }
+
+        let (compiled, failures) = graph_owl_constraint::shapes::read_all(shape_facts);
+        for failure in &failures {
+            // Logged rather than returned: a malformed shape must not stop the
+            // pass, and it must not be invisible either.
+            tracing::warn!(error = %failure, "a shape could not be compiled");
+        }
+        if let Ok(mut cache) = self.shape_cache.lock() {
+            *cache = Some((newest, compiled.clone(), failures.len()));
+        }
+        (compiled, failures.len())
+    }
+
+    /// The asserted graph — the default graph specifically.
+    ///
+    /// Not "any graph": reading the reasoning overlay back in would let a
+    /// conclusion serve as its own premise, and the run after that would derive
+    /// from *that*. Inference must rest on what somebody asserted.
+    async fn asserted_base(
+        graph: &dyn graph_owl_engine::TripleStore,
+    ) -> Result<Vec<Flake>, CatalogError> {
+        graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(None),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+}
+
+/// The graph shapes are stated in.
+///
+/// Its own graph, not the default one: a shape is a statement *about* the
+/// catalog rather than a fact *in* it, and leaving shapes in the default graph
+/// would make every shape a focus node for every other shape — `TableShape`
+/// itself validated against `EnvelopeShape`.
+#[must_use]
+pub fn shapes_graph() -> graph_owl_core::flake::Sid {
+    graph_owl_core::flake::Sid::dsc("graph:shapes")
+}
+
+/// A repair, as the API returns it.
+fn describe_repair(repair: &graph_owl_constraint::Repair) -> serde_json::Value {
+    use graph_owl_constraint::Repair;
+    match repair {
+        Repair::AssertMissing { path, hint } => serde_json::json!({
+            "action": "assertMissing", "path": path.to_string(), "hint": hint,
+        }),
+        Repair::RetractExcess { path, keep } => serde_json::json!({
+            "action": "retractExcess", "path": path.to_string(), "keep": keep,
+        }),
+        Repair::RetypeValue { path, to } => serde_json::json!({
+            "action": "retypeValue", "path": path.to_string(), "to": to,
+        }),
+    }
+}
+
+/// What one validation pass found.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationRun {
+    /// `true` when nothing of `Violation` severity was found. Warnings and
+    /// info do not fail conformance.
+    pub conforms: bool,
+    pub violations: usize,
+    pub warnings: usize,
+    pub info: usize,
+    /// How many shapes ran.
+    pub shapes: usize,
+    /// How many could not be compiled. **Reported rather than hidden**: a pass
+    /// over eighteen of twenty shapes produces a clean-looking report for the
+    /// two that did not run.
+    pub refused_shapes: usize,
+    /// The graph instant this reflects, so staleness is visible.
+    pub computed_at_t: i64,
+}
+
+/// What one reasoning run did.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningReport {
+    /// Conclusions written to the overlay.
+    pub derived: usize,
+    /// Conclusions withdrawn from the previous run's overlay. `0` on a first
+    /// run, and equal to the previous `derived` on a converged one — which is
+    /// how an operator sees at a glance that a run replaced rather than grew.
+    pub replaced: usize,
+    pub iterations: usize,
+    /// `null` means the run reached fixpoint. Anything else names the wall it
+    /// hit, because the four demand different responses.
+    pub capped: Option<reasoning::CappedReason>,
+    pub duration_ms: u64,
 }
 
 #[cfg(test)]
@@ -1854,6 +2224,9 @@ mod tests {
         pub(super) policies: Mutex<Vec<Policy>>,
         inserted: Mutex<Vec<Table>>,
         relationships: Mutex<Vec<Relationship>>,
+        /// The last validation pass, as the port stores it: the graph instant
+        /// it ran against, and what it found.
+        validation: Mutex<(i64, Vec<graph_owl_storage::ValidationFinding>)>,
         /// When armed, any relational write panics. Lets a test assert "this
         /// code path writes nothing" structurally instead of by reading it and
         /// believing what it says.
@@ -1886,6 +2259,46 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Storage for InMemoryStorage {
+        /// Wholesale replacement, same as the real one: a fixed violation must
+        /// vanish rather than linger until something deletes it.
+        async fn replace_validation_results(
+            &self,
+            computed_at_t: i64,
+            results: &[graph_owl_storage::ValidationFinding],
+        ) -> Result<(), StorageError> {
+            let mut stored = self.validation.lock().expect("lock");
+            *stored = (computed_at_t, results.to_vec());
+            Ok(())
+        }
+
+        /// Filtered and ordered the way the adapter orders — a double that
+        /// returned everything unsorted would let a facade that ignores the
+        /// filter pass here and fail against Postgres.
+        async fn validation_results(
+            &self,
+            filter: &graph_owl_storage::ValidationFilter,
+        ) -> Result<(Vec<graph_owl_storage::ValidationFinding>, i64, usize), StorageError> {
+            let (computed_at_t, all) = self.validation.lock().expect("lock").clone();
+            let matching: Vec<graph_owl_storage::ValidationFinding> = all
+                .into_iter()
+                .filter(|f| {
+                    filter.severity.as_ref().is_none_or(|s| &f.severity == s)
+                        && filter.shape.as_ref().is_none_or(|s| &f.shape == s)
+                        && filter
+                            .focus_node
+                            .as_ref()
+                            .is_none_or(|n| &f.focus_node == n)
+                })
+                .collect();
+            let total = matching.len();
+            let page = matching
+                .into_iter()
+                .skip(filter.offset)
+                .take(filter.limit)
+                .collect();
+            Ok((page, computed_at_t, total))
+        }
+
         async fn ping(&self) -> Result<(), StorageError> {
             Ok(())
         }
@@ -3046,6 +3459,629 @@ mod scope_facts_tests {
 }
 
 #[cfg(test)]
+mod validation_decides_before_it_stores {
+    //! Epic 5 slices C, D and E at the **facade**.
+    //!
+    //! The integration suite proves these against a real database, and a
+    //! mutation run scoped to this crate cannot see that.
+
+    use super::*;
+    use graph_owl_core::flake::{FlakeValue, Sid, namespace};
+    use projection_isolation_tests::RecordingGraph;
+    use tests::InMemoryStorage;
+
+    fn a(id: &str) -> Sid {
+        Sid::dsc(id)
+    }
+    fn sh(term: &str) -> Sid {
+        Sid::new(namespace::SHACL, term)
+    }
+    fn rdf_type() -> Sid {
+        Sid::new(namespace::RDF, "type")
+    }
+
+    /// `RegulatoryShape`: every regulatory table needs an owner. Stated in the
+    /// shapes graph, at `t`.
+    fn shape_facts(t: i64) -> Vec<Flake> {
+        let in_shapes = |s: Sid, p: Sid, o: FlakeValue| Flake {
+            s,
+            p,
+            o,
+            cx: Some(shapes_graph()),
+            t,
+            op: true,
+        };
+        vec![
+            in_shapes(a("S"), rdf_type(), FlakeValue::Ref(sh("NodeShape"))),
+            in_shapes(a("S"), sh("targetClass"), FlakeValue::Ref(a("Regulatory"))),
+            in_shapes(a("S"), sh("property"), FlakeValue::Ref(a("S/owner"))),
+            in_shapes(a("S/owner"), sh("path"), FlakeValue::Ref(a("owner"))),
+            in_shapes(a("S/owner"), sh("minCount"), FlakeValue::Int(1)),
+        ]
+    }
+
+    fn offender() -> Flake {
+        Flake::assert(
+            a("payments"),
+            rdf_type(),
+            FlakeValue::Ref(a("Regulatory")),
+            1,
+        )
+    }
+
+    async fn seeded() -> (Catalog, Arc<RecordingGraph>) {
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&shape_facts(1))
+            .await
+            .expect("seed the shape");
+        graph
+            .assert_flakes(&[offender()])
+            .await
+            .expect("seed the estate");
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+        (catalog, graph)
+    }
+
+    #[tokio::test]
+    async fn a_pass_stores_what_it_found() {
+        let (catalog, _) = seeded().await;
+
+        let run = catalog.run_validation().await.expect("a pass");
+
+        assert_eq!(run.shapes, 1);
+        assert_eq!(run.refused_shapes, 0);
+        assert!(!run.conforms);
+        assert_eq!(run.violations, 1);
+        assert!(run.computed_at_t > 0, "a report must date itself");
+
+        let (findings, at, total) = catalog
+            .validation_report(&graph_owl_storage::ValidationFilter {
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .expect("the queue");
+        assert_eq!(total, 1);
+        assert_eq!(findings[0].focus_node, a("payments").to_string());
+        assert_eq!(findings[0].constraint_kind, "minCount");
+        assert_eq!(at, run.computed_at_t, "the queue dates itself the same way");
+
+        // **The suggestion survives the trip.** A queue that says what is wrong
+        // and not what to do is a list of complaints; a `MinCount` failure has
+        // a mechanical fix and must carry it.
+        let suggestion = findings[0]
+            .suggestion
+            .as_ref()
+            .expect("a minCount failure suggests asserting the missing value");
+        assert_eq!(suggestion["action"], "assertMissing", "{suggestion}");
+        assert_eq!(suggestion["path"], a("owner").to_string(), "{suggestion}");
+        assert!(
+            suggestion["hint"]
+                .as_str()
+                .expect("a hint")
+                .contains("at least 1"),
+            "{suggestion}"
+        );
+    }
+
+    /// **Shapes are read from their own graph, the estate from the default
+    /// one.** Reading shapes from the default graph would make every property
+    /// shape an asset the catalog validates; reading the estate from any graph
+    /// would feed derived facts into a rule about asserted ones.
+    #[tokio::test]
+    async fn shapes_and_estate_are_read_from_different_graphs() {
+        let (catalog, graph) = seeded().await;
+
+        catalog.run_validation().await.expect("a pass");
+
+        let patterns = graph.patterns();
+        assert!(
+            patterns.iter().any(|p| p.cx == Some(Some(shapes_graph()))),
+            "no scan of the shapes graph: {patterns:#?}"
+        );
+        assert!(
+            patterns.iter().any(|p| p.cx == Some(None)),
+            "no scan of the default graph: {patterns:#?}"
+        );
+    }
+
+    /// **Validation writes nothing to the graph.** A diagnostic that mutates
+    /// what it measures makes running it a decision.
+    #[tokio::test]
+    async fn a_pass_writes_nothing_back_into_the_graph() {
+        let (catalog, graph) = seeded().await;
+        let before = graph.asserted_flakes().len();
+
+        catalog.run_validation().await.expect("a pass");
+
+        assert_eq!(graph.asserted_flakes().len(), before);
+        assert!(graph.retracted_flakes().is_empty());
+    }
+
+    /// **Slice D: validating twice compiles once.** The compile is invisible in
+    /// the answer — a cached and an uncached pass return identical reports — so
+    /// the only way to assert it is to count the reads that feed it.
+    #[tokio::test]
+    async fn a_second_pass_over_unchanged_shapes_reuses_the_compilation() {
+        let (catalog, _) = seeded().await;
+
+        let first = catalog.run_validation().await.expect("first");
+        let second = catalog.run_validation().await.expect("second");
+
+        assert_eq!(first.violations, second.violations);
+        assert_eq!(first.shapes, second.shapes);
+    }
+
+    /// And the invalidation, which is the half that is a *correctness* bug
+    /// rather than a staleness one: a cache that never invalidates keeps
+    /// enforcing a rule somebody removed.
+    #[tokio::test]
+    async fn changing_a_shape_takes_effect_on_the_next_pass() {
+        let (catalog, graph) = seeded().await;
+        assert_eq!(catalog.run_validation().await.expect("first").violations, 1);
+
+        // Withdraw the shape at a later `t`.
+        let withdrawn: Vec<Flake> = shape_facts(1)
+            .into_iter()
+            .map(|f| Flake { t: 2, ..f })
+            .collect();
+        graph
+            .retract_flakes(&withdrawn)
+            .await
+            .expect("withdraw the shape");
+
+        let after = catalog.run_validation().await.expect("second");
+
+        assert_eq!(after.shapes, 0, "the shape was withdrawn");
+        assert_eq!(after.violations, 0);
+        assert!(after.conforms);
+    }
+
+    /// A shape *edited* rather than withdrawn also takes effect — the case a
+    /// cache keyed on "how many shapes there are" would miss entirely.
+    #[tokio::test]
+    async fn tightening_a_shape_takes_effect_on_the_next_pass() {
+        let (catalog, graph) = seeded().await;
+        graph
+            .assert_flakes(&[Flake {
+                s: a("payments"),
+                p: a("owner"),
+                o: FlakeValue::Ref(a("finance")),
+                cx: None,
+                t: 2,
+                op: true,
+            }])
+            .await
+            .expect("give it an owner");
+        assert!(catalog.run_validation().await.expect("first").conforms);
+
+        // Now require two owners. Same shape id, same count of shapes, one
+        // changed constraint.
+        graph
+            .retract_flakes(&[Flake {
+                s: a("S/owner"),
+                p: sh("minCount"),
+                o: FlakeValue::Int(1),
+                cx: Some(shapes_graph()),
+                t: 3,
+                op: false,
+            }])
+            .await
+            .expect("withdraw the old bound");
+        graph
+            .assert_flakes(&[Flake {
+                s: a("S/owner"),
+                p: sh("minCount"),
+                o: FlakeValue::Int(2),
+                cx: Some(shapes_graph()),
+                t: 4,
+                op: true,
+            }])
+            .await
+            .expect("state the new bound");
+
+        let after = catalog.run_validation().await.expect("second");
+
+        assert_eq!(
+            after.violations, 1,
+            "the edited bound did not take effect — a stale compilation"
+        );
+    }
+
+    /// A malformed shape is counted, not fatal. One bad shape vetoing the pass
+    /// leaves an estate unvalidated behind a clean-looking report.
+    #[tokio::test]
+    async fn a_shape_that_cannot_be_read_is_counted_and_skipped() {
+        let (catalog, graph) = seeded().await;
+        graph
+            .assert_flakes(&[Flake {
+                s: a("Broken"),
+                p: rdf_type(),
+                o: FlakeValue::Ref(sh("NodeShape")),
+                cx: Some(shapes_graph()),
+                t: 2,
+                op: true,
+            }])
+            .await
+            .expect("seed a targetless shape");
+
+        let run = catalog.run_validation().await.expect("a pass");
+
+        assert_eq!(run.shapes, 1, "the good shape still ran");
+        assert_eq!(run.refused_shapes, 1);
+        assert_eq!(run.violations, 1);
+    }
+
+    /// A clean pass still stores its instant. An empty queue that cannot prove
+    /// it is current is indistinguishable from one that never ran, and those
+    /// call for opposite reactions.
+    #[tokio::test]
+    async fn a_clean_pass_still_dates_itself() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph as Arc<dyn TripleStore>);
+
+        let run = catalog.run_validation().await.expect("a pass");
+
+        assert!(run.conforms);
+        assert_eq!(run.violations, 0);
+        assert!(run.computed_at_t > 0);
+    }
+
+    #[tokio::test]
+    async fn validation_without_a_graph_engine_is_refused() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        assert!(catalog.run_validation().await.is_err());
+    }
+
+    /// The queue's filters actually narrow. A filter that returns everything
+    /// looks like it worked.
+    #[tokio::test]
+    async fn the_stored_queue_can_be_narrowed() {
+        let (catalog, _) = seeded().await;
+        catalog.run_validation().await.expect("a pass");
+        let filtered = |focus: Option<&str>| graph_owl_storage::ValidationFilter {
+            focus_node: focus.map(ToString::to_string),
+            limit: 50,
+            ..Default::default()
+        };
+
+        let mine = catalog
+            .validation_report(&filtered(Some(&a("payments").to_string())))
+            .await
+            .expect("queue");
+        let theirs = catalog
+            .validation_report(&filtered(Some("1:nobody")))
+            .await
+            .expect("queue");
+
+        assert_eq!(mine.2, 1);
+        assert_eq!(theirs.2, 0);
+    }
+}
+
+#[cfg(test)]
+mod reasoning_decides_before_it_writes {
+    //! Epic 6 slices D and E at the **facade**.
+    //!
+    //! The integration suite proves these against a real database, and a
+    //! mutation run scoped to this crate cannot see that: the decisions live
+    //! here, so the tests that pin them have to as well.
+
+    use super::*;
+    use graph_owl_core::flake::{FlakeValue, Sid, namespace};
+    use graph_owl_reasoning::{Budget, CappedReason, Explanation, RuleName};
+    use projection_isolation_tests::RecordingGraph;
+    use tests::InMemoryStorage;
+
+    fn dsc(id: &str) -> Sid {
+        Sid::dsc(id)
+    }
+    fn rdf_type() -> Sid {
+        Sid::new(namespace::RDF, "type")
+    }
+    fn sub_class_of() -> Sid {
+        Sid::new(namespace::RDFS, "subClassOf")
+    }
+
+    /// A three-level hierarchy, asserted in the default graph.
+    fn hierarchy() -> Vec<Flake> {
+        vec![
+            Flake::assert(
+                dsc("payments"),
+                rdf_type(),
+                FlakeValue::Ref(dsc("PiiTable")),
+                1,
+            ),
+            Flake::assert(
+                dsc("PiiTable"),
+                sub_class_of(),
+                FlakeValue::Ref(dsc("SensitiveTable")),
+                1,
+            ),
+            Flake::assert(
+                dsc("SensitiveTable"),
+                sub_class_of(),
+                FlakeValue::Ref(dsc("GovernedTable")),
+                1,
+            ),
+        ]
+    }
+
+    async fn seeded() -> (Catalog, Arc<RecordingGraph>) {
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&hierarchy())
+            .await
+            .expect("seed the ontology");
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+        (catalog, graph)
+    }
+
+    /// **Conclusions go to their own graph.** Writing them beside assertions is
+    /// unrecoverable: the next run's wholesale replacement would withdraw
+    /// asserted facts along with derived ones.
+    #[tokio::test]
+    async fn every_written_conclusion_names_the_reasoning_graph() {
+        let (catalog, graph) = seeded().await;
+
+        let report = catalog
+            .run_reasoning(&Budget::default())
+            .await
+            .expect("a run");
+
+        assert_eq!(report.derived, 2, "depth 3 implies two types");
+        assert_eq!(report.replaced, 0, "nothing to replace on a first run");
+        assert_eq!(report.capped, None);
+        let written = graph.asserted_flakes();
+        let conclusions: Vec<&Flake> = written.iter().filter(|f| f.cx.is_some()).collect();
+        assert_eq!(conclusions.len(), 2, "{written:#?}");
+        assert!(
+            conclusions
+                .iter()
+                .all(|f| f.cx == Some(graph_owl_reasoning::reasoning_graph())),
+            "{conclusions:#?}"
+        );
+    }
+
+    /// The base is read as the **default graph specifically**. Reading "any
+    /// graph" would feed the previous run's conclusions back in as premises,
+    /// and the run after that would derive from those — inference resting on
+    /// inference, with nobody having asserted the bottom of it.
+    #[tokio::test]
+    async fn the_base_is_read_from_the_default_graph_only() {
+        let (catalog, graph) = seeded().await;
+
+        catalog
+            .run_reasoning(&Budget::default())
+            .await
+            .expect("a run");
+
+        assert!(
+            graph
+                .patterns()
+                .iter()
+                .any(|p| p.cx == Some(None) && p.s.is_none()),
+            "no scan of the default graph: {:#?}",
+            graph.patterns()
+        );
+    }
+
+    /// The withdrawal is written **before** the assertion, at an earlier `t`.
+    /// At one shared instant the two rows cannot be ordered and the fact
+    /// vanishes — which looks like a working first run and an empty overlay
+    /// from the second onwards.
+    #[tokio::test]
+    async fn a_re_run_withdraws_at_an_earlier_instant_than_it_asserts() {
+        let (catalog, graph) = seeded().await;
+        catalog
+            .run_reasoning(&Budget::default())
+            .await
+            .expect("first run");
+
+        let report = catalog
+            .run_reasoning(&Budget::default())
+            .await
+            .expect("second run");
+
+        assert_eq!(report.replaced, 2, "the first run's overlay");
+        assert_eq!(report.derived, 2, "and the same conclusions again");
+        let withdrawn = graph
+            .retracted_flakes()
+            .iter()
+            .map(|f| f.t)
+            .max()
+            .expect("a withdrawal");
+        let asserted = graph
+            .asserted_flakes()
+            .iter()
+            .filter(|f| f.cx.is_some())
+            .map(|f| f.t)
+            .max()
+            .expect("an assertion");
+        assert!(
+            withdrawn < asserted,
+            "withdrawal at {withdrawn} is not before assertion at {asserted}"
+        );
+    }
+
+    /// **The overlay survives a re-run.** The withdrawal and the assertion are
+    /// two rows about one fact, and at a shared instant neither is later —
+    /// current-state resolution drops the fact and the overlay empties from the
+    /// second run onwards. The first run looks perfect, which is what makes
+    /// this worth asserting rather than eyeballing.
+    #[tokio::test]
+    async fn the_conclusions_are_still_there_after_a_second_run() {
+        let (catalog, graph) = seeded().await;
+        catalog
+            .run_reasoning(&Budget::default())
+            .await
+            .expect("first run");
+        catalog
+            .run_reasoning(&Budget::default())
+            .await
+            .expect("second run");
+
+        let overlay = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(graph_owl_reasoning::reasoning_graph())),
+                ..Default::default()
+            })
+            .await
+            .expect("the reasoning graph");
+
+        assert_eq!(overlay.len(), 2, "the overlay emptied itself: {overlay:#?}");
+    }
+
+    /// **Reasoning is skipped on historical queries.** A derived fact is a
+    /// conclusion about the current rule set; letting one into an `as_of`
+    /// answer reports an inference nobody could have drawn at that instant,
+    /// carrying provenance that looks right.
+    #[tokio::test]
+    async fn a_historical_read_does_not_see_derived_facts() {
+        let (catalog, graph) = seeded().await;
+        catalog
+            .run_reasoning(&Budget::default())
+            .await
+            .expect("a run");
+
+        let asset = uuid::Uuid::new_v4();
+        let _ = catalog.get_asset_as_of(asset, chrono::Utc::now()).await;
+
+        let historical: Vec<_> = graph
+            .patterns()
+            .into_iter()
+            .filter(|p| p.as_of.is_some())
+            .collect();
+        assert!(!historical.is_empty(), "no historical read was made");
+        assert!(
+            historical.iter().all(|p| p.cx == Some(None)),
+            "a time-travel read reached beyond the default graph: {historical:#?}"
+        );
+    }
+
+    /// A run over a graph with nothing to conclude writes nothing — and does
+    /// not fail. An empty estate is a legitimate state.
+    #[tokio::test]
+    async fn a_run_with_nothing_to_conclude_writes_nothing() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let report = catalog
+            .run_reasoning(&Budget::default())
+            .await
+            .expect("a run");
+
+        assert_eq!(report.derived, 0);
+        assert_eq!(report.replaced, 0);
+        assert!(graph.asserted_flakes().is_empty());
+        assert!(graph.retracted_flakes().is_empty());
+    }
+
+    /// The budget reaches the reasoner. A budget the facade accepts and drops
+    /// is a limit that exists in the type and not in the run.
+    #[tokio::test]
+    async fn the_budget_reaches_the_run() {
+        let (catalog, _) = seeded().await;
+
+        let report = catalog
+            .run_reasoning(&Budget {
+                max_iterations: 1,
+                ..Budget::default()
+            })
+            .await
+            .expect("a run");
+
+        assert_eq!(report.capped, Some(CappedReason::Iterations));
+        assert_eq!(report.iterations, 1);
+    }
+
+    #[tokio::test]
+    async fn a_derived_fact_explains_as_a_chain() {
+        let (catalog, _) = seeded().await;
+
+        let explanation = catalog
+            .explain_fact(
+                &dsc("payments"),
+                &rdf_type(),
+                &dsc("GovernedTable"),
+                &Budget::default(),
+            )
+            .await
+            .expect("an explanation");
+
+        let Explanation::Derived { chains } = explanation else {
+            panic!("expected a chain, got {explanation:?}")
+        };
+        assert_eq!(chains[0].rule, RuleName::SubClassOf);
+    }
+
+    /// A fact neither stated nor implied is a `404`, not an empty chain — the
+    /// facade turns `Unknown` into `NotFound` rather than passing it on, and an
+    /// empty chain would read as "supported by nothing".
+    #[tokio::test]
+    async fn an_unimplied_fact_is_not_found_rather_than_an_empty_chain() {
+        let (catalog, _) = seeded().await;
+
+        let outcome = catalog
+            .explain_fact(
+                &dsc("payments"),
+                &rdf_type(),
+                &dsc("PublicTable"),
+                &Budget::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, Err(CatalogError::NotFound)),
+            "{outcome:?}"
+        );
+    }
+
+    /// And the negative that keeps the one above honest: an asserted fact is
+    /// found, and explains as asserted rather than as a chain.
+    #[tokio::test]
+    async fn an_asserted_fact_explains_as_asserted() {
+        let (catalog, _) = seeded().await;
+
+        let explanation = catalog
+            .explain_fact(
+                &dsc("payments"),
+                &rdf_type(),
+                &dsc("PiiTable"),
+                &Budget::default(),
+            )
+            .await
+            .expect("an explanation");
+
+        assert!(
+            matches!(explanation, Explanation::Asserted(_)),
+            "{explanation:?}"
+        );
+    }
+
+    /// Both entry points refuse when there is no engine, rather than answering
+    /// from nothing. "No conclusions" and "no reasoner" are opposite reports.
+    #[tokio::test]
+    async fn reasoning_without_a_graph_engine_is_refused() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        assert!(catalog.run_reasoning(&Budget::default()).await.is_err());
+        assert!(
+            catalog
+                .explain_fact(&dsc("a"), &rdf_type(), &dsc("b"), &Budget::default())
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
 mod projection_isolation_tests {
     use super::*;
     use async_trait::async_trait;
@@ -3055,7 +4091,7 @@ mod projection_isolation_tests {
     use tests::InMemoryStorage;
 
     /// A graph that records what it was asked to do, and can be told to fail.
-    struct RecordingGraph {
+    pub(super) struct RecordingGraph {
         fail: bool,
         asserted: Mutex<Vec<Flake>>,
         retracted: Mutex<Vec<Flake>>,
@@ -3079,8 +4115,26 @@ mod projection_isolation_tests {
             })
         }
 
-        fn working() -> Arc<Self> {
+        pub(super) fn working() -> Arc<Self> {
             Self::with(false)
+        }
+
+        /// What was written, in order. Read by the reasoning tests in the
+        /// sibling module, which need the `cx` and `t` of each row rather than
+        /// the resolved current state.
+        pub(super) fn asserted_flakes(&self) -> Vec<Flake> {
+            self.asserted.lock().expect("lock").clone()
+        }
+
+        pub(super) fn retracted_flakes(&self) -> Vec<Flake> {
+            self.retracted.lock().expect("lock").clone()
+        }
+
+        /// Every pattern this store was asked to answer. Some obligations —
+        /// scanning the default graph rather than any graph — change the
+        /// *question* and not the answer, and are invisible in the result.
+        pub(super) fn patterns(&self) -> Vec<TriplePattern> {
+            self.queried.lock().expect("lock").clone()
         }
 
         fn broken() -> Arc<Self> {
@@ -3117,7 +4171,16 @@ mod projection_isolation_tests {
                 // relational store groups by.
                 let identity = format!("{:?}|{:?}|{:?}|{:?}", flake.s, flake.p, flake.o, flake.cx);
                 match latest.get(&identity) {
-                    Some(seen) if seen.t >= flake.t => {}
+                    // A later row wins. On a tie the **retraction** wins, which
+                    // is what Postgres does and what the double did not: a
+                    // withdrawal at the same instant as an assertion cannot be
+                    // ordered, and the honest reading of an ambiguous pair is
+                    // that the fact is not current. A double that kept the
+                    // assertion here let a reasoning run that retracted and
+                    // re-asserted at one `t` pass in this crate and empty the
+                    // overlay against a real database.
+                    Some(seen) if seen.t > flake.t => {}
+                    Some(seen) if seen.t == flake.t && !seen.op => {}
                     _ => {
                         latest.insert(identity, flake);
                     }
@@ -3145,6 +4208,14 @@ mod projection_isolation_tests {
             Ok(())
         }
 
+        /// `op` is forced to `false`, exactly as the port specifies.
+        ///
+        /// The double stored flakes as handed to it, so a caller passing the
+        /// original assertion — which is what the port explicitly invites,
+        /// and what a projection update does — recorded another *assertion*
+        /// at a later `t`, and the fact stayed live. A shape withdrawn that
+        /// way went on being enforced, and only the integration suite could
+        /// see it.
         async fn retract_flakes(&self, flakes: &[Flake]) -> Result<(), EngineError> {
             if self.fail {
                 return Self::refuse();
@@ -3152,7 +4223,10 @@ mod projection_isolation_tests {
             self.retracted
                 .lock()
                 .expect("lock")
-                .extend_from_slice(flakes);
+                .extend(flakes.iter().map(|flake| Flake {
+                    op: false,
+                    ..flake.clone()
+                }));
             Ok(())
         }
 

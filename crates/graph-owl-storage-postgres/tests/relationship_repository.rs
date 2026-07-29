@@ -4,10 +4,6 @@ use chrono::Utc;
 use graph_owl_core::Relationship;
 use graph_owl_storage::{Storage, StorageError};
 use graph_owl_storage_postgres::PostgresStorage;
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
 use uuid::Uuid;
 
 fn mock_relationship() -> Relationship {

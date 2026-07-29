@@ -16,10 +16,6 @@ use graph_owl_core::flake::TriplePattern;
 use graph_owl_core::flake::{Flake, FlakeValue, Sid};
 use graph_owl_engine::TripleStore;
 use graph_owl_engine_postgres::PostgresTripleStore;
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
 
 const SUBJECTS: i64 = 10_000;
 /// 10 predicates x 10k subjects = 100k flakes, the size the plan's acceptance

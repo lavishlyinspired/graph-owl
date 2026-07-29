@@ -57,6 +57,7 @@ import {
   type GraphEdge,
   type Overview,
   type SearchFacets,
+  type ValidationRun,
   ApiError,
   api,
   isUnauthenticated,
@@ -73,6 +74,14 @@ import { Background, Controls, Position, ReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { type LineageGraph, positions } from "./graph/lineage";
 import {
+  type Finding,
+  type Severity,
+  currency,
+  describeSuggestion,
+  groupByAsset,
+  localName,
+} from "./governance/queue";
+import {
   type Picture as CyPicture,
   layoutOptions,
   toElements,
@@ -84,7 +93,7 @@ import watermarkImg from "./assets/watermark1.png";
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
 
-type Section = "overview" | "explore" | "connectors";
+type Section = "overview" | "explore" | "connectors" | "governance";
 
 const KIND_ICON: Record<AssetKind, React.ReactNode> = {
   service: <CloudServerOutlined />,
@@ -1777,6 +1786,207 @@ function RunHistory({ colors }: { colors: (typeof palette)["light"] }) {
   );
 }
 
+/** Severity, as a colour and a word.
+ *
+ *  Never colour alone: `00h-ui-design-system.md` requires a state to be legible
+ *  without it, because a red dot and an amber dot are the same dot to a reader
+ *  who cannot tell them apart.
+ */
+const SEVERITY_TAG: Record<Severity, { color: string; label: string }> = {
+  violation: { color: "error", label: "Violation" },
+  warning: { color: "warning", label: "Warning" },
+  info: { color: "default", label: "Info" },
+};
+
+/** The violations queue, and the two engines that fill it — Epic 41.
+ *
+ *  One page for both because they answer the same question from two sides:
+ *  validation says what is broken, reasoning says what the catalog believes and
+ *  why. A steward opens this to decide what to do next.
+ */
+function GovernancePage({ colors }: { colors: (typeof palette)["light"] }) {
+  const [findings, setFindings] = useState<readonly Finding[] | null>(null);
+  const [computedAtT, setComputedAtT] = useState(0);
+  const [currentT, setCurrentT] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [lastRun, setLastRun] = useState<ValidationRun | null>(null);
+  const [severity, setSeverity] = useState<Severity | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const report = await api.validationReport(severity ? { severity } : {});
+      setFindings(report.data);
+      setComputedAtT(report.computedAtT);
+      setFailed(null);
+    } catch (error) {
+      // An empty queue and an unreachable one look identical, and only one of
+      // them means "nothing is wrong".
+      setFailed(error instanceof ApiError ? error.problem.title : "could not load the queue");
+      setFindings([]);
+    }
+  }, [severity]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const run = async () => {
+    setRunning(true);
+    try {
+      const result = await api.runValidation();
+      setLastRun(result);
+      setCurrentT(result.computedAtT);
+      await load();
+    } catch (error) {
+      setFailed(error instanceof ApiError ? error.problem.title : "the pass did not run");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const groups = useMemo(() => groupByAsset(findings ?? []), [findings]);
+  // `currentT` is only known after a pass, so before one the report is judged
+  // against itself — which reads as "current" and is honest: nothing newer is
+  // known to exist.
+  const age = currency(computedAtT, Math.max(currentT, computedAtT));
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Flex justify="space-between" align="flex-start" wrap gap={12}>
+        <div>
+          <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+            Governance
+          </Title>
+          <Paragraph type="secondary" style={{ margin: "4px 0 0", fontSize: 13 }}>
+            What the shapes say is broken, and what the reasoner concluded.
+            Validation never blocks a write — it reports.
+          </Paragraph>
+        </div>
+        <Space>
+          <Tag color={age.stale ? "warning" : "success"}>{age.label}</Tag>
+          <Button type="primary" loading={running} onClick={() => void run()}>
+            Run validation
+          </Button>
+          <Button
+            onClick={() => {
+              void api.runReasoning().then(() => load());
+            }}
+          >
+            Run reasoning
+          </Button>
+        </Space>
+      </Flex>
+
+      {failed && <Alert type="error" showIcon message={failed} />}
+
+      {lastRun && (
+        <Alert
+          type={lastRun.conforms ? "success" : "warning"}
+          showIcon
+          message={
+            lastRun.conforms
+              ? `${lastRun.shapes} shape(s) ran, nothing violated`
+              : `${lastRun.violations} violation(s), ${lastRun.warnings} warning(s) across ${lastRun.shapes} shape(s)`
+          }
+          description={
+            // A pass over eighteen of twenty shapes produces a clean-looking
+            // report for the two that did not run. Saying so is the point.
+            lastRun.refusedShapes > 0
+              ? `${lastRun.refusedShapes} shape(s) could not be compiled and did not run.`
+              : undefined
+          }
+        />
+      )}
+
+      <Space>
+        {(["violation", "warning", "info"] as const).map((s) => (
+          <Button
+            key={s}
+            size="small"
+            type={severity === s ? "primary" : "default"}
+            onClick={() => setSeverity(severity === s ? null : s)}
+          >
+            {SEVERITY_TAG[s].label}
+          </Button>
+        ))}
+      </Space>
+
+      {findings === null ? (
+        <Spin />
+      ) : groups.length === 0 ? (
+        <Card>
+          <Paragraph type="secondary" style={{ margin: 0 }}>
+            {computedAtT === 0
+              ? "No validation pass has run yet. An empty queue is only good news once something has looked."
+              : "Nothing violated. Every shape ran and every asset it targets conforms."}
+          </Paragraph>
+        </Card>
+      ) : (
+        <Space direction="vertical" size="small" style={{ width: "100%" }}>
+          {groups.map((group) => (
+            <Card
+              key={group.focusNode}
+              size="small"
+              title={
+                <Space>
+                  <Tag color={SEVERITY_TAG[group.severity].color}>
+                    {SEVERITY_TAG[group.severity].label}
+                  </Tag>
+                  <Text strong>{localName(group.focusNode)}</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {group.findings.length} finding
+                    {group.findings.length === 1 ? "" : "s"}
+                  </Text>
+                </Space>
+              }
+            >
+              <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                {group.findings.map((finding) => {
+                  const fix = describeSuggestion(finding.suggestion);
+                  return (
+                    <div key={finding.id}>
+                      <Space size={8} wrap>
+                        <Tag>{finding.constraint}</Tag>
+                        <Text>{finding.message}</Text>
+                        {finding.actual && (
+                          <Text code style={{ fontSize: 12 }}>
+                            {finding.actual}
+                          </Text>
+                        )}
+                      </Space>
+                      {fix && (
+                        <div style={{ marginTop: 2 }}>
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            {/* Suggested, never applied: the catalog does not
+                                know whether a missing owner means "assign one"
+                                or "this is deprecated". */}
+                            Suggested — {fix}
+                          </Text>
+                        </div>
+                      )}
+                      <div>
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          {localName(finding.shape)}
+                          {finding.path ? ` · ${localName(finding.path)}` : ""}
+                        </Text>
+                      </div>
+                    </div>
+                  );
+                })}
+              </Space>
+            </Card>
+          ))}
+        </Space>
+      )}
+
+      <Text type="secondary" style={{ fontSize: 11, color: colors.border }}>
+        Repairs are suggestions. Nothing on this page is applied automatically.
+      </Text>
+    </Space>
+  );
+}
+
 function ConnectorsPage({ onDone, colors }: { onDone: () => void; colors: (typeof palette)["light"] }) {
   const [chosen, setChosen] = useState<string | null>(null);
 
@@ -1857,7 +2067,12 @@ function AppShell() {
   // on Explore regardless, or the link would not open the thing it names.
   const [section, setSectionRaw] = useState<Section>(() => {
     const named = readParam("section");
-    if (named === "connectors" || named === "explore" || named === "overview") {
+    if (
+      named === "connectors" ||
+      named === "explore" ||
+      named === "overview" ||
+      named === "governance"
+    ) {
       return named;
     }
     return readParam("asset") ? "explore" : "overview";
@@ -2214,6 +2429,11 @@ function AppShell() {
                 items={[
                   { key: "overview", icon: <DashboardOutlined />, label: "Overview" },
                   { key: "explore", icon: <CompassOutlined />, label: "Explore" },
+                  {
+                    key: "governance",
+                    icon: <SafetyCertificateOutlined />,
+                    label: "Governance",
+                  },
                   { key: "connectors", icon: <PlusOutlined />, label: "Connectors" },
                 ]}
               />
@@ -2274,6 +2494,8 @@ function AppShell() {
                   }}
                   onAddSource={() => setSection("connectors")}
                 />
+              ) : section === "governance" ? (
+                <GovernancePage colors={colors} />
               ) : section === "connectors" ? (
                 <ConnectorsPage onDone={refresh} colors={colors} />
               ) : results !== null ? (
