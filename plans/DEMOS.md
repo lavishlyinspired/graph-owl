@@ -462,10 +462,13 @@ actually holds could not be asserted at all.
 **The claim**: an agent asks "is `upi_transactions` safe to build a fraud model on?" and gets a policy-filtered, provenance-carrying answer — plus the institutional memory of why the schema changed last quarter.
 
 ### Epic 14 — MCP + outbound events ★
-- [ ] MCP server in Rust (`rmcp`), same `AccessPredicate` as HTTP
-- [ ] Seven read tools; trust summaries and gaps
-- [ ] Token-budgeted responses
-- [ ] Outbound webhooks, HMAC-signed, at-least-once
+- [x] **Protocol, authentication and policy together, with one tool** *(Slice A)* — `graph-owl-mcp` is pure, reaching the catalog through a `ContextSource` port, so the security decisions are testable without a database. **Denied and absent are one answer**: a refusal naming an asset the caller cannot see tells them it exists, which is the fact the policy withholds. Authentication is checked *before* the tool name, because "no such tool" tells an unauthenticated caller which tools exist. `policy_filtered` rides on every context — an agent that cannot tell a complete answer from a filtered one presents the filtered one as complete
+- [x] **Trust summaries and gaps** *(Slice B)* — lifecycle, certification with expiry *evaluated* (tested at exactly the boundary), quality, and named gaps. **An asset nobody tested reports `Unknown`, never `Healthy`**; `None` and `Some(false)` are kept apart because "never ran" and "ran and failed" are opposite statements. An unrecognised lifecycle is `Unknown` rather than `Production`, and a blank description counts as missing. `gaps` is empty only when genuinely complete
+- [~] **Not wired to anything yet** — no `ContextSource` implementation over `Catalog` and no transport, so nothing serves these. The adapter must map the catalog's fields onto `Observed` **without defaulting on the way in**, or the `None` this module protects is lost before it arrives
+- [ ] The remaining six read tools — search, lineage, governance, graph query *(Slices C, D)*
+- [ ] Token-budgeted responses *(Slice E)*
+- [ ] Outbound webhooks, HMAC-signed, at-least-once *(Slice F)*
+- [ ] The thesis test: an agent with only MCP access answers a real question *(Slice G)*
 
 ### Epic 31 — Organizational memory ★
 - [ ] Memory objects: kind, content, authorship, confidence, `as_of`

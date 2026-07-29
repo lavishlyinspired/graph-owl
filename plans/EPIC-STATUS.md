@@ -34,7 +34,7 @@ marks for it yet, which is a different thing from zero of them done.
 | **11** | [`11-people-and-ownership.md`](11-people-and-ownership.md) | **Shipped** | 2/2 | Epic 3 (envelope carries `owners`) |
 | **12** | [`12-13-security.md`](12-13-security.md) | In progress | 13/15 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **13** | [`12-13-security.md`](12-13-security.md) | In progress | 9/10 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
-| **14** | [`14-mcp-activation.md`](14-mcp-activation.md) | Not started | 0/4 | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard… |
+| **14** | [`14-mcp-activation.md`](14-mcp-activation.md) | In progress | 2/7 (+1 partial) | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard… |
 | **15** | [`15-connectors.md`](15-connectors.md) | In progress | 13/17 | Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable) |
 | **16** | [`16-ingestion-apis.md`](16-ingestion-apis.md) | Not started | 0/3 | Epic 1 (contract), Epic 15 (upsert semantics) |
 | **17** | [`17-entity-resolution.md`](17-entity-resolution.md) | Not started | 0/3 | Epic 4 (`sameAs` in the graph), Epic 15 + 16 (two write paths make this necessa… |
@@ -248,10 +248,13 @@ marks for it yet, which is a different thing from zero of them done.
 
 ### Epic 14 — MCP + Outbound Events ★
 
-- [ ] MCP server in Rust (`rmcp`), same `AccessPredicate` as HTTP
-- [ ] Seven read tools; trust summaries and gaps
-- [ ] Token-budgeted responses
-- [ ] Outbound webhooks, HMAC-signed, at-least-once
+- [x] Protocol, authentication and policy together, with one tool
+- [x] Trust summaries and gaps
+- [~] Not wired to anything yet
+- [ ] The remaining six read tools — search, lineage, governance, graph query *(Slices C, D)*
+- [ ] Token-budgeted responses *(Slice E)*
+- [ ] Outbound webhooks, HMAC-signed, at-least-once *(Slice F)*
+- [ ] The thesis test: an agent with only MCP access answers a real question *(Slice G)*
 
 ### Epic 15 — Source Connectors
 
