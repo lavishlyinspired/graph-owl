@@ -8,6 +8,7 @@
 
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::response::Response;
+use graph_owl_api::Catalog;
 
 /// The header a client uses to name its own request, and the one echoed back.
 pub const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
@@ -297,9 +298,54 @@ pub async fn observe(request: axum::extract::Request, next: axum::middleware::Ne
     response
 }
 
+/// How many pool connections are handed out.
+///
+/// Derived rather than counted, for the reason `PoolStats` does not report it:
+/// a pool moves connections between idle and in-use constantly, and two
+/// separately-sampled numbers publish a pair that does not sum to the total an
+/// operator is reading them against.
+///
+/// Saturating because the two readings are taken a moment apart — a connection
+/// returned in between would otherwise underflow into an enormous in-use count,
+/// and a metrics path must not panic.
+#[must_use]
+pub fn connections_in_use(stats: graph_owl_storage::PoolStats) -> u32 {
+    stats.connections.saturating_sub(stats.idle)
+}
+
+const POOL: &str = "graph_owl_db_pool_connections";
+const ENTITIES: &str = "graph_owl_catalog_entities_total";
+
 /// Serves the exporter's rendering. Excluded from its own counters by
 /// [`is_metered`].
-pub async fn metrics_endpoint() -> String {
+///
+/// **The gauges are sampled here rather than on a timer.** A background task
+/// would publish numbers that are up to its interval old and keep running when
+/// nobody is scraping; sampling on the scrape means the value Prometheus reads
+/// is the value at the moment it asked, and costs nothing when nobody asks.
+pub async fn metrics_endpoint(
+    axum::extract::State(catalog): axum::extract::State<Catalog>,
+) -> String {
+    if let Some(stats) = catalog.pool_stats() {
+        metrics::gauge!(POOL, "state" => "idle").set(f64::from(stats.idle));
+        metrics::gauge!(POOL, "state" => "in_use").set(f64::from(connections_in_use(stats)));
+    }
+
+    // As the system principal, deliberately. This is an operational gauge, and
+    // one whose value depended on who scraped it would be meaningless — an
+    // estate does not change size according to who is looking. It reports
+    // aggregate counts, never which assets exist, and `/metrics` is already
+    // unauthenticated by design.
+    if let Ok(counts) = catalog
+        .count_assets_by_kind_for(&graph_owl_core::Principal::system())
+        .await
+    {
+        for (kind, count) in counts {
+            #[allow(clippy::cast_precision_loss)]
+            metrics::gauge!(ENTITIES, "entity_type" => kind.as_str()).set(count as f64);
+        }
+    }
+
     metrics_handle().render()
 }
 
@@ -698,6 +744,59 @@ mod tests {
             let (name, _) = &seen[0];
             assert!(name.contains('.'), "{name} is not <subsystem>.<operation>");
             assert!(name.starts_with("http."), "{name}");
+        }
+    }
+
+    mod pool_occupancy {
+        use super::*;
+        use graph_owl_storage::PoolStats;
+
+        #[test]
+        fn in_use_is_the_pool_minus_what_is_idle() {
+            assert_eq!(
+                connections_in_use(PoolStats {
+                    connections: 10,
+                    idle: 3
+                }),
+                7
+            );
+        }
+
+        #[test]
+        fn a_fully_idle_pool_has_nothing_in_use() {
+            assert_eq!(
+                connections_in_use(PoolStats {
+                    connections: 5,
+                    idle: 5
+                }),
+                0
+            );
+        }
+
+        #[test]
+        fn a_fully_busy_pool_reports_every_connection_in_use() {
+            assert_eq!(
+                connections_in_use(PoolStats {
+                    connections: 5,
+                    idle: 0
+                }),
+                5
+            );
+        }
+
+        /// The two readings are taken a moment apart, so a connection returned
+        /// in between can make `idle` exceed the total that was sampled first.
+        /// Underflowing into an enormous count would be worse than briefly
+        /// reporting zero, and a metrics path must not panic at all.
+        #[test]
+        fn more_idle_than_the_pool_holds_does_not_underflow() {
+            assert_eq!(
+                connections_in_use(PoolStats {
+                    connections: 4,
+                    idle: 9
+                }),
+                0
+            );
         }
     }
 

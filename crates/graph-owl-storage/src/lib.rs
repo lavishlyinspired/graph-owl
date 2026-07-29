@@ -60,8 +60,29 @@ pub enum UpdateOutcome {
     VersionMismatch(EntityVersion),
 }
 
+/// Connection-pool occupancy, for the operational gauge.
+///
+/// `idle` rather than `in_use`, because that is what a pool can report without
+/// racing itself: connections move between the two constantly, and a pool that
+/// counted both separately would publish a pair that does not sum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolStats {
+    /// Connections the pool currently holds, idle or not.
+    pub connections: u32,
+    pub idle: u32,
+}
+
 #[async_trait]
 pub trait Storage: Send + Sync {
+    /// Connection-pool occupancy, if this backend has a pool.
+    ///
+    /// `None` by default, and that is not the same as zero: a backend without a
+    /// pool has nothing to report, and publishing `0` would show an operator a
+    /// permanently empty pool rather than the absence of one.
+    fn pool_stats(&self) -> Option<PoolStats> {
+        None
+    }
+
     /// Cheapest round trip that proves the backing store answers.
     async fn ping(&self) -> Result<(), StorageError>;
 

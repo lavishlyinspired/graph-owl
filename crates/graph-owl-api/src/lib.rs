@@ -1150,6 +1150,12 @@ impl Catalog {
         Ok(predicate)
     }
 
+    /// Connection-pool occupancy, for the operational gauge.
+    #[must_use]
+    pub fn pool_stats(&self) -> Option<graph_owl_storage::PoolStats> {
+        self.storage.pool_stats()
+    }
+
     /// Forget every cached authorization decision.
     ///
     /// Called by anything that changes what a decision was computed *from* — a

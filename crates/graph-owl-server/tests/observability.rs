@@ -183,3 +183,55 @@ async fn request_duration_is_exported_in_base_units() {
         "a millisecond-named metric is a contract violation: {scraped}"
     );
 }
+
+/// The two gauges Slice D names, sampled at scrape time rather than on a timer.
+#[tokio::test]
+async fn the_pool_and_entity_gauges_are_exported() {
+    let (app, _database, _) = test_app().await;
+
+    // One asset, so the entity gauge has something to report that is not zero —
+    // an all-zero gauge is indistinguishable from one that is never set.
+    let created = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/assets")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"kind":"service","name":"hdfc-core"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("handled");
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    let scraped = scrape(&app).await;
+
+    assert!(
+        scraped.contains(r#"graph_owl_db_pool_connections{state="idle"}"#),
+        "{scraped}"
+    );
+    assert!(
+        scraped.contains(r#"graph_owl_db_pool_connections{state="in_use"}"#),
+        "{scraped}"
+    );
+    assert!(
+        scraped.contains(r#"graph_owl_catalog_entities_total{entity_type="service"} 1"#),
+        "the catalogue holds one service and the gauge must say so: {scraped}"
+    );
+}
+
+/// And the negative: a kind nothing was created for must not appear with a
+/// fabricated count. A gauge reporting zero tables where the catalog has never
+/// had one is a different statement from silence, and only one of them is true.
+#[tokio::test]
+async fn a_kind_with_no_assets_is_not_reported_as_zero() {
+    let (app, _database, _) = test_app().await;
+
+    let scraped = scrape(&app).await;
+
+    assert!(
+        !scraped.contains(r#"entity_type="column""#),
+        "nothing has been catalogued: {scraped}"
+    );
+}

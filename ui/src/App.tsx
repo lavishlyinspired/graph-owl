@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import {
   App as AntApp,
   Breadcrumb,
@@ -68,6 +68,13 @@ import { type DiffEdge, diff } from "./graph/diff";
 import { type GraphModel, expand, performedExpansions, replay, seed } from "./graph/model";
 import { brand, darkTheme, lightTheme, palette } from "./theme";
 import { GenericSourceMark, PostgresMark } from "./icons";
+import cytoscape from "cytoscape";
+import {
+  type Picture as CyPicture,
+  layoutOptions,
+  toElements,
+  wantsWebgl,
+} from "./graph/cytoscape";
 import watermarkImg from "./assets/watermark1.png";
 
 const { Header, Sider, Content } = Layout;
@@ -424,6 +431,133 @@ function OverviewPage({
   );
 }
 
+/** The canvas.
+ *
+ *  Cytoscape rather than the hand-drawn SVG this replaced. The SVG was honest
+ *  at demo scale and explicitly would not survive 10k nodes (`00f`); Cytoscape
+ *  ships a WebGL renderer and a deterministic `breadthfirst` layout, which are
+ *  the two things that decision needed.
+ *
+ *  **Everything decidable lives in `graph/cytoscape.ts`** — which elements
+ *  exist, what classes they carry, whether the layout is deterministic — and is
+ *  tested there. This component is the imperative shell: mount, feed, listen.
+ *  `00f` requires graph tests to assert the model rather than the picture, and
+ *  that is only possible if the picture is this thin.
+ */
+function GraphCanvas({
+  picture,
+  colors,
+  onExpand,
+  label,
+}: {
+  picture: CyPicture;
+  colors: (typeof palette)["light"];
+  onExpand: (id: string) => void;
+  label: string;
+}) {
+  const host = useRef<HTMLDivElement | null>(null);
+  const cy = useRef<cytoscape.Core | null>(null);
+  const expand = useRef(onExpand);
+  expand.current = onExpand;
+
+  const elements = useMemo(() => toElements(picture), [picture]);
+
+  useEffect(() => {
+    if (!host.current) return undefined;
+    const instance = cytoscape({
+      container: host.current,
+      elements,
+      // Chosen once, at creation. `00f` rejects a hybrid that swaps renderers
+      // mid-session: the swap discards the layout at the moment a reader most
+      // needs it, because their mental map of where things are is the main
+      // thing keeping a large graph legible.
+      // `renderer` is not in Cytoscape's published option type, but it is the
+      // documented way to select the WebGL backend, so the cast is narrow and
+      // stated rather than an `any` on the whole options object.
+      ...(wantsWebgl(picture.nodes.length)
+        ? ({ renderer: { name: "canvas", webgl: true } } as unknown as cytoscape.CytoscapeOptions)
+        : {}),
+      style: [
+        {
+          selector: "node",
+          style: {
+            label: "data(label)",
+            "font-size": 11,
+            color: colors.text,
+            "text-valign": "bottom",
+            "text-margin-y": 4,
+            "background-color": colors.primary,
+            width: 18,
+            height: 18,
+          },
+        },
+        { selector: "node.seed", style: { width: 26, height: 26, "font-weight": "bold" } },
+        // A ring, not a colour: the expandable marker has to survive a reader
+        // who cannot distinguish the two hues.
+        {
+          selector: "node.expandable",
+          style: { "border-width": 3, "border-color": colors.primary, "background-opacity": 0.35 },
+        },
+        {
+          selector: "node.truncated",
+          style: { "border-width": 3, "border-style": "dashed", "border-color": colors.text },
+        },
+        { selector: "node.hidden-kind", style: { "background-color": colors.border } },
+        // Removed nodes stay in the picture, marked by shape *and* opacity
+        // rather than colour alone — a deletion shown only in red is invisible
+        // to a reader who cannot see red.
+        {
+          selector: "node.removed",
+          style: { shape: "diamond", "background-opacity": 0.4, "border-style": "dashed", "border-width": 2, "border-color": colors.text },
+        },
+        { selector: "node.added", style: { shape: "star" } },
+        { selector: "edge", style: { width: 1, "line-color": colors.border, "curve-style": "straight" } },
+        { selector: "edge.removed", style: { "line-style": "dashed", "line-color": colors.text } },
+        { selector: "edge.added", style: { width: 2, "line-color": colors.primary } },
+      ],
+      layout: layoutOptions(picture.seedId),
+      // The reader drives the picture; nothing moves on its own.
+      autoungrabify: true,
+    });
+    instance.on("tap", "node.expandable", (event) => {
+      expand.current(event.target.id());
+    });
+    cy.current = instance;
+    return () => {
+      instance.destroy();
+      cy.current = null;
+    };
+    // Colours change only with the theme, which remounts cheaply; elements are
+    // handled below so an expansion does not tear the canvas down.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [colors]);
+
+  // Elements are replaced in place and re-laid out, rather than remounting.
+  // A remount loses the reader's pan and zoom on every expand, which is the
+  // one thing they were using to keep their place.
+  useEffect(() => {
+    const instance = cy.current;
+    if (!instance) return;
+    instance.elements().remove();
+    instance.add(elements as cytoscape.ElementDefinition[]);
+    instance.layout(layoutOptions(picture.seedId)).run();
+  }, [elements, picture.seedId]);
+
+  return (
+    <div
+      ref={host}
+      role="img"
+      aria-label={label}
+      style={{
+        height: 420,
+        border: `1px solid ${colors.border}`,
+        borderRadius: 16,
+        background: colors.raised,
+      }}
+    />
+  );
+}
+
 /** The graph explorer.
  *
  *  A deterministic **radial** layout rather than a force simulation: rings by
@@ -580,74 +714,11 @@ function GraphExplorer({
     return model ? { nodes: model.nodes, edges: model.edges } : null;
   }, [comparison, model]);
 
-  /** Change per node, for the canvas. Empty when not comparing. */
-  const changeOf = useMemo(
-    () => new Map((comparison?.nodes ?? []).map((node) => [node.id, node.change])),
-    [comparison],
-  );
-
-  const layout = useMemo(() => {
-    if (!picture) return null;
-    const width = 900;
-    const height = 460;
-    const centre = { x: width / 2, y: height / 2 };
-
-    // Distance is recovered from the edge set rather than requested from the
-    // server a second time: BFS over what was returned is cheap and cannot
-    // disagree with the picture being drawn.
-    const adjacency = new Map<string, string[]>();
-    for (const edge of picture.edges) {
-      adjacency.set(edge.from, [...(adjacency.get(edge.from) ?? []), edge.to]);
-      adjacency.set(edge.to, [...(adjacency.get(edge.to) ?? []), edge.from]);
-    }
-    const depth = new Map<string, number>([[assetId, 0]]);
-    let frontier = [assetId];
-    while (frontier.length > 0) {
-      const next: string[] = [];
-      for (const node of frontier) {
-        for (const neighbour of adjacency.get(node) ?? []) {
-          if (!depth.has(neighbour)) {
-            depth.set(neighbour, (depth.get(node) ?? 0) + 1);
-            next.push(neighbour);
-          }
-        }
-      }
-      frontier = next;
-    }
-
-    const rings = new Map<number, string[]>();
-    for (const node of picture.nodes) {
-      // A node with no path in the returned edges still belongs somewhere;
-      // the outer ring is honest about it being least connected.
-      const d = depth.get(node.id) ?? Math.max(1, hops);
-      rings.set(d, [...(rings.get(d) ?? []), node.id]);
-    }
-
-    const positions = new Map<string, { x: number; y: number }>();
-    const maxRing = Math.max(...[...rings.keys()], 1);
-    for (const [ring, ids] of rings) {
-      if (ring === 0) {
-        positions.set(ids[0] ?? assetId, centre);
-        continue;
-      }
-      const radius = (Math.min(width, height) / 2 - 60) * (ring / maxRing);
-      ids.forEach((id, i) => {
-        // Offset each ring so successive rings do not align spokes, which
-        // makes edges overlap and the picture read as fewer nodes than it has.
-        const angle = (2 * Math.PI * i) / ids.length + ring * 0.4;
-        positions.set(id, {
-          x: centre.x + radius * Math.cos(angle),
-          y: centre.y + radius * Math.sin(angle),
-        });
-      });
-    }
-    return { width, height, positions };
-  }, [picture, assetId, hops]);
 
   if (error) {
     return <Empty description={error} />;
   }
-  if (!view || !layout || !picture) {
+  if (!view || !picture) {
     return <Text type="secondary">Walking the graph…</Text>;
   }
 
@@ -734,120 +805,22 @@ function GraphExplorer({
         )}
       </Flex>
 
-      <div style={{ overflowX: "auto", border: `1px solid ${colors.border}`, borderRadius: 16 }}>
-        <svg
-          viewBox={`0 0 ${layout.width} ${layout.height}`}
-          style={{ width: "100%", minWidth: 640, display: "block", background: colors.raised }}
-          role="img"
-          aria-label={
-            comparison
-              ? `Graph comparison: ${comparison.summary.added} added, ${comparison.summary.removed} removed, ${comparison.summary.changed} changed`
-              : `Graph neighbourhood: ${picture.nodes.length} nodes, ${picture.edges.length} edges`
-          }
-        >
-          {picture.edges.map((edge, i) => {
-            const a = layout.positions.get(edge.from);
-            const b = layout.positions.get(edge.to);
-            if (!a || !b) return null;
-            const change = "change" in edge ? edge.change : "unchanged";
-            return (
-              <line
-                key={`${edge.from}-${edge.to}-${i}`}
-                x1={a.x}
-                y1={a.y}
-                x2={b.x}
-                y2={b.y}
-                stroke={change === "unchanged" ? colors.border : colors.text}
-                strokeWidth={change === "unchanged" ? 1.5 : 2}
-                // Removed edges are dashed and added ones solid-but-heavier,
-                // so the distinction survives a greyscale print and a
-                // screenshot pasted into a ticket. Not colour alone — Epic 40
-                // decision 4.
-                strokeDasharray={change === "removed" ? "5 4" : undefined}
-                opacity={change === "removed" ? 0.6 : 1}
-              />
-            );
-          })}
-          {picture.nodes.map((node) => {
-            const at = layout.positions.get(node.id);
-            if (!at) return null;
-            const isSeed = node.id === assetId;
-            const isExpanded = view.expanded.includes(node.id);
-            const hidesMore = view.truncatedAt.includes(node.id);
-            const change = changeOf.get(node.id);
-            const fill = isSeed
-              ? colors.primary
-              : node.kind
-                ? KIND_COLOR[node.kind] === "default"
-                  ? colors.textSubtle
-                  : KIND_COLOR[node.kind]
-                : colors.textDisabled;
-            return (
-              <g
-                key={node.id}
-                onClick={() => expandNode(node.id)}
-                style={{ cursor: isExpanded ? "default" : "pointer" }}
-              >
-                <circle
-                  cx={at.x}
-                  cy={at.y}
-                  r={isSeed ? 13 : 8}
-                  fill={change === "removed" ? "none" : fill}
-                  stroke={change === "removed" ? fill : colors.raised}
-                  strokeWidth={2}
-                  strokeDasharray={change === "removed" ? "3 3" : undefined}
-                />
-                {/* An unexpanded node is drawn with a ring, so what is still
-                    unexplored is visible without hovering anything. Suppressed
-                    while comparing: two dashed treatments on one canvas would
-                    make "unexplored" and "removed" look like each other. */}
-                {!isExpanded && !comparison && (
-                  <circle
-                    cx={at.x}
-                    cy={at.y}
-                    r={isSeed ? 17 : 12}
-                    fill="none"
-                    stroke={fill}
-                    strokeWidth={1}
-                    strokeDasharray="2 3"
-                    opacity={0.7}
-                  />
-                )}
-                {/* Truncation is marked on the node that is hiding something,
-                    not only on the canvas — the shape of the omission is what
-                    tells someone which conclusion they may not draw. */}
-                {hidesMore && (
-                  <text
-                    x={at.x + (isSeed ? 15 : 11)}
-                    y={at.y - (isSeed ? 9 : 6)}
-                    fontSize={13}
-                    fontWeight={700}
-                    fill={colors.warning}
-                  >
-                    +
-                  </text>
-                )}
-                {/* The change is written into the label as a sigil, not
-                    signalled by colour. A reader who cannot distinguish the
-                    palette — or who printed the page — still gets the answer.
-                    Epic 40 decision 4. */}
-                <text
-                  x={at.x}
-                  y={at.y - (isSeed ? 24 : 19)}
-                  textAnchor="middle"
-                  fontSize={11}
-                  fontWeight={isSeed || change === "added" ? 600 : 400}
-                  fill={colors.text}
-                  textDecoration={change === "removed" ? "line-through" : undefined}
-                >
-                  {change === "added" ? "+ " : change === "removed" ? "− " : change === "changed" ? "~ " : ""}
-                  {node.name.length > 22 ? `${node.name.slice(0, 21)}…` : node.name}
-                </text>
-              </g>
-            );
-          })}
-        </svg>
-      </div>
+      <GraphCanvas
+        picture={{
+          seedId: view.seedId,
+          nodes: picture.nodes,
+          edges: picture.edges,
+          expanded: view.expanded,
+          truncatedAt: view.truncatedAt,
+        }}
+        colors={colors}
+        onExpand={expandNode}
+        label={
+          comparison
+            ? `Graph comparison: ${comparison.summary.added} added, ${comparison.summary.removed} removed, ${comparison.summary.changed} changed`
+            : `Graph neighbourhood: ${picture.nodes.length} nodes, ${picture.edges.length} edges`
+        }
+      />
 
       {/* A picture is not an accessible interface on its own. The same data as
           a list, so the neighbourhood is reachable by keyboard and by a screen

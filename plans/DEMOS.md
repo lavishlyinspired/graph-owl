@@ -23,8 +23,6 @@ revision (rule 0's corollary).*
 |---|---|---|
 | 1 | **Epic 15** — scheduled runs, run-history persistence, `source_hash` fingerprinting to skip unchanged records | — |
 | 1 | **Epic 1 K** — a client generated in another language and exercised. The valuable half — responses checked against the promised schemas — shipped | — |
-| 2 | **Epic 10** — memory budget report, admission control, cross-port spans, pool/entity gauges | — |
-| 3 | **Epic 40** — WebGL swap; SVG will not survive 10k nodes. Every *interaction* the swap was expected to bring already works and is tested at the model layer, so what remains is scale alone | — |
 | 3 | **Epic 40** — React Flow + d3-dag lineage DAG | Epic 29 (nothing declares lineage yet) |
 
 **Deferred *by design*, and not Demo 1–3 debt** — listing them as gaps would be
@@ -238,8 +236,8 @@ test's scrape had already installed the recorder.
 **Pending in this epic**
 - [x] **Admission control** — a bounded semaphore per class fronting the expensive paths; a request that cannot get a permit is rejected **immediately** with `503` and `Retry-After`, never queued. An unbounded queue converts overload into latency collapse: everyone waits, everyone times out, everyone retries, and the queue grows. A fast `503` lets a well-behaved client back off while the requests already in flight finish at normal speed
 - [x] Permits available, held and rejections are exported per class, so "overloaded" and "broken" — which look identical from outside and demand opposite responses — are distinguishable
-- Spans across port boundaries: `tracing` is wired but the facade → storage and query → triple-store child spans are not, so a slow request is not yet attributable to a layer
-- `db_pool_connections{state}` and `catalog_entities_total{entity_type}` gauges (Slice D lists both; only the two HTTP series ship)
+- [x] **Spans across port boundaries** — the middleware opens `http.request` carrying `request_id`, and the handler runs *inside* it, so `catalog.*`, `storage.*` and `engine.*` spans are its children and inherit the id. That inheritance is the whole mechanism: without a parent span those are roots, and a slow request is attributable to the process rather than to a layer. Every `#[instrument]` uses `skip_all` — the default records each argument as a span field, and these arguments are FQNs, search strings and SPARQL, which is customer metadata that must not reach a tracing backend
+- [x] **`db_pool_connections{state}` and `catalog_entities_total{entity_type}`**, sampled at scrape time rather than on a timer: a background task publishes numbers up to its interval old and keeps running when nobody is scraping, where sampling on the scrape is exact and free when nobody asks. `in_use` is derived from `connections - idle` rather than counted separately, because two independently-sampled numbers publish a pair that does not sum
 
 ### Epic 11 — Users, teams, ownership
 - [x] `User` with roles; auto-provisioned on first sight
@@ -393,7 +391,8 @@ no library can supply actually live.
 - [x] Non-visual equivalent: the same neighbourhood as a keyboard-navigable table, expansion included
 - [x] **Expand-on-click** *(Slice B)* — one hop per click, budgeted server-side; dedup by node id and by `(from, to, relationship)`; truncation **sticky and per-node**, so the marker sits on the node hiding something; `?expand=` replays the expansions, so a pasted link restores the sender's picture
 - [x] **Diff mode** *(Slice D)* — two instants, `?compareTo=`. A node removed between them is **still drawn**, marked by sigil, strikethrough and dash pattern rather than colour alone. A truncated side marks the comparison `partial`, because a partial comparison shown as complete invents deletions that never happened
-- [~] Still SVG, not WebGL — honest at demo scale, will not survive 10k nodes. Every *interaction* the swap was expected to bring already works and is tested at the model layer, so what remains is scale alone
+- [x] **Cytoscape canvas, WebGL above 256 nodes** *(Slice A, renderer)* — the hand-drawn SVG is gone. `breadthfirst` rooted at the seed, `animate: false`, `maximal`/`grid` pinned: a force layout settles differently every run, so the same neighbourhood never looks the same twice and nobody can say "the node on the left". WebGL is chosen **once, at creation** — `00f` rejects a hybrid that swaps mid-session, because the swap discards the layout at the moment a reader most needs it
+- [x] **The model was untouched by the swap**, which is the payoff of `GraphView` having been renderer-agnostic from the start. Everything decidable — which elements exist, what classes they carry, whether the layout is deterministic — lives in `graph/cytoscape.ts` and is tested there; the component is mount, feed, listen
 - [x] **Diff compares the *expanded* model, not the seed walk** — the baseline replays the reader's expansions at the earlier instant. A node expanded today that did not exist then is skipped rather than treated as empty, and the skip does not mark the comparison `partial` (which would suppress the deletions the screen exists to show)
 - [ ] React Flow + d3-dag lineage DAG
 - [ ] Derived edges visually distinct — nothing derives edges until Epic 6

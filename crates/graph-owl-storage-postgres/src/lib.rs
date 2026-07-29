@@ -72,6 +72,15 @@ impl PostgresStorage {
 
 #[async_trait]
 impl Storage for PostgresStorage {
+    fn pool_stats(&self) -> Option<graph_owl_storage::PoolStats> {
+        Some(graph_owl_storage::PoolStats {
+            connections: self.pool.size(),
+            // `num_idle` is a `usize` that cannot exceed `size`, which is a
+            // `u32` — so the cast is lossless in every state a pool can reach.
+            idle: u32::try_from(self.pool.num_idle()).unwrap_or(u32::MAX),
+        })
+    }
+
     async fn ping(&self) -> Result<(), StorageError> {
         sqlx::query("SELECT 1")
             .execute(&self.pool)

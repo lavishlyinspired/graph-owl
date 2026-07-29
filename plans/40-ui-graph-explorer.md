@@ -1,9 +1,54 @@
 # Plan: Graph Explorer, Lineage & Time Travel (Epic 40) ★
 
 **Branch**: feat/ui-explorer
-**Status**: In progress — **differentiator**. Slices B and D shipped on the SVG canvas (28 Jul 2026); Slice A's model exists but not its `Sid`-derived identity; C, E, F not started
+**Status**: In progress — **differentiator**. Slices B and D shipped, and the
+canvas is now Cytoscape with a deterministic layout and WebGL above 256 nodes
+(29 Jul 2026). Slice A's model exists but not its `Sid`-derived identity; the
+lineage DAG waits on Epic 29, which is what would declare lineage; E and F not
+started
 **Depends on**: Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes, time travel), Epic 6 (reasoning overlay), Epic 29 (lineage), **Epic 7c** (`Sid`-derived element ids — Slice A's node identity comes from the LPG projection, not from fetch order)
 **Crates**: frontend in **`ui/`** (features `explorer`, `lineage`, `graph`) · served by **`graph-owl-ui`** · consumes the Epic 7a traversal, Epic 29 lineage, and Epic 4 as-of APIs — **no new endpoint is private to the console**
+
+## The renderer swap, as built (29 July 2026)
+
+The hand-drawn SVG is replaced by Cytoscape. `00f`'s revision picked it over
+Sigma because Cytoscape ships **deterministic layouts** and Sigma has none — with
+Sigma the layout is code this project writes, owns and tests, in order to use a
+library whose WebGL advantage expired when Cytoscape 3.31 shipped one.
+
+**Everything decidable lives in `ui/src/graph/cytoscape.ts`**, not in the
+component: which elements exist, what classes each carries, whether the layout
+is deterministic, and whether WebGL is worth switching on. `00f` requires graph
+tests to assert the model rather than the picture, and that is only possible if
+the picture is thin. The component is mount, feed, listen.
+
+**The model did not change.** `GraphView` was renderer-agnostic from Slice A, so
+`model.ts`, `diff.ts` and their mutation-tested assertions survived the swap
+untouched. That was the claim the design made two slices ago and this is the
+first time it was actually tested.
+
+Three decisions worth keeping:
+
+- **WebGL above 256 nodes, chosen once at creation.** Not because Canvas is
+  inadequate below that — it is *better*, because WebGL has a fixed
+  context-creation cost and a texture atlas that only pays for itself once there
+  is enough to draw. `00f` rejects a hybrid that swaps renderers mid-session:
+  the swap discards the layout at the moment a reader most needs it, since their
+  mental map of where things are is the main thing keeping a large graph
+  legible. 256 is an order of magnitude below the 10,000-node interactivity
+  budget, so the budget is never what this threshold is testing.
+- **Elements are replaced in place, not remounted.** A remount loses the
+  reader's pan and zoom on every expand — the one thing they were using to keep
+  their place.
+- **Removed nodes are marked by shape and opacity, never colour alone.** A
+  deletion shown only in red is invisible to a reader who cannot see red, and
+  this screen exists to show deletions.
+
+A mutation run over `src/graph` found the assertion style was hiding a real
+defect: `classes.join(" ")` mutated to `join("")` produced one garbage class
+name that broke every style rule, and every `toContain("seed")` assertion passed
+straight through it. Classes are now asserted as a split list. `src/graph` is at
+**100%**, 166 mutants.
 
 ## Why this epic is starred
 

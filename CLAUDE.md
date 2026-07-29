@@ -105,6 +105,9 @@ One incident already occurred and was reverted during planning (a cache-tier tab
 
   `--file` remains right for a *new* file, where the file and the diff are the same thing.
 
+- **`--lib` blinds the run to whatever only integration tests cover, and the report calls that a survivor.** Measured on `observability.rs`: `observe` and `metrics_endpoint` are HTTP middleware and a handler, exercised only by `tests/observability.rs`, and a `--lib` run reported all three of their mutants as MISSED. Re-run without `--lib`, scoped with `--re`, **all three were caught in 3 minutes**.
+  So: `--lib` for code with unit coverage, which is where pure decisions belong anyway; drop it — and pay the container cost, scoped tightly with `--re` — for the thin imperative shells that only an end-to-end test reaches. A MISSED line from a `--lib` run is a question about coverage *shape*, not automatically a gap.
+
 - **`scripts/mutants.sh` bakes both in**, so the fast invocation is the default rather than something to remember:
 
   ```
