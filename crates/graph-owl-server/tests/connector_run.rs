@@ -216,3 +216,59 @@ async fn a_system_schema_is_not_catalogued() {
         "cataloguing system schemas buries real assets under internal ones"
     );
 }
+
+/// **Decision 7, end to end.** A re-run against an unchanged source must not
+/// write. Decision 3 already made a re-run *converge*; this is what makes it
+/// *cheap*, and the skip count is the only way an operator can tell a run that
+/// wrote nothing because nothing changed from one that wrote nothing because it
+/// was broken.
+#[tokio::test]
+async fn a_rerun_against_an_unchanged_source_skips_every_record() {
+    let (app, _database, connection_string) = test_app().await;
+    seed_source(&connection_string).await;
+
+    let first = run_connector(&app, &connection_string).await;
+    assert!(first["created"].as_u64().unwrap() > 0, "{first}");
+    assert_eq!(first["skipped"], 0, "nothing is fingerprinted yet: {first}");
+
+    let second = run_connector(&app, &connection_string).await;
+
+    assert_eq!(
+        second["created"], 0,
+        "an unchanged source must produce no writes: {second}"
+    );
+    assert_eq!(
+        second["skipped"], first["created"],
+        "every record the first run created must be skipped by the second: {second}"
+    );
+    assert_eq!(second["failed"], 0, "{second}");
+}
+
+/// And the negative that stops "skip everything" from passing: a source that
+/// *has* changed is written, not skipped.
+#[tokio::test]
+async fn a_changed_source_is_written_rather_than_skipped() {
+    let (app, _database, connection_string) = test_app().await;
+    seed_source(&connection_string).await;
+    run_connector(&app, &connection_string).await;
+
+    // A new column is a record the catalog has never seen.
+    let pool = sqlx::PgPool::connect(&connection_string)
+        .await
+        .expect("source connection");
+    sqlx::query("ALTER TABLE sales.orders ADD COLUMN settled_at TIMESTAMPTZ")
+        .execute(&pool)
+        .await
+        .expect("add a column");
+
+    let second = run_connector(&app, &connection_string).await;
+
+    assert_eq!(
+        second["created"], 1,
+        "the new column must be catalogued: {second}"
+    );
+    assert!(
+        second["skipped"].as_u64().unwrap() > 0,
+        "and everything unchanged must still skip: {second}"
+    );
+}

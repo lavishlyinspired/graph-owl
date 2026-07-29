@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+sha2.workspace = true
 graph-owl-core.workspace = true
 async-trait.workspace = true
 serde.workspace = true

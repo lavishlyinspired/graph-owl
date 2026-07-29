@@ -1436,14 +1436,48 @@ async fn run_postgres_connector(
     // Per-record failure does not abort the run (15-connectors.md Slice B): a
     // single unreadable table must not cost the other nine hundred.
     let mut created = 0;
+    let mut skipped = 0;
     let mut failures: Vec<serde_json::Value> = Vec::new();
     // What the source reported *and* the catalog accepted. Deletion is decided
     // against this, never against the fetched list: an asset that failed to
     // ingest is a write problem, and treating it as absent would convert a
     // transient error into a tombstone.
     let mut ingested: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // One round trip for the whole batch (decision 7). The point of
+    // fingerprinting is to make an unchanged re-run cheap, and a lookup per
+    // record would replace the write it saves with a read.
+    let fqns: Vec<String> = records.iter().map(|record| record.path.join(".")).collect();
+    let existing = catalog
+        .existing_fingerprints(&fqns)
+        .await
+        .unwrap_or_default();
+
     for record in records {
         let path = record.path.join(".");
+        let hash = record.source_hash();
+        let outcome = graph_owl_connectors::decide_ingest(
+            existing
+                .get(&path)
+                .copied()
+                // An FQN the batch lookup did not answer for is treated as
+                // absent, which creates. Guessing "unchanged" on a failed read
+                // would skip a write on the strength of a query that did not
+                // succeed.
+                .unwrap_or(graph_owl_connectors::Existing::Absent),
+            hash,
+        );
+
+        if outcome == graph_owl_connectors::Ingest::Skip {
+            skipped += 1;
+            // Counted as reported-by-the-source, which is what deletion
+            // detection reconciles against. A skipped record is present at the
+            // source; omitting it here would tombstone every unchanged asset on
+            // the first run that used fingerprinting.
+            ingested.insert(path);
+            continue;
+        }
+
         match catalog
             .ingest_record(
                 &principal,
@@ -1456,6 +1490,9 @@ async fn run_postgres_connector(
         {
             Ok(asset) => {
                 created += 1;
+                // After the write, never before: a fingerprint recorded for a
+                // write that then failed would skip the retry.
+                let _ = catalog.remember_source_hash(asset.id, &hash).await;
                 ingested.insert(asset.fully_qualified_name);
             }
             // A run that reports only a count tells an operator something is
@@ -1493,6 +1530,10 @@ async fn run_postgres_connector(
         "connector": connector.type_name(),
         "serviceName": payload.service_name,
         "created": created,
+        // Reported, not inferred. A run that wrote nothing because nothing
+        // changed and a run that wrote nothing because it was broken produce
+        // the same `created` count, and an operator needs to tell them apart.
+        "skipped": skipped,
         "failed": failures.len(),
         "failures": failures,
         "deletions": deletions,

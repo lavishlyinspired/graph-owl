@@ -1353,6 +1353,43 @@ impl Catalog {
     /// `NotFound` if the record's parent has not been written yet — which is a
     /// connector contract violation, since `Connector::fetch` promises parents
     /// before children.
+    /// Fingerprints for a batch of FQNs, as the three states a run acts on.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn existing_fingerprints(
+        &self,
+        fqns: &[String],
+    ) -> Result<std::collections::HashMap<String, graph_owl_connectors::Existing>, CatalogError>
+    {
+        let stored = self.storage.source_hashes(fqns).await?;
+        Ok(fqns
+            .iter()
+            .map(|fqn| {
+                let existing = match stored.get(fqn) {
+                    None => graph_owl_connectors::Existing::Absent,
+                    Some(None) => graph_owl_connectors::Existing::Unfingerprinted,
+                    Some(Some(bytes)) => <[u8; 32]>::try_from(bytes.as_slice()).map_or(
+                        // A stored value of the wrong width cannot be compared,
+                        // and treating it as a match would skip forever. Patch,
+                        // which rewrites it correctly.
+                        graph_owl_connectors::Existing::Unfingerprinted,
+                        graph_owl_connectors::Existing::Fingerprinted,
+                    ),
+                };
+                (fqn.clone(), existing)
+            })
+            .collect())
+    }
+
+    /// Record what the source said about an asset.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn remember_source_hash(&self, id: Uuid, hash: &[u8]) -> Result<(), CatalogError> {
+        Ok(self.storage.set_source_hash(id, hash).await?)
+    }
+
     pub async fn ingest_record(
         &self,
         principal: &Principal,
@@ -1647,6 +1684,7 @@ mod tests {
         /// are the same predicate — so the only observable is whether the
         /// question reached storage at all.
         pub(super) policy_reads: std::sync::atomic::AtomicUsize,
+        source_hashes: Mutex<std::collections::HashMap<Uuid, Vec<u8>>>,
     }
 
     impl InMemoryStorage {
@@ -1955,6 +1993,35 @@ mod tests {
         /// fake's convention, not the schema's, and it is enough to model the
         /// one property that matters: different roles resolve different
         /// policies.
+        /// Honours the port's distinction between the two absences: an FQN
+        /// missing from the map does not exist, and one present with `None`
+        /// exists without a fingerprint. A double that returned an empty map
+        /// for both would make every re-run look like a first run.
+        async fn source_hashes(
+            &self,
+            fqns: &[String],
+        ) -> Result<std::collections::HashMap<String, Option<Vec<u8>>>, StorageError> {
+            Ok(self
+                .assets
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|asset| !asset.deleted)
+                .filter(|asset| fqns.contains(&asset.fully_qualified_name))
+                .map(|asset| {
+                    (
+                        asset.fully_qualified_name.clone(),
+                        self.source_hashes.lock().unwrap().get(&asset.id).cloned(),
+                    )
+                })
+                .collect())
+        }
+
+        async fn set_source_hash(&self, id: Uuid, hash: &[u8]) -> Result<(), StorageError> {
+            self.source_hashes.lock().unwrap().insert(id, hash.to_vec());
+            Ok(())
+        }
+
         async fn policies_for_roles(&self, roles: &[String]) -> Result<Vec<Policy>, StorageError> {
             self.policy_reads
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

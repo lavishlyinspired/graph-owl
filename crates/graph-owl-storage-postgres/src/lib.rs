@@ -72,6 +72,46 @@ impl PostgresStorage {
 
 #[async_trait]
 impl Storage for PostgresStorage {
+    #[tracing::instrument(name = "storage.source_hashes", skip_all)]
+    async fn source_hashes(
+        &self,
+        fqns: &[String],
+    ) -> Result<std::collections::HashMap<String, Option<Vec<u8>>>, StorageError> {
+        // Deleted rows are excluded deliberately. A tombstoned asset must look
+        // *absent* to a re-run, so the record is created afresh rather than
+        // compared against the fingerprint it had before it was deleted — and
+        // `upsert_asset` is what refuses to resurrect the tombstone.
+        let rows = sqlx::query(
+            "SELECT fully_qualified_name, source_hash FROM assets
+             WHERE NOT deleted AND fully_qualified_name = ANY($1)",
+        )
+        .bind(fqns)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("fully_qualified_name"),
+                    row.get::<Option<Vec<u8>>, _>("source_hash"),
+                )
+            })
+            .collect())
+    }
+
+    #[tracing::instrument(name = "storage.set_source_hash", skip_all)]
+    async fn set_source_hash(&self, id: Uuid, hash: &[u8]) -> Result<(), StorageError> {
+        sqlx::query("UPDATE assets SET source_hash = $2 WHERE id = $1")
+            .bind(id)
+            .bind(hash)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
     fn pool_stats(&self) -> Option<graph_owl_storage::PoolStats> {
         Some(graph_owl_storage::PoolStats {
             connections: self.pool.size(),

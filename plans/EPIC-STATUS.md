@@ -35,7 +35,7 @@ marks for it yet, which is a different thing from zero of them done.
 | **12** | [`12-13-security.md`](12-13-security.md) | In progress | 13/15 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **13** | [`12-13-security.md`](12-13-security.md) | In progress | 9/10 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **14** | [`14-mcp-activation.md`](14-mcp-activation.md) | Not started | 0/4 | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard… |
-| **15** | [`15-connectors.md`](15-connectors.md) | In progress | 7/12 | Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable) |
+| **15** | [`15-connectors.md`](15-connectors.md) | In progress | 11/15 | Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable) |
 | **16** | [`16-ingestion-apis.md`](16-ingestion-apis.md) | Not started | 0/3 | Epic 1 (contract), Epic 15 (upsert semantics) |
 | **17** | [`17-entity-resolution.md`](17-entity-resolution.md) | Not started | 0/3 | Epic 4 (`sameAs` in the graph), Epic 15 + 16 (two write paths make this necessa… |
 | **18** | [`18-inbound-events.md`](18-inbound-events.md) | Not started | 0/2 | Epic 16 (ingestion contract), Epic 17 (resolution, so pushes do not duplicate) |
@@ -256,7 +256,10 @@ marks for it yet, which is a different thing from zero of them done.
 - [x] System schemas excluded; views catalogued and marked
 - [x] Deletion detection with a threshold guard — off by default; a refusal deletes nothing at
 - [ ] Scheduled runs, run history persistence
-- [ ] `source_hash` fingerprinting to skip unchanged records
+- [x] `source_hash` fingerprinting
+- [x] The fingerprint covers source-owned fields only.
+- [x] A skipped record still counts as reported by the source
+- [x] The run reports `skipped` alongside `created`: a run that wrote nothing because nothing 
 - [ ] Deletion detection, threshold guard
 - [ ] `source_hash` fingerprinting
 - [ ] Python connector protocol + one non-Postgres source

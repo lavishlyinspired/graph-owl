@@ -21,7 +21,7 @@ revision (rule 0's corollary).*
 
 | Demo | Remaining | Blocks |
 |---|---|---|
-| 1 | **Epic 15** — scheduled runs, run-history persistence, `source_hash` fingerprinting to skip unchanged records | — |
+| 1 | **Epic 15** — scheduled runs and run-history persistence. `graph-owl does not become a scheduler` (decision 5), so "scheduled runs" means an external trigger, and what is missing is the *history* a triggered run should leave behind | — |
 | 1 | **Epic 1 K** — a client generated in another language and exercised. The valuable half — responses checked against the promised schemas — shipped | — |
 | 3 | **Epic 40** — React Flow + d3-dag lineage DAG | Epic 29 (nothing declares lineage yet) |
 
@@ -140,7 +140,10 @@ vector embeddings → out of process per `00j`.
 - [x] System schemas excluded; views catalogued and marked
 - [x] Deletion detection with a threshold guard — off by default; a refusal deletes nothing at all; a source reporting almost nothing is caught by the threshold and names what it saw *(Epic 15)*
 - [ ] Scheduled runs, run history persistence
-- [ ] `source_hash` fingerprinting to skip unchanged records
+- [x] **`source_hash` fingerprinting** *(decision 7)* — a re-run reads, compares and skips. Decision 3 already made a re-run *converge*; this makes it cheap. Three outcomes decided before any write: create if the FQN is unknown, patch if the fingerprint differs, **patch if there is no fingerprint at all** — absent evidence is not evidence of sameness, and skipping on it would freeze every pre-fingerprinting asset invisibly
+- [x] **The fingerprint covers source-owned fields only.** A description edited in the console is catalog-owned; including it would make every human edit look like a source change and the connector would helpfully overwrite it. Framed with lengths rather than concatenated, because `["ab","c"]` and `["a","bc"]` are different assets that a naive join gives identical bytes
+- [x] **A skipped record still counts as reported by the source**, so deletion detection does not tombstone it — getting that wrong would delete the entire catalog on the first run that used fingerprinting
+- [x] The run reports `skipped` alongside `created`: a run that wrote nothing because nothing changed and one that wrote nothing because it was broken are otherwise indistinguishable
 
 ### Epic 39 — Console foundation
 - [x] SPA embedded in the binary via `rust-embed`, one process

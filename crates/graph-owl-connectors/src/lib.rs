@@ -32,6 +32,114 @@ impl SourceRecord {
     pub fn name(&self) -> &str {
         self.path.last().map_or("", String::as_str)
     }
+
+    /// A fingerprint of what the **source** said, and nothing else.
+    ///
+    /// Decision 3 makes a re-run *converge*; it does not make it *cheap* — the
+    /// catalog still receives, validates and diffs every record before deciding
+    /// nothing changed. This turns the second run into read-compare-skip for the
+    /// unchanged majority.
+    ///
+    /// **Only source-owned fields.** A description a person edited in the
+    /// console is catalog-owned: including it would make every human edit look
+    /// like a source change on the next run, and the connector would helpfully
+    /// overwrite it. Kind, path, and the source's own description and
+    /// properties are what the source is entitled to assert.
+    ///
+    /// Framed with lengths rather than concatenated, because
+    /// `["ab", "c"]` and `["a", "bc"]` are different paths and a naive join
+    /// gives them the same bytes — a collision between two real assets, which
+    /// is the one failure mode a fingerprint must not have.
+    #[must_use]
+    pub fn source_hash(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(self.kind.as_str().as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(
+            u64::try_from(self.path.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for segment in &self.path {
+            hasher.update(
+                u64::try_from(segment.len())
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes(),
+            );
+            hasher.update(segment.as_bytes());
+        }
+        // `None` and `Some("")` are different statements — "the source has
+        // nothing to say" versus "the source says it is empty" — and a
+        // fingerprint that conflated them would skip a write that clears a
+        // description.
+        hash_optional(&mut hasher, self.description.as_deref().map(str::as_bytes));
+        hash_optional(
+            &mut hasher,
+            self.properties
+                .as_ref()
+                .map(|p| p.to_string())
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hasher.finalize().into()
+    }
+}
+
+fn hash_optional(hasher: &mut sha2::Sha256, value: Option<&[u8]>) {
+    use sha2::Digest as _;
+    match value {
+        None => hasher.update([0u8]),
+        Some(bytes) => {
+            hasher.update([1u8]);
+            hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+            hasher.update(bytes);
+        }
+    }
+}
+
+/// What a run should do with one record, decided before any write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ingest {
+    /// The FQN is unknown.
+    Create,
+    /// Known, and the source says something different.
+    Patch,
+    /// Known, and the source says exactly what it said last time.
+    Skip,
+}
+
+/// What the catalog already holds for an FQN.
+///
+/// Three states, not two. `Option<[u8; 32]>` cannot express them: "no such
+/// asset" and "an asset with no fingerprint" are different situations with
+/// different correct answers, and collapsing them makes one of the two wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Existing {
+    /// No asset with this FQN.
+    Absent,
+    /// The asset exists but carries no fingerprint — catalogued before
+    /// fingerprinting, or by a connector that does not compute one.
+    Unfingerprinted,
+    Fingerprinted([u8; 32]),
+}
+
+/// Decision 7's three outcomes.
+///
+/// An asset with **no stored fingerprint is patched, not skipped**. We cannot
+/// prove it changed, and that is exactly the point: skipping on absent evidence
+/// would freeze every pre-fingerprinting asset at whatever it said then, and
+/// the freeze would be invisible — the run would report success and change
+/// nothing, for as long as nobody noticed.
+#[must_use]
+pub fn decide_ingest(existing: Existing, incoming: [u8; 32]) -> Ingest {
+    match existing {
+        Existing::Absent => Ingest::Create,
+        Existing::Unfingerprinted => Ingest::Patch,
+        Existing::Fingerprinted(stored) if stored == incoming => Ingest::Skip,
+        Existing::Fingerprinted(_) => Ingest::Patch,
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -328,5 +436,175 @@ mod deletion_plan_tests {
         // guard at all, since a run deleting half an estate is exactly the one
         // that should stop and ask.
         const { assert!(T > 0.0 && T < 0.5) };
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn record() -> SourceRecord {
+        SourceRecord {
+            kind: AssetKind::Table,
+            path: vec![
+                "hdfc-core".into(),
+                "retail".into(),
+                "upi_transactions".into(),
+            ],
+            description: Some("Every UPI payment.".into()),
+            properties: Some(json!({ "rows": 12 })),
+        }
+    }
+
+    mod what_the_source_said {
+        use super::*;
+
+        #[test]
+        fn the_same_record_fingerprints_the_same_way() {
+            assert_eq!(record().source_hash(), record().source_hash());
+        }
+
+        #[test]
+        fn a_changed_description_changes_the_fingerprint() {
+            let mut changed = record();
+            changed.description = Some("Something else.".into());
+
+            assert_ne!(record().source_hash(), changed.source_hash());
+        }
+
+        #[test]
+        fn changed_properties_change_the_fingerprint() {
+            let mut changed = record();
+            changed.properties = Some(json!({ "rows": 13 }));
+
+            assert_ne!(record().source_hash(), changed.source_hash());
+        }
+
+        #[test]
+        fn a_changed_kind_changes_the_fingerprint() {
+            let mut changed = record();
+            changed.kind = AssetKind::Column;
+
+            assert_ne!(record().source_hash(), changed.source_hash());
+        }
+
+        /// **The collision a naive join produces.** `["ab", "c"]` and
+        /// `["a", "bc"]` are different assets; concatenating their segments
+        /// gives both the same bytes, so one would be skipped as unchanged
+        /// against the other's fingerprint.
+        #[test]
+        fn two_paths_that_concatenate_alike_fingerprint_differently() {
+            let mut left = record();
+            left.path = vec!["ab".into(), "c".into()];
+            let mut right = record();
+            right.path = vec!["a".into(), "bc".into()];
+
+            assert_ne!(left.source_hash(), right.source_hash());
+        }
+
+        /// "The source has nothing to say" and "the source says it is empty"
+        /// are different statements, and conflating them skips the write that
+        /// clears a description.
+        #[test]
+        fn an_absent_description_differs_from_an_empty_one() {
+            let mut absent = record();
+            absent.description = None;
+            let mut empty = record();
+            empty.description = Some(String::new());
+
+            assert_ne!(absent.source_hash(), empty.source_hash());
+        }
+
+        #[test]
+        fn absent_properties_differ_from_empty_properties() {
+            let mut absent = record();
+            absent.properties = None;
+            let mut empty = record();
+            empty.properties = Some(json!({}));
+
+            assert_ne!(absent.source_hash(), empty.source_hash());
+        }
+
+        /// The negative that stops a constant passing everything above: two
+        /// genuinely identical records must agree, and the hash must not simply
+        /// be a function of one field.
+        #[test]
+        fn records_differing_only_in_path_still_differ() {
+            let mut other = record();
+            other.path = vec![
+                "hdfc-core".into(),
+                "retail".into(),
+                "card_settlements".into(),
+            ];
+
+            assert_ne!(record().source_hash(), other.source_hash());
+        }
+    }
+
+    mod deciding_before_the_write {
+        use super::*;
+
+        #[test]
+        fn an_unknown_fqn_is_created() {
+            assert_eq!(
+                decide_ingest(Existing::Absent, record().source_hash()),
+                Ingest::Create
+            );
+        }
+
+        #[test]
+        fn an_identical_fingerprint_is_skipped() {
+            let hash = record().source_hash();
+
+            assert_eq!(
+                decide_ingest(Existing::Fingerprinted(hash), hash),
+                Ingest::Skip
+            );
+        }
+
+        #[test]
+        fn a_different_fingerprint_is_patched() {
+            let mut changed = record();
+            changed.description = Some("new".into());
+
+            assert_eq!(
+                decide_ingest(
+                    Existing::Fingerprinted(record().source_hash()),
+                    changed.source_hash()
+                ),
+                Ingest::Patch
+            );
+        }
+
+        /// **Absent evidence is not evidence of sameness.** Skipping an asset
+        /// with no stored fingerprint would freeze every pre-fingerprinting
+        /// asset at whatever it said then — and the freeze would be invisible,
+        /// because the run reports success and changes nothing.
+        #[test]
+        fn an_asset_with_no_fingerprint_is_patched_rather_than_skipped() {
+            assert_eq!(
+                decide_ingest(Existing::Unfingerprinted, record().source_hash()),
+                Ingest::Patch
+            );
+        }
+
+        /// And the negative for the whole mechanism: skip must be reachable
+        /// *only* on an exact match. A `Skip` returned for anything else makes
+        /// a re-run silently stop updating the catalog.
+        #[test]
+        fn nothing_but_an_exact_match_is_skipped() {
+            let hash = record().source_hash();
+            let mut other = record();
+            other.path = vec!["different".into()];
+
+            for existing in [
+                Existing::Absent,
+                Existing::Unfingerprinted,
+                Existing::Fingerprinted(other.source_hash()),
+            ] {
+                assert_ne!(decide_ingest(existing, hash), Ingest::Skip, "{existing:?}");
+            }
+        }
     }
 }

@@ -208,6 +208,23 @@ pub trait Storage: Send + Sync {
     /// Every policy attached to any of these roles, deduplicated.
     async fn policies_for_roles(&self, roles: &[String]) -> Result<Vec<Policy>, StorageError>;
 
+    /// Fingerprints for the FQNs a run is about to write.
+    ///
+    /// One round trip for the whole batch, not one per record: the point of
+    /// fingerprinting is to make an unchanged re-run cheap, and a per-record
+    /// lookup would replace the write it saves with a read.
+    ///
+    /// FQNs absent from the result do not exist; present-with-`None` exist
+    /// without a fingerprint. Those are different answers — see `Existing` in
+    /// `graph-owl-connectors`.
+    async fn source_hashes(
+        &self,
+        fqns: &[String],
+    ) -> Result<std::collections::HashMap<String, Option<Vec<u8>>>, StorageError>;
+
+    /// Record what the source said, so the next run can compare against it.
+    async fn set_source_hash(&self, id: Uuid, hash: &[u8]) -> Result<(), StorageError>;
+
     /// Lists assets visible under `predicate`.
     ///
     /// Separate from `list_assets` so the unfiltered path cannot be reached by
