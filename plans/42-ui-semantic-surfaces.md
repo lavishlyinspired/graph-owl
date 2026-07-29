@@ -108,6 +108,66 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: The lossy-mapping test — a view toggle that silently drops what does not map teaches users the two models are equivalent when Epic 7c's entire mapping report exists to say they are not. Second RED: the partial-export test, because an export that silently omits denied rows produces a file someone will treat as complete. Mutator watch: discarding the mapping report must fail; a full-or-nothing export must fail the partial test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+### Slice G: A text-first ontology editor, with the graph as feedback
+
+**Added 30 July 2026** after a survey of ontology tooling. The gap it closes is
+real and this console does not cover it: there is a **SPARQL workbench** for
+asking questions and a **graph explorer** for reading the estate, but nowhere to
+*author* an ontology. Today a vocabulary is edited by writing Turtle in another
+tool and importing it, which means the round trip crosses two applications and
+the graph consequences of an edit are invisible until after it lands.
+
+**Value**: an ontology author sees what their edit does to the graph while they
+are making it — the feedback loop that makes a subsumption mistake obvious
+rather than discoverable a week later by a wrong inference.
+
+**Path**: a text editor beside a live graph of what it declares. The editor's
+text is the **source**; the graph is a rendering of it, never an alternative
+input. Two editable representations of one ontology is two things to keep in
+step, and the one that loses is always the one the author was not looking at.
+
+**Every serialisation Epic 9 parses, not Turtle alone.** Turtle ships first
+because it is the format people actually write by hand, but the editor is a
+*text* surface over a parser that already handles N-Triples and JSON-LD — and
+tying it to one syntax would mean a second editor the day somebody arrives with
+a JSON-LD context. The format is detected or chosen; the graph and the save path
+are identical either way. The tooling that inspired this slice is Turtle-only,
+and that is a property of its parser rather than of the idea.
+
+**Acceptance criteria**:
+- The text is parsed as the author types; a syntax error marks its line and the
+  **last good graph stays on screen**, because blanking the picture on every
+  half-typed triple makes the feedback useless.
+- The same document opens and saves in any format Epic 9 supports, and switching
+  format does not change the graph — if it does, one of the two parsers is
+  wrong, and this is the cheapest place to find that out.
+- The graph shows classes, properties and subsumption, and **distinguishes terms
+  this ontology declares from terms it merely references** — an author who
+  cannot see which is which will "fix" somebody else's vocabulary.
+- Namespace and predicate filters, because a real vocabulary is unreadable
+  whole.
+- An edit that would be **refused by Epic 5's shapes** or produce no inference
+  says so before it is saved, using the dry-run pattern the policy editor
+  already establishes.
+- Saving goes through the existing import path (Epic 9 Slice E) — validated and
+  resolved, not a second write path.
+
+**RED**: The stale-graph test — a syntax error must keep the previous graph and
+mark the line, and a test asserting the picture did not blank is the only way to
+catch a renderer that clears on every keystroke. Mutator watch: rendering
+declared and referenced terms alike must fail the distinction test.
+
+**Licensing — binding, and the reason this slice names it.** A capable editor in
+this space exists and is **GPL-3.0**, which `00i` and the `cargo deny` allowlist
+both refuse: copyleft is rejected, and a GPL implementation is not a source this
+project may read *or* borrow structure from. Its README was read for the
+capability gap only, and nothing beyond "this gap exists" was taken. The
+implementation source is the **W3C Turtle specification**, per `00i` rule 2, and
+the parser is `00l`'s adopt-not-write decision — `oxttl`/`oxrdf` are Apache-2.0
+and already in the tree via `spargebra`.
+
+**Done when**: criteria met, mutation report reviewed, commit approved.
+
 ### Slice F: Agent activity, Bolt sessions, and the route budget
 
 **Acceptance criteria**: agent sessions with identity, connection time, and operation counts; operations filterable by type and entity; **write-backs distinguished from reads** and linked to what they changed; Bolt endpoint status and active sessions (Epic 7d), read-only; everything filtered by Epic 13 policy like any other read, verified by a two-principal test; **no control that mutates an agent's permissions** — a structural assertion of decision 5; total routes ≤ 30, CI-asserted as a build failure; zero axe violations; every queue workable by keyboard.

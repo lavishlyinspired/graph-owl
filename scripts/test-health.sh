@@ -77,3 +77,9 @@ echo "  cargo test --workspace         ~241s (97s of it real test execution)"
 echo
 echo "If those numbers hold, the slowness is a rebuild rather than the"
 echo "environment: time 'cargo build --workspace --tests' separately first."
+echo
+echo "And if a suite is running: do not compile anything until it finishes."
+echo "cargo build, cargo clippy and cargo test -p <crate> all take the same"
+echo "build lock and relink crates the running suite links against. That, not"
+echo "the environment, is the usual reason a clean-looking workspace run takes"
+echo "half an hour."

@@ -129,6 +129,29 @@ pub struct Waiver {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A configured connector, **without its credential**.
+///
+/// There is deliberately **no field for the secret**. A `redacted: bool` beside
+/// the value, or a `secret: Option<String>` a handler is trusted to skip, is one
+/// `Debug` derive or one `..` spread away from a password in a log line or a
+/// response body. Making it unrepresentable is the only version of this rule
+/// that cannot be got wrong later by somebody who does not know it exists.
+///
+/// The run path reads the credential through [`Storage::connector_secret`],
+/// which is the single call site anybody has to review.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorConfig {
+    pub id: Uuid,
+    pub connector: String,
+    pub service_name: String,
+    pub settings: serde_json::Value,
+    /// Whether a credential is stored — never which one. An operator has to be
+    /// able to tell "configured" from "configured and unusable", and that
+    /// question does not need the value to answer it.
+    pub has_secret: bool,
+}
+
 /// A group of people who own things together.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Team {
@@ -402,6 +425,40 @@ pub trait Storage: Send + Sync {
     ///
     /// [`StorageError`] if the read fails.
     async fn waivers(&self) -> Result<Vec<Waiver>, StorageError>;
+
+    /// Save a connector configuration.
+    ///
+    /// `secret` is `None` to **leave an existing credential alone** — an
+    /// edit-then-save round trip cannot resend what it was never given, and
+    /// treating absent as "clear it" would silently break a connector every
+    /// time somebody renamed its service.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the write fails.
+    async fn upsert_connector_config(
+        &self,
+        config: &ConnectorConfig,
+        secret: Option<&str>,
+    ) -> Result<(), StorageError>;
+
+    /// Every configuration, without credentials.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn connector_configs(&self) -> Result<Vec<ConnectorConfig>, StorageError>;
+
+    /// The stored credential, for the run path only.
+    ///
+    /// **The one call site that sees a secret**, which is the point of it being
+    /// a separate method: a reviewer auditing where credentials go has one
+    /// signature to grep for rather than every read of a config.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn connector_secret(&self, id: Uuid) -> Result<Option<String>, StorageError>;
 
     /// Create or update a team, replacing its membership.
     ///

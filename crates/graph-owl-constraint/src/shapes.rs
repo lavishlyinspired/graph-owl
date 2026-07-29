@@ -13,10 +13,12 @@
 //!   `rdf:first`/`rdf:rest` chain, which costs two extra nodes per member and
 //!   an ordering this graph does not use. Repeating the predicate says the same
 //!   thing in the flake model's own idiom.
-//! - **`sh:not`, `sh:and` and `sh:or` are not read from triples yet.** The
-//!   validator implements all three; only the encoding is missing, because
-//!   nesting shape references needs a resolution pass this slice does not have.
-//!   Until then a combinator can be built in code but not stated in the graph.
+//! - **A combinator's branches are property shapes, not node shapes.** SHACL
+//!   lets `sh:not`/`sh:and`/`sh:or` reference a full shape; here a branch is a
+//!   property shape with its own `sh:path` and terms. That is the shape the
+//!   useful case takes — "an owner **or** a steward" is two paths, not two
+//!   node shapes — and it keeps a branch readable without resolving a second
+//!   level of targeting that would then disagree with its parent's.
 
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
 use graph_owl_ontology::{Constraint, DataType, NodeKind, Severity, Shape, Target};
@@ -48,6 +50,10 @@ pub enum ShapeError {
         wanted: &'static str,
         got: String,
     },
+    #[error("shape `{shape}`: property shape `{property}` references itself")]
+    CircularShape { shape: String, property: String },
+    #[error("shape `{shape}`: property shape `{property}` states no constraint")]
+    EmptyBranch { shape: String, property: String },
     #[error(transparent)]
     Compile(#[from] CompileError),
 }
@@ -124,6 +130,10 @@ const KNOWN: &[&str] = &[
 
 /// Terms that appear on a property shape without being constraints.
 const STRUCTURAL: &[&str] = &["path"];
+
+/// The logical combinators, whose values are references to other property
+/// shapes rather than literal bounds.
+const COMBINATORS: &[&str] = &["not", "and", "or"];
 
 fn datatype_from(name: &str) -> Option<DataType> {
     Some(match name {
@@ -293,6 +303,127 @@ fn constraint_from(
     })
 }
 
+/// Every constraint stated directly on one property shape, as one constraint.
+///
+/// Several terms on one property shape are an implicit `And` — that is what
+/// `sh:minCount 1` beside `sh:maxCount 3` already means, and reading them as
+/// anything else would change the meaning of every shape written so far.
+///
+/// `open` carries the shapes already being read, so a shape that references
+/// itself is **refused rather than recursed into**. A cycle here is a hang, and
+/// a hang in shape compilation is a server that will not start.
+fn read_branch(
+    shape: &Sid,
+    property: &Sid,
+    facts: &[Flake],
+    open: &mut Vec<Sid>,
+) -> Result<Constraint, ShapeError> {
+    if open.contains(property) {
+        return Err(ShapeError::CircularShape {
+            shape: shape.to_string(),
+            property: property.to_string(),
+        });
+    }
+    open.push(property.clone());
+
+    let path = first(facts, property, &sh("path"))
+        .and_then(as_ref_sid)
+        .cloned();
+
+    let terms: BTreeSet<&str> = facts
+        .iter()
+        .filter(|f| f.op && &f.s == property && f.p.namespace_code == namespace::SHACL)
+        .map(|f| f.p.id.as_str())
+        .collect();
+
+    let mut constraints = Vec::new();
+    for term in &terms {
+        if STRUCTURAL.contains(term) {
+            continue;
+        }
+        if COMBINATORS.contains(term) {
+            constraints.push(read_combinator(shape, property, term, facts, open)?);
+            continue;
+        }
+        if !KNOWN.contains(term) {
+            return Err(ShapeError::UnknownConstraint {
+                shape: shape.to_string(),
+                term: (*term).to_string(),
+            });
+        }
+        // A term needs a path to be about anything. A branch that is *only* a
+        // combinator legitimately has none.
+        let path = path.as_ref().ok_or_else(|| ShapeError::NoPath {
+            shape: shape.to_string(),
+            property: property.to_string(),
+        })?;
+        constraints.push(constraint_from(shape, term, path, facts, property)?);
+    }
+
+    open.pop();
+
+    match constraints.len() {
+        0 => Err(ShapeError::EmptyBranch {
+            shape: shape.to_string(),
+            property: property.to_string(),
+        }),
+        // **An `And` of one is fine, and a special case for it was dead code.**
+        // The comment here previously claimed unwrapping mattered because `And`
+        // would render as `and` in a violation report. It does not: `And`
+        // contributes no violation of its own, it collects its branches' — so
+        // the report is identical either way, and mutation testing said so by
+        // deleting the arm with nothing failing.
+        _ => Ok(Constraint::And(constraints)),
+    }
+}
+
+/// One combinator, with its branches resolved.
+fn read_combinator(
+    shape: &Sid,
+    property: &Sid,
+    term: &str,
+    facts: &[Flake],
+    open: &mut Vec<Sid>,
+) -> Result<Constraint, ShapeError> {
+    let branches: Vec<&Sid> = values(facts, property, &sh(term))
+        .into_iter()
+        .filter_map(as_ref_sid)
+        .collect();
+
+    if branches.is_empty() {
+        return Err(ShapeError::WrongValue {
+            shape: shape.to_string(),
+            term: term.to_string(),
+            wanted: "a reference to at least one property shape",
+            got: "nothing".to_string(),
+        });
+    }
+    // `sh:not` over several branches is ambiguous — "not any" and "not all" are
+    // different statements — so it is refused rather than guessed at.
+    if term == "not" && branches.len() > 1 {
+        return Err(ShapeError::WrongValue {
+            shape: shape.to_string(),
+            term: term.to_string(),
+            wanted: "exactly one branch; `not` over several is ambiguous \
+                     between \"not any\" and \"not all\"",
+            got: format!("{} branches", branches.len()),
+        });
+    }
+
+    let mut resolved = Vec::new();
+    for branch in branches {
+        resolved.push(read_branch(shape, branch, facts, open)?);
+    }
+
+    Ok(match term {
+        "not" => Constraint::Not(Box::new(
+            resolved.pop().expect("exactly one branch checked above"),
+        )),
+        "and" => Constraint::And(resolved),
+        _ => Constraint::Or(resolved),
+    })
+}
+
 fn target_of(shape: &Sid, facts: &[Flake]) -> Result<Target, ShapeError> {
     if let Some(class) = first(facts, shape, &sh("targetClass")).and_then(as_ref_sid) {
         return Ok(Target::Class(class.clone()));
@@ -354,35 +485,11 @@ pub fn read_shape(id: &Sid, facts: &[Flake]) -> Result<CompiledShape, ShapeError
         .into_iter()
         .filter_map(as_ref_sid)
     {
-        let path = first(facts, property, &sh("path"))
-            .and_then(as_ref_sid)
-            .ok_or_else(|| ShapeError::NoPath {
-                shape: id.to_string(),
-                property: property.to_string(),
-            })?
-            .clone();
-
-        // Sorted, so the same triples always compile to the same shape. Fact
-        // order out of the store is not guaranteed, and a constraint list that
-        // reorders makes the violation report reorder with it.
-        let terms: BTreeSet<&str> = facts
-            .iter()
-            .filter(|f| f.op && &f.s == property && f.p.namespace_code == namespace::SHACL)
-            .map(|f| f.p.id.as_str())
-            .collect();
-
-        for term in &terms {
-            if STRUCTURAL.contains(term) {
-                continue;
-            }
-            if !KNOWN.contains(term) {
-                return Err(ShapeError::UnknownConstraint {
-                    shape: id.to_string(),
-                    term: (*term).to_string(),
-                });
-            }
-            constraints.push(constraint_from(id, term, &path, facts, property)?);
-        }
+        // One branch reader for the top level and for every nested one, so a
+        // combinator's branch is read by exactly the same rules as a plain
+        // property shape. Two readers would be two vocabularies.
+        let mut open = Vec::new();
+        constraints.push(read_branch(id, property, facts, &mut open)?);
     }
 
     Ok(compile(&Shape {
@@ -421,6 +528,16 @@ pub fn read_all(facts: &[Flake]) -> (Vec<CompiledShape>, Vec<ShapeError>) {
     (shapes, failures)
 }
 
+/// One `(term, value)` on a seed shape's property.
+///
+/// Named, with `Property` and `Definition` below, because the seed table nests
+/// three deep and a reader should not have to count brackets to see what it is.
+type Term<'a> = (&'a str, FlakeValue);
+/// `(property suffix, path, terms)`.
+type Property<'a> = (&'a str, &'a str, &'a [Term<'a>]);
+/// `(shape, target, properties)`.
+type Definition<'a> = (&'a str, &'a str, &'a [Property<'a>]);
+
 /// The shapes the core entity model ships with — Epic 5's seed set.
 ///
 /// **Returned as flakes rather than written by a migration.** A migration would
@@ -448,7 +565,7 @@ pub fn core_shapes(t: i64) -> Vec<Flake> {
     };
 
     // (shape, target class, [(property suffix, path, [(term, value)])])
-    let definitions: &[(&str, &str, &[(&str, &str, &[(&str, FlakeValue)])])] = &[
+    let definitions: &[Definition<'_>] = &[
         (
             "TableShape",
             "table",
@@ -1318,6 +1435,250 @@ mod tests {
                 .collect();
 
             assert_eq!(first, second);
+        }
+    }
+
+    /// # Combinators, stated as triples
+    ///
+    /// The branches are property shapes with their own `sh:path`, because the
+    /// useful case is two *paths* — "an owner or a steward" — and not two node
+    /// shapes whose targeting could then disagree with the parent's.
+    mod combinators_from_triples {
+        use super::*;
+        use crate::validate;
+
+        /// A shape whose single property carries `term` pointing at `branches`.
+        fn with_combinator(term: &str, branches: &[&str]) -> Vec<Flake> {
+            let mut facts = vec![
+                node_shape("S"),
+                f(a("S"), sh("targetClass"), FlakeValue::Ref(a("T"))),
+                f(a("S"), sh("property"), FlakeValue::Ref(a("S/p"))),
+            ];
+            for branch in branches {
+                facts.push(f(a("S/p"), sh(term), FlakeValue::Ref(a(branch))));
+            }
+            facts
+        }
+
+        /// One branch: requires `path` to be present.
+        fn requires(id: &str, path: &str) -> Vec<Flake> {
+            vec![
+                f(a(id), sh("path"), FlakeValue::Ref(a(path))),
+                f(a(id), sh("minCount"), FlakeValue::Int(1)),
+            ]
+        }
+
+        fn subject_of(class: &str) -> Flake {
+            typed("n", class)
+        }
+
+        /// **The case combinators exist for**: an owner *or* a steward, either
+        /// will do. Two paths, which a node-shape encoding could not express
+        /// without a second target.
+        #[test]
+        fn an_or_over_two_paths_is_satisfied_by_either() {
+            let mut shape = with_combinator("or", &["S/owner", "S/steward"]);
+            shape.extend(requires("S/owner", "owner"));
+            shape.extend(requires("S/steward", "steward"));
+
+            for held in ["owner", "steward"] {
+                let mut facts = shape.clone();
+                facts.push(subject_of("T"));
+                facts.push(f(a("n"), a(held), FlakeValue::Ref(a("someone"))));
+
+                let (shapes, failures) = read_all(&facts);
+                assert!(failures.is_empty(), "{held}: {failures:#?}");
+                assert!(
+                    validate(&shapes, &facts).conforms,
+                    "{held} alone should satisfy the or"
+                );
+            }
+
+            // And neither violates — once, not per branch.
+            let mut neither = shape;
+            neither.push(subject_of("T"));
+            let (shapes, _) = read_all(&neither);
+            let report = validate(&shapes, &neither);
+            assert_eq!(report.violations.len(), 1, "{:#?}", report.violations);
+            assert_eq!(report.violations[0].constraint, "or");
+        }
+
+        #[test]
+        fn an_and_needs_every_branch() {
+            let mut shape = with_combinator("and", &["S/owner", "S/steward"]);
+            shape.extend(requires("S/owner", "owner"));
+            shape.extend(requires("S/steward", "steward"));
+
+            let mut one = shape.clone();
+            one.push(subject_of("T"));
+            one.push(f(a("n"), a("owner"), FlakeValue::Ref(a("someone"))));
+            assert!(!validate(&read_all(&one).0, &one).conforms);
+
+            let mut both = shape;
+            both.push(subject_of("T"));
+            both.push(f(a("n"), a("owner"), FlakeValue::Ref(a("someone"))));
+            both.push(f(a("n"), a("steward"), FlakeValue::Ref(a("ops"))));
+            assert!(validate(&read_all(&both).0, &both).conforms);
+        }
+
+        #[test]
+        fn a_not_inverts_its_branch() {
+            let mut shape = with_combinator("not", &["S/deprecated"]);
+            shape.extend(requires("S/deprecated", "deprecated"));
+
+            let mut absent = shape.clone();
+            absent.push(subject_of("T"));
+            assert!(validate(&read_all(&absent).0, &absent).conforms);
+
+            let mut present = shape;
+            present.push(subject_of("T"));
+            present.push(f(a("n"), a("deprecated"), FlakeValue::Boolean(true)));
+            assert!(!validate(&read_all(&present).0, &present).conforms);
+        }
+
+        /// Combinators nest. A branch is read by the same reader as the top
+        /// level, so `or(and(a, b), c)` needs no second vocabulary.
+        #[test]
+        fn combinators_nest() {
+            let mut facts = with_combinator("or", &["S/both", "S/alone"]);
+            // `S/both` is itself an `and`.
+            facts.push(f(a("S/both"), sh("and"), FlakeValue::Ref(a("S/x"))));
+            facts.push(f(a("S/both"), sh("and"), FlakeValue::Ref(a("S/y"))));
+            facts.extend(requires("S/x", "x"));
+            facts.extend(requires("S/y", "y"));
+            facts.extend(requires("S/alone", "z"));
+
+            let satisfied_by_both = {
+                let mut f2 = facts.clone();
+                f2.push(subject_of("T"));
+                f2.push(f(a("n"), a("x"), FlakeValue::Int(1)));
+                f2.push(f(a("n"), a("y"), FlakeValue::Int(1)));
+                f2
+            };
+            let satisfied_by_z = {
+                let mut f2 = facts.clone();
+                f2.push(subject_of("T"));
+                f2.push(f(a("n"), a("z"), FlakeValue::Int(1)));
+                f2
+            };
+            let satisfied_by_half = {
+                let mut f2 = facts;
+                f2.push(subject_of("T"));
+                f2.push(f(a("n"), a("x"), FlakeValue::Int(1)));
+                f2
+            };
+
+            assert!(validate(&read_all(&satisfied_by_both).0, &satisfied_by_both).conforms);
+            assert!(validate(&read_all(&satisfied_by_z).0, &satisfied_by_z).conforms);
+            assert!(
+                !validate(&read_all(&satisfied_by_half).0, &satisfied_by_half).conforms,
+                "half of the `and` branch should not satisfy the `or`"
+            );
+        }
+
+        /// **A shape referencing itself is refused, not recursed into.** A cycle
+        /// here is a hang, and a hang in shape compilation is a server that will
+        /// not start.
+        #[test]
+        fn a_self_referencing_shape_is_refused_rather_than_hanging() {
+            let mut facts = with_combinator("not", &["S/loop"]);
+            facts.push(f(a("S/loop"), sh("not"), FlakeValue::Ref(a("S/loop"))));
+
+            let (_, failures) = read_all(&facts);
+
+            assert!(
+                matches!(&failures[0], ShapeError::CircularShape { .. }),
+                "{failures:#?}"
+            );
+        }
+
+        /// A longer cycle too — `a → b → a` is the one a single-step guard
+        /// misses.
+        #[test]
+        fn an_indirect_cycle_is_refused() {
+            let mut facts = with_combinator("and", &["S/a"]);
+            facts.push(f(a("S/a"), sh("and"), FlakeValue::Ref(a("S/b"))));
+            facts.push(f(a("S/b"), sh("and"), FlakeValue::Ref(a("S/a"))));
+
+            let (_, failures) = read_all(&facts);
+
+            assert!(
+                matches!(&failures[0], ShapeError::CircularShape { .. }),
+                "{failures:#?}"
+            );
+        }
+
+        /// **`sh:not` over several branches is ambiguous** — "not any" and "not
+        /// all" are different statements — so it is refused rather than one of
+        /// them being guessed at.
+        #[test]
+        fn a_not_over_several_branches_is_refused() {
+            let mut facts = with_combinator("not", &["S/a", "S/b"]);
+            facts.extend(requires("S/a", "a"));
+            facts.extend(requires("S/b", "b"));
+
+            let (_, failures) = read_all(&facts);
+
+            assert!(
+                matches!(&failures[0], ShapeError::WrongValue { term, .. } if term == "not"),
+                "{failures:#?}"
+            );
+        }
+
+        /// A combinator pointing at nothing is a shape somebody started. It
+        /// constrains nothing while looking like a rule.
+        #[test]
+        fn a_combinator_with_no_branches_is_refused() {
+            let facts = vec![
+                node_shape("S"),
+                f(a("S"), sh("targetClass"), FlakeValue::Ref(a("T"))),
+                f(a("S"), sh("property"), FlakeValue::Ref(a("S/p"))),
+                f(
+                    a("S/p"),
+                    sh("or"),
+                    FlakeValue::String("not a reference".into()),
+                ),
+            ];
+
+            let (_, failures) = read_all(&facts);
+
+            assert!(!failures.is_empty(), "an unusable `or` was accepted");
+        }
+
+        /// A branch that states nothing is refused. An empty branch in an `or`
+        /// is satisfied by everything, which silently disables the whole
+        /// combinator.
+        #[test]
+        fn an_empty_branch_is_refused() {
+            let mut facts = with_combinator("or", &["S/real", "S/empty"]);
+            facts.extend(requires("S/real", "owner"));
+            // `S/empty` has a path and no terms.
+            facts.push(f(a("S/empty"), sh("path"), FlakeValue::Ref(a("steward"))));
+
+            let (_, failures) = read_all(&facts);
+
+            assert!(
+                matches!(&failures[0], ShapeError::EmptyBranch { .. }),
+                "{failures:#?}"
+            );
+        }
+
+        /// Several terms on one property shape remain an implicit `And`, and a
+        /// single term remains itself — rendering `and` in a violation for a
+        /// lone `minCount` would tell a reader nothing.
+        #[test]
+        fn a_single_term_is_not_wrapped_in_an_and() {
+            let mut facts = vec![
+                node_shape("S"),
+                f(a("S"), sh("targetClass"), FlakeValue::Ref(a("T"))),
+                f(a("S"), sh("property"), FlakeValue::Ref(a("S/p"))),
+            ];
+            facts.extend(requires("S/p", "owner"));
+            facts.push(subject_of("T"));
+
+            let report = validate(&read_all(&facts).0, &facts);
+
+            assert_eq!(report.violations[0].constraint, "minCount");
         }
     }
 }

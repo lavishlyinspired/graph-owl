@@ -192,6 +192,72 @@ One incident already occurred and was reverted during planning (a cache-tier tab
   separate change with its own tests — not four fixture changes at once, which
   is what made each failure point somewhere else.
 
+  **The gate is tiered, and the cheap tier is the one that earns its place.**
+  Measured 30 July 2026:
+
+  | Gate | Cost | What it catches |
+  |---|---|---|
+  | `CARGO_TARGET_DIR=/tmp/check cargo check -p <crate>` | seconds, no lock | types, in one crate |
+  | `cargo test -p <crate> --lib` | seconds | that crate's own logic |
+  | **`cargo build --workspace --tests`** | **65s incremental** | **every cross-crate break** |
+  | `cargo test --workspace -- --test-threads=1` | 241s clean | behaviour against real Postgres |
+
+  **Every cross-crate breakage in that session was a compile error, not a test
+  failure** — five of them: `EdgeRef` gaining a field, `AssetContext` gaining
+  one, `delete_lineage_edge` changing its return type, a new `ConflictKind`
+  variant leaving three `match` arms non-exhaustive, and a doctest link to a type
+  that did not exist yet. None needed a container to find.
+
+  So: **compile the workspace on every commit** — it is 65 seconds and it covers
+  the class of bug that actually bites. Batch the *full* suite across several
+  slices, and run it before pushing or when a slice touched storage, the engine
+  or the server. What must not be batched is the compile: five slices written
+  against one failing suite gives five candidate causes, which is the same
+  attribution problem as writing with no compiler at all.
+
+  **Write code freely while a suite runs. Do not compile until it finishes.**
+
+  This is the sharpest form of the "one cargo at a time" rule, and it is the one
+  that keeps getting missed, because it does not look like running two suites.
+  `cargo build` — or `cargo test -p <crate> --lib`, or `cargo clippy` — takes the
+  same build lock and recompiles crates the running suite's later test binaries
+  link against. The suite then waits for the lock *and* relinks, and the symptom
+  is a workspace run that takes half an hour while `test-health.sh` reports a
+  perfectly clean environment.
+
+  Measured 30 July 2026: a suite at 896/1046 tests after **30 minutes**, with
+  three containers, ten databases and `/dev/shm` at 3% — nothing wrong with the
+  environment at all. The cause was six or seven `cargo build` invocations run
+  alongside it while writing an unrelated slice.
+
+  Editing files is free; it is the compiler that collides. Batch the edits, wait
+  for the run, then build once.
+
+  **But there is a way to type-check without waiting**, found 30 July 2026:
+  cargo locks **per target directory**, so a check against a different one does
+  not contend at all.
+
+  ```
+  CARGO_TARGET_DIR=/tmp/check cargo check -p <crate> --all-targets
+  ```
+
+  Measured against a running workspace suite: **1m00s** for the first crate
+  (it rebuilds dependencies into the fresh directory) and incremental after
+  that, with the suite unaffected. It costs CPU and disk, not the lock.
+
+  This is the difference between writing a slice blind and writing it verified.
+  **Use it** — writing several epics' worth of code with no compiler feedback
+  inverts the whole point of short RED→GREEN cycles: the errors arrive together,
+  at the end, in one undifferentiated pile where none of them can be attributed
+  to the decision that caused it.
+
+  What it does **not** replace is running the tests. `cargo check` proves the
+  code compiles, not that it is right.
+
+  **One thing editing is not free for**: a file a *running* test asserts
+  against. Editing `openapi.rs`'s route table mid-run made the committed-contract
+  drift guard fail — a manufactured failure that looks exactly like a real one.
+
   **Waiting for a run: match the process name, not the command line.**
   `pgrep -f <pattern>` matches every process whose *full command line* contains
   the pattern — including the shell running the pgrep. A loop like

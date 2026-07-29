@@ -1008,6 +1008,56 @@
         "summary": "An asset's version history"
       }
     },
+    "/connectors/configs": {
+      "get": {
+        "operationId": "get_connectors_configs",
+        "responses": {
+          "200": {
+            "description": "Every connector configuration, without credentials"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every connector configuration, without credentials"
+      },
+      "post": {
+        "operationId": "post_connectors_configs",
+        "responses": {
+          "201": {
+            "description": "Save a connector configuration; the credential is write-only"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Save a connector configuration; the credential is write-only"
+      }
+    },
     "/connectors/postgres/runs": {
       "post": {
         "operationId": "post_connectors_postgres_runs",

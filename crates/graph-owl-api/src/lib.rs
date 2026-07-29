@@ -1247,6 +1247,92 @@ impl Catalog {
         self.storage.pool_stats()
     }
 
+    /// Save a connector configuration.
+    ///
+    /// `secret` is `None` to leave an existing credential alone: an
+    /// edit-then-save round trip cannot resend what it was never given.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the connector or service name is blank.
+    /// `Storage` if the write fails.
+    #[tracing::instrument(name = "catalog.save_connector_config", skip_all)]
+    pub async fn save_connector_config(
+        &self,
+        connector: &str,
+        service_name: &str,
+        settings: serde_json::Value,
+        secret: Option<&str>,
+    ) -> Result<graph_owl_storage::ConnectorConfig, CatalogError> {
+        let mut problems = Vec::new();
+        if connector.trim().is_empty() {
+            problems.push(FieldError::new(
+                "connector",
+                FieldErrorCode::Required,
+                "which connector this configures".to_string(),
+            ));
+        }
+        if service_name.trim().is_empty() {
+            problems.push(FieldError::new(
+                "serviceName",
+                FieldErrorCode::Required,
+                "the service this configuration is for".to_string(),
+            ));
+        }
+        // A blank secret is not a secret. Accepting `""` would set `has_secret`
+        // and then fail at connection time with a credential error nobody can
+        // explain.
+        if secret.is_some_and(|s| s.trim().is_empty()) {
+            problems.push(FieldError::new(
+                "secret",
+                FieldErrorCode::Type,
+                "a blank secret is not a credential; omit the field to keep the \
+                 existing one"
+                    .to_string(),
+            ));
+        }
+        if !problems.is_empty() {
+            return Err(CatalogError::Validation(problems));
+        }
+
+        let config = graph_owl_storage::ConnectorConfig {
+            id: Uuid::new_v4(),
+            connector: connector.to_string(),
+            service_name: service_name.to_string(),
+            settings,
+            // Set from what storage actually holds, on the read below — a value
+            // computed here would claim a credential this call may not have
+            // supplied.
+            has_secret: false,
+        };
+        self.storage
+            .upsert_connector_config(&config, secret)
+            .await?;
+
+        self.storage
+            .connector_configs()
+            .await?
+            .into_iter()
+            .find(|c| c.connector == connector && c.service_name == service_name)
+            .ok_or_else(|| {
+                CatalogError::Storage(StorageError::Unexpected(
+                    "the configuration vanished between write and read".to_string(),
+                ))
+            })
+    }
+
+    /// Every connector configuration, **without credentials**.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    #[tracing::instrument(name = "catalog.connector_configs", skip_all)]
+    pub async fn connector_configs(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::ConnectorConfig>, CatalogError> {
+        Ok(self.storage.connector_configs().await?)
+    }
+
     /// Create or update a team.
     ///
     /// # Errors
@@ -2759,6 +2845,10 @@ mod tests {
         waivers: Mutex<Vec<graph_owl_storage::Waiver>>,
         assignments: Mutex<Vec<graph_owl_storage::Assignment>>,
         teams: Mutex<Vec<graph_owl_storage::Team>>,
+        /// The config **and** its credential, so a test can prove the credential
+        /// is kept and still never returned by the read path.
+        #[allow(clippy::type_complexity)]
+        connectors: Mutex<Vec<(graph_owl_storage::ConnectorConfig, Option<String>)>>,
         /// When armed, any relational write panics. Lets a test assert "this
         /// code path writes nothing" structurally instead of by reading it and
         /// believing what it says.
@@ -2791,6 +2881,55 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Storage for InMemoryStorage {
+        async fn upsert_connector_config(
+            &self,
+            config: &graph_owl_storage::ConnectorConfig,
+            secret: Option<&str>,
+        ) -> Result<(), StorageError> {
+            let mut held = self.connectors.lock().expect("lock");
+            // `None` leaves an existing credential alone, exactly as the
+            // adapter's `COALESCE` does. A double that cleared it would let a
+            // facade pass here and silently break connectors in production.
+            let existing = held
+                .iter()
+                .find(|(c, _)| {
+                    c.connector == config.connector && c.service_name == config.service_name
+                })
+                .and_then(
+                    |(_, s): &(graph_owl_storage::ConnectorConfig, Option<String>)| s.clone(),
+                );
+            held.retain(|(c, _)| {
+                !(c.connector == config.connector && c.service_name == config.service_name)
+            });
+            let kept = secret.map(ToString::to_string).or(existing);
+            let mut stored = config.clone();
+            stored.has_secret = kept.is_some();
+            held.push((stored, kept));
+            Ok(())
+        }
+
+        async fn connector_configs(
+            &self,
+        ) -> Result<Vec<graph_owl_storage::ConnectorConfig>, StorageError> {
+            Ok(self
+                .connectors
+                .lock()
+                .expect("lock")
+                .iter()
+                .map(|(c, _)| c.clone())
+                .collect())
+        }
+
+        async fn connector_secret(&self, id: Uuid) -> Result<Option<String>, StorageError> {
+            Ok(self
+                .connectors
+                .lock()
+                .expect("lock")
+                .iter()
+                .find(|(c, _)| c.id == id)
+                .and_then(|(_, s)| s.clone()))
+        }
+
         async fn upsert_team(&self, team: &graph_owl_storage::Team) -> Result<(), StorageError> {
             // The real adapter's foreign key refuses an unknown member. A
             // looser double would let a facade skipping the check pass here
@@ -6717,6 +6856,164 @@ mod projection_isolation_tests {
             storage
                 .policy_reads
                 .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// **The secrets round-trip test, and the plan's first RED.** A
+        /// credential must never appear in anything a reader can see — not in
+        /// the value, not in the debug rendering, not in the JSON.
+        ///
+        /// The strongest version of this is structural: `ConnectorConfig` has
+        /// **no field** for a secret, so a handler cannot leak one by
+        /// forgetting to redact. This test pins that the guarantee holds
+        /// end to end anyway, because a later `secret: Option<String>` added
+        /// "just for the edit form" would compile and pass everything else.
+        #[tokio::test]
+        async fn a_stored_credential_never_comes_back() {
+            let (catalog, _) = catalog_with_policy().await;
+
+            let saved = catalog
+                .save_connector_config(
+                    "postgres",
+                    "warehouse",
+                    serde_json::json!({ "host": "db.internal", "database": "retail" }),
+                    Some("s3cr3t-p4ssw0rd"),
+                )
+                .await
+                .expect("save");
+
+            // It was stored — the flag says so without saying what.
+            assert!(saved.has_secret);
+
+            for rendering in [
+                format!("{saved:?}"),
+                serde_json::to_string(&saved).expect("serialises"),
+                serde_json::to_string(&catalog.connector_configs().await.expect("list"))
+                    .expect("serialises"),
+            ] {
+                assert!(
+                    !rendering.contains("s3cr3t"),
+                    "a credential surfaced in {rendering}"
+                );
+            }
+
+            // And the non-secret settings *are* returned, so the assertions
+            // above are about the credential rather than about a read that
+            // returns nothing.
+            assert_eq!(saved.settings["host"], "db.internal");
+        }
+
+        /// The run path can still reach it — a write-only secret that nothing
+        /// can read is a connector that cannot connect.
+        #[tokio::test]
+        async fn the_run_path_can_read_the_credential() {
+            let (catalog, _) = catalog_with_policy().await;
+            let saved = catalog
+                .save_connector_config(
+                    "postgres",
+                    "warehouse",
+                    serde_json::json!({}),
+                    Some("s3cr3t"),
+                )
+                .await
+                .expect("save");
+
+            let secret = catalog
+                .storage
+                .connector_secret(saved.id)
+                .await
+                .expect("read");
+
+            assert_eq!(secret.as_deref(), Some("s3cr3t"));
+        }
+
+        /// **An edit that does not resend the credential keeps it.** A round trip
+        /// through a form cannot resend what it was never given, and treating
+        /// absent as "clear it" would break a connector every time somebody
+        /// changed a setting.
+        #[tokio::test]
+        async fn saving_without_a_secret_keeps_the_existing_one() {
+            let (catalog, _) = catalog_with_policy().await;
+            catalog
+                .save_connector_config(
+                    "postgres",
+                    "warehouse",
+                    serde_json::json!({}),
+                    Some("keep-me"),
+                )
+                .await
+                .expect("first");
+
+            let updated = catalog
+                .save_connector_config(
+                    "postgres",
+                    "warehouse",
+                    serde_json::json!({ "database": "changed" }),
+                    None,
+                )
+                .await
+                .expect("edit");
+
+            assert!(updated.has_secret, "the credential was cleared by an edit");
+            assert_eq!(updated.settings["database"], "changed");
+            assert_eq!(
+                catalog
+                    .storage
+                    .connector_secret(updated.id)
+                    .await
+                    .expect("read")
+                    .as_deref(),
+                Some("keep-me")
+            );
+        }
+
+        /// A configuration with no credential is a real state — some databases
+        /// are reachable without one — and must be distinguishable from one that
+        /// has a credential.
+        #[tokio::test]
+        async fn a_configuration_without_a_credential_says_so() {
+            let (catalog, _) = catalog_with_policy().await;
+
+            let saved = catalog
+                .save_connector_config("postgres", "warehouse", serde_json::json!({}), None)
+                .await
+                .expect("save");
+
+            assert!(!saved.has_secret);
+        }
+
+        /// **A blank secret is not a secret.** Accepting `""` would set the flag
+        /// and then fail at connection time with a credential error nobody can
+        /// explain.
+        #[tokio::test]
+        async fn a_blank_secret_is_refused_rather_than_stored() {
+            let (catalog, _) = catalog_with_policy().await;
+
+            for blank in ["", "   "] {
+                let outcome = catalog
+                    .save_connector_config("postgres", "w", serde_json::json!({}), Some(blank))
+                    .await;
+                assert!(
+                    matches!(outcome, Err(CatalogError::Validation(_))),
+                    "{blank:?} was accepted as a credential"
+                );
+            }
+        }
+
+        /// One configuration per service per connector: two would make "which
+        /// credential did last night's run use" unanswerable.
+        #[tokio::test]
+        async fn saving_twice_updates_rather_than_duplicating() {
+            let (catalog, _) = catalog_with_policy().await;
+            catalog
+                .save_connector_config("postgres", "warehouse", serde_json::json!({}), Some("a"))
+                .await
+                .expect("first");
+            catalog
+                .save_connector_config("postgres", "warehouse", serde_json::json!({}), Some("b"))
+                .await
+                .expect("second");
+
+            assert_eq!(catalog.connector_configs().await.expect("list").len(), 1);
         }
 
         fn person(id: &str) -> StoredUser {

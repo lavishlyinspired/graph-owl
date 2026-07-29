@@ -457,6 +457,76 @@ impl Storage for PostgresStorage {
             .collect())
     }
 
+    #[tracing::instrument(name = "storage.upsert_connector_config", skip_all)]
+    async fn upsert_connector_config(
+        &self,
+        config: &graph_owl_storage::ConnectorConfig,
+        secret: Option<&str>,
+    ) -> Result<(), StorageError> {
+        // `COALESCE($5, connector_configs.secret)` is what makes `None` mean
+        // "leave it alone". An edit-then-save round trip cannot resend a
+        // credential it was never given, and treating absent as "clear it"
+        // would break a connector every time somebody renamed its service.
+        sqlx::query(
+            "INSERT INTO connector_configs (id, connector, service_name, settings, secret)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (connector, service_name) DO UPDATE
+                SET settings   = EXCLUDED.settings,
+                    secret     = COALESCE(EXCLUDED.secret, connector_configs.secret),
+                    updated_at = now()",
+        )
+        .bind(config.id)
+        .bind(&config.connector)
+        .bind(&config.service_name)
+        .bind(&config.settings)
+        .bind(secret)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    #[tracing::instrument(name = "storage.connector_configs", skip_all)]
+    async fn connector_configs(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::ConnectorConfig>, StorageError> {
+        // **`secret` is not in the SELECT.** The struct has no field for it, so
+        // this could not compile if it were — but naming the columns rather than
+        // `SELECT *` means a reviewer can see the omission is deliberate.
+        let rows = sqlx::query(
+            "SELECT id, connector, service_name, settings,
+                    (secret IS NOT NULL) AS has_secret
+               FROM connector_configs
+              ORDER BY connector, service_name",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| graph_owl_storage::ConnectorConfig {
+                id: row.get("id"),
+                connector: row.get("connector"),
+                service_name: row.get("service_name"),
+                settings: row.get("settings"),
+                has_secret: row.get("has_secret"),
+            })
+            .collect())
+    }
+
+    #[tracing::instrument(name = "storage.connector_secret", skip_all)]
+    async fn connector_secret(&self, id: Uuid) -> Result<Option<String>, StorageError> {
+        // The only place a credential is read. Deliberately its own method so a
+        // reviewer auditing where secrets go has one signature to grep for.
+        sqlx::query_scalar("SELECT secret FROM connector_configs WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map(Option::flatten)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
     #[tracing::instrument(name = "storage.upsert_team", skip_all)]
     async fn upsert_team(&self, team: &graph_owl_storage::Team) -> Result<(), StorageError> {
         // One transaction: a team whose row was written and whose membership

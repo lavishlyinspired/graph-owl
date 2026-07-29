@@ -26,7 +26,7 @@ is the condition that index exists to catch.
 | **2** | 1 | [`02-entity-hierarchy.md`](02-entity-hierarchy.md) | In progress | 6/7 | Epic 1 (conventions, relationship taxonomy) |
 | **3** | 2 | [`03-versioning.md`](03-versioning.md) | In progress | 11/13 (+1 partial) | Epic 2 (four entity types to apply the envelope to) |
 | **4** | 3 | [`04-engine-triples.md`](04-engine-triples.md) | In progress | 8/11 (+1 partial) | Epic 3 (four entity types with an envelope to project) |
-| **5** | 4 | [`05-engine-constraints.md`](05-engine-constraints.md) | In progress | 8/9 (+1 partial) | Epic 4 (triples to validate) |
+| **5** | 4 | [`05-engine-constraints.md`](05-engine-constraints.md) | In progress | 9/10 (+1 partial) | Epic 4 (triples to validate) |
 | **6** | 4, 12 | [`06-engine-reasoning.md`](06-engine-reasoning.md) | In progress | 7/8 (+1 partial) | Epic 4 (triples), Epic 5 (ontology types) |
 | **7** | 3 | [`07-engine-query.md`](07-engine-query.md) | In progress | 8/9 | Epic 4 (triples), Epic 13 (authorization to compile into queries), **Epic 7a**… |
 | **7a** | 3 | [`07a-engine-traversal.md`](07a-engine-traversal.md) | **Shipped** | 5/5 | Epic 4 (triples, SPOT/POST/OPST indexes) |
@@ -69,7 +69,7 @@ is the condition that index exists to catch.
 | **38** | 9 | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | — | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
 | **39** | 1 | [`39-ui-foundation.md`](39-ui-foundation.md) | In progress | 22/23 | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
 | **40** | 3 | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | **Shipped** | 11/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
-| **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | In progress | 9/10 (+1 partial) | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
+| **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | In progress | 10/11 (+1 partial) | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
 | **42** | 7 | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | Not started | 0/3 | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
 | **43** | 5 | [`43-framework-integrations.md`](43-framework-integrations.md) | Not started | 0/4 | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
 | **93** | 3 | [`93-console-overview.md`](93-console-overview.md) | Not started | — | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
@@ -152,6 +152,7 @@ is the condition that index exists to catch.
 - [x] `GET /validation/report`
 - [x] All six target kinds
 - [x] Seed shapes ship
+- [x] `sh:not`/`sh:and`/`sh:or` stated as triples
 - [~] Pending in this epic
 
 ### Epic 6 — Reasoning Overlay *(Demo 4, 12)*
@@ -413,6 +414,7 @@ is the condition that index exists to catch.
 - [x] Violations are assignable
 - [x] The derivation chain rendered beside a derived fact
 - [x] Policy dry-run
+- [x] Connector configuration with write-only secrets
 - [~] Admin: the rest of the section
 
 ### Epic 42 — Semantic Browse, Review Queues & Agent Activity *(Demo 7)*

@@ -217,3 +217,26 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 3. `cargo test --workspace`, `cargo clippy --workspace --all-targets`, `cargo fmt --check`.
 4. Every budget green in CI.
 5. Any budget revision recorded with its reason in this plan — never silently raised.
+
+## Where the data comes from (added 30 July 2026)
+
+**Generated benchmarks for the numbers that need to be dialled**, real dumps for
+the distributions that cannot be invented:
+
+- **LUBM** and **BSBM** — parameterised RDF generators, so scale is a knob
+  rather than a download. These are what "10M flakes" should mean here.
+- **Wikidata** or **DBpedia** dumps — real degree distributions and real
+  vocabulary sprawl, which no generator reproduces. Use these to *size* budgets,
+  not to discover bottlenecks.
+
+**And a distinction worth keeping.** Tabular dataset sources (Kaggle and
+similar) are the wrong shape for this: they give volume without graph structure,
+and the costs this epic measures are structural — path length, branching factor,
+degree skew.
+
+**Synthetic still wins for isolating a variable.** Epic 103's entry condition is
+whether traversal cost grows with *depth*; a real graph confounds depth with
+branching factor and degree distribution, so it would show that something is
+slow without showing which term dominates. Generate for the gate, download for
+the budget.
+

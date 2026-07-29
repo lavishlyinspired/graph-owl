@@ -90,6 +90,10 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/policies/dry-run", post(dry_run_policy))
         .route("/users/{id}/roles", put(set_user_roles))
         .route("/teams", get(list_teams).post(upsert_team))
+        .route(
+            "/connectors/configs",
+            get(list_connector_configs).post(save_connector_config),
+        )
         // Unauthenticated by design: an orchestrator's probe must not depend
         // on the identity provider being reachable.
         .route("/health", get(health))
@@ -1384,6 +1388,65 @@ async fn run_validation(
         return Err(AppError::NotFound);
     }
     Ok(Json(catalog.run_validation().await?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectorConfigRequest {
+    connector: String,
+    service_name: String,
+    /// Everything a reader may see. Rendered by `SchemaForm` from the
+    /// connector's own JSON Schema, which is why it is free-form here.
+    #[serde(default)]
+    settings: serde_json::Value,
+    /// **Omit to keep the existing credential.** An edit form cannot resend what
+    /// it was never given, and `Option` is what lets absent mean "leave it"
+    /// rather than "clear it" — the difference between changing a port and
+    /// breaking a connector.
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+impl ValidateBody for ConnectorConfigRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Save a connector configuration — Epic 41 Slice F.
+///
+/// Admin-only: a connector configuration holds a credential and decides what
+/// gets catalogued, which is administration rather than cataloguing.
+async fn save_connector_config(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<ConnectorConfigRequest>,
+) -> Result<(StatusCode, Json<graph_owl_storage::ConnectorConfig>), AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let saved = catalog
+        .save_connector_config(
+            &payload.connector,
+            &payload.service_name,
+            payload.settings,
+            payload.secret.as_deref(),
+        )
+        .await?;
+    // `ConnectorConfig` has no field for a credential, so this response cannot
+    // carry one — the guarantee is the type, not this handler remembering.
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+/// Every configuration, without credentials.
+async fn list_connector_configs(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<Vec<graph_owl_storage::ConnectorConfig>>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.connector_configs().await?))
 }
 
 #[derive(Debug, serde::Deserialize)]
