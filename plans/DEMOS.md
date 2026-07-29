@@ -21,9 +21,7 @@ revision (rule 0's corollary).*
 
 | Demo | Remaining | Blocks |
 |---|---|---|
-| 1 | **Epic 15** — scheduled runs and run-history persistence. `graph-owl does not become a scheduler` (decision 5), so "scheduled runs" means an external trigger, and what is missing is the *history* a triggered run should leave behind | — |
-| 1 | **Epic 1 K** — a client generated in another language and exercised. The valuable half — responses checked against the promised schemas — shipped | — |
-| 3 | **Epic 40** — React Flow + d3-dag lineage DAG | Epic 29 (nothing declares lineage yet) |
+| 3 | **Epic 40** — React Flow + d3-dag lineage DAG | **Epic 29 Slice A**, and the blocker is narrower than "nothing declares lineage": `Feeds` is already in the relationship vocabulary, but `Catalog::create_relationship` is hardcoded to `(EntityKind::Table, EntityKind::Table)` — the pre-`Asset` entity. Lineage between the assets the catalog actually holds cannot be asserted at all, by a human or a connector |
 
 **Deferred *by design*, and not Demo 1–3 debt** — listing them as gaps would be
 scope confusion: `rdf:reifies` and the language-tag side table → Epic 94 ·
@@ -35,9 +33,9 @@ vector embeddings → out of process per `00j`.
 
 | Demo | Theme | Epics | State |
 |---|---|---|---|
-| **1** | A source becomes a browsable catalog | 1, 2, 15, 39 (partial) | **Shipped** — + deletion detection |
-| **2** | A governed catalog people can trust | +3, 8, 10, 11, 12, 13 | **Shipped** — + `If-Match`/412, console sign-in, facets (gaps named per epic) |
-| **3** ★ | It is a graph engine | +4, 7, 7a, 40, 93 | **Mostly shipped** — Epic 4 A–H, 7 A–C (SPARQL over flakes, pushdown), 7a core, 40 A/B/D, 93 Overview. Explorer is still SVG; lineage DAG not started |
+| **1** | A source becomes a browsable catalog | 1, 2, 15, 39 (partial) | **Complete** — deletion detection, `source_hash` skip, run history, and a generated client round-tripped against a live service |
+| **2** | A governed catalog people can trust | +3, 8, 10, 11, 12, 13 | **Complete** — `If-Match`/412, OIDC sign-in, ranked search, and Epic 10 at 17/17 (budget, admission control, spans, gauges) |
+| **3** ★ | It is a graph engine | +4, 7, 7a, 40, 93 | **Mostly shipped** — Epic 4 A–H, 7 A–C (SPARQL over flakes, pushdown), 7a core, 40 A/B/D, 93 Overview, and the explorer is now a Cytoscape/WebGL canvas. One item left: the lineage DAG, which needs Epic 29 Slice A — a **Demo 7** epic — before there is any lineage to draw |
 | **4** | It reasons, and it validates | +5, 6, 41 | |
 | **5** ★ | Agents can use it | +14, 31, 32, 43 | |
 | **6** | It fills itself | +16, 17, 18, 19, 20, 21 | |
@@ -120,7 +118,8 @@ vector embeddings → out of process per `00j`.
 - [x] **H** Unknown query parameters rejected and named
 - [x] **I** `Location` header on creates, asserted against the returned id
 - [x] **J** OpenAPI 3.1 generated from code, served at `/openapi.json`, committed and drift-guarded. **One route table, two consumers**: the spec is built from it and the router is asserted against it, so a route cannot be documented without existing *or* exist without being documented. Schemas are `ToSchema` derives on the domain types, so a field added to `Asset` reaches the contract without anyone remembering
-- [~] **K** The valuable half of it: a real request and a real error are checked **against the schema the contract promises** — required fields present, and no field the schema does not describe. That second half is what catches a spec that has fallen behind its type. What is *not* done is generating a client in another language and running it, which is what the slice literally says
+- [x] **K** A TypeScript client is generated from `openapi.json` and driven against a live server: create → read → list → patch → delete, a typed problem+json error, and pagination following a cursor. `scripts/verify-generated-client.sh` regenerates the contract, regenerates the client, starts Postgres and a server, and runs it. The client is **not committed** — it is derived from the spec, and a committed copy is a second thing to keep in step
+- [x] **It earned its keep immediately.** The contract said `DELETE /assets/{id}` returns `204`; the server returns `200` with the cascade count, deliberately — *"a delete that silently tombstoned 400 columns and returned 204 would leave an operator unable to tell whether it did what they meant"*. A spec can be valid, drift-guarded, and still describe a service that does not exist; only a client running against the real thing catches that
 
 ### Epic 2 — Entity hierarchy & columns
 - [x] `Asset` + `AssetKind` for all five levels, one type not five
@@ -139,7 +138,9 @@ vector embeddings → out of process per `00j`.
 - [x] Run report names each failure and its reason
 - [x] System schemas excluded; views catalogued and marked
 - [x] Deletion detection with a threshold guard — off by default; a refusal deletes nothing at all; a source reporting almost nothing is caught by the threshold and names what it saw *(Epic 15)*
-- [ ] Scheduled runs, run history persistence
+- [x] **Run history persisted** — a run opens its row *before* the work and closes it after, so a run that dies mid-flight leaves a row with no `finishedAt` rather than leaving nothing. A history that only records completions cannot show a crash, which is what it is most needed for. Recording never fails the run it records: a catalogue that refused to sync because its own audit row would not write would be trading the thing for the record of the thing
+- [x] `GET /connectors/runs`, newest first, and the console's Connectors page shows it — a run that leaves a record nobody can see is half a feature. The table distinguishes **did not finish** from **failed** from **refused**, and shows "unchanged (n skipped)" rather than a bare zero
+- [ ] ~~Scheduled runs~~ — **refused by decision 5**, not missing: *"graph-owl does not become a scheduler. Runs are triggered by an API call or external cron. Scheduling is a solved problem owned by other software."* The tracker line was asking for something the plan rejects on purpose. What it was really missing was the history above
 - [x] **`source_hash` fingerprinting** *(decision 7)* — a re-run reads, compares and skips. Decision 3 already made a re-run *converge*; this makes it cheap. Three outcomes decided before any write: create if the FQN is unknown, patch if the fingerprint differs, **patch if there is no fingerprint at all** — absent evidence is not evidence of sameness, and skipping on it would freeze every pre-fingerprinting asset invisibly
 - [x] **The fingerprint covers source-owned fields only.** A description edited in the console is catalog-owned; including it would make every human edit look like a source change and the connector would helpfully overwrite it. Framed with lengths rather than concatenated, because `["ab","c"]` and `["a","bc"]` are different assets that a naive join gives identical bytes
 - [x] **A skipped record still counts as reported by the source**, so deletion detection does not tombstone it — getting that wrong would delete the entire catalog on the first run that used fingerprinting

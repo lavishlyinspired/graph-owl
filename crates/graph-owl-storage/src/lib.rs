@@ -5,6 +5,7 @@ use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
     page::{Page, PageRequest},
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// A user as stored. Distinct from `Principal`, which is the request-scoped
@@ -58,6 +59,27 @@ pub enum UpdateOutcome {
     /// The guard did not match. Carries what the version actually is, so the
     /// caller can show the reader what they were about to overwrite.
     VersionMismatch(EntityVersion),
+}
+
+/// One connector run, as history records it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorRun {
+    pub id: Uuid,
+    pub connector: String,
+    pub service_name: String,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// `None` means the run never reported back — a crash, not a fast success.
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created: i32,
+    pub skipped: i32,
+    pub failed: i32,
+    pub deleted: i32,
+    pub failures: serde_json::Value,
+    /// Why deletion detection declined, when it did. A refusal is a successful
+    /// run that deliberately did nothing.
+    pub refusal: Option<String>,
+    pub triggered_by: String,
 }
 
 /// Connection-pool occupancy, for the operational gauge.
@@ -207,6 +229,24 @@ pub trait Storage: Send + Sync {
     async fn upsert_user(&self, user: &StoredUser) -> Result<(), StorageError>;
     /// Every policy attached to any of these roles, deduplicated.
     async fn policies_for_roles(&self, roles: &[String]) -> Result<Vec<Policy>, StorageError>;
+
+    /// Open a run row before the work starts.
+    ///
+    /// Written *before* rather than after, so a run that dies mid-flight leaves
+    /// a row with no `finished_at` instead of leaving nothing. A history that
+    /// only records completions cannot show a crash, which is the failure it is
+    /// most needed for.
+    async fn begin_run(&self, run: &ConnectorRun) -> Result<(), StorageError>;
+
+    /// Close it with what actually happened.
+    async fn finish_run(&self, run: &ConnectorRun) -> Result<(), StorageError>;
+
+    /// Recent runs for a service, newest first.
+    async fn recent_runs(
+        &self,
+        service_name: &str,
+        limit: usize,
+    ) -> Result<Vec<ConnectorRun>, StorageError>;
 
     /// Fingerprints for the FQNs a run is about to write.
     ///

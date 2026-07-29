@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono.workspace = true
+serde_json.workspace = true
+serde.workspace = true
 graph-owl-core.workspace = true
 graph-owl-authz.workspace = true
 async-trait.workspace = true

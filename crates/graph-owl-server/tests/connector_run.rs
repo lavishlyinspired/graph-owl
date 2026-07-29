@@ -272,3 +272,71 @@ async fn a_changed_source_is_written_rather_than_skipped() {
         "and everything unchanged must still skip: {second}"
     );
 }
+
+/// **A run leaves a record.** Before this, the report went back in the HTTP
+/// response and nowhere else, so "did last night's sync work" was unanswerable
+/// the moment the caller closed the connection.
+#[tokio::test]
+async fn a_run_is_recorded_in_history() {
+    let (app, _database, connection_string) = test_app().await;
+    seed_source(&connection_string).await;
+
+    let report = run_connector(&app, &connection_string).await;
+    let history = get(&app, "/connectors/runs").await;
+
+    let runs = history.as_array().expect("an array of runs");
+    assert_eq!(runs.len(), 1, "{history}");
+    assert_eq!(
+        runs[0]["id"], report["runId"],
+        "the report names the row it wrote"
+    );
+    assert_eq!(runs[0]["serviceName"], "warehouse");
+    assert_eq!(runs[0]["connector"], "postgres");
+    assert_eq!(runs[0]["created"], report["created"]);
+    assert_eq!(runs[0]["failed"], 0);
+    assert!(
+        runs[0]["finishedAt"].is_string(),
+        "a completed run has an ending: {history}"
+    );
+    assert!(runs[0]["triggeredBy"].is_string(), "{history}");
+}
+
+/// Newest first, because history is read as a timeline. A second run must not
+/// be hidden behind the first, and the skip count must distinguish them.
+#[tokio::test]
+async fn history_is_newest_first_and_distinguishes_the_runs() {
+    let (app, _database, connection_string) = test_app().await;
+    seed_source(&connection_string).await;
+
+    let first = run_connector(&app, &connection_string).await;
+    let second = run_connector(&app, &connection_string).await;
+
+    let history = get(&app, "/connectors/runs").await;
+    let runs = history.as_array().expect("an array");
+
+    assert_eq!(runs.len(), 2, "{history}");
+    assert_eq!(runs[0]["id"], second["runId"], "newest first: {history}");
+    assert_eq!(runs[1]["id"], first["runId"]);
+    // The second run wrote nothing because nothing changed, and the row says
+    // so — which is the whole reason `skipped` is stored beside `created`.
+    assert_eq!(runs[0]["created"], 0, "{history}");
+    assert!(runs[0]["skipped"].as_u64().unwrap() > 0, "{history}");
+}
+
+/// And the negative: a service filter must actually filter, or the parameter
+/// is a lie that looks like it worked.
+#[tokio::test]
+async fn history_can_be_narrowed_to_one_service() {
+    let (app, _database, connection_string) = test_app().await;
+    seed_source(&connection_string).await;
+    run_connector(&app, &connection_string).await;
+
+    let mine = get(&app, "/connectors/runs?serviceName=warehouse").await;
+    let theirs = get(&app, "/connectors/runs?serviceName=something-else").await;
+
+    assert_eq!(mine.as_array().expect("array").len(), 1, "{mine}");
+    assert!(
+        theirs.as_array().expect("array").is_empty(),
+        "another service's history is not this one's: {theirs}"
+    );
+}

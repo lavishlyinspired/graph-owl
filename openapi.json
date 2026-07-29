@@ -152,6 +152,16 @@
         },
         "type": "array"
       },
+      "CascadeCount": {
+        "description": "How many assets the operation affected, including the subtree.",
+        "properties": {
+          "deleted": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "ChangeDescription": {
         "description": "Computed server-side by diffing before against after — never supplied by the\nclient. This is why PATCH stays DTO-shaped rather than JSON Patch: a state\ndiff describes *effect*, a patch document describes *intent*, and an audit\ntrail wants effect.",
         "properties": {
@@ -632,8 +642,15 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Soft-delete an asset and its subtree"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CascadeCount"
+                }
+              }
+            },
+            "description": "Soft-delete an asset and its subtree, reporting how many were tombstoned"
           },
           "401": {
             "content": {
@@ -661,7 +678,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "Soft-delete an asset and its subtree"
+        "summary": "Soft-delete an asset and its subtree, reporting how many were tombstoned"
       },
       "get": {
         "operationId": "get_assets__id_",
@@ -1025,6 +1042,32 @@
           }
         ],
         "summary": "Catalogue a Postgres source"
+      }
+    },
+    "/connectors/runs": {
+      "get": {
+        "operationId": "get_connectors_runs",
+        "responses": {
+          "200": {
+            "description": "Recent connector runs, newest first"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Recent connector runs, newest first"
       }
     },
     "/docs/": {

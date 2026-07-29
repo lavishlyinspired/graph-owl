@@ -228,6 +228,15 @@ pub static ROUTES: &[Route] = &[
     ),
     route(
         "get",
+        "/connectors/runs",
+        "Recent connector runs, newest first",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "get",
         "/openapi.json",
         "This document",
         None,
@@ -262,13 +271,18 @@ pub static ROUTES: &[Route] = &[
         200,
         true,
     ),
+    // **200 with a count, not 204.** Found by Slice K: the contract said 204 and
+    // the handler has always returned the cascade count, deliberately — "a
+    // delete that silently tombstoned 400 columns and returned 204 would leave
+    // an operator unable to tell whether it did what they meant". A generated
+    // client would have been written against the wrong one.
     route(
         "delete",
         "/assets/{id}",
-        "Soft-delete an asset and its subtree",
+        "Soft-delete an asset and its subtree, reporting how many were tombstoned",
         None,
-        None,
-        204,
+        Some("CascadeCount"),
+        200,
         true,
     ),
     route(
@@ -423,6 +437,17 @@ pub fn document() -> Value {
 
     if let Some(map) = schemas.as_object_mut() {
         map.insert("Problem".to_string(), problem_schema());
+        // The cascade count a soft delete and a restore report. Hand-written
+        // because the handlers build it inline; there is no Rust type whose
+        // schema this would be.
+        map.insert(
+            "CascadeCount".to_string(),
+            json!({
+                "type": "object",
+                "description": "How many assets the operation affected, including the subtree.",
+                "properties": { "deleted": { "type": "integer", "format": "int64" } }
+            }),
+        );
         // Generic instantiations. `Page<T>` is one Rust type and several
         // contract types, and OpenAPI has no generics to express that.
         map.insert("Page_Asset".to_string(), page_of("Asset"));

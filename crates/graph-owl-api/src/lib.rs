@@ -1353,6 +1353,40 @@ impl Catalog {
     /// `NotFound` if the record's parent has not been written yet — which is a
     /// connector contract violation, since `Connector::fetch` promises parents
     /// before children.
+    /// Open a run row before the work starts.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn begin_run(
+        &self,
+        run: &graph_owl_storage::ConnectorRun,
+    ) -> Result<(), CatalogError> {
+        Ok(self.storage.begin_run(run).await?)
+    }
+
+    /// Close it with what happened.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn finish_run(
+        &self,
+        run: &graph_owl_storage::ConnectorRun,
+    ) -> Result<(), CatalogError> {
+        Ok(self.storage.finish_run(run).await?)
+    }
+
+    /// Recent runs, newest first. An empty service name means every service.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying storage fails.
+    pub async fn recent_runs(
+        &self,
+        service_name: &str,
+        limit: usize,
+    ) -> Result<Vec<graph_owl_storage::ConnectorRun>, CatalogError> {
+        Ok(self.storage.recent_runs(service_name, limit).await?)
+    }
+
     /// Fingerprints for a batch of FQNs, as the three states a run acts on.
     ///
     /// # Errors
@@ -1685,6 +1719,7 @@ mod tests {
         /// question reached storage at all.
         pub(super) policy_reads: std::sync::atomic::AtomicUsize,
         source_hashes: Mutex<std::collections::HashMap<Uuid, Vec<u8>>>,
+        runs: Mutex<Vec<graph_owl_storage::ConnectorRun>>,
     }
 
     impl InMemoryStorage {
@@ -1993,6 +2028,45 @@ mod tests {
         /// fake's convention, not the schema's, and it is enough to model the
         /// one property that matters: different roles resolve different
         /// policies.
+        async fn begin_run(
+            &self,
+            run: &graph_owl_storage::ConnectorRun,
+        ) -> Result<(), StorageError> {
+            self.runs.lock().unwrap().push(run.clone());
+            Ok(())
+        }
+
+        /// Replaces the open row rather than appending a second one — a run is
+        /// one row that gains an ending, not two rows that must be correlated.
+        async fn finish_run(
+            &self,
+            run: &graph_owl_storage::ConnectorRun,
+        ) -> Result<(), StorageError> {
+            let mut runs = self.runs.lock().unwrap();
+            if let Some(open) = runs.iter_mut().find(|r| r.id == run.id) {
+                *open = run.clone();
+            }
+            Ok(())
+        }
+
+        async fn recent_runs(
+            &self,
+            service_name: &str,
+            limit: usize,
+        ) -> Result<Vec<graph_owl_storage::ConnectorRun>, StorageError> {
+            let mut runs: Vec<_> = self
+                .runs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| service_name.is_empty() || r.service_name == service_name)
+                .cloned()
+                .collect();
+            runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+            runs.truncate(limit);
+            Ok(runs)
+        }
+
         /// Honours the port's distinction between the two absences: an FQN
         /// missing from the map does not exist, and one present with `None`
         /// exists without a fingerprint. A double that returned an empty map

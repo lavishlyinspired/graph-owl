@@ -72,6 +72,85 @@ impl PostgresStorage {
 
 #[async_trait]
 impl Storage for PostgresStorage {
+    #[tracing::instrument(name = "storage.begin_run", skip_all)]
+    async fn begin_run(&self, run: &graph_owl_storage::ConnectorRun) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO connector_runs
+                 (id, connector, service_name, started_at, triggered_by)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(run.id)
+        .bind(&run.connector)
+        .bind(&run.service_name)
+        .bind(run.started_at)
+        .bind(&run.triggered_by)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    #[tracing::instrument(name = "storage.finish_run", skip_all)]
+    async fn finish_run(&self, run: &graph_owl_storage::ConnectorRun) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE connector_runs
+                SET finished_at = $2, created = $3, skipped = $4, failed = $5,
+                    deleted = $6, failures = $7, refusal = $8
+              WHERE id = $1",
+        )
+        .bind(run.id)
+        .bind(run.finished_at)
+        .bind(run.created)
+        .bind(run.skipped)
+        .bind(run.failed)
+        .bind(run.deleted)
+        .bind(&run.failures)
+        .bind(&run.refusal)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    #[tracing::instrument(name = "storage.recent_runs", skip_all)]
+    async fn recent_runs(
+        &self,
+        service_name: &str,
+        limit: usize,
+    ) -> Result<Vec<graph_owl_storage::ConnectorRun>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, connector, service_name, started_at, finished_at,
+                    created, skipped, failed, deleted, failures, refusal, triggered_by
+               FROM connector_runs
+              WHERE ($1 = '' OR service_name = $1)
+              ORDER BY started_at DESC
+              LIMIT $2",
+        )
+        .bind(service_name)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| graph_owl_storage::ConnectorRun {
+                id: row.get("id"),
+                connector: row.get("connector"),
+                service_name: row.get("service_name"),
+                started_at: row.get("started_at"),
+                finished_at: row.get("finished_at"),
+                created: row.get("created"),
+                skipped: row.get("skipped"),
+                failed: row.get("failed"),
+                deleted: row.get("deleted"),
+                failures: row.get("failures"),
+                refusal: row.get("refusal"),
+                triggered_by: row.get("triggered_by"),
+            })
+            .collect())
+    }
+
     #[tracing::instrument(name = "storage.source_hashes", skip_all)]
     async fn source_hashes(
         &self,

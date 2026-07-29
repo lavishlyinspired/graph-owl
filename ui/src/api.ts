@@ -57,6 +57,24 @@ export interface Facet {
   count: number;
 }
 
+export interface ConnectorRun {
+  id: string;
+  connector: string;
+  serviceName: string;
+  startedAt: string;
+  /** Null means the run never reported back — a crash, not a fast success. */
+  finishedAt: string | null;
+  created: number;
+  skipped: number;
+  failed: number;
+  deleted: number;
+  failures: unknown[];
+  /** Why deletion detection declined. A refusal is a successful run that
+   *  deliberately did nothing. */
+  refusal: string | null;
+  triggeredBy: string;
+}
+
 export interface SearchFacets {
   kind: Facet[];
   schema: Facet[];
@@ -234,8 +252,12 @@ export const api = {
     serviceName: string;
     includeSchemas?: string[];
   }) =>
-    request<{ created: number; failed: number; failures: unknown[] }>(
+    request<{ runId: string; created: number; skipped: number; failed: number; failures: unknown[] }>(
       "/connectors/postgres/runs",
       { method: "POST", body: JSON.stringify(body) },
     ),
+  /** Recent runs, newest first. A run that leaves a record nobody can see is
+   *  only half the feature — "did last night's sync work" has to be answerable
+   *  without a database session. */
+  connectorRuns: () => request<ConnectorRun[]>("/connectors/runs?limit=20"),
 };

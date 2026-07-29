@@ -2,8 +2,8 @@
 **Branch**: feat/api-conventions
 **Status**: **Shipped** — slices A–J. The contract is generated from a single
 route table, served at `/openapi.json`, committed, drift-guarded and validated
-as OpenAPI 3.1. Slice K is partial: responses are checked against the promised
-schemas, but no client is generated in another language. Demo 1
+as OpenAPI 3.1. Slice K generates a TypeScript client from the contract and round-trips it
+against a live server. Demo 1
 **Depends on**: nothing
 **Unblocks**: everything
 **Crates**: `graph-owl-core` (Principal, Page, RelationshipType) · `graph-owl-api` (CatalogError) · `graph-owl-server` (problem+json, OpenAPI, extractors)
@@ -243,6 +243,20 @@ than running it. What *is* mutable — the branches deciding whether an operatio
 documents a `401`, a `404`, a `400`, or a request body — is covered, and those
 are the decisions worth testing: each one is a branch a generated client either
 grows or does not.
+
+### Slice K found a contract error on its first run
+
+The spec said `DELETE /assets/{id}` returns `204`. The handler returns `200`
+with the cascade count, and has always done so on purpose — the comment above it
+reads *"a delete that silently tombstoned 400 columns and returned 204 would
+leave an operator unable to tell whether it did what they meant."*
+
+Every earlier check passed on it. The document validated as OpenAPI 3.1, every
+`$ref` resolved, the drift guard was green because the committed copy matched
+the code, and the route-coverage test was green because the route existed. All
+of those check the spec against *itself*. **Only a client generated from it and
+run against a real server checks it against the service** — which is the whole
+argument for this slice, and it took one run to demonstrate.
 
 ### What "fails CI" means here, honestly
 

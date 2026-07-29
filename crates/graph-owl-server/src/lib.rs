@@ -73,6 +73,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/graph/reconcile", post(reconcile_projection))
         .route("/sparql", post(sparql))
         .route("/connectors/postgres/runs", post(run_postgres_connector))
+        .route("/connectors/runs", get(list_connector_runs))
         // Unauthenticated by design: an orchestrator's probe must not depend
         // on the identity provider being reachable.
         .route("/health", get(health))
@@ -1435,6 +1436,28 @@ async fn run_postgres_connector(
 
     // Per-record failure does not abort the run (15-connectors.md Slice B): a
     // single unreadable table must not cost the other nine hundred.
+    // Opened before the work, so a run that dies mid-flight leaves a row with
+    // no `finished_at` rather than leaving nothing. A history that only records
+    // completions cannot show a crash, which is what it is most needed for.
+    let mut run = graph_owl_storage::ConnectorRun {
+        id: Uuid::new_v4(),
+        connector: connector.type_name().to_string(),
+        service_name: payload.service_name.clone(),
+        started_at: chrono::Utc::now(),
+        finished_at: None,
+        created: 0,
+        skipped: 0,
+        failed: 0,
+        deleted: 0,
+        failures: json!([]),
+        refusal: None,
+        triggered_by: principal.id.clone(),
+    };
+    // Recording history must not fail the run it is recording. A catalogue that
+    // refused to sync because its own audit row would not write would be
+    // trading the thing for the record of the thing.
+    let _ = catalog.begin_run(&run).await;
+
     let mut created = 0;
     let mut skipped = 0;
     let mut failures: Vec<serde_json::Value> = Vec::new();
@@ -1526,7 +1549,19 @@ async fn run_postgres_connector(
         None
     };
 
+    run.finished_at = Some(chrono::Utc::now());
+    run.created = i32::try_from(created).unwrap_or(i32::MAX);
+    run.skipped = i32::try_from(skipped).unwrap_or(i32::MAX);
+    run.failed = i32::try_from(failures.len()).unwrap_or(i32::MAX);
+    run.deleted = deletions
+        .as_ref()
+        .map_or(0, |plan| i32::try_from(plan.absent).unwrap_or(i32::MAX));
+    run.refusal = deletions.as_ref().and_then(|plan| plan.refused.clone());
+    run.failures = json!(failures);
+    let _ = catalog.finish_run(&run).await;
+
     Ok(Json(json!({
+        "runId": run.id,
         "connector": connector.type_name(),
         "serviceName": payload.service_name,
         "created": created,
@@ -1538,6 +1573,34 @@ async fn run_postgres_connector(
         "failures": failures,
         "deletions": deletions,
     })))
+}
+
+/// Recent connector runs, newest first.
+///
+/// Unfiltered by service unless asked, because the first question after a
+/// nightly sync is "did anything run", not "did this one run".
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RunHistoryQuery {
+    service_name: Option<String>,
+    limit: Option<usize>,
+}
+
+/// Bounded so a history that has grown for a year cannot be asked for at once.
+const RUN_HISTORY_MAX: usize = 100;
+
+async fn list_connector_runs(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppQuery(query): AppQuery<RunHistoryQuery>,
+) -> Result<Json<Vec<graph_owl_storage::ConnectorRun>>, AppError> {
+    let _ = principal;
+    let limit = query.limit.unwrap_or(20).min(RUN_HISTORY_MAX);
+    Ok(Json(
+        catalog
+            .recent_runs(query.service_name.as_deref().unwrap_or_default(), limit)
+            .await?,
+    ))
 }
 
 // ---- envelope (Epic 3) ----

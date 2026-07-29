@@ -75,6 +75,7 @@ import {
   toElements,
   wantsWebgl,
 } from "./graph/cytoscape";
+import type { ConnectorRun } from "./api";
 import watermarkImg from "./assets/watermark1.png";
 
 const { Header, Sider, Content } = Layout;
@@ -1514,7 +1515,101 @@ function ConnectorRunForm({
   );
 }
 
-function ConnectorsPage({ onDone }: { onDone: () => void }) {
+/** What the connector actually did, kept after it finished.
+ *
+ *  A run previously reported into the HTTP response and nowhere else, so "did
+ *  last night's sync work" was unanswerable the moment the caller closed the
+ *  connection. `15-connectors.md` treats run history as a governance concern
+ *  for that reason: a catalog whose freshness cannot be evidenced is one nobody
+ *  can trust a decision to.
+ */
+function RunHistory({ colors }: { colors: (typeof palette)["light"] }) {
+  const [runs, setRuns] = useState<ConnectorRun[] | null>(null);
+
+  useEffect(() => {
+    api
+      .connectorRuns()
+      .then(setRuns)
+      .catch(() => setRuns([]));
+  }, []);
+
+  if (runs === null) return <Text type="secondary">Loading run history…</Text>;
+  if (runs.length === 0) {
+    return (
+      <Text type="secondary">
+        No runs recorded yet. Catalogue a source and its result will appear here.
+      </Text>
+    );
+  }
+
+  return (
+    <Table
+      size="small"
+      rowKey="id"
+      pagination={false}
+      dataSource={runs}
+      columns={[
+        {
+          title: "When",
+          dataIndex: "startedAt",
+          render: (at: string) => new Date(at).toLocaleString(),
+        },
+        { title: "Service", dataIndex: "serviceName" },
+        {
+          title: "Result",
+          render: (_: unknown, run: ConnectorRun) => {
+            // A run that never reported is not a fast success, and the table
+            // must not let the two look alike.
+            if (run.finishedAt === null) {
+              return <Tag color="red">did not finish</Tag>;
+            }
+            if (run.failed > 0) {
+              return <Tag color="red">{run.failed} failed</Tag>;
+            }
+            // A refusal is a *successful* run that deliberately did nothing —
+            // reading it as a failure sends someone looking for a fault that is
+            // not there.
+            if (run.refusal) {
+              return <Tag color="orange">refused</Tag>;
+            }
+            return <Tag color="green">ok</Tag>;
+          },
+        },
+        {
+          title: "Written",
+          render: (_: unknown, run: ConnectorRun) =>
+            run.created === 0 && run.skipped > 0 ? (
+              // The distinction the whole `skipped` column exists for: nothing
+              // written because nothing changed, not because nothing worked.
+              <Text type="secondary">unchanged ({run.skipped} skipped)</Text>
+            ) : (
+              <span>
+                {run.created} written
+                {run.skipped > 0 && (
+                  <Text type="secondary"> · {run.skipped} unchanged</Text>
+                )}
+              </span>
+            ),
+        },
+        {
+          title: "Removed",
+          render: (_: unknown, run: ConnectorRun) =>
+            run.refusal ? (
+              <Tooltip title={run.refusal}>
+                <Text type="warning">refused</Text>
+              </Tooltip>
+            ) : (
+              <Text type={run.deleted > 0 ? undefined : "secondary"}>{run.deleted}</Text>
+            ),
+        },
+        { title: "By", dataIndex: "triggeredBy" },
+      ]}
+      style={{ border: `1px solid ${colors.border}`, borderRadius: 12 }}
+    />
+  );
+}
+
+function ConnectorsPage({ onDone, colors }: { onDone: () => void; colors: (typeof palette)["light"] }) {
   const [chosen, setChosen] = useState<string | null>(null);
 
   if (chosen === "postgres") {
@@ -1563,6 +1658,16 @@ function ConnectorsPage({ onDone }: { onDone: () => void }) {
           </Col>
         ))}
       </Row>
+
+      <div>
+        <Title level={5} style={{ margin: "8px 0 4px", fontWeight: 600 }}>
+          Recent runs
+        </Title>
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          What each catalogue run did, kept after it finished.
+        </Text>
+      </div>
+      <RunHistory colors={colors} />
     </Space>
   );
 }
@@ -2002,7 +2107,7 @@ function AppShell() {
                   onAddSource={() => setSection("connectors")}
                 />
               ) : section === "connectors" ? (
-                <ConnectorsPage onDone={refresh} />
+                <ConnectorsPage onDone={refresh} colors={colors} />
               ) : results !== null ? (
                 <Row gutter={24} style={{ width: "100%" }}>
                   <Col flex="200px">
