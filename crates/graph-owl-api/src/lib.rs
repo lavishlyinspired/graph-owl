@@ -235,6 +235,32 @@ pub struct SparqlOutcome {
     pub truncated: bool,
     /// The transaction time the answer was computed at, when one was asked for.
     pub as_of: Option<i64>,
+    /// **What the engine decided to read**, one entry per scan.
+    ///
+    /// The single number that explains a slow query. Pushdown turns "read the
+    /// estate and let the evaluator filter" into "read what the question
+    /// names", and an author who cannot see which of the two happened cannot
+    /// tell a query that is inherently expensive from one that is one triple
+    /// pattern away from being cheap.
+    ///
+    /// A **single `?s ?p ?o` entry means no pattern could be bounded** and the
+    /// whole graph was read — which is correct, and is the thing worth seeing.
+    pub plan: Vec<String>,
+}
+
+/// Render one planned scan the way a reader thinks about it.
+///
+/// `?` for an unbound position rather than omitting it, so the *shape* of what
+/// will be read is visible at a glance: `?s dsc:name ?o` and `dsc:x ?p ?o`
+/// narrow in different directions and cost differently.
+fn describe_scan(pattern: &graph_owl_core::flake::TriplePattern) -> String {
+    let position = |bound: Option<String>| bound.unwrap_or_else(|| "?".to_string());
+    format!(
+        "{} {} {}",
+        position(pattern.s.as_ref().map(ToString::to_string)),
+        position(pattern.p.as_ref().map(ToString::to_string)),
+        position(pattern.o.as_ref().map(|o| format!("{o:?}"))),
+    )
 }
 
 /// Keep only the facts this principal may see, up to the budget.
@@ -608,6 +634,10 @@ impl Catalog {
             .unwrap_or_else(|| vec![graph_owl_core::flake::TriplePattern::default()]);
 
         let mut all = Vec::new();
+        // Described before they run: the plan is what the engine *decided*, and
+        // computing it from what came back would describe the outcome instead.
+        let plan: Vec<String> = scans.iter().map(describe_scan).collect();
+
         for mut scan in scans {
             scan.as_of = at;
             all.extend(
@@ -644,6 +674,7 @@ impl Catalog {
             facts_scanned: facts.len(),
             truncated,
             as_of: at,
+            plan,
         })
     }
 
@@ -4644,6 +4675,64 @@ mod projection_isolation_tests {
         assert!(outcome.facts_scanned > 0);
         assert!(!outcome.truncated);
         let _ = created;
+    }
+
+    /// **The plan is what the engine decided to read**, and it is the single
+    /// number that explains a slow query. A bounded query names the predicate
+    /// it will scan.
+    #[tokio::test]
+    async fn sparql_reports_the_scan_it_planned() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?n WHERE { ?s <https://graph-owl.dev/ns/catalog#name> ?n }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(outcome.plan.len(), 1, "{:?}", outcome.plan);
+        assert!(
+            outcome.plan[0].contains("name"),
+            "the plan should name the bound predicate: {:?}",
+            outcome.plan
+        );
+        // Unbound positions are shown rather than omitted, so the *shape* of
+        // the read is visible: narrowing on a subject and on a predicate cost
+        // differently and must not render alike.
+        assert!(outcome.plan[0].starts_with("? "), "{:?}", outcome.plan);
+    }
+
+    /// **An unbounded query reports the full scan**, which is the entry worth
+    /// seeing. Reporting nothing — or an empty plan — would let the most
+    /// expensive query in the system look like the cheapest.
+    #[tokio::test]
+    async fn a_query_that_cannot_be_bounded_says_it_reads_everything() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(
+            outcome.plan,
+            vec!["? ? ?".to_string()],
+            "{:?}",
+            outcome.plan
+        );
     }
 
     /// `as_of` must reach the scan.

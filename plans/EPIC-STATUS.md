@@ -61,7 +61,7 @@ marks for it yet, which is a different thing from zero of them done.
 | **37b** | [`37b-portability.md`](37b-portability.md) | Not started | — | Epic 3 (history is part of what must survive) |
 | **37c** | [`37c-embeddable.md`](37c-embeddable.md) | Not started | — | Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate again… |
 | **38** | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | — | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
-| **39** | [`39-ui-foundation.md`](39-ui-foundation.md) | In progress | 19/23 | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
+| **39** | [`39-ui-foundation.md`](39-ui-foundation.md) | In progress | 21/23 | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
 | **40** | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | In progress | 10/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
 | **41** | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | In progress | 3/7 | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
 | **42** | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | Not started | 0/3 | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
@@ -362,8 +362,8 @@ marks for it yet, which is a different thing from zero of them done.
 - [x] Empty-database first-run state that offers the next action
 - [x] Trust bar that states what it does not know yet
 - [x] Deep-linkable selection (`?asset=`)
-- [ ] OIDC/PKCE login, tokens in memory only
-- [ ] Generated API client (blocked on Epic 1 Slice J)
+- [x] OIDC/PKCE login
+- [x] Generated API client
 - [x] Hierarchy tree, asset detail, and the five-level service → column navigation
 - [x] Trust bar: version, last editor, and honest "not captured yet" for certification and lin
 - [x] Version history tab with the diff viewer

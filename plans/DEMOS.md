@@ -153,8 +153,8 @@ vector embeddings → out of process per `00j`.
 - [x] Empty-database first-run state that offers the next action
 - [x] Trust bar that states what it does not know yet
 - [x] Deep-linkable selection (`?asset=`)
-- [ ] OIDC/PKCE login, tokens in memory only
-- [ ] Generated API client (blocked on Epic 1 Slice J)
+- [x] **OIDC/PKCE login** — verifier parked in `sessionStorage` across the redirect, because the navigation destroys the JS context and a verifier held in memory is `null` by the time the callback needs it. The **access token stays in memory only**; the *refresh* token moved to `sessionStorage` on 30 July 2026 so a reload restores the session rather than bouncing the user through a login they had already completed. `localStorage` was rejected — it survives a browser restart at the cost of leaving a long-lived credential on disk
+- [x] **Generated API client** — a TypeScript client generated from `openapi.json` and driven against a live server *(Epic 1 Slice K)*. Not committed: it is derived from the spec, and a committed copy is a second thing to keep in step
 
 **Known issues carried forward**
 - ~~`/assets/{id}` is an API namespace; prefixing the API is the fix.~~ **Withdrawn 28 July 2026 — the proposed fix contradicts `00d-api-conventions.md`**, which keeps the URL unversioned and unprefixed *precisely so that adding a prefix later carries a signal*. Nothing is broken: the console routes entirely in query parameters (`?asset=`, `?asOf=`, `?compareTo=`, `?expand=`, `?tab=`), which cannot collide with an API route by construction. `00d` now states that as a constraint to keep rather than a coincidence to rediscover.

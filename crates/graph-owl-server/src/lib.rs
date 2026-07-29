@@ -1322,6 +1322,11 @@ async fn sparql(
         // eventually-consistent answer presented as current is this design's
         // failure mode, and the stamp is what makes it honest instead.
         "asOf": outcome.as_of,
+        // **What the engine decided to read.** An author who cannot see
+        // whether pushdown bounded their query cannot tell one that is
+        // inherently expensive from one a single triple pattern away from
+        // being cheap.
+        "plan": outcome.plan,
     })))
 }
 
