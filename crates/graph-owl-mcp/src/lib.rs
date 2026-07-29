@@ -9,6 +9,8 @@
 //! The one decision worth reading this file for: **denied and absent are the
 //! same answer**. See [`Outcome::NotFound`].
 
+pub mod trust;
+
 use async_trait::async_trait;
 use serde::Serialize;
 

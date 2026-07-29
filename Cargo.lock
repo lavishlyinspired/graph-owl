@@ -976,6 +976,7 @@ name = "graph-owl-mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "graph-owl-api",
  "graph-owl-core",
  "serde",
