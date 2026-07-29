@@ -192,13 +192,18 @@ One incident already occurred and was reverted during planning (a cache-tier tab
   separate change with its own tests — not four fixture changes at once, which
   is what made each failure point somewhere else.
 
-  **Waiting for a run: match the binary, not the string.** `pgrep -f "cargo test"`
-  matches *the shell running the pgrep*, so a loop like
-  `until ! pgrep -f "cargo test"; do sleep 20; done` waits for itself and never
-  terminates. Every such waiter then shows up in `ps | grep "cargo test"` and
-  looks like another concurrent suite, which is a second wrong conclusion on top
-  of the first. Use `pgrep -f "bin/cargo test"`, and count with it before
-  believing that runs are stacked.
+  **Waiting for a run: match the process name, not the command line.**
+  `pgrep -f <pattern>` matches every process whose *full command line* contains
+  the pattern — including the shell running the pgrep. A loop like
+  `until ! pgrep -f "cargo test"; do sleep 20; done` therefore waits for itself,
+  forever, and then shows up in `ps` as another concurrent suite: a wrong
+  conclusion stacked on a wrong measurement.
+
+  **This was got wrong twice.** The second attempt narrowed the pattern to
+  `bin/cargo test` and had exactly the same defect, because the waiter's own
+  command line contains that too. The fix is `pgrep -x cargo`, which matches the
+  executable name and nothing else. Better still, do not poll: let the run
+  finish and read its output.
 
   **A config change to the shared container invalidates its reuse hash**, and
   testcontainers then tries to create a second container with the same name —

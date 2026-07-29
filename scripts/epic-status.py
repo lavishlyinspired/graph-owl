@@ -110,6 +110,35 @@ def slices_by_epic() -> dict[str, list[tuple[str, str]]]:
     return marks
 
 
+def demos_by_epic() -> dict[str, list[str]]:
+    """Which demo each epic serves, from DEMOS.md's own coverage index.
+
+    Read rather than restated, for the same reason the slice marks are: the
+    index is maintained beside the demos it describes, and a second copy here
+    is a second thing to keep in step. An epic may serve more than one demo —
+    Epic 6 is Demo 4's reasoning and is recalibrated in Demo 12 — so this is a
+    list, and a single number would quietly drop the later work.
+    """
+    demos: dict[str, list[str]] = {}
+    in_table = False
+    for line in (PLANS / "DEMOS.md").read_text().splitlines():
+        if re.match(r"^\|\s*Demo\s*\|\s*Epics covered\s*\|", line):
+            in_table = True
+            continue
+        if in_table:
+            row = re.match(r"^\|\s*(\d+)\s*★?\s*\|\s*(.+?)\s*\|\s*$", line)
+            if not row:
+                # The first non-row ends the table. Reading past it would pick
+                # up whatever prose follows as epic numbers.
+                if not line.startswith("|"):
+                    break
+                continue
+            demo, covered = row.group(1), row.group(2)
+            for number in re.findall(r"\d+[a-z]?", covered):
+                demos.setdefault(number, []).append(demo)
+    return demos
+
+
 def bar(slices: list[tuple[str, str]]) -> str:
     if not slices:
         return "—"
@@ -132,6 +161,7 @@ def state(slices: list[tuple[str, str]]) -> str:
 def main() -> int:
     owners = plans_by_epic()
     marks = slices_by_epic()
+    demos = demos_by_epic()
 
     def order(number: str) -> tuple[int, str]:
         digits = re.match(r"(\d+)", number)
@@ -156,8 +186,14 @@ def main() -> int:
         "`—` in **Slices** means the plan exists and `DEMOS.md` tracks no slice",
         "marks for it yet, which is a different thing from zero of them done.",
         "",
-        "| Epic | Plan | State | Slices | Depends on |",
-        "|---|---|---|---|---|",
+        "**Demo** is which demo an epic serves, from `DEMOS.md`'s coverage",
+        "index. An epic serving more than one shows both — Epic 6 is Demo 4's",
+        "reasoning *and* is recalibrated in Demo 12, and a single number would",
+        "quietly drop the later work. `—` means the epic is in no demo, which",
+        "is the condition that index exists to catch.",
+        "",
+        "| Epic | Demo | Plan | State | Slices | Depends on |",
+        "|---|---|---|---|---|---|",
     ]
     for number in numbers:
         plan = owners.get(number, {})
@@ -167,8 +203,9 @@ def main() -> int:
         depends = plan.get("depends", "") or "—"
         if len(depends) > 80:
             depends = depends[:79].rstrip() + "…"
+        demo = ", ".join(demos.get(number, [])) or "—"
         out.append(
-            f"| **{number}** | {link} | {state(slices)} | {bar(slices)} "
+            f"| **{number}** | {demo} | {link} | {state(slices)} | {bar(slices)} "
             f"| {depends.replace('|', chr(92) + '|')} |"
         )
 
@@ -179,7 +216,9 @@ def main() -> int:
             continue
         plan = owners.get(number, {})
         title = re.sub(r"\s*\(Epics?[^)]*\)\s*", " ", plan.get("title", "no plan file")).strip()
-        out.append(f"### Epic {number} — {title}")
+        demo = ", ".join(demos.get(number, []))
+        where = f" *(Demo {demo})*" if demo else ""
+        out.append(f"### Epic {number} — {title}{where}")
         out.append("")
         for mark, summary in slices:
             out.append(f"- {mark} {summary}")

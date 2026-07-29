@@ -22,11 +22,15 @@ CONTAINER=graph-owl-tests
 # 30-second stalls before a binary's first test — which looks exactly like a
 # fixture bug and is not. Measured: `cargo test -p graph-owl-server` is 74s
 # alone and 228s alongside a second run.
-# Matches the cargo *binary*, not any shell whose command line mentions it.
-# `pgrep -f "cargo test"` also matches the script doing the pgrep — which is
-# how a wait-for-the-suite loop ends up waiting for itself, forever. That cost
-# an afternoon and several stacked runs before anyone noticed.
-concurrent=$(pgrep -f "bin/cargo test" 2>/dev/null | wc -l | tr -d ' ')
+# **Match the executable, not the command line.** `pgrep -f <anything>` matches
+# every process whose *full command line* contains the pattern — including the
+# shell running the pgrep, and including any wait-loop that mentions it. Two
+# separate attempts at a "wait for the suite" loop in this project waited for
+# themselves forever, and both then showed up in `ps` as extra concurrent
+# suites, which is a wrong conclusion stacked on a wrong measurement.
+#
+# `pgrep -x cargo` matches the process *name* only, which is what was meant.
+concurrent=$(pgrep -x cargo 2>/dev/null | wc -l | tr -d ' ')
 if [ "$concurrent" -gt 1 ]; then
     echo "!! ${concurrent} 'cargo test' processes are running."
     echo "   Two suites racing is the single biggest slowdown this project has had."
