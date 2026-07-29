@@ -31,6 +31,8 @@ pub enum ConflictKind {
     /// is the live one, and "why is this accepted" is the question the record
     /// exists to answer.
     WaiverExists,
+    /// This finding is already assigned. Two owners is no owner.
+    AssignmentExists,
 }
 
 #[derive(Debug, Error)]
@@ -125,6 +127,34 @@ pub struct Waiver {
     /// **Required.** A permanent waiver is a rule switched off without being
     /// switched off — invisible in the shape and never reviewed again.
     pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A group of people who own things together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Team {
+    pub id: String,
+    pub display_name: String,
+    /// `None` is a real state — usually somebody created the team in a hurry.
+    /// Requiring one would get it filled with the word "team".
+    pub description: Option<String>,
+    /// Ordered by id, so two reads of an unchanged team compare equal.
+    pub members: Vec<String>,
+}
+
+/// Who is fixing a violation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assignment {
+    pub id: Uuid,
+    /// The finding's identity, not its row id — same reason as [`Waiver`].
+    pub shape: String,
+    pub focus_node: String,
+    pub path: Option<String>,
+    pub constraint_kind: String,
+    /// A `users.id`. **Not free text**: an assignment to a name nobody can
+    /// resolve is a queue row that looks worked and is not.
+    pub assignee: String,
+    pub assigned_by: String,
+    pub assigned_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// What slice of the queue a caller wants.
@@ -372,6 +402,55 @@ pub trait Storage: Send + Sync {
     ///
     /// [`StorageError`] if the read fails.
     async fn waivers(&self) -> Result<Vec<Waiver>, StorageError>;
+
+    /// Create or update a team, replacing its membership.
+    ///
+    /// Membership is **replaced, not merged**: a partial update cannot express
+    /// "remove everybody", and removal is the operation that has to work — a
+    /// team somebody has left is an owner who no longer exists.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the write fails, including when a named member is
+    /// not a known user.
+    async fn upsert_team(&self, team: &Team) -> Result<(), StorageError>;
+
+    /// One team, with its members.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn find_team(&self, id: &str) -> Result<Option<Team>, StorageError>;
+
+    /// Every team, by id.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn teams(&self) -> Result<Vec<Team>, StorageError>;
+
+    /// Put a finding on somebody's plate.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Conflict`] if it is already assigned — two owners is no
+    /// owner. [`StorageError`] if the assignee is not a known user.
+    async fn assign_finding(&self, assignment: &Assignment) -> Result<(), StorageError>;
+
+    /// Take a finding off somebody's plate.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the delete fails. Unassigning something that was not
+    /// assigned is `Ok(false)`, not an error.
+    async fn unassign_finding(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Every assignment.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn assignments(&self) -> Result<Vec<Assignment>, StorageError>;
 
     /// Open a run row before the work starts.
     ///

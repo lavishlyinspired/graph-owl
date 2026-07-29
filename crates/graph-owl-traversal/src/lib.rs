@@ -85,6 +85,15 @@ pub struct EdgeRef {
     /// `feeds`, `contains`, … Carried on the edge so a consumer can style or
     /// filter without resolving either endpoint.
     pub relationship: String,
+    /// The reasoner concluded this edge; nobody asserted it.
+    ///
+    /// **Carried, not inferred.** `00b` decision 2 keeps conclusions in their
+    /// own graph precisely so nobody mistakes one for something a person
+    /// stated, and a picture that draws both alike undoes that separation
+    /// exactly where it matters most — in front of somebody about to act on it.
+    /// A consumer cannot recover this from the endpoints or the relationship
+    /// name, so it has to ride on the edge.
+    pub derived: bool,
 }
 
 /// A route through the graph.
@@ -302,6 +311,7 @@ mod subgraph_tests {
             from: sid(from),
             to: sid(to),
             relationship: "contains".to_string(),
+            derived: false,
         }
     }
 

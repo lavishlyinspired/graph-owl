@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  edgeClasses,
   type Picture,
   WEBGL_THRESHOLD,
   edgeId,
@@ -233,5 +234,59 @@ describe("choosing a renderer", () => {
    *  interactivity budget, so the budget is never the thing being tested. */
   it("sits well below the interactivity budget", () => {
     expect(WEBGL_THRESHOLD).toBeLessThan(1_000);
+  });
+});
+
+describe("a derived edge is drawn differently", () => {
+  // **Not decoration.** `00b` decision 2 keeps conclusions in their own graph
+  // precisely so nobody mistakes one for something a person asserted, and a
+  // picture that renders both alike undoes that separation in front of the
+  // reader most likely to act on it.
+  it("carries a class an asserted edge does not", () => {
+    const derived = edgeClasses({ from: "a", to: "b", relationship: "feeds", derived: true });
+    const asserted = edgeClasses({ from: "a", to: "b", relationship: "feeds", derived: false });
+
+    expect(derived.split(" ")).toContain("derived");
+    expect(asserted.split(" ")).not.toContain("derived");
+  });
+
+  // An older server that does not send the flag understates what the reasoner
+  // did rather than overstating it — the safe direction for a claim about
+  // provenance.
+  it("treats an absent flag as asserted", () => {
+    expect(edgeClasses({ from: "a", to: "b", relationship: "feeds" }).split(" ")).not.toContain(
+      "derived",
+    );
+  });
+
+  // The diff classes still apply: an edge can be both newly added and derived,
+  // and losing either would misreport what changed or where it came from.
+  it("keeps the change class alongside", () => {
+    const classes = edgeClasses({
+      from: "a",
+      to: "b",
+      relationship: "feeds",
+      derived: true,
+      change: "added",
+    }).split(" ");
+
+    expect(classes).toContain("added");
+    expect(classes).toContain("derived");
+  });
+
+  it("reaches the elements the canvas draws", () => {
+    const elements = toElements({
+      seedId: "a",
+      nodes: [
+        { id: "a", name: "a", kind: "table" },
+        { id: "b", name: "b", kind: "table" },
+      ],
+      edges: [{ from: "a", to: "b", relationship: "feeds", derived: true }],
+      expanded: ["a", "b"],
+      truncatedAt: [],
+    });
+
+    const edge = elements.find((e) => e.group === "edges");
+    expect(edge?.classes.split(" ")).toContain("derived");
   });
 });

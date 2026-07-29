@@ -1286,6 +1286,32 @@
         "summary": "Everything the landing page needs"
       }
     },
+    "/policies/dry-run": {
+      "post": {
+        "operationId": "post_policies_dry-run",
+        "responses": {
+          "200": {
+            "description": "What a policy would do to the estate, without saving it"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "What a policy would do to the estate, without saving it"
+      }
+    },
     "/ready": {
       "get": {
         "operationId": "get_ready",
@@ -1796,6 +1822,176 @@
           }
         ],
         "summary": "Relate two tables"
+      }
+    },
+    "/teams": {
+      "get": {
+        "operationId": "get_teams",
+        "responses": {
+          "200": {
+            "description": "Every team, with its members"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every team, with its members"
+      },
+      "post": {
+        "operationId": "post_teams",
+        "responses": {
+          "201": {
+            "description": "Create or update a team, replacing its membership"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create or update a team, replacing its membership"
+      }
+    },
+    "/users/{id}/roles": {
+      "put": {
+        "operationId": "put_users__id__roles",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Replace a user's roles, invalidating cached authorization"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Replace a user's roles, invalidating cached authorization"
+      }
+    },
+    "/validation/assignments": {
+      "post": {
+        "operationId": "post_validation_assignments",
+        "responses": {
+          "201": {
+            "description": "Put a finding on somebody's plate"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Put a finding on somebody's plate"
+      }
+    },
+    "/validation/assignments/{id}": {
+      "delete": {
+        "operationId": "delete_validation_assignments__id_",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Take a finding off somebody's plate"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Take a finding off somebody's plate"
       }
     },
     "/validation/report": {

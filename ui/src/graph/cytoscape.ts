@@ -104,10 +104,28 @@ export function toElements(picture: Picture): Element[] {
         target: edge.to,
         label: edge.relationship,
       },
-      classes: changeOf(edge as DiffEdge),
+      classes: edgeClasses(edge as GraphEdge & DiffEdge),
     }));
 
   return [...nodes, ...edges];
+}
+
+/** Classes on an edge.
+ *
+ *  **A derived edge is drawn differently, and that is not decoration.** `00b`
+ *  decision 2 keeps conclusions in their own graph precisely so nobody
+ *  mistakes one for something a person asserted — and a picture that renders
+ *  both alike undoes that separation in front of the one reader most likely to
+ *  act on it. An asserted `feeds` and an inferred one carry different weight in
+ *  every decision somebody makes from this graph.
+ *
+ *  Absent means asserted: an older server that does not send the flag
+ *  understates what the reasoner did rather than overstating it.
+ */
+export function edgeClasses(edge: GraphEdge & { change?: Change }): string {
+  const classes: string[] = [changeOf(edge)];
+  if (edge.derived === true) classes.push("derived");
+  return classes.join(" ");
 }
 
 /** The layout.

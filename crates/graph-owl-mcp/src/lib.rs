@@ -9,6 +9,7 @@
 //! The one decision worth reading this file for: **denied and absent are the
 //! same answer**. See [`Outcome::NotFound`].
 
+pub mod catalog;
 pub mod trust;
 
 use async_trait::async_trait;
@@ -60,6 +61,10 @@ pub struct AssetContext {
     /// know. This flag is the difference between a partial answer and a wrong
     /// one.
     pub policy_filtered: bool,
+    /// What the agent should believe about this asset. Carried on every
+    /// context, because retrieval without it is a fact with no weight attached
+    /// — and an agent given facts and no confidence reports them all alike.
+    pub trust: crate::trust::TrustSummary,
 }
 
 /// What a tool call produced.
@@ -231,10 +236,19 @@ mod tests {
                     description: Some("customer orders".into()),
                     related: vec!["warehouse.customers".into()],
                     policy_filtered: false,
+                    trust: unknown_trust(),
                 }));
             }
             Ok(None)
         }
+    }
+
+    /// A trust summary for a context whose trust is not what is under test.
+    /// Deliberately the **bare** one — every gap, nothing known — so a test
+    /// that accidentally depends on trust reads as suspicious rather than
+    /// plausible.
+    fn unknown_trust() -> crate::trust::TrustSummary {
+        crate::trust::summarise(&crate::trust::Observed::default(), chrono::Utc::now())
     }
 
     fn args(fqn: &str) -> serde_json::Value {
@@ -512,6 +526,7 @@ mod tests {
                 description: None,
                 related: vec![],
                 policy_filtered: true,
+                trust: unknown_trust(),
             };
 
             let json = serde_json::to_value(&filtered).expect("serialises");
@@ -547,6 +562,7 @@ mod tests {
                 description: None,
                 related: vec![],
                 policy_filtered: false,
+                trust: unknown_trust(),
             })
             .expect("serialises");
 

@@ -689,6 +689,18 @@ function GraphCanvas({
         },
         { selector: "node.added", style: { shape: "star" } },
         { selector: "edge", style: { width: 1, "line-color": colors.border, "curve-style": "straight" } },
+        {
+          // **A conclusion, drawn as one.** Dashed and tinted, so it is legible
+          // as inferred without colour alone carrying the meaning —
+          // `00h-ui-design-system.md` requires a state to survive being unable
+          // to tell two hues apart, and this is a state somebody acts on.
+          selector: "edge.derived",
+          style: {
+            "line-style": "dashed",
+            "line-color": brand.cyan400,
+            "target-arrow-color": brand.cyan400,
+          },
+        },
         { selector: "edge.removed", style: { "line-style": "dashed", "line-color": colors.text } },
         { selector: "edge.added", style: { width: 2, "line-color": colors.primary } },
       ],

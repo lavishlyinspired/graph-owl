@@ -10,9 +10,13 @@ workspace = true
 [dependencies]
 graph-owl-core = { path = "../graph-owl-core" }
 graph-owl-api = { path = "../graph-owl-api" }
+graph-owl-storage = { path = "../graph-owl-storage" }
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
 chrono.workspace = true

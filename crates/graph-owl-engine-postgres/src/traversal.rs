@@ -36,7 +36,7 @@ fn push_live_flakes(builder: &mut QueryBuilder<'_, sqlx::Postgres>, as_of: Optio
                 SELECT DISTINCT ON (namespace_s, sid_s, namespace_p, sid_p, value_type, value_key,
                                     cx_namespace, cx_id)
                        namespace_s, sid_s, namespace_p, sid_p, value_type, value_ref_ns,
-                       value_ref_id, value_str, op
+                       value_ref_id, value_str, op, cx_id
                 FROM flakes
                 WHERE (",
     );
@@ -66,7 +66,12 @@ fn push_logical_edges(builder: &mut QueryBuilder<'_, sqlx::Postgres>, filter: &E
     builder.push(
         ", edges AS (
             SELECT f.value_ref_id AS from_id, t.value_ref_id AS to_id,
-                   COALESCE(r.value_str, 'related') AS rel_type
+                   COALESCE(r.value_str, 'related') AS rel_type,
+                   -- **A conclusion is not an assertion**, and `00b` decision 2
+                   -- keeps them in separate graphs precisely so nobody mistakes
+                   -- one for the other. A picture that draws them alike undoes
+                   -- that separation exactly where it matters most.
+                   (f.cx_id = 'graph:reasoning') AS derived
             FROM live f
             JOIN live t ON t.sid_s = f.sid_s AND t.sid_p = '",
     );
@@ -79,7 +84,8 @@ fn push_logical_edges(builder: &mut QueryBuilder<'_, sqlx::Postgres>, filter: &E
     builder.push(
         "'
           UNION ALL
-            SELECT d.sid_s AS from_id, d.value_ref_id AS to_id, d.sid_p AS rel_type
+            SELECT d.sid_s AS from_id, d.value_ref_id AS to_id, d.sid_p AS rel_type,
+                   (d.cx_id = 'graph:reasoning') AS derived
             FROM live d
             WHERE d.value_type = 0
               AND d.sid_p NOT IN ('",
@@ -118,14 +124,14 @@ fn push_frontier(
     builder.push(", directed AS (");
     let mut first = true;
     if direction.follows_outgoing() {
-        builder.push("SELECT from_id AS src, to_id AS dst, rel_type FROM filtered");
+        builder.push("SELECT from_id AS src, to_id AS dst, rel_type, derived FROM filtered");
         first = false;
     }
     if direction.follows_incoming() {
         if !first {
             builder.push(" UNION ");
         }
-        builder.push("SELECT to_id AS src, from_id AS dst, rel_type FROM filtered");
+        builder.push("SELECT to_id AS src, from_id AS dst, rel_type, derived FROM filtered");
     }
     builder.push(")");
 
@@ -388,7 +394,7 @@ impl TraversalEngine for PostgresTripleStore {
         builder.push_bind(i64::try_from(bounds.max_nodes.saturating_add(1)).unwrap_or(i64::MAX));
         builder.push(
             " )
-             SELECT r.node_id, r.depth, e.to_id, e.rel_type
+             SELECT r.node_id, r.depth, e.to_id, e.rel_type, e.derived
              FROM reachable r
              LEFT JOIN filtered e ON e.from_id = r.node_id
              ORDER BY r.depth, r.node_id",
@@ -417,6 +423,10 @@ impl TraversalEngine for PostgresTripleStore {
                     from: Sid::new(namespace::DSC, from),
                     to: Sid::new(namespace::DSC, to),
                     relationship: row.get::<String, _>("rel_type"),
+                    // `unwrap_or(false)` reads the safe way round: an edge whose
+                    // provenance could not be read is shown as asserted, which
+                    // understates rather than overstates what the reasoner did.
+                    derived: row.get::<Option<bool>, _>("derived").unwrap_or(false),
                 };
                 if !edges.contains(&edge) {
                     edges.push(edge);

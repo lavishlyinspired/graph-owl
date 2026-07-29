@@ -457,6 +457,198 @@ impl Storage for PostgresStorage {
             .collect())
     }
 
+    #[tracing::instrument(name = "storage.upsert_team", skip_all)]
+    async fn upsert_team(&self, team: &graph_owl_storage::Team) -> Result<(), StorageError> {
+        // One transaction: a team whose row was written and whose membership
+        // was not is a team that silently owns things on nobody's behalf.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO teams (id, display_name, description)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (id) DO UPDATE
+                SET display_name = EXCLUDED.display_name,
+                    description   = EXCLUDED.description",
+        )
+        .bind(&team.id)
+        .bind(&team.display_name)
+        .bind(&team.description)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // Replaced, not merged. A partial update cannot express "remove
+        // everybody", and removal is the operation that has to work.
+        sqlx::query("DELETE FROM team_members WHERE team_id = $1")
+            .bind(&team.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        for member in &team.members {
+            sqlx::query("INSERT INTO team_members (team_id, user_id) VALUES ($1, $2)")
+                .bind(&team.id)
+                .bind(member)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    if e.as_database_error()
+                        .is_some_and(|d| d.is_foreign_key_violation())
+                    {
+                        StorageError::Unexpected(format!(
+                            "`{member}` is not a known user; a team member nobody \
+                             can resolve is an owner who does not exist"
+                        ))
+                    } else {
+                        StorageError::Unexpected(e.to_string())
+                    }
+                })?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    #[tracing::instrument(name = "storage.find_team", skip_all)]
+    async fn find_team(&self, id: &str) -> Result<Option<graph_owl_storage::Team>, StorageError> {
+        let row = sqlx::query(
+            "SELECT t.id, t.display_name, t.description,
+                    COALESCE(
+                        ARRAY_AGG(m.user_id ORDER BY m.user_id)
+                            FILTER (WHERE m.user_id IS NOT NULL),
+                        '{}'
+                    ) AS members
+               FROM teams t
+               LEFT JOIN team_members m ON m.team_id = t.id
+              WHERE t.id = $1
+              GROUP BY t.id",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(row.map(|row| graph_owl_storage::Team {
+            id: row.get("id"),
+            display_name: row.get("display_name"),
+            description: row.get("description"),
+            members: row.get("members"),
+        }))
+    }
+
+    #[tracing::instrument(name = "storage.teams", skip_all)]
+    async fn teams(&self) -> Result<Vec<graph_owl_storage::Team>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT t.id, t.display_name, t.description,
+                    COALESCE(
+                        ARRAY_AGG(m.user_id ORDER BY m.user_id)
+                            FILTER (WHERE m.user_id IS NOT NULL),
+                        '{}'
+                    ) AS members
+               FROM teams t
+               LEFT JOIN team_members m ON m.team_id = t.id
+              GROUP BY t.id
+              ORDER BY t.id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| graph_owl_storage::Team {
+                id: row.get("id"),
+                display_name: row.get("display_name"),
+                description: row.get("description"),
+                members: row.get("members"),
+            })
+            .collect())
+    }
+
+    #[tracing::instrument(name = "storage.assign_finding", skip_all)]
+    async fn assign_finding(
+        &self,
+        assignment: &graph_owl_storage::Assignment,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO validation_assignments
+                 (id, shape, focus_node, path, constraint_kind, assignee, assigned_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(assignment.id)
+        .bind(&assignment.shape)
+        .bind(&assignment.focus_node)
+        .bind(&assignment.path)
+        .bind(&assignment.constraint_kind)
+        .bind(&assignment.assignee)
+        .bind(&assignment.assigned_by)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            let db = e.as_database_error();
+            if db.is_some_and(|d| d.is_unique_violation()) {
+                StorageError::Conflict {
+                    detail: "this finding is already assigned".to_string(),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::AssignmentExists,
+                }
+            } else if db.is_some_and(|d| d.is_foreign_key_violation()) {
+                // The FK is what makes "assign to a nickname" impossible. Said
+                // plainly here so the API can explain it rather than returning
+                // a 500 for something the caller can fix.
+                StorageError::Unexpected(
+                    "that assignee is not a known user; a finding assigned to a \
+                     name nobody can resolve looks worked and is not"
+                        .to_string(),
+                )
+            } else {
+                StorageError::Unexpected(e.to_string())
+            }
+        })
+    }
+
+    #[tracing::instrument(name = "storage.unassign_finding", skip_all)]
+    async fn unassign_finding(&self, id: Uuid) -> Result<bool, StorageError> {
+        sqlx::query("DELETE FROM validation_assignments WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map(|done| done.rows_affected() > 0)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    #[tracing::instrument(name = "storage.assignments", skip_all)]
+    async fn assignments(&self) -> Result<Vec<graph_owl_storage::Assignment>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, shape, focus_node, path, constraint_kind,
+                    assignee, assigned_by, assigned_at
+               FROM validation_assignments",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| graph_owl_storage::Assignment {
+                id: row.get("id"),
+                shape: row.get("shape"),
+                focus_node: row.get("focus_node"),
+                path: row.get("path"),
+                constraint_kind: row.get("constraint_kind"),
+                assignee: row.get("assignee"),
+                assigned_by: row.get("assigned_by"),
+                assigned_at: row.get("assigned_at"),
+            })
+            .collect())
+    }
+
     #[tracing::instrument(name = "storage.recent_runs", skip_all)]
     async fn recent_runs(
         &self,

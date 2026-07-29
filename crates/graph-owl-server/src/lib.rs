@@ -11,7 +11,7 @@ use axum::{
     },
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use std::sync::Arc;
 
@@ -85,6 +85,11 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/validation/report", get(validation_report))
         .route("/validation/waivers", post(waive_finding))
         .route("/validation/waivers/{id}", delete(revoke_waiver))
+        .route("/validation/assignments", post(assign_finding))
+        .route("/validation/assignments/{id}", delete(unassign_finding))
+        .route("/policies/dry-run", post(dry_run_policy))
+        .route("/users/{id}/roles", put(set_user_roles))
+        .route("/teams", get(list_teams).post(upsert_team))
         // Unauthenticated by design: an orchestrator's probe must not depend
         // on the identity provider being reachable.
         .route("/health", get(health))
@@ -768,6 +773,10 @@ impl AppError {
                 kind: ConflictKind::WaiverExists,
                 ..
             } => "waiver-exists",
+            AppError::Conflict {
+                kind: ConflictKind::AssignmentExists,
+                ..
+            } => "assignment-exists",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
             AppError::PreconditionFailed { .. } => "version-conflict",
@@ -798,6 +807,10 @@ impl AppError {
                 kind: ConflictKind::WaiverExists,
                 ..
             } => "This finding is already waived",
+            AppError::Conflict {
+                kind: ConflictKind::AssignmentExists,
+                ..
+            } => "This finding is already assigned",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
             AppError::PreconditionFailed { .. } => "Version precondition failed",
@@ -850,6 +863,10 @@ impl AppError {
             } => "this finding already has a waiver; revoke it before recording \
                   a different reason"
                 .to_string(),
+            AppError::Conflict {
+                kind: ConflictKind::AssignmentExists,
+                ..
+            } => "this finding is already assigned; two owners is no owner".to_string(),
             AppError::NotFound => "the requested resource does not exist".to_string(),
             AppError::PreconditionFailed { current } => format!(
                 "this asset is now at version {current}; your `If-Match` named an \
@@ -1244,6 +1261,11 @@ async fn asset_graph(
             "from": e.from.id,
             "to": e.to.id,
             "relationship": e.relationship,
+            // **The reasoner concluded this; nobody asserted it.** Decision 2
+            // keeps conclusions in their own graph so nobody mistakes one for a
+            // stated fact, and a picture that draws both alike undoes that
+            // separation in front of the person about to act on it.
+            "derived": e.derived,
         })).collect::<Vec<_>>(),
         "truncated": graph.truncated,
     })))
@@ -1362,6 +1384,222 @@ async fn run_validation(
         return Err(AppError::NotFound);
     }
     Ok(Json(catalog.run_validation().await?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamRequest {
+    id: String,
+    display_name: String,
+    #[serde(default)]
+    description: Option<String>,
+    /// The complete membership, not a delta — a partial update cannot express
+    /// "remove everybody", and removal is the operation that has to work.
+    #[serde(default)]
+    members: Vec<String>,
+}
+
+impl ValidateBody for TeamRequest {
+    /// Shape only. "A team needs a name", "a member has to be a known user" are
+    /// facts about the *estate*, which only the facade can check, and a rule
+    /// stated in two places is a rule that will disagree with itself.
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+fn team_body(team: &graph_owl_storage::Team) -> serde_json::Value {
+    json!({
+        "id": team.id,
+        "displayName": team.display_name,
+        "description": team.description,
+        "members": team.members,
+    })
+}
+
+/// Create or update a team — Epic 11.
+async fn upsert_team(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<TeamRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    // A team is who owns things, so who may define one is an administrative
+    // question rather than a cataloguing one.
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let stored = catalog
+        .upsert_team(&graph_owl_storage::Team {
+            id: payload.id,
+            display_name: payload.display_name,
+            description: payload.description,
+            members: payload.members,
+        })
+        .await?;
+    Ok((StatusCode::CREATED, Json(team_body(&stored))))
+}
+
+/// Every team, so an owner picker has something to offer.
+async fn list_teams(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let teams = catalog.teams().await?;
+    Ok(Json(json!(teams.iter().map(team_body).collect::<Vec<_>>())))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RolesRequest {
+    /// The complete set, not a delta. A grant-only endpoint cannot express
+    /// revocation, and revocation is the operation that has to work.
+    roles: Vec<String>,
+}
+
+impl ValidateBody for RolesRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Replace a user's roles — Epic 13.
+///
+/// Admin-only: granting oneself a role is the shortest path to every other
+/// permission, so this is the endpoint where a missing check is worst.
+///
+/// `PUT` rather than `PATCH` because the body is the whole set. A partial
+/// update could not express "remove every role", which is the operation that
+/// most needs to be expressible.
+async fn set_user_roles(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<String>,
+    AppJson(payload): AppJson<RolesRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let user = catalog.set_user_roles(&id, payload.roles).await?;
+    Ok(Json(json!({
+        "id": user.id,
+        "displayName": user.display_name,
+        "roles": user.roles,
+    })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssignRequest {
+    shape: String,
+    focus_node: String,
+    #[serde(default)]
+    path: Option<String>,
+    constraint: String,
+    /// A `users.id`. Free text is refused, because a finding assigned to a name
+    /// nobody can resolve looks worked and is not.
+    assignee: String,
+}
+
+impl ValidateBody for AssignRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Put a finding on somebody's plate — Epic 41.
+async fn assign_finding(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<AssignRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let finding = graph_owl_storage::ValidationFinding {
+        id: Uuid::new_v4(),
+        shape: payload.shape,
+        focus_node: payload.focus_node,
+        path: payload.path,
+        constraint_kind: payload.constraint,
+        severity: String::new(),
+        message: String::new(),
+        actual: None,
+        suggestion: None,
+    };
+
+    let assignment = catalog
+        .assign_finding(&principal, &finding, &payload.assignee)
+        .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": assignment.id,
+            "assignee": assignment.assignee,
+            "assignedBy": assignment.assigned_by,
+        })),
+    ))
+}
+
+/// Take a finding off somebody's plate.
+async fn unassign_finding(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    catalog.unassign_finding(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DryRunRequest {
+    /// The policy as it would be saved.
+    policy: graph_owl_authz::Policy,
+    /// Whose access to simulate. Roles matter: a policy is only meaningful
+    /// against a subject, and "what would this do" has no answer without one.
+    #[serde(default)]
+    roles: Vec<String>,
+}
+
+impl ValidateBody for DryRunRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// What a policy *would* do, without saving it — Epic 41.
+///
+/// **Writes nothing.** A dry-run that persisted would be the opposite of a dry
+/// run, and the whole reason to offer one is that a policy is hard to reason
+/// about and easy to get catastrophically wrong in the permissive direction.
+///
+/// Reports counts *and* examples: "admits 4,231 assets" is what a reader acts
+/// on, and a handful of names is how they check the count means what they
+/// think.
+async fn dry_run_policy(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<DryRunRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+
+    let outcome = catalog
+        .dry_run_policy(&payload.policy, &payload.roles)
+        .await?;
+
+    Ok(Json(json!({
+        "admitted": outcome.admitted,
+        "denied": outcome.denied,
+        "total": outcome.admitted + outcome.denied,
+        // A sample, not the whole estate: a dry-run that returned every FQN
+        // would be a second way to enumerate the catalog, and this endpoint is
+        // about the *shape* of the decision.
+        "examples": outcome.examples,
+        // **The one an admin is really asking about.** A policy that admits
+        // everything is almost always a mistake, and it looks identical to a
+        // correct one in a count alone.
+        "admitsEverything": outcome.admits_everything,
+    })))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1498,6 +1736,15 @@ async fn validation_report(
             // **Marked, not hidden.** A waived finding removed from the queue
             // is one nobody reviews — including nobody noticing its acceptance
             // is about to lapse.
+            // Independent of the waiver: "somebody is on this" and "somebody
+            // accepted this" are different statements, and either can hold
+            // without the other.
+            "assignment": row.assignment.as_ref().map(|a| json!({
+                "id": a.id,
+                "assignee": a.assignee,
+                "assignedBy": a.assigned_by,
+                "assignedAt": a.assigned_at,
+            })),
             "waiver": row.waiver.as_ref().map(|w| json!({
                 "id": w.id,
                 "reason": w.reason,

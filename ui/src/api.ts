@@ -148,6 +148,10 @@ export interface GraphEdge {
   from: string;
   to: string;
   relationship: string;
+  /** The reasoner concluded this edge; nobody asserted it. Optional on the
+   *  wire so an older server does not break the console — absent reads as
+   *  asserted, which understates rather than overstates what was inferred. */
+  derived?: boolean;
 }
 
 export interface GraphView {

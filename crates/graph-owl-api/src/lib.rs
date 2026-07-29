@@ -1247,6 +1247,109 @@ impl Catalog {
         self.storage.pool_stats()
     }
 
+    /// Create or update a team.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the id or display name is blank, or a named member is
+    /// not a known user — a member nobody can resolve is an owner who does not
+    /// exist, and the mistake surfaces later as an asset owned by nothing.
+    /// `Storage` if the write fails.
+    #[tracing::instrument(name = "catalog.upsert_team", skip_all)]
+    pub async fn upsert_team(
+        &self,
+        team: &graph_owl_storage::Team,
+    ) -> Result<graph_owl_storage::Team, CatalogError> {
+        let mut problems = Vec::new();
+        if team.id.trim().is_empty() {
+            problems.push(FieldError::new(
+                "id",
+                FieldErrorCode::Required,
+                "a team needs an id".to_string(),
+            ));
+        }
+        if team.display_name.trim().is_empty() {
+            problems.push(FieldError::new(
+                "displayName",
+                FieldErrorCode::Required,
+                "a team needs a name somebody can recognise".to_string(),
+            ));
+        }
+        // Checked here as well as by the foreign key, so the caller gets a
+        // field-level `400` naming who is unknown rather than a storage error
+        // they have to interpret.
+        for member in &team.members {
+            if self.storage.find_user(member).await?.is_none() {
+                problems.push(FieldError::new(
+                    "members",
+                    FieldErrorCode::Type,
+                    format!("`{member}` is not a known user"),
+                ));
+            }
+        }
+        if !problems.is_empty() {
+            return Err(CatalogError::Validation(problems));
+        }
+
+        self.storage.upsert_team(team).await?;
+        self.storage.find_team(&team.id).await?.ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "the team vanished between write and read".to_string(),
+            ))
+        })
+    }
+
+    /// Every team.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    #[tracing::instrument(name = "catalog.teams", skip_all)]
+    pub async fn teams(&self) -> Result<Vec<graph_owl_storage::Team>, CatalogError> {
+        Ok(self.storage.teams().await?)
+    }
+
+    /// Change what roles a user holds.
+    ///
+    /// **Invalidates the decision cache, and that is the entire point.** A
+    /// compiled predicate is cached per subject and operation, and a revoked
+    /// role that keeps working until some TTL elapses is a revocation whose
+    /// window is invisible to whoever performed it. There is deliberately no
+    /// TTL (see [`Self::invalidate_authorization`]), so this call is the only
+    /// thing that expires an entry — omitting it would leave the old access in
+    /// force with nothing to show why.
+    ///
+    /// The whole cache rather than one subject's entries: roles are compiled
+    /// against policies that name *other* subjects too, so a change to one
+    /// person can alter what a group-based rule grants everybody. Clearing
+    /// selectively would be right most of the time, which is the worst
+    /// property a security control can have.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if there is no such user — creating one as a side effect of
+    /// granting it roles would let a typo mint a principal.
+    /// `Storage` if the write fails.
+    #[tracing::instrument(name = "catalog.set_user_roles", skip_all)]
+    pub async fn set_user_roles(
+        &self,
+        id: &str,
+        roles: Vec<String>,
+    ) -> Result<StoredUser, CatalogError> {
+        let existing = self
+            .storage
+            .find_user(id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+
+        let updated = StoredUser { roles, ..existing };
+        self.storage.upsert_user(&updated).await?;
+        // After the write, never before: invalidating first leaves a window in
+        // which a concurrent request re-populates the cache from the old rows.
+        self.invalidate_authorization();
+        Ok(updated)
+    }
+
     /// Forget every cached authorization decision.
     ///
     /// Called by anything that changes what a decision was computed *from* — a
@@ -2297,6 +2400,58 @@ impl Catalog {
         Ok(waiver)
     }
 
+    /// Put a finding on somebody's plate.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the assignee is not a known user — an assignment to a
+    /// name nobody can resolve is a queue row that looks worked and is not.
+    /// `Storage` if it is already assigned.
+    #[tracing::instrument(name = "catalog.assign_finding", skip_all)]
+    pub async fn assign_finding(
+        &self,
+        principal: &Principal,
+        finding: &graph_owl_storage::ValidationFinding,
+        assignee: &str,
+    ) -> Result<graph_owl_storage::Assignment, CatalogError> {
+        // Checked here as well as by the foreign key, so the caller gets a
+        // field-level `400` naming the field rather than a storage error they
+        // have to interpret. The key remains the guarantee; this is the message.
+        if self.storage.find_user(assignee).await?.is_none() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "assignee",
+                FieldErrorCode::Type,
+                format!(
+                    "`{assignee}` is not a known user; a finding assigned to a \
+                     name nobody can resolve looks worked and is not"
+                ),
+            )]));
+        }
+
+        let assignment = graph_owl_storage::Assignment {
+            id: Uuid::new_v4(),
+            shape: finding.shape.clone(),
+            focus_node: finding.focus_node.clone(),
+            path: finding.path.clone(),
+            constraint_kind: finding.constraint_kind.clone(),
+            assignee: assignee.to_string(),
+            assigned_by: principal.id.clone(),
+            assigned_at: Utc::now(),
+        };
+        self.storage.assign_finding(&assignment).await?;
+        Ok(assignment)
+    }
+
+    /// Take a finding off somebody's plate.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the delete fails.
+    #[tracing::instrument(name = "catalog.unassign_finding", skip_all)]
+    pub async fn unassign_finding(&self, id: Uuid) -> Result<bool, CatalogError> {
+        Ok(self.storage.unassign_finding(id).await?)
+    }
+
     /// Withdraw a waiver, putting the finding back in the queue.
     ///
     /// # Errors
@@ -2305,6 +2460,64 @@ impl Catalog {
     #[tracing::instrument(name = "catalog.revoke_waiver", skip_all)]
     pub async fn revoke_waiver(&self, id: Uuid) -> Result<bool, CatalogError> {
         Ok(self.storage.revoke_waiver(id).await?)
+    }
+
+    /// What a policy **would** do, without saving it.
+    ///
+    /// The reason to offer a dry-run at all: a policy is hard to reason about
+    /// and easy to get catastrophically wrong in the *permissive* direction,
+    /// where nothing fails and nobody notices. Writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the estate cannot be read.
+    #[tracing::instrument(name = "catalog.dry_run_policy", skip_all)]
+    pub async fn dry_run_policy(
+        &self,
+        policy: &graph_owl_authz::Policy,
+        roles: &[String],
+    ) -> Result<PolicyDryRun, CatalogError> {
+        let subject = graph_owl_authz::Subject {
+            id: "dry-run".to_string(),
+            roles: roles.to_vec(),
+            // **Never admin.** An admin bypasses policy entirely, so simulating
+            // one would report that every policy admits everything — a dry-run
+            // that always says the same thing, and says the reassuring thing.
+            is_admin: false,
+        };
+        let predicate = graph_owl_authz::compile(
+            &subject,
+            MetadataOperation::ViewBasic,
+            std::slice::from_ref(policy),
+        );
+
+        let estate = self.storage.list_assets_under_fqn("").await?;
+        let mut admitted = 0;
+        let mut denied = 0;
+        let mut examples = Vec::new();
+        for asset in &estate {
+            if predicate.admits(&asset.fully_qualified_name) {
+                admitted += 1;
+                // A sample, not the estate: returning every FQN would make this
+                // a second way to enumerate the catalog, and the question here
+                // is the *shape* of the decision.
+                if examples.len() < 5 {
+                    examples.push(asset.fully_qualified_name.clone());
+                }
+            } else {
+                denied += 1;
+            }
+        }
+
+        Ok(PolicyDryRun {
+            admitted,
+            denied,
+            examples,
+            // **The question an admin is really asking.** A policy admitting
+            // everything is almost always a mistake, and against a small estate
+            // it looks identical to a correct one in the counts alone.
+            admits_everything: denied == 0 && !estate.is_empty(),
+        })
     }
 
     /// The stored queue, filtered and paged.
@@ -2323,6 +2536,7 @@ impl Catalog {
     ) -> Result<(Vec<WaivedFinding>, i64, usize), CatalogError> {
         let (findings, computed_at_t, total) = self.storage.validation_results(filter).await?;
         let waivers = self.storage.waivers().await?;
+        let assignments = self.storage.assignments().await?;
         let now = Utc::now();
 
         let decorated = findings
@@ -2344,10 +2558,20 @@ impl Catalog {
                     })
                     .cloned();
                 let waiver_expired = waiver.as_ref().is_some_and(|w| w.expires_at <= now);
+                let assignment = assignments
+                    .iter()
+                    .find(|a| {
+                        a.shape == finding.shape
+                            && a.focus_node == finding.focus_node
+                            && a.path == finding.path
+                            && a.constraint_kind == finding.constraint_kind
+                    })
+                    .cloned();
                 WaivedFinding {
                     finding,
                     waiver,
                     waiver_expired,
+                    assignment,
                 }
             })
             .collect();
@@ -2368,12 +2592,11 @@ impl Catalog {
     ) -> (Vec<graph_owl_constraint::CompiledShape>, usize) {
         let newest = shape_facts.iter().map(|f| f.t).max().unwrap_or(0);
 
-        if let Ok(cache) = self.shape_cache.lock() {
-            if let Some((cached_t, shapes, refused)) = cache.as_ref() {
-                if *cached_t == newest {
-                    return (shapes.clone(), *refused);
-                }
-            }
+        if let Ok(cache) = self.shape_cache.lock()
+            && let Some((cached_t, shapes, refused)) = cache.as_ref()
+            && *cached_t == newest
+        {
+            return (shapes.clone(), *refused);
         }
 
         let (compiled, failures) = graph_owl_constraint::shapes::read_all(shape_facts);
@@ -2433,6 +2656,19 @@ fn describe_repair(repair: &graph_owl_constraint::Repair) -> serde_json::Value {
     }
 }
 
+/// What a policy would do to the estate as it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyDryRun {
+    pub admitted: usize,
+    pub denied: usize,
+    /// Up to five admitted names, so a reader can check the count means what
+    /// they think it means.
+    pub examples: Vec<String>,
+    /// Nothing was denied. Almost always a mistake, and indistinguishable from
+    /// a correct policy in the counts alone against a small estate.
+    pub admits_everything: bool,
+}
+
 /// A finding, and whatever acceptance stands against it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WaivedFinding {
@@ -2443,6 +2679,10 @@ pub struct WaivedFinding {
     /// finding whose acceptance lapsed and one nobody ever accepted look
     /// identical otherwise, and only the first is somebody's to answer for.
     pub waiver_expired: bool,
+    /// Who is fixing it. Independent of the waiver: "somebody is on this" and
+    /// "somebody accepted this" are different statements, and either can hold
+    /// without the other.
+    pub assignment: Option<graph_owl_storage::Assignment>,
 }
 
 /// What one validation pass found.
@@ -2517,6 +2757,8 @@ mod tests {
         /// it ran against, and what it found.
         validation: Mutex<(i64, Vec<graph_owl_storage::ValidationFinding>)>,
         waivers: Mutex<Vec<graph_owl_storage::Waiver>>,
+        assignments: Mutex<Vec<graph_owl_storage::Assignment>>,
+        teams: Mutex<Vec<graph_owl_storage::Team>>,
         /// When armed, any relational write panics. Lets a test assert "this
         /// code path writes nothing" structurally instead of by reading it and
         /// believing what it says.
@@ -2549,6 +2791,97 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Storage for InMemoryStorage {
+        async fn upsert_team(&self, team: &graph_owl_storage::Team) -> Result<(), StorageError> {
+            // The real adapter's foreign key refuses an unknown member. A
+            // looser double would let a facade skipping the check pass here
+            // and fail against Postgres.
+            let users = self.users.lock().expect("lock");
+            for member in &team.members {
+                if users.iter().all(|u| &u.id != member) {
+                    return Err(StorageError::Unexpected(format!(
+                        "`{member}` is not a known user"
+                    )));
+                }
+            }
+            drop(users);
+            let mut teams = self.teams.lock().expect("lock");
+            teams.retain(|t: &graph_owl_storage::Team| t.id != team.id);
+            let mut stored = team.clone();
+            // Ordered, as the adapter's `ARRAY_AGG ... ORDER BY` guarantees, so
+            // two reads of an unchanged team compare equal.
+            stored.members.sort();
+            teams.push(stored);
+            Ok(())
+        }
+
+        async fn find_team(
+            &self,
+            id: &str,
+        ) -> Result<Option<graph_owl_storage::Team>, StorageError> {
+            Ok(self
+                .teams
+                .lock()
+                .expect("lock")
+                .iter()
+                .find(|t| t.id == id)
+                .cloned())
+        }
+
+        async fn teams(&self) -> Result<Vec<graph_owl_storage::Team>, StorageError> {
+            let mut teams = self.teams.lock().expect("lock").clone();
+            teams.sort_by(|a, b| a.id.cmp(&b.id));
+            Ok(teams)
+        }
+
+        async fn assign_finding(
+            &self,
+            assignment: &graph_owl_storage::Assignment,
+        ) -> Result<(), StorageError> {
+            // The real adapter's foreign key is what refuses an unknown
+            // assignee. A double that accepted one would let a facade skipping
+            // the check pass here and fail against Postgres.
+            if self
+                .users
+                .lock()
+                .expect("lock")
+                .iter()
+                .all(|u| u.id != assignment.assignee)
+            {
+                return Err(StorageError::Unexpected(
+                    "that assignee is not a known user".to_string(),
+                ));
+            }
+            let mut held = self.assignments.lock().expect("lock");
+            let identity = |a: &graph_owl_storage::Assignment| {
+                (
+                    a.shape.clone(),
+                    a.focus_node.clone(),
+                    a.path.clone().unwrap_or_default(),
+                    a.constraint_kind.clone(),
+                )
+            };
+            if held.iter().any(|a| identity(a) == identity(assignment)) {
+                return Err(StorageError::Conflict {
+                    detail: "this finding is already assigned".to_string(),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::AssignmentExists,
+                });
+            }
+            held.push(assignment.clone());
+            Ok(())
+        }
+
+        async fn unassign_finding(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut held = self.assignments.lock().expect("lock");
+            let before = held.len();
+            held.retain(|a| a.id != id);
+            Ok(held.len() < before)
+        }
+
+        async fn assignments(&self) -> Result<Vec<graph_owl_storage::Assignment>, StorageError> {
+            Ok(self.assignments.lock().expect("lock").clone())
+        }
+
         async fn waive_finding(
             &self,
             waiver: &graph_owl_storage::Waiver,
@@ -3845,6 +4178,37 @@ mod validation_decides_before_it_stores {
         )
     }
 
+    fn service(name: &str) -> UpsertAsset {
+        UpsertAsset {
+            kind: AssetKind::Service,
+            name: name.to_string(),
+            parent_id: None,
+            description: None,
+            properties: None,
+        }
+    }
+
+    /// A policy admitting everything, which is the shape a dry-run most needs
+    /// to be able to call out.
+    fn allow_all() -> graph_owl_authz::Policy {
+        graph_owl_authz::Policy {
+            name: "everything".to_string(),
+            rules: vec![graph_owl_authz::Rule {
+                name: "all".to_string(),
+                effect: graph_owl_authz::Effect::Allow,
+                operations: vec![MetadataOperation::ViewBasic],
+                resources: graph_owl_authz::ResourceMatcher::All,
+            }],
+        }
+    }
+
+    fn allow_nothing() -> graph_owl_authz::Policy {
+        graph_owl_authz::Policy {
+            name: "nothing".to_string(),
+            rules: vec![],
+        }
+    }
+
     fn all() -> graph_owl_storage::ValidationFilter {
         graph_owl_storage::ValidationFilter {
             limit: 50,
@@ -4336,6 +4700,421 @@ mod validation_decides_before_it_stores {
         let (after, _, _) = catalog.validation_report(&all()).await.expect("queue");
         assert_eq!(after.iter().filter(|r| r.waiver.is_some()).count(), 1);
         assert_eq!(after.iter().filter(|r| r.waiver.is_none()).count(), 1);
+    }
+
+    /// **An assignment to a name nobody can resolve is a queue row that looks
+    /// worked and is not.** Free-text assignees make "what is on my plate"
+    /// unanswerable the first time somebody types a nickname.
+    #[tokio::test]
+    async fn a_finding_cannot_be_assigned_to_someone_who_does_not_exist() {
+        let (catalog, _) = seeded().await;
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+
+        let outcome = catalog
+            .assign_finding(&Principal::system(), &rows[0].finding, "nobody@nowhere")
+            .await;
+
+        assert!(
+            matches!(outcome, Err(CatalogError::Validation(_))),
+            "{outcome:?}"
+        );
+    }
+
+    /// And the positive: a known user can be assigned, and the assignment rides
+    /// with the finding in the queue.
+    #[tokio::test]
+    async fn a_finding_assigned_to_a_known_user_says_whose_it_is() {
+        let (catalog, _) = seeded().await;
+        catalog
+            .storage
+            .upsert_user(&graph_owl_storage::StoredUser {
+                id: "priya".to_string(),
+                display_name: "Priya".to_string(),
+                email: None,
+                is_admin: false,
+                is_bot: false,
+                roles: vec![],
+            })
+            .await
+            .expect("a user");
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+
+        catalog
+            .assign_finding(&Principal::system(), &rows[0].finding, "priya")
+            .await
+            .expect("assign");
+
+        let (after, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        assert_eq!(
+            after[0].assignment.as_ref().expect("assigned").assignee,
+            "priya"
+        );
+    }
+
+    /// **Two owners is no owner.**
+    #[tokio::test]
+    async fn a_finding_cannot_be_assigned_twice() {
+        let (catalog, _) = seeded().await;
+        for who in ["priya", "sam"] {
+            catalog
+                .storage
+                .upsert_user(&graph_owl_storage::StoredUser {
+                    id: who.to_string(),
+                    display_name: who.to_string(),
+                    email: None,
+                    is_admin: false,
+                    is_bot: false,
+                    roles: vec![],
+                })
+                .await
+                .expect("a user");
+        }
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+
+        catalog
+            .assign_finding(&Principal::system(), &rows[0].finding, "priya")
+            .await
+            .expect("first");
+        let second = catalog
+            .assign_finding(&Principal::system(), &rows[0].finding, "sam")
+            .await;
+
+        assert!(second.is_err(), "a second owner was accepted");
+    }
+
+    /// **An assignment survives a re-run**, for the same reason a waiver does:
+    /// findings are replaced wholesale and their row ids are regenerated.
+    #[tokio::test]
+    async fn an_assignment_survives_the_next_validation_pass() {
+        let (catalog, _) = seeded().await;
+        catalog
+            .storage
+            .upsert_user(&graph_owl_storage::StoredUser {
+                id: "priya".to_string(),
+                display_name: "Priya".to_string(),
+                email: None,
+                is_admin: false,
+                is_bot: false,
+                roles: vec![],
+            })
+            .await
+            .expect("a user");
+        catalog.run_validation().await.expect("first");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        catalog
+            .assign_finding(&Principal::system(), &rows[0].finding, "priya")
+            .await
+            .expect("assign");
+
+        catalog.run_validation().await.expect("second");
+
+        let (after, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        assert!(
+            after[0].assignment.is_some(),
+            "the assignment did not survive"
+        );
+    }
+
+    /// **Assignment and acceptance are independent.** "Somebody is fixing this"
+    /// and "somebody accepted this" are different statements: either can hold
+    /// without the other, and collapsing them would make an accepted finding
+    /// look unowned.
+    #[tokio::test]
+    async fn a_finding_can_be_both_assigned_and_waived() {
+        let (catalog, _) = seeded().await;
+        catalog
+            .storage
+            .upsert_user(&graph_owl_storage::StoredUser {
+                id: "priya".to_string(),
+                display_name: "Priya".to_string(),
+                email: None,
+                is_admin: false,
+                is_bot: false,
+                roles: vec![],
+            })
+            .await
+            .expect("a user");
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+
+        catalog
+            .assign_finding(&Principal::system(), &rows[0].finding, "priya")
+            .await
+            .expect("assign");
+        catalog
+            .waive_finding(
+                &Principal::system(),
+                &rows[0].finding,
+                "accepted while Priya fixes it",
+                Utc::now() + chrono::Duration::days(7),
+            )
+            .await
+            .expect("waive");
+
+        let (after, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        assert!(after[0].assignment.is_some());
+        assert!(after[0].waiver.is_some());
+    }
+
+    /// Unassigning takes it off the plate, and doing so twice is the same
+    /// intent twice rather than an error.
+    #[tokio::test]
+    async fn unassigning_clears_the_owner() {
+        let (catalog, _) = seeded().await;
+        catalog
+            .storage
+            .upsert_user(&graph_owl_storage::StoredUser {
+                id: "priya".to_string(),
+                display_name: "Priya".to_string(),
+                email: None,
+                is_admin: false,
+                is_bot: false,
+                roles: vec![],
+            })
+            .await
+            .expect("a user");
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        let assignment = catalog
+            .assign_finding(&Principal::system(), &rows[0].finding, "priya")
+            .await
+            .expect("assign");
+
+        assert!(
+            catalog
+                .unassign_finding(assignment.id)
+                .await
+                .expect("unassign")
+        );
+        assert!(
+            !catalog
+                .unassign_finding(assignment.id)
+                .await
+                .expect("again")
+        );
+
+        let (after, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        assert!(after[0].assignment.is_none());
+    }
+
+    /// **A dry-run writes nothing.** One that persisted would be the opposite
+    /// of a dry run, and the whole reason to offer one is that a policy is easy
+    /// to get catastrophically wrong in the permissive direction.
+    #[tokio::test]
+    async fn a_dry_run_reports_without_writing() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage.clone());
+        for name in ["alpha", "beta", "gamma"] {
+            catalog
+                .upsert_asset(&Principal::system(), service(name))
+                .await
+                .expect("seed");
+        }
+        storage.forbid_writes();
+
+        let outcome = catalog
+            .dry_run_policy(&allow_nothing(), &["finance".to_string()])
+            .await
+            .expect("a dry run");
+
+        assert_eq!(outcome.admitted + outcome.denied, 3);
+    }
+
+    /// **A policy that denies nothing is almost always a mistake**, and against
+    /// a small estate it looks identical to a correct one in the counts alone.
+    /// Saying so is the single most useful thing a dry-run does.
+    #[tokio::test]
+    async fn a_policy_that_admits_everything_says_so() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+        catalog
+            .upsert_asset(&Principal::system(), service("alpha"))
+            .await
+            .expect("seed");
+
+        let wide_open = catalog
+            .dry_run_policy(&allow_all(), &[])
+            .await
+            .expect("a dry run");
+
+        assert!(wide_open.admits_everything, "{wide_open:?}");
+        assert_eq!(wide_open.denied, 0);
+    }
+
+    /// And the negative: a policy granting nothing does not claim to admit
+    /// everything, and an **empty estate** does not either — nothing to deny is
+    /// not the same as denying nothing, and reporting it as wide open would
+    /// alarm somebody on their first day.
+    #[tokio::test]
+    async fn a_restrictive_policy_and_an_empty_estate_do_not_claim_to_be_wide_open() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+        let nothing = allow_nothing();
+
+        let empty = catalog
+            .dry_run_policy(&nothing, &[])
+            .await
+            .expect("a dry run");
+        assert!(!empty.admits_everything, "an empty estate is not wide open");
+
+        catalog
+            .upsert_asset(&Principal::system(), service("alpha"))
+            .await
+            .expect("seed");
+        let restrictive = catalog
+            .dry_run_policy(&nothing, &[])
+            .await
+            .expect("a dry run");
+
+        assert!(!restrictive.admits_everything);
+        assert_eq!(restrictive.admitted, 0);
+        assert_eq!(restrictive.denied, 1);
+    }
+
+    /// **Never simulated as an admin.** An admin bypasses policy entirely, so
+    /// a dry-run against one reports that every policy admits everything — a
+    /// check that always says the same thing, and says the reassuring thing.
+    #[tokio::test]
+    async fn a_dry_run_does_not_simulate_an_administrator() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+        catalog
+            .upsert_asset(&Principal::system(), service("alpha"))
+            .await
+            .expect("seed");
+
+        let outcome = catalog
+            .dry_run_policy(&allow_nothing(), &[])
+            .await
+            .expect("a dry run");
+
+        assert_eq!(
+            outcome.admitted, 0,
+            "the dry run bypassed the policy it was asked to evaluate"
+        );
+    }
+
+    /// Examples are a sample, not the estate. Returning every FQN would make
+    /// this a second way to enumerate the catalog.
+    #[tokio::test]
+    async fn examples_are_a_sample_rather_than_the_whole_estate() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+        for n in 0..12 {
+            catalog
+                .upsert_asset(&Principal::system(), service(&format!("svc{n}")))
+                .await
+                .expect("seed");
+        }
+
+        let outcome = catalog
+            .dry_run_policy(&allow_all(), &[])
+            .await
+            .expect("a dry run");
+
+        assert_eq!(outcome.admitted, 12);
+        assert_eq!(outcome.examples.len(), 5, "the sample is bounded");
+    }
+
+    /// **An assignment belongs to one finding.** The match is on all four
+    /// identity fields, and a predicate that got any one of them wrong would
+    /// attach somebody's name to work they never took — which reads, in a
+    /// queue, as that work being handled.
+    ///
+    /// The fixture varies every field that can vary: two shapes, two nodes,
+    /// two paths, two constraints. With one finding under test, any comparison
+    /// looks correct.
+    #[tokio::test]
+    async fn an_assignment_attaches_to_exactly_one_finding() {
+        let graph = RecordingGraph::working();
+        // Two shapes, each requiring a different path, so findings differ in
+        // shape, path and constraint.
+        for (shape, path, term, value) in [
+            ("S", "owner", "minCount", FlakeValue::Int(1)),
+            ("T", "description", "minCount", FlakeValue::Int(1)),
+        ] {
+            let in_shapes = |s: Sid, p: Sid, o: FlakeValue| Flake {
+                s,
+                p,
+                o,
+                cx: Some(shapes_graph()),
+                t: 1,
+                op: true,
+            };
+            graph
+                .assert_flakes(&[
+                    in_shapes(a(shape), rdf_type(), FlakeValue::Ref(sh("NodeShape"))),
+                    in_shapes(
+                        a(shape),
+                        sh("targetClass"),
+                        FlakeValue::Ref(a("Regulatory")),
+                    ),
+                    in_shapes(
+                        a(shape),
+                        sh("property"),
+                        FlakeValue::Ref(a(&format!("{shape}/p"))),
+                    ),
+                    in_shapes(
+                        a(&format!("{shape}/p")),
+                        sh("path"),
+                        FlakeValue::Ref(a(path)),
+                    ),
+                    in_shapes(a(&format!("{shape}/p")), sh(term), value),
+                ])
+                .await
+                .expect("shape");
+        }
+        // Two offenders, so findings differ in focus node too.
+        for node in ["payments", "ledger"] {
+            graph
+                .assert_flakes(&[Flake::assert(
+                    a(node),
+                    rdf_type(),
+                    FlakeValue::Ref(a("Regulatory")),
+                    1,
+                )])
+                .await
+                .expect("offender");
+        }
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph as Arc<dyn TripleStore>);
+        catalog
+            .storage
+            .upsert_user(&graph_owl_storage::StoredUser {
+                id: "priya".to_string(),
+                display_name: "Priya".to_string(),
+                email: None,
+                is_admin: false,
+                is_bot: false,
+                roles: vec![],
+            })
+            .await
+            .expect("a user");
+
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        assert_eq!(rows.len(), 4, "two shapes over two nodes: {rows:#?}");
+
+        let target = rows[0].finding.clone();
+        catalog
+            .assign_finding(&Principal::system(), &target, "priya")
+            .await
+            .expect("assign");
+
+        let (after, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        let assigned: Vec<_> = after.iter().filter(|r| r.assignment.is_some()).collect();
+        assert_eq!(
+            assigned.len(),
+            1,
+            "the assignment spread beyond its finding: {after:#?}"
+        );
+        assert_eq!(assigned[0].finding.shape, target.shape);
+        assert_eq!(assigned[0].finding.focus_node, target.focus_node);
+        assert_eq!(assigned[0].finding.path, target.path);
+        assert_eq!(assigned[0].finding.constraint_kind, target.constraint_kind);
     }
 
     /// The queue's filters actually narrow. A filter that returns everything
@@ -5938,6 +6717,292 @@ mod projection_isolation_tests {
             storage
                 .policy_reads
                 .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn person(id: &str) -> StoredUser {
+            StoredUser {
+                id: id.to_string(),
+                display_name: id.to_string(),
+                email: None,
+                is_admin: false,
+                is_bot: false,
+                roles: vec![],
+            }
+        }
+
+        fn team(id: &str, members: &[&str]) -> graph_owl_storage::Team {
+            graph_owl_storage::Team {
+                id: id.to_string(),
+                display_name: format!("The {id} team"),
+                description: None,
+                members: members.iter().map(|m| (*m).to_string()).collect(),
+            }
+        }
+
+        /// **A member nobody can resolve is an owner who does not exist**, and
+        /// the mistake surfaces much later as an asset owned by nothing.
+        #[tokio::test]
+        async fn a_team_cannot_name_a_member_who_is_not_a_user() {
+            let (catalog, _) = catalog_with_policy().await;
+
+            let outcome = catalog.upsert_team(&team("platform", &["ghost"])).await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::Validation(_))),
+                "{outcome:?}"
+            );
+        }
+
+        /// And the positive, so the refusal above is about the unknown member
+        /// rather than about teams never being creatable.
+        #[tokio::test]
+        async fn a_team_of_known_people_is_created_with_its_membership() {
+            let (catalog, _) = catalog_with_policy().await;
+            for who in ["priya", "sam"] {
+                catalog
+                    .storage
+                    .upsert_user(&person(who))
+                    .await
+                    .expect("user");
+            }
+
+            let stored = catalog
+                .upsert_team(&team("platform", &["sam", "priya"]))
+                .await
+                .expect("create");
+
+            // Ordered, so two reads of an unchanged team compare equal and a
+            // diff between them means something.
+            assert_eq!(stored.members, vec!["priya", "sam"]);
+            assert_eq!(stored.display_name, "The platform team");
+        }
+
+        /// **Membership is replaced, not merged.** A partial update cannot
+        /// express "remove everybody", and removal is the operation that has to
+        /// work — a team somebody has left is an owner who no longer exists.
+        #[tokio::test]
+        async fn updating_a_team_replaces_its_membership_rather_than_adding_to_it() {
+            let (catalog, _) = catalog_with_policy().await;
+            for who in ["priya", "sam"] {
+                catalog
+                    .storage
+                    .upsert_user(&person(who))
+                    .await
+                    .expect("user");
+            }
+            catalog
+                .upsert_team(&team("platform", &["priya", "sam"]))
+                .await
+                .expect("create");
+
+            let updated = catalog
+                .upsert_team(&team("platform", &["sam"]))
+                .await
+                .expect("update");
+
+            assert_eq!(updated.members, vec!["sam"], "priya was not removed");
+        }
+
+        /// Emptying a team is expressible. A model where the last member cannot
+        /// be removed leaves a departed colleague owning things forever.
+        #[tokio::test]
+        async fn a_team_can_be_emptied() {
+            let (catalog, _) = catalog_with_policy().await;
+            catalog
+                .storage
+                .upsert_user(&person("priya"))
+                .await
+                .expect("user");
+            catalog
+                .upsert_team(&team("platform", &["priya"]))
+                .await
+                .expect("create");
+
+            let emptied = catalog
+                .upsert_team(&team("platform", &[]))
+                .await
+                .expect("empty");
+
+            assert!(emptied.members.is_empty());
+        }
+
+        /// A team needs a name a person recognises. An id alone reads as a slug
+        /// in every owner column it appears in.
+        #[tokio::test]
+        async fn a_team_needs_an_id_and_a_name() {
+            let (catalog, _) = catalog_with_policy().await;
+
+            for broken in [
+                graph_owl_storage::Team {
+                    id: "  ".into(),
+                    ..team("x", &[])
+                },
+                graph_owl_storage::Team {
+                    display_name: "".into(),
+                    ..team("x", &[])
+                },
+            ] {
+                assert!(
+                    matches!(
+                        catalog.upsert_team(&broken).await,
+                        Err(CatalogError::Validation(_))
+                    ),
+                    "{broken:?} was accepted"
+                );
+            }
+        }
+
+        /// A person may be in several teams: ownership follows the
+        /// organisation, and organisations are not trees.
+        #[tokio::test]
+        async fn a_person_can_belong_to_more_than_one_team() {
+            let (catalog, _) = catalog_with_policy().await;
+            catalog
+                .storage
+                .upsert_user(&person("priya"))
+                .await
+                .expect("user");
+            catalog
+                .upsert_team(&team("platform", &["priya"]))
+                .await
+                .expect("a");
+            catalog
+                .upsert_team(&team("finance", &["priya"]))
+                .await
+                .expect("b");
+
+            let teams = catalog.teams().await.expect("teams");
+
+            assert_eq!(teams.len(), 2);
+            assert!(teams.iter().all(|t| t.members == vec!["priya"]));
+        }
+
+        /// **A revoked role stops working immediately.** This is the whole
+        /// reason the cache has no TTL: a revocation whose window is invisible
+        /// to whoever performed it is a revocation nobody can reason about.
+        /// Without the invalidation the old predicate keeps answering, and the
+        /// person who removed the role has no way to see that it still works.
+        #[tokio::test]
+        async fn revoking_a_role_takes_effect_on_the_very_next_request() {
+            let (catalog, storage) = catalog_with_policy().await;
+            catalog
+                .storage
+                .upsert_user(&StoredUser {
+                    id: "asha".to_string(),
+                    display_name: "Asha".to_string(),
+                    email: None,
+                    is_admin: false,
+                    is_bot: false,
+                    roles: vec!["analyst".to_string()],
+                })
+                .await
+                .expect("a user");
+            let asha = analyst(&["analyst"]);
+
+            // Warm the cache, so the next answer would be served from it.
+            catalog
+                .list_assets_for(&asha, None, &page())
+                .await
+                .expect("first");
+            let warmed = reads(&storage);
+
+            catalog
+                .set_user_roles("asha", vec![])
+                .await
+                .expect("revoke");
+
+            catalog
+                .list_assets_for(&asha, None, &page())
+                .await
+                .expect("after revocation");
+
+            assert!(
+                reads(&storage) > warmed,
+                "the decision was still served from cache after a role change"
+            );
+        }
+
+        /// And the negative that stops "invalidate always" passing: an
+        /// unrelated read after the revocation is cached again, so the cache
+        /// still works. A control that clears on every request is a control
+        /// that has quietly become a no-op.
+        #[tokio::test]
+        async fn the_cache_still_works_after_an_invalidation() {
+            let (catalog, storage) = catalog_with_policy().await;
+            catalog
+                .storage
+                .upsert_user(&StoredUser {
+                    id: "asha".to_string(),
+                    display_name: "Asha".to_string(),
+                    email: None,
+                    is_admin: false,
+                    is_bot: false,
+                    roles: vec!["analyst".to_string()],
+                })
+                .await
+                .expect("a user");
+            let asha = analyst(&["analyst"]);
+            catalog
+                .set_user_roles("asha", vec![])
+                .await
+                .expect("revoke");
+
+            catalog
+                .list_assets_for(&asha, None, &page())
+                .await
+                .expect("first");
+            let after_first = reads(&storage);
+            catalog
+                .list_assets_for(&asha, None, &page())
+                .await
+                .expect("second");
+
+            assert_eq!(reads(&storage), after_first, "the cache stopped caching");
+        }
+
+        /// Granting a role to a name nobody has seen would let a typo mint a
+        /// principal — and the mistake would only surface as access that
+        /// silently does nothing.
+        #[tokio::test]
+        async fn roles_cannot_be_granted_to_a_user_that_does_not_exist() {
+            let (catalog, _) = catalog_with_policy().await;
+
+            let outcome = catalog
+                .set_user_roles("nobody", vec!["admin".to_string()])
+                .await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::NotFound)),
+                "{outcome:?}"
+            );
+        }
+
+        /// The roles actually change, and nothing else about the user does.
+        #[tokio::test]
+        async fn setting_roles_replaces_them_and_leaves_the_rest_alone() {
+            let (catalog, _) = catalog_with_policy().await;
+            catalog
+                .storage
+                .upsert_user(&StoredUser {
+                    id: "asha".to_string(),
+                    display_name: "Asha Rao".to_string(),
+                    email: Some("asha@example.com".to_string()),
+                    is_admin: false,
+                    is_bot: false,
+                    roles: vec!["analyst".to_string()],
+                })
+                .await
+                .expect("a user");
+
+            let updated = catalog
+                .set_user_roles("asha", vec!["steward".to_string()])
+                .await
+                .expect("set roles");
+
+            assert_eq!(updated.roles, vec!["steward".to_string()]);
+            assert_eq!(updated.display_name, "Asha Rao", "the name was rewritten");
+            assert_eq!(updated.email.as_deref(), Some("asha@example.com"));
+            assert!(!updated.is_admin, "admin was granted as a side effect");
         }
 
         /// The point of the cache: the second identical question does not go
