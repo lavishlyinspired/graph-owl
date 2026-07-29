@@ -382,6 +382,81 @@ impl Storage for PostgresStorage {
         ))
     }
 
+    #[tracing::instrument(name = "storage.waive_finding", skip_all)]
+    async fn waive_finding(&self, waiver: &graph_owl_storage::Waiver) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO validation_waivers
+                 (id, shape, focus_node, path, constraint_kind,
+                  reason, waived_by, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(waiver.id)
+        .bind(&waiver.shape)
+        .bind(&waiver.focus_node)
+        .bind(&waiver.path)
+        .bind(&waiver.constraint_kind)
+        .bind(&waiver.reason)
+        .bind(&waiver.waived_by)
+        .bind(waiver.expires_at)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            // The unique index is what makes a second waiver impossible;
+            // translating it here means the API can say so rather than
+            // returning an opaque 500 for a condition a caller can fix.
+            if e.as_database_error()
+                .is_some_and(|db| db.is_unique_violation())
+            {
+                StorageError::Conflict {
+                    detail: "this finding is already waived".to_string(),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::WaiverExists,
+                }
+            } else {
+                StorageError::Unexpected(e.to_string())
+            }
+        })
+    }
+
+    #[tracing::instrument(name = "storage.revoke_waiver", skip_all)]
+    async fn revoke_waiver(&self, id: Uuid) -> Result<bool, StorageError> {
+        sqlx::query("DELETE FROM validation_waivers WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map(|done| done.rows_affected() > 0)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    #[tracing::instrument(name = "storage.waivers", skip_all)]
+    async fn waivers(&self) -> Result<Vec<graph_owl_storage::Waiver>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, shape, focus_node, path, constraint_kind,
+                    reason, waived_by, waived_at, expires_at
+               FROM validation_waivers
+              ORDER BY expires_at",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| graph_owl_storage::Waiver {
+                id: row.get("id"),
+                shape: row.get("shape"),
+                focus_node: row.get("focus_node"),
+                path: row.get("path"),
+                constraint_kind: row.get("constraint_kind"),
+                reason: row.get("reason"),
+                waived_by: row.get("waived_by"),
+                waived_at: row.get("waived_at"),
+                expires_at: row.get("expires_at"),
+            })
+            .collect())
+    }
+
     #[tracing::instrument(name = "storage.recent_runs", skip_all)]
     async fn recent_runs(
         &self,

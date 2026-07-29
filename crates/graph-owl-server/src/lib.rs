@@ -83,6 +83,8 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/validation/runs", post(run_validation))
         .route("/validation/shapes/seed", post(seed_core_shapes))
         .route("/validation/report", get(validation_report))
+        .route("/validation/waivers", post(waive_finding))
+        .route("/validation/waivers/{id}", delete(revoke_waiver))
         // Unauthenticated by design: an orchestrator's probe must not depend
         // on the identity provider being reachable.
         .route("/health", get(health))
@@ -762,6 +764,10 @@ impl AppError {
                 kind: ConflictKind::RelationshipTuple,
                 ..
             } => "relationship-conflict",
+            AppError::Conflict {
+                kind: ConflictKind::WaiverExists,
+                ..
+            } => "waiver-exists",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
             AppError::PreconditionFailed { .. } => "version-conflict",
@@ -788,6 +794,10 @@ impl AppError {
                 kind: ConflictKind::RelationshipTuple,
                 ..
             } => "Relationship already exists",
+            AppError::Conflict {
+                kind: ConflictKind::WaiverExists,
+                ..
+            } => "This finding is already waived",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
             AppError::PreconditionFailed { .. } => "Version precondition failed",
@@ -834,6 +844,12 @@ impl AppError {
                 kind: ConflictKind::RelationshipTuple,
                 ..
             } => format!("the relationship '{detail}' already exists"),
+            AppError::Conflict {
+                kind: ConflictKind::WaiverExists,
+                ..
+            } => "this finding already has a waiver; revoke it before recording \
+                  a different reason"
+                .to_string(),
             AppError::NotFound => "the requested resource does not exist".to_string(),
             AppError::PreconditionFailed { current } => format!(
                 "this asset is now at version {current}; your `If-Match` named an \
@@ -1348,6 +1364,77 @@ async fn run_validation(
     Ok(Json(catalog.run_validation().await?))
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WaiveRequest {
+    /// The finding's *identity*, not its row id: results are replaced wholesale
+    /// each pass and every row gets a fresh id, so a waiver keyed on one would
+    /// survive until the next run and then point at nothing.
+    shape: String,
+    focus_node: String,
+    #[serde(default)]
+    path: Option<String>,
+    constraint: String,
+    reason: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl ValidateBody for WaiveRequest {
+    /// The reason and the expiry are checked in the facade, not here: both are
+    /// governance rules ("a waiver has to say why", "a waiver has to expire"),
+    /// and a rule stated in two places is a rule that will disagree with itself.
+    /// Shape alone is this trait's job.
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Accept a violation, on the record — Epic 41.
+async fn waive_finding(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<WaiveRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let finding = graph_owl_storage::ValidationFinding {
+        id: Uuid::new_v4(),
+        shape: payload.shape,
+        focus_node: payload.focus_node,
+        path: payload.path,
+        constraint_kind: payload.constraint,
+        severity: String::new(),
+        message: String::new(),
+        actual: None,
+        suggestion: None,
+    };
+
+    let waiver = catalog
+        .waive_finding(&principal, &finding, &payload.reason, payload.expires_at)
+        .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": waiver.id,
+            "reason": waiver.reason,
+            "waivedBy": waiver.waived_by,
+            "expiresAt": waiver.expires_at,
+        })),
+    ))
+}
+
+/// Withdraw a waiver, putting the finding back in the queue.
+///
+/// `204` whether or not one was there: revoking twice is the same intent twice,
+/// and a `404` would make a client treat an already-clean state as a failure.
+async fn revoke_waiver(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    catalog.revoke_waiver(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Write the shapes the core entity model ships with — Epic 5.
 ///
 /// Explicit rather than automatic on startup: a server that silently seeds
@@ -1398,16 +1485,29 @@ async fn validation_report(
     let (findings, computed_at_t, total) = catalog.validation_report(&filter).await?;
 
     Ok(Json(json!({
-        "data": findings.iter().map(|f| json!({
-            "id": f.id,
-            "shape": f.shape,
-            "focusNode": f.focus_node,
-            "path": f.path,
-            "constraint": f.constraint_kind,
-            "severity": f.severity,
-            "message": f.message,
-            "actual": f.actual,
-            "suggestion": f.suggestion,
+        "data": findings.iter().map(|row| json!({
+            "id": row.finding.id,
+            "shape": row.finding.shape,
+            "focusNode": row.finding.focus_node,
+            "path": row.finding.path,
+            "constraint": row.finding.constraint_kind,
+            "severity": row.finding.severity,
+            "message": row.finding.message,
+            "actual": row.finding.actual,
+            "suggestion": row.finding.suggestion,
+            // **Marked, not hidden.** A waived finding removed from the queue
+            // is one nobody reviews — including nobody noticing its acceptance
+            // is about to lapse.
+            "waiver": row.waiver.as_ref().map(|w| json!({
+                "id": w.id,
+                "reason": w.reason,
+                "waivedBy": w.waived_by,
+                "waivedAt": w.waived_at,
+                "expiresAt": w.expires_at,
+                // An expired waiver and no waiver at all look identical
+                // otherwise, and only the first is somebody's to answer for.
+                "expired": row.waiver_expired,
+            })),
         })).collect::<Vec<_>>(),
         // **The instant this reflects.** A validation report whose currency is
         // unknown is unactionable: a steward cannot tell a queue that is clean

@@ -27,6 +27,10 @@ pub enum ConflictKind {
     Fqn,
     /// The `(from, type, to)` relationship tuple already exists.
     RelationshipTuple,
+    /// This finding is already waived. A second waiver would hide which reason
+    /// is the live one, and "why is this accepted" is the question the record
+    /// exists to answer.
+    WaiverExists,
 }
 
 #[derive(Debug, Error)]
@@ -99,6 +103,28 @@ pub struct ValidationFinding {
     pub message: String,
     pub actual: Option<String>,
     pub suggestion: Option<serde_json::Value>,
+}
+
+/// A violation somebody accepted, on the record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Waiver {
+    pub id: Uuid,
+    /// What the waiver is *about* — the same four fields that identify a
+    /// finding. Not the finding's row id: results are replaced wholesale every
+    /// pass and every row gets a fresh UUID, so a waiver keyed on one would
+    /// survive until the next run and then point at nothing.
+    pub shape: String,
+    pub focus_node: String,
+    pub path: Option<String>,
+    pub constraint_kind: String,
+    /// **Required.** A waiver without a reason is a violation deleted with
+    /// extra steps.
+    pub reason: String,
+    pub waived_by: String,
+    pub waived_at: chrono::DateTime<chrono::Utc>,
+    /// **Required.** A permanent waiver is a rule switched off without being
+    /// switched off — invisible in the shape and never reviewed again.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// What slice of the queue a caller wants.
@@ -319,6 +345,33 @@ pub trait Storage: Send + Sync {
         &self,
         filter: &ValidationFilter,
     ) -> Result<(Vec<ValidationFinding>, i64, usize), StorageError>;
+
+    /// Record that somebody accepted a violation.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Conflict`] if this finding is already waived — a second
+    /// waiver would hide which reason is the live one.
+    async fn waive_finding(&self, waiver: &Waiver) -> Result<(), StorageError>;
+
+    /// Withdraw a waiver, putting the finding back in the queue.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the delete fails. A waiver that was not there is
+    /// `Ok(false)`, not an error: revoking twice is the same intent twice.
+    async fn revoke_waiver(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Every waiver, expired ones included.
+    ///
+    /// **Expiry is evaluated by the reader, not filtered here.** A queue that
+    /// silently dropped expired waivers would make a finding reappear with no
+    /// explanation of where its acceptance went.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn waivers(&self) -> Result<Vec<Waiver>, StorageError>;
 
     /// Open a run row before the work starts.
     ///

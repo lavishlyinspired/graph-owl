@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   type Finding,
   type Severity,
+  type Waiver,
   SEVERITY_ORDER,
+  isWaived,
   currency,
   describeSuggestion,
   groupByAsset,
@@ -227,3 +229,71 @@ describe("how current the report is", () => {
 });
 
 type Suggestion = NonNullable<Finding["suggestion"]>;
+
+function waiver(over: Partial<Waiver> = {}): Waiver {
+  return {
+    id: "w1",
+    reason: "accepted until the migration lands",
+    waivedBy: "governance",
+    waivedAt: "2026-07-01T00:00:00Z",
+    expiresAt: "2026-12-01T00:00:00Z",
+    expired: false,
+    ...over,
+  };
+}
+
+describe("an accepted finding", () => {
+  it("is waived when a live acceptance covers it", () => {
+    expect(isWaived(finding({ waiver: waiver() }))).toBe(true);
+  });
+
+  // An expired waiver accepts nothing. The record stays visible so a reader
+  // can see the acceptance lapsed rather than wondering where it went.
+  it("is not waived once the acceptance has lapsed", () => {
+    expect(isWaived(finding({ waiver: waiver({ expired: true }) }))).toBe(false);
+  });
+
+  it("is not waived when nobody accepted it", () => {
+    expect(isWaived(finding())).toBe(false);
+    expect(isWaived(finding({ waiver: null }))).toBe(false);
+  });
+
+  // **Shown, not hidden.** Removing accepted work from the queue makes the
+  // acceptance invisible — and with it the fact that it is about to lapse.
+  it("stays in the queue", () => {
+    const rows = groupByAsset([finding({ waiver: waiver() })]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.fullyWaived).toBe(true);
+  });
+
+  // But it is not what a steward works next, so it sorts below live work —
+  // even when its severity is louder.
+  it("sorts below unaccepted work of lower severity", () => {
+    const rows = groupByAsset([
+      finding({ focusNode: "1:accepted", severity: "violation", waiver: waiver() }),
+      finding({ focusNode: "1:live", severity: "info" }),
+    ]);
+
+    expect(rows.map((r) => r.focusNode)).toEqual(["1:live", "1:accepted"]);
+  });
+
+  // A group is only fully accepted when *every* finding is. One unaccepted
+  // problem is still a problem, and the group belongs with live work.
+  it("is not fully waived when one finding is still open", () => {
+    const rows = groupByAsset([
+      finding({ constraint: "minCount", waiver: waiver() }),
+      finding({ constraint: "maxCount" }),
+    ]);
+
+    expect(rows[0]!.fullyWaived).toBe(false);
+  });
+
+  // A group whose acceptances have all lapsed is live work again, not
+  // accepted work — that is the whole reason expiry exists.
+  it("returns to live work when its acceptances expire", () => {
+    const rows = groupByAsset([finding({ waiver: waiver({ expired: true }) })]);
+
+    expect(rows[0]!.fullyWaived).toBe(false);
+  });
+});

@@ -333,6 +333,24 @@ export const api = {
     return request<ValidationReport>(`/validation/report?${query}`);
   },
   runValidation: () => request<ValidationRun>("/validation/runs", { method: "POST" }),
+  /** Accept a violation. Reason and expiry are both required and the server
+   *  refuses without them — a waiver nobody can review is a violation deleted
+   *  with extra steps. */
+  waiveFinding: (body: {
+    shape: string;
+    focusNode: string;
+    path: string | null;
+    constraint: string;
+    reason: string;
+    expiresAt: string;
+  }) =>
+    request<{ id: string }>("/validation/waivers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  revokeWaiver: (id: string) =>
+    request<void>(`/validation/waivers/${id}`, { method: "DELETE" }),
   runReasoning: () => request<ReasoningReport>("/reasoning/runs", { method: "POST" }),
   /** Run a SPARQL query. The budget is the server's, not ours — a client that
    *  could raise its own limit does not have one. */

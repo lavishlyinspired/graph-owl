@@ -17,6 +17,7 @@ import {
   Popover,
   Row,
   Space,
+  Modal,
   Spin,
   Statistic,
   Table,
@@ -2255,6 +2256,8 @@ function GovernancePage({ colors }: { colors: (typeof palette)["light"] }) {
   const [lastRun, setLastRun] = useState<ValidationRun | null>(null);
   const [severity, setSeverity] = useState<Severity | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
+  const [waiving, setWaiving] = useState<Finding | null>(null);
+  const [reason, setReason] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -2377,6 +2380,10 @@ function GovernancePage({ colors }: { colors: (typeof palette)["light"] }) {
                     {SEVERITY_TAG[group.severity].label}
                   </Tag>
                   <Text strong>{localName(group.focusNode)}</Text>
+                  {/* Shown, never hidden: an accepted finding removed from the
+                      queue is one nobody reviews — including nobody noticing
+                      the acceptance is about to lapse. */}
+                  {group.fullyWaived && <Tag color="processing">Accepted</Tag>}
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     {group.findings.length} finding
                     {group.findings.length === 1 ? "" : "s"}
@@ -2414,6 +2421,39 @@ function GovernancePage({ colors }: { colors: (typeof palette)["light"] }) {
                           {finding.path ? ` · ${localName(finding.path)}` : ""}
                         </Text>
                       </div>
+                      {finding.waiver ? (
+                        <div style={{ marginTop: 4 }}>
+                          <Space size={6} wrap>
+                            {/* An expired acceptance and none at all look
+                                identical unless the lapse is said out loud,
+                                and only one is somebody's to answer for. */}
+                            <Tag color={finding.waiver.expired ? "warning" : "processing"}>
+                              {finding.waiver.expired ? "Acceptance expired" : "Accepted"}
+                            </Tag>
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              {finding.waiver.reason} — {finding.waiver.waivedBy}, until{" "}
+                              {new Date(finding.waiver.expiresAt).toLocaleDateString()}
+                            </Text>
+                            <Button
+                              size="small"
+                              onClick={() => {
+                                const id = finding.waiver?.id;
+                                if (id) void api.revokeWaiver(id).then(() => load());
+                              }}
+                            >
+                              Revoke
+                            </Button>
+                          </Space>
+                        </div>
+                      ) : (
+                        <Button
+                          size="small"
+                          style={{ marginTop: 4 }}
+                          onClick={() => setWaiving(finding)}
+                        >
+                          Accept…
+                        </Button>
+                      )}
                     </div>
                   );
                 })}
@@ -2422,6 +2462,58 @@ function GovernancePage({ colors }: { colors: (typeof palette)["light"] }) {
           ))}
         </Space>
       )}
+
+      <Modal
+        open={waiving !== null}
+        title="Accept this violation"
+        okText="Accept for 30 days"
+        okButtonProps={{ disabled: reason.trim().length === 0 }}
+        onCancel={() => {
+          setWaiving(null);
+          setReason("");
+        }}
+        onOk={() => {
+          if (!waiving) return;
+          const expires = new Date();
+          expires.setDate(expires.getDate() + 30);
+          void api
+            .waiveFinding({
+              shape: waiving.shape,
+              focusNode: waiving.focusNode,
+              path: waiving.path,
+              constraint: waiving.constraint,
+              reason: reason.trim(),
+              expiresAt: expires.toISOString(),
+            })
+            .then(() => {
+              setWaiving(null);
+              setReason("");
+              return load();
+            })
+            .catch((error) =>
+              setFailed(
+                error instanceof ApiError
+                  ? (error.problem.detail ?? error.problem.title)
+                  : "the waiver was refused",
+              ),
+            );
+        }}
+      >
+        <Paragraph type="secondary" style={{ fontSize: 13 }}>
+          {/* Both rules are enforced by the server; saying them here is what
+              stops somebody discovering them by being refused. */}
+          A waiver has to say why, and it expires. Without a reason nobody can
+          review it later; without an expiry it is a rule switched off where
+          nobody will see it again.
+        </Paragraph>
+        <Input.TextArea
+          autoFocus
+          rows={3}
+          value={reason}
+          placeholder="Why is this acceptable, and until what changes?"
+          onChange={(e) => setReason(e.target.value)}
+        />
+      </Modal>
 
       <Text type="secondary" style={{ fontSize: 11, color: colors.border }}>
         Repairs are suggestions. Nothing on this page is applied automatically.

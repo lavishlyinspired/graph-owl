@@ -1875,6 +1875,79 @@
         ],
         "summary": "Write the shapes the core entity model ships with"
       }
+    },
+    "/validation/waivers": {
+      "post": {
+        "operationId": "post_validation_waivers",
+        "responses": {
+          "201": {
+            "description": "Accept a violation, with a reason and an expiry"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Accept a violation, with a reason and an expiry"
+      }
+    },
+    "/validation/waivers/{id}": {
+      "delete": {
+        "operationId": "delete_validation_waivers__id_",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Withdraw a waiver, returning the finding to the queue"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Withdraw a waiver, returning the finding to the queue"
+      }
     }
   },
   "servers": [

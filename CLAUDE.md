@@ -192,6 +192,14 @@ One incident already occurred and was reverted during planning (a cache-tier tab
   separate change with its own tests — not four fixture changes at once, which
   is what made each failure point somewhere else.
 
+  **Waiting for a run: match the binary, not the string.** `pgrep -f "cargo test"`
+  matches *the shell running the pgrep*, so a loop like
+  `until ! pgrep -f "cargo test"; do sleep 20; done` waits for itself and never
+  terminates. Every such waiter then shows up in `ps | grep "cargo test"` and
+  looks like another concurrent suite, which is a second wrong conclusion on top
+  of the first. Use `pgrep -f "bin/cargo test"`, and count with it before
+  believing that runs are stacked.
+
   **A config change to the shared container invalidates its reuse hash**, and
   testcontainers then tries to create a second container with the same name —
   which fails with a 409 conflict and reads like the container is broken. It is

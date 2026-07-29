@@ -2242,6 +2242,71 @@ impl Catalog {
         Ok(flakes.len())
     }
 
+    /// Accept a violation, on the record.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the reason is blank or the expiry is not in the future.
+    /// `Storage` if this finding is already waived.
+    #[tracing::instrument(name = "catalog.waive_finding", skip_all)]
+    pub async fn waive_finding(
+        &self,
+        principal: &Principal,
+        finding: &graph_owl_storage::ValidationFinding,
+        reason: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<graph_owl_storage::Waiver, CatalogError> {
+        let mut problems = Vec::new();
+        // **A reason is required.** Without one a waiver is a violation deleted
+        // with extra steps: the next reader cannot tell an accepted risk from a
+        // forgotten one, and cannot judge whether the acceptance still holds.
+        if reason.trim().is_empty() {
+            problems.push(FieldError::new(
+                "reason",
+                FieldErrorCode::Required,
+                "a waiver has to say why; without one nobody can review it".to_string(),
+            ));
+        }
+        // **An expiry in the past is not a waiver**, it is a finding that
+        // reappears immediately — which reads as the waiver having failed.
+        if expires_at <= Utc::now() {
+            problems.push(FieldError::new(
+                "expiresAt",
+                FieldErrorCode::Type,
+                "a waiver has to expire in the future; a past expiry accepts \
+                 nothing"
+                    .to_string(),
+            ));
+        }
+        if !problems.is_empty() {
+            return Err(CatalogError::Validation(problems));
+        }
+
+        let waiver = graph_owl_storage::Waiver {
+            id: Uuid::new_v4(),
+            shape: finding.shape.clone(),
+            focus_node: finding.focus_node.clone(),
+            path: finding.path.clone(),
+            constraint_kind: finding.constraint_kind.clone(),
+            reason: reason.trim().to_string(),
+            waived_by: principal.id.clone(),
+            waived_at: Utc::now(),
+            expires_at,
+        };
+        self.storage.waive_finding(&waiver).await?;
+        Ok(waiver)
+    }
+
+    /// Withdraw a waiver, putting the finding back in the queue.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the delete fails.
+    #[tracing::instrument(name = "catalog.revoke_waiver", skip_all)]
+    pub async fn revoke_waiver(&self, id: Uuid) -> Result<bool, CatalogError> {
+        Ok(self.storage.revoke_waiver(id).await?)
+    }
+
     /// The stored queue, filtered and paged.
     ///
     /// Reads results rather than recomputing: this is polled by a queue view,
@@ -2255,8 +2320,39 @@ impl Catalog {
     pub async fn validation_report(
         &self,
         filter: &graph_owl_storage::ValidationFilter,
-    ) -> Result<(Vec<graph_owl_storage::ValidationFinding>, i64, usize), CatalogError> {
-        Ok(self.storage.validation_results(filter).await?)
+    ) -> Result<(Vec<WaivedFinding>, i64, usize), CatalogError> {
+        let (findings, computed_at_t, total) = self.storage.validation_results(filter).await?;
+        let waivers = self.storage.waivers().await?;
+        let now = Utc::now();
+
+        let decorated = findings
+            .into_iter()
+            .map(|finding| {
+                // **Marked, not hidden.** A waived finding removed from the
+                // queue is one nobody reviews: the acceptance becomes
+                // invisible, and so does the fact that it is about to expire.
+                // An expired waiver is likewise *shown* as expired rather than
+                // dropped, or a finding would reappear with no account of
+                // where its acceptance went.
+                let waiver = waivers
+                    .iter()
+                    .find(|w| {
+                        w.shape == finding.shape
+                            && w.focus_node == finding.focus_node
+                            && w.path == finding.path
+                            && w.constraint_kind == finding.constraint_kind
+                    })
+                    .cloned();
+                let waiver_expired = waiver.as_ref().is_some_and(|w| w.expires_at <= now);
+                WaivedFinding {
+                    finding,
+                    waiver,
+                    waiver_expired,
+                }
+            })
+            .collect();
+
+        Ok((decorated, computed_at_t, total))
     }
 
     /// Compile the shapes, reusing the last compilation when nothing changed.
@@ -2337,6 +2433,18 @@ fn describe_repair(repair: &graph_owl_constraint::Repair) -> serde_json::Value {
     }
 }
 
+/// A finding, and whatever acceptance stands against it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaivedFinding {
+    pub finding: graph_owl_storage::ValidationFinding,
+    /// The waiver covering this finding, live **or expired**.
+    pub waiver: Option<graph_owl_storage::Waiver>,
+    /// The waiver has run out. Reported rather than treated as absent: a
+    /// finding whose acceptance lapsed and one nobody ever accepted look
+    /// identical otherwise, and only the first is somebody's to answer for.
+    pub waiver_expired: bool,
+}
+
 /// What one validation pass found.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2408,6 +2516,7 @@ mod tests {
         /// The last validation pass, as the port stores it: the graph instant
         /// it ran against, and what it found.
         validation: Mutex<(i64, Vec<graph_owl_storage::ValidationFinding>)>,
+        waivers: Mutex<Vec<graph_owl_storage::Waiver>>,
         /// When armed, any relational write panics. Lets a test assert "this
         /// code path writes nothing" structurally instead of by reading it and
         /// believing what it says.
@@ -2440,6 +2549,47 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Storage for InMemoryStorage {
+        async fn waive_finding(
+            &self,
+            waiver: &graph_owl_storage::Waiver,
+        ) -> Result<(), StorageError> {
+            let mut waivers = self.waivers.lock().expect("lock");
+            // The same uniqueness the unique index enforces. A double that
+            // accepted a second waiver would let a facade that never checks
+            // pass here and conflict against Postgres.
+            let identity = |w: &graph_owl_storage::Waiver| {
+                (
+                    w.shape.clone(),
+                    w.focus_node.clone(),
+                    w.path.clone().unwrap_or_default(),
+                    w.constraint_kind.clone(),
+                )
+            };
+            if waivers
+                .iter()
+                .any(|held| identity(held) == identity(waiver))
+            {
+                return Err(StorageError::Conflict {
+                    detail: "this finding is already waived".to_string(),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::WaiverExists,
+                });
+            }
+            waivers.push(waiver.clone());
+            Ok(())
+        }
+
+        async fn revoke_waiver(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut waivers = self.waivers.lock().expect("lock");
+            let before = waivers.len();
+            waivers.retain(|w| w.id != id);
+            Ok(waivers.len() < before)
+        }
+
+        async fn waivers(&self) -> Result<Vec<graph_owl_storage::Waiver>, StorageError> {
+            Ok(self.waivers.lock().expect("lock").clone())
+        }
+
         /// Wholesale replacement, same as the real one: a fixed violation must
         /// vanish rather than linger until something deletes it.
         async fn replace_validation_results(
@@ -3695,6 +3845,13 @@ mod validation_decides_before_it_stores {
         )
     }
 
+    fn all() -> graph_owl_storage::ValidationFilter {
+        graph_owl_storage::ValidationFilter {
+            limit: 50,
+            ..Default::default()
+        }
+    }
+
     async fn seeded() -> (Catalog, Arc<RecordingGraph>) {
         let graph = RecordingGraph::working();
         graph
@@ -3730,14 +3887,15 @@ mod validation_decides_before_it_stores {
             .await
             .expect("the queue");
         assert_eq!(total, 1);
-        assert_eq!(findings[0].focus_node, a("payments").to_string());
-        assert_eq!(findings[0].constraint_kind, "minCount");
+        assert_eq!(findings[0].finding.focus_node, a("payments").to_string());
+        assert_eq!(findings[0].finding.constraint_kind, "minCount");
         assert_eq!(at, run.computed_at_t, "the queue dates itself the same way");
 
         // **The suggestion survives the trip.** A queue that says what is wrong
         // and not what to do is a list of complaints; a `MinCount` failure has
         // a mechanical fix and must carry it.
         let suggestion = findings[0]
+            .finding
             .suggestion
             .as_ref()
             .expect("a minCount failure suggests asserting the missing value");
@@ -3921,6 +4079,263 @@ mod validation_decides_before_it_stores {
         let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
 
         assert!(catalog.run_validation().await.is_err());
+    }
+
+    /// **Marked, not hidden.** A waived finding removed from the queue is one
+    /// nobody reviews: the acceptance becomes invisible, and so does the fact
+    /// that it is about to expire.
+    #[tokio::test]
+    async fn a_waived_finding_is_still_in_the_queue_and_says_who_accepted_it() {
+        let (catalog, _) = seeded().await;
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+
+        catalog
+            .waive_finding(
+                &Principal::system(),
+                &rows[0].finding,
+                "accepted until the ownership migration lands",
+                Utc::now() + chrono::Duration::days(30),
+            )
+            .await
+            .expect("waive");
+
+        let (after, _, total) = catalog.validation_report(&all()).await.expect("queue");
+
+        assert_eq!(total, 1, "the finding must not vanish from the count");
+        let waiver = after[0].waiver.as_ref().expect("the waiver rides with it");
+        assert_eq!(
+            waiver.reason,
+            "accepted until the ownership migration lands"
+        );
+        assert!(!after[0].waiver_expired);
+    }
+
+    /// **The waiver survives a re-run.** Findings are replaced wholesale and
+    /// every row gets a fresh id, so a waiver keyed on the row would work once
+    /// and then point at nothing — the failure would look like the waiver
+    /// having been forgotten.
+    #[tokio::test]
+    async fn a_waiver_survives_the_next_validation_pass() {
+        let (catalog, _) = seeded().await;
+        catalog.run_validation().await.expect("first pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        let original_id = rows[0].finding.id;
+        catalog
+            .waive_finding(
+                &Principal::system(),
+                &rows[0].finding,
+                "known and accepted",
+                Utc::now() + chrono::Duration::days(7),
+            )
+            .await
+            .expect("waive");
+
+        catalog.run_validation().await.expect("second pass");
+
+        let (after, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        assert_ne!(after[0].finding.id, original_id, "the row was regenerated");
+        assert!(
+            after[0].waiver.is_some(),
+            "the waiver did not survive the re-run"
+        );
+    }
+
+    /// **An expired waiver is shown as expired, not treated as absent.** A
+    /// finding whose acceptance lapsed and one nobody ever accepted look
+    /// identical otherwise, and only the first is somebody's to answer for.
+    #[tokio::test]
+    async fn an_expired_waiver_is_reported_rather_than_forgotten() {
+        let (catalog, _) = seeded().await;
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+
+        // Straight past the facade's own guard, because what is under test is
+        // how a waiver that has *become* stale reads — not whether one can be
+        // created stale, which the next test covers.
+        catalog
+            .storage
+            .waive_finding(&graph_owl_storage::Waiver {
+                id: Uuid::new_v4(),
+                shape: rows[0].finding.shape.clone(),
+                focus_node: rows[0].finding.focus_node.clone(),
+                path: rows[0].finding.path.clone(),
+                constraint_kind: rows[0].finding.constraint_kind.clone(),
+                reason: "was accepted last year".to_string(),
+                waived_by: "someone".to_string(),
+                waived_at: Utc::now() - chrono::Duration::days(400),
+                expires_at: Utc::now() - chrono::Duration::days(1),
+            })
+            .await
+            .expect("store an expired waiver");
+
+        let (after, _, _) = catalog.validation_report(&all()).await.expect("queue");
+
+        assert!(
+            after[0].waiver.is_some(),
+            "the record must still be visible"
+        );
+        assert!(after[0].waiver_expired, "and it must read as expired");
+    }
+
+    /// **A waiver has to say why.** Without a reason it is a violation deleted
+    /// with extra steps — the next reader cannot tell an accepted risk from a
+    /// forgotten one.
+    #[tokio::test]
+    async fn a_waiver_without_a_reason_is_refused() {
+        let (catalog, _) = seeded().await;
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+
+        for blank in ["", "   "] {
+            let outcome = catalog
+                .waive_finding(
+                    &Principal::system(),
+                    &rows[0].finding,
+                    blank,
+                    Utc::now() + chrono::Duration::days(1),
+                )
+                .await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::Validation(_))),
+                "{blank:?} was accepted as a reason"
+            );
+        }
+    }
+
+    /// **A waiver has to expire.** A permanent one is a rule switched off
+    /// without being switched off — invisible in the shape and never reviewed.
+    /// A past expiry accepts nothing and reads as the waiver having failed.
+    #[tokio::test]
+    async fn a_waiver_that_expires_in_the_past_is_refused() {
+        let (catalog, _) = seeded().await;
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+
+        let outcome = catalog
+            .waive_finding(
+                &Principal::system(),
+                &rows[0].finding,
+                "accepted",
+                Utc::now() - chrono::Duration::minutes(1),
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, Err(CatalogError::Validation(_))),
+            "{outcome:?}"
+        );
+    }
+
+    /// One live waiver per finding. A second would hide which reason is the
+    /// live one, and "why is this accepted" is the question the record exists
+    /// to answer.
+    #[tokio::test]
+    async fn a_finding_cannot_be_waived_twice() {
+        let (catalog, _) = seeded().await;
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        let principal = Principal::system();
+        let expires = Utc::now() + chrono::Duration::days(1);
+
+        catalog
+            .waive_finding(&principal, &rows[0].finding, "the first reason", expires)
+            .await
+            .expect("first");
+        let second = catalog
+            .waive_finding(&principal, &rows[0].finding, "a different reason", expires)
+            .await;
+
+        assert!(second.is_err(), "a second waiver was accepted");
+    }
+
+    /// Revoking puts the finding back, unaccepted.
+    #[tokio::test]
+    async fn revoking_a_waiver_returns_the_finding_to_the_queue() {
+        let (catalog, _) = seeded().await;
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        let waiver = catalog
+            .waive_finding(
+                &Principal::system(),
+                &rows[0].finding,
+                "temporarily accepted",
+                Utc::now() + chrono::Duration::days(1),
+            )
+            .await
+            .expect("waive");
+
+        assert!(catalog.revoke_waiver(waiver.id).await.expect("revoke"));
+
+        let (after, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        assert!(after[0].waiver.is_none());
+        // And revoking again is the same intent twice, not an error.
+        assert!(
+            !catalog
+                .revoke_waiver(waiver.id)
+                .await
+                .expect("revoke again")
+        );
+    }
+
+    /// A waiver covers **one** finding, not every finding on the asset. An
+    /// asset with three problems and one accepted still has two.
+    #[tokio::test]
+    async fn a_waiver_covers_one_finding_not_the_whole_asset() {
+        let graph = RecordingGraph::working();
+        graph.assert_flakes(&shape_facts(1)).await.expect("shape");
+        // A second property shape, so the offender breaks two rules.
+        graph
+            .assert_flakes(&[
+                Flake {
+                    s: a("S"),
+                    p: sh("property"),
+                    o: FlakeValue::Ref(a("S/desc")),
+                    cx: Some(shapes_graph()),
+                    t: 1,
+                    op: true,
+                },
+                Flake {
+                    s: a("S/desc"),
+                    p: sh("path"),
+                    o: FlakeValue::Ref(a("description")),
+                    cx: Some(shapes_graph()),
+                    t: 1,
+                    op: true,
+                },
+                Flake {
+                    s: a("S/desc"),
+                    p: sh("minCount"),
+                    o: FlakeValue::Int(1),
+                    cx: Some(shapes_graph()),
+                    t: 1,
+                    op: true,
+                },
+            ])
+            .await
+            .expect("second rule");
+        graph.assert_flakes(&[offender()]).await.expect("estate");
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph as Arc<dyn TripleStore>);
+
+        catalog.run_validation().await.expect("a pass");
+        let (rows, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        assert_eq!(rows.len(), 2, "two rules broken");
+
+        catalog
+            .waive_finding(
+                &Principal::system(),
+                &rows[0].finding,
+                "one of them is accepted",
+                Utc::now() + chrono::Duration::days(1),
+            )
+            .await
+            .expect("waive");
+
+        let (after, _, _) = catalog.validation_report(&all()).await.expect("queue");
+        assert_eq!(after.iter().filter(|r| r.waiver.is_some()).count(), 1);
+        assert_eq!(after.iter().filter(|r| r.waiver.is_none()).count(), 1);
     }
 
     /// The queue's filters actually narrow. A filter that returns everything

@@ -457,3 +457,162 @@ async fn seeding_twice_does_not_double_the_shapes() {
     assert_eq!(run["shapes"], 3, "the seed set doubled: {run}");
     assert_eq!(run["refusedShapes"], 0, "{run}");
 }
+
+async fn waive(app: &axum::Router, row: &Value, reason: &str) -> (StatusCode, Value) {
+    let body = serde_json::json!({
+        "shape": row["shape"],
+        "focusNode": row["focusNode"],
+        "path": row["path"],
+        "constraint": row["constraint"],
+        "reason": reason,
+        "expiresAt": (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339(),
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/validation/waivers")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    let status = response.status();
+    (status, json_body(response).await)
+}
+
+/// **A waiver survives the next pass.** Findings are replaced wholesale and
+/// every row gets a fresh id, so a waiver keyed on a row id works once and then
+/// points at nothing — a failure that reads as the waiver having been
+/// forgotten rather than as a design error.
+#[tokio::test]
+async fn a_waiver_survives_a_re_run_because_it_names_the_finding_not_the_row() {
+    let (app, _database, connection_string) = test_app().await;
+    let store = graph(&connection_string).await;
+    seed_shape(&store).await;
+    seed_offender(&store).await;
+    run_validation(&app).await;
+
+    let queue = report(&app, "").await;
+    let row = &queue["data"][0];
+    let original_id = row["id"].as_str().expect("id").to_string();
+    let (status, _) = waive(&app, row, "accepted until the migration lands").await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    run_validation(&app).await;
+
+    let after = report(&app, "").await;
+    let rows = after["data"].as_array().expect("data");
+    // Marked, not hidden: the queue still shows it, so the acceptance stays
+    // reviewable — including the fact that it will lapse.
+    assert_eq!(rows.len(), 2, "{after}");
+    let waived = rows
+        .iter()
+        .find(|r| !r["waiver"].is_null())
+        .expect("one finding should carry its waiver");
+    assert_ne!(
+        waived["id"].as_str().expect("id"),
+        original_id,
+        "row regenerated"
+    );
+    assert_eq!(
+        waived["waiver"]["reason"], "accepted until the migration lands",
+        "{after}"
+    );
+    assert_eq!(waived["waiver"]["expired"], false, "{after}");
+}
+
+/// A waiver has to say why, and has to expire. Both are governance rules, and
+/// both are refused at the API rather than silently accepted.
+#[tokio::test]
+async fn a_waiver_needs_a_reason_and_a_future_expiry() {
+    let (app, _database, connection_string) = test_app().await;
+    let store = graph(&connection_string).await;
+    seed_shape(&store).await;
+    seed_offender(&store).await;
+    run_validation(&app).await;
+    let queue = report(&app, "").await;
+    let row = &queue["data"][0];
+
+    let (blank, _) = waive(&app, row, "   ").await;
+    assert_eq!(
+        blank,
+        StatusCode::BAD_REQUEST,
+        "a blank reason was accepted"
+    );
+
+    let past = serde_json::json!({
+        "shape": row["shape"],
+        "focusNode": row["focusNode"],
+        "path": row["path"],
+        "constraint": row["constraint"],
+        "reason": "accepted",
+        "expiresAt": (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/validation/waivers")
+                .header("content-type", "application/json")
+                .body(Body::from(past.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("handled");
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a past expiry accepts nothing and was accepted"
+    );
+}
+
+/// One live waiver per finding, and revoking puts it back in play.
+#[tokio::test]
+async fn a_finding_cannot_be_waived_twice_and_a_waiver_can_be_withdrawn() {
+    let (app, _database, connection_string) = test_app().await;
+    let store = graph(&connection_string).await;
+    seed_shape(&store).await;
+    seed_offender(&store).await;
+    run_validation(&app).await;
+    let queue = report(&app, "").await;
+    let row = &queue["data"][0];
+
+    let (first, waiver) = waive(&app, row, "the live reason").await;
+    assert_eq!(first, StatusCode::CREATED);
+    let (second, problem) = waive(&app, row, "a competing reason").await;
+    assert_eq!(
+        second,
+        StatusCode::CONFLICT,
+        "a second waiver would hide which reason is live: {problem}"
+    );
+
+    let revoked = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/validation/waivers/{}",
+                    waiver["id"].as_str().expect("id")
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("handled");
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+
+    let after = report(&app, "").await;
+    assert!(
+        after["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .all(|r| r["waiver"].is_null()),
+        "the waiver outlived its revocation: {after}"
+    );
+}

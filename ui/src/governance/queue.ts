@@ -18,6 +18,19 @@ export interface Suggestion {
   readonly to?: string;
 }
 
+/** An acceptance somebody recorded against a finding. */
+export interface Waiver {
+  readonly id: string;
+  readonly reason: string;
+  readonly waivedBy: string;
+  readonly waivedAt: string;
+  readonly expiresAt: string;
+  /** The acceptance has run out. **Reported, not filtered**: a finding whose
+   *  waiver lapsed and one nobody ever accepted look identical otherwise, and
+   *  only the first is somebody's to answer for. */
+  readonly expired: boolean;
+}
+
 export interface Finding {
   readonly id: string;
   readonly shape: string;
@@ -28,10 +41,22 @@ export interface Finding {
   readonly message: string;
   readonly actual: string | null;
   readonly suggestion: Suggestion | null;
+  /** Live or expired. `null` when nobody has accepted this. */
+  readonly waiver?: Waiver | null;
 }
 
 /** Worst first. A queue is worked from the top, so this is the order. */
 export const SEVERITY_ORDER: readonly Severity[] = ["violation", "warning", "info"];
+
+/** Is this finding accepted *right now*?
+ *
+ *  An expired waiver does not count. The record stays visible so a reader can
+ *  see the acceptance lapsed rather than being left to wonder where it went,
+ *  but a lapsed acceptance accepts nothing.
+ */
+export function isWaived(finding: Finding): boolean {
+  return finding.waiver != null && !finding.waiver.expired;
+}
 
 function rank(severity: Severity): number {
   const index = SEVERITY_ORDER.indexOf(severity);
@@ -45,6 +70,10 @@ export interface AssetGroup {
   readonly findings: readonly Finding[];
   /** The loudest severity in the group — what the group's badge shows. */
   readonly severity: Severity;
+  /** Every finding here has a live acceptance. The group is still shown —
+   *  hiding it makes the acceptance invisible, and with it the fact that it is
+   *  about to lapse — but it is not what a steward works next. */
+  readonly fullyWaived: boolean;
 }
 
 /** One row per asset, not one per finding.
@@ -73,9 +102,22 @@ export function groupByAsset(findings: readonly Finding[]): AssetGroup[] {
       );
       // Which makes the group's own severity the first one — computing it a
       // second way with a fold was a second chance to disagree with the sort.
-      return { focusNode, findings, severity: findings[0]!.severity };
+      return {
+        focusNode,
+        findings,
+        severity: findings[0]!.severity,
+        fullyWaived: findings.every(isWaived),
+      };
     })
-    .sort((a, b) => rank(a.severity) - rank(b.severity) || a.focusNode.localeCompare(b.focusNode));
+    // **Accepted work sorts last, and is still shown.** A steward works the
+    // unaccepted findings; removing the accepted ones would make the
+    // acceptance — and its approaching expiry — invisible.
+    .sort(
+      (a, b) =>
+        Number(a.fullyWaived) - Number(b.fullyWaived) ||
+        rank(a.severity) - rank(b.severity) ||
+        a.focusNode.localeCompare(b.focusNode),
+    );
 }
 
 /** What a suggestion tells somebody to do, in a sentence.
