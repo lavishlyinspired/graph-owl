@@ -210,7 +210,9 @@ const fn relation_strength(relation: LinkRelation) -> f64 {
         LinkRelation::About => 1.0,
         LinkRelation::Affects => 0.6,
         LinkRelation::Evidence => 0.5,
-        LinkRelation::Follows => 0.4,
+        // Both point at another *memory* rather than an asset, so neither is
+        // usually competing to answer a question about a table.
+        LinkRelation::Follows | LinkRelation::Contradicts => 0.4,
         LinkRelation::Mentions => 0.2,
     }
 }

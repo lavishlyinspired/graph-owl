@@ -84,6 +84,9 @@ pub enum LinkRelation {
     Evidence,
     /// Another memory this one builds on.
     Follows,
+    /// This memory disagrees with another. **Declared by a person**, which is
+    /// why it is a link and not an inference — see `contradiction`.
+    Contradicts,
     /// Named in passing. **Deliberately weaker than `About`** and not an
     /// anchor: a memory that mentions a table is not a memory about it, and
     /// letting it anchor would make every incident report the primary answer

@@ -1,3 +1,4 @@
+pub mod contradiction;
 pub mod envelope;
 pub mod flake;
 pub mod fqn;

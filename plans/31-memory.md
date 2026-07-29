@@ -1,9 +1,20 @@
 # Plan: Organizational Memory (Epic 31) ★
 
 **Branch**: feat/memory
-**Status**: **In progress** — the pure core of Slices A, C and D shipped 30 Jul 2026
-(`graph-owl-core::memory`, `graph-owl-core::recall`). Persistence, the HTTP
-surface, Slice B's supersede endpoint and Slice E's contradictions are open.
+**Status**: **In progress** — the pure core of Slices A, C, D and E shipped
+30 Jul 2026 (`graph-owl-core::memory`, `::recall`, `::contradiction`).
+Persistence, the HTTP surface, Slice B's supersede endpoint and Slice E's
+confirm/dismiss endpoints are open.
+
+**Slice E resolved "overlapping `as_of`" without a magic number.** The criterion
+reads "two `Decision` memories about the same asset with overlapping `as_of`",
+but `as_of` is an instant, so "overlapping" needs an interpretation — and the
+obvious one ("within N days") would be a number with no derivation available,
+which `00i` rule 4 forbids. Supersession says it exactly and needs no number: a
+superseded decision is **history**, not a competing claim, and a decision that
+supersedes another is a **correction**, which is the opposite of a contradiction.
+So two decisions overlap precisely when both are current and neither corrects the
+other.
 **Depends on**: Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it)
 **Benefits from**: Epic 21 (extraction), Epic 30 (incidents)
 **Crates**: `graph-owl-core` (Memory, MemoryLink, Authorship, **pure ranking function**) · `graph-owl-search` (embeddings for the semantic term) · `graph-owl-storage-postgres` · `graph-owl-api` · `graph-owl-mcp` (recall tool)
