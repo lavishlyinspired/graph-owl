@@ -63,7 +63,7 @@ marks for it yet, which is a different thing from zero of them done.
 | **38** | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | — | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
 | **39** | [`39-ui-foundation.md`](39-ui-foundation.md) | In progress | 21/23 | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
 | **40** | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | In progress | 10/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
-| **41** | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | In progress | 3/7 | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
+| **41** | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | In progress | 5/7 | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
 | **42** | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | Not started | 0/3 | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
 | **43** | [`43-framework-integrations.md`](43-framework-integrations.md) | Not started | 0/4 | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
 | **93** | [`93-console-overview.md`](93-console-overview.md) | Not started | — | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
@@ -397,8 +397,8 @@ marks for it yet, which is a different thing from zero of them done.
 
 - [x] Violations queue
 - [x] Both engines triggerable from the console
-- [ ] SPARQL editor with plan display
-- [ ] Results as table ⇄ graph
+- [x] SPARQL editor with plan display
+- [x] Results as table ⇄ graph
 - [ ] Violations as an assignable **workflow** with waivers — the queue displays; assignment a
 - [x] The derivation chain rendered beside a derived fact
 - [ ] Admin: policies with dry-run, connectors, jobs

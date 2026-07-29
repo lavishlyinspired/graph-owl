@@ -57,6 +57,7 @@ import {
   type GraphEdge,
   type Overview,
   type SearchFacets,
+  type SparqlResult,
   type ValidationRun,
   ApiError,
   api,
@@ -89,6 +90,14 @@ import {
   rulesUsed,
 } from "./governance/explanation";
 import {
+  type Solution,
+  columns as resultColumns,
+  display as displayTerm,
+  graphShape,
+  toGraph,
+  verdict,
+} from "./workbench/results";
+import {
   type Picture as CyPicture,
   layoutOptions,
   toElements,
@@ -100,7 +109,7 @@ import watermarkImg from "./assets/watermark1.png";
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
 
-type Section = "overview" | "explore" | "connectors" | "governance";
+type Section = "overview" | "explore" | "connectors" | "governance" | "workbench";
 
 const KIND_ICON: Record<AssetKind, React.ReactNode> = {
   service: <CloudServerOutlined />,
@@ -1806,6 +1815,201 @@ function RunHistory({ colors }: { colors: (typeof palette)["light"] }) {
   );
 }
 
+/** The SPARQL workbench — Epic 41.
+ *
+ *  Three things on one screen, and the second is the one that makes the others
+ *  usable: the query, **what the engine decided to read**, and the results.
+ *  An author who cannot see the plan cannot tell a query that is inherently
+ *  expensive from one that is a single triple pattern away from being cheap.
+ */
+function WorkbenchPage({ colors }: { colors: (typeof palette)["light"] }) {
+  const [query, setQuery] = useState(
+    "SELECT ?s ?p ?o WHERE { ?s ?p ?o }\nLIMIT 50",
+  );
+  const [result, setResult] = useState<SparqlResult | null>(null);
+  const [running, setRunning] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [asGraph, setAsGraph] = useState(false);
+
+  const run = async () => {
+    setRunning(true);
+    setFailed(null);
+    try {
+      setResult(await api.sparql(query));
+    } catch (error) {
+      // A parse error is the author's to fix and belongs on screen verbatim —
+      // "query failed" sends them guessing at which line.
+      setFailed(error instanceof ApiError ? error.problem.detail ?? error.problem.title : "the query did not run");
+      setResult(null);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const rows: Solution[] = useMemo(() => [...(result?.rows ?? [])], [result]);
+  const shape = useMemo(() => graphShape(rows), [rows]);
+  const notes = useMemo(
+    () =>
+      result
+        ? verdict(rows, {
+            truncated: result.truncated,
+            factsScanned: result.factsScanned,
+            plan: result.plan,
+          })
+        : null,
+    [result, rows],
+  );
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <div>
+        <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+          Workbench
+        </Title>
+        <Paragraph type="secondary" style={{ margin: "4px 0 0", fontSize: 13 }}>
+          SPARQL over the catalog graph, filtered to what you may see. The plan
+          shows what the engine read to answer you.
+        </Paragraph>
+      </div>
+
+      <Input.TextArea
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        autoSize={{ minRows: 5, maxRows: 16 }}
+        spellCheck={false}
+        style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 13 }}
+      />
+
+      <Space>
+        <Button type="primary" loading={running} onClick={() => void run()}>
+          Run
+        </Button>
+        {result && (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {rows.length} row{rows.length === 1 ? "" : "s"} · {result.factsScanned} facts read
+          </Text>
+        )}
+      </Space>
+
+      {failed && <Alert type="error" showIcon message="The query did not run" description={failed} />}
+
+      {notes?.warnings.map((warning) => (
+        <Alert key={warning} type="warning" showIcon message={warning} />
+      ))}
+
+      {result && (
+        <Card size="small" title="Plan">
+          {/* One line per scan. A single `? ? ?` is the whole graph, and that
+              is exactly the entry worth seeing. */}
+          {result.plan.map((scan, i) => (
+            <div key={`${scan}-${i}`}>
+              <Text code style={{ fontSize: 12 }}>
+                {scan}
+              </Text>
+            </div>
+          ))}
+          {result.plan.length === 0 && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              No scan was needed.
+            </Text>
+          )}
+        </Card>
+      )}
+
+      {result && rows.length > 0 && (
+        <>
+          <Space>
+            <Button size="small" type={asGraph ? "default" : "primary"} onClick={() => setAsGraph(false)}>
+              Table
+            </Button>
+            {/* Offered only when the results *are* triples. Drawing arbitrary
+                columns as nodes asserts a relationship the query never
+                returned, and a picture is believed more readily than a table. */}
+            <Tooltip
+              title={
+                shape ? undefined : "These results are not triples, so there is no honest graph to draw."
+              }
+            >
+              <Button
+                size="small"
+                disabled={!shape}
+                type={asGraph ? "primary" : "default"}
+                onClick={() => setAsGraph(true)}
+              >
+                Graph
+              </Button>
+            </Tooltip>
+          </Space>
+
+          {asGraph && shape ? (
+            <Card size="small" styles={{ body: { height: 420, padding: 0 } }}>
+              <ReactFlow
+                nodes={toGraph(rows, shape).nodes.map((node, i) => ({
+                  id: node.id,
+                  position: { x: (i % 5) * 190, y: Math.floor(i / 5) * 110 },
+                  data: { label: node.label },
+                  style: {
+                    background: colors.surface,
+                    border: `1px solid ${colors.border}`,
+                    borderRadius: 8,
+                    fontSize: 12,
+                    padding: 6,
+                  },
+                }))}
+                edges={toGraph(rows, shape).edges.map((edge, i) => ({
+                  id: `${edge.from}-${edge.to}-${i}`,
+                  source: edge.from,
+                  target: edge.to,
+                  label: edge.label,
+                }))}
+                fitView
+                proOptions={{ hideAttribution: true }}
+              >
+                <Background />
+                <Controls />
+              </ReactFlow>
+            </Card>
+          ) : (
+            <Table
+              size="small"
+              rowKey={(_, i) => String(i)}
+              dataSource={rows.map((row, i) => ({ ...row, __i: i }))}
+              pagination={{ pageSize: 25, size: "small" }}
+              columns={resultColumns(rows).map((name) => ({
+                title: name,
+                dataIndex: name,
+                key: name,
+                render: (value: string | undefined) =>
+                  value === undefined ? (
+                    // An unbound variable is not an empty string. `OPTIONAL`
+                    // produces exactly this, and rendering it blank makes
+                    // "no value" indistinguishable from "the empty value".
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      unbound
+                    </Text>
+                  ) : (
+                    <Tooltip title={value}>
+                      <Text style={{ fontSize: 12 }}>{displayTerm(value)}</Text>
+                    </Tooltip>
+                  ),
+              }))}
+            />
+          )}
+        </>
+      )}
+
+      {result && rows.length === 0 && !failed && (
+        <Card>
+          <Paragraph type="secondary" style={{ margin: 0 }}>
+            The query ran and matched nothing. That is an answer — it read{" "}
+            {result.factsScanned} facts to establish it.
+          </Paragraph>
+        </Card>
+      )}
+    </Space>
+  );
+}
+
 /** What the reasoner concluded about this asset, and why — Demo 4's second half.
  *
  *  A derived fact is **visibly marked**: `00b` decision 2 keeps conclusions in
@@ -2310,7 +2514,8 @@ function AppShell() {
       named === "connectors" ||
       named === "explore" ||
       named === "overview" ||
-      named === "governance"
+      named === "governance" ||
+      named === "workbench"
     ) {
       return named;
     }
@@ -2673,6 +2878,7 @@ function AppShell() {
                     icon: <SafetyCertificateOutlined />,
                     label: "Governance",
                   },
+                  { key: "workbench", icon: <ThunderboltOutlined />, label: "Workbench" },
                   { key: "connectors", icon: <PlusOutlined />, label: "Connectors" },
                 ]}
               />
@@ -2735,6 +2941,8 @@ function AppShell() {
                 />
               ) : section === "governance" ? (
                 <GovernancePage colors={colors} />
+              ) : section === "workbench" ? (
+                <WorkbenchPage colors={colors} />
               ) : section === "connectors" ? (
                 <ConnectorsPage onDone={refresh} colors={colors} />
               ) : results !== null ? (

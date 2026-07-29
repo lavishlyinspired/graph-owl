@@ -60,6 +60,20 @@ export interface Facet {
 export type { LineageGraph, LineageNode, LineageEdge } from "./graph/lineage";
 export type { Finding, Severity, Suggestion } from "./governance/queue";
 export type { Explanation } from "./governance/explanation";
+export type { Solution } from "./workbench/results";
+
+/** What a SPARQL query returned, and what it cost. */
+export interface SparqlResult {
+  readonly rows: readonly import("./workbench/results").Solution[];
+  readonly factsScanned: number;
+  /** The budget cut the answer short. **Always present**, never inferred from
+   *  the row count — a truncated answer that looks complete is the failure
+   *  this project refuses everywhere. */
+  readonly truncated: boolean;
+  readonly asOf: number | null;
+  /** What the engine decided to read, one entry per scan. */
+  readonly plan: readonly string[];
+}
 
 /** The stored violations queue, and the instant it reflects. */
 export interface ValidationReport {
@@ -317,6 +331,14 @@ export const api = {
   },
   runValidation: () => request<ValidationRun>("/validation/runs", { method: "POST" }),
   runReasoning: () => request<ReasoningReport>("/reasoning/runs", { method: "POST" }),
+  /** Run a SPARQL query. The budget is the server's, not ours — a client that
+   *  could raise its own limit does not have one. */
+  sparql: (query: string) =>
+    request<SparqlResult>("/sparql", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query }),
+    }),
   /** What the reasoner concluded about one subject, as the last run stored it.
    *  Not a fresh pass — an asset page opens with this. */
   derivedAbout: (subject: string) =>
