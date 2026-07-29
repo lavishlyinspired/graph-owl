@@ -8,6 +8,7 @@ import {
   stateMatches,
   takeHandoff,
 } from "./pkce";
+import { rememberSession, storedSession } from "./session";
 
 /** Build-time configuration, not literals.
  *
@@ -115,6 +116,7 @@ async function exchangeCode(code: string, codeVerifier: string): Promise<void> {
   const data = await response.json();
   _accessToken = data.access_token ?? null;
   _refreshToken = data.refresh_token ?? null;
+  rememberSession(window.sessionStorage, _refreshToken);
   notify();
 }
 
@@ -139,18 +141,26 @@ async function refreshAccessToken(): Promise<boolean> {
       if (!response.ok) {
         _accessToken = null;
         _refreshToken = null;
+        rememberSession(window.sessionStorage, null);
         notify();
         return false;
       }
 
       const data = await response.json();
       _accessToken = data.access_token ?? null;
-      if (data.refresh_token) _refreshToken = data.refresh_token;
+      // Auth0 rotates refresh tokens: the one just used is now spent, so a
+      // response carrying a new one must replace the stored copy or the next
+      // reload restores a token the provider has already revoked.
+      if (data.refresh_token) {
+        _refreshToken = data.refresh_token;
+        rememberSession(window.sessionStorage, data.refresh_token);
+      }
       notify();
       return true;
     } catch {
       _accessToken = null;
       _refreshToken = null;
+      rememberSession(window.sessionStorage, null);
       notify();
       return false;
     } finally {
@@ -169,13 +179,20 @@ async function refreshAccessToken(): Promise<boolean> {
  *  in" state rather than a flash of the sign-in screen the user just left. */
 const arrivedOnCallback = readCallback(window.location.search);
 
+/** Is there a session to restore?
+ *
+ *  Read once at module scope, before React renders, for the same reason
+ *  `arrivedOnCallback` is: the first paint has to be "restoring" rather than a
+ *  flash of the sign-in screen the user is about to be silently signed past. */
+const hasStoredSession = arrivedOnCallback.kind === "none" && storedSession(window.sessionStorage) !== null;
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const token = useSyncExternalStore(subscribeToTokenChanges, getTokenSnapshot);
   const [exchange, setExchange] = useState<{
     status: "idle" | "exchanging";
     error: string | null;
   }>(
-    arrivedOnCallback.kind === "code"
+    arrivedOnCallback.kind === "code" || hasStoredSession
       ? { status: "exchanging", error: null }
       : {
           status: "idle",
@@ -190,6 +207,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // one-shot resource: React renders a component twice under StrictMode, and
   // an authorization code is single-use, so the second attempt fails and the
   // first sign-in of every session looks broken.
+  // Restore a session the previous page load left behind, *before* concluding
+  // the user is signed out. Without this a reload sends somebody who is still
+  // signed in with the provider back through a login they already completed.
+  useEffect(() => {
+    if (!hasStoredSession) return;
+    const stored = storedSession(window.sessionStorage);
+    if (!stored) return;
+
+    _refreshToken = stored;
+    let live = true;
+    refreshAccessToken().then((restored) => {
+      if (!live) return;
+      // A refresh token the provider has revoked is not an error worth showing:
+      // the session simply ended, and the sign-in screen is the right answer.
+      setExchange({ status: "idle", error: restored ? null : null });
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
   useEffect(() => {
     if (arrivedOnCallback.kind === "none") return;
 
@@ -245,6 +283,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     logout: () => {
       _accessToken = null;
       _refreshToken = null;
+      rememberSession(window.sessionStorage, null);
       notify();
 
       const params = new URLSearchParams({

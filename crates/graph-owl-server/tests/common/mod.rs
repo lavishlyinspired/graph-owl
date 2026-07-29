@@ -136,6 +136,12 @@ async fn fresh_database() -> (TestDb, String) {
     let admin = sqlx::PgPool::connect(&shared.admin_url)
         .await
         .expect("connect to the shared server");
+
+    // **This call went missing once.** The sweep was defined here and never
+    // invoked, so 197 databases accumulated before anyone noticed — and the
+    // symptom was a slow suite, which points anywhere but at a dead function.
+    sweep_stale_databases(&admin).await;
+
     // Not parameterised because an identifier cannot be bound — and the name is
     // a UUID this function generated, never anything a test supplied.
     sqlx::query(&format!("CREATE DATABASE {name}"))

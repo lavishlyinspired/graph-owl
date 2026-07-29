@@ -431,7 +431,9 @@ actually holds could not be asserted at all.
 - [x] **Continuous validation with violation reports, not write-time rejection** *(Slice C)* — `POST /validation/runs` reads, validates and writes *nothing* back to the graph
 - [x] **Severity classification; repair suggestions never auto-applied** *(Slices A, E)* — a warning does not fail conformance; `MinCount` suggests `AssertMissing`, `MaxCount` suggests `RetractExcess`, a wrong type suggests `RetypeValue`, and everything else suggests nothing rather than restating the violation
 - [x] **`GET /validation/report`** *(Slice E)* — paged, filterable by severity, shape and focus node, and **carrying the `t` it reflects**, because a queue whose currency is unknown is unactionable
-- [~] **Pending in this epic**: `LiteralsOf` and `ImplicitClass` targets; `sh:not`/`sh:and`/`sh:or` stated *as triples* (the validator implements all three, the encoding needs a shape-reference resolution pass); `sh:in` as an RDF list rather than a repeated predicate; the five seed shapes as a migration
+- [x] **All six target kinds** — `Class`, `Subjects`, `SubjectsOf`, `ObjectsOf`, `LiteralsOf`, `ImplicitClass`. A literal target focuses the node that *holds* the value, because a literal has no identity to report a violation against
+- [x] **Seed shapes ship** — `TableShape`, `ColumnShape` and `ConfidenceShape`, written through `POST /validation/shapes/seed` as flakes rather than by a migration: a migration would hand-encode each object into the flake table's text encoding, which is computed in Rust and would then exist in two places. Explicit rather than automatic on startup, so a server cannot re-impose a rule somebody removed
+- [~] **Pending in this epic**: `sh:not`/`sh:and`/`sh:or` stated *as triples* — the validator implements all three, the encoding needs a shape-reference resolution pass; `sh:in` as an RDF list rather than a repeated predicate (a stated departure, in `00k`); `RelationshipShape` and `EnvelopeShape` from the seed table, which need Epic 2's relationship projection to have anything to target
 
 ### Epic 6 — Reasoning overlay
 - [x] **Eight OWL 2 RL axioms as built-in rules** *(Slice A)* — subClassOf, subPropertyOf, transitive, symmetric, inverseOf, domain, range, sameAs. Eight named functions, not a rule interpreter. Iterates to fixpoint with dedup, so depth-3 chains resolve and a symmetric property terminates instead of ping-ponging. A derived fact carries the **max premise `t`**, so it can never be visible at an instant before the facts implying it. Retracted flakes derive nothing
@@ -439,7 +441,9 @@ actually holds could not be asserted at all.
 - [x] **Derived facts in `graph:reasoning`, never persisted into the base** *(Slice E)* — a run replaces the overlay wholesale and leaves the default graph byte-identical. Withdrawal precedes assertion at a strictly earlier `t`, or current-state resolution drops the fact and the overlay empties from the second run onwards
 - [x] **`GET /reasoning/explain` derivation chains** *(Slice D)* — recursive to the assertions underneath, every route when a fact follows more than one, `404` when nothing supports it. Confidence is the **minimum** of the premises, not the product
 - [x] **Reasoning is skipped on historical queries** — `as_of` reads the default graph specifically. Inferring from premises that did not hold at `t` would be a wrong answer carrying right-looking provenance
-- [~] **Pending in this epic**: the standard seeded rule set and the differential test against Epics 11 and 23 *(Slice F)*; classification propagation along `feeds` as an opt-in rule; certification invalidation on an upstream Major bump
+- [x] **Classification propagates along `feeds`, opt-in per classification** *(Slice F)* — the opt-in is stated on the classification itself, as a fact, so "why did this spread" is answerable from the graph rather than from a config file. Epic 25 made non-propagation the default deliberately: `pii` follows the data and `deprecated` does not, and a blanket rule turns the estate one colour within a run. It rides the ordinary fixpoint, so a chain carries the whole way down and a diamond concludes once
+- [x] **Lineage is projected into the graph** — the prerequisite nobody had noticed: lineage lived only in `lineage_edges`, so nothing could reason over it and no SPARQL question could reach it. Asserted and withdrawn alongside the relational row, failure never propagated, per decision 6
+- [~] **Pending in this epic**: ownership and domain inheritance down `contains`, and the differential test asserting they agree with Epics 11 and 23 — **those epics are not built**, so there is nothing yet to differ from and a rule written now would be a second implementation of a first that does not exist; certification invalidation on an upstream Major bump (Epic 26)
 
 ### Epic 41 — Workbench & governance
 ### Epic 41 — Workbench & governance
@@ -448,7 +452,7 @@ actually holds could not be asserted at all.
 - [ ] SPARQL editor with plan display
 - [ ] Results as table ⇄ graph
 - [ ] Violations as an assignable **workflow** with waivers — the queue displays; assignment and waivers do not exist yet
-- [ ] The derivation chain rendered beside a derived fact — `explanation.ts` flattens it (100% mutation-tested) and the endpoint serves it; nothing renders it yet
+- [x] **The derivation chain rendered beside a derived fact** — a Reasoning tab on every asset lists what the reasoner concluded about it, each expandable to an indented chain down to the assertions underneath. Conclusions are marked as conclusions: `00b` decision 2 keeps them in their own graph so nobody mistakes one for something a person asserted, and the console honours that where it matters most
 - [ ] Admin: policies with dry-run, connectors, jobs
 
 ---

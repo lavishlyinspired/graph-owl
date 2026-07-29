@@ -113,13 +113,46 @@ impl Storage for PostgresStorage {
     }
 
     #[tracing::instrument(name = "storage.delete_lineage_edge", skip_all)]
-    async fn delete_lineage_edge(&self, id: Uuid) -> Result<bool, StorageError> {
-        sqlx::query("DELETE FROM lineage_edges WHERE id = $1")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map(|done| done.rows_affected() > 0)
-            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    async fn delete_lineage_edge(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::lineage::LineageEdge>, StorageError> {
+        // `RETURNING`, so the caller can withdraw the matching triple from the
+        // graph. A read followed by a delete races with a concurrent delete and
+        // projects a retraction for an edge somebody else already removed.
+        let row = sqlx::query(
+            "DELETE FROM lineage_edges WHERE id = $1
+             RETURNING id, from_asset_id, to_asset_id, relationship, source,
+                       query, description, created_at, created_by",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        row.map(|row| {
+            let relationship: String = row.get("relationship");
+            let source: String = row.get("source");
+            Ok(graph_owl_core::lineage::LineageEdge {
+                id: row.get("id"),
+                from_asset_id: row.get("from_asset_id"),
+                to_asset_id: row.get("to_asset_id"),
+                relationship: graph_owl_core::relationship_type::RelationshipType::parse(
+                    &relationship,
+                )
+                .map_err(|e| StorageError::Unexpected(format!("unknown relationship {e:?}")))?,
+                details: graph_owl_core::lineage::LineageDetails {
+                    source: graph_owl_core::lineage::LineageSource::parse(&source).map_err(
+                        |e| StorageError::Unexpected(format!("unknown lineage source {e}")),
+                    )?,
+                    query: row.get("query"),
+                    description: row.get("description"),
+                },
+                created_at: row.get("created_at"),
+                created_by: row.get("created_by"),
+            })
+        })
+        .transpose()
     }
 
     #[tracing::instrument(name = "storage.lineage_edges_touching", skip_all)]

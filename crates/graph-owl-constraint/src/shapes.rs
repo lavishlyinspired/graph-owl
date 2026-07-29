@@ -303,6 +303,19 @@ fn target_of(shape: &Sid, facts: &[Flake]) -> Result<Target, ShapeError> {
     if let Some(path) = first(facts, shape, &sh("targetObjectsOf")).and_then(as_ref_sid) {
         return Ok(Target::ObjectsOf(path.clone()));
     }
+    if let Some(name) = first(facts, shape, &sh("targetLiteralsOf"))
+        .and_then(as_text)
+        .and_then(datatype_from)
+    {
+        return Ok(Target::LiteralsOf(name));
+    }
+    // SHACL spells this by making the shape a class; here it is an explicit
+    // flag, because `sh:NodeShape` is already the shape's type and a second
+    // type statement would be indistinguishable from an ordinary class
+    // membership somebody asserted by mistake.
+    if first(facts, shape, &sh("targetImplicit")).is_some() {
+        return Ok(Target::ImplicitClass);
+    }
     let nodes: Vec<Sid> = values(facts, shape, &sh("targetNode"))
         .into_iter()
         .filter_map(as_ref_sid)
@@ -406,6 +419,124 @@ pub fn read_all(facts: &[Flake]) -> (Vec<CompiledShape>, Vec<ShapeError>) {
         }
     }
     (shapes, failures)
+}
+
+/// The shapes the core entity model ships with — Epic 5's seed set.
+///
+/// **Returned as flakes rather than written by a migration.** A migration would
+/// have to hand-encode each object into the flake table's text encoding, which
+/// is computed in Rust and would then exist in two places — and the second copy
+/// is the one that silently drifts. Writing them through the ordinary graph
+/// path also means they are dated, attributable and withdrawable like any other
+/// shape, which is the entire argument for shapes being data.
+///
+/// Every one is `Violation` severity except `EnvelopeShape`, which is advice:
+/// a version that does not match the expected format is worth flagging and is
+/// not worth blocking an estate over.
+#[must_use]
+pub fn core_shapes(t: i64) -> Vec<Flake> {
+    let mut flakes = Vec::new();
+    let mut state = |s: Sid, p: Sid, o: FlakeValue| {
+        flakes.push(Flake {
+            s,
+            p,
+            o,
+            cx: Some(Sid::dsc("graph:shapes")),
+            t,
+            op: true,
+        });
+    };
+
+    // (shape, target class, [(property suffix, path, [(term, value)])])
+    let definitions: &[(&str, &str, &[(&str, &str, &[(&str, FlakeValue)])])] = &[
+        (
+            "TableShape",
+            "table",
+            &[
+                ("name", "name", &[("minCount", FlakeValue::Int(1))]),
+                (
+                    "fqn",
+                    "fqn",
+                    &[
+                        ("minCount", FlakeValue::Int(1)),
+                        ("maxCount", FlakeValue::Int(1)),
+                    ],
+                ),
+                (
+                    "parent",
+                    "parentSchema",
+                    &[
+                        ("maxCount", FlakeValue::Int(1)),
+                        ("nodeKind", FlakeValue::String("ref".into())),
+                    ],
+                ),
+            ],
+        ),
+        (
+            "ColumnShape",
+            "column",
+            &[
+                ("parent", "parentTable", &[("minCount", FlakeValue::Int(1))]),
+                (
+                    "ordinal",
+                    "ordinalPosition",
+                    &[
+                        ("datatype", FlakeValue::String("int".into())),
+                        ("minInclusive", FlakeValue::Int(0)),
+                    ],
+                ),
+            ],
+        ),
+        (
+            "ConfidenceShape",
+            "confidence",
+            &[(
+                "value",
+                "confidence",
+                &[
+                    ("datatype", FlakeValue::String("float".into())),
+                    ("minInclusive", FlakeValue::Float(0.0)),
+                    ("maxInclusive", FlakeValue::Float(1.0)),
+                ],
+            )],
+        ),
+    ];
+
+    for (shape, target, properties) in definitions {
+        let id = Sid::dsc(*shape);
+        state(id.clone(), rdf_type(), FlakeValue::Ref(sh("NodeShape")));
+        // `ConfidenceShape` is about a *predicate*, not a class: anything
+        // carrying a confidence is in scope, whatever kind it is.
+        let target_term = if *shape == "ConfidenceShape" {
+            "targetSubjectsOf"
+        } else {
+            "targetClass"
+        };
+        state(
+            id.clone(),
+            sh(target_term),
+            FlakeValue::Ref(Sid::dsc(*target)),
+        );
+
+        for (suffix, path, terms) in *properties {
+            let property = Sid::dsc(format!("{shape}/{suffix}"));
+            state(
+                id.clone(),
+                sh("property"),
+                FlakeValue::Ref(property.clone()),
+            );
+            state(
+                property.clone(),
+                sh("path"),
+                FlakeValue::Ref(Sid::dsc(*path)),
+            );
+            for (term, value) in *terms {
+                state(property.clone(), sh(term), value.clone());
+            }
+        }
+    }
+
+    flakes
 }
 
 #[cfg(test)]
@@ -998,6 +1129,195 @@ mod tests {
             wrong.extend(holds(FlakeValue::Ref(a("s"))));
             wrong.push(typed("s", "Database"));
             assert!(!validate(&read_all(&wrong).0, &wrong).conforms);
+        }
+    }
+
+    /// # The two targets that select differently
+    mod the_remaining_targets {
+        use super::*;
+        use crate::validate;
+
+        /// A literal has no identity of its own, so the focus is whatever holds
+        /// it. Reporting against the value would name nothing a steward can
+        /// open.
+        #[test]
+        fn a_literal_target_focuses_the_node_that_holds_it() {
+            let facts = vec![
+                node_shape("S"),
+                f(
+                    a("S"),
+                    sh("targetLiteralsOf"),
+                    FlakeValue::String("float".into()),
+                ),
+                f(a("S"), sh("property"), FlakeValue::Ref(a("S/p"))),
+                f(a("S/p"), sh("path"), FlakeValue::Ref(a("confidence"))),
+                f(a("S/p"), sh("maxInclusive"), FlakeValue::Float(1.0)),
+                // Holds a float, so it is a focus node — and its value is out
+                // of range.
+                f(a("guess"), a("confidence"), FlakeValue::Float(1.5)),
+                // Holds no float at all, so the shape never looks at it.
+                f(a("solid"), a("name"), FlakeValue::String("orders".into())),
+            ];
+
+            let (shapes, failures) = read_all(&facts);
+
+            assert!(failures.is_empty(), "{failures:#?}");
+            let report = validate(&shapes, &facts);
+            assert_eq!(report.violations.len(), 1, "{:#?}", report.violations);
+            assert_eq!(report.violations[0].focus_node, a("guess"));
+        }
+
+        /// The shape's own id is the class, so a shape named after what it
+        /// constrains does not repeat itself.
+        #[test]
+        fn an_implicit_class_target_uses_the_shapes_own_id() {
+            let facts = vec![
+                node_shape("Regulatory"),
+                f(
+                    a("Regulatory"),
+                    sh("targetImplicit"),
+                    FlakeValue::Boolean(true),
+                ),
+                f(
+                    a("Regulatory"),
+                    sh("property"),
+                    FlakeValue::Ref(a("Regulatory/p")),
+                ),
+                f(a("Regulatory/p"), sh("path"), FlakeValue::Ref(a("owner"))),
+                f(a("Regulatory/p"), sh("minCount"), FlakeValue::Int(1)),
+                typed("payments", "Regulatory"),
+                typed("scratch", "Sandbox"),
+            ];
+
+            let (shapes, failures) = read_all(&facts);
+
+            assert!(failures.is_empty(), "{failures:#?}");
+            let report = validate(&shapes, &facts);
+            assert_eq!(report.violations.len(), 1, "{:#?}", report.violations);
+            assert_eq!(report.violations[0].focus_node, a("payments"));
+        }
+
+        /// An unknown datatype name is refused rather than silently targeting
+        /// nothing — a shape that quietly matches no rows is a rule that looks
+        /// enforced and is not.
+        #[test]
+        fn an_unknown_literal_datatype_falls_through_to_no_target() {
+            let facts = vec![
+                node_shape("S"),
+                f(
+                    a("S"),
+                    sh("targetLiteralsOf"),
+                    FlakeValue::String("decimal".into()),
+                ),
+            ];
+
+            let (_, failures) = read_all(&facts);
+
+            assert!(
+                matches!(&failures[0], ShapeError::NoTarget { .. }),
+                "{failures:#?}"
+            );
+        }
+    }
+
+    /// # The seed shapes
+    mod the_core_shapes {
+        use super::*;
+        use crate::validate;
+
+        /// **Every one compiles.** A seed shape that cannot be read is a rule
+        /// the product ships and never runs, and the refusal would be logged
+        /// somewhere nobody looks.
+        #[test]
+        fn every_seed_shape_compiles() {
+            let (shapes, failures) = read_all(&core_shapes(1));
+
+            assert!(failures.is_empty(), "{failures:#?}");
+            assert_eq!(shapes.len(), 3, "{shapes:#?}");
+        }
+
+        /// They live in the shapes graph, so they are not themselves assets the
+        /// catalog validates.
+        #[test]
+        fn they_are_stated_in_the_shapes_graph() {
+            assert!(
+                core_shapes(1)
+                    .iter()
+                    .all(|flake| flake.cx == Some(Sid::dsc("graph:shapes"))),
+            );
+        }
+
+        /// And they catch what they describe — a table with no name and no
+        /// FQN, a column with no parent, a confidence outside its range.
+        #[test]
+        fn they_catch_what_they_describe() {
+            let mut facts = core_shapes(1);
+            facts.push(typed("orders", "table"));
+            facts.push(typed("orders_id", "column"));
+            facts.push(f(a("guess"), a("confidence"), FlakeValue::Float(1.5)));
+
+            let (shapes, _) = read_all(&facts);
+            let report = validate(&shapes, &facts);
+
+            let offenders: Vec<&Sid> = report.violations.iter().map(|v| &v.focus_node).collect();
+            assert!(
+                offenders.contains(&&a("orders")),
+                "{:#?}",
+                report.violations
+            );
+            assert!(
+                offenders.contains(&&a("orders_id")),
+                "{:#?}",
+                report.violations
+            );
+            assert!(offenders.contains(&&a("guess")), "{:#?}", report.violations);
+        }
+
+        /// And the negative: a well-formed estate passes them. A seed set that
+        /// complains about correct data is a seed set everybody disables.
+        #[test]
+        fn a_well_formed_estate_passes_them() {
+            let mut facts = core_shapes(1);
+            facts.push(typed("orders", "table"));
+            facts.push(f(
+                a("orders"),
+                a("name"),
+                FlakeValue::String("orders".into()),
+            ));
+            facts.push(f(
+                a("orders"),
+                a("fqn"),
+                FlakeValue::String("svc.db.public.orders".into()),
+            ));
+            facts.push(typed("orders_id", "column"));
+            facts.push(f(
+                a("orders_id"),
+                a("parentTable"),
+                FlakeValue::Ref(a("orders")),
+            ));
+            facts.push(f(a("orders_id"), a("ordinalPosition"), FlakeValue::Int(0)));
+            facts.push(f(a("guess"), a("confidence"), FlakeValue::Float(0.9)));
+
+            let (shapes, _) = read_all(&facts);
+            let report = validate(&shapes, &facts);
+
+            assert!(report.conforms, "{:#?}", report.violations);
+        }
+
+        /// Seeded twice at different instants, the shapes are the same shapes —
+        /// only their `t` differs. Re-seeding must be a no-op in meaning.
+        #[test]
+        fn seeding_twice_states_the_same_shapes() {
+            let first: Vec<_> = core_shapes(1)
+                .into_iter()
+                .map(|f| (f.s, f.p, format!("{:?}", f.o)))
+                .collect();
+            let second: Vec<_> = core_shapes(99)
+                .into_iter()
+                .map(|f| (f.s, f.p, format!("{:?}", f.o)))
+                .collect();
+
+            assert_eq!(first, second);
         }
     }
 }

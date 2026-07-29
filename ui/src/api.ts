@@ -317,6 +317,12 @@ export const api = {
   },
   runValidation: () => request<ValidationRun>("/validation/runs", { method: "POST" }),
   runReasoning: () => request<ReasoningReport>("/reasoning/runs", { method: "POST" }),
+  /** What the reasoner concluded about one subject, as the last run stored it.
+   *  Not a fresh pass — an asset page opens with this. */
+  derivedAbout: (subject: string) =>
+    request<{ s: string; p: string; o: string; t: number }[]>(
+      `/reasoning/derived?subject=${encodeURIComponent(subject)}`,
+    ),
   /** Why a fact holds, all the way down to the assertions under it. */
   explain: (s: string, p: string, o: string) =>
     request<Explanation>(

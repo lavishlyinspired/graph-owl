@@ -3,8 +3,7 @@
 # the console embedded. One command, one binary, one database.
 #
 #   ./scripts/demo.sh          light  — no auth, everything visible
-#   ./scripts/demo.sh --secure        — HS256 JWT, with the two-principal policy
-#   ./scripts/demo.sh          OIDC auto-detected from .env (no flag needed)
+#   ./scripts/demo.sh --secure        — JWT on, with the two-principal policy
 #   ./scripts/demo.sh --stop          — tear it all down
 set -euo pipefail
 
@@ -34,47 +33,6 @@ case "${1:-}" in
   "") ;;
   *) die "unknown option: $1 (expected --secure or --stop)" ;;
 esac
-
-# Auto-detect OIDC from .env (the server loads it the same way at startup).
-# When OIDC is active the demo auto-fetches a token via client_credentials
-# grant, falling back to $OIDC_TOKEN if set explicitly.
-OIDC_MODE=false
-OIDC_ACCESS_TOKEN=""
-OIDC_ISSUER_URL=""
-OIDC_AUDIENCE_URL=""
-if [ "${SECURE}" = false ] && [ -f "${ROOT}/.env" ]; then
-  _oidc=$(grep '^OIDC_ISSUER=' "${ROOT}/.env" 2>/dev/null | head -1 || true)
-  _aud=$(grep '^OIDC_AUDIENCE=' "${ROOT}/.env" 2>/dev/null | head -1 || true)
-  if [ -n "$_oidc" ]; then
-    OIDC_MODE=true
-    OIDC_ISSUER_URL="${_oidc#*=}"
-    OIDC_AUDIENCE_URL="${_aud#*=}"
-  fi
-fi
-# Environment beats .env
-if [ -n "${OIDC_ISSUER:-}" ]; then OIDC_MODE=true; OIDC_ISSUER_URL="${OIDC_ISSUER}"; fi
-if [ -n "${OIDC_AUDIENCE:-}" ]; then OIDC_AUDIENCE_URL="${OIDC_AUDIENCE}"; fi
-
-# Acquire a token for OIDC-authenticated requests
-if [ "${OIDC_MODE}" = true ]; then
-  OIDC_ACCESS_TOKEN="${OIDC_TOKEN:-}"
-  if [ -z "$OIDC_ACCESS_TOKEN" ]; then
-    _cid=$(grep '^OIDC_CLIENT_ID=' "${ROOT}/.env" 2>/dev/null | head -1 | sed 's/^OIDC_CLIENT_ID=//' || true)
-    _cs=$(grep '^OIDC_CLIENT_SECRET=' "${ROOT}/.env" 2>/dev/null | head -1 | sed 's/^OIDC_CLIENT_SECRET=//' || true)
-    [ -z "$_cid" ] && _cid="${OIDC_CLIENT_ID:-}"
-    [ -z "$_cs" ] && _cs="${OIDC_CLIENT_SECRET:-}"
-    if [ -n "$_cid" ] && [ -n "$_cs" ]; then
-      OIDC_ACCESS_TOKEN=$(curl -fsS -X POST "${OIDC_ISSUER_URL}oauth/token" \
-        -H 'content-type: application/json' \
-        -d "{\"client_id\":\"$_cid\",\"client_secret\":\"$_cs\",\"audience\":\"${OIDC_AUDIENCE_URL}\",\"grant_type\":\"client_credentials\"}" \
-        | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
-    fi
-  fi
-  if [ -z "$OIDC_ACCESS_TOKEN" ]; then
-    die "OIDC is configured but no token is available.
-  Either set OIDC_TOKEN, or add OIDC_CLIENT_ID and OIDC_CLIENT_SECRET to .env"
-  fi
-fi
 
 command -v docker >/dev/null || die "docker is required"
 docker info >/dev/null 2>&1 || die "docker is not running — start Docker Desktop"
@@ -114,13 +72,8 @@ say "Building the server"
 
 say "Starting graph-owl on :${APP_PORT}"
 lsof -ti:${APP_PORT} 2>/dev/null | xargs kill -9 2>/dev/null || true
-# When --secure is passed, suppress OIDC_ISSUER so dotenvy in .env
-# doesn't switch the server to OIDC mode (which would reject the HS256
-# self-signed tokens the script generates). When not --secure, OIDC mode
-# auto-detected from .env works.
 if [ "${SECURE}" = true ]; then
   DATABASE_URL="${APP_URL}" GRAPH_OWL_JWT_SECRET="${SECRET}" \
-    OIDC_ISSUER="" \
     nohup "${ROOT}/target/release/graph-owl-server" > /tmp/graphowl.log 2>&1 &
 else
   DATABASE_URL="${APP_URL}" \
@@ -147,11 +100,10 @@ PY
 }
 
 say "Cataloguing the estate"
+# macOS ships bash 3.2, where "${ARRAY[@]}" on an empty array is an unbound
+# variable under `set -u`. Two explicit calls rather than a clever expansion.
 BODY="{\"connectionString\":\"${PG_URL}\",\"serviceName\":\"hdfc-core\",\"includeSchemas\":[\"core_banking\",\"payments\",\"lending\",\"risk\",\"regulatory\"]}"
-if [ "${OIDC_MODE}" = true ]; then
-  RUN=$(curl -fsS -X POST "http://localhost:${APP_PORT}/connectors/postgres/runs" \
-    -H "authorization: Bearer ${OIDC_ACCESS_TOKEN}" -H 'content-type: application/json' -d "${BODY}")
-elif [ "${SECURE}" = true ]; then
+if [ "${SECURE}" = true ]; then
   RUN=$(curl -fsS -X POST "http://localhost:${APP_PORT}/connectors/postgres/runs" \
     -H "authorization: Bearer $(token root)" -H 'content-type: application/json' -d "${BODY}")
 else
@@ -160,11 +112,7 @@ else
 fi
 echo "${RUN}" | python3 -c "import sys,json;d=json.load(sys.stdin);print(f\"  {d['created']} assets, {d['failed']} failed\")"
 
-if [ "${OIDC_MODE}" = true ]; then
-  say "OIDC authentication active"
-  echo "  Token subject is automatically provisioned on first request"
-  echo "  Admin status from GRAPH_OWL_ADMIN_SUBJECTS in .env"
-elif [ "${SECURE}" = true ]; then
+if [ "${SECURE}" = true ]; then
   say "Configuring two principals"
   P() { docker exec ${CONTAINER} psql -U postgres -d graphowl -qtAc "$1" >/dev/null; }
   P "UPDATE users SET is_admin = TRUE WHERE id = 'root'"

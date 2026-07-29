@@ -379,3 +379,81 @@ async fn shapes_are_not_themselves_validated() {
         "the property shapes in the shapes graph were validated as data: {run}"
     );
 }
+
+/// **The seed shapes ship and they run.** A rule the product includes and never
+/// executes is worse than none: it reads as governance that is in place.
+#[tokio::test]
+async fn the_seeded_shapes_run_against_a_real_estate() {
+    let (app, _database, connection_string) = test_app().await;
+    let store = graph(&connection_string).await;
+
+    let seeded = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/validation/shapes/seed")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    assert_eq!(seeded.status(), StatusCode::OK);
+    assert!(
+        json_body(seeded).await["flakes"].as_u64().expect("flakes") > 0,
+        "the seed wrote nothing"
+    );
+
+    // A column with no parent table and an out-of-range confidence: two
+    // different seed shapes, so a pass that only ran one would still look busy.
+    let t = store.next_time().await.expect("a transaction time");
+    store
+        .assert_flakes(&[
+            Flake::assert(a("orphan"), rdf_type(), FlakeValue::Ref(a("column")), t),
+            Flake::assert(a("guess"), a("confidence"), FlakeValue::Float(1.5), t),
+        ])
+        .await
+        .expect("seed the estate");
+
+    let run = run_validation(&app).await;
+
+    assert_eq!(
+        run["refusedShapes"], 0,
+        "a shipped shape did not compile: {run}"
+    );
+    assert_eq!(run["conforms"], false, "{run}");
+
+    let queue = report(&app, "").await;
+    let offenders: Vec<&str> = queue["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .map(|row| row["focusNode"].as_str().expect("focusNode"))
+        .collect();
+    assert!(offenders.contains(&"1:orphan"), "{queue}");
+    assert!(offenders.contains(&"1:guess"), "{queue}");
+}
+
+/// Seeding twice is a no-op in meaning. A restart that re-imposed rules would
+/// make removing one impossible.
+#[tokio::test]
+async fn seeding_twice_does_not_double_the_shapes() {
+    let (app, _database, _) = test_app().await;
+    let seed = || {
+        app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/validation/shapes/seed")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+    };
+
+    seed().await.expect("first");
+    seed().await.expect("second");
+
+    let run = run_validation(&app).await;
+
+    assert_eq!(run["shapes"], 3, "the seed set doubled: {run}");
+    assert_eq!(run["refusedShapes"], 0, "{run}");
+}

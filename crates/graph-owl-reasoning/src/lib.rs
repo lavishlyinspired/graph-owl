@@ -42,13 +42,18 @@ pub enum RuleName {
     Domain,
     Range,
     SameAs,
+    /// Not an OWL axiom — a **catalog** rule, seeded per
+    /// `06-engine-reasoning.md`'s standard rule set. Named in the same enum
+    /// because a reader of a derivation should not have to know which family a
+    /// rule came from to understand why a fact holds.
+    ClassificationFlows,
 }
 
 impl RuleName {
     /// The eight, in the order they run. Order does not change the fixpoint —
     /// that is the point of iterating — but a fixed order makes a run
     /// reproducible, which is what makes a derivation reviewable.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::SubClassOf,
         Self::SubPropertyOf,
         Self::Transitive,
@@ -57,6 +62,7 @@ impl RuleName {
         Self::Domain,
         Self::Range,
         Self::SameAs,
+        Self::ClassificationFlows,
     ];
 
     /// The rule's identity as a subject, for provenance written to the graph.
@@ -71,6 +77,7 @@ impl RuleName {
             Self::Domain => "rule:domain",
             Self::Range => "rule:range",
             Self::SameAs => "rule:sameAs",
+            Self::ClassificationFlows => "rule:classificationFlows",
         })
     }
 }
@@ -260,6 +267,11 @@ fn is_axiom(f: &Flake) -> bool {
         // reaches arbitrarily far back into old data.
         (namespace::OWL, "sameAs"),
     ];
+    // The same argument for the catalog rule's opt-in: declaring that `pii`
+    // propagates makes every lineage edge in the estate suddenly relevant.
+    if f.p == Sid::dsc("propagatesAlong") {
+        return true;
+    }
     if schema.iter().any(|(ns, id)| f.p == v(*ns, id)) {
         return true;
     }
@@ -491,6 +503,78 @@ fn rule_same_as(pass: &mut Pass) {
     }
 }
 
+/// Classification propagates downstream — Slice F's first standard rule.
+///
+/// `(a feeds b), (a classification C), (C propagatesAlong feeds) => (b classification C)`
+///
+/// **Opt-in per classification, and that is the whole design.** Epic 25 made
+/// non-propagation the default deliberately: a `pii` marking genuinely follows
+/// the data, and a `deprecated` marking genuinely does not — it is about the
+/// asset, not its contents. A blanket rule spreads every marking to everything
+/// downstream and the estate turns uniformly red within one run, which is the
+/// same as no markings at all.
+///
+/// The opt-in lives on the *classification*, stated as a fact, so "why did this
+/// spread" is answerable from the graph rather than from a config file. It rides
+/// the ordinary fixpoint, so a chain propagates the whole way down and a diamond
+/// yields one conclusion rather than two.
+/// One (opt-in, edge, classification) triple, checked and carried.
+///
+/// Extracted because the rule joins its three premises two ways — a new edge
+/// over an old classification, and a new classification over an old edge — and
+/// the *check* is the same both times. Writing it twice meant a mutation to one
+/// copy was masked by the other, which is a reviewer's problem as much as a
+/// test's: two copies of a condition are two chances for them to disagree.
+fn carry_classification(
+    pass: &mut Pass,
+    opt_in: &Flake,
+    edge: &Flake,
+    held: &Flake,
+    carrier: &Sid,
+) {
+    pass.joins += 1;
+    // The marking must be held by *this* edge's source and be the one that
+    // opted in. Either check alone lets an unrelated node's marking travel
+    // down a lineage it has nothing to do with.
+    if held.s != edge.s || obj(held) != Some(carrier) {
+        return;
+    }
+    let Some(downstream) = obj(edge) else { return };
+    pass.emit(
+        downstream.clone(),
+        Sid::dsc("classification"),
+        carrier.clone(),
+        RuleName::ClassificationFlows,
+        &[opt_in, edge, held],
+    );
+}
+
+fn rule_classification_flows(pass: &mut Pass) {
+    let (all, new) = (pass.all, pass.new);
+    let classification = Sid::dsc("classification");
+    let propagates = Sid::dsc("propagatesAlong");
+
+    for opt_in in with_predicate(all, &propagates) {
+        let Some(along) = obj(opt_in) else { continue };
+        let carrier = opt_in.s.clone();
+
+        // A new edge, against everything already marked.
+        for edge in with_predicate(new, along) {
+            for held in with_predicate(all, &classification) {
+                carry_classification(pass, opt_in, edge, held, &carrier);
+            }
+        }
+        // A new marking, against every edge already recorded. Without this a
+        // table classified *after* its lineage was written propagates nothing —
+        // which is the normal order of events.
+        for held in with_predicate(new, &classification) {
+            for edge in with_predicate(all, along) {
+                carry_classification(pass, opt_in, edge, held, &carrier);
+            }
+        }
+    }
+}
+
 fn run(rule: RuleName) -> fn(&mut Pass) {
     match rule {
         RuleName::SubClassOf => rule_sub_class_of,
@@ -501,6 +585,7 @@ fn run(rule: RuleName) -> fn(&mut Pass) {
         RuleName::Domain => rule_domain,
         RuleName::Range => rule_range,
         RuleName::SameAs => rule_same_as,
+        RuleName::ClassificationFlows => rule_classification_flows,
     }
 }
 
@@ -1597,7 +1682,7 @@ mod tests {
                 rules: vec![rule],
                 ..Budget::default()
             };
-            let cases: [(RuleName, Vec<Flake>); 8] = [
+            let cases: [(RuleName, Vec<Flake>); 9] = [
                 (
                     RuleName::SubClassOf,
                     vec![
@@ -1651,6 +1736,14 @@ mod tests {
                 (
                     RuleName::SameAs,
                     vec![f(a("x"), same_as(), a("y")), f(a("x"), a("knows"), a("z"))],
+                ),
+                (
+                    RuleName::ClassificationFlows,
+                    vec![
+                        f(a("pii"), a("propagatesAlong"), a("feeds")),
+                        f(a("raw"), a("classification"), a("pii")),
+                        f(a("raw"), a("feeds"), a("curated")),
+                    ],
                 ),
             ];
 
@@ -1770,6 +1863,352 @@ mod tests {
                     && d.fact.p == a("knows")
                     && d.fact.o == FlakeValue::Ref(a("q"))),
                 "the identity arrived mid-run and must still reach old data: {:#?}",
+                reasoning.facts
+            );
+        }
+    }
+
+    /// # Slice F — the standard rule set
+    ///
+    /// Catalog rules rather than OWL axioms. They ride the same fixpoint and
+    /// carry the same provenance, because a reader asking why a fact holds
+    /// should not have to know which family the rule came from.
+    mod classification_flows_downstream {
+        use super::*;
+
+        fn feeds() -> Sid {
+            a("feeds")
+        }
+        fn classification() -> Sid {
+            a("classification")
+        }
+        fn propagates_along() -> Sid {
+            a("propagatesAlong")
+        }
+
+        /// `pii` is declared to follow the data; `raw` feeds `curated`.
+        fn opted_in() -> Vec<Flake> {
+            vec![
+                f(a("pii"), propagates_along(), feeds()),
+                f(a("raw"), classification(), a("pii")),
+                f(a("raw"), feeds(), a("curated")),
+            ]
+        }
+
+        fn derived_classification(reasoning: &Reasoning, node: &Sid, class: &Sid) -> bool {
+            reasoning.facts.iter().any(|d| {
+                d.fact.s == *node
+                    && d.fact.p == classification()
+                    && d.fact.o == FlakeValue::Ref(class.clone())
+            })
+        }
+
+        #[test]
+        fn a_classification_that_opts_in_reaches_the_next_table_down() {
+            let reasoning = derive(&opted_in());
+
+            assert!(
+                derived_classification(&reasoning, &a("curated"), &a("pii")),
+                "{:#?}",
+                reasoning.facts
+            );
+        }
+
+        /// **The default, and the reason the opt-in exists.** Epic 25 made
+        /// non-propagation deliberate: `deprecated` is about the asset, not its
+        /// contents, and a blanket rule turns the whole estate one colour
+        /// within a run — which is the same as no markings at all.
+        #[test]
+        fn a_classification_that_does_not_opt_in_stays_put() {
+            let facts = vec![
+                f(a("deprecated"), classification(), a("unused")),
+                f(a("raw"), classification(), a("deprecated")),
+                f(a("raw"), feeds(), a("curated")),
+            ];
+
+            let reasoning = derive(&facts);
+
+            assert!(
+                !derived_classification(&reasoning, &a("curated"), &a("deprecated")),
+                "a marking nobody opted in propagated anyway: {:#?}",
+                reasoning.facts
+            );
+        }
+
+        /// It rides the fixpoint, so a chain carries the whole way down. A
+        /// single-step rule stops at the first hop, and the table three joins
+        /// downstream — the one nobody remembers holds regulated data — is
+        /// exactly the one this exists to reach.
+        #[test]
+        fn it_carries_the_whole_way_down_a_chain() {
+            let mut facts = opted_in();
+            facts.push(f(a("curated"), feeds(), a("mart")));
+            facts.push(f(a("mart"), feeds(), a("dashboard")));
+
+            let reasoning = derive(&facts);
+
+            for node in ["curated", "mart", "dashboard"] {
+                assert!(
+                    derived_classification(&reasoning, &a(node), &a("pii")),
+                    "{node} was not reached: {:#?}",
+                    reasoning.facts
+                );
+            }
+        }
+
+        /// Downstream only. Marking a consumer must not mark its source: the
+        /// direction is the entire claim, and a rule that ran both ways would
+        /// report that a raw table contains something its output invented.
+        #[test]
+        fn it_does_not_run_upstream() {
+            let facts = vec![
+                f(a("pii"), propagates_along(), feeds()),
+                f(a("curated"), classification(), a("pii")),
+                f(a("raw"), feeds(), a("curated")),
+            ];
+
+            let reasoning = derive(&facts);
+
+            assert!(
+                !derived_classification(&reasoning, &a("raw"), &a("pii")),
+                "a classification travelled against the flow: {:#?}",
+                reasoning.facts
+            );
+        }
+
+        /// **Order of events does not matter.** Marking a table *after* its
+        /// lineage was recorded is the normal case — the connector writes
+        /// lineage on Monday and somebody classifies on Tuesday — and a rule
+        /// that only fired on new edges would propagate nothing.
+        #[test]
+        fn marking_a_table_after_its_lineage_still_propagates() {
+            // The classification is *derived* here rather than asserted, so it
+            // arrives in a later iteration than the edge, exactly as it would
+            // if it had been written later.
+            let facts = vec![
+                f(a("pii"), propagates_along(), feeds()),
+                f(a("raw"), feeds(), a("curated")),
+                f(a("marks"), sub_property_of(), classification()),
+                f(a("raw"), a("marks"), a("pii")),
+            ];
+
+            let reasoning = derive(&facts);
+
+            assert!(
+                derived_classification(&reasoning, &a("curated"), &a("pii")),
+                "{:#?}",
+                reasoning.facts
+            );
+        }
+
+        /// A diamond marks the shared node once, with the routes that reached
+        /// it. Two rows would double-count in every consumer.
+        #[test]
+        fn a_diamond_marks_the_shared_node_once() {
+            let facts = vec![
+                f(a("pii"), propagates_along(), feeds()),
+                f(a("raw"), classification(), a("pii")),
+                f(a("raw"), feeds(), a("left")),
+                f(a("raw"), feeds(), a("right")),
+                f(a("left"), feeds(), a("mart")),
+                f(a("right"), feeds(), a("mart")),
+            ];
+
+            let reasoning = derive(&facts);
+
+            let marks: Vec<_> = reasoning
+                .facts
+                .iter()
+                .filter(|d| d.fact.s == a("mart") && d.fact.p == classification())
+                .collect();
+            assert_eq!(marks.len(), 1, "{marks:#?}");
+            assert!(
+                marks[0].derivations.len() >= 2,
+                "both routes should be recorded: {:#?}",
+                marks[0].derivations
+            );
+        }
+
+        /// The opt-in names the edge kind, so a classification that follows
+        /// `feeds` does not follow `derivedFrom` unless it says so.
+        #[test]
+        fn the_opt_in_names_the_edge_kind_it_follows() {
+            let mut facts = opted_in();
+            facts.push(f(a("raw"), a("derivedFrom"), a("other")));
+
+            let reasoning = derive(&facts);
+
+            assert!(derived_classification(&reasoning, &a("curated"), &a("pii")));
+            assert!(
+                !derived_classification(&reasoning, &a("other"), &a("pii")),
+                "it followed an edge kind it was not opted in for: {:#?}",
+                reasoning.facts
+            );
+        }
+
+        /// Disabling the rule removes its conclusions, and leaves the eight OWL
+        /// rules running — the property that makes the standard set a
+        /// configuration rather than a constant.
+        #[test]
+        fn the_rule_can_be_turned_off() {
+            let mut facts = opted_in();
+            facts.push(f(a("thing"), rdf_type(), a("C1")));
+            facts.push(f(a("C1"), sub_class_of(), a("C2")));
+
+            let budget = Budget {
+                rules: RuleName::ALL
+                    .iter()
+                    .copied()
+                    .filter(|r| *r != RuleName::ClassificationFlows)
+                    .collect(),
+                ..Budget::default()
+            };
+            let reasoning = derive_within(&facts, &budget);
+
+            assert!(!derived_classification(
+                &reasoning,
+                &a("curated"),
+                &a("pii")
+            ));
+            assert!(
+                reasoning
+                    .facts
+                    .iter()
+                    .any(|d| d.fact.o == FlakeValue::Ref(a("C2"))),
+                "the OWL rules must still run: {:#?}",
+                reasoning.facts
+            );
+        }
+
+        /// The derivation names the rule and all three premises, so "why is
+        /// this table marked" answers itself.
+        #[test]
+        fn the_conclusion_explains_which_edge_carried_it() {
+            let facts = opted_in();
+            let reasoning = derive(&facts);
+            let target = f(a("curated"), classification(), a("pii"));
+
+            let Explanation::Derived { chains } = explain(&reasoning, &facts, &target) else {
+                panic!("should be derived")
+            };
+
+            assert_eq!(chains[0].rule, RuleName::ClassificationFlows);
+            assert_eq!(chains[0].premises.len(), 3, "{:#?}", chains[0].premises);
+            assert!(
+                chains[0]
+                    .premises
+                    .iter()
+                    .all(|p| matches!(p, Explanation::Asserted(_))),
+                "{:#?}",
+                chains[0].premises
+            );
+        }
+
+        /// A retracted lineage edge carries nothing. A classification that
+        /// outlived the edge that justified it is a marking nobody can trace.
+        #[test]
+        fn a_withdrawn_edge_stops_carrying() {
+            let mut facts = opted_in();
+            facts[2].op = false;
+
+            let reasoning = derive(&facts);
+
+            assert!(!derived_classification(
+                &reasoning,
+                &a("curated"),
+                &a("pii")
+            ));
+        }
+    }
+
+    /// # The two halves of the propagation rule, isolated
+    ///
+    /// The rule joins three premises, so semi-naive evaluation needs it to fire
+    /// on a **new edge over an old classification** and on a **new
+    /// classification over an old edge**. On the first iteration both halves
+    /// see the same facts and either alone produces the answer — which means a
+    /// broken half is invisible until a later iteration reaches it.
+    mod propagation_fires_from_either_side {
+        use super::*;
+
+        fn classification() -> Sid {
+            a("classification")
+        }
+
+        /// A `feeds` edge that only exists once `subPropertyOf` has run. The
+        /// classification was asserted before the run, so by the iteration that
+        /// sees the edge it is old news — only the new-edge half can fire.
+        #[test]
+        fn a_newly_derived_edge_picks_up_a_classification_already_there() {
+            let facts = vec![
+                f(a("pii"), a("propagatesAlong"), a("feeds")),
+                f(a("pipes"), sub_property_of(), a("feeds")),
+                f(a("raw"), a("pipes"), a("curated")),
+                f(a("raw"), classification(), a("pii")),
+            ];
+
+            let reasoning = derive(&facts);
+
+            assert!(
+                reasoning.facts.iter().any(|d| d.fact.s == a("curated")
+                    && d.fact.p == classification()
+                    && d.fact.o == FlakeValue::Ref(a("pii"))),
+                "the new-edge half of the rule never fired: {:#?}",
+                reasoning.facts
+            );
+        }
+
+        /// **Somebody else's marking is not this table's.** The rule must
+        /// require the classification to be held by the edge's *source* **and**
+        /// to be the one that opted in — either check alone lets an unrelated
+        /// node's marking travel down a lineage it has nothing to do with.
+        #[test]
+        fn an_unrelated_nodes_classification_does_not_travel() {
+            let facts = vec![
+                f(a("pii"), a("propagatesAlong"), a("feeds")),
+                f(a("secret"), a("propagatesAlong"), a("feeds")),
+                f(a("raw"), classification(), a("pii")),
+                // Held by a node with no lineage at all.
+                f(a("unrelated"), classification(), a("secret")),
+                f(a("raw"), a("feeds"), a("curated")),
+            ];
+
+            let reasoning = derive(&facts);
+
+            assert!(
+                reasoning
+                    .facts
+                    .iter()
+                    .any(|d| d.fact.s == a("curated") && d.fact.o == FlakeValue::Ref(a("pii"))),
+                "the real marking should still travel: {:#?}",
+                reasoning.facts
+            );
+            assert!(
+                !reasoning
+                    .facts
+                    .iter()
+                    .any(|d| d.fact.s == a("curated") && d.fact.o == FlakeValue::Ref(a("secret"))),
+                "a marking from a node with no lineage travelled: {:#?}",
+                reasoning.facts
+            );
+        }
+
+        /// And the same for the other half: an unrelated node's *newly derived*
+        /// marking must not travel down somebody else's edge either.
+        #[test]
+        fn an_unrelated_nodes_derived_classification_does_not_travel() {
+            let facts = vec![
+                f(a("secret"), a("propagatesAlong"), a("feeds")),
+                f(a("marks"), sub_property_of(), classification()),
+                f(a("unrelated"), a("marks"), a("secret")),
+                f(a("raw"), a("feeds"), a("curated")),
+            ];
+
+            let reasoning = derive(&facts);
+
+            assert!(
+                !reasoning.facts.iter().any(|d| d.fact.s == a("curated")),
+                "{:#?}",
                 reasoning.facts
             );
         }

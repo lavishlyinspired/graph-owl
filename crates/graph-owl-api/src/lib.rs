@@ -1439,13 +1439,62 @@ impl Catalog {
             created_by: principal.id.clone(),
         };
         self.storage.create_lineage_edge(&edge).await?;
+        self.project_lineage(&edge, true).await;
         Ok(edge)
     }
 
     /// # Errors
     /// Returns an error if the underlying storage fails.
     pub async fn remove_lineage(&self, id: Uuid) -> Result<bool, CatalogError> {
-        Ok(self.storage.delete_lineage_edge(id).await?)
+        let removed = self.storage.delete_lineage_edge(id).await?;
+        if let Some(edge) = &removed {
+            self.project_lineage(edge, false).await;
+        }
+        Ok(removed.is_some())
+    }
+
+    /// Mirror one lineage edge into the graph as a triple.
+    ///
+    /// **Lineage has to be in the graph for anything to reason over it.**
+    /// Relational storage answers "what feeds this table"; a rule that
+    /// propagates a classification downstream needs `feeds` as a *fact*, and so
+    /// does any SPARQL query about lineage. Decision 6 still holds — relational
+    /// is the source of truth and this is a projection of it.
+    ///
+    /// **Never propagates a failure**, for the same reason asset projection
+    /// does not: a graph outage must not become a catalog outage.
+    async fn project_lineage(&self, edge: &graph_owl_core::lineage::LineageEdge, asserted: bool) {
+        let Some(graph) = &self.graph else {
+            return;
+        };
+
+        let outcome = async {
+            let t = graph.next_time().await?;
+            let flake = Flake {
+                s: graph_owl_core::flake::Sid::dsc(edge.from_asset_id.to_string()),
+                p: graph_owl_core::flake::Sid::dsc(edge.relationship.as_str()),
+                o: graph_owl_core::flake::FlakeValue::Ref(graph_owl_core::flake::Sid::dsc(
+                    edge.to_asset_id.to_string(),
+                )),
+                cx: None,
+                t,
+                op: asserted,
+            };
+            if asserted {
+                graph.assert_flakes(&[flake]).await
+            } else {
+                graph.retract_flakes(&[flake]).await
+            }
+        }
+        .await;
+
+        if let Err(error) = outcome {
+            eprintln!(
+                "graph projection failed for lineage edge {} ({error}). The edge \
+                 is intact; the graph view is stale until reconciliation.",
+                edge.id
+            );
+        }
     }
 
     /// The lineage graph around one asset, bounded in both directions.
@@ -1941,6 +1990,37 @@ impl Catalog {
         })
     }
 
+    /// The conclusions the last run drew about one subject.
+    ///
+    /// Read from the stored overlay rather than re-derived: this is what an
+    /// asset page shows on open, and a full forward-chaining pass per page view
+    /// would make the catalog slowest exactly where it is browsed most. The
+    /// explanation endpoint re-derives; this one reports what was written.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured or the read fails.
+    #[tracing::instrument(name = "catalog.derived_about", skip_all)]
+    pub async fn derived_about(
+        &self,
+        subject: &graph_owl_core::flake::Sid,
+    ) -> Result<Vec<Flake>, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                s: Some(subject.clone()),
+                cx: Some(Some(reasoning::reasoning_graph())),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
     /// Why a fact holds, recursively, down to the assertions under it.
     ///
     /// **Re-derived rather than read back.** Provenance is not stored: the
@@ -2059,6 +2139,36 @@ impl Catalog {
             refused_shapes: refused,
             computed_at_t,
         })
+    }
+
+    /// Write the core shapes into the shapes graph.
+    ///
+    /// Deliberate and idempotent rather than automatic on startup: a server
+    /// that silently seeds governance rules is a server that re-imposes a rule
+    /// somebody removed on purpose, every time it restarts. Re-seeding restates
+    /// the same facts, which the graph deduplicates by identity.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured or the write fails.
+    #[tracing::instrument(name = "catalog.seed_core_shapes", skip_all)]
+    pub async fn seed_core_shapes(&self) -> Result<usize, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let t = graph
+            .next_time()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        let flakes = graph_owl_constraint::shapes::core_shapes(t);
+        graph
+            .assert_flakes(&flakes)
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        Ok(flakes.len())
     }
 
     /// The stored queue, filtered and paged.
@@ -2611,11 +2721,16 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_lineage_edge(&self, id: Uuid) -> Result<bool, StorageError> {
+        /// Returns what was deleted, as the port specifies — the caller needs
+        /// the endpoints to withdraw the matching triple from the graph.
+        async fn delete_lineage_edge(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_core::lineage::LineageEdge>, StorageError> {
             let mut edges = self.lineage.lock().unwrap();
-            let before = edges.len();
+            let removed = edges.iter().find(|edge| edge.id == id).cloned();
             edges.retain(|edge| edge.id != id);
-            Ok(edges.len() < before)
+            Ok(removed)
         }
 
         async fn lineage_edges_touching(

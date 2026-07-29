@@ -185,7 +185,7 @@ fn values<'a>(facts: &'a [Flake], subject: &Sid, path: &Sid) -> Vec<&'a FlakeVal
 /// Sorted, because a report whose rows reshuffle between runs cannot be diffed,
 /// and "did last night's run make this worse" is the question a violations
 /// queue exists to answer.
-fn focus_nodes(target: &Target, facts: &[Flake]) -> Vec<Sid> {
+fn focus_nodes(target: &Target, facts: &[Flake], shape: &Sid) -> Vec<Sid> {
     let mut found: Vec<Sid> = match target {
         Target::Subjects(subjects) => subjects.clone(),
         Target::Class(class) => facts
@@ -208,6 +208,21 @@ fn focus_nodes(target: &Target, facts: &[Flake]) -> Vec<Sid> {
                 // reason nobody can fix.
                 _ => None,
             })
+            .collect(),
+        // The subject that *holds* the literal, not the literal itself: a
+        // literal has no identity to report a violation against, and "the
+        // string `draft` is wrong" names nothing a steward can open.
+        Target::LiteralsOf(dt) => facts
+            .iter()
+            .filter(|f| f.op && dt.matches(&f.o))
+            .map(|f| f.s.clone())
+            .collect(),
+        // The shape's own id is the class. Saves a shape named after what it
+        // constrains from repeating itself.
+        Target::ImplicitClass => facts
+            .iter()
+            .filter(|f| f.op && f.p == rdf_type() && f.o == FlakeValue::Ref(shape.clone()))
+            .map(|f| f.s.clone())
             .collect(),
     };
     found.sort_by_key(ToString::to_string);
@@ -430,7 +445,7 @@ pub fn validate(shapes: &[CompiledShape], facts: &[Flake]) -> ValidationReport {
     let mut violations = Vec::new();
 
     for compiled in shapes {
-        for subject in focus_nodes(&compiled.shape.target, facts) {
+        for subject in focus_nodes(&compiled.shape.target, facts, &compiled.shape.id) {
             for constraint in &compiled.shape.constraints {
                 for (token, path, actual, suggestion) in
                     evaluate(compiled, constraint, &subject, facts)
@@ -1458,6 +1473,44 @@ mod tests {
             );
 
             assert!(report.conforms, "{:#?}", report.violations);
+        }
+
+        /// A literal target reads live values only. A withdrawn value would
+        /// make its holder a focus node for a constraint about data the graph
+        /// no longer states — a violation nobody can fix, because there is
+        /// nothing there.
+        ///
+        /// The constraint is deliberately about a **different** path: a
+        /// per-value rule over the retracted value itself conforms vacuously,
+        /// so it cannot tell a node that was skipped from one that was checked
+        /// and had nothing to check.
+        #[test]
+        fn a_retracted_literal_contributes_no_focus_node() {
+            let shape = || {
+                compile(&Shape {
+                    id: a("S"),
+                    target: Target::LiteralsOf(DataType::Float),
+                    constraints: vec![Constraint::MinCount {
+                        path: a("owner"),
+                        n: 1,
+                    }],
+                    severity: Severity::Violation,
+                    message: None,
+                })
+                .expect("compiles")
+            };
+
+            let mut value = fact("guess", "confidence", FlakeValue::Float(0.5));
+            value.op = false;
+            assert!(
+                validate(&[shape()], &[value.clone()]).conforms,
+                "a withdrawn value selected its holder"
+            );
+
+            // And the positive, so the assertion above is about the retraction
+            // rather than about a target that selects nothing.
+            value.op = true;
+            assert!(!validate(&[shape()], &[value]).conforms);
         }
 
         /// The same for the subject side: a withdrawn statement does not make

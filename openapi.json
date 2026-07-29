@@ -1298,6 +1298,32 @@
         "summary": "Readiness"
       }
     },
+    "/reasoning/derived": {
+      "get": {
+        "operationId": "get_reasoning_derived",
+        "responses": {
+          "200": {
+            "description": "What the reasoner concluded about one subject"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "What the reasoner concluded about one subject"
+      }
+    },
     "/reasoning/explain": {
       "get": {
         "operationId": "get_reasoning_explain",
@@ -1822,6 +1848,32 @@
           }
         ],
         "summary": "Validate the estate against every shape and replace the queue"
+      }
+    },
+    "/validation/shapes/seed": {
+      "post": {
+        "operationId": "post_validation_shapes_seed",
+        "responses": {
+          "200": {
+            "description": "Write the shapes the core entity model ships with"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Write the shapes the core entity model ships with"
       }
     }
   },

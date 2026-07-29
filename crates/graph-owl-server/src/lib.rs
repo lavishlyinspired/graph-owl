@@ -79,7 +79,9 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/lineage/asset/{id}", get(lineage_graph))
         .route("/reasoning/runs", post(run_reasoning))
         .route("/reasoning/explain", get(explain_fact))
+        .route("/reasoning/derived", get(derived_about))
         .route("/validation/runs", post(run_validation))
+        .route("/validation/shapes/seed", post(seed_core_shapes))
         .route("/validation/report", get(validation_report))
         // Unauthenticated by design: an orchestrator's probe must not depend
         // on the identity provider being reachable.
@@ -1338,6 +1340,22 @@ async fn run_validation(
     Ok(Json(catalog.run_validation().await?))
 }
 
+/// Write the shapes the core entity model ships with — Epic 5.
+///
+/// Explicit rather than automatic on startup: a server that silently seeds
+/// governance rules re-imposes one somebody removed on purpose, on every
+/// restart. Admin-only, because a shape is a rule.
+async fn seed_core_shapes(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let written = catalog.seed_core_shapes().await?;
+    Ok(Json(json!({ "flakes": written })))
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReportQuery {
@@ -1415,6 +1433,28 @@ async fn run_reasoning(
         .run_reasoning(&graph_owl_reasoning::Budget::default())
         .await?;
     Ok(Json(report))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DerivedQuery {
+    subject: String,
+}
+
+/// What the reasoner concluded about one subject — Epic 6 Slice E.
+///
+/// The overlay as stored, not a fresh pass: an asset page opens with this, and
+/// re-deriving per page view would make the catalog slowest where it is browsed
+/// most.
+async fn derived_about(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Query(query): Query<DerivedQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let subject = parse_sid("subject", &query.subject)?;
+    let facts = catalog.derived_about(&subject).await?;
+    Ok(Json(json!(
+        facts.iter().map(flake_body).collect::<Vec<_>>()
+    )))
 }
 
 /// A triple, named the way flakes name one: `namespace:local` per position.

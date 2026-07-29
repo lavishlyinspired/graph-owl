@@ -129,6 +129,75 @@ One incident already occurred and was reverted during planning (a cache-tier tab
 
   Delete the container by hand when you want a genuinely fresh one: `docker rm -f graph-owl-tests`.
 
+  **Before diagnosing a slow suite, run `scripts/test-health.sh`.** Every
+  slowdown this project has had was environmental, and each cost an hour of
+  looking in the wrong place. Two so far, both invisible in the code:
+
+  1. **146 leaked containers** — the `static OnceCell` never drops, so
+     testcontainers never cleaned up. Same binary: 7.9s clean, 25.9s with the
+     leftovers. Fixed structurally by reuse (a named container cannot
+     accumulate).
+  2. **197 stale databases**, 30 July 2026 — `sweep_stale_databases` was
+     *defined* in `graph-owl-server`'s test harness and **never called**. The
+     patch that added it matched in two of the three `tests/common/mod.rs` files
+     and silently did nothing in the third, which is the crate with the most
+     integration tests. One binary: 4.0s with them, 2.2s without. The script now
+     flags a count over 60.
+
+  **And check whether you are timing a rebuild.** `cargo test --workspace` after
+  an edit includes compiling it. A 43s run of one test binary was 39s of build
+  and 4s of tests. Time `cargo build --workspace --tests` first, then time
+  `cargo test` separately, or the measurement says nothing.
+
+  **Where the integration suite's time actually goes, measured 30 July 2026.**
+  Instrumented `test_app()` rather than guessed: **249ms per test**, and at 272
+  integration tests that is ~68s of the ~85s of reported test execution. The
+  breakdown was almost entirely **connection establishment** — five TCP
+  connections per test at ~28–30ms each against Docker's mapped port on macOS:
+
+  | phase | cost |
+  |---|---|
+  | admin pool connect | 30ms |
+  | `PostgresStorage::connect` — pool **plus** a separate refinery client | 59ms |
+  | `PostgresTripleStore::connect` — same again | 58ms |
+  | `CREATE DATABASE` | ~35ms |
+
+  **Migrations are not the cost, despite appearances.** 16 migrations measured
+  at 330ms via `psql` — but that was 16 *process spawns*. Refinery in-process is
+  fast, and replacing migration-replay with `CREATE DATABASE ... TEMPLATE` moved
+  one binary from 8.29s to **8.45s**: nothing.
+
+  **Tried and reverted: template databases plus a shared pool.** Cloning a
+  migrated template lets the fixture skip `connect` entirely and share one pool
+  between both adapters, which took `test_app()` **249ms → 111ms → 47ms**. It
+  was reverted anyway, because it broke the suite twice in ways that pointed
+  away from the change:
+
+  - `pg_advisory_lock` is **session**-scoped and was run against a pool, so the
+    unlock landed on a different connection, the locked session returned to the
+    pool still holding it, and later clones blocked until acquire timed out —
+    surfacing as `PoolTimedOut` in an unrelated test.
+  - All three harnesses shared one template name and each built it with only
+    *its own* migrations, so whichever binary ran first decided the schema.
+  - `CREATE DATABASE` succeeding and the migration then failing leaves a
+    template that exists and is empty, and the existence check is all that
+    guards it — every clone from then on is unmigrated, permanently.
+  - After fixing all three, a connection still leaked one per test and the pool
+    exhausted at exactly its default of 10.
+
+  **The finding stands even though the change did not**: the lever is
+  connections per test, not migrations. A future attempt should start by giving
+  the two adapters a `from_pool` constructor so one pool serves both, add an
+  explicit `max_connections` to the admin pool, and treat the template as a
+  separate change with its own tests — not four fixture changes at once, which
+  is what made each failure point somewhere else.
+
+  **A config change to the shared container invalidates its reuse hash**, and
+  testcontainers then tries to create a second container with the same name —
+  which fails with a 409 conflict and reads like the container is broken. It is
+  not: `docker rm -f graph-owl-tests` once, and the next run rebuilds it. Adding
+  `--shm-size` caused exactly this.
+
   **The trap that made every earlier measurement wrong.** Holding the container in a `static OnceCell` means its `Drop` never runs, so testcontainers never cleaned up — and containers accumulated *one per binary per run*. **146 were found running at once.** Docker degrades badly under that load, and it had silently inflated every timing taken while it was true: the same binary measured 7.9s on a clean daemon and 25.9s with the leftovers present. Reuse fixes it structurally, because a named container cannot accumulate — there is only ever the one. If timings ever look inexplicable again, `docker ps -q | wc -l` is the first thing to check.
 
   **Rejected: raising `max_connections`.** Tried at 500 to head off pool exhaustion on the shared server; it made startup markedly slower (per-binary 7.9s → 32s) because Postgres allocates shared memory proportional to it. The pools are fine at the default — the exhaustion that prompted it was a symptom of the 146 stale containers, not of sharing.

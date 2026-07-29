@@ -270,7 +270,17 @@ pub trait Storage: Send + Sync {
         edge: &graph_owl_core::lineage::LineageEdge,
     ) -> Result<(), StorageError>;
 
-    async fn delete_lineage_edge(&self, id: Uuid) -> Result<bool, StorageError>;
+    /// Delete an edge and return what was deleted.
+    ///
+    /// The edge rather than a boolean, because the caller has to mirror the
+    /// removal into the graph and needs the endpoints to name the triple. One
+    /// `DELETE ... RETURNING` rather than a read followed by a delete: the
+    /// two-statement version races with a concurrent delete and projects a
+    /// retraction for an edge somebody else already removed.
+    async fn delete_lineage_edge(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::lineage::LineageEdge>, StorageError>;
 
     /// Every edge touching any of these assets, in one round trip.
     ///

@@ -89,6 +89,20 @@ pub enum Target {
     SubjectsOf(Sid),
     /// Every object of this predicate.
     ObjectsOf(Sid),
+    /// Every literal of this datatype, wherever it appears.
+    ///
+    /// The only target that selects *values* rather than nodes, which is why
+    /// its focus is the subject holding the literal: a literal has no identity
+    /// of its own to report a violation against, and "the string `draft` is
+    /// wrong" names nothing a steward can open.
+    LiteralsOf(DataType),
+    /// The shape is itself a class; its instances are the target.
+    ///
+    /// SHACL's implicit class targeting. Distinct from [`Target::Class`] only
+    /// in where the class name comes from — the shape's own id rather than a
+    /// separate statement — and worth having because a shape named after the
+    /// class it constrains should not have to repeat itself.
+    ImplicitClass,
 }
 
 /// One thing that must hold.

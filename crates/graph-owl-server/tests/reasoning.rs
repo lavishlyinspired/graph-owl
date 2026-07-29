@@ -317,3 +317,238 @@ async fn an_unparseable_identifier_is_rejected_rather_than_missing() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+/// `count` tables under a real hierarchy.
+///
+/// Through the API rather than straight into the store, so lineage goes through
+/// the write path that projects it — which is the thing under test.
+async fn tables(app: &axum::Router, count: usize) -> Vec<String> {
+    async fn create(app: &axum::Router, body: Value) -> Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/assets")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        json_body(response).await
+    }
+
+    let service = create(
+        app,
+        serde_json::json!({ "kind": "service", "name": "hdfc-core" }),
+    )
+    .await;
+    let database = create(
+        app,
+        serde_json::json!({ "kind": "database", "name": "retail", "parentId": service["id"] }),
+    )
+    .await;
+    let schema = create(
+        app,
+        serde_json::json!({ "kind": "schema", "name": "payments", "parentId": database["id"] }),
+    )
+    .await;
+
+    let mut ids = Vec::new();
+    for n in 0..count {
+        let table = create(
+            app,
+            serde_json::json!({
+                "kind": "table",
+                "name": format!("t{n}"),
+                "parentId": schema["id"],
+            }),
+        )
+        .await;
+        ids.push(table["id"].as_str().expect("id").to_string());
+    }
+    ids
+}
+
+/// **Demo 4's second claim, end to end.** Classify one table as PII and watch
+/// the classification reach everything downstream as a *derived* fact, with a
+/// chain that names the edge that carried it.
+///
+/// This is the test that proves lineage reaches the graph at all: before it,
+/// lineage lived only in a relational table and nothing could reason over it.
+#[tokio::test]
+async fn a_classification_propagates_along_projected_lineage() {
+    let (app, _database, connection_string) = test_app().await;
+    let store = graph(&connection_string).await;
+
+    // A chain of three, catalogued through the API so lineage goes through the
+    // real write path — projection included.
+    let ids = tables(&app, 3).await;
+
+    for pair in ids.windows(2) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/lineage")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"fromAssetId":"{}","toAssetId":"{}"}}"#,
+                        pair[0], pair[1]
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("handled");
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "lineage should assert"
+        );
+    }
+
+    // `pii` opts in to following `feeds`, and the head of the chain carries it.
+    let t = store.next_time().await.expect("a transaction time");
+    store
+        .assert_flakes(&[
+            Flake::assert(
+                dsc("pii"),
+                dsc("propagatesAlong"),
+                FlakeValue::Ref(dsc("feeds")),
+                t,
+            ),
+            Flake::assert(
+                dsc(&ids[0]),
+                dsc("classification"),
+                FlakeValue::Ref(dsc("pii")),
+                t,
+            ),
+        ])
+        .await
+        .expect("classify the source");
+
+    let report = run_reasoning(&app).await;
+    assert!(
+        report["derived"].as_u64().expect("derived") >= 2,
+        "two tables downstream: {report}"
+    );
+
+    // The far end of the chain is marked, and it is a *conclusion* — in the
+    // reasoning graph, not beside the facts somebody asserted.
+    let derived = overlay(&store).await;
+    assert!(
+        derived.iter().any(|f| f.s == dsc(&ids[2])
+            && f.p == dsc("classification")
+            && f.o == FlakeValue::Ref(dsc("pii"))),
+        "the classification did not reach the end of the chain: {derived:#?}"
+    );
+
+    // And it explains itself, naming the edge that carried it.
+    let (status, body) = explain(
+        &app,
+        &dsc(&ids[1]).to_string(),
+        &dsc("classification").to_string(),
+        &dsc("pii").to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "derived", "{body}");
+    assert_eq!(body["chains"][0]["rule"], "classificationFlows", "{body}");
+}
+
+/// And the negative that makes the opt-in mean something: a marking nobody
+/// declared propagating stays where it was put. Epic 25 made that the default
+/// deliberately — a blanket rule turns the estate one colour in a single run.
+#[tokio::test]
+async fn a_classification_without_an_opt_in_does_not_travel() {
+    let (app, _database, connection_string) = test_app().await;
+    let store = graph(&connection_string).await;
+
+    let t = store.next_time().await.expect("a transaction time");
+    store
+        .assert_flakes(&[
+            Flake::assert(dsc("raw"), dsc("feeds"), FlakeValue::Ref(dsc("curated")), t),
+            Flake::assert(
+                dsc("raw"),
+                dsc("classification"),
+                FlakeValue::Ref(dsc("deprecated")),
+                t,
+            ),
+        ])
+        .await
+        .expect("seed");
+
+    run_reasoning(&app).await;
+
+    let derived = overlay(&store).await;
+    assert!(
+        !derived.iter().any(|f| f.s == dsc("curated")),
+        "a marking nobody opted in travelled anyway: {derived:#?}"
+    );
+}
+
+/// **Removing a lineage edge withdraws it from the graph too.** A projection
+/// that only ever adds leaves the reasoner concluding from an edge the catalog
+/// no longer holds — a marking nobody can trace back to anything.
+#[tokio::test]
+async fn removing_a_lineage_edge_withdraws_its_triple() {
+    let (app, _database, connection_string) = test_app().await;
+    let store = graph(&connection_string).await;
+
+    let ids = tables(&app, 2).await;
+
+    let created = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/lineage")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"fromAssetId":"{}","toAssetId":"{}"}}"#,
+                    ids[0], ids[1]
+                )))
+                .expect("request"),
+        )
+        .await
+        .expect("handled");
+    let edge = json_body(created).await;
+
+    async fn feeds_in_graph(store: &graph_owl_engine_postgres::PostgresTripleStore) -> Vec<Flake> {
+        store
+            .query_pattern(&TriplePattern {
+                p: Some(dsc("feeds")),
+                cx: Some(None),
+                ..Default::default()
+            })
+            .await
+            .expect("feeds")
+    }
+
+    assert_eq!(
+        feeds_in_graph(&store).await.len(),
+        1,
+        "the edge should have been projected"
+    );
+
+    let removed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/lineage/{}", edge["id"].as_str().expect("id")))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("handled");
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+
+    assert!(
+        feeds_in_graph(&store).await.is_empty(),
+        "the triple outlived the edge it mirrored"
+    );
+}

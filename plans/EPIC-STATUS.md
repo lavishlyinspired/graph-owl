@@ -20,8 +20,8 @@ marks for it yet, which is a different thing from zero of them done.
 | **2** | [`02-entity-hierarchy.md`](02-entity-hierarchy.md) | In progress | 6/7 | Epic 1 (conventions, relationship taxonomy) |
 | **3** | [`03-versioning.md`](03-versioning.md) | In progress | 11/13 (+1 partial) | Epic 2 (four entity types to apply the envelope to) |
 | **4** | [`04-engine-triples.md`](04-engine-triples.md) | In progress | 8/11 (+1 partial) | Epic 3 (four entity types with an envelope to project) |
-| **5** | [`05-engine-constraints.md`](05-engine-constraints.md) | In progress | 6/7 (+1 partial) | Epic 4 (triples to validate) |
-| **6** | [`06-engine-reasoning.md`](06-engine-reasoning.md) | In progress | 5/6 (+1 partial) | Epic 4 (triples), Epic 5 (ontology types) |
+| **5** | [`05-engine-constraints.md`](05-engine-constraints.md) | In progress | 8/9 (+1 partial) | Epic 4 (triples to validate) |
+| **6** | [`06-engine-reasoning.md`](06-engine-reasoning.md) | In progress | 7/8 (+1 partial) | Epic 4 (triples), Epic 5 (ontology types) |
 | **7** | [`07-engine-query.md`](07-engine-query.md) | In progress | 8/9 | Epic 4 (triples), Epic 13 (authorization to compile into queries), **Epic 7a**… |
 | **7a** | [`07a-engine-traversal.md`](07a-engine-traversal.md) | **Shipped** | 5/5 | Epic 4 (triples, SPOT/POST/OPST indexes) |
 | **7b** | [`07b-engine-cypher.md`](07b-engine-cypher.md) | Not started | — | Epic 7 (SPARQL plan is the lowering target), Epic 7a (traversal), **Epic 7c (LP… |
@@ -63,7 +63,7 @@ marks for it yet, which is a different thing from zero of them done.
 | **38** | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | — | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
 | **39** | [`39-ui-foundation.md`](39-ui-foundation.md) | In progress | 19/23 | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
 | **40** | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | In progress | 10/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
-| **41** | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | In progress | 2/7 | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
+| **41** | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | In progress | 3/7 | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
 | **42** | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | Not started | 0/3 | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
 | **43** | [`43-framework-integrations.md`](43-framework-integrations.md) | Not started | 0/4 | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
 | **93** | [`93-console-overview.md`](93-console-overview.md) | Not started | — | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
@@ -144,6 +144,8 @@ marks for it yet, which is a different thing from zero of them done.
 - [x] Continuous validation with violation reports, not write-time rejection
 - [x] Severity classification; repair suggestions never auto-applied
 - [x] `GET /validation/report`
+- [x] All six target kinds
+- [x] Seed shapes ship
 - [~] Pending in this epic
 
 ### Epic 6 — Reasoning Overlay
@@ -153,6 +155,8 @@ marks for it yet, which is a different thing from zero of them done.
 - [x] Derived facts in `graph:reasoning`, never persisted into the base
 - [x] `GET /reasoning/explain` derivation chains
 - [x] Reasoning is skipped on historical queries
+- [x] Classification propagates along `feeds`, opt-in per classification
+- [x] Lineage is projected into the graph
 - [~] Pending in this epic
 
 ### Epic 7 — Graph Query — SPARQL ★
@@ -393,7 +397,7 @@ marks for it yet, which is a different thing from zero of them done.
 - [ ] SPARQL editor with plan display
 - [ ] Results as table ⇄ graph
 - [ ] Violations as an assignable **workflow** with waivers — the queue displays; assignment a
-- [ ] The derivation chain rendered beside a derived fact — `explanation
+- [x] The derivation chain rendered beside a derived fact
 - [ ] Admin: policies with dry-run, connectors, jobs
 
 ### Epic 42 — Semantic Browse, Review Queues & Agent Activity
