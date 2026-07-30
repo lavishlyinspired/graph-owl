@@ -1987,6 +1987,188 @@ impl Catalog {
         Ok(updated)
     }
 
+    // ---- Epic 31: organizational memory ----
+
+    /// Store a memory, with its links validated against what exists.
+    ///
+    /// The domain refuses an unanchored or over-confident memory before this is
+    /// called; what this adds is the part only storage knows — whether each link
+    /// points at something real.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` naming the offending link **by index**, because "one of your
+    /// links is wrong" is not actionable with four of them. `Conflict` if the id
+    /// is taken.
+    pub async fn create_memory(
+        &self,
+        memory: &graph_owl_core::memory::Memory,
+    ) -> Result<(), CatalogError> {
+        match self.storage.save_memory(memory).await? {
+            graph_owl_storage::MemoryWrite::Saved => Ok(()),
+            graph_owl_storage::MemoryWrite::UnknownLinkTarget { index, target } => {
+                Err(unresolvable_link(index, target))
+            }
+        }
+    }
+
+    /// One memory, superseded or not.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn memory(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::memory::Memory>, CatalogError> {
+        Ok(self.storage.find_memory(id).await?)
+    }
+
+    /// What we know about a subject, best first, each with its staleness.
+    ///
+    /// This is the capability the epic exists for, and it is assembled here
+    /// rather than in storage because ranking is a pure decision and staleness is
+    /// computed on read — **neither is a property of a row**. A stored staleness
+    /// flag would be wrong from the moment somebody edited the subject, and wrong
+    /// silently.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if a read fails.
+    pub async fn recall(
+        &self,
+        subject: Uuid,
+        query: &str,
+        include_superseded: bool,
+    ) -> Result<Vec<RecalledMemory>, CatalogError> {
+        let memories = self
+            .storage
+            .memories_about(subject, include_superseded)
+            .await?;
+
+        // The subject's history, read **once** for the whole set rather than per
+        // memory: every memory here is about the same subject, and a per-memory
+        // read would turn one recall into N round trips for identical data.
+        let current = self.storage.get_asset(subject).await?.map(|a| a.version);
+        let history: Vec<(graph_owl_core::envelope::EntityVersion, DateTime<Utc>)> = self
+            .storage
+            .asset_versions(subject)
+            .await?
+            .into_iter()
+            .map(|version| (version.version, version.updated_at))
+            .collect();
+
+        let staleness: Vec<graph_owl_core::memory::Staleness> = memories
+            .iter()
+            .map(|memory| {
+                graph_owl_core::memory::staleness(
+                    graph_owl_core::memory::version_at(memory.as_of, &history),
+                    current,
+                )
+            })
+            .collect();
+
+        let candidates: Vec<graph_owl_core::recall::Candidate<'_>> = memories
+            .iter()
+            .zip(&staleness)
+            .map(|(memory, verdict)| graph_owl_core::recall::Candidate {
+                memory,
+                staleness: verdict.clone(),
+                // Epic 8 fills this. `None` is honest — a reader can tell
+                // "measured, not similar" from "never measured".
+                semantic: None,
+            })
+            .collect();
+
+        let weights = graph_owl_core::recall::Weights::default();
+        Ok(
+            graph_owl_core::recall::rank(query, subject, &candidates, Utc::now(), &weights)
+                .into_iter()
+                .map(|ranked| RecalledMemory {
+                    memory: ranked.memory.clone(),
+                    staleness: ranked.staleness,
+                    score: ranked.score,
+                })
+                .collect(),
+        )
+    }
+
+    /// Correct a memory, keeping the original readable.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the original does not exist. `Conflict` naming the current
+    /// memory if it has already been corrected — a client with only "no" cannot
+    /// retry against the right target.
+    pub async fn supersede_memory(
+        &self,
+        original: Uuid,
+        replacement: &graph_owl_core::memory::Memory,
+    ) -> Result<(), CatalogError> {
+        match self.storage.supersede_memory(original, replacement).await? {
+            graph_owl_storage::SupersedeOutcome::Superseded => Ok(()),
+            graph_owl_storage::SupersedeOutcome::NotFound => Err(CatalogError::NotFound),
+            graph_owl_storage::SupersedeOutcome::UnknownLinkTarget { index, target } => {
+                Err(unresolvable_link(index, target))
+            }
+            graph_owl_storage::SupersedeOutcome::AlreadySuperseded { current } => {
+                Err(CatalogError::Conflict {
+                    detail: format!(
+                        "memory {original} has already been corrected by {current}; supersede that one instead"
+                    ),
+                    existing_id: Some(current),
+                    kind: graph_owl_storage::ConflictKind::MemoryExists,
+                })
+            }
+        }
+    }
+
+    /// Every open contradiction about a subject, declared and candidate.
+    ///
+    /// **Nothing is resolved and nothing is hidden.** The pair is reported; a
+    /// human decides. Dismissals are applied so a pair somebody already closed
+    /// does not reopen — a queue that reopens closed items is a queue people stop
+    /// reading.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if a read fails.
+    pub async fn contradictions_about(
+        &self,
+        subject: Uuid,
+    ) -> Result<Vec<graph_owl_core::contradiction::Contradiction>, CatalogError> {
+        // Superseded memories are included on purpose: detection needs to *see*
+        // them to rule them out, and filtering here would hide the very state
+        // that distinguishes a correction from a conflict.
+        let memories = self.storage.memories_about(subject, true).await?;
+        let reviews = self.storage.contradiction_reviews().await?;
+        let refs: Vec<&graph_owl_core::memory::Memory> = memories.iter().collect();
+        Ok(graph_owl_core::contradiction::contradictions(
+            &refs, &reviews,
+        ))
+    }
+
+    /// Record what a human decided about a candidate contradiction.
+    ///
+    /// Confirming does **not** close it: the pair stays in the queue flagged as
+    /// confirmed, because confirming a disagreement is not resolving one, and
+    /// resolving one is what this epic refuses to do.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails, including when either memory is unknown.
+    pub async fn review_contradiction(
+        &self,
+        review: graph_owl_core::contradiction::Review,
+        reviewed_by: &str,
+        note: Option<&str>,
+    ) -> Result<(), CatalogError> {
+        Ok(self
+            .storage
+            .review_contradiction(review, reviewed_by, note)
+            .await?)
+    }
+
     /// # Errors
     ///
     /// `NotFound` if the asset does not exist.
@@ -2755,6 +2937,36 @@ pub struct PolicyDryRun {
     pub admits_everything: bool,
 }
 
+/// A link that points at nothing, as the field error a client can act on.
+///
+/// One function for both the create and the correct path, so the two cannot
+/// drift into reporting the same mistake differently — which is exactly what
+/// happened when only one of them had a mapping.
+fn unresolvable_link(index: usize, target: Uuid) -> CatalogError {
+    CatalogError::Validation(vec![validation::FieldError::new(
+        format!("links[{index}].target"),
+        validation::FieldErrorCode::Type,
+        format!("{target} is neither a known asset nor a known memory"),
+    )])
+}
+
+/// A recalled memory, with everything a reader needs to weigh it.
+///
+/// Staleness and score are **beside** the memory rather than on it: neither is a
+/// property of the memory, and putting them on it would invite storing them.
+/// Whether a memory still describes its subject changes when the subject changes;
+/// where it ranks depends on the query that found it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecalledMemory {
+    pub memory: graph_owl_core::memory::Memory,
+    /// **Flagged, never hidden.** "We knew this and it may have changed" is
+    /// information; dropping it leaves a reader believing nobody ever looked.
+    pub staleness: graph_owl_core::memory::Staleness,
+    /// Decomposed, because a ranking nobody can audit is a ranking nobody should
+    /// act on.
+    pub score: graph_owl_core::recall::Score,
+}
+
 /// A finding, and whatever acceptance stands against it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WaivedFinding {
@@ -2861,6 +3073,8 @@ mod tests {
         source_hashes: Mutex<std::collections::HashMap<Uuid, Vec<u8>>>,
         runs: Mutex<Vec<graph_owl_storage::ConnectorRun>>,
         lineage: Mutex<Vec<graph_owl_core::lineage::LineageEdge>>,
+        memories: Mutex<Vec<graph_owl_core::memory::Memory>>,
+        reviews: Mutex<Vec<graph_owl_core::contradiction::Review>>,
     }
 
     impl InMemoryStorage {
@@ -2881,6 +3095,143 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Storage for InMemoryStorage {
+        // ---- Epic 31, and this double is deliberately as strict as the port ----
+        //
+        // Four times in this project a double has been looser than the port it
+        // stands for, and each time the looseness hid a real defect until an
+        // integration test found it. So: an unresolvable link target is rejected
+        // here too, supersession writes both halves, and a dismissal is
+        // normalised before it is stored.
+        async fn save_memory(
+            &self,
+            memory: &graph_owl_core::memory::Memory,
+        ) -> Result<graph_owl_storage::MemoryWrite, StorageError> {
+            self.guard_write("save_memory");
+            let mut held = self.memories.lock().expect("lock");
+            if held.iter().any(|existing| existing.id == memory.id) {
+                return Err(StorageError::Conflict {
+                    detail: format!("memory {} already exists", memory.id),
+                    existing_id: Some(memory.id),
+                    kind: graph_owl_storage::ConflictKind::MemoryExists,
+                });
+            }
+
+            let assets = self.assets.lock().expect("lock");
+            for (index, edge) in memory.links.iter().enumerate() {
+                let known = assets.iter().any(|asset| asset.id == edge.target)
+                    || held.iter().any(|other| other.id == edge.target);
+                if !known {
+                    return Ok(graph_owl_storage::MemoryWrite::UnknownLinkTarget {
+                        index,
+                        target: edge.target,
+                    });
+                }
+            }
+
+            held.push(memory.clone());
+            Ok(graph_owl_storage::MemoryWrite::Saved)
+        }
+
+        async fn find_memory(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_core::memory::Memory>, StorageError> {
+            Ok(self
+                .memories
+                .lock()
+                .expect("lock")
+                .iter()
+                .find(|memory| memory.id == id)
+                .cloned())
+        }
+
+        async fn memories_about(
+            &self,
+            subject: Uuid,
+            include_superseded: bool,
+        ) -> Result<Vec<graph_owl_core::memory::Memory>, StorageError> {
+            Ok(self
+                .memories
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|memory| memory.links.iter().any(|edge| edge.target == subject))
+                .filter(|memory| include_superseded || memory.superseded_by.is_none())
+                .cloned()
+                .collect())
+        }
+
+        async fn supersede_memory(
+            &self,
+            original: Uuid,
+            replacement: &graph_owl_core::memory::Memory,
+        ) -> Result<graph_owl_storage::SupersedeOutcome, StorageError> {
+            self.guard_write("supersede_memory");
+            let mut held = self.memories.lock().expect("lock");
+            let Some(position) = held.iter().position(|memory| memory.id == original) else {
+                return Ok(graph_owl_storage::SupersedeOutcome::NotFound);
+            };
+            if let Some(current) = held[position].superseded_by {
+                return Ok(graph_owl_storage::SupersedeOutcome::AlreadySuperseded { current });
+            }
+
+            let assets = self.assets.lock().expect("lock");
+            for (index, edge) in replacement.links.iter().enumerate() {
+                let known = assets.iter().any(|asset| asset.id == edge.target)
+                    || held.iter().any(|other| other.id == edge.target);
+                if !known {
+                    return Ok(graph_owl_storage::SupersedeOutcome::UnknownLinkTarget {
+                        index,
+                        target: edge.target,
+                    });
+                }
+            }
+            drop(assets);
+
+            let mut correction = replacement.clone();
+            correction.supersedes = Some(original);
+            held[position].superseded_by = Some(correction.id);
+            held.push(correction);
+            Ok(graph_owl_storage::SupersedeOutcome::Superseded)
+        }
+
+        async fn review_contradiction(
+            &self,
+            review: graph_owl_core::contradiction::Review,
+            _reviewed_by: &str,
+            _note: Option<&str>,
+        ) -> Result<(), StorageError> {
+            self.guard_write("review_contradiction");
+            let normalised = if review.a < review.b {
+                review
+            } else {
+                graph_owl_core::contradiction::Review {
+                    a: review.b,
+                    b: review.a,
+                    verdict: review.verdict,
+                }
+            };
+            let mut held = self.reviews.lock().expect("lock");
+            // Upsert, as the port specifies: a reviewer changing their mind is one
+            // pair with a new verdict. A double that appended would let a stale
+            // verdict keep applying and would make the double looser than the
+            // primary key it stands for.
+            match held
+                .iter_mut()
+                .find(|existing| existing.a == normalised.a && existing.b == normalised.b)
+            {
+                Some(existing) => existing.verdict = normalised.verdict,
+                None => held.push(normalised),
+            }
+            Ok(())
+        }
+
+        async fn contradiction_reviews(
+            &self,
+        ) -> Result<Vec<graph_owl_core::contradiction::Review>, StorageError> {
+            Ok(self.reviews.lock().expect("lock").clone())
+        }
+
         async fn upsert_connector_config(
             &self,
             config: &graph_owl_storage::ConnectorConfig,

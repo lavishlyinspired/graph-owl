@@ -92,7 +92,8 @@ pub struct Candidate<'a> {
 /// The score, decomposed. **The decomposition is the explanation** — a ranking
 /// nobody can audit is a ranking nobody should act on, and it is also what makes
 /// "a config change changes ordering predictably" checkable rather than a hope.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Score {
     pub anchor: f64,
     pub lexical: f64,

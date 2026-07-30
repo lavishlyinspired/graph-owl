@@ -1,10 +1,80 @@
 # Plan: Organizational Memory (Epic 31) ★
 
 **Branch**: feat/memory
-**Status**: **In progress** — the pure core of Slices A, C, D and E shipped
-30 Jul 2026 (`graph-owl-core::memory`, `::recall`, `::contradiction`).
-Persistence, the HTTP surface, Slice B's supersede endpoint and Slice E's
-confirm/dismiss endpoints are open.
+**Status**: **In progress** — Slices A, B, C, D and E have their domain core and
+their persistence, 30 Jul 2026. `graph-owl-core::memory` / `::recall` /
+`::contradiction`, `V15__memories.sql`, six `Storage` port methods with a
+Postgres adapter and 15 integration tests, and the `Catalog` facade
+(`create_memory`, `memory`, `recall`, `supersede_memory`,
+`contradictions_about`, `dismiss_contradiction`). The HTTP surface is live —
+`POST /memories`, `GET /memories/{id}`, `POST /memories/{id}/supersede`,
+`GET /assets/{id}/memories`, `GET /assets/{id}/contradictions`,
+`POST /contradictions/reviews` — with end-to-end tests and the contract
+regenerated.
+
+**The MCP `recall` tool shipped** (`graph-owl-mcp`, 30 Jul 2026), which is what
+makes this epic reachable by an agent rather than only by the console. Epic 14
+still has no *transport* — nothing speaks MCP over stdio or HTTP — so the tool is
+declared, dispatched and tested but not yet served, exactly as `get_asset_context`
+has been since Epic 14 Slice B.
+
+Four flags travel with every recalled memory, and each exists to stop an agent
+overstating what it read:
+
+| Flag | What goes wrong without it |
+|---|---|
+| `humanAuthored` | An agent reads **its own earlier guess** back as institutional knowledge and compounds it, confidence growing each retrieval because it keeps finding "the catalog says so" |
+| `staleness` | The same argument as `policyFiltered`: an agent that cannot tell current from stale presents stale as current |
+| `contradicted` | The agent picks one of two conflicting memories and presents it as the answer — adjudicating institutional disagreement **by omission** |
+| `confidence` | Facts with no weight attached get reported all alike |
+
+Two distinctions the dispatcher keeps that `Outcome` did not previously cover:
+`Recalled([])` is **not** `NotFound`, because "nothing has been written down" and
+"there is no such table" are opposite statements and an agent that conflates them
+fills the silence; and superseded memories are **excluded rather than flagged**,
+because a withdrawn memory arriving as an unmarked peer of its own correction is
+not stale but retracted, and no flag makes presenting both defensible.
+
+**What is genuinely left**: Slice C's semantic term, and any console surface.
+
+**Why the semantic term is not merely unfinished.** `graph-owl-search`'s own
+module docs already record that embeddings are generated **out of process**
+(`00j`), so the port that matters sits at that process boundary and does not
+exist. Implementing the term today would mean either fabricating a lexical
+similarity and labelling it semantic — which destroys the distinction
+`Score.semantic: Option<f64>` exists to preserve, since a reader could no longer
+tell "measured, not similar" from "never measured" — or inventing a seam with no
+implementation on either side, which `00e`'s growth trigger and that module's docs
+both refuse in writing. It waits for Epic 8. **And one thing this build cannot exercise**: no
+request can currently resolve to a *person*, because `Principal::system()` is the
+placeholder until Epic 12 — so every memory written over HTTP today is recorded
+as agent-authored, honestly, and the "a human defaults to confidence 1.0" path is
+covered by unit tests only. Mapping `system` to human authorship to make the
+fixtures read nicely would be exactly the relabelling the trust model refuses.
+
+**Two schema decisions worth reading before extending this.**
+
+- **Links keep referential integrity by splitting the target column.** A link
+  points at either an asset or another memory. A single polymorphic `target UUID`
+  could not be a foreign key, and `V13` already refused that trade for owners:
+  losing referential integrity to save a column lets a deleted asset stay named
+  as a subject. `MemoryLink` still carries one `Uuid` because the domain does not
+  care which it is — the adapter resolves it, and that resolution is needed
+  anyway to answer "a link to a nonexistent target → 400".
+- **Reviews are one table with a verdict column, not a dismissals table beside a
+  confirmations table.** Two tables would make "confirmed *and* dismissed"
+  representable, and a reviewer changing their mind would be a delete from one
+  plus an insert into the other with nothing making the pair atomic. One row per
+  pair makes the contradictory state unrepresentable and a change of mind a plain
+  `UPDATE`. This replaced a dismissals-only table that was already written and
+  tested — caught while implementing *confirm*, which is when the wrong shape
+  became visible.
+- **`ON DELETE RESTRICT` on both supersession columns.** Deleting a memory
+  somebody corrected would destroy the record of what people believed *before*
+  they were corrected, which is most of the reason to keep a record. Refusing the
+  delete is the honest failure. Deleting the *subject*, by contrast, cascades the
+  link and keeps the memory — `Staleness::SubjectUnknown` exists precisely so
+  that state can be reported rather than deleted.
 
 **Slice E resolved "overlapping `as_of`" without a magic number.** The criterion
 reads "two `Decision` memories about the same asset with overlapping `as_of`",
@@ -221,6 +291,22 @@ weight. Three were missing on the first pass and mutation found all three.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
 ### Slice E: Contradictions surface
+
+**Shipped 30 Jul 2026.** Two notes on how the criteria were met:
+
+- "Overlapping `as_of`" was resolved **without a time window**, because any
+  window would be a number with no derivation, which `00i` rule 4 forbids.
+  Supersession says it exactly: a superseded decision is history, and a decision
+  that supersedes another is a correction — the opposite of a contradiction.
+- **Confirming is not resolving.** A confirmed pair stays in the queue flagged
+  `confirmed`; only a dismissal removes it, and neither memory is ever hidden or
+  picked as the winner. `ContradictionKind` keeps `Confirmed` distinct from
+  `Declared` because the provenance differs in a way somebody will want to query:
+  a confirmed candidate is evidence the heuristic works, a declared one says
+  nothing about it. And a confirmation cannot **resurrect** a pair detection no
+  longer finds — if one side has since been superseded, the disagreement was
+  settled by correction, and re-raising it would reopen a question the record
+  already answers.
 
 **Value**: Conflicting institutional knowledge is visible rather than silently inconsistent.
 **Acceptance criteria**: an explicit `Contradicts` link surfaces both memories in a review queue; two `Decision` memories about the same asset with overlapping `as_of` are flagged as *candidate* contradictions; a human can confirm or dismiss a candidate; dismissal is recorded so the pair is not re-flagged; contradictions are **never** auto-resolved and neither memory is hidden.

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use graph_owl_api::{Catalog, CatalogError};
 
 use crate::{
-    AssetContext, ContextSource, SourceError,
+    AssetContext, ContextSource, MemoryContext, SourceError,
     trust::{Observed, summarise},
 };
 
@@ -152,5 +152,102 @@ impl ContextSource for CatalogContext {
             policy_filtered: visible.len() < all.len(),
             trust: summarise(&observe(&asset, false), chrono::Utc::now()),
         }))
+    }
+
+    async fn recall(
+        &self,
+        principal: &str,
+        fqn: &str,
+        query: &str,
+    ) -> Result<Option<Vec<MemoryContext>>, SourceError> {
+        let who = self
+            .catalog
+            .resolve_principal(principal, principal)
+            .await
+            .map_err(|e| unavailable(&e))?;
+
+        let Some(asset) = self
+            .catalog
+            .get_asset_by_fqn(fqn)
+            .await
+            .map_err(|e| unavailable(&e))?
+        else {
+            return Ok(None);
+        };
+        // **The same visibility gate the context tool uses**, and reused rather
+        // than restated: two implementations of "may this principal see it" is one
+        // more than can be kept in step, and knowledge about an asset is at least
+        // as sensitive as the asset.
+        if self.catalog.get_asset_for(&who, asset.id).await.is_err() {
+            return Ok(None);
+        }
+
+        // Current memories only. A superseded memory reaching an agent as an
+        // unmarked peer of its own correction is the worst possible outcome here —
+        // it is not stale, it is *withdrawn*, and there is no flag that makes
+        // presenting both defensible.
+        let recalled = self
+            .catalog
+            .recall(asset.id, query, false)
+            .await
+            .map_err(|e| unavailable(&e))?;
+
+        // Read once for the whole set rather than per memory: they are all about
+        // the same asset, so the queue is the same queue.
+        let conflicts = self
+            .catalog
+            .contradictions_about(asset.id)
+            .await
+            .map_err(|e| unavailable(&e))?;
+        let disputed: std::collections::HashSet<uuid::Uuid> = conflicts
+            .iter()
+            .flat_map(|conflict| [conflict.a, conflict.b])
+            .collect();
+
+        Ok(Some(
+            recalled
+                .into_iter()
+                .map(|item| MemoryContext {
+                    kind: format!("{:?}", item.memory.kind).to_lowercase(),
+                    content: item.memory.content.clone(),
+                    summary: item.memory.summary.clone(),
+                    confidence: item.memory.confidence,
+                    human_authored: matches!(
+                        item.memory.authorship,
+                        graph_owl_core::memory::Authorship::Human { .. }
+                    ),
+                    staleness: staleness_note(&item.staleness),
+                    contradicted: disputed.contains(&item.memory.id),
+                })
+                .collect(),
+        ))
+    }
+}
+
+/// Staleness as a sentence an agent can pass on, or `None` when fresh.
+///
+/// Words rather than a code, because this text is going into a language model's
+/// context and a bare `possiblyStale` gives it nothing to tell a reader. `None`
+/// for fresh, so the flag is present exactly when it means something — a field
+/// that is always set is a field that gets summarised away.
+fn staleness_note(staleness: &graph_owl_core::memory::Staleness) -> Option<String> {
+    use graph_owl_core::memory::Staleness;
+    match staleness {
+        Staleness::Fresh => None,
+        Staleness::PossiblyStale { since } => Some(format!(
+            "the asset has changed since this was written (now version {}.{}), \
+             but only in a backward-compatible way",
+            since.major, since.minor
+        )),
+        Staleness::Stale { since } => Some(format!(
+            "the asset has changed in a breaking way since this was written \
+             (now version {}.{}); what it describes may no longer exist",
+            since.major, since.minor
+        )),
+        Staleness::SubjectUnknown => Some(
+            "the asset this describes could not be resolved, so this could \
+                  not be checked against it"
+                .to_string(),
+        ),
     }
 }

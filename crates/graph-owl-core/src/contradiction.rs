@@ -32,6 +32,11 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ContradictionKind {
+    /// A reviewer looked at a candidate and agreed. **The strongest statement
+    /// available**, and kept distinct from `Declared` because the provenance
+    /// differs in a way somebody will want to query: a confirmed candidate is
+    /// evidence the heuristic works, a declared one says nothing about it.
+    Confirmed,
     /// A person said so, with a `Contradicts` link. Never filtered by kind or
     /// subject: a human assertion of disagreement outranks any rule here.
     Declared,
@@ -55,20 +60,52 @@ pub struct Contradiction {
     pub kind: ContradictionKind,
 }
 
-/// A pair a human has looked at and rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Dismissal {
-    pub a: Uuid,
-    pub b: Uuid,
+/// What a reviewer decided about a pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Verdict {
+    /// Yes, these disagree. **Stays in the queue**, flagged as confirmed —
+    /// confirming a contradiction is not resolving it, and this epic never
+    /// resolves one.
+    Confirmed,
+    /// No, they do not. Recorded so the pair is not re-flagged.
+    Dismissed,
 }
 
-/// Every contradiction among these memories, declared and candidate.
+/// A pair a human has looked at, and what they decided.
+///
+/// **One record with a verdict, not a dismissals table beside a confirmations
+/// table.** Two tables would make "confirmed *and* dismissed" representable, and
+/// changing one's mind would be a delete from one plus an insert into the other
+/// with nothing making that atomic. One row per pair makes the contradictory
+/// state unrepresentable and a change of mind an `UPDATE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Review {
+    pub a: Uuid,
+    pub b: Uuid,
+    pub verdict: Verdict,
+}
+
+/// Every open contradiction among these memories.
+///
+/// Reviews do two different things and it is worth being explicit about which:
+/// `Dismissed` **removes** a pair from the answer, and `Confirmed` **upgrades**
+/// one that is already there. A confirmation cannot resurrect a pair detection no
+/// longer finds — if one side has since been superseded, the disagreement was
+/// settled by correction, and re-raising it would reopen a question the record
+/// already answers.
 #[must_use]
-pub fn contradictions(memories: &[&Memory], dismissed: &[Dismissal]) -> Vec<Contradiction> {
+pub fn contradictions(memories: &[&Memory], reviews: &[Review]) -> Vec<Contradiction> {
     let present: HashSet<Uuid> = memories.iter().map(|memory| memory.id).collect();
-    let suppressed: HashSet<(Uuid, Uuid)> = dismissed
+    let suppressed: HashSet<(Uuid, Uuid)> = reviews
         .iter()
-        .map(|dismissal| unordered(dismissal.a, dismissal.b))
+        .filter(|review| review.verdict == Verdict::Dismissed)
+        .map(|review| unordered(review.a, review.b))
+        .collect();
+    let affirmed: HashSet<(Uuid, Uuid)> = reviews
+        .iter()
+        .filter(|review| review.verdict == Verdict::Confirmed)
+        .map(|review| unordered(review.a, review.b))
         .collect();
 
     // Keyed on the unordered pair, so mutual declarations and a declaration that
@@ -124,7 +161,17 @@ pub fn contradictions(memories: &[&Memory], dismissed: &[Dismissal]) -> Vec<Cont
 
     found
         .into_values()
+        // Suppression is applied **last**, so a pair that somehow carried both
+        // verdicts is still deterministic. The storage primary key makes that
+        // state unreachable; determinism here costs nothing and means a future
+        // second writer cannot make the queue depend on row order.
         .filter(|conflict| !suppressed.contains(&(conflict.a, conflict.b)))
+        .map(|mut conflict| {
+            if affirmed.contains(&(conflict.a, conflict.b)) {
+                conflict.kind = ContradictionKind::Confirmed;
+            }
+            conflict
+        })
         .collect()
 }
 
@@ -214,6 +261,22 @@ mod tests {
             Utc::now(),
         )
         .unwrap()
+    }
+
+    fn dismissed(a: Uuid, b: Uuid) -> Review {
+        Review {
+            a,
+            b,
+            verdict: Verdict::Dismissed,
+        }
+    }
+
+    fn confirmed(a: Uuid, b: Uuid) -> Review {
+        Review {
+            a,
+            b,
+            verdict: Verdict::Confirmed,
+        }
     }
 
     fn pairs(found: &[Contradiction]) -> Vec<(Uuid, Uuid)> {
@@ -531,10 +594,7 @@ mod tests {
         let subject = Uuid::new_v4();
         let one = decision(subject);
         let two = decision(subject);
-        let dismissal = Dismissal {
-            a: one.id,
-            b: two.id,
-        };
+        let dismissal = dismissed(one.id, two.id);
 
         assert!(contradictions(&[&one, &two], &[dismissal]).is_empty());
     }
@@ -547,10 +607,7 @@ mod tests {
         let subject = Uuid::new_v4();
         let one = decision(subject);
         let two = decision(subject);
-        let backwards = Dismissal {
-            a: two.id,
-            b: one.id,
-        };
+        let backwards = dismissed(two.id, one.id);
 
         assert!(contradictions(&[&one, &two], &[backwards]).is_empty());
     }
@@ -563,10 +620,7 @@ mod tests {
         let one = decision(subject);
         let two = decision(subject);
         let three = decision(subject);
-        let dismissal = Dismissal {
-            a: one.id,
-            b: two.id,
-        };
+        let dismissal = dismissed(one.id, two.id);
 
         let found = contradictions(&[&one, &two, &three], &[dismissal]);
 
@@ -585,10 +639,7 @@ mod tests {
             relation: LinkRelation::Contradicts,
             target: two.id,
         });
-        let dismissal = Dismissal {
-            a: two.id,
-            b: one.id,
-        };
+        let dismissal = dismissed(two.id, one.id);
 
         assert!(contradictions(&[&one, &two], &[dismissal]).is_empty());
     }
@@ -598,10 +649,7 @@ mod tests {
         let subject = Uuid::new_v4();
         let one = decision(subject);
         let two = decision(subject);
-        let elsewhere = Dismissal {
-            a: Uuid::new_v4(),
-            b: Uuid::new_v4(),
-        };
+        let elsewhere = dismissed(Uuid::new_v4(), Uuid::new_v4());
 
         assert_eq!(contradictions(&[&one, &two], &[elsewhere]).len(), 1);
     }
@@ -622,6 +670,123 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].kind, ContradictionKind::Declared);
+    }
+
+    // ---- confirmation ----
+
+    // **Confirming is not resolving.** The pair stays in the queue, flagged as
+    // confirmed — a confirmed disagreement that vanished from the queue would
+    // read as settled, and settling it is the one thing this epic refuses to do.
+    #[test]
+    fn a_confirmed_candidate_stays_visible_and_is_marked_confirmed() {
+        let subject = Uuid::new_v4();
+        let one = decision(subject);
+        let two = decision(subject);
+
+        let found = contradictions(&[&one, &two], &[confirmed(one.id, two.id)]);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, ContradictionKind::Confirmed);
+        assert_eq!(found[0].subject, Some(subject));
+    }
+
+    // Order-independent, for the same reason dismissal is: a verdict recorded in
+    // the other order would silently stop applying, and the queue would quietly
+    // downgrade a reviewed pair back to a guess.
+    #[test]
+    fn a_confirmation_recorded_in_either_order_applies() {
+        let subject = Uuid::new_v4();
+        let one = decision(subject);
+        let two = decision(subject);
+
+        let found = contradictions(&[&one, &two], &[confirmed(two.id, one.id)]);
+
+        assert_eq!(found[0].kind, ContradictionKind::Confirmed);
+    }
+
+    // A confirmation **cannot resurrect** a pair detection no longer finds. If one
+    // side has since been superseded the disagreement was settled by correction,
+    // and re-raising it would reopen a question the record already answers.
+    #[test]
+    fn a_confirmation_does_not_resurrect_a_pair_that_no_longer_conflicts() {
+        let subject = Uuid::new_v4();
+        let mut retired = decision(subject);
+        let current = decision(subject);
+        let review = confirmed(retired.id, current.id);
+        retired.superseded_by = Some(current.id);
+
+        assert!(contradictions(&[&retired, &current], &[review]).is_empty());
+    }
+
+    // Confirmed beats declared: a reviewer who looked at *this pair in the queue*
+    // has made the stronger statement, and the two provenances are kept apart
+    // because a confirmed candidate is evidence the heuristic works while a
+    // declared one says nothing about it.
+    #[test]
+    fn confirming_a_declared_contradiction_upgrades_it() {
+        let mut one = of_kind(MemoryKind::Caveat, Uuid::new_v4());
+        let two = of_kind(MemoryKind::Caveat, Uuid::new_v4());
+        one.links.push(MemoryLink {
+            relation: LinkRelation::Contradicts,
+            target: two.id,
+        });
+
+        let found = contradictions(&[&one, &two], &[confirmed(one.id, two.id)]);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, ContradictionKind::Confirmed);
+    }
+
+    // And the negative: without the review it is still `Declared`, so the test
+    // above is about the confirmation rather than about a function that always
+    // says confirmed.
+    #[test]
+    fn an_unreviewed_declaration_stays_declared() {
+        let mut one = of_kind(MemoryKind::Caveat, Uuid::new_v4());
+        let two = of_kind(MemoryKind::Caveat, Uuid::new_v4());
+        one.links.push(MemoryLink {
+            relation: LinkRelation::Contradicts,
+            target: two.id,
+        });
+
+        let found = contradictions(&[&one, &two], &[]);
+
+        assert_eq!(found[0].kind, ContradictionKind::Declared);
+    }
+
+    // A verdict about one pair says nothing about another. Confirming A-vs-B must
+    // not upgrade A-vs-C, which would put a reviewer's name against a judgement
+    // they never made.
+    #[test]
+    fn confirming_one_pair_leaves_the_others_as_candidates() {
+        let subject = Uuid::new_v4();
+        let one = decision(subject);
+        let two = decision(subject);
+        let three = decision(subject);
+
+        let found = contradictions(&[&one, &two, &three], &[confirmed(one.id, two.id)]);
+
+        assert_eq!(found.len(), 3);
+        let upgraded = found
+            .iter()
+            .filter(|c| c.kind == ContradictionKind::Confirmed)
+            .count();
+        assert_eq!(upgraded, 1);
+    }
+
+    // Unreachable through storage — the primary key is the pair — but pinned so a
+    // future second writer cannot make the queue depend on row order. Dismissal
+    // wins, because the pair was removed before anything could upgrade it.
+    #[test]
+    fn a_pair_carrying_both_verdicts_resolves_deterministically() {
+        let subject = Uuid::new_v4();
+        let one = decision(subject);
+        let two = decision(subject);
+        let both = [confirmed(one.id, two.id), dismissed(one.id, two.id)];
+        let reversed = [dismissed(one.id, two.id), confirmed(one.id, two.id)];
+
+        assert!(contradictions(&[&one, &two], &both).is_empty());
+        assert!(contradictions(&[&one, &two], &reversed).is_empty());
     }
 
     #[test]

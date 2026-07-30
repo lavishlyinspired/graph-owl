@@ -17,6 +17,8 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+# The recall tool works with memory ids to mark which results are disputed.
+uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

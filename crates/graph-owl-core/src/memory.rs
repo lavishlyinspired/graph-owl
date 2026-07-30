@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// What kind of knowledge this is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MemoryKind {
     /// Why something is the way it is.
@@ -39,8 +39,17 @@ pub enum MemoryKind {
 /// person stood behind it, and a field somebody can edit is a field that will be
 /// edited by a migration script. [`MemoryUpdate`] has no authorship field, so
 /// there is nothing to send.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+// `rename_all` on an enum renames the **variants**, not their fields, so this
+// serialized `agent_id` and `user_id` in snake_case while every other type on the
+// wire was camelCase. `rename_all_fields` is the one that reaches the fields.
+// Caught by the HTTP test, and by nothing else: the domain tests compare Rust
+// values, and the repository tests compare columns — neither looks at the JSON.
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Authorship {
     Human {
         user_id: String,
@@ -73,7 +82,7 @@ impl Authorship {
 }
 
 /// How a memory relates to what it is about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LinkRelation {
     /// The anchor. **At least one is required** — see [`Memory::new`].
@@ -95,7 +104,7 @@ pub enum LinkRelation {
 }
 
 /// One edge from a memory to something in the catalog.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryLink {
     pub relation: LinkRelation,
@@ -125,7 +134,7 @@ pub enum MemoryError {
 /// when the *subject* changes, not when the memory does — so a stored flag is
 /// wrong the moment somebody edits the table it is about, and wrong silently.
 /// See [`staleness`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Memory {
     pub id: Uuid,
@@ -305,6 +314,32 @@ pub fn staleness(
         return Staleness::PossiblyStale { since: now };
     }
     Staleness::Fresh
+}
+
+/// Which version of the subject was in force when the memory was written.
+///
+/// The **highest** recorded version at or before `as_of`, not the one with the
+/// latest timestamp: two version rows can share a timestamp — a migration
+/// backfilling history does exactly that — and the higher version is the later
+/// one by definition, while "latest timestamp" would pick arbitrarily between
+/// them.
+///
+/// **Defaults to [`EntityVersion::initial`]** when the history holds nothing
+/// that early. Every entity is created at `0.1`, so nothing can precede it, and
+/// the effect is that a memory older than the recorded history is compared
+/// against the beginning — conservative in the right direction, because every
+/// recorded change then counts as a change since. The alternative, reporting
+/// [`Staleness::SubjectUnknown`], would be wrong: the subject is right there.
+#[must_use]
+pub fn version_at(
+    as_of: DateTime<Utc>,
+    history: &[(EntityVersion, DateTime<Utc>)],
+) -> EntityVersion {
+    history
+        .iter()
+        .filter(|(_, at)| *at <= as_of)
+        .max_by_key(|(version, _)| (version.major, version.minor))
+        .map_or_else(EntityVersion::initial, |(version, _)| *version)
 }
 
 #[cfg(test)]
@@ -638,6 +673,79 @@ mod tests {
                 since: version(3, 0)
             }
         );
+    }
+
+    fn at(hours_ago: i64) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-07-30T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+            - chrono::Duration::hours(hours_ago)
+    }
+
+    #[test]
+    fn the_version_in_force_is_the_highest_one_recorded_by_then() {
+        let history = [
+            (version(1, 0), at(100)),
+            (version(1, 3), at(50)),
+            (version(2, 0), at(10)),
+        ];
+
+        assert_eq!(version_at(at(30), &history), version(1, 3));
+    }
+
+    // A version recorded at exactly the memory's instant was in force: the memory
+    // describes the asset as it then was, and excluding it would compare against
+    // the state the memory was written *to replace*.
+    #[test]
+    fn a_version_recorded_at_the_same_instant_counts() {
+        let history = [(version(1, 0), at(100)), (version(2, 0), at(30))];
+
+        assert_eq!(version_at(at(30), &history), version(2, 0));
+    }
+
+    #[test]
+    fn a_later_version_is_not_in_force_yet() {
+        let history = [(version(1, 0), at(100)), (version(9, 0), at(1))];
+
+        assert_eq!(version_at(at(30), &history), version(1, 0));
+    }
+
+    // A memory older than the recorded history compares against the beginning.
+    // Every entity is created at `0.1`, so nothing can precede it — and the
+    // effect is that every recorded change counts as a change since, which is the
+    // conservative direction.
+    #[test]
+    fn nothing_recorded_that_early_falls_back_to_the_initial_version() {
+        assert_eq!(
+            version_at(at(500), &[(version(3, 0), at(10))]),
+            EntityVersion::initial()
+        );
+        assert_eq!(version_at(at(500), &[]), EntityVersion::initial());
+    }
+
+    // **By version, not by timestamp.** A migration backfilling history writes
+    // several rows at one instant, and "latest timestamp" then picks arbitrarily
+    // between them — which makes staleness non-deterministic on exactly the data
+    // a backfill produces.
+    #[test]
+    fn versions_sharing_a_timestamp_resolve_to_the_higher_one() {
+        let same = at(40);
+        let history = [
+            (version(1, 0), same),
+            (version(2, 5), same),
+            (version(1, 9), same),
+        ];
+
+        assert_eq!(version_at(at(30), &history), version(2, 5));
+    }
+
+    // Minor ordering within one major, so the comparison is on the pair and not
+    // on `major` alone.
+    #[test]
+    fn minor_versions_order_within_a_major() {
+        let history = [(version(1, 2), at(60)), (version(1, 11), at(50))];
+
+        assert_eq!(version_at(at(30), &history), version(1, 11));
     }
 
     // The flag names what changed, so a reader can judge whether it matters to

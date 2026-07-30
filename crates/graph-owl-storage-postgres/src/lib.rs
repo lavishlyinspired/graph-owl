@@ -1,13 +1,232 @@
 use async_trait::async_trait;
 use graph_owl_authz::{AccessPredicate, Policy};
+use graph_owl_core::contradiction::{Review, Verdict};
+use graph_owl_core::memory::{Authorship, LinkRelation, Memory, MemoryKind, MemoryLink};
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
     envelope::{ChangeDescription, EntityVersion, classify},
     page::{Cursor, Page, PageRequest},
 };
-use graph_owl_storage::{ConflictKind, Storage, StorageError, StoredUser, UpdateOutcome};
-use sqlx::{PgPool, Row, postgres::PgRow};
+use graph_owl_storage::{
+    ConflictKind, MemoryWrite, Storage, StorageError, StoredUser, SupersedeOutcome, UpdateOutcome,
+};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
+
+/// Every column a `Memory` is rebuilt from, by id. Named once so the shape
+/// cannot drift between the single read and the by-subject read.
+const MEMORY_COLUMNS: &str = "SELECT id, kind, content, summary, author_kind, author_user_id,
+            author_agent_id, author_model, confidence, as_of, supersedes, superseded_by
+     FROM memories WHERE id = $1";
+
+/// The wire spelling of a kind.
+///
+/// A `match` rather than a `Serialize` round-trip through JSON: the column has a
+/// `CHECK` listing these exact strings, so a rename that forgets the migration
+/// has to fail to compile rather than fail at 3am on the first write.
+const fn memory_kind_str(kind: MemoryKind) -> &'static str {
+    match kind {
+        MemoryKind::Rationale => "rationale",
+        MemoryKind::Incident => "incident",
+        MemoryKind::Decision => "decision",
+        MemoryKind::Caveat => "caveat",
+    }
+}
+
+const fn verdict_str(verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::Confirmed => "confirmed",
+        Verdict::Dismissed => "dismissed",
+    }
+}
+
+/// Rebuild a verdict from the column.
+///
+/// An unrecognised value is an error rather than a default. Defaulting to
+/// `Dismissed` would silently hide a pair a reviewer confirmed; defaulting to
+/// `Confirmed` would put their name against a judgement they did not make. The
+/// `CHECK` means this can only happen across versions, which is exactly when a
+/// loud failure is wanted.
+fn verdict_from(value: &str) -> Result<Verdict, StorageError> {
+    match value {
+        "confirmed" => Ok(Verdict::Confirmed),
+        "dismissed" => Ok(Verdict::Dismissed),
+        other => Err(StorageError::Unexpected(format!(
+            "unknown contradiction verdict in storage: {other}"
+        ))),
+    }
+}
+
+const fn relation_str(relation: LinkRelation) -> &'static str {
+    match relation {
+        LinkRelation::About => "about",
+        LinkRelation::Affects => "affects",
+        LinkRelation::Evidence => "evidence",
+        LinkRelation::Follows => "follows",
+        LinkRelation::Contradicts => "contradicts",
+        LinkRelation::Mentions => "mentions",
+    }
+}
+
+/// Rebuild a kind from the column.
+///
+/// An unrecognised value is an error rather than a default. A row written by a
+/// newer version reading back as `Rationale` would silently reclassify somebody's
+/// decision, and the `CHECK` means this can only happen across versions — which
+/// is exactly when a loud failure is wanted.
+fn memory_kind_from(value: &str) -> Result<MemoryKind, StorageError> {
+    match value {
+        "rationale" => Ok(MemoryKind::Rationale),
+        "incident" => Ok(MemoryKind::Incident),
+        "decision" => Ok(MemoryKind::Decision),
+        "caveat" => Ok(MemoryKind::Caveat),
+        other => Err(StorageError::Unexpected(format!(
+            "unknown memory kind in storage: {other}"
+        ))),
+    }
+}
+
+fn relation_from(value: &str) -> Result<LinkRelation, StorageError> {
+    match value {
+        "about" => Ok(LinkRelation::About),
+        "affects" => Ok(LinkRelation::Affects),
+        "evidence" => Ok(LinkRelation::Evidence),
+        "follows" => Ok(LinkRelation::Follows),
+        "contradicts" => Ok(LinkRelation::Contradicts),
+        "mentions" => Ok(LinkRelation::Mentions),
+        other => Err(StorageError::Unexpected(format!(
+            "unknown memory link relation in storage: {other}"
+        ))),
+    }
+}
+
+/// Write a memory's links, resolving each target to an asset or a memory.
+///
+/// Returns `Some((index, target))` for the **first** unresolvable link rather
+/// than collecting them all: the client has to fix that one regardless, and
+/// reporting four failures when the first is a typo in a copied id is noise.
+///
+/// Deliberately *not* a `MemoryWrite`: two callers need the same fact in two
+/// different outcome shapes, and returning one of them from a shared helper
+/// forced the other to unwrap a variant it could never see.
+async fn insert_links(
+    tx: &mut Transaction<'_, Postgres>,
+    memory_id: Uuid,
+    links: &[MemoryLink],
+) -> Result<Option<(usize, Uuid)>, StorageError> {
+    for (index, edge) in links.iter().enumerate() {
+        // Which column the target belongs in is a question only the database can
+        // answer, and asking it is not wasted work — Slice A requires an
+        // unresolvable target to be reported as a client error naming the index,
+        // so the lookup is the validation.
+        let is_asset: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM assets WHERE id = $1)")
+                .bind(edge.target)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let is_memory: bool = if is_asset {
+            false
+        } else {
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM memories WHERE id = $1)")
+                .bind(edge.target)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        };
+
+        if !is_asset && !is_memory {
+            return Ok(Some((index, edge.target)));
+        }
+
+        sqlx::query(
+            "INSERT INTO memory_links (memory_id, relation, asset_target, memory_target)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(memory_id)
+        .bind(relation_str(edge.relation))
+        .bind(if is_asset { Some(edge.target) } else { None })
+        .bind(if is_asset { None } else { Some(edge.target) })
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+    }
+    Ok(None)
+}
+
+/// A memory's links, from whichever target column holds each one.
+async fn read_links(pool: &PgPool, memory_id: Uuid) -> Result<Vec<MemoryLink>, StorageError> {
+    let rows: Vec<(String, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT relation, asset_target, memory_target FROM memory_links
+         WHERE memory_id = $1 ORDER BY relation, asset_target, memory_target",
+    )
+    .bind(memory_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+    rows.into_iter()
+        .map(|(relation, asset_target, memory_target)| {
+            // The `CHECK` guarantees exactly one is set, so a row with neither is
+            // a corrupt row and not a shape to paper over with a default.
+            let target = asset_target.or(memory_target).ok_or_else(|| {
+                StorageError::Unexpected(format!("memory link {memory_id} has no target"))
+            })?;
+            Ok(MemoryLink {
+                relation: relation_from(&relation)?,
+                target,
+            })
+        })
+        .collect()
+}
+
+/// Rebuild a `Memory` from a row plus its links.
+///
+/// **Constructed field by field rather than through `Memory::new`.** The
+/// constructor refuses a memory with no anchor, which is right on the way in and
+/// wrong on the way out: a row that somehow lost its anchor must be *readable*
+/// so somebody can see and fix it, not unreadable so it becomes invisible — and
+/// hiding a row is the failure mode this whole epic is against.
+fn memory_from_row(row: &PgRow, links: Vec<MemoryLink>) -> Result<Memory, StorageError> {
+    let author_kind: String = row.get("author_kind");
+    let authorship = match author_kind.as_str() {
+        "human" => Authorship::Human {
+            // `ON DELETE SET NULL` on the FK: losing the attribution is better
+            // than losing the memory, so a deleted person reads back as an
+            // unnamed human rather than as an error or as an agent.
+            user_id: row
+                .get::<Option<String>, _>("author_user_id")
+                .unwrap_or_default(),
+        },
+        "agent" => Authorship::Agent {
+            agent_id: row
+                .get::<Option<String>, _>("author_agent_id")
+                .unwrap_or_default(),
+            model: row
+                .get::<Option<String>, _>("author_model")
+                .unwrap_or_default(),
+        },
+        other => {
+            return Err(StorageError::Unexpected(format!(
+                "unknown authorship kind in storage: {other}"
+            )));
+        }
+    };
+
+    Ok(Memory {
+        id: row.get("id"),
+        kind: memory_kind_from(&row.get::<String, _>("kind"))?,
+        content: row.get("content"),
+        summary: row.get("summary"),
+        authorship,
+        confidence: row.get("confidence"),
+        links,
+        as_of: row.get("as_of"),
+        supersedes: row.get("supersedes"),
+        superseded_by: row.get("superseded_by"),
+    })
+}
 
 mod embedded {
     refinery::embed_migrations!("migrations");
@@ -528,6 +747,262 @@ impl Storage for PostgresStorage {
     }
 
     #[tracing::instrument(name = "storage.upsert_team", skip_all)]
+    // ---- Epic 31: organizational memory ----
+
+    async fn save_memory(&self, memory: &Memory) -> Result<MemoryWrite, StorageError> {
+        // One transaction: a memory whose row was written and whose links were
+        // not is an **unanchored** memory — stored, permanently unretrievable,
+        // and holding the id somebody was told the write succeeded under. The
+        // domain refuses to construct one; the adapter must not create one by
+        // failing halfway.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let (author_kind, author_user_id, author_agent_id, author_model) = match &memory.authorship
+        {
+            Authorship::Human { user_id } => ("human", Some(user_id.clone()), None, None),
+            Authorship::Agent { agent_id, model } => {
+                ("agent", None, Some(agent_id.clone()), Some(model.clone()))
+            }
+        };
+
+        sqlx::query(
+            "INSERT INTO memories
+                (id, kind, content, summary, author_kind, author_user_id,
+                 author_agent_id, author_model, confidence, as_of)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(memory.id)
+        .bind(memory_kind_str(memory.kind))
+        .bind(&memory.content)
+        .bind(&memory.summary)
+        .bind(author_kind)
+        .bind(&author_user_id)
+        .bind(&author_agent_id)
+        .bind(&author_model)
+        .bind(memory.confidence)
+        .bind(memory.as_of)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            if e.as_database_error()
+                .is_some_and(|d| d.is_unique_violation())
+            {
+                StorageError::Conflict {
+                    detail: format!("memory {} already exists", memory.id),
+                    existing_id: Some(memory.id),
+                    kind: ConflictKind::MemoryExists,
+                }
+            } else {
+                StorageError::Unexpected(e.to_string())
+            }
+        })?;
+
+        if let Some((index, target)) = insert_links(&mut tx, memory.id, &memory.links).await? {
+            // Rolled back explicitly rather than by dropping `tx`: the caller is
+            // getting `Ok(UnknownLinkTarget)`, and an implicit rollback on a
+            // success-shaped return is the kind of thing a later reader assumes
+            // did not happen.
+            tx.rollback()
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            return Ok(MemoryWrite::UnknownLinkTarget { index, target });
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(MemoryWrite::Saved)
+    }
+
+    async fn find_memory(&self, id: Uuid) -> Result<Option<Memory>, StorageError> {
+        let Some(row) = sqlx::query(MEMORY_COLUMNS)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let links = read_links(&self.pool, id).await?;
+        Ok(Some(memory_from_row(&row, links)?))
+    }
+
+    async fn memories_about(
+        &self,
+        subject: Uuid,
+        include_superseded: bool,
+    ) -> Result<Vec<Memory>, StorageError> {
+        // The subject may be an asset or another memory, and the caller does not
+        // know which — the domain's `MemoryLink` carries one id precisely because
+        // it does not care. Matching either column keeps that true above the
+        // adapter rather than pushing the split upward.
+        let rows = sqlx::query(
+            "SELECT m.id, m.kind, m.content, m.summary, m.author_kind, m.author_user_id,
+                    m.author_agent_id, m.author_model, m.confidence, m.as_of,
+                    m.supersedes, m.superseded_by
+             FROM memories m
+             JOIN memory_links l ON l.memory_id = m.id
+             WHERE (l.asset_target = $1 OR l.memory_target = $1)
+               AND ($2 OR m.superseded_by IS NULL)
+             GROUP BY m.id
+             ORDER BY m.as_of DESC, m.id",
+        )
+        .bind(subject)
+        .bind(include_superseded)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut memories = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id: Uuid = row.get("id");
+            let links = read_links(&self.pool, id).await?;
+            memories.push(memory_from_row(row, links)?);
+        }
+        Ok(memories)
+    }
+
+    async fn supersede_memory(
+        &self,
+        original: Uuid,
+        replacement: &Memory,
+    ) -> Result<SupersedeOutcome, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // `FOR UPDATE`, so two concurrent corrections cannot both read "not yet
+        // superseded" and both write themselves in. The loser gets
+        // `AlreadySuperseded` naming the winner, which is exactly what it needs
+        // to retry correctly.
+        let existing: Option<(Option<Uuid>,)> =
+            sqlx::query_as("SELECT superseded_by FROM memories WHERE id = $1 FOR UPDATE")
+                .bind(original)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let Some((superseded_by,)) = existing else {
+            return Ok(SupersedeOutcome::NotFound);
+        };
+        if let Some(current) = superseded_by {
+            return Ok(SupersedeOutcome::AlreadySuperseded { current });
+        }
+
+        let (author_kind, author_user_id, author_agent_id, author_model) =
+            match &replacement.authorship {
+                Authorship::Human { user_id } => ("human", Some(user_id.clone()), None, None),
+                Authorship::Agent { agent_id, model } => {
+                    ("agent", None, Some(agent_id.clone()), Some(model.clone()))
+                }
+            };
+
+        sqlx::query(
+            "INSERT INTO memories
+                (id, kind, content, summary, author_kind, author_user_id,
+                 author_agent_id, author_model, confidence, as_of, supersedes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(replacement.id)
+        .bind(memory_kind_str(replacement.kind))
+        .bind(&replacement.content)
+        .bind(&replacement.summary)
+        .bind(author_kind)
+        .bind(&author_user_id)
+        .bind(&author_agent_id)
+        .bind(&author_model)
+        .bind(replacement.confidence)
+        .bind(replacement.as_of)
+        .bind(original)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        if let Some((index, target)) =
+            insert_links(&mut tx, replacement.id, &replacement.links).await?
+        {
+            tx.rollback()
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            // The same client-fixable condition the create path reports, reported
+            // the same way. It previously became an `Unexpected` — a `500` for a
+            // body that would have earned a `400` from `POST /memories`.
+            return Ok(SupersedeOutcome::UnknownLinkTarget { index, target });
+        }
+
+        // The other half. Both or neither — a dangling pair reads as history and
+        // is not.
+        sqlx::query("UPDATE memories SET superseded_by = $2, updated_at = now() WHERE id = $1")
+            .bind(original)
+            .bind(replacement.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(SupersedeOutcome::Superseded)
+    }
+
+    async fn review_contradiction(
+        &self,
+        review: Review,
+        reviewed_by: &str,
+        note: Option<&str>,
+    ) -> Result<(), StorageError> {
+        // Normalised before it is stored. The schema also enforces `a < b`, so
+        // this is belt and braces — but the braces matter: the CHECK would turn a
+        // reviewer's click into a 500 rather than quietly ordering it.
+        let (a, b) = if review.a < review.b {
+            (review.a, review.b)
+        } else {
+            (review.b, review.a)
+        };
+
+        sqlx::query(
+            "INSERT INTO memory_contradiction_reviews (a, b, verdict, reviewed_by, note)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (a, b) DO UPDATE
+                    SET verdict     = EXCLUDED.verdict,
+                        reviewed_by = EXCLUDED.reviewed_by,
+                        reviewed_at = now(),
+                        note        = EXCLUDED.note",
+        )
+        .bind(a)
+        .bind(b)
+        .bind(verdict_str(review.verdict))
+        .bind(reviewed_by)
+        .bind(note)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn contradiction_reviews(&self) -> Result<Vec<Review>, StorageError> {
+        let rows: Vec<(Uuid, Uuid, String)> =
+            sqlx::query_as("SELECT a, b, verdict FROM memory_contradiction_reviews")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        rows.into_iter()
+            .map(|(a, b, verdict)| {
+                Ok(Review {
+                    a,
+                    b,
+                    verdict: verdict_from(&verdict)?,
+                })
+            })
+            .collect()
+    }
+
     async fn upsert_team(&self, team: &graph_owl_storage::Team) -> Result<(), StorageError> {
         // One transaction: a team whose row was written and whose membership
         // was not is a team that silently owns things on nobody's behalf.

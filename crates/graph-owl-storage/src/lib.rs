@@ -3,6 +3,8 @@ use graph_owl_authz::{AccessPredicate, Policy};
 use graph_owl_core::envelope::EntityVersion;
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
+    contradiction::Review,
+    memory::Memory,
     page::{Page, PageRequest},
 };
 use serde::{Deserialize, Serialize};
@@ -33,6 +35,11 @@ pub enum ConflictKind {
     WaiverExists,
     /// This finding is already assigned. Two owners is no owner.
     AssignmentExists,
+    /// A memory with this id already exists. Its own variant rather than reusing
+    /// one above, because this enum's whole purpose is that a client can act on
+    /// the collision — and "your memory id collided" needs a different response
+    /// from "that name is taken".
+    MemoryExists,
 }
 
 #[derive(Debug, Error)]
@@ -65,6 +72,52 @@ pub enum UpdateOutcome {
     /// The guard did not match. Carries what the version actually is, so the
     /// caller can show the reader what they were about to overwrite.
     VersionMismatch(EntityVersion),
+}
+
+/// What saving a memory did.
+///
+/// Not a `Result<(), StorageError>`: an unresolvable link is a **client**
+/// mistake with a specific fix, and Slice A requires the response to name *which*
+/// link is wrong. Folding it into `Unexpected(String)` would leave a client
+/// parsing prose to find out which of four links to correct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryWrite {
+    Saved,
+    /// A link points at neither a known asset nor a known memory.
+    ///
+    /// `index` is the position in the submitted link list, because "one of your
+    /// links is wrong" is not actionable when there are four of them.
+    UnknownLinkTarget {
+        index: usize,
+        target: Uuid,
+    },
+}
+
+/// What superseding a memory did.
+///
+/// Three outcomes, and the third is why this is not a `bool`: superseding a
+/// memory that has *already* been corrected must name the current one, or a
+/// client retrying has no way to find the right target and will keep hitting the
+/// same wall.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupersedeOutcome {
+    Superseded,
+    NotFound,
+    /// Already corrected. Carries the id of the memory that corrected it.
+    AlreadySuperseded {
+        current: Uuid,
+    },
+    /// The correction's own link points at nothing known.
+    ///
+    /// Present for the same reason [`MemoryWrite::UnknownLinkTarget`] is: it is a
+    /// **client** mistake with a specific fix. Leaving it out made the correction
+    /// path return `500` for exactly the condition the create path returns `400`
+    /// for — the same request body, a different status, decided only by which
+    /// endpoint it was sent to.
+    UnknownLinkTarget {
+        index: usize,
+        target: Uuid,
+    },
 }
 
 /// One connector run, as history records it.
@@ -599,4 +652,93 @@ pub trait Storage: Send + Sync {
         &self,
         predicate: &AccessPredicate,
     ) -> Result<Vec<(AssetKind, i64)>, StorageError>;
+
+    // ---- Epic 31: organizational memory ----
+
+    /// Store a memory and its links.
+    ///
+    /// Links are resolved to an asset or another memory here, because the
+    /// schema keeps them in separate foreign-key columns — a polymorphic target
+    /// could not be a foreign key, and a deleted asset that goes on being named
+    /// as a subject is the silent rot this schema refuses everywhere else.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Conflict`] if the id already exists.
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn save_memory(&self, memory: &Memory) -> Result<MemoryWrite, StorageError>;
+
+    /// One memory, with its links, **whether or not it has been superseded**.
+    ///
+    /// A superseded memory stays readable: the record of what people believed
+    /// before they were corrected is most of the reason to keep a record.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn find_memory(&self, id: Uuid) -> Result<Option<Memory>, StorageError>;
+
+    /// Every memory linked to this subject, by any relation.
+    ///
+    /// **By any relation, not only `About`** — ranking needs the weak links too,
+    /// since it is what distinguishes "about this table" from "mentions it".
+    /// Filtering here would hard-code a relevance decision into a read.
+    ///
+    /// `include_superseded` defaults the retrieval contract: current only, with
+    /// history available on request.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn memories_about(
+        &self,
+        subject: Uuid,
+        include_superseded: bool,
+    ) -> Result<Vec<Memory>, StorageError>;
+
+    /// Replace a memory with a correction, marking both sides in one
+    /// transaction.
+    ///
+    /// **Both halves or neither.** Supersession is two rows, and a half-written
+    /// pair is a chain that reads as history but is not — the dangling case is
+    /// real enough that contradiction detection has a test for it.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn supersede_memory(
+        &self,
+        original: Uuid,
+        replacement: &Memory,
+    ) -> Result<SupersedeOutcome, StorageError>;
+
+    /// Record what a human decided about a candidate contradiction.
+    ///
+    /// **Upsert, not insert.** A reviewer changing their mind is one pair with a
+    /// new verdict, not a second row — and a duplicate-key failure on a second
+    /// click is a `500` for a person doing something reasonable.
+    ///
+    /// The pair is normalised before it is stored, and the schema enforces it: a
+    /// verdict recorded in the other order would silently stop applying, the
+    /// queue would reopen or downgrade the pair on its own, and it would be
+    /// unreproducible because it depends on load order.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails, including when either
+    /// memory or the reviewing user is unknown.
+    async fn review_contradiction(
+        &self,
+        review: Review,
+        reviewed_by: &str,
+        note: Option<&str>,
+    ) -> Result<(), StorageError>;
+
+    /// Every verdict, so detection can skip what a human closed and upgrade what
+    /// they confirmed.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn contradiction_reviews(&self) -> Result<Vec<Review>, StorageError>;
 }

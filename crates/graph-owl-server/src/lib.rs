@@ -90,6 +90,16 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/policies/dry-run", post(dry_run_policy))
         .route("/users/{id}/roles", put(set_user_roles))
         .route("/teams", get(list_teams).post(upsert_team))
+        // Epic 31. `/memories` for the record itself; the reads hang off the
+        // asset, because "what do we know about this table" is the question, and
+        // a client that has an asset id should not have to know a second noun to
+        // ask it.
+        .route("/memories", post(create_memory))
+        .route("/memories/{id}", get(get_memory))
+        .route("/memories/{id}/supersede", post(supersede_memory))
+        .route("/assets/{id}/memories", get(recall_memories))
+        .route("/assets/{id}/contradictions", get(list_contradictions))
+        .route("/contradictions/reviews", post(review_contradiction))
         .route("/connectors/{connector}/schema", get(connector_schema))
         .route(
             "/connectors/configs",
@@ -782,6 +792,10 @@ impl AppError {
                 kind: ConflictKind::AssignmentExists,
                 ..
             } => "assignment-exists",
+            AppError::Conflict {
+                kind: ConflictKind::MemoryExists,
+                ..
+            } => "memory-exists",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
             AppError::PreconditionFailed { .. } => "version-conflict",
@@ -816,6 +830,10 @@ impl AppError {
                 kind: ConflictKind::AssignmentExists,
                 ..
             } => "This finding is already assigned",
+            AppError::Conflict {
+                kind: ConflictKind::MemoryExists,
+                ..
+            } => "A memory with this id already exists",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
             AppError::PreconditionFailed { .. } => "Version precondition failed",
@@ -872,6 +890,10 @@ impl AppError {
                 kind: ConflictKind::AssignmentExists,
                 ..
             } => "this finding is already assigned; two owners is no owner".to_string(),
+            AppError::Conflict {
+                kind: ConflictKind::MemoryExists,
+                ..
+            } => "a memory with this id already exists".to_string(),
             AppError::NotFound => "the requested resource does not exist".to_string(),
             AppError::PreconditionFailed { current } => format!(
                 "this asset is now at version {current}; your `If-Match` named an \
@@ -1501,6 +1523,260 @@ fn team_body(team: &graph_owl_storage::Team) -> serde_json::Value {
         "description": team.description,
         "members": team.members,
     })
+}
+
+// ---- Epic 31: organizational memory ----
+
+/// A memory as a client submits it.
+///
+/// **No `id`, no `authorship`, no `supersedes`/`supersededBy`.** The id is the
+/// server's; authorship comes from the authenticated principal, because a body
+/// that could name its own author is a body that can forge one, and the whole
+/// trust model rests on it; the supersession fields are set by the supersede
+/// operation, which writes both halves at once. Structural rather than validated
+/// — serde drops what is not here, so there is nothing for a future handler to
+/// forget to reject.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryRequest {
+    kind: graph_owl_core::memory::MemoryKind,
+    content: String,
+    #[serde(default)]
+    summary: Option<String>,
+    /// Omitted means "the default for this author": `1.0` for a person, and a
+    /// refusal for an agent, which must state its own.
+    #[serde(default)]
+    confidence: Option<f64>,
+    links: Vec<graph_owl_core::memory::MemoryLink>,
+    /// When this was true of its subject. Defaults to now, because the common
+    /// case is writing down what you just learned.
+    #[serde(default)]
+    as_of: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ValidateBody for MemoryRequest {
+    /// Shape only. "A memory needs an anchor", "confidence is between 0 and 1"
+    /// and "an agent must state its own confidence" are all enforced by
+    /// `Memory::new`, and a rule stated in two places is a rule that will
+    /// disagree with itself.
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// The principal, as authorship.
+///
+/// **Taken from the token, never from the body.** A bot principal becomes agent
+/// authorship, a person becomes human authorship — the distinction is the trust
+/// model, and letting a request assert it would make the whole ranking term
+/// meaningless.
+fn authorship_of(principal: &Principal) -> graph_owl_core::memory::Authorship {
+    match principal.kind {
+        // `Service` and `System` both mean "not a person". `System` reaching this
+        // path at all would be a migration or a reconciler writing a memory, and
+        // recording that as human-authored is the exact relabelling the trust
+        // model refuses — so the non-person branch is the default and `User` is
+        // the one that has to be proven.
+        graph_owl_core::PrincipalKind::User => graph_owl_core::memory::Authorship::Human {
+            user_id: principal.id.clone(),
+        },
+        graph_owl_core::PrincipalKind::Service | graph_owl_core::PrincipalKind::System => {
+            graph_owl_core::memory::Authorship::Agent {
+                agent_id: principal.id.clone(),
+                // The model is not in the token. Recorded as unknown rather than
+                // guessed: "which model said this" matters when its conclusions
+                // turn out wrong, and a fabricated answer is worse than an
+                // absent one.
+                model: "unknown".to_string(),
+            }
+        }
+    }
+}
+
+fn memory_body(memory: &graph_owl_core::memory::Memory) -> serde_json::Value {
+    json!(memory)
+}
+
+/// Write something down — Epic 31 Slice A.
+async fn create_memory(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<MemoryRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let mut memory = graph_owl_core::memory::Memory::new(
+        payload.kind,
+        payload.content,
+        authorship_of(&principal),
+        payload.confidence,
+        payload.links,
+        payload.as_of.unwrap_or_else(chrono::Utc::now),
+    )
+    .map_err(memory_rejection)?;
+    memory.summary = payload.summary;
+
+    catalog.create_memory(&memory).await?;
+    Ok((StatusCode::CREATED, Json(memory_body(&memory))))
+}
+
+/// A domain refusal as a field error.
+///
+/// Each maps to the field a client can actually change. `NoAnchor` points at
+/// `links` rather than at the memory as a whole, because "add an about link" is
+/// the fix and a message about the memory does not say that.
+fn memory_rejection(error: graph_owl_core::memory::MemoryError) -> AppError {
+    use graph_owl_core::memory::MemoryError;
+    let (field, code) = match &error {
+        MemoryError::NoAnchor => ("links", FieldErrorCode::Required),
+        MemoryError::NoContent => ("content", FieldErrorCode::Empty),
+        MemoryError::ConfidenceOutOfRange(_) | MemoryError::AgentWithoutConfidence => {
+            ("confidence", FieldErrorCode::Type)
+        }
+    };
+    AppError::Validation(vec![FieldError::new(field, code, error.to_string())])
+}
+
+async fn get_memory(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // A superseded memory is returned, not 404'd: the record of what people
+    // believed before they were corrected is most of the reason to keep a record,
+    // and the body carries `supersededBy` so a reader can follow the correction.
+    catalog
+        .memory(id)
+        .await?
+        .map(|memory| Json(memory_body(&memory)))
+        .ok_or(AppError::NotFound)
+}
+
+/// Correct a memory — Epic 31 Slice B.
+///
+/// `409` when it has already been corrected, naming the current one. A client
+/// with only "no" cannot retry against the right target.
+async fn supersede_memory(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<MemoryRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let mut replacement = graph_owl_core::memory::Memory::new(
+        payload.kind,
+        payload.content,
+        authorship_of(&principal),
+        payload.confidence,
+        payload.links,
+        payload.as_of.unwrap_or_else(chrono::Utc::now),
+    )
+    .map_err(memory_rejection)?;
+    replacement.summary = payload.summary;
+    replacement.supersedes = Some(id);
+
+    catalog.supersede_memory(id, &replacement).await?;
+    Ok((StatusCode::CREATED, Json(memory_body(&replacement))))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecallQuery {
+    /// The words to rank against. Absent is legitimate — "everything we know
+    /// about this table" is a real question — and scores zero on the lexical
+    /// term rather than producing `NaN`.
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    include_superseded: bool,
+}
+
+/// What we know about an asset, best first — Epic 31 Slice C.
+async fn recall_memories(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    Query(params): Query<RecallQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let recalled = catalog
+        .recall(
+            id,
+            params.q.as_deref().unwrap_or(""),
+            params.include_superseded,
+        )
+        .await?;
+
+    Ok(Json(json!(
+        recalled
+            .iter()
+            .map(|item| json!({
+                "memory": memory_body(&item.memory),
+                // **Flagged, never hidden.** A stale memory is returned with its
+                // verdict; dropping it leaves a reader believing nobody looked.
+                "staleness": item.staleness,
+                // The decomposition, so a reader who disagrees with the order can
+                // see which term produced it.
+                "score": item.score,
+            }))
+            .collect::<Vec<_>>()
+    )))
+}
+
+/// Open disagreements about an asset — Epic 31 Slice E.
+///
+/// Nothing is resolved and neither memory is hidden. A human decides.
+async fn list_contradictions(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    Ok(Json(json!(catalog.contradictions_about(id).await?)))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewRequest {
+    a: Uuid,
+    b: Uuid,
+    /// `confirmed` or `dismissed`. **No default** — a verdict this endpoint had to
+    /// guess would be a judgement about institutional disagreement made by the
+    /// absence of a field.
+    verdict: graph_owl_core::contradiction::Verdict,
+    /// Nullable: "these are about different quarters" is worth capturing, and
+    /// forcing a note gets the field filled with "n/a".
+    #[serde(default)]
+    note: Option<String>,
+}
+
+impl ValidateBody for ReviewRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Confirm or dismiss a candidate contradiction — Epic 31 Slice E.
+///
+/// Recorded against the reviewing principal, because a verdict with no author is
+/// an unattributable judgement about institutional disagreement, which is the one
+/// thing this epic must never produce.
+///
+/// **Confirming does not close it.** The pair stays in the queue marked
+/// confirmed; only a dismissal removes it. Neither memory is ever hidden and
+/// neither is ever picked as the winner.
+async fn review_contradiction(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<ReviewRequest>,
+) -> Result<StatusCode, AppError> {
+    catalog
+        .review_contradiction(
+            graph_owl_core::contradiction::Review {
+                a: payload.a,
+                b: payload.b,
+                verdict: payload.verdict,
+            },
+            &principal.id,
+            payload.note.as_deref(),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Create or update a team — Epic 11.

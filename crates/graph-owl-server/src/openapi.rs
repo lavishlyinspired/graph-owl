@@ -352,6 +352,64 @@ pub static ROUTES: &[Route] = &[
         200,
         true,
     ),
+    // Epic 31. Bodies are documented by name where a schema exists; the recall
+    // and contradiction reads return composed envelopes rather than a single
+    // domain type, so they carry no `response` name — the same choice the other
+    // composed reads in this table already make.
+    route(
+        "post",
+        "/memories",
+        "Write down organizational knowledge",
+        None,
+        Some("Memory"),
+        201,
+        true,
+    ),
+    route(
+        "get",
+        "/memories/{id}",
+        "One memory, superseded or not",
+        None,
+        Some("Memory"),
+        200,
+        true,
+    ),
+    route(
+        "post",
+        "/memories/{id}/supersede",
+        "Correct a memory, keeping the original readable",
+        None,
+        Some("Memory"),
+        201,
+        true,
+    ),
+    route(
+        "get",
+        "/assets/{id}/memories",
+        "What we know about this asset, best first, each flagged for staleness",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/assets/{id}/contradictions",
+        "Open disagreements about this asset; nothing is resolved and nothing is hidden",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "post",
+        "/contradictions/reviews",
+        "Confirm or dismiss a candidate contradiction; confirming does not close it",
+        None,
+        None,
+        204,
+        true,
+    ),
     route(
         "get",
         "/connectors/{connector}/schema",
@@ -530,6 +588,11 @@ pub static ROUTES: &[Route] = &[
     graph_owl_api::CreateTable,
     graph_owl_api::CreateRelationship,
     graph_owl_api::UpsertAsset,
+    graph_owl_core::memory::Memory,
+    graph_owl_core::memory::MemoryKind,
+    graph_owl_core::memory::MemoryLink,
+    graph_owl_core::memory::LinkRelation,
+    graph_owl_core::memory::Authorship,
 )))]
 struct Components;
 
