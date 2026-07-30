@@ -108,29 +108,36 @@ One incident already occurred and was reverted during planning (a cache-tier tab
 - **`--lib` blinds the run to whatever only integration tests cover, and the report calls that a survivor.** Measured on `observability.rs`: `observe` and `metrics_endpoint` are HTTP middleware and a handler, exercised only by `tests/observability.rs`, and a `--lib` run reported all three of their mutants as MISSED. Re-run without `--lib`, scoped with `--re`, **all three were caught in 3 minutes**.
   So: `--lib` for code with unit coverage, which is where pure decisions belong anyway; drop it — and pay the container cost, scoped tightly with `--re` — for the thin imperative shells that only an end-to-end test reaches. A MISSED line from a `--lib` run is a question about coverage *shape*, not automatically a gap.
 
-- **Doc-tests are 97% of the workspace suite's wall time. Use `--lib --tests` for the routine gate.** Measured 30 July 2026, warm tree, nothing else running:
+- **The single biggest cost in this project is macOS scanning each freshly linked test binary on its FIRST execution — ~200 seconds each, ~75 of them per build.** Measured 30 July 2026 by running one binary directly, twice, with no cargo involved:
 
-  | Command | Wall | Tests passed |
+  | `wire_conventions` (57 MB) | Wall | Tests inside |
   |---|---|---|
-  | `cargo test --workspace` | **5198s (87 min)** | 1347 |
-  | `cargo test --workspace --lib --tests` | **152s (2.5 min)** | 1347 |
+  | 1st execution after linking | **213s** | 3.68s |
+  | 2nd execution, unchanged | **3.2s** | 3.68s |
 
-  **The same 1347 tests pass either way.** Doc-tests cost 5046 seconds and add no behavioural coverage — `rustdoc --test` compiles and links a harness per crate, 28 of them, and `graph-owl-server`'s links a 78 MB rlib. They are worth running (an example that no longer compiles is a lie in the documentation) but they are worth running **before a push, not on every gate**.
+  209 seconds of pure overhead, no compilation, identical work. That is Gatekeeper/XProtect evaluating a newly written executable. **It is paid once per binary per build**, so a gate after a port change can cost hours while `cargo` and `rustc` sit idle and every environment check comes back clean.
+
+  **The full cost model:**
+
+  | Cost | Size | When |
+  |---|---|---|
+  | Compilation | ~2 min worst case | after a port change |
+  | **First execution of newly linked binaries** | **~200s × 75** | after any build |
+  | Doc-tests (`rustdoc` rebuilds a harness per crate) | ~84 min | only on full `cargo test --workspace` |
+  | Actual test execution | **~150s** | always |
+
+  **The fix is a machine setting, and it is worth more than every other optimisation in this file combined**: add the terminal (and VS Code, if suites run from its integrated terminal) under **System Settings → Privacy & Security → Developer Tools**, then *fully quit and reopen it* — the exemption only reaches processes spawned after it takes effect, so an already-running shell keeps paying.
+
+  **Also run `--lib --tests` for the routine gate.** Doc-tests add 84 minutes and zero behavioural coverage — the same 1354 tests pass either way:
 
   ```
-  cargo test --workspace --lib --tests -- --test-threads=1   # 2.5 min — the gate
-  cargo test --workspace --doc                               # 84 min — before pushing
+  cargo test --workspace --lib --tests -- --test-threads=1   # the gate
+  cargo test --workspace --doc                               # before pushing only
   ```
 
-  **Why this took five investigations to find, which is the part worth remembering.** Doc-tests run **`rustdoc`**, not `rustc`. Every check of `pgrep -x rustc` came back zero during the slow stretches, which read as "not compiling" and sent attention to `ps` — where FSEvents at 98% and Gatekeeper at 32% looked like a satisfying answer. Both were real and neither was the cause. The log said so plainly the whole time: `Finished in 0.20s`, zero `Compiling` lines, 75 binaries **and 28 doc-test sections**.
+  **How this took six investigations, because the diagnostic that seems obvious actively hides it.** "Run the same command twice; if the second is fast it was a build" is wrong here — the second run is *always* fast, because the binary has been assessed by then. That rule produced three confident wrong answers (concurrent tooling, then a rebuild, then doc-tests-only). What finally worked was refusing to explain a gap by anything except a number: **115s of reported test execution against 52 minutes of wall clock**, then timing a single binary's first and second execution *directly*, outside cargo.
 
-  Three wrong causes were published in this file before the right one: concurrent tooling (real, but not the whole gap), macOS security scanning (wrong), and a rebuild (wrong — cargo reported a 0.20s build). The measurement that settles it in one step, and should be the first move every time:
-
-  ```
-  grep -oE "finished in [0-9.]+s" <log> | awk '{gsub(/[^0-9.]/,"",$3); s+=$3} END {print s}'
-  ```
-
-  **147s of test execution against 5198s of wall clock.** A gap that size is never explained by the thing you are already looking at. Account for *all* the elapsed time before naming a cause, and check `rustdoc` as well as `rustc` before concluding nothing is compiling.
+  So: when elapsed time and summed test time disagree by an order of magnitude, do not reason about it. Run one binary twice, by hand, and read the two numbers.
 
 - **Verify once per EPIC, not once per slice — and the build being "slow" is the same complaint.** Measured 30 July 2026, one verification cycle on this workspace:
 

@@ -2544,6 +2544,7 @@ impl Catalog {
         &self,
         principal: &Principal,
         items: Vec<IngestItem>,
+        edges: Vec<IngestEdge>,
     ) -> Result<Vec<IngestOutcome>, CatalogError> {
         // FQNs are derived here, not taken from the client — `Asset` documents them
         // as "derived from the parent chain, never client-set", and a batch that
@@ -2651,6 +2652,94 @@ impl Catalog {
                 // **One item's failure is reported, not raised.** Raising would
                 // abandon the rest of the batch, which is the all-or-nothing
                 // behaviour this slice exists to avoid.
+                Err(error) => outcomes.push(IngestOutcome {
+                    index,
+                    status: 400,
+                    id: None,
+                    problem: Some(format!("{error:?}")),
+                }),
+            }
+        }
+
+        // **Edges after every entity**, because an edge's endpoints may be
+        // anywhere in the batch — including an item submitted after it. Ordering
+        // entities among themselves is a containment problem with one answer;
+        // ordering an edge against them is not, so edges simply go last.
+        //
+        // Indexes continue from the entity range so a `207` addresses the whole
+        // request with one numbering, rather than making a client know which of
+        // two lists an index refers to.
+        for (offset, edge) in edges.iter().enumerate() {
+            let index = items.len() + offset;
+            let resolve = |fqn: &String| -> Option<Uuid> { landed.get(fqn).copied() };
+
+            let from = match resolve(&edge.from_fqn) {
+                Some(id) => Some(id),
+                None => self
+                    .storage
+                    .get_asset_by_fqn(&edge.from_fqn)
+                    .await?
+                    .map(|a| a.id),
+            };
+            let to = match resolve(&edge.to_fqn) {
+                Some(id) => Some(id),
+                None => self
+                    .storage
+                    .get_asset_by_fqn(&edge.to_fqn)
+                    .await?
+                    .map(|a| a.id),
+            };
+
+            let (Some(from), Some(to)) = (from, to) else {
+                let missing = if from.is_none() {
+                    &edge.from_fqn
+                } else {
+                    &edge.to_fqn
+                };
+                outcomes.push(IngestOutcome {
+                    index,
+                    status: 400,
+                    id: None,
+                    problem: Some(format!(
+                        "`{missing}` is neither in this batch nor in the catalog"
+                    )),
+                });
+                continue;
+            };
+
+            let result = match graph_owl_core::relationship_type::RelationshipType::parse(
+                &edge.relationship,
+            ) {
+                Ok(relationship) => self
+                    .assert_lineage(
+                        principal,
+                        from,
+                        to,
+                        relationship,
+                        graph_owl_core::lineage::LineageDetails {
+                            // A push is a connector speaking, not a person:
+                            // `Manual` would claim somebody vouched for this.
+                            source: graph_owl_core::lineage::LineageSource::Connector,
+                            query: edge.query.clone(),
+                            description: edge.description.clone(),
+                        },
+                    )
+                    .await
+                    .map(|edge| edge.id),
+                Err(unknown) => Err(CatalogError::Validation(vec![validation::FieldError::new(
+                    "relationship",
+                    validation::FieldErrorCode::Type,
+                    format!("`{}` is not a relationship type", unknown.got),
+                )])),
+            };
+
+            match result {
+                Ok(id) => outcomes.push(IngestOutcome {
+                    index,
+                    status: 200,
+                    id: Some(id),
+                    problem: None,
+                }),
                 Err(error) => outcomes.push(IngestOutcome {
                     index,
                     status: 400,
@@ -3458,6 +3547,29 @@ pub struct IngestItem {
     pub parent_fqn: Option<String>,
     pub description: Option<String>,
     pub properties: Option<serde_json::Value>,
+}
+
+/// One edge in a push — Epic 16 Slice A.
+///
+/// Endpoints are named by **FQN**, resolved against this batch first and the
+/// catalog second: "a relationship whose endpoints are in the same batch resolves"
+/// is a stated criterion, because a pusher cannot pre-create in dependency order.
+///
+/// **Every pushed edge is a lineage edge, and there is deliberately no option for
+/// anything else.** Epic 1's `Relationship` operates on the `tables` relation,
+/// which is not `assets` — a push creates assets, so a plain relationship between
+/// two of them can never resolve. Offering the choice and failing every time is
+/// worse than not offering it: the option would look like a capability, and the
+/// `NotFound` it produced would look like a missing entity rather than a
+/// mismatched model. Found by a test doing exactly that.
+#[derive(Debug, Clone)]
+pub struct IngestEdge {
+    pub from_fqn: String,
+    pub to_fqn: String,
+    /// A lineage relationship — `feeds`, `derivedFrom`, and so on.
+    pub relationship: String,
+    pub query: Option<String>,
+    pub description: Option<String>,
 }
 
 /// What happened to one pushed item.

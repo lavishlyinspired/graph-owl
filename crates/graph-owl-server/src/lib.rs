@@ -1624,7 +1624,26 @@ const MAX_INGEST_ITEMS: usize = 1000;
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IngestRequest {
+    #[serde(default)]
     items: Vec<IngestItemRequest>,
+    /// Edges between entities, by FQN. Applied after every entity, because an
+    /// endpoint may be an item submitted later in the same batch.
+    #[serde(default)]
+    edges: Vec<IngestEdgeRequest>,
+}
+
+#[derive(Debug, serde::Deserialize, std::hash::Hash)]
+#[serde(rename_all = "camelCase")]
+struct IngestEdgeRequest {
+    from_fqn: String,
+    to_fqn: String,
+    /// A lineage relationship. Every pushed edge is lineage: `Relationship`
+    /// operates on the `tables` relation, and a push creates assets.
+    relationship: String,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, std::hash::Hash)]
@@ -1704,15 +1723,18 @@ async fn ingest(
         }
     }
 
-    if payload.items.len() > MAX_INGEST_ITEMS {
+    // The ceiling counts everything the request asks for: a batch of 900 entities
+    // and 900 edges is 1800 units of work, and counting only one list would let a
+    // caller double the cost by splitting it across two fields.
+    let total = payload.items.len() + payload.edges.len();
+    if total > MAX_INGEST_ITEMS {
         return Err(AppError::Validation(vec![FieldError::new(
             "items",
             FieldErrorCode::Type,
             format!(
-                "a push carries at most {MAX_INGEST_ITEMS} items; this one has {}. \
-                 Larger loads go through the batch-file path, because a request \
-                 that big cannot be answered synchronously",
-                payload.items.len()
+                "a push carries at most {MAX_INGEST_ITEMS} items and edges combined; \
+                 this one has {total}. Larger loads go through the batch-file path, \
+                 because a request that big cannot be answered synchronously"
             ),
         )]));
     }
@@ -1738,7 +1760,19 @@ async fn ingest(
         });
     }
 
-    let outcomes = catalog.ingest(&principal, items).await?;
+    let edges = payload
+        .edges
+        .iter()
+        .map(|edge| graph_owl_api::IngestEdge {
+            from_fqn: edge.from_fqn.clone(),
+            to_fqn: edge.to_fqn.clone(),
+            relationship: edge.relationship.clone(),
+            query: edge.query.clone(),
+            description: edge.description.clone(),
+        })
+        .collect();
+
+    let outcomes = catalog.ingest(&principal, items, edges).await?;
     let accepted = outcomes.iter().filter(|o| o.status < 400).count();
     let body = json!({
         "accepted": accepted,
@@ -1784,6 +1818,12 @@ fn fingerprint(request: &IngestRequest) -> String {
             .as_ref()
             .map(ToString::to_string)
             .hash(&mut hasher);
+    }
+    // Edges are part of the request's identity: two pushes with the same entities
+    // and different edges are different requests, and hashing only the entities
+    // would replay the first answer for the second.
+    for edge in &request.edges {
+        edge.hash(&mut hasher);
     }
     format!("{:016x}", hasher.finish())
 }

@@ -326,3 +326,220 @@ async fn a_replay_is_matched_on_content_not_byte_order() {
     assert_eq!(status, StatusCode::MULTI_STATUS, "{second}");
     assert_eq!(second, first);
 }
+
+// ---- Slice A: relationships and lineage in the same call ----
+
+fn edge(from: &str, to: &str, relationship: &str) -> Value {
+    json!({ "fromFqn": from, "toFqn": to, "relationship": relationship })
+}
+
+// **The stated criterion**: "a relationship whose endpoints are in the same batch
+// resolves". A pusher cannot pre-create in dependency order, so an edge naming two
+// entities from its own batch has to work.
+#[tokio::test]
+async fn an_edge_between_two_entities_in_the_same_batch_resolves() {
+    let (app, _db, _) = test_app().await;
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/ingest",
+        Some(json!({
+            "items": [
+                item("service", "svc", None),
+                item("database", "db", Some("svc")),
+                item("schema", "public", Some("svc.db")),
+                item("table", "orders", Some("svc.db.public")),
+                item("table", "mart", Some("svc.db.public")),
+            ],
+            "edges": [edge("svc.db.public.orders", "svc.db.public.mart", "feeds")],
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::MULTI_STATUS, "{body}");
+    assert_eq!(body["accepted"], json!(6), "5 entities and 1 edge: {body}");
+}
+
+// An edge submitted **before** the entities it names must still resolve — edges are
+// applied after every entity precisely so submission order cannot matter.
+#[tokio::test]
+async fn an_edge_naming_entities_submitted_after_it_still_resolves() {
+    let (app, _db, _) = test_app().await;
+
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/ingest",
+        Some(json!({
+            "items": [
+                item("service", "svc", None),
+                item("database", "db", Some("svc")),
+                item("schema", "public", Some("svc.db")),
+                item("table", "a", Some("svc.db.public")),
+                item("table", "b", Some("svc.db.public")),
+            ],
+            "edges": [edge("svc.db.public.a", "svc.db.public.b", "feeds")],
+        })),
+    )
+    .await;
+
+    assert_eq!(body["rejected"], json!(0), "{body}");
+}
+
+// Lineage goes to the lineage graph, and the flag is explicit: the two models have
+// overlapping vocabularies, and guessing would file an edge where nothing looks.
+#[tokio::test]
+async fn a_lineage_edge_is_recorded_as_lineage() {
+    let (app, _db, _) = test_app().await;
+    let mut lineage = edge("svc.db.public.a", "svc.db.public.b", "feeds");
+    lineage["description"] = json!("nightly load");
+
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/ingest",
+        Some(json!({
+            "items": [
+                item("service", "svc", None),
+                item("database", "db", Some("svc")),
+                item("schema", "public", Some("svc.db")),
+                item("table", "a", Some("svc.db.public")),
+                item("table", "b", Some("svc.db.public")),
+            ],
+            "edges": [lineage],
+        })),
+    )
+    .await;
+    assert_eq!(body["rejected"], json!(0), "{body}");
+
+    // It is visible through the lineage API, not merely accepted.
+    let ids: Vec<&str> = body["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .filter_map(|r| r["id"].as_str())
+        .collect();
+    let table_a = ids.first().expect("an id");
+    let (status, graph) = send(
+        &app,
+        "GET",
+        &format!("/lineage/asset/{}?upstream=2&downstream=2", ids[3]),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+    assert!(
+        !graph["edges"].as_array().expect("edges").is_empty(),
+        "the lineage edge should be in the graph: {graph} (a={table_a})"
+    );
+}
+
+// An endpoint that exists nowhere fails only its own edge — the entities still land.
+#[tokio::test]
+async fn an_edge_with_an_unresolvable_endpoint_fails_only_itself() {
+    let (app, _db, _) = test_app().await;
+
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/ingest",
+        Some(json!({
+            "items": [item("service", "svc", None)],
+            "edges": [edge("svc", "nowhere.at.all", "feeds")],
+        })),
+    )
+    .await;
+
+    assert_eq!(body["accepted"], json!(1), "{body}");
+    assert_eq!(body["rejected"], json!(1), "{body}");
+    let results = body["results"].as_array().expect("results");
+    assert!(
+        results[1]["problem"]
+            .as_str()
+            .expect("problem")
+            .contains("nowhere.at.all"),
+        "{body}"
+    );
+}
+
+// Indexes continue past the entity range, so one numbering addresses the whole
+// request — a client should not have to know which list an index refers to.
+#[tokio::test]
+async fn edge_results_are_indexed_after_the_entities() {
+    let (app, _db, _) = test_app().await;
+
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/ingest",
+        Some(json!({
+            "items": [item("service", "a", None), item("service", "b", None)],
+            "edges": [edge("a", "b", "feeds")],
+        })),
+    )
+    .await;
+
+    let indexes: Vec<u64> = body["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .map(|r| r["index"].as_u64().expect("index"))
+        .collect();
+    assert_eq!(indexes, vec![0, 1, 2], "{body}");
+}
+
+// The ceiling counts both lists: splitting work across fields must not double the
+// cost a request can impose.
+#[tokio::test]
+async fn the_ceiling_counts_entities_and_edges_together() {
+    let (app, _db, _) = test_app().await;
+    let items: Vec<Value> = (0..600)
+        .map(|i| item("service", &format!("s{i}"), None))
+        .collect();
+    let edges: Vec<Value> = (0..600)
+        .map(|i| edge("s0", &format!("s{i}"), "feeds"))
+        .collect();
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/ingest",
+        Some(json!({ "items": items, "edges": edges })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+// Two pushes with the same entities but different edges are different requests —
+// hashing only the entities would replay the first answer for the second.
+#[tokio::test]
+async fn edges_are_part_of_the_idempotency_fingerprint() {
+    let (app, _db, _) = test_app().await;
+    let base = vec![item("service", "a", None), item("service", "b", None)];
+
+    let first = Request::builder()
+        .method("POST")
+        .uri("/ingest")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "edge-key")
+        .body(Body::from(
+            json!({ "items": base.clone(), "edges": [] }).to_string(),
+        ))
+        .expect("request");
+    app.clone().oneshot(first).await.expect("handled");
+
+    let second = Request::builder()
+        .method("POST")
+        .uri("/ingest")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "edge-key")
+        .body(Body::from(
+            json!({ "items": base, "edges": [edge("a", "b", "feeds")] }).to_string(),
+        ))
+        .expect("request");
+    let response = app.clone().oneshot(second).await.expect("handled");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
