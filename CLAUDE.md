@@ -108,6 +108,22 @@ One incident already occurred and was reverted during planning (a cache-tier tab
 - **`--lib` blinds the run to whatever only integration tests cover, and the report calls that a survivor.** Measured on `observability.rs`: `observe` and `metrics_endpoint` are HTTP middleware and a handler, exercised only by `tests/observability.rs`, and a `--lib` run reported all three of their mutants as MISSED. Re-run without `--lib`, scoped with `--re`, **all three were caught in 3 minutes**.
   So: `--lib` for code with unit coverage, which is where pure decisions belong anyway; drop it — and pay the container cost, scoped tightly with `--re` — for the thin imperative shells that only an end-to-end test reaches. A MISSED line from a `--lib` run is a question about coverage *shape*, not automatically a gap.
 
+- **Check for a second agent in the checkout before diagnosing anything else. This one cost most of a day.** Found 30 July 2026: a commit appeared on top of mine that I had not written (`Epic 11 Slice D`, with a 287-line test file), and my own untracked `.vscode/settings.json` had been swept into it by somebody else's `git add -A`. `pgrep -x claude` showed **three** processes where there should have been one — two other sessions were working in the same working tree.
+
+  Everything unexplained that day traces to it: an "hour-long" suite, a 222s `cargo mutants` baseline build against 18s quiet, a test binary at 205s that ran in 3s minutes later, and a 64s → 1s swing on identical code. I had attributed the stray `cargo test -q -p graph-owl-api -p graph-owl-mcp -p graph-owl-core --lib` in `ps` to rust-analyzer. **That was wrong** — it was the other session, and the crate list was exactly what its slice touched.
+
+  So the first three checks when something is inexplicably slow, in order:
+
+  ```
+  pgrep -x claude | wc -l     # more than 1 means another agent shares the tree
+  pgrep -x cargo  | wc -l     # more than 1 means something is racing you
+  git log --oneline -3        # a commit you did not write is the loudest signal
+  ```
+
+  **`git add -A` is what makes this dangerous**, not the shared build lock. Two agents committing to `main` in one working tree will sweep up each other's in-flight files, and neither one's commit is then what its message says. If two sessions must run, give each a **git worktree**: separate checkout, separate `target/`, and both failure modes disappear at once.
+
+- **A backgrounded `cd` does not move the session, but a foreground one does — and the difference has bitten twice.** `cd ui && …` in a command that gets backgrounded leaves the session's cwd alone; the same `cd` in a foreground command persists it. On 30 July 2026 a `cd ui` left the shell in `ui/`, so `.vscode/settings.json` was written to `ui/.vscode/settings.json` and a later `python3` step failed with `FileNotFoundError: CLAUDE.md`. Prefer absolute paths, or `git -C`, over `cd`.
+
 - **Before believing any timing, measure it twice on a quiet machine — contention inflates by 20-70x, not by 20%.** Measured 30 July 2026 on one `graph-owl-server` test binary, same tree, same binary:
 
   | Conditions | Wall |

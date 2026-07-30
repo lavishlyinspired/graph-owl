@@ -1,0 +1,31 @@
+{
+  // **Give rust-analyzer its own target directory.**
+  //
+  // By default it runs `cargo check` in the workspace's `target/`, which takes the
+  // same build lock as `cargo build` and `cargo test` from a terminal. Cargo locks
+  // per target directory, so pointing rust-analyzer elsewhere removes that class of
+  // contention for the price of some disk — the same trick as the
+  // `CARGO_TARGET_DIR=/tmp/check cargo check` rule in CLAUDE.md, in the other
+  // direction.
+  //
+  // **Honest scope note.** This was written while diagnosing an hour-long suite,
+  // and I initially blamed rust-analyzer for a stray `cargo test` seen in `ps`.
+  // That attribution was wrong: it was a second Claude Code session working in the
+  // same checkout. The setting is still correct — the IDE genuinely does share the
+  // lock by default — but it is preventive hygiene, not the fix for that incident.
+  "rust-analyzer.cargo.targetDir": true,
+
+  // Check the whole workspace, not just the open crate. Every cross-crate breakage
+  // in this project has been a compile error, and this surfaces them while typing
+  // instead of at `cargo build --workspace --tests` time. Affordable now that it
+  // has its own target directory.
+  "rust-analyzer.check.workspace": true,
+
+  // `clippy`, matching the gate the project actually uses:
+  // `[workspace.lints.clippy] all = "warn", pedantic = "warn"`. Seeing pedantic
+  // warnings live is what stops them arriving in a batch at commit time.
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.checkOnSave": true,
+
+  "files.watcherExclude": { "**/target/**": true }
+}
