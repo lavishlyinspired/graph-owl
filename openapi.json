@@ -300,6 +300,10 @@
           "id": {
             "type": "string"
           },
+          "inherited": {
+            "description": "True when this owner was not recorded on the entity itself but found by\nwalking up the containment hierarchy — Epic 11 Slice D.\n\n**The flag is the whole point of inheriting.** Without it, a 5,000-table\ncatalog reads as fully owned when in fact nobody has ever named an owner\nbelow the database, and the ownership-gap report has nothing to report.\nWith it, \"deliberately owned here\" and \"owned by whoever owns the thing\nabove\" are different answers, which is what a steward needs to know.\n\nAlways serialized, never omitted when false: a console reading its absence\ncannot tell \"direct\" from \"an older server that did not know about\ninheritance\".\n\nPer *entry* rather than per list. Today the list is homogeneous — the walk\nstops at the first owned ancestor and takes all of its owners — but the\nflag describes a fact about one owner, and putting it beside the owner it\ndescribes means no caller has to correlate two places.\n\n**`default` is load-bearing, not defensive.** Every version snapshot in\n`asset_versions` written before this field existed is an `Asset` JSON\nwithout it, and `asset_versions` deserializes with `.ok()?` inside a\n`filter_map` — so a snapshot that failed to parse would not error, it\nwould *silently vanish from an asset's history*. `false` is also the\ncorrect reading of those snapshots rather than merely a safe one:\ninheritance did not exist when they were written, so every owner they\nrecord was recorded directly.",
+            "type": "boolean"
+          },
           "kind": {
             "$ref": "#/components/schemas/OwnerKind"
           }

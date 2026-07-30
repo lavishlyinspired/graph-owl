@@ -3321,6 +3321,7 @@ mod tests {
                     id: owner.id.clone(),
                     kind: owner.kind,
                     display_name,
+                    inherited: false,
                 });
             }
             drop(users);

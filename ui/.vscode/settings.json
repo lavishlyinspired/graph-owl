@@ -1,0 +1,35 @@
+{
+  // **rust-analyzer must not share `target/` with the terminal.**
+  //
+  // By default it runs `cargo check` in the same target directory on every save,
+  // which takes the same build lock as `cargo build` / `cargo test`. The symptom
+  // is a suite that stalls for no visible reason while `test-health.sh` reports a
+  // perfectly clean environment — and it is indistinguishable from a fixture bug
+  // unless you happen to look at `ps` and notice a `cargo` you did not start.
+  //
+  // Found 30 July 2026: an unexplained
+  // `cargo test -q -p graph-owl-api -p graph-owl-mcp -p graph-owl-core --lib`
+  // had been running for 12 minutes alongside a workspace build. It was not a
+  // Claude Code hook and not a command anyone typed — it was the IDE.
+  //
+  // `true` puts it in `target/rust-analyzer`. Cargo locks per target directory, so
+  // this removes the contention entirely at the cost of some disk.
+  "rust-analyzer.cargo.targetDir": true,
+
+  // Check the whole workspace, not just the open crate — this is what catches the
+  // cross-crate breakage that `cargo build --workspace --tests` catches, without
+  // waiting for a commit. Cheap now that it has its own target directory.
+  "rust-analyzer.check.workspace": true,
+
+  // `clippy` rather than `check`, matching the gate the project actually uses:
+  // `[workspace.lints.clippy] all = "warn", pedantic = "warn"`. Seeing pedantic
+  // warnings while typing is what stops them arriving in a batch at commit time.
+  "rust-analyzer.check.command": "clippy",
+
+  // Never `cargo test` on save. It starts Postgres containers.
+  "rust-analyzer.checkOnSave": true,
+
+  "files.watcherExclude": {
+    "**/target/**": true
+  }
+}

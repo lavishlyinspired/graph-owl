@@ -40,6 +40,34 @@ pub struct EntityReference {
     /// a renamed team shows its new name everywhere rather than whatever it was
     /// called when ownership was assigned.
     pub display_name: String,
+    /// True when this owner was not recorded on the entity itself but found by
+    /// walking up the containment hierarchy — Epic 11 Slice D.
+    ///
+    /// **The flag is the whole point of inheriting.** Without it, a 5,000-table
+    /// catalog reads as fully owned when in fact nobody has ever named an owner
+    /// below the database, and the ownership-gap report has nothing to report.
+    /// With it, "deliberately owned here" and "owned by whoever owns the thing
+    /// above" are different answers, which is what a steward needs to know.
+    ///
+    /// Always serialized, never omitted when false: a console reading its absence
+    /// cannot tell "direct" from "an older server that did not know about
+    /// inheritance".
+    ///
+    /// Per *entry* rather than per list. Today the list is homogeneous — the walk
+    /// stops at the first owned ancestor and takes all of its owners — but the
+    /// flag describes a fact about one owner, and putting it beside the owner it
+    /// describes means no caller has to correlate two places.
+    ///
+    /// **`default` is load-bearing, not defensive.** Every version snapshot in
+    /// `asset_versions` written before this field existed is an `Asset` JSON
+    /// without it, and `asset_versions` deserializes with `.ok()?` inside a
+    /// `filter_map` — so a snapshot that failed to parse would not error, it
+    /// would *silently vanish from an asset's history*. `false` is also the
+    /// correct reading of those snapshots rather than merely a safe one:
+    /// inheritance did not exist when they were written, so every owner they
+    /// record was recorded directly.
+    #[serde(default)]
+    pub inherited: bool,
 }
 
 impl EntityReference {
@@ -49,6 +77,7 @@ impl EntityReference {
             id: id.into(),
             kind: OwnerKind::User,
             display_name: display_name.into(),
+            inherited: false,
         }
     }
 
@@ -58,6 +87,16 @@ impl EntityReference {
             id: id.into(),
             kind: OwnerKind::Team,
             display_name: display_name.into(),
+            inherited: false,
+        }
+    }
+
+    /// Mark this owner as reached by walking up the hierarchy.
+    #[must_use]
+    pub fn inherited(self) -> Self {
+        Self {
+            inherited: true,
+            ..self
         }
     }
 }
@@ -209,6 +248,49 @@ mod tests {
 
         assert_eq!(json["owners"][0]["displayName"], "Priya");
         assert!(json["owners"][0].get("display_name").is_none());
+    }
+
+    // **Slice D.** An owner recorded on the asset itself is not inherited, and the
+    // flag is always present rather than omitted when false — the whole point of
+    // the flag is to distinguish "deliberately owned here" from "nobody set this
+    // and we walked up", and a field that disappears in one of those two cases
+    // makes the console read its absence as the other one.
+    #[test]
+    fn a_directly_recorded_owner_is_not_inherited() {
+        let json = as_json(vec![EntityReference::user("priya", "Priya")]);
+
+        assert_eq!(json["owners"][0]["inherited"], serde_json::json!(false));
+    }
+
+    // Inheritance is a property of *this* owner entry, not of the read, so the
+    // flag travels with the reference wherever it is rendered.
+    #[test]
+    fn an_inherited_owner_says_so_on_the_wire() {
+        let json = as_json(vec![
+            EntityReference::team("platform", "Platform").inherited(),
+        ]);
+
+        assert_eq!(json["owners"][0]["inherited"], serde_json::json!(true));
+        assert_eq!(json["owners"][0]["id"], "platform");
+    }
+
+    // **The version-history regression this field could have caused.** Snapshots
+    // in `asset_versions` are whole `Asset` JSON documents, and every one written
+    // before Slice D lacks `inherited`. That read path deserializes with `.ok()?`
+    // inside a `filter_map`, so a snapshot it cannot parse does not raise — it
+    // disappears from the asset's history, silently, with no failing test
+    // anywhere. `#[serde(default)]` is what prevents that, and this is the test
+    // that stops somebody removing it to make the OpenAPI schema tidier.
+    #[test]
+    fn an_owner_recorded_before_inheritance_existed_still_parses() {
+        let old_snapshot = r#"{"id":"priya","kind":"user","displayName":"Priya"}"#;
+
+        let owner: EntityReference = serde_json::from_str(old_snapshot).expect("parses");
+
+        assert_eq!(owner.id, "priya");
+        // Correct, not merely safe: inheritance did not exist when this was
+        // written, so the owner it names was necessarily recorded directly.
+        assert!(!owner.inherited);
     }
 
     // A client submits `{id, kind}` and nothing else. `displayName` is resolved at

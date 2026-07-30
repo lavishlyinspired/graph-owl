@@ -1058,6 +1058,9 @@ impl Storage for PostgresStorage {
                 id: owner.id.clone(),
                 kind: owner.kind,
                 display_name,
+                // A write records ownership *here*, so what comes back is direct
+                // by construction. Inheritance is a read-time projection only.
+                inherited: false,
             });
         }
 
@@ -1110,48 +1113,24 @@ impl Storage for PostgresStorage {
     }
 
     async fn asset_owners(&self, asset_id: Uuid) -> Result<Vec<EntityReference>, StorageError> {
-        // Display names come from the principal's own row, joined at read time —
-        // a renamed team shows its new name everywhere rather than the label it
-        // had when ownership was assigned.
-        let rows: Vec<(
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )> = sqlx::query_as(
-            "SELECT o.user_id, u.display_name, o.team_id, t.display_name
-                 FROM asset_owners o
-                 LEFT JOIN users u ON u.id = o.user_id
-                 LEFT JOIN teams t ON t.id = o.team_id
-                 WHERE o.asset_id = $1
-                 ORDER BY o.ordinal",
-        )
+        // **The same projection the asset read uses**, deliberately. Two reads
+        // that disagree about who owns a table is what a console shows a steward,
+        // and the second implementation is where the disagreement comes from —
+        // so there is only one, and inheritance is correct here for free.
+        let owners: Option<serde_json::Value> = sqlx::query_scalar(&format!(
+            "SELECT {OWNERS_JSON} FROM assets WHERE assets.id = $1"
+        ))
         .bind(asset_id)
-        .fetch_all(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-        rows.into_iter()
-            .map(|(user_id, user_name, team_id, team_name)| {
-                // The CHECK guarantees exactly one side is set, so a row with
-                // neither is corrupt rather than a shape to paper over.
-                match (user_id, team_id) {
-                    (Some(id), None) => Ok(EntityReference {
-                        display_name: user_name.unwrap_or_else(|| id.clone()),
-                        id,
-                        kind: OwnerKind::User,
-                    }),
-                    (None, Some(id)) => Ok(EntityReference {
-                        display_name: team_name.unwrap_or_else(|| id.clone()),
-                        id,
-                        kind: OwnerKind::Team,
-                    }),
-                    _ => Err(StorageError::Unexpected(format!(
-                        "asset_owners row for {asset_id} names neither a user nor a team"
-                    ))),
-                }
-            })
-            .collect()
+        // No asset is not an error here: the caller has already established the
+        // asset exists, or is asking a question whose honest answer is "nobody".
+        let Some(owners) = owners else {
+            return Ok(Vec::new());
+        };
+        serde_json::from_value(owners).map_err(|e| StorageError::Unexpected(e.to_string()))
     }
 
     async fn upsert_team(&self, team: &graph_owl_storage::Team) -> Result<(), StorageError> {
@@ -2405,12 +2384,23 @@ fn asset_from_row(row: PgRow) -> Asset {
     }
 }
 
-/// Owners as a JSON array, aggregated **in SQL**.
+/// Effective owners as a JSON array, aggregated **in SQL**.
 ///
 /// A correlated subquery rather than a join, because a join multiplies asset rows
 /// by owner count and every caller would then have to de-duplicate — and rather
 /// than a second query per asset, because a list of 200 assets would become 201
 /// round trips against Docker's mapped port at ~30ms each.
+///
+/// **Effective, not direct** (Epic 11 Slice D). An asset with no owner of its own
+/// reports the nearest owned ancestor's owners, flagged `inherited`. The walk is
+/// a recursive CTE per row; containment is at most five levels deep
+/// (service → database → schema → table → column), so the recursion is bounded by
+/// the domain rather than by a limit anybody has to remember to set.
+///
+/// `ORDER BY hops LIMIT 1` is what makes inheritance **stop at the nearest owned
+/// ancestor** rather than accumulate up the chain: "who do I ask about this
+/// table" has one answer, and a list that grows with tree depth answers "who
+/// might conceivably care" instead.
 ///
 /// `coalesce(..., '[]')` so an unowned asset yields an empty array rather than
 /// `NULL`: the domain's `owners` is always a list, and the two must agree or the
@@ -2420,15 +2410,29 @@ fn asset_from_row(row: PgRow) -> Asset {
 /// and fall back to the id — an owner row can only exist for a live principal
 /// (both columns are foreign keys), so the fallback is unreachable defence rather
 /// than a real case.
-const OWNERS_JSON: &str = "(SELECT coalesce(json_agg(json_build_object(
+const OWNERS_JSON: &str = "(WITH RECURSIVE ancestry (node, next_up, hops) AS (
+            SELECT seed.id, seed.parent_id, 0 FROM assets seed WHERE seed.id = assets.id
+        UNION ALL
+            SELECT up.id, up.parent_id, ancestry.hops + 1
+              FROM assets up JOIN ancestry ON up.id = ancestry.next_up
+    ),
+    nearest AS (
+        SELECT ancestry.node, ancestry.hops
+          FROM ancestry
+         WHERE EXISTS (SELECT 1 FROM asset_owners o WHERE o.asset_id = ancestry.node)
+         ORDER BY ancestry.hops
+         LIMIT 1
+    )
+    SELECT coalesce(json_agg(json_build_object(
         'id',          coalesce(o.user_id, o.team_id),
         'kind',        CASE WHEN o.user_id IS NOT NULL THEN 'user' ELSE 'team' END,
-        'displayName', coalesce(u.display_name, t.display_name, o.user_id, o.team_id)
+        'displayName', coalesce(u.display_name, t.display_name, o.user_id, o.team_id),
+        'inherited',   nearest.hops > 0
     ) ORDER BY o.ordinal), '[]'::json)
-    FROM asset_owners o
+    FROM nearest
+    JOIN asset_owners o ON o.asset_id = nearest.node
     LEFT JOIN users u ON u.id = o.user_id
-    LEFT JOIN teams t ON t.id = o.team_id
-    WHERE o.asset_id = assets.id) AS owners";
+    LEFT JOIN teams t ON t.id = o.team_id) AS owners";
 
 const ASSET_COLUMNS: &str = "id, kind, name, fully_qualified_name, parent_id, description, properties, version_major, version_minor, updated_by, change_description, deleted, deleted_at, created_at, updated_at";
 

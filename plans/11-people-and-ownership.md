@@ -23,7 +23,7 @@ Answer the question asked of a catalog more than any other: *who do I talk to ab
 - [ ] `User` and `Team` have full CRUD with the envelope.
 - [ ] A team can contain teams and users; cycles are rejected.
 - [ ] Any entity can have multiple owners, mixing users and teams.
-- [ ] A table with no explicit owner reports its schema's owner with `inherited: true`.
+- [x] A table with no explicit owner reports its schema's owner with `inherited: true`.
 - [ ] `GET /tables?owner={id}` matches both direct and inherited ownership.
 - [ ] A user can follow an entity and list what they follow.
 - [ ] Deleting a team with owned assets is rejected or reassigns — not silently orphaning.

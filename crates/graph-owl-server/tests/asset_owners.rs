@@ -246,3 +246,93 @@ async fn an_owner_without_a_kind_is_refused() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+// ---- Epic 11 Slice D: ownership inherits ----
+
+/// `warehouse` → `warehouse.retail` → `warehouse.retail.public` →
+/// `warehouse.retail.public.orders`, returned outermost-first.
+async fn estate(app: &axum::Router) -> [String; 4] {
+    let service = asset(app, "warehouse").await;
+    let mut ids = vec![service];
+    for (kind, name) in [
+        ("database", "retail"),
+        ("schema", "public"),
+        ("table", "orders"),
+    ] {
+        let parent = ids.last().expect("a parent").clone();
+        let (status, body) = send(
+            app,
+            "POST",
+            "/assets",
+            Some(json!({ "kind": kind, "name": name, "parentId": parent })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        ids.push(body["id"].as_str().expect("an id").to_string());
+    }
+    ids.try_into().expect("four levels")
+}
+
+// The wire shape of the flag, asserted against the bytes. A round trip agrees
+// with itself whatever the field is called — the lesson `Authorship` taught by
+// shipping `agent_id` — and this field exists to be read by a console.
+#[tokio::test]
+async fn an_inherited_owner_is_flagged_on_the_wire() {
+    let (app, _db, _) = test_app().await;
+    let [_service, _database, schema, table] = estate(&app).await;
+    team(&app, "platform", "Platform Team").await;
+    let (status, body) = send(
+        &app,
+        "PUT",
+        &format!("/assets/{schema}/owners"),
+        Some(json!({ "owners": [{ "id": "platform", "kind": "team" }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = send(&app, "GET", &format!("/assets/{table}"), None).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["owners"][0]["displayName"], "Platform Team", "{body}");
+    assert_eq!(body["owners"][0]["inherited"], json!(true), "{body}");
+}
+
+// The flag is always present, never omitted when false — a console reading its
+// absence cannot tell "owned here" from "an older server that did not know about
+// inheritance", and those need different UI.
+#[tokio::test]
+async fn a_direct_owner_carries_the_flag_set_to_false() {
+    let (app, _db, _) = test_app().await;
+    let orders = asset(&app, "orders").await;
+    send(
+        &app,
+        "PUT",
+        &format!("/assets/{orders}/owners"),
+        Some(json!({ "owners": [{ "id": SEEDED_USER, "kind": "user" }] })),
+    )
+    .await;
+
+    let (_, body) = send(&app, "GET", &format!("/assets/{orders}"), None).await;
+
+    assert_eq!(body["owners"][0]["inherited"], json!(false), "{body}");
+}
+
+// The write echo reports what was *recorded*, not what would now be read. A PUT
+// that answered with `inherited: true` would tell a client its write had not
+// landed where it asked.
+#[tokio::test]
+async fn setting_owners_echoes_them_as_direct() {
+    let (app, _db, _) = test_app().await;
+    let [_service, database, _schema, _table] = estate(&app).await;
+
+    let (status, body) = send(
+        &app,
+        "PUT",
+        &format!("/assets/{database}/owners"),
+        Some(json!({ "owners": [{ "id": SEEDED_USER, "kind": "user" }] })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["owners"][0]["inherited"], json!(false), "{body}");
+}
