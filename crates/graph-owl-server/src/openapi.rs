@@ -356,6 +356,70 @@ pub static ROUTES: &[Route] = &[
     // and contradiction reads return composed envelopes rather than a single
     // domain type, so they carry no `response` name — the same choice the other
     // composed reads in this table already make.
+    // Epic 11 Slices A, B, F, G.
+    route(
+        "put",
+        "/users/{id}",
+        "Create or rename a user; grants no roles",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "delete",
+        "/users/{id}",
+        "Delete a user; `409` with counts unless `reassignTo` is given",
+        None,
+        None,
+        204,
+        true,
+    ),
+    route(
+        "delete",
+        "/teams/{id}",
+        "Delete a team; `409` with counts unless `reassignTo` is given",
+        None,
+        None,
+        204,
+        true,
+    ),
+    route(
+        "get",
+        "/teams/{id}/children",
+        "Teams reporting into this one",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/users/{id}/follows",
+        "What this user follows",
+        None,
+        Some("Page_Asset"),
+        200,
+        true,
+    ),
+    route(
+        "put",
+        "/assets/{id}/followers/{user_id}",
+        "Follow an asset; idempotent, so a second follow is also 200",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "delete",
+        "/assets/{id}/followers/{user_id}",
+        "Stop following an asset",
+        None,
+        None,
+        204,
+        true,
+    ),
     // Epic 11 Slice C. `PUT` because the body is the complete owner list.
     route(
         "put",

@@ -108,6 +108,22 @@ One incident already occurred and was reverted during planning (a cache-tier tab
 - **`--lib` blinds the run to whatever only integration tests cover, and the report calls that a survivor.** Measured on `observability.rs`: `observe` and `metrics_endpoint` are HTTP middleware and a handler, exercised only by `tests/observability.rs`, and a `--lib` run reported all three of their mutants as MISSED. Re-run without `--lib`, scoped with `--re`, **all three were caught in 3 minutes**.
   So: `--lib` for code with unit coverage, which is where pure decisions belong anyway; drop it — and pay the container cost, scoped tightly with `--re` — for the thin imperative shells that only an end-to-end test reaches. A MISSED line from a `--lib` run is a question about coverage *shape*, not automatically a gap.
 
+- **"One cargo at a time" is the wrong scope. It is one heavy workload at a time, whatever the toolchain.** Measured 30 July 2026: a workspace suite took **30 minutes** for 57 binaries against a ~4-minute baseline, with a clean environment, one cargo, no second agent, and the log advancing every few seconds — so nothing the existing checks look for. The cause was **`npx stryker run`, three times, while the suite ran**. Stryker spawns **17 test-runner processes**; vitest spawns workers of its own.
+
+  None of them take cargo's build lock, which is precisely why the rule as written did not flag them, and why `pgrep -x cargo` returning 1 was reassuring and wrong. They compete for CPU, and this suite runs at ~20% CPU waiting on Docker — it has no headroom to lose.
+
+  So the check is not "is another cargo running" but **"is anything expensive running"**:
+
+  ```
+  pgrep -x claude | wc -l              # another agent in the tree
+  pgrep -x cargo  | wc -l              # another Rust build or suite
+  pgrep -f "stryker|vitest|tsc" | wc -l   # the ones that own no cargo lock
+  ```
+
+  Frontend work is not free just because it is not Rust. Batch the JS test and mutation runs the same way the Rust ones are batched, and do not interleave them with a workspace suite.
+
+  **One suspect worth clearing quickly next time**: `crates/graph-owl-ui/build.rs` watches `../../ui/dist`, *not* `ui/src` — so editing TypeScript does **not** trigger a Rust rebuild, and `npm run build` is the only thing that does.
+
 - **Check for a second agent in the checkout before diagnosing anything else. This one cost most of a day.** Found 30 July 2026: a commit appeared on top of mine that I had not written (`Epic 11 Slice D`, with a 287-line test file), and my own untracked `.vscode/settings.json` had been swept into it by somebody else's `git add -A`. `pgrep -x claude` showed **three** processes where there should have been one — two other sessions were working in the same working tree.
 
   Everything unexplained that day traces to it: an "hour-long" suite, a 222s `cargo mutants` baseline build against 18s quiet, a test binary at 205s that ran in 3s minutes later, and a 64s → 1s swing on identical code. I had attributed the stray `cargo test -q -p graph-owl-api -p graph-owl-mcp -p graph-owl-core --lib` in `ps` to rust-analyzer. **That was wrong** — it was the other session, and the crate list was exactly what its slice touched.

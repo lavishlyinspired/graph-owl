@@ -241,6 +241,7 @@ async fn every_owner_of_the_nearest_ancestor_is_inherited_in_order() {
             display_name: "Platform Team".to_string(),
             description: None,
             members: vec![],
+            parent_team_id: None,
         })
         .await
         .expect("team");

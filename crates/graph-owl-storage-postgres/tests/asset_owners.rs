@@ -73,6 +73,7 @@ async fn team(storage: &PostgresStorage, id: &str, name: &str) -> OwnerRef {
             display_name: name.to_string(),
             description: None,
             members: vec![],
+            parent_team_id: None,
         })
         .await
         .expect("team");
@@ -531,6 +532,7 @@ async fn filtering_by_a_team_does_not_match_assets_owned_by_its_members() {
             display_name: "Platform".to_string(),
             description: None,
             members: vec!["priya".to_string()],
+            parent_team_id: None,
         })
         .await
         .expect("team");

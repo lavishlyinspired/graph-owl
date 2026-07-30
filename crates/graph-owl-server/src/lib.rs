@@ -90,6 +90,14 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/policies/dry-run", post(dry_run_policy))
         .route("/users/{id}/roles", put(set_user_roles))
         .route("/teams", get(list_teams).post(upsert_team))
+        .route("/teams/{id}/children", get(list_child_teams))
+        .route("/teams/{id}", delete(delete_team))
+        .route("/users/{id}", put(upsert_user).delete(delete_user))
+        .route("/users/{id}/follows", get(list_follows))
+        .route(
+            "/assets/{id}/followers/{user_id}",
+            put(follow_asset).delete(unfollow_asset),
+        )
         // Epic 31. `/memories` for the record itself; the reads hang off the
         // asset, because "what do we know about this table" is the question, and
         // a client that has an asset id should not have to know a second noun to
@@ -804,6 +812,10 @@ impl AppError {
                 kind: ConflictKind::MemoryExists,
                 ..
             } => "memory-exists",
+            AppError::Conflict {
+                kind: ConflictKind::PrincipalStillHolds,
+                ..
+            } => "principal-still-holds",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
             AppError::PreconditionFailed { .. } => "version-conflict",
@@ -842,6 +854,10 @@ impl AppError {
                 kind: ConflictKind::MemoryExists,
                 ..
             } => "A memory with this id already exists",
+            AppError::Conflict {
+                kind: ConflictKind::PrincipalStillHolds,
+                ..
+            } => "This principal still holds things",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
             AppError::PreconditionFailed { .. } => "Version precondition failed",
@@ -902,6 +918,14 @@ impl AppError {
                 kind: ConflictKind::MemoryExists,
                 ..
             } => "a memory with this id already exists".to_string(),
+            // **The detail passes through**, unlike every other conflict here: the
+            // counts by kind are the actionable part, and a canned sentence cannot
+            // carry "1 service, 3 schemas, 396 columns".
+            AppError::Conflict {
+                kind: ConflictKind::PrincipalStillHolds,
+                detail,
+                ..
+            } => detail.clone(),
             AppError::NotFound => "the requested resource does not exist".to_string(),
             AppError::PreconditionFailed { current } => format!(
                 "this asset is now at version {current}; your `If-Match` named an \
@@ -1540,6 +1564,10 @@ async fn list_connector_configs(
 #[serde(rename_all = "camelCase")]
 struct TeamRequest {
     id: String,
+    /// The team this one reports into — Epic 11 Slice B. A cycle at **any** depth
+    /// is refused, not merely self-parenting.
+    #[serde(default)]
+    parent_team_id: Option<String>,
     display_name: String,
     #[serde(default)]
     description: Option<String>,
@@ -1564,6 +1592,10 @@ fn team_body(team: &graph_owl_storage::Team) -> serde_json::Value {
         "displayName": team.display_name,
         "description": team.description,
         "members": team.members,
+        // Always present, `null` for a root. A console reading its absence cannot
+        // tell "top of the hierarchy" from "a server that does not know about
+        // nesting" — the same argument as `inherited` on an owner.
+        "parentTeamId": team.parent_team_id,
     })
 }
 
@@ -1881,9 +1913,190 @@ async fn upsert_team(
             display_name: payload.display_name,
             description: payload.description,
             members: payload.members,
+            parent_team_id: payload.parent_team_id,
         })
         .await?;
     Ok((StatusCode::CREATED, Json(team_body(&stored))))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserRequest {
+    display_name: String,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+impl ValidateBody for UserRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Create or update a user — Epic 11 Slice A's missing half.
+///
+/// **Users previously existed only by signing in.** Auto-provisioning on first
+/// authentication (Epic 12 Slice A) is right for people who use the console, and
+/// it left no way to name somebody who has not yet — so a person could not be
+/// recorded as an owner at all until they logged in, which is exactly backwards
+/// for onboarding.
+///
+/// `PUT` on the id rather than `POST` to a collection: the caller chooses the id
+/// (it is the identity-provider subject), so the request is idempotent and a retry
+/// is not a second user.
+async fn upsert_user(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<String>,
+    AppJson(payload): AppJson<UserRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let stored = catalog
+        .upsert_user_record(&id, &payload.display_name, payload.email.as_deref())
+        .await?;
+    Ok(Json(json!({
+        "id": stored.id,
+        "displayName": stored.display_name,
+        "email": stored.email,
+        "roles": stored.roles,
+    })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeletePrincipalQuery {
+    /// Transfer what this principal owns before deleting it. `kind` is required
+    /// alongside, because `users.id` and `teams.id` can collide and transferring
+    /// ownership to the wrong principal is not recoverable by reading the response.
+    #[serde(default)]
+    reassign_to: Option<String>,
+    #[serde(default)]
+    reassign_to_kind: Option<graph_owl_core::ownership::OwnerKind>,
+}
+
+/// Resolve the optional reassignment target from a delete request.
+fn reassignment(
+    query: &DeletePrincipalQuery,
+) -> Result<Option<graph_owl_core::ownership::OwnerRef>, AppError> {
+    match (&query.reassign_to, query.reassign_to_kind) {
+        (None, _) => Ok(None),
+        (Some(id), Some(kind)) => Ok(Some(graph_owl_core::ownership::OwnerRef {
+            id: id.clone(),
+            kind,
+        })),
+        // **Not defaulted to `user`.** Guessing the kind would transfer an estate
+        // to whichever principal happened to share the id.
+        (Some(_), None) => Err(AppError::Validation(vec![FieldError::new(
+            "reassignToKind",
+            FieldErrorCode::Required,
+            "`reassignToKind` is required with `reassignTo`: a user and a team can \
+             share an id, and guessing would transfer ownership to the wrong one",
+        )])),
+    }
+}
+
+async fn delete_user(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<String>,
+    AppQuery(query): AppQuery<DeletePrincipalQuery>,
+) -> Result<StatusCode, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let target = reassignment(&query)?;
+    catalog
+        .delete_principal(
+            &graph_owl_core::ownership::OwnerRef {
+                id,
+                kind: graph_owl_core::ownership::OwnerKind::User,
+            },
+            target.as_ref(),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_team(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<String>,
+    AppQuery(query): AppQuery<DeletePrincipalQuery>,
+) -> Result<StatusCode, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let target = reassignment(&query)?;
+    catalog
+        .delete_principal(
+            &graph_owl_core::ownership::OwnerRef {
+                id,
+                kind: graph_owl_core::ownership::OwnerKind::Team,
+            },
+            target.as_ref(),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Teams reporting into this one.
+async fn list_child_teams(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let children = catalog.child_teams(&id).await?;
+    Ok(Json(json!(
+        children.iter().map(team_body).collect::<Vec<_>>()
+    )))
+}
+
+/// Follow an asset — Epic 11 Slice F.
+///
+/// **`200`, not `201`, and idempotent.** Following what you already follow is the
+/// state you asked for; a `409` would make a retried request look like a conflict
+/// and a `201` would claim a second edge was created.
+async fn follow_asset(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path((id, user_id)): Path<(Uuid, String)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Following on somebody else's behalf is an administrative act; following for
+    // yourself is not.
+    if principal.id != user_id && !principal.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let outcome = catalog.follow_asset(id, &user_id).await?;
+    Ok(Json(json!({
+        "following": true,
+        "created": outcome == graph_owl_storage::FollowOutcome::Followed,
+        "followerCount": catalog.follower_count(id).await?,
+    })))
+}
+
+async fn unfollow_asset(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path((id, user_id)): Path<(Uuid, String)>,
+) -> Result<StatusCode, AppError> {
+    if principal.id != user_id && !principal.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    catalog.unfollow_asset(id, &user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// What a user follows, paginated like every other asset page.
+async fn list_follows(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<String>,
+    AppQuery(query): AppQuery<AssetListQuery>,
+) -> Result<Json<Page<Asset>>, AppError> {
+    let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    Ok(Json(catalog.assets_followed_by(&id, &page).await?))
 }
 
 /// Every team, so an owner picker has something to offer.

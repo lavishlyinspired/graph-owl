@@ -1374,6 +1374,29 @@ impl Catalog {
                 ));
             }
         }
+        // **Cycle detection, at any depth** — Epic 11 Slice B. Checked here rather
+        // than only in the schema because the database can cheaply refuse
+        // self-parenting and nothing more: `A → B → C → A` needs an ancestor walk,
+        // and the walk has to happen before the write or the graph it walks is
+        // already broken.
+        if let Some(parent) = &team.parent_team_id {
+            if self.storage.find_team(parent).await?.is_none() {
+                problems.push(FieldError::new(
+                    "parentTeamId",
+                    FieldErrorCode::Type,
+                    format!("`{parent}` is not a known team"),
+                ));
+            } else if self.storage.would_cycle(&team.id, parent).await? {
+                problems.push(FieldError::new(
+                    "parentTeamId",
+                    FieldErrorCode::Type,
+                    format!(
+                        "making `{parent}` the parent of `{}` would close a cycle in the team hierarchy",
+                        team.id
+                    ),
+                ));
+            }
+        }
         if !problems.is_empty() {
             return Err(CatalogError::Validation(problems));
         }
@@ -1384,6 +1407,143 @@ impl Catalog {
                 "the team vanished between write and read".to_string(),
             ))
         })
+    }
+
+    /// Teams reporting directly into this one.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the team does not exist. `Storage` if the read fails.
+    pub async fn child_teams(
+        &self,
+        id: &str,
+    ) -> Result<Vec<graph_owl_storage::Team>, CatalogError> {
+        if self.storage.find_team(id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self.storage.child_teams(id).await?)
+    }
+
+    /// Record that a user follows an asset — Epic 11 Slice F.
+    ///
+    /// **Idempotent**: following what you already follow is the state you asked
+    /// for, not a conflict.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the asset does not exist. `Validation` if the asset is
+    /// soft-deleted — following a tombstone records interest in something nobody
+    /// can read.
+    pub async fn follow_asset(
+        &self,
+        asset_id: Uuid,
+        user_id: &str,
+    ) -> Result<graph_owl_storage::FollowOutcome, CatalogError> {
+        let Some(asset) = self.storage.get_asset(asset_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        if asset.deleted {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "assetId",
+                FieldErrorCode::Type,
+                "this asset is deleted; following it would record interest in \
+                 something nobody can read"
+                    .to_string(),
+            )]));
+        }
+        Ok(self.storage.follow_asset(asset_id, user_id).await?)
+    }
+
+    /// Stop following. Also idempotent.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    pub async fn unfollow_asset(&self, asset_id: Uuid, user_id: &str) -> Result<(), CatalogError> {
+        Ok(self.storage.unfollow_asset(asset_id, user_id).await?)
+    }
+
+    /// What this user follows.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn assets_followed_by(
+        &self,
+        user_id: &str,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, CatalogError> {
+        Ok(self.storage.assets_followed_by(user_id, page).await?)
+    }
+
+    /// How many people follow this asset.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn follower_count(&self, asset_id: Uuid) -> Result<i64, CatalogError> {
+        Ok(self.storage.follower_count(asset_id).await?)
+    }
+
+    /// Delete a principal, refusing to strand what it holds — Epic 11 Slice G.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the principal does not exist. `Conflict` carrying the counts
+    /// when it still owns assets or parents teams and no `reassign_to` was given —
+    /// "ownership stays truthful when somebody leaves" is the slice's value, and a
+    /// silent cascade to unowned is exactly what that forbids. `Validation` if the
+    /// reassignment target does not exist.
+    pub async fn delete_principal(
+        &self,
+        principal: &graph_owl_core::ownership::OwnerRef,
+        reassign_to: Option<&graph_owl_core::ownership::OwnerRef>,
+    ) -> Result<i64, CatalogError> {
+        match self
+            .storage
+            .delete_principal(principal, reassign_to)
+            .await?
+        {
+            graph_owl_storage::PrincipalDeletion::Deleted { reassigned } => Ok(reassigned),
+            graph_owl_storage::PrincipalDeletion::NotFound => Err(CatalogError::NotFound),
+            graph_owl_storage::PrincipalDeletion::UnknownTarget => {
+                Err(CatalogError::Validation(vec![FieldError::new(
+                    "reassignTo",
+                    FieldErrorCode::Type,
+                    "the principal to reassign ownership to does not exist".to_string(),
+                )]))
+            }
+            graph_owl_storage::PrincipalDeletion::StillHolds(holdings) => {
+                // The detail names counts *by kind*, because "you still own 400
+                // things" is not actionable while "1 service, 3 schemas, 396
+                // columns" says reassign the service and let inheritance do the
+                // rest.
+                let owned = holdings
+                    .owned_by_kind
+                    .iter()
+                    .map(|(kind, n)| format!("{n} {}", kind.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut detail = format!(
+                    "`{}` still owns {} asset(s): {owned}",
+                    principal.id,
+                    holdings.owned_total()
+                );
+                if !holdings.child_teams.is_empty() {
+                    detail.push_str(&format!(
+                        "; and parents {} team(s): {}",
+                        holdings.child_teams.len(),
+                        holdings.child_teams.join(", ")
+                    ));
+                }
+                detail.push_str(". Pass reassignTo to transfer, or remove the ownership first.");
+                Err(CatalogError::Conflict {
+                    detail,
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::PrincipalStillHolds,
+                })
+            }
+        }
     }
 
     /// Every team.
@@ -1418,6 +1578,59 @@ impl Catalog {
     /// granting it roles would let a typo mint a principal.
     /// `Storage` if the write fails.
     #[tracing::instrument(name = "catalog.set_user_roles", skip_all)]
+    /// Create or update a user's record — Epic 11 Slice A's missing half.
+    ///
+    /// **Roles are deliberately not settable here.** `set_user_roles` is the one
+    /// path that grants them, and it invalidates the authorization cache; a second
+    /// path that also wrote roles would have to remember to do the same, and the
+    /// one that forgot would leave stale permissions in force. Creating a user
+    /// grants nothing, which is also the right default for onboarding.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the id or display name is blank — an unnamed principal is
+    /// one nobody can pick from a list.
+    pub async fn upsert_user_record(
+        &self,
+        id: &str,
+        display_name: &str,
+        email: Option<&str>,
+    ) -> Result<StoredUser, CatalogError> {
+        let mut problems = Vec::new();
+        if id.trim().is_empty() {
+            problems.push(FieldError::new(
+                "id",
+                FieldErrorCode::Required,
+                "a user needs an id — the identity provider's subject".to_string(),
+            ));
+        }
+        if display_name.trim().is_empty() {
+            problems.push(FieldError::new(
+                "displayName",
+                FieldErrorCode::Required,
+                "a user needs a name somebody can recognise in an owner list".to_string(),
+            ));
+        }
+        if !problems.is_empty() {
+            return Err(CatalogError::Validation(problems));
+        }
+
+        // Existing roles and flags are preserved: this endpoint renames and
+        // records, it does not re-provision. Overwriting `is_admin` from a body
+        // would make a rename a privilege change.
+        let existing = self.storage.find_user(id).await?;
+        let user = StoredUser {
+            id: id.to_string(),
+            display_name: display_name.to_string(),
+            email: email.map(ToString::to_string),
+            is_admin: existing.as_ref().is_some_and(|u| u.is_admin),
+            is_bot: existing.as_ref().is_some_and(|u| u.is_bot),
+            roles: existing.map(|u| u.roles).unwrap_or_default(),
+        };
+        self.storage.upsert_user(&user).await?;
+        Ok(user)
+    }
+
     pub async fn set_user_roles(
         &self,
         id: &str,
@@ -3102,6 +3315,7 @@ mod tests {
         waivers: Mutex<Vec<graph_owl_storage::Waiver>>,
         assignments: Mutex<Vec<graph_owl_storage::Assignment>>,
         teams: Mutex<Vec<graph_owl_storage::Team>>,
+        followers: Mutex<Vec<(Uuid, String)>>,
         /// The config **and** its credential, so a test can prove the credential
         /// is kept and still never returned by the read path.
         #[allow(clippy::type_complexity)]
@@ -3279,6 +3493,238 @@ mod tests {
             &self,
         ) -> Result<Vec<graph_owl_core::contradiction::Review>, StorageError> {
             Ok(self.reviews.lock().expect("lock").clone())
+        }
+
+        async fn child_teams(
+            &self,
+            id: &str,
+        ) -> Result<Vec<graph_owl_storage::Team>, StorageError> {
+            Ok(self
+                .teams
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|team| team.parent_team_id.as_deref() == Some(id))
+                .cloned()
+                .collect())
+        }
+
+        async fn would_cycle(&self, team: &str, parent: &str) -> Result<bool, StorageError> {
+            if team == parent {
+                return Ok(true);
+            }
+            // Walks ancestry, as the port specifies. A double that compared only
+            // the immediate parent would pass every depth-1 test and let
+            // `A → B → C → A` through — which is Slice B's named mutator watch.
+            let teams = self.teams.lock().expect("lock");
+            let mut node = Some(parent.to_string());
+            let mut seen = 0;
+            while let Some(current) = node {
+                if current == team {
+                    return Ok(true);
+                }
+                // Guard against an already-corrupt chain rather than looping
+                // forever while deciding whether a loop would be created.
+                seen += 1;
+                if seen > teams.len() {
+                    return Ok(true);
+                }
+                node = teams
+                    .iter()
+                    .find(|candidate| candidate.id == current)
+                    .and_then(|candidate| candidate.parent_team_id.clone());
+            }
+            Ok(false)
+        }
+
+        async fn follow_asset(
+            &self,
+            asset_id: Uuid,
+            user_id: &str,
+        ) -> Result<graph_owl_storage::FollowOutcome, StorageError> {
+            self.guard_write("follow_asset");
+            let mut held = self.followers.lock().expect("lock");
+            let edge = (asset_id, user_id.to_string());
+            if held.contains(&edge) {
+                return Ok(graph_owl_storage::FollowOutcome::AlreadyFollowing);
+            }
+            held.push(edge);
+            Ok(graph_owl_storage::FollowOutcome::Followed)
+        }
+
+        async fn unfollow_asset(&self, asset_id: Uuid, user_id: &str) -> Result<(), StorageError> {
+            self.guard_write("unfollow_asset");
+            self.followers
+                .lock()
+                .expect("lock")
+                .retain(|(id, who)| !(*id == asset_id && who == user_id));
+            Ok(())
+        }
+
+        async fn assets_followed_by(
+            &self,
+            user_id: &str,
+            page: &PageRequest,
+        ) -> Result<Page<Asset>, StorageError> {
+            let followed: Vec<Uuid> = self
+                .followers
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|(_, who)| who == user_id)
+                .map(|(id, _)| *id)
+                .collect();
+            let assets: Vec<Asset> = self
+                .assets
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|asset| followed.contains(&asset.id) && !asset.deleted)
+                .cloned()
+                .collect();
+            Ok(Page::from_overfetch(assets, page.limit, |a: &Asset| {
+                Cursor::new(a.fully_qualified_name.clone(), a.id)
+            }))
+        }
+
+        async fn follower_count(&self, asset_id: Uuid) -> Result<i64, StorageError> {
+            Ok(i64::try_from(
+                self.followers
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .filter(|(id, _)| *id == asset_id)
+                    .count(),
+            )
+            .unwrap_or(i64::MAX))
+        }
+
+        async fn principal_holdings(
+            &self,
+            principal: &graph_owl_core::ownership::OwnerRef,
+        ) -> Result<graph_owl_storage::Holdings, StorageError> {
+            let owners = self.owners.lock().expect("lock");
+            let assets = self.assets.lock().expect("lock");
+            // Keyed on the wire string because `AssetKind` is deliberately not
+            // `Ord` — deriving an ordering on a domain enum to satisfy a test
+            // double would put an arbitrary rank on the hierarchy.
+            let mut by_kind: std::collections::BTreeMap<&'static str, (AssetKind, i64)> =
+                std::collections::BTreeMap::new();
+            for (asset_id, list) in owners.iter() {
+                if list
+                    .iter()
+                    .any(|o| o.id == principal.id && o.kind == principal.kind)
+                {
+                    if let Some(asset) = assets.iter().find(|a| a.id == *asset_id) {
+                        by_kind
+                            .entry(asset.kind.as_str())
+                            .or_insert((asset.kind, 0))
+                            .1 += 1;
+                    }
+                }
+            }
+            drop(owners);
+            drop(assets);
+            let child_teams = match principal.kind {
+                graph_owl_core::ownership::OwnerKind::Team => self
+                    .teams
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .filter(|t| t.parent_team_id.as_deref() == Some(principal.id.as_str()))
+                    .map(|t| t.id.clone())
+                    .collect(),
+                graph_owl_core::ownership::OwnerKind::User => Vec::new(),
+            };
+            Ok(graph_owl_storage::Holdings {
+                owned_by_kind: by_kind.into_values().collect(),
+                child_teams,
+            })
+        }
+
+        async fn delete_principal(
+            &self,
+            principal: &graph_owl_core::ownership::OwnerRef,
+            reassign_to: Option<&graph_owl_core::ownership::OwnerRef>,
+        ) -> Result<graph_owl_storage::PrincipalDeletion, StorageError> {
+            self.guard_write("delete_principal");
+            let known = match principal.kind {
+                graph_owl_core::ownership::OwnerKind::User => self
+                    .users
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .any(|u| u.id == principal.id),
+                graph_owl_core::ownership::OwnerKind::Team => self
+                    .teams
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .any(|t| t.id == principal.id),
+            };
+            if !known {
+                return Ok(graph_owl_storage::PrincipalDeletion::NotFound);
+            }
+
+            let holdings = self.principal_holdings(principal).await?;
+            let mut reassigned = 0_i64;
+            if let Some(target) = reassign_to {
+                let target_known = match target.kind {
+                    graph_owl_core::ownership::OwnerKind::User => self
+                        .users
+                        .lock()
+                        .expect("lock")
+                        .iter()
+                        .any(|u| u.id == target.id),
+                    graph_owl_core::ownership::OwnerKind::Team => self
+                        .teams
+                        .lock()
+                        .expect("lock")
+                        .iter()
+                        .any(|t| t.id == target.id),
+                };
+                if !target_known {
+                    return Ok(graph_owl_storage::PrincipalDeletion::UnknownTarget);
+                }
+                let mut owners = self.owners.lock().expect("lock");
+                let mut assets = self.assets.lock().expect("lock");
+                for (asset_id, list) in owners.iter_mut() {
+                    let mut moved = false;
+                    for entry in list.iter_mut() {
+                        if entry.id == principal.id && entry.kind == principal.kind {
+                            entry.id = target.id.clone();
+                            entry.kind = target.kind;
+                            moved = true;
+                        }
+                    }
+                    if moved {
+                        reassigned += 1;
+                        // The version bump the port promises; without it a transfer
+                        // is invisible to anyone subscribed to Minor changes.
+                        if let Some(asset) = assets.iter_mut().find(|a| a.id == *asset_id) {
+                            asset.version.minor += 1;
+                        }
+                    }
+                }
+            } else if !holdings.is_empty() {
+                return Ok(graph_owl_storage::PrincipalDeletion::StillHolds(Box::new(
+                    holdings,
+                )));
+            }
+
+            match principal.kind {
+                graph_owl_core::ownership::OwnerKind::User => self
+                    .users
+                    .lock()
+                    .expect("lock")
+                    .retain(|u| u.id != principal.id),
+                graph_owl_core::ownership::OwnerKind::Team => self
+                    .teams
+                    .lock()
+                    .expect("lock")
+                    .retain(|t| t.id != principal.id),
+            }
+            Ok(graph_owl_storage::PrincipalDeletion::Deleted { reassigned })
         }
 
         async fn set_asset_owners(
@@ -7529,6 +7975,7 @@ mod projection_isolation_tests {
                 display_name: format!("The {id} team"),
                 description: None,
                 members: members.iter().map(|m| (*m).to_string()).collect(),
+                parent_team_id: None,
             }
         }
 

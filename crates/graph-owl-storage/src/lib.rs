@@ -36,6 +36,13 @@ pub enum ConflictKind {
     WaiverExists,
     /// This finding is already assigned. Two owners is no owner.
     AssignmentExists,
+    /// This principal still owns assets or parents teams — Epic 11 Slice G.
+    ///
+    /// Its own variant because the response has to carry *counts by kind*, and
+    /// reusing `AssignmentExists` meant the server's canned message for that kind
+    /// replaced them: "this finding is already assigned" told a steward nothing
+    /// about the 400 columns they were about to strand. Found by an HTTP test.
+    PrincipalStillHolds,
     /// A memory with this id already exists. Its own variant rather than reusing
     /// one above, because this enum's whole purpose is that a client can act on
     /// the collision — and "your memory id collided" needs a different response
@@ -119,6 +126,56 @@ pub enum SupersedeOutcome {
         index: usize,
         target: Uuid,
     },
+}
+
+/// Whether a follow created an edge or found one already there.
+///
+/// Distinguished so a caller can report honestly, not so it can fail: both are
+/// `200`. Slice F's idempotency is the point, and a double-follow that returned
+/// `409` would make a retried request look like a conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowOutcome {
+    Followed,
+    AlreadyFollowing,
+}
+
+/// What a principal holds, for the pre-delete check.
+///
+/// Counted **by kind**, because Slice G requires the refusal to report "how many
+/// assets and of which types": "you still own 400 things" is not actionable, while
+/// "1 service, 3 schemas, 396 columns" tells a steward whether to reassign the
+/// service and let inheritance do the rest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Holdings {
+    pub owned_by_kind: Vec<(AssetKind, i64)>,
+    /// Teams reporting into this one. Only ever non-empty for a team.
+    pub child_teams: Vec<String>,
+}
+
+impl Holdings {
+    /// Whether deleting this principal would strand anything.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.owned_by_kind.is_empty() && self.child_teams.is_empty()
+    }
+
+    #[must_use]
+    pub fn owned_total(&self) -> i64 {
+        self.owned_by_kind.iter().map(|(_, n)| n).sum()
+    }
+}
+
+/// What deleting a principal did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrincipalDeletion {
+    Deleted {
+        reassigned: i64,
+    },
+    NotFound,
+    /// It still holds things and no `reassignTo` was given.
+    StillHolds(Box<Holdings>),
+    /// The `reassignTo` target does not exist.
+    UnknownTarget,
 }
 
 /// What setting an asset's owners did.
@@ -235,6 +292,13 @@ pub struct Team {
     pub description: Option<String>,
     /// Ordered by id, so two reads of an unchanged team compare equal.
     pub members: Vec<String>,
+    /// The team this one reports into — Epic 11 Slice B's nesting half.
+    ///
+    /// At most one, which is what makes this a hierarchy rather than a graph. A
+    /// cycle at **any** depth is refused: `A → B → C → A` is as much a cycle as
+    /// `A → A`, and a check that only compared immediate parents would pass the
+    /// deep case while leaving an ancestor walk that never terminates.
+    pub parent_team_id: Option<String>,
 }
 
 /// Who is fixing a violation.
@@ -782,6 +846,90 @@ pub trait Storage: Send + Sync {
         reviewed_by: &str,
         note: Option<&str>,
     ) -> Result<(), StorageError>;
+
+    // ---- Epic 11 Slices B, F, G: nesting, following, and safe deletion ----
+
+    /// Teams reporting directly into this one.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn child_teams(&self, id: &str) -> Result<Vec<Team>, StorageError>;
+
+    /// Whether making `parent` the parent of `team` would close a cycle.
+    ///
+    /// Checked by walking `parent`'s ancestry, so a cycle at **any** depth is
+    /// caught. Slice B's own mutator watch is exactly this: "a check that only
+    /// compares immediate parent passes depth-1 and fails depth-3".
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn would_cycle(&self, team: &str, parent: &str) -> Result<bool, StorageError>;
+
+    /// Record that a user follows an asset.
+    ///
+    /// **Idempotent.** Following something you already follow is not an error, it
+    /// is the state you asked for — Slice F requires a second follow to be a `200`
+    /// with one edge rather than a `409`.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails, including when the asset
+    /// or the user is unknown.
+    async fn follow_asset(
+        &self,
+        asset_id: Uuid,
+        user_id: &str,
+    ) -> Result<FollowOutcome, StorageError>;
+
+    /// Stop following. Unfollowing something not followed is also not an error.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn unfollow_asset(&self, asset_id: Uuid, user_id: &str) -> Result<(), StorageError>;
+
+    /// What this user follows, newest first.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn assets_followed_by(
+        &self,
+        user_id: &str,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, StorageError>;
+
+    /// How many people follow this asset.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn follower_count(&self, asset_id: Uuid) -> Result<i64, StorageError>;
+
+    /// What a principal still holds, so deletion can refuse with a reason.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn principal_holdings(&self, principal: &OwnerRef) -> Result<Holdings, StorageError>;
+
+    /// Delete a principal, optionally transferring what it owns first.
+    ///
+    /// **One transaction.** A reassignment that moved half the assets and then
+    /// failed to delete the principal would leave ownership half-moved with no
+    /// record of which half — Slice G's mutator watch is precisely
+    /// "non-transactional reassignment".
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn delete_principal(
+        &self,
+        principal: &OwnerRef,
+        reassign_to: Option<&OwnerRef>,
+    ) -> Result<PrincipalDeletion, StorageError>;
 
     /// Every verdict, so detection can skip what a human closed and upgrade what
     /// they confirmed.

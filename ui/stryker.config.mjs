@@ -21,5 +21,11 @@ export default {
     // side-effecting shell (redirects, storage, React), and mutating it
     // produces survivors that mean nothing.
     "src/auth/pkce.ts",
+    // `src/admin/` for the same reason, and it was an omission rather than a
+    // decision: `schemaForm.ts` reached 100% by being run explicitly, so the score
+    // was real but nothing enforced it. Being in `mutate` is what makes a
+    // regression fail a run somebody actually does.
+    "src/admin/**/*.ts",
+    "!src/admin/**/*.test.ts",
   ],
 };

@@ -41,6 +41,18 @@ export interface EntityReference {
   inherited: boolean;
 }
 
+/** A team, as `GET /teams` returns it — Epic 11 Slices B and C. */
+export interface Team {
+  id: string;
+  displayName: string;
+  description: string | null;
+  members: string[];
+  /** The team this one reports into, `null` for a root. Always present: a console
+   *  reading its absence cannot tell "top of the hierarchy" from "a server that
+   *  does not know about nesting". */
+  parentTeamId: string | null;
+}
+
 export interface Asset {
   id: string;
   kind: AssetKind;

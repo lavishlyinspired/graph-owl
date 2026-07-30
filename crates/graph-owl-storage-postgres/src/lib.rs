@@ -9,8 +9,8 @@ use graph_owl_core::{
     page::{Cursor, Page, PageRequest},
 };
 use graph_owl_storage::{
-    ConflictKind, MemoryWrite, OwnersWrite, Storage, StorageError, StoredUser, SupersedeOutcome,
-    UpdateOutcome,
+    ConflictKind, FollowOutcome, Holdings, MemoryWrite, OwnersWrite, PrincipalDeletion, Storage,
+    StorageError, StoredUser, SupersedeOutcome, UpdateOutcome,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -32,6 +32,35 @@ const fn memory_kind_str(kind: MemoryKind) -> &'static str {
         MemoryKind::Incident => "incident",
         MemoryKind::Decision => "decision",
         MemoryKind::Caveat => "caveat",
+    }
+}
+
+/// One mapper for every team read.
+///
+/// Written when `parent_team_id` was added and three reads each built a `Team` by
+/// hand: a new column added to two of them and missed in the third is a team that
+/// reports a parent on one endpoint and none on another.
+fn team_from_row(row: PgRow) -> graph_owl_storage::Team {
+    graph_owl_storage::Team {
+        id: row.get("id"),
+        display_name: row.get("display_name"),
+        description: row.get("description"),
+        members: row.get("members"),
+        // `get`, not `try_get(..).ok().flatten()`: a query that forgot the column
+        // would then report every team as a root, which reads as real data. A
+        // panic on a missing column is a bug found in the first test that runs it.
+        parent_team_id: row.get("parent_team_id"),
+    }
+}
+
+/// A principal as the `(user_id, team_id)` pair `asset_owners` stores.
+///
+/// One place, because getting the pair the wrong way round silently reassigns
+/// ownership to a principal of the other kind that happens to share an id.
+fn split(principal: &OwnerRef) -> (Option<&str>, Option<&str>) {
+    match principal.kind {
+        OwnerKind::User => (Some(principal.id.as_str()), None),
+        OwnerKind::Team => (None, Some(principal.id.as_str())),
     }
 }
 
@@ -1133,6 +1162,289 @@ impl Storage for PostgresStorage {
         serde_json::from_value(owners).map_err(|e| StorageError::Unexpected(e.to_string()))
     }
 
+    // ---- Epic 11 Slices B, F, G ----
+
+    async fn child_teams(&self, id: &str) -> Result<Vec<graph_owl_storage::Team>, StorageError> {
+        // Members aggregated in SQL, matching `teams()` and `find_team()` — a loop
+        // asking per team would be one round trip per child for data one query
+        // already returns.
+        let rows = sqlx::query(
+            "SELECT t.id, t.display_name, t.description, t.parent_team_id,
+                    COALESCE(
+                        ARRAY_AGG(m.user_id ORDER BY m.user_id)
+                            FILTER (WHERE m.user_id IS NOT NULL),
+                        '{}'
+                    ) AS members
+               FROM teams t
+               LEFT JOIN team_members m ON m.team_id = t.id
+              WHERE t.parent_team_id = $1
+              GROUP BY t.id
+              ORDER BY t.id",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows.into_iter().map(team_from_row).collect())
+    }
+
+    async fn would_cycle(&self, team: &str, parent: &str) -> Result<bool, StorageError> {
+        // **Walk the proposed parent's ancestry, not just its immediate parent.**
+        // Slice B's mutator watch is exactly this: a depth-1 check passes
+        // `A parentOf B, B parentOf A` and lets `A → B → C → A` through, leaving an
+        // ancestor walk that never terminates.
+        //
+        // `team = parent` is the depth-0 case and the database also refuses it, but
+        // it is checked here so the caller gets a message rather than a constraint
+        // violation.
+        if team == parent {
+            return Ok(true);
+        }
+        let closes: bool = sqlx::query_scalar(
+            "WITH RECURSIVE ancestry (node) AS (
+                     SELECT $2::text
+                 UNION
+                     SELECT t.parent_team_id FROM teams t
+                       JOIN ancestry ON t.id = ancestry.node
+                      WHERE t.parent_team_id IS NOT NULL
+             )
+             SELECT EXISTS (SELECT 1 FROM ancestry WHERE node = $1)",
+        )
+        .bind(team)
+        .bind(parent)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(closes)
+    }
+
+    async fn follow_asset(
+        &self,
+        asset_id: Uuid,
+        user_id: &str,
+    ) -> Result<FollowOutcome, StorageError> {
+        // `ON CONFLICT DO NOTHING` plus `RETURNING` is what makes idempotency
+        // race-free: a read-then-write would let two concurrent follows both see
+        // "not following" and one of them fail on the primary key.
+        let inserted: Option<(Uuid,)> = sqlx::query_as(
+            "INSERT INTO asset_followers (asset_id, user_id) VALUES ($1, $2)
+             ON CONFLICT (asset_id, user_id) DO NOTHING
+             RETURNING asset_id",
+        )
+        .bind(asset_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(if inserted.is_some() {
+            FollowOutcome::Followed
+        } else {
+            FollowOutcome::AlreadyFollowing
+        })
+    }
+
+    async fn unfollow_asset(&self, asset_id: Uuid, user_id: &str) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM asset_followers WHERE asset_id = $1 AND user_id = $2")
+            .bind(asset_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn assets_followed_by(
+        &self,
+        user_id: &str,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, StorageError> {
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        // Keyset on `(fully_qualified_name, id)` like every other asset page, so a
+        // follow list paginates the same way and the cursor is interchangeable.
+        let sql = format!(
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
+              JOIN asset_followers f ON f.asset_id = assets.id
+             WHERE f.user_id = $1
+               AND NOT assets.deleted
+               AND ($2::text IS NULL OR (fully_qualified_name, assets.id) > ($2, $3))
+             ORDER BY fully_qualified_name, assets.id
+             LIMIT $4"
+        );
+        let query = sqlx::query(&sql)
+            .bind(user_id)
+            .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
+            .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
+            .bind(overfetch);
+        self.asset_page(query, page).await
+    }
+
+    async fn follower_count(&self, asset_id: Uuid) -> Result<i64, StorageError> {
+        sqlx::query_scalar("SELECT count(*) FROM asset_followers WHERE asset_id = $1")
+            .bind(asset_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    async fn principal_holdings(&self, principal: &OwnerRef) -> Result<Holdings, StorageError> {
+        let (user_id, team_id) = split(principal);
+        // Counted by kind, because Slice G requires the refusal to say "how many
+        // assets and of which types": "you own 400 things" is not actionable,
+        // "1 service, 3 schemas, 396 columns" says reassign the service.
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT a.kind, count(*) FROM asset_owners o
+               JOIN assets a ON a.id = o.asset_id
+              WHERE (o.user_id = $1 OR o.team_id = $2)
+              GROUP BY a.kind ORDER BY a.kind",
+        )
+        .bind(user_id)
+        .bind(team_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut owned_by_kind = Vec::with_capacity(rows.len());
+        for (kind, count) in rows {
+            owned_by_kind.push((
+                AssetKind::parse(&kind)
+                    .map_err(|_| StorageError::Unexpected(format!("unknown asset kind: {kind}")))?,
+                count,
+            ));
+        }
+
+        let child_teams = match principal.kind {
+            OwnerKind::Team => {
+                sqlx::query_scalar("SELECT id FROM teams WHERE parent_team_id = $1 ORDER BY id")
+                    .bind(&principal.id)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(|e| StorageError::Unexpected(e.to_string()))?
+            }
+            // A user cannot parent a team, so the query would always be empty and
+            // asking it would be a round trip that can only say "no".
+            OwnerKind::User => Vec::new(),
+        };
+
+        Ok(Holdings {
+            owned_by_kind,
+            child_teams,
+        })
+    }
+
+    async fn delete_principal(
+        &self,
+        principal: &OwnerRef,
+        reassign_to: Option<&OwnerRef>,
+    ) -> Result<PrincipalDeletion, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let table = match principal.kind {
+            OwnerKind::User => "SELECT 1 FROM users WHERE id = $1",
+            OwnerKind::Team => "SELECT 1 FROM teams WHERE id = $1",
+        };
+        let exists: Option<(i32,)> = sqlx::query_as(table)
+            .bind(&principal.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if exists.is_none() {
+            return Ok(PrincipalDeletion::NotFound);
+        }
+
+        let holdings = self.principal_holdings(principal).await?;
+        let mut reassigned = 0_i64;
+
+        if let Some(target) = reassign_to {
+            let target_table = match target.kind {
+                OwnerKind::User => "SELECT 1 FROM users WHERE id = $1",
+                OwnerKind::Team => "SELECT 1 FROM teams WHERE id = $1",
+            };
+            let target_exists: Option<(i32,)> = sqlx::query_as(target_table)
+                .bind(&target.id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            if target_exists.is_none() {
+                return Ok(PrincipalDeletion::UnknownTarget);
+            }
+
+            let (from_user, from_team) = split(principal);
+            let (to_user, to_team) = split(target);
+            // **Reassign, then bump.** Slice G requires each affected asset's
+            // version to move: ownership changing is a change somebody subscribed
+            // to Minor bumps should see, and a silent transfer makes the audit
+            // trail claim nothing happened.
+            //
+            // `ON CONFLICT DO NOTHING` on the update target: if the asset is
+            // already owned by the destination, the transfer collapses to a
+            // deletion rather than violating the identity index.
+            let moved: Vec<(Uuid,)> = sqlx::query_as(
+                "UPDATE asset_owners SET user_id = $3, team_id = $4
+                  WHERE (user_id = $1 OR team_id = $2)
+                    AND NOT EXISTS (
+                          SELECT 1 FROM asset_owners existing
+                           WHERE existing.asset_id = asset_owners.asset_id
+                             AND (existing.user_id = $3 OR existing.team_id = $4))
+                RETURNING asset_id",
+            )
+            .bind(from_user)
+            .bind(from_team)
+            .bind(to_user)
+            .bind(to_team)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            reassigned = i64::try_from(moved.len()).unwrap_or(i64::MAX);
+
+            for (asset_id,) in &moved {
+                sqlx::query(
+                    "UPDATE assets SET version_minor = version_minor + 1, updated_at = now()
+                      WHERE id = $1",
+                )
+                .bind(asset_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            }
+
+            // Child teams move with the ownership: a team being deleted cannot stay
+            // the parent of anything, and `ON DELETE RESTRICT` would refuse the
+            // delete otherwise.
+            if matches!(principal.kind, OwnerKind::Team) && matches!(target.kind, OwnerKind::Team) {
+                sqlx::query("UPDATE teams SET parent_team_id = $2 WHERE parent_team_id = $1")
+                    .bind(&principal.id)
+                    .bind(&target.id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            }
+        } else if !holdings.is_empty() {
+            return Ok(PrincipalDeletion::StillHolds(Box::new(holdings)));
+        }
+
+        let delete = match principal.kind {
+            OwnerKind::User => "DELETE FROM users WHERE id = $1",
+            OwnerKind::Team => "DELETE FROM teams WHERE id = $1",
+        };
+        sqlx::query(delete)
+            .bind(&principal.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(PrincipalDeletion::Deleted { reassigned })
+    }
+
     async fn upsert_team(&self, team: &graph_owl_storage::Team) -> Result<(), StorageError> {
         // One transaction: a team whose row was written and whose membership
         // was not is a team that silently owns things on nobody's behalf.
@@ -1143,15 +1455,17 @@ impl Storage for PostgresStorage {
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
         sqlx::query(
-            "INSERT INTO teams (id, display_name, description)
-             VALUES ($1, $2, $3)
+            "INSERT INTO teams (id, display_name, description, parent_team_id)
+             VALUES ($1, $2, $3, $4)
              ON CONFLICT (id) DO UPDATE
-                SET display_name = EXCLUDED.display_name,
-                    description   = EXCLUDED.description",
+                SET display_name   = EXCLUDED.display_name,
+                    description    = EXCLUDED.description,
+                    parent_team_id = EXCLUDED.parent_team_id",
         )
         .bind(&team.id)
         .bind(&team.display_name)
         .bind(&team.description)
+        .bind(&team.parent_team_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
@@ -1192,7 +1506,7 @@ impl Storage for PostgresStorage {
     #[tracing::instrument(name = "storage.find_team", skip_all)]
     async fn find_team(&self, id: &str) -> Result<Option<graph_owl_storage::Team>, StorageError> {
         let row = sqlx::query(
-            "SELECT t.id, t.display_name, t.description,
+            "SELECT t.id, t.display_name, t.description, t.parent_team_id,
                     COALESCE(
                         ARRAY_AGG(m.user_id ORDER BY m.user_id)
                             FILTER (WHERE m.user_id IS NOT NULL),
@@ -1208,18 +1522,13 @@ impl Storage for PostgresStorage {
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-        Ok(row.map(|row| graph_owl_storage::Team {
-            id: row.get("id"),
-            display_name: row.get("display_name"),
-            description: row.get("description"),
-            members: row.get("members"),
-        }))
+        Ok(row.map(team_from_row))
     }
 
     #[tracing::instrument(name = "storage.teams", skip_all)]
     async fn teams(&self) -> Result<Vec<graph_owl_storage::Team>, StorageError> {
         let rows = sqlx::query(
-            "SELECT t.id, t.display_name, t.description,
+            "SELECT t.id, t.display_name, t.description, t.parent_team_id,
                     COALESCE(
                         ARRAY_AGG(m.user_id ORDER BY m.user_id)
                             FILTER (WHERE m.user_id IS NOT NULL),
@@ -1234,15 +1543,7 @@ impl Storage for PostgresStorage {
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| graph_owl_storage::Team {
-                id: row.get("id"),
-                display_name: row.get("display_name"),
-                description: row.get("description"),
-                members: row.get("members"),
-            })
-            .collect())
+        Ok(rows.into_iter().map(team_from_row).collect())
     }
 
     #[tracing::instrument(name = "storage.assign_finding", skip_all)]
