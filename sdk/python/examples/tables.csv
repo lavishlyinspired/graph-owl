@@ -1,0 +1,5 @@
+service,database,schema,table,description
+payments,core,public,orders,one row per order
+payments,core,public,shipments,one row per shipment
+payments,core,audit,events,append-only
+billing,ledger,public,invoices,

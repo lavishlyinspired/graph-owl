@@ -126,6 +126,15 @@ One incident already occurred and was reverted during planning (a cache-tier tab
   | Doc-tests (`rustdoc` rebuilds a harness per crate) | ~84 min | only on full `cargo test --workspace` |
   | Actual test execution | **~150s** | always |
 
+  **Confirmed fixed, 31 July 2026.** Same binary, forced to relink, timed immediately:
+
+  | | Before the exemption | After |
+  |---|---|---|
+  | 1st execution after linking | **213,000ms** | **58ms** |
+  | 2nd execution | 3,200ms | 42ms |
+
+  ~3,700x. If a gate ever costs hours again with a clean environment, this setting is the first thing to re-check — it does not survive a machine reset, and it only reaches processes spawned after it takes effect.
+
   **The fix is a machine setting, and it is worth more than every other optimisation in this file combined**: add the terminal (and VS Code, if suites run from its integrated terminal) under **System Settings → Privacy & Security → Developer Tools**, then *fully quit and reopen it* — the exemption only reaches processes spawned after it takes effect, so an already-running shell keeps paying.
 
   **Also run `--lib --tests` for the routine gate.** Doc-tests add 84 minutes and zero behavioural coverage — the same 1354 tests pass either way:

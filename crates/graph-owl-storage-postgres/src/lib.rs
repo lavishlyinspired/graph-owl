@@ -1524,6 +1524,184 @@ impl Storage for PostgresStorage {
         Ok(())
     }
 
+    // ---- Epic 16 Slice C ----
+
+    async fn create_ingest_job(
+        &self,
+        job: &graph_owl_storage::IngestJob,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO ingest_jobs (id, format, state, submitted_by, started_at, heartbeat_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(job.id)
+        .bind(&job.format)
+        .bind(&job.state)
+        .bind(&job.submitted_by)
+        // Written from the job rather than defaulted to `now()`: the port hands
+        // over a fully-formed row, and an adapter that quietly substituted its
+        // own clock would make the type's `heartbeat_at` field a lie — and the
+        // reaper's whole behaviour untestable without waiting five real minutes.
+        .bind(job.started_at)
+        .bind(job.heartbeat_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn ingest_job(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<Option<graph_owl_storage::IngestJob>, StorageError> {
+        type Row = (
+            uuid::Uuid,
+            String,
+            String,
+            i64,
+            i64,
+            i64,
+            serde_json::Value,
+            Option<String>,
+            bool,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        );
+
+        let row: Option<Row> = sqlx::query_as(
+            "SELECT id, format, state, rows_read, accepted, rejected, failures,
+                    halt_reason, cancel_requested, submitted_by,
+                    started_at, heartbeat_at, finished_at
+               FROM ingest_jobs
+              WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(row.map(|r| graph_owl_storage::IngestJob {
+            id: r.0,
+            format: r.1,
+            state: r.2,
+            rows_read: r.3,
+            accepted: r.4,
+            rejected: r.5,
+            // A failure list that will not parse is reported as empty rather than
+            // as an error: the counts are still true, and refusing to answer a
+            // poll because one detail string is malformed would strand a client
+            // with no way to learn anything at all.
+            failures: serde_json::from_value(r.6).unwrap_or_default(),
+            halt_reason: r.7,
+            cancel_requested: r.8,
+            submitted_by: r.9,
+            started_at: r.10,
+            heartbeat_at: r.11,
+            finished_at: r.12,
+        }))
+    }
+
+    async fn report_ingest_progress(
+        &self,
+        id: uuid::Uuid,
+        progress: graph_owl_storage::IngestProgress,
+        new_failures: &[graph_owl_storage::RowFailure],
+    ) -> Result<bool, StorageError> {
+        // Counts are **set**, not incremented: the worker holds the running
+        // totals and one retried statement must not double them. Failures are
+        // appended, because the worker only carries the chunk it just read —
+        // holding every failure in memory to rewrite the whole list would undo
+        // the memory bound this slice exists for.
+        let appended = serde_json::to_value(new_failures)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let row: Option<(bool,)> = sqlx::query_as(
+            "UPDATE ingest_jobs
+                SET rows_read    = $2,
+                    accepted     = $3,
+                    rejected     = $4,
+                    failures     = failures || $5::jsonb,
+                    heartbeat_at = now(),
+                    state        = 'running'
+              WHERE id = $1
+          RETURNING cancel_requested",
+        )
+        .bind(id)
+        .bind(progress.rows_read)
+        .bind(progress.accepted)
+        .bind(progress.rejected)
+        .bind(&appended)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // A job whose row has gone is a job nobody is waiting for, so stopping is
+        // the right answer — the same one cancellation gives.
+        Ok(row.is_none_or(|(cancelled,)| cancelled))
+    }
+
+    async fn finish_ingest_job(
+        &self,
+        id: uuid::Uuid,
+        state: &str,
+        halt_reason: Option<&str>,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE ingest_jobs
+                SET state = $2, halt_reason = $3, finished_at = now(), heartbeat_at = now()
+              WHERE id = $1",
+        )
+        .bind(id)
+        .bind(state)
+        .bind(halt_reason)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn cancel_ingest_job(&self, id: uuid::Uuid) -> Result<bool, StorageError> {
+        // `finished_at IS NULL` is the whole condition: cancelling a job that
+        // already succeeded would rewrite a settled answer, and reporting success
+        // for it would tell a client something stopped that had already finished.
+        let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+            "UPDATE ingest_jobs
+                SET cancel_requested = TRUE
+              WHERE id = $1 AND finished_at IS NULL
+          RETURNING id",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(row.is_some())
+    }
+
+    async fn reap_abandoned_ingest_jobs(
+        &self,
+        stale_after_seconds: i64,
+    ) -> Result<u64, StorageError> {
+        let reaped = sqlx::query(
+            "UPDATE ingest_jobs
+                SET state = 'failed',
+                    halt_reason = 'abandoned: the worker stopped reporting',
+                    finished_at = now()
+              WHERE finished_at IS NULL
+                AND heartbeat_at < now() - ($1::double precision * interval '1 second')",
+        )
+        .bind(f64::from(
+            i32::try_from(stale_after_seconds.max(0)).unwrap_or(i32::MAX),
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(reaped.rows_affected())
+    }
+
     async fn upsert_team(&self, team: &graph_owl_storage::Team) -> Result<(), StorageError> {
         // One transaction: a team whose row was written and whose membership
         // was not is a team that silently owns things on nobody's behalf.

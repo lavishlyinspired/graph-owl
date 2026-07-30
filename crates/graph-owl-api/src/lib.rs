@@ -63,21 +63,21 @@ impl ValidateBody for UpsertAsset {
     fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
         let mut errors = Vec::new();
         require_non_empty_string(value, &FieldPath::root().key("kind"), &mut errors);
-        if let Some(kind) = value.get("kind").and_then(serde_json::Value::as_str) {
-            if AssetKind::parse(kind).is_err() {
-                errors.push(FieldError::new(
-                    "kind",
-                    FieldErrorCode::Type,
-                    format!(
-                        "`{kind}` is not an asset kind; expected one of: {}",
-                        AssetKind::ALL
-                            .iter()
-                            .map(|k| k.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                ));
-            }
+        if let Some(kind) = value.get("kind").and_then(serde_json::Value::as_str)
+            && AssetKind::parse(kind).is_err()
+        {
+            errors.push(FieldError::new(
+                "kind",
+                FieldErrorCode::Type,
+                format!(
+                    "`{kind}` is not an asset kind; expected one of: {}",
+                    AssetKind::ALL
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
         }
         require_non_empty_string(value, &FieldPath::root().key("name"), &mut errors);
         optional_string(value, &FieldPath::root().key("description"), &mut errors);
@@ -2522,6 +2522,266 @@ impl Catalog {
             .await?)
     }
 
+    // ---- Epic 16 Slice C: batch file ingestion ----
+
+    /// Register a job for a file that is about to be read.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    pub async fn create_ingest_job(
+        &self,
+        id: Uuid,
+        format: &str,
+        submitted_by: &str,
+    ) -> Result<(), CatalogError> {
+        self.storage
+            .create_ingest_job(&graph_owl_storage::IngestJob {
+                id,
+                format: format.to_string(),
+                state: graph_owl_connectors::job::JobState::Queued.to_string(),
+                rows_read: 0,
+                accepted: 0,
+                rejected: 0,
+                failures: Vec::new(),
+                halt_reason: None,
+                cancel_requested: false,
+                submitted_by: submitted_by.to_string(),
+                started_at: chrono::Utc::now(),
+                heartbeat_at: chrono::Utc::now(),
+                finished_at: None,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// A job as it stands, having first failed anything that stopped reporting.
+    ///
+    /// **The reaper runs on read, not on a timer.** This project refuses a
+    /// scheduler (Epic 15 decision 5), and the only moment a stuck job matters is
+    /// when somebody asks about it — so the poll that would otherwise wait
+    /// forever is exactly the right place to notice.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn ingest_job(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::IngestJob>, CatalogError> {
+        self.storage
+            .reap_abandoned_ingest_jobs(ABANDONED_AFTER_SECONDS)
+            .await?;
+        Ok(self.storage.ingest_job(id).await?)
+    }
+
+    /// Ask a running job to stop. `false` if it had already finished.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    pub async fn cancel_ingest_job(&self, id: Uuid) -> Result<bool, CatalogError> {
+        Ok(self.storage.cancel_ingest_job(id).await?)
+    }
+
+    /// Close a job out as failed before it read anything.
+    ///
+    /// Separate from the worker's own verdict because there is a window — the
+    /// upload spooled, the job registered, the file gone — where nothing was read
+    /// and so no `Progress` exists to judge. Leaving it `queued` would be the
+    /// worst of the options: a client polling a job that will never move.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    pub async fn fail_ingest_job(&self, id: Uuid, reason: &str) -> Result<(), CatalogError> {
+        self.storage
+            .finish_ingest_job(
+                id,
+                &graph_owl_connectors::job::JobState::Failed.to_string(),
+                Some(reason),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Read a batch file to the end, applying it in chunks.
+    ///
+    /// Runs after the response has already gone back with `202`, so nothing here
+    /// can be reported to the caller directly — every outcome lands in the job
+    /// row instead, which is what makes decision 2's "batch is a job" real rather
+    /// than a naming choice.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the job row cannot be updated. A file that cannot be read, or
+    /// rows that cannot be applied, are recorded on the job rather than returned:
+    /// there is nobody left to return them to.
+    pub async fn run_batch_ingest(
+        &self,
+        id: Uuid,
+        source: impl std::io::BufRead + Send + 'static,
+        format: graph_owl_connectors::rows::Format,
+        principal: Principal,
+        error_cap: usize,
+    ) -> Result<(), CatalogError> {
+        use graph_owl_connectors::job::{Halt, Progress, should_halt, verdict};
+        use graph_owl_connectors::rows::{Row, RowError};
+
+        // A bounded channel **is** the memory bound at this layer, the same way
+        // the iterator is at the parser's. The reader thread blocks once the
+        // channel is full, so a fast file and a slow catalog cannot conspire to
+        // buffer a 500k-row backlog in the middle.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Row, RowError>>(BATCH_CHUNK_ROWS);
+        // A dedicated thread rather than `spawn_blocking`: the parser is a
+        // synchronous iterator that has to live for the whole file, and holding a
+        // blocking-pool slot open for the duration of a 500k-row read would
+        // starve every other blocking task in the process.
+        std::thread::spawn(move || {
+            for row in graph_owl_connectors::rows::rows(source, format) {
+                if tx.blocking_send(row).is_err() {
+                    // The consumer stopped — cancelled, capped, or gone. Nothing
+                    // left to read for.
+                    break;
+                }
+            }
+        });
+
+        let mut progress = Progress::default();
+        let mut halt: Option<Halt> = None;
+        let mut pending: Vec<(u64, IngestItem)> = Vec::new();
+        let mut failures: Vec<graph_owl_storage::RowFailure> = Vec::new();
+
+        while let Some(next) = rx.recv().await {
+            progress.rows_read += 1;
+            match read_batch_row(next) {
+                Ok((number, item)) => pending.push((number, item)),
+                Err(failure) => {
+                    progress.rejected += 1;
+                    failures.push(failure);
+                }
+            }
+
+            // Checked every row, not every chunk: the cap exists to stop a file
+            // that is wrong in its entirety, and reading another 499 rows to
+            // notice would defeat the point.
+            if let Some(reached) = should_halt(progress, error_cap, false) {
+                halt = Some(reached);
+                break;
+            }
+
+            if pending.len() + failures.len() >= BATCH_CHUNK_ROWS
+                && let Some(cancelled) = self
+                    .flush_batch_chunk(id, &principal, &mut progress, &mut pending, &mut failures)
+                    .await?
+            {
+                halt = Some(cancelled);
+                break;
+            }
+        }
+
+        if halt.is_none() {
+            self.flush_batch_chunk(id, &principal, &mut progress, &mut pending, &mut failures)
+                .await?;
+        } else {
+            // Still reported, so the counts a client polls describe everything
+            // that was actually read — a halt must not silently discard the work
+            // done in the chunk it happened in.
+            self.storage
+                .report_ingest_progress(id, storage_progress(progress), &failures)
+                .await?;
+        }
+
+        let state = verdict(progress, halt.as_ref());
+        self.storage
+            .finish_ingest_job(
+                id,
+                &state.to_string(),
+                halt.as_ref().map(halt_reason).as_deref(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Apply what has accumulated and report it, returning a halt if the job was
+    /// cancelled while the chunk was in flight.
+    async fn flush_batch_chunk(
+        &self,
+        id: Uuid,
+        principal: &Principal,
+        progress: &mut graph_owl_connectors::job::Progress,
+        pending: &mut Vec<(u64, IngestItem)>,
+        failures: &mut Vec<graph_owl_storage::RowFailure>,
+    ) -> Result<Option<graph_owl_connectors::job::Halt>, CatalogError> {
+        if !pending.is_empty() {
+            let numbers: Vec<u64> = pending.iter().map(|(number, _)| *number).collect();
+            let items: Vec<IngestItem> = pending.drain(..).map(|(_, item)| item).collect();
+
+            match self.ingest(principal, items.clone(), Vec::new()).await {
+                Ok(outcomes) => {
+                    for outcome in outcomes {
+                        let row = numbers.get(outcome.index).copied().unwrap_or_default();
+                        if outcome.status >= 400 {
+                            progress.rejected += 1;
+                            failures.push(graph_owl_storage::RowFailure {
+                                row,
+                                detail: outcome.problem.unwrap_or_else(|| "rejected".to_string()),
+                            });
+                        } else {
+                            progress.accepted += 1;
+                        }
+                    }
+                }
+                Err(chunk_error) => {
+                    // A chunk-level failure is a duplicate FQN or a containment
+                    // cycle *within these 500 rows* — a property of the chunk, not
+                    // of any one row, so `ingest` has nothing per-item to report.
+                    //
+                    // Retried one row at a time rather than written off. A file
+                    // with one repeated FQN would otherwise cost 499 innocent rows
+                    // per occurrence, and a client would see a rejection list that
+                    // named rows with nothing wrong with them. The extra round
+                    // trips are paid only on the failure path.
+                    let detail = batch_detail(&chunk_error);
+                    for (number, item) in numbers.iter().zip(items) {
+                        match self.ingest(principal, vec![item], Vec::new()).await {
+                            Ok(outcomes) if outcomes.iter().all(|outcome| outcome.status < 400) => {
+                                progress.accepted += 1;
+                            }
+                            Ok(outcomes) => {
+                                progress.rejected += 1;
+                                failures.push(graph_owl_storage::RowFailure {
+                                    row: *number,
+                                    detail: outcomes
+                                        .into_iter()
+                                        .find_map(|outcome| outcome.problem)
+                                        .unwrap_or_else(|| detail.clone()),
+                                });
+                            }
+                            Err(row_error) => {
+                                progress.rejected += 1;
+                                failures.push(graph_owl_storage::RowFailure {
+                                    row: *number,
+                                    detail: batch_detail(&row_error),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let cancelled = self
+            .storage
+            .report_ingest_progress(id, storage_progress(*progress), failures)
+            .await?;
+        // Cleared **after** the report, because failures are appended in storage:
+        // sending them again would double every entry in the job's report.
+        failures.clear();
+
+        Ok(cancelled.then_some(graph_owl_connectors::job::Halt::Cancelled))
+    }
+
     // ---- Epic 16 Slice A: synchronous push ----
 
     /// Push a batch, applying what is valid and reporting what is not.
@@ -3549,6 +3809,131 @@ pub struct IngestItem {
     pub properties: Option<serde_json::Value>,
 }
 
+/// How many rows a batch job applies in one round trip.
+///
+/// **Half the synchronous ceiling**, so a chunk is never a load the synchronous
+/// path would itself refuse — the batch path gets its size from the same
+/// argument rather than inventing a second one, and the margin leaves room for
+/// the edges a future slice will apply alongside.
+const BATCH_CHUNK_ROWS: usize = 500;
+
+/// How long a job may go without a heartbeat before it is presumed dead.
+///
+/// A chunk is at most [`BATCH_CHUNK_ROWS`] rows and heartbeats when it lands, so
+/// a healthy job reports on the order of seconds. Five minutes is two orders of
+/// magnitude above that, and the asymmetry is deliberate: declaring a live job
+/// abandoned corrupts a real result, while waiting too long only delays the
+/// moment a crashed job stops reading `running`.
+const ABANDONED_AFTER_SECONDS: i64 = 300;
+
+/// The default number of rejected rows a job tolerates before giving up.
+///
+/// From the plan: "errors accumulate to a bounded cap (default 1000) after which
+/// the job fails with 'too many errors' rather than producing an unreadable
+/// report". The cap is about legibility, not about correctness — a file that
+/// produces a thousand rejections is wrong in a way no per-row list will explain.
+pub const BATCH_ERROR_CAP: usize = 1000;
+
+fn storage_progress(
+    progress: graph_owl_connectors::job::Progress,
+) -> graph_owl_storage::IngestProgress {
+    graph_owl_storage::IngestProgress {
+        rows_read: i64::try_from(progress.rows_read).unwrap_or(i64::MAX),
+        accepted: i64::try_from(progress.accepted).unwrap_or(i64::MAX),
+        rejected: i64::try_from(progress.rejected).unwrap_or(i64::MAX),
+    }
+}
+
+/// Why a job stopped, in words a client can act on.
+fn halt_reason(halt: &graph_owl_connectors::job::Halt) -> String {
+    match halt {
+        graph_owl_connectors::job::Halt::ErrorCap { cap } => format!(
+            "too many errors: {cap} rows were rejected, so reading stopped. \
+             A file failing this often is usually wrong in one way — check the \
+             first few rejections rather than all of them"
+        ),
+        graph_owl_connectors::job::Halt::Cancelled => {
+            "cancelled; the counts describe what had landed when it stopped".to_string()
+        }
+        graph_owl_connectors::job::Halt::Abandoned => {
+            "abandoned: the worker stopped reporting".to_string()
+        }
+    }
+}
+
+/// One row, as far as it can be understood without touching the catalog.
+///
+/// A free function rather than a method: it needs nothing from the catalog, and
+/// a `&self` it never reads would suggest otherwise to the next reader.
+fn read_batch_row(
+    next: Result<graph_owl_connectors::rows::Row, graph_owl_connectors::rows::RowError>,
+) -> Result<(u64, IngestItem), graph_owl_storage::RowFailure> {
+    let row = next.map_err(
+        |graph_owl_connectors::rows::RowError::Malformed { number, detail }| {
+            graph_owl_storage::RowFailure {
+                row: number,
+                detail,
+            }
+        },
+    )?;
+    let draft = graph_owl_connectors::batch::draft_from_row(&row).map_err(
+        |graph_owl_connectors::rows::RowError::Malformed { number, detail }| {
+            graph_owl_storage::RowFailure {
+                row: number,
+                detail,
+            }
+        },
+    )?;
+    let kind = AssetKind::parse(&draft.kind).map_err(|_| graph_owl_storage::RowFailure {
+        row: row.number,
+        detail: format!(
+            "`{}` is not an asset kind; expected one of: {}",
+            draft.kind,
+            AssetKind::ALL
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })?;
+    Ok((
+        row.number,
+        IngestItem {
+            kind,
+            name: draft.name,
+            parent_fqn: draft.parent_fqn,
+            description: draft.description,
+            properties: draft.properties,
+        },
+    ))
+}
+
+/// A catalog failure rendered for a job report.
+///
+/// `CatalogError` has no `Display` on purpose — HTTP handlers *map* it to a
+/// status and a problem body rather than printing it — but a batch row has no
+/// handler behind it, and "something went wrong on row 41,203" is not a report.
+fn batch_detail(error: &CatalogError) -> String {
+    match error {
+        CatalogError::NotFound => "no such entity".to_string(),
+        CatalogError::Conflict { detail, .. } => detail.clone(),
+        CatalogError::Validation(fields) => fields
+            .iter()
+            .map(|field| format!("{}: {}", field.field, field.detail))
+            .collect::<Vec<_>>()
+            .join("; "),
+        CatalogError::IllegalRelationship {
+            from,
+            relationship,
+            to,
+        } => format!("{relationship:?} is not legal from {from:?} to {to:?}"),
+        CatalogError::PreconditionFailed { .. } => {
+            "the entity changed while this batch was in flight".to_string()
+        }
+        CatalogError::Storage(inner) => inner.to_string(),
+    }
+}
+
 /// One edge in a push — Epic 16 Slice A.
 ///
 /// Endpoints are named by **FQN**, resolved against this batch first and the
@@ -3715,6 +4100,7 @@ mod tests {
         /// because validation reports failures by index.
         #[allow(clippy::type_complexity)]
         owners: Mutex<Vec<(Uuid, Vec<graph_owl_core::ownership::EntityReference>)>>,
+        jobs: Mutex<Vec<graph_owl_storage::IngestJob>>,
     }
 
     impl InMemoryStorage {
@@ -3917,6 +4303,102 @@ mod tests {
             Ok(())
         }
 
+        // ---- Epic 16 Slice C, and as strict as the port ----
+
+        async fn create_ingest_job(
+            &self,
+            job: &graph_owl_storage::IngestJob,
+        ) -> Result<(), StorageError> {
+            self.guard_write("create_ingest_job");
+            self.jobs.lock().expect("lock").push(job.clone());
+            Ok(())
+        }
+
+        async fn ingest_job(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_storage::IngestJob>, StorageError> {
+            Ok(self
+                .jobs
+                .lock()
+                .expect("lock")
+                .iter()
+                .find(|job| job.id == id)
+                .cloned())
+        }
+
+        async fn report_ingest_progress(
+            &self,
+            id: Uuid,
+            progress: graph_owl_storage::IngestProgress,
+            new_failures: &[graph_owl_storage::RowFailure],
+        ) -> Result<bool, StorageError> {
+            self.guard_write("report_ingest_progress");
+            let mut held = self.jobs.lock().expect("lock");
+            let Some(job) = held.iter_mut().find(|job| job.id == id) else {
+                // The port stops a worker whose row has gone, and so does this:
+                // a double that kept going would hide the case where it matters.
+                return Ok(true);
+            };
+            job.rows_read = progress.rows_read;
+            job.accepted = progress.accepted;
+            job.rejected = progress.rejected;
+            // Appended, exactly as the SQL does — a double that replaced would
+            // pass a test that the real adapter would double-count.
+            job.failures.extend_from_slice(new_failures);
+            job.heartbeat_at = chrono::Utc::now();
+            job.state = "running".to_string();
+            Ok(job.cancel_requested)
+        }
+
+        async fn finish_ingest_job(
+            &self,
+            id: Uuid,
+            state: &str,
+            halt_reason: Option<&str>,
+        ) -> Result<(), StorageError> {
+            self.guard_write("finish_ingest_job");
+            let mut held = self.jobs.lock().expect("lock");
+            if let Some(job) = held.iter_mut().find(|job| job.id == id) {
+                job.state = state.to_string();
+                job.halt_reason = halt_reason.map(ToString::to_string);
+                job.finished_at = Some(chrono::Utc::now());
+            }
+            Ok(())
+        }
+
+        async fn cancel_ingest_job(&self, id: Uuid) -> Result<bool, StorageError> {
+            self.guard_write("cancel_ingest_job");
+            let mut held = self.jobs.lock().expect("lock");
+            let Some(job) = held
+                .iter_mut()
+                .find(|job| job.id == id && job.finished_at.is_none())
+            else {
+                return Ok(false);
+            };
+            job.cancel_requested = true;
+            Ok(true)
+        }
+
+        async fn reap_abandoned_ingest_jobs(
+            &self,
+            stale_after_seconds: i64,
+        ) -> Result<u64, StorageError> {
+            let cutoff = chrono::Utc::now() - chrono::Duration::seconds(stale_after_seconds);
+            let mut held = self.jobs.lock().expect("lock");
+            let mut reaped = 0;
+            for job in held
+                .iter_mut()
+                .filter(|job| job.finished_at.is_none() && job.heartbeat_at < cutoff)
+            {
+                job.state = "failed".to_string();
+                job.halt_reason = Some("abandoned: the worker stopped reporting".to_string());
+                job.finished_at = Some(chrono::Utc::now());
+                reaped += 1;
+            }
+            Ok(reaped)
+        }
+
         async fn child_teams(
             &self,
             id: &str,
@@ -4036,13 +4518,12 @@ mod tests {
                 if list
                     .iter()
                     .any(|o| o.id == principal.id && o.kind == principal.kind)
+                    && let Some(asset) = assets.iter().find(|a| a.id == *asset_id)
                 {
-                    if let Some(asset) = assets.iter().find(|a| a.id == *asset_id) {
-                        by_kind
-                            .entry(asset.kind.as_str())
-                            .or_insert((asset.kind, 0))
-                            .1 += 1;
-                    }
+                    by_kind
+                        .entry(asset.kind.as_str())
+                        .or_insert((asset.kind, 0))
+                        .1 += 1;
                 }
             }
             drop(owners);
@@ -4652,7 +5133,7 @@ mod tests {
                 .filter(|v| v.snapshot.id == id)
                 .cloned()
                 .collect();
-            versions.sort_by(|a, b| b.version.cmp(&a.version));
+            versions.sort_by_key(|version| std::cmp::Reverse(version.version));
             Ok(versions)
         }
 
@@ -4810,7 +5291,7 @@ mod tests {
                 .filter(|r| service_name.is_empty() || r.service_name == service_name)
                 .cloned()
                 .collect();
-            runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+            runs.sort_by_key(|run| std::cmp::Reverse(run.started_at));
             runs.truncate(limit);
             Ok(runs)
         }
@@ -4874,13 +5355,13 @@ mod tests {
                 let owners = self.owners.lock().expect("lock");
                 let mut node = Some(asset.id);
                 while let Some(current) = node {
-                    if let Some((_, found)) = owners.iter().find(|(id, _)| *id == current) {
-                        if !found.is_empty() {
-                            // Stops at the nearest owned ancestor rather than
-                            // accumulating up the chain: "who do I ask" has one
-                            // answer.
-                            return found.iter().map(|o| o.id.clone()).collect();
-                        }
+                    if let Some((_, found)) = owners.iter().find(|(id, _)| *id == current)
+                        && !found.is_empty()
+                    {
+                        // Stops at the nearest owned ancestor rather than
+                        // accumulating up the chain: "who do I ask" has one
+                        // answer.
+                        return found.iter().map(|o| o.id.clone()).collect();
                     }
                     node = assets
                         .iter()
@@ -9040,5 +9521,319 @@ mod projection_isolation_tests {
                 .await
                 .expect("a missing subscriber is not an outage");
         }
+    }
+}
+
+/// Epic 16 Slice C — what a batch job says happened.
+///
+/// These run against the in-memory double at the **real** chunk size, so the
+/// cancellation and heartbeat behaviour under test is the behaviour that
+/// ships. A test-only chunk knob would have made these cheaper and would
+/// have proved nothing about production.
+#[cfg(test)]
+mod batch_jobs_report_what_landed {
+    use super::*;
+    use graph_owl_connectors::rows::Format;
+    use tests::InMemoryStorage;
+
+    fn jsonl(rows: impl IntoIterator<Item = String>) -> std::io::Cursor<String> {
+        let mut text = String::new();
+        for row in rows {
+            text.push_str(&row);
+            text.push('\n');
+        }
+        std::io::Cursor::new(text)
+    }
+
+    fn service_rows(count: usize) -> Vec<String> {
+        (0..count)
+            .map(|n| format!("{{\"kind\":\"service\",\"name\":\"svc-{n}\"}}"))
+            .collect()
+    }
+
+    async fn run(
+        body: std::io::Cursor<String>,
+        error_cap: usize,
+    ) -> (Catalog, graph_owl_storage::IngestJob) {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let id = Uuid::new_v4();
+        catalog
+            .create_ingest_job(id, "jsonl", "tester")
+            .await
+            .expect("registered");
+        catalog
+            .run_batch_ingest(
+                id,
+                std::io::BufReader::new(body),
+                Format::Jsonl,
+                Principal::system(),
+                error_cap,
+            )
+            .await
+            .expect("ran");
+        let job = catalog.ingest_job(id).await.expect("read").expect("job");
+        (catalog, job)
+    }
+
+    #[tokio::test]
+    async fn a_clean_file_lands_every_row_and_succeeds() {
+        let (_, job) = run(jsonl(service_rows(3)), BATCH_ERROR_CAP).await;
+
+        assert_eq!(job.state, "succeeded");
+        assert_eq!(job.accepted, 3);
+        assert_eq!(job.rejected, 0);
+        assert_eq!(job.rows_read, 3);
+        assert!(job.failures.is_empty());
+        assert!(job.finished_at.is_some(), "a settled job has an end");
+    }
+
+    /// **The partial-success criterion, at file scale.** One typo must not
+    /// cost the other rows, and the report has to name the line so a client
+    /// can find it in a file they cannot read by eye.
+    #[tokio::test]
+    async fn one_bad_row_is_reported_by_line_number_and_the_rest_land() {
+        let mut rows = service_rows(3);
+        rows.insert(1, "not json at all".to_string());
+
+        let (_, job) = run(jsonl(rows), BATCH_ERROR_CAP).await;
+
+        assert_eq!(job.state, "partial");
+        assert_eq!(job.accepted, 3);
+        assert_eq!(job.rejected, 1);
+        assert_eq!(job.failures.len(), 1);
+        assert_eq!(
+            job.failures[0].row, 2,
+            "the second line of the file, not the second failure"
+        );
+    }
+
+    /// Nothing landed is `failed`, not `partial` — `partial` is the bucket
+    /// for jobs that mostly worked, and a client seeing it re-pushes only
+    /// what was rejected.
+    #[tokio::test]
+    async fn a_file_where_nothing_lands_is_failed_not_partial() {
+        let (_, job) = run(jsonl(vec!["nope".into(), "also nope".into()]), 100).await;
+
+        assert_eq!(job.state, "failed");
+        assert_eq!(job.accepted, 0);
+    }
+
+    /// **The cap stops reading.** A 500k-row file with the wrong delimiter
+    /// produces 500k identical errors, and the report nobody can read is the
+    /// failure this prevents — so `rows_read` must be far short of the file.
+    #[tokio::test]
+    async fn the_error_cap_halts_reading_and_names_itself() {
+        let bad: Vec<String> = (0..50).map(|n| format!("garbage {n}")).collect();
+
+        let (_, job) = run(jsonl(bad), 3).await;
+
+        assert_eq!(job.state, "failed");
+        assert_eq!(job.rejected, 3);
+        assert!(
+            job.rows_read < 50,
+            "reading continued past the cap: {} rows",
+            job.rows_read
+        );
+        let reason = job.halt_reason.expect("a halt says why");
+        assert!(reason.contains("too many errors"), "{reason}");
+    }
+
+    /// A halt still reports the rows it had read, so a client's counts are
+    /// not silently short by up to one chunk.
+    #[tokio::test]
+    async fn a_halted_job_still_reports_the_failures_from_its_last_chunk() {
+        let bad: Vec<String> = (0..10).map(|n| format!("garbage {n}")).collect();
+
+        let (_, job) = run(jsonl(bad), 2).await;
+
+        assert_eq!(job.failures.len(), 2, "{:?}", job.failures);
+        assert_eq!(job.failures[0].row, 1);
+    }
+
+    /// **Cancellation is observed at a chunk boundary**, which is why this
+    /// test uses a file larger than one chunk: a smaller file finishes
+    /// before there is anything to stop, and a test that pretended otherwise
+    /// would be testing a knob rather than the product.
+    #[tokio::test]
+    async fn a_cancelled_job_stops_mid_file_and_reports_what_landed() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let id = Uuid::new_v4();
+        catalog
+            .create_ingest_job(id, "jsonl", "tester")
+            .await
+            .expect("registered");
+        assert!(
+            catalog.cancel_ingest_job(id).await.expect("cancelled"),
+            "an unfinished job can be cancelled"
+        );
+
+        catalog
+            .run_batch_ingest(
+                id,
+                std::io::BufReader::new(jsonl(service_rows(BATCH_CHUNK_ROWS * 2 + 10))),
+                Format::Jsonl,
+                Principal::system(),
+                BATCH_ERROR_CAP,
+            )
+            .await
+            .expect("ran");
+
+        let job = catalog.ingest_job(id).await.expect("read").expect("job");
+        assert_eq!(job.state, "failed");
+        assert_eq!(
+            job.rows_read,
+            i64::try_from(BATCH_CHUNK_ROWS).expect("fits"),
+            "it stopped at the first chunk boundary, not at the end of the file"
+        );
+        assert_eq!(
+            job.accepted,
+            i64::try_from(BATCH_CHUNK_ROWS).expect("fits"),
+            "what landed before the stop still landed"
+        );
+        let reason = job.halt_reason.expect("a halt says why");
+        assert!(reason.contains("cancelled"), "{reason}");
+    }
+
+    /// A job already settled cannot be cancelled — there is nothing running,
+    /// and rewriting a finished verdict would lose the answer a client came
+    /// back for.
+    #[tokio::test]
+    async fn a_finished_job_cannot_be_cancelled() {
+        let (catalog, job) = run(jsonl(service_rows(1)), BATCH_ERROR_CAP).await;
+
+        assert!(!catalog.cancel_ingest_job(job.id).await.expect("asked"));
+    }
+
+    /// **A crashed worker must not leave a job reading `running` forever.**
+    /// The reaper runs on poll rather than on a timer, so this is the exact
+    /// path a waiting client takes.
+    #[tokio::test]
+    async fn a_job_that_stopped_reporting_is_failed_when_somebody_polls_it() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage.clone());
+        let id = Uuid::new_v4();
+        let stale = chrono::Utc::now() - chrono::Duration::seconds(ABANDONED_AFTER_SECONDS + 1);
+        storage
+            .create_ingest_job(&graph_owl_storage::IngestJob {
+                id,
+                format: "jsonl".to_string(),
+                state: "running".to_string(),
+                rows_read: 12,
+                accepted: 12,
+                rejected: 0,
+                failures: Vec::new(),
+                halt_reason: None,
+                cancel_requested: false,
+                submitted_by: "tester".to_string(),
+                started_at: stale,
+                heartbeat_at: stale,
+                finished_at: None,
+            })
+            .await
+            .expect("registered");
+
+        let job = catalog.ingest_job(id).await.expect("read").expect("job");
+
+        assert_eq!(job.state, "failed");
+        assert!(job.finished_at.is_some());
+        assert!(
+            job.halt_reason
+                .expect("a reaped job says why")
+                .contains("abandoned"),
+            "a reaped job must say it was reaped, not merely fail"
+        );
+    }
+
+    /// And a live job is *not* reaped, which is the assertion that stops the
+    /// reaper from being a random job-killer.
+    #[tokio::test]
+    async fn a_job_that_is_still_reporting_survives_a_poll() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage.clone());
+        let id = Uuid::new_v4();
+        catalog
+            .create_ingest_job(id, "jsonl", "tester")
+            .await
+            .expect("registered");
+
+        let job = catalog.ingest_job(id).await.expect("read").expect("job");
+
+        assert_eq!(job.state, "queued");
+        assert!(job.finished_at.is_none());
+    }
+
+    /// Row numbers are file line numbers all the way through, including past
+    /// a chunk boundary — a client greps their file with this, and a number
+    /// that restarted per chunk would send them to the wrong line.
+    #[tokio::test]
+    async fn a_row_number_survives_a_chunk_boundary() {
+        let mut rows = service_rows(BATCH_CHUNK_ROWS + 20);
+        let broken = BATCH_CHUNK_ROWS + 5;
+        rows[broken] = "not json".to_string();
+
+        let (_, job) = run(jsonl(rows), BATCH_ERROR_CAP).await;
+
+        assert_eq!(job.failures.len(), 1, "{:?}", job.failures);
+        assert_eq!(
+            job.failures[0].row,
+            u64::try_from(broken + 1).expect("fits"),
+            "line numbers are 1-based and do not restart per chunk"
+        );
+    }
+
+    /// A failure is reported **once**. Storage appends, so a worker that did
+    /// not clear its buffer after reporting would repeat every earlier
+    /// failure in each subsequent chunk — a report that grows quadratically
+    /// and names the same row over and over.
+    #[tokio::test]
+    async fn a_failure_is_not_repeated_in_the_next_chunk() {
+        let mut rows = service_rows(BATCH_CHUNK_ROWS * 2);
+        rows[1] = "not json".to_string();
+
+        let (_, job) = run(jsonl(rows), BATCH_ERROR_CAP).await;
+
+        assert_eq!(job.failures.len(), 1, "{:?}", job.failures);
+        assert_eq!(job.rejected, 1);
+    }
+
+    /// A row naming a kind this catalog does not have is a **row** failure,
+    /// not a job failure: one bad `kind` cell must not stop a file.
+    #[tokio::test]
+    async fn an_unknown_kind_rejects_the_row_and_names_what_was_expected() {
+        let rows = vec![
+            "{\"kind\":\"tabel\",\"name\":\"orders\"}".to_string(),
+            "{\"kind\":\"service\",\"name\":\"svc\"}".to_string(),
+        ];
+
+        let (_, job) = run(jsonl(rows), BATCH_ERROR_CAP).await;
+
+        assert_eq!(job.state, "partial");
+        assert_eq!(job.accepted, 1);
+        assert!(
+            job.failures[0].detail.contains("tabel"),
+            "{}",
+            job.failures[0].detail
+        );
+    }
+
+    /// A file that cannot even be opened still settles the job — a client
+    /// polling must never wait on a job that will never move.
+    #[tokio::test]
+    async fn a_job_that_never_started_is_failed_rather_than_left_queued() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let id = Uuid::new_v4();
+        catalog
+            .create_ingest_job(id, "jsonl", "tester")
+            .await
+            .expect("registered");
+
+        catalog
+            .fail_ingest_job(id, "the spooled upload could not be read")
+            .await
+            .expect("failed");
+
+        let job = catalog.ingest_job(id).await.expect("read").expect("job");
+        assert_eq!(job.state, "failed");
+        assert!(job.finished_at.is_some());
     }
 }

@@ -1,0 +1,150 @@
+# The gate, as CI runs it.
+#
+# Epic 16 Slice E requires that "generation runs on every PR so a contract
+# change that breaks an SDK fails the build". Nothing else was running on a PR
+# before this, so the workflow covers the rest of the gate too — the shape the
+# repository has been running by hand since Epic 1.
+#
+# Jobs are split by what they need rather than by what they check: `rust` needs
+# a toolchain and Docker, `sdks` needs Node and Python, and `contract` needs
+# only the toolchain. Splitting them means a contract drift is reported as a
+# contract drift and not as one failure among 1300 tests.
+
+name: gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # A failing build should say what failed, not print a backtrace of cargo.
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: fmt, clippy and the workspace suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        # `-A clippy::pedantic` and not a bare `-D warnings`. The workspace sets
+        # `all = "warn", pedantic = "warn"` deliberately: pedantic is read as
+        # advice here, not as policy, and a gate that denied it would fail on a
+        # baseline nobody has decided to adopt. Denying everything *else* is a
+        # gate that actually gates — it was zero when this workflow landed, and
+        # keeping it zero is the point.
+        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::pedantic
+
+      # `--test-threads=1` is not caution, it is required: the integration suite
+      # shares one Postgres container and creates a database per test, and
+      # concurrent creation intermittently fails with `PortNotExposed`. Measured
+      # on this workspace; see CLAUDE.md.
+      - name: tests
+        run: cargo test --workspace --lib --tests -- --test-threads=1
+
+      # Doc-tests are separated because they cost ~84 minutes on this workspace
+      # against ~2.5 for the behavioural suite, and they catch a different class
+      # of problem: an example that no longer compiles.
+      - name: doc-tests
+        run: cargo test --workspace --doc
+
+  contract:
+    name: the committed contract matches the code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `openapi.json` is committed so a contract change shows up in a diff a
+      # reviewer reads. Regenerating and comparing is what stops it becoming a
+      # file nobody remembers to update.
+      - name: regenerate and compare
+        run: |
+          cargo run -q -p graph-owl-server --bin openapi > /tmp/openapi.json
+          diff -u openapi.json /tmp/openapi.json || {
+            echo "::error::openapi.json is stale — regenerate: cargo run -p graph-owl-server --bin openapi > openapi.json"
+            exit 1
+          }
+
+  sdks:
+    name: SDKs generate and agree with the contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: generate the contract
+        run: cargo run -q -p graph-owl-server --bin openapi > openapi.json
+
+      # **The drift criterion.** Generation runs here, so a contract change that
+      # the generator cannot express fails the build rather than a customer's
+      # next push.
+      - name: generate the TypeScript type layer
+        run: |
+          cd sdk/typescript
+          npm install --no-audit --no-fund
+          npm run generate
+          npm run typecheck
+
+      - name: TypeScript SDK unit and contract tests
+        run: cd sdk/typescript && npm test
+
+      - name: Python SDK unit, contract and example tests
+        run: |
+          python -m venv "$RUNNER_TEMP/sdk-venv"
+          "$RUNNER_TEMP/sdk-venv/bin/pip" install -q pytest
+          cd sdk/python
+          PYTHONPATH=. "$RUNNER_TEMP/sdk-venv/bin/pytest" -q
+
+  sdk-roundtrip:
+    name: both SDKs push at a live service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The only test that proves the contract *describes the service* rather
+      # than merely being well-formed: generate a client from it and drive a
+      # real server with it.
+      - name: verify-sdks.sh
+        run: bash scripts/verify-sdks.sh
+
+  ui:
+    name: console typecheck and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: install
+        run: cd ui && npm install --no-audit --no-fund
+      - name: build
+        run: cd ui && npm run build
+      - name: tests
+        run: cd ui && npm test

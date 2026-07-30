@@ -301,7 +301,7 @@ async fn deleting_an_owner_reports_what_it_still_holds() {
     let orders = asset(&storage, "orders").await;
     let priya = user(&storage, "priya").await;
     storage
-        .set_asset_owners(orders, &[priya.clone()])
+        .set_asset_owners(orders, std::slice::from_ref(&priya))
         .await
         .expect("set");
 
@@ -332,7 +332,7 @@ async fn reassignment_moves_every_asset_and_removes_the_principal() {
     let ravi = user(&storage, "ravi").await;
     for id in [one, two] {
         storage
-            .set_asset_owners(id, &[priya.clone()])
+            .set_asset_owners(id, std::slice::from_ref(&priya))
             .await
             .expect("set");
     }
@@ -361,7 +361,7 @@ async fn reassignment_bumps_the_version_of_each_asset_it_moves() {
     let priya = user(&storage, "priya").await;
     let ravi = user(&storage, "ravi").await;
     storage
-        .set_asset_owners(orders, &[priya.clone()])
+        .set_asset_owners(orders, std::slice::from_ref(&priya))
         .await
         .expect("set");
     let before = storage
@@ -396,7 +396,7 @@ async fn reassigning_to_an_unknown_principal_is_refused() {
     let orders = asset(&storage, "orders").await;
     let priya = user(&storage, "priya").await;
     storage
-        .set_asset_owners(orders, &[priya.clone()])
+        .set_asset_owners(orders, std::slice::from_ref(&priya))
         .await
         .expect("set");
 

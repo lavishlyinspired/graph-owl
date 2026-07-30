@@ -88,7 +88,16 @@ pub fn class_of(route: &str) -> Option<Class> {
         // A source scan and a full projection rebuild. Both hold a connection
         // for their whole duration and neither is latency-sensitive, so both
         // are better refused than queued.
-        "/connectors/postgres/runs" | "/graph/reconcile" => Some(Class::Ingestion),
+        //
+        // `/ingest/batch` joins them for the same reason and a second one: it
+        // spools the whole upload to disk before answering, so a herd of them
+        // costs disk as well as connections. The *polling* routes are
+        // deliberately absent — a client that cannot ask how its job is doing
+        // has to guess, and a `503` on a poll would make an overloaded server
+        // look like a lost job.
+        "/connectors/postgres/runs" | "/graph/reconcile" | "/ingest/batch" => {
+            Some(Class::Ingestion)
+        }
         _ => None,
     }
 }

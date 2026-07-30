@@ -249,6 +249,60 @@ pub struct ConnectorRun {
     pub triggered_by: String,
 }
 
+/// One batch ingestion job — Epic 16 Slice C.
+///
+/// Decision 2: **batch is a job, not a request.** A 500k-row file cannot be
+/// answered synchronously, so this row *is* the answer, polled until it settles.
+///
+/// `state` is a string rather than an enum because the vocabulary is decided in
+/// `graph-owl-connectors`' `JobState` and this crate is the port: importing the
+/// enum here would put a domain decision behind a storage boundary, and
+/// duplicating it would give two definitions of `partial` that could drift.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestJob {
+    pub id: Uuid,
+    /// The format the upload declared — `jsonl` or `csv`.
+    pub format: String,
+    pub state: String,
+    pub rows_read: i64,
+    pub accepted: i64,
+    pub rejected: i64,
+    /// The per-row reasons, bounded by the error cap.
+    ///
+    /// **Not just the count.** A job that reports only a number tells a client
+    /// something is wrong and nothing about what, at which point their only move
+    /// is to re-send the file and hope.
+    pub failures: Vec<RowFailure>,
+    /// Why it stopped before the end of the file, when it did.
+    pub halt_reason: Option<String>,
+    pub cancel_requested: bool,
+    pub submitted_by: String,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// Last time the worker said it was alive. A stale one is how a crashed job
+    /// becomes distinguishable from a slow one.
+    pub heartbeat_at: chrono::DateTime<chrono::Utc>,
+    /// `None` while it is still running.
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Why one row did not land.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RowFailure {
+    /// The line number in the submitted file, so a client can grep for it.
+    pub row: u64,
+    pub detail: String,
+}
+
+/// What a job has done so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IngestProgress {
+    pub rows_read: i64,
+    pub accepted: i64,
+    pub rejected: i64,
+}
+
 /// One stored violation.
 ///
 /// Flat strings rather than the validator's typed `Violation`: this crosses a
@@ -990,6 +1044,78 @@ pub trait Storage: Send + Sync {
         status: u16,
         body: &serde_json::Value,
     ) -> Result<(), StorageError>;
+
+    // ---- Epic 16 Slice C: batch jobs ----
+
+    /// Record a job that is about to start.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn create_ingest_job(&self, job: &IngestJob) -> Result<(), StorageError>;
+
+    /// The job as it stands, or `None` if no such job.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn ingest_job(&self, id: Uuid) -> Result<Option<IngestJob>, StorageError>;
+
+    /// Report progress **and learn whether to stop**, in one round trip.
+    ///
+    /// The two are deliberately the same call. A worker that heartbeats and then
+    /// separately asks "was I cancelled?" does twice the work to answer a
+    /// question the first statement already had the row for, and the window
+    /// between the two is exactly where a cancelled job processes one more chunk.
+    ///
+    /// Returns whether cancellation has been requested.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn report_ingest_progress(
+        &self,
+        id: Uuid,
+        progress: IngestProgress,
+        new_failures: &[RowFailure],
+    ) -> Result<bool, StorageError>;
+
+    /// Close a job out with its verdict.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn finish_ingest_job(
+        &self,
+        id: Uuid,
+        state: &str,
+        halt_reason: Option<&str>,
+    ) -> Result<(), StorageError>;
+
+    /// Ask an in-flight job to stop. Returns `false` if it had already finished.
+    ///
+    /// **A request, not an order.** The worker is the only thing that can stop
+    /// cleanly and report what landed; killing it from here would leave the
+    /// counts describing a moment nobody observed.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn cancel_ingest_job(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Fail every job that stopped reporting, returning how many were reaped.
+    ///
+    /// A process that dies mid-job leaves a row saying `running` forever, and a
+    /// client polling it waits for an answer that will never come. The heartbeat
+    /// is what makes "stopped reporting" observable without a scheduler.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn reap_abandoned_ingest_jobs(
+        &self,
+        stale_after_seconds: i64,
+    ) -> Result<u64, StorageError>;
 
     /// Every verdict, so detection can skip what a human closed and upgrade what
     /// they confirmed.

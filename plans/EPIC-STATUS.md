@@ -53,7 +53,7 @@ is the condition that index exists to catch.
 | **13** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 10/10 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **14** | 5 | [`14-mcp-activation.md`](14-mcp-activation.md) | In progress | 3/8 (+1 partial) | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard… |
 | **15** | 1 | [`15-connectors.md`](15-connectors.md) | In progress | 13/17 | Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable) |
-| **16** | 6 | [`16-ingestion-apis.md`](16-ingestion-apis.md) | In progress | 3/7 (+1 partial) | Epic 1 (contract), Epic 15 (upsert semantics) |
+| **16** | 6 | [`16-ingestion-apis.md`](16-ingestion-apis.md) | In progress | 5/8 (+2 partial) | Epic 1 (contract), Epic 15 (upsert semantics) |
 | **17** | 6 | [`17-entity-resolution.md`](17-entity-resolution.md) | Not started | 0/3 | Epic 4 (`sameAs` in the graph), Epic 15 + 16 (two write paths make this necessa… |
 | **18** | 6 | [`18-inbound-events.md`](18-inbound-events.md) | Not started | 0/2 | Epic 16 (ingestion contract), Epic 17 (resolution, so pushes do not duplicate) |
 | **19** | 6 | [`19-streaming.md`](19-streaming.md) | Not started | 0/2 | Epic 16 (ingestion contract), Epic 18 (dedup and ordering machinery) |
@@ -313,9 +313,17 @@ is the condition that index exists to catch.
 - [x] Idempotency
 - [x] Boundary validation
 - [x] Relationships and lineage in a push
-- [ ] Batch file ingestion
-- [ ] Generated TypeScript and Python SDKs
+- [~] Batch file ingestion — job, reaper and cancel land; **not multipart, no Parquet, no RSS assertion** (below)
+- [x] Generated TypeScript and Python SDKs
+- [x] Custom adapter guide and runnable example
 - [ ] `ConflictKind` eats a conflict's detail unless it has its own variant.
+
+**Three of Slice C's acceptance criteria were met differently than written, and one was not met at all.** Recorded here rather than ticked, because each is a decision a later reader would otherwise have to rediscover:
+
+- **Raw body, not `multipart/form-data`.** Every pusher on this path is a program (decision 1 puts adapters out of process), and multipart is a browser form encoding — it would cost each SDK a dependency to encode something no browser sends. `POST /ingest/batch` takes `application/x-ndjson` or `text/csv` directly.
+- **No Parquet.** It is columnar, so any reader must materialise a row group at a time — which contradicts the *same slice's* bounded-memory criterion — and it costs the `arrow`+`parquet` dependency pair for a format any pusher converts from in one line. `Format::parse` refuses it **by name** rather than falling through to the line parser, so the answer is "this build does not read Parquet" and not 500k parse errors.
+- **Bounded memory is structural, not asserted.** `rows()` returns an iterator over a `BufRead` and nothing in the path ever holds more than one row, so a 500k-row file and a 5-row file cost the same. The plan asked for a peak-RSS assertion on a generated large file; that test does not exist, and the property currently rests on the type signature.
+- **The error cap is decided and unit-tested, but no end-to-end test drives a file past 1000 errors.** `should_halt` is covered at 100% mutation; the wiring is not covered by an integration test.
 
 ### Epic 17 — Entity Resolution & Deduplication *(Demo 6)*
 

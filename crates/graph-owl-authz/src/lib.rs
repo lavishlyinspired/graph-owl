@@ -734,15 +734,15 @@ impl DecisionCache {
         };
         inner.tick += 1;
         let tick = inner.tick;
-        if inner.entries.len() >= self.capacity && !inner.entries.contains_key(&key) {
-            if let Some(coldest) = inner
+        if inner.entries.len() >= self.capacity
+            && !inner.entries.contains_key(&key)
+            && let Some(coldest) = inner
                 .entries
                 .iter()
                 .min_by_key(|(_, (_, last_used))| *last_used)
                 .map(|(k, _)| k.clone())
-            {
-                inner.entries.remove(&coldest);
-            }
+        {
+            inner.entries.remove(&coldest);
         }
         inner.entries.insert(key, (predicate, tick));
     }

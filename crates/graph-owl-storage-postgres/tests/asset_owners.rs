@@ -163,7 +163,7 @@ async fn a_rejected_owner_list_changes_nothing() {
     let priya = user(&storage, "priya", "Priya").await;
     let platform = team(&storage, "platform", "Platform").await;
     storage
-        .set_asset_owners(orders, &[platform.clone()])
+        .set_asset_owners(orders, std::slice::from_ref(&platform))
         .await
         .expect("set");
 
@@ -378,10 +378,7 @@ async fn estate(storage: &PostgresStorage, prefix: &str) -> (Uuid, Uuid, Uuid) {
     ] {
         let fqn = match &parent {
             None => name.clone(),
-            Some(_) => format!(
-                "{}",
-                ids.iter().map(|_| "").collect::<String>() + &format!("{prefix}.{name}")
-            ),
+            Some(_) => format!("{prefix}.{name}"),
         };
         let written = storage
             .upsert_asset(Asset {

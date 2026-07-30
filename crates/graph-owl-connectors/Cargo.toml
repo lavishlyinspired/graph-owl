@@ -12,6 +12,7 @@ sha2.workspace = true
 graph-owl-core.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
+csv = "1"
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn versions_order_by_major_then_minor() {
-        let mut versions = vec![
+        let mut versions = [
             EntityVersion { major: 1, minor: 0 },
             EntityVersion { major: 0, minor: 9 },
             EntityVersion {

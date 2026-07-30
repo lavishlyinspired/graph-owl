@@ -1,0 +1,20 @@
+[project]
+name = "graph-owl-sdk"
+version = "0.1.0"
+description = "Push metadata into graph-owl from anything you can write Python against."
+requires-python = ">=3.10"
+# **No runtime dependencies, on purpose.** A custom adapter runs in somebody
+# else's environment — a scheduler image, a lambda, a notebook — and every
+# dependency this SDK adds is one they have to resolve against whatever they
+# already pinned. The standard library covers HTTP, JSON, UUIDs and backoff.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["graph_owl_sdk*"]

@@ -24,7 +24,6 @@ struct Assets;
 /// unknown API path: a fallback registered first turns every mistyped endpoint
 /// into a `200 text/html`, the generated client parses HTML as JSON, and the
 /// user sees a blank page instead of an error (`39-ui-foundation.md` Slice A).
-#[must_use]
 pub fn router() -> Router {
     Router::new().fallback(get(serve))
 }

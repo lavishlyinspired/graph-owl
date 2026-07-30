@@ -1,0 +1,20 @@
+{
+  "name": "@graph-owl/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Push metadata into graph-owl from anything you can write code against.",
+  "main": "src/index.ts",
+  "scripts": {
+    "generate": "openapi-typescript ../../openapi.json -o src/generated/api.d.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run src/ingest.test.ts src/contract.test.ts",
+    "test:roundtrip": "vitest run src/roundtrip.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "openapi-typescript": "^7.13.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.7"
+  }
+}

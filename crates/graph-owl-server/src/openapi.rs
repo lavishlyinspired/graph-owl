@@ -505,6 +505,36 @@ pub static ROUTES: &[Route] = &[
         207,
         true,
     ),
+    // Epic 16 Slice C. `202` because decision 2 makes a batch a job: the only
+    // honest synchronous answer to a 500k-row file is "I have started", and a
+    // `200` would claim a result nobody has yet.
+    route(
+        "post",
+        "/ingest/batch",
+        "Upload a JSONL or CSV batch; 202 with a job handle to poll",
+        None,
+        None,
+        202,
+        true,
+    ),
+    route(
+        "get",
+        "/ingest/jobs/{id}",
+        "How a batch job is doing: state, counts, and per-row failures",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "delete",
+        "/ingest/jobs/{id}",
+        "Ask a batch job to stop; the response says what had landed",
+        None,
+        None,
+        200,
+        true,
+    ),
     route(
         "post",
         "/connectors/{connector}/test",
@@ -985,10 +1015,10 @@ mod tests {
             match value {
                 Value::Object(map) => {
                     for (key, child) in map {
-                        if key == "$ref" {
-                            if let Some(name) = child.as_str() {
-                                found.push(name.to_string());
-                            }
+                        if key == "$ref"
+                            && let Some(name) = child.as_str()
+                        {
+                            found.push(name.to_string());
                         }
                         refs(child, found);
                     }

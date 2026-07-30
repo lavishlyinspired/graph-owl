@@ -119,6 +119,14 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/connectors/{connector}/schema", get(connector_schema))
         .route("/connectors/{connector}/test", post(test_connector))
         .route("/ingest", post(ingest))
+        // Epic 16 Slice C. `202` and a handle, never a result: decision 2 says a
+        // 500k-row file is a job, and the only honest synchronous answer to one
+        // is "I have started".
+        .route("/ingest/batch", post(ingest_batch))
+        .route(
+            "/ingest/jobs/{id}",
+            get(ingest_job).delete(cancel_ingest_job),
+        )
         .route(
             "/connectors/configs",
             get(list_connector_configs).post(save_connector_config),
@@ -1798,6 +1806,166 @@ async fn ingest(
     }
 
     Ok((StatusCode::MULTI_STATUS, Json(body)))
+}
+
+/// Where an upload is spooled while it is being read.
+///
+/// **Spooled to disk, not held in memory.** The request body has to be fully
+/// received before the connection can be answered, and a 500k-row file held in a
+/// `Vec<u8>` to satisfy that would break the memory bound this slice exists for
+/// before the parser ever saw a row.
+fn spool_path(id: uuid::Uuid) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("graph-owl-ingest-{id}"))
+}
+
+/// Accept a batch file — Epic 16 Slice C.
+///
+/// **Raw body with a `Content-Type`, not `multipart/form-data`.** The plan says
+/// multipart, and this deliberately differs: multipart is a browser form
+/// encoding, every pusher here is a program, and it would add a parsing
+/// dependency and a second place for the byte stream to be buffered. A client
+/// sends `curl --data-binary @file -H 'Content-Type: application/x-ndjson'`.
+/// Recorded in the plan under "deviations".
+async fn ingest_batch(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Body,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    use graph_owl_connectors::rows::Format;
+
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+
+    // Refused by name rather than guessed at. A Parquet file fed to a line parser
+    // reports every row as malformed, which buries "this build does not read
+    // Parquet" under half a million parse errors.
+    let format = Format::parse(content_type).ok_or_else(|| {
+        AppError::Validation(vec![FieldError::new(
+            "content-type",
+            FieldErrorCode::Type,
+            format!(
+                "`{content_type}` is not a batch format this build reads. \
+                 Send `application/x-ndjson` (one entity per line) or `text/csv`. \
+                 Parquet is columnar, so a reader must hold a row group at a time, \
+                 which is exactly the property batch ingestion avoids — convert it \
+                 to JSONL before pushing"
+            ),
+        )])
+    })?;
+
+    let id = uuid::Uuid::new_v4();
+    catalog
+        .create_ingest_job(id, &format!("{format:?}").to_lowercase(), &principal.id)
+        .await?;
+
+    let path = spool_path(id);
+    spool(body, &path)
+        .await
+        .map_err(|error| AppError::Internal(format!("the upload could not be spooled: {error}")))?;
+
+    // Detached, because the response has to go back now. Every outcome from here
+    // lands on the job row — including a panic, which the reaper turns into
+    // `failed` rather than a row that reads `running` forever.
+    let worker = catalog.clone();
+    tokio::spawn(async move {
+        let outcome = match std::fs::File::open(&path) {
+            Ok(file) => {
+                worker
+                    .run_batch_ingest(
+                        id,
+                        std::io::BufReader::new(file),
+                        format,
+                        principal,
+                        graph_owl_api::BATCH_ERROR_CAP,
+                    )
+                    .await
+            }
+            Err(error) => {
+                worker
+                    .fail_ingest_job(
+                        id,
+                        &format!("the spooled upload could not be read: {error}"),
+                    )
+                    .await
+            }
+        };
+        if let Err(error) = outcome {
+            tracing::error!(job = %id, "batch job could not be recorded: {error:?}");
+        }
+        // Removed whether it succeeded or not: a spool file that outlives its job
+        // is a copy of somebody's metadata sitting in a shared temp directory.
+        if let Err(error) = std::fs::remove_file(&path) {
+            tracing::warn!(job = %id, "the spooled upload could not be removed: {error}");
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "id": id,
+            "state": "queued",
+            "poll": format!("/ingest/jobs/{id}"),
+        })),
+    ))
+}
+
+/// Stream a request body to disk without ever holding it whole.
+async fn spool(body: axum::body::Body, path: &std::path::Path) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    use tokio_stream::StreamExt;
+
+    let mut file = spool_file(path).await?;
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(std::io::Error::other)?;
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await
+}
+
+/// Create the spool file, readable only by this process's user where the
+/// platform can express that.
+///
+/// The temp directory is shared, and the file is a verbatim copy of somebody's
+/// metadata — a default-`0644` spool would publish it to every account on the
+/// host for the life of the job.
+async fn spool_file(path: &std::path::Path) -> std::io::Result<tokio::fs::File> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path).await
+}
+
+/// Poll a batch job — Epic 16 Slice C.
+async fn ingest_job(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let job = catalog.ingest_job(id).await?.ok_or(AppError::NotFound)?;
+    Ok(Json(serde_json::to_value(&job).unwrap_or_default()))
+}
+
+/// Ask a batch job to stop — Epic 16 Slice C.
+///
+/// `200` with the job either way, rather than `204`: a client cancelling
+/// something needs to see what had landed by the time it stopped, and a body-less
+/// response makes them poll again to find out.
+async fn cancel_ingest_job(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // `false` means it had already finished, which is **not** an error: a client
+    // that cancels a job the instant it completes has not done anything wrong,
+    // and a `409` there would be noise in every well-behaved cancel path.
+    catalog.cancel_ingest_job(id).await?;
+    let job = catalog.ingest_job(id).await?.ok_or(AppError::NotFound)?;
+    Ok(Json(serde_json::to_value(&job).unwrap_or_default()))
 }
 
 /// A stable fingerprint of a push body.

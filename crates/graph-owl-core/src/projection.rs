@@ -152,6 +152,175 @@ pub fn asset_update_flakes(before: &Asset, after: &Asset, t: i64) -> Vec<Flake> 
     out
 }
 
+/// Reassemble an asset from the flakes visible at some transaction time.
+///
+/// The inverse of [`asset_to_flakes`], and the payoff of the whole flake
+/// model: given the flakes current *as of* a past `t`, this returns the entity
+/// as it stood then — reconstructed, not looked up in a snapshot table that
+/// could have drifted from the facts.
+///
+/// Returns `None` when the flakes do not describe an asset at all. That is the
+/// honest answer for a subject that did not exist yet: an asset synthesised
+/// from partial facts would be a state the catalog was never in.
+///
+/// # Errors
+///
+/// None — a malformed set yields `None` rather than a panic, because these
+/// flakes come from storage and a corrupt row must not take down a read.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn asset_from_flakes(id: uuid::Uuid, flakes: &[Flake]) -> Option<Asset> {
+    let subject = id.to_string();
+    let mine: Vec<&Flake> = flakes.iter().filter(|f| f.s.id == subject).collect();
+    if mine.is_empty() {
+        return None;
+    }
+
+    let find = |predicate: &str| -> Option<&FlakeValue> {
+        mine.iter().find(|f| f.p.id == predicate).map(|f| &f.o)
+    };
+    let text = |predicate: &str| -> Option<String> {
+        match find(predicate) {
+            Some(FlakeValue::String(s)) => Some(s.clone()),
+            _ => None,
+        }
+    };
+    let instant = |predicate: &str| -> Option<chrono::DateTime<chrono::Utc>> {
+        match find(predicate) {
+            Some(FlakeValue::Instant(dt)) => Some(*dt),
+            _ => None,
+        }
+    };
+
+    // Identity, name and kind are what make this an asset rather than an
+    // arbitrary bag of facts. Without all three there is nothing to return.
+    let kind = AssetKind::parse(&text("type")?).ok()?;
+    let name = text("name")?;
+    let fully_qualified_name = text("fqn")?;
+
+    let version = text("version")
+        .and_then(|raw| {
+            let (major, minor) = raw.split_once('.')?;
+            Some(crate::envelope::EntityVersion {
+                major: major.parse().ok()?,
+                minor: minor.parse().ok()?,
+            })
+        })
+        .unwrap_or_else(crate::envelope::EntityVersion::initial);
+
+    // The parent predicate is typed by the parent's kind, so the lookup has to
+    // ask for the one this kind would have written.
+    let parent_id = parent_predicate(kind).and_then(|predicate| match find(&predicate.id) {
+        Some(FlakeValue::Ref(reference)) => reference.id.parse().ok(),
+        _ => None,
+    });
+
+    Some(Asset {
+        id,
+        kind,
+        name,
+        fully_qualified_name,
+        parent_id,
+        description: text("description"),
+        properties: match find("properties") {
+            Some(FlakeValue::Json(raw)) => serde_json::from_str(raw).ok(),
+            _ => None,
+        },
+        // **Empty on a historical read, and that is the honest answer.** Owners
+        // live in a relational join table, not in the triple projection, so a
+        // reconstruction from flakes has nothing to read. Filling them from the
+        // *current* owners would attribute today's ownership to a past version,
+        // which is exactly the misattribution `change_description: None` below
+        // refuses for the same reason.
+        owners: Vec::new(),
+        version,
+        updated_by: text("updatedBy").unwrap_or_else(|| "system".to_string()),
+        // A historical read reconstructs *state*, not the diff that produced
+        // it. The change description belongs to the version row that recorded
+        // it, and inventing one here would attribute a change to the wrong
+        // transaction.
+        change_description: None,
+        deleted: matches!(find("deleted"), Some(FlakeValue::Boolean(true))),
+        deleted_at: instant("deletedAt"),
+        created_at: instant("createdAt").unwrap_or_else(chrono::Utc::now),
+        updated_at: instant("updatedAt").unwrap_or_else(chrono::Utc::now),
+    })
+}
+
+/// The node a relationship occupies in the graph.
+///
+/// A relationship is a **node**, not a bare predicate assertion between its
+/// endpoints. The flat form cannot carry a payload — confidence, provenance,
+/// the SQL that produced a lineage edge — and "every relationship below 0.5
+/// confidence" is not expressible over it at all. The cost is two hops to
+/// traverse (`plans/04-engine-triples.md` decision 4).
+#[must_use]
+pub fn relationship_sid(relationship: &crate::Relationship) -> Sid {
+    Sid::new(namespace::DSC, relationship.id.to_string())
+}
+
+/// Project a relationship into the graph as a reified node.
+#[must_use]
+pub fn relationship_to_flakes(relationship: &crate::Relationship, t: i64) -> Vec<Flake> {
+    let subject = relationship_sid(relationship);
+    let entity = |id: uuid::Uuid| FlakeValue::Ref(Sid::new(namespace::DSC, id.to_string()));
+
+    vec![
+        // `rdf:type`, not `dsc:type`: this says what kind of *thing* the node
+        // is in the standard vocabulary, which is what lets Epic 9 export it
+        // without a translation table.
+        Flake::assert(
+            subject.clone(),
+            Sid::new(namespace::RDF, "type"),
+            FlakeValue::Ref(Sid::dsc("Relationship")),
+            t,
+        ),
+        // Endpoints are references so OPST reverse traversal reaches them —
+        // "what feeds this table" is a lookup by object, and a string endpoint
+        // would put it on a sequential scan.
+        Flake::assert(
+            subject.clone(),
+            Sid::dsc("fromEntity"),
+            entity(relationship.from_entity_id),
+            t,
+        ),
+        Flake::assert(
+            subject.clone(),
+            Sid::dsc("toEntity"),
+            entity(relationship.to_entity_id),
+            t,
+        ),
+        Flake::assert(
+            subject.clone(),
+            Sid::dsc("relType"),
+            FlakeValue::String(relationship.relationship_type.clone()),
+            t,
+        ),
+        // The endpoint *kinds* travel with the edge. Without them a traversal
+        // has to resolve both endpoints to learn whether an edge is
+        // table→table or column→column, which is two extra reads per edge on
+        // the hot path.
+        Flake::assert(
+            subject.clone(),
+            Sid::dsc("fromEntityType"),
+            FlakeValue::String(relationship.from_entity_type.clone()),
+            t,
+        ),
+        Flake::assert(
+            subject.clone(),
+            Sid::dsc("toEntityType"),
+            FlakeValue::String(relationship.to_entity_type.clone()),
+            t,
+        ),
+        Flake::assert(
+            subject,
+            Sid::dsc("createdAt"),
+            FlakeValue::Instant(relationship.created_at),
+            t,
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod projection_tests {
     use super::*;
@@ -783,173 +952,4 @@ mod projection_tests {
             }
         }
     }
-}
-
-/// Reassemble an asset from the flakes visible at some transaction time.
-///
-/// The inverse of [`asset_to_flakes`], and the payoff of the whole flake
-/// model: given the flakes current *as of* a past `t`, this returns the entity
-/// as it stood then — reconstructed, not looked up in a snapshot table that
-/// could have drifted from the facts.
-///
-/// Returns `None` when the flakes do not describe an asset at all. That is the
-/// honest answer for a subject that did not exist yet: an asset synthesised
-/// from partial facts would be a state the catalog was never in.
-///
-/// # Errors
-///
-/// None — a malformed set yields `None` rather than a panic, because these
-/// flakes come from storage and a corrupt row must not take down a read.
-#[must_use]
-#[allow(clippy::too_many_lines)]
-pub fn asset_from_flakes(id: uuid::Uuid, flakes: &[Flake]) -> Option<Asset> {
-    let subject = id.to_string();
-    let mine: Vec<&Flake> = flakes.iter().filter(|f| f.s.id == subject).collect();
-    if mine.is_empty() {
-        return None;
-    }
-
-    let find = |predicate: &str| -> Option<&FlakeValue> {
-        mine.iter().find(|f| f.p.id == predicate).map(|f| &f.o)
-    };
-    let text = |predicate: &str| -> Option<String> {
-        match find(predicate) {
-            Some(FlakeValue::String(s)) => Some(s.clone()),
-            _ => None,
-        }
-    };
-    let instant = |predicate: &str| -> Option<chrono::DateTime<chrono::Utc>> {
-        match find(predicate) {
-            Some(FlakeValue::Instant(dt)) => Some(*dt),
-            _ => None,
-        }
-    };
-
-    // Identity, name and kind are what make this an asset rather than an
-    // arbitrary bag of facts. Without all three there is nothing to return.
-    let kind = AssetKind::parse(&text("type")?).ok()?;
-    let name = text("name")?;
-    let fully_qualified_name = text("fqn")?;
-
-    let version = text("version")
-        .and_then(|raw| {
-            let (major, minor) = raw.split_once('.')?;
-            Some(crate::envelope::EntityVersion {
-                major: major.parse().ok()?,
-                minor: minor.parse().ok()?,
-            })
-        })
-        .unwrap_or_else(crate::envelope::EntityVersion::initial);
-
-    // The parent predicate is typed by the parent's kind, so the lookup has to
-    // ask for the one this kind would have written.
-    let parent_id = parent_predicate(kind).and_then(|predicate| match find(&predicate.id) {
-        Some(FlakeValue::Ref(reference)) => reference.id.parse().ok(),
-        _ => None,
-    });
-
-    Some(Asset {
-        id,
-        kind,
-        name,
-        fully_qualified_name,
-        parent_id,
-        description: text("description"),
-        properties: match find("properties") {
-            Some(FlakeValue::Json(raw)) => serde_json::from_str(raw).ok(),
-            _ => None,
-        },
-        // **Empty on a historical read, and that is the honest answer.** Owners
-        // live in a relational join table, not in the triple projection, so a
-        // reconstruction from flakes has nothing to read. Filling them from the
-        // *current* owners would attribute today's ownership to a past version,
-        // which is exactly the misattribution `change_description: None` below
-        // refuses for the same reason.
-        owners: Vec::new(),
-        version,
-        updated_by: text("updatedBy").unwrap_or_else(|| "system".to_string()),
-        // A historical read reconstructs *state*, not the diff that produced
-        // it. The change description belongs to the version row that recorded
-        // it, and inventing one here would attribute a change to the wrong
-        // transaction.
-        change_description: None,
-        deleted: matches!(find("deleted"), Some(FlakeValue::Boolean(true))),
-        deleted_at: instant("deletedAt"),
-        created_at: instant("createdAt").unwrap_or_else(chrono::Utc::now),
-        updated_at: instant("updatedAt").unwrap_or_else(chrono::Utc::now),
-    })
-}
-
-/// The node a relationship occupies in the graph.
-///
-/// A relationship is a **node**, not a bare predicate assertion between its
-/// endpoints. The flat form cannot carry a payload — confidence, provenance,
-/// the SQL that produced a lineage edge — and "every relationship below 0.5
-/// confidence" is not expressible over it at all. The cost is two hops to
-/// traverse (`plans/04-engine-triples.md` decision 4).
-#[must_use]
-pub fn relationship_sid(relationship: &crate::Relationship) -> Sid {
-    Sid::new(namespace::DSC, relationship.id.to_string())
-}
-
-/// Project a relationship into the graph as a reified node.
-#[must_use]
-pub fn relationship_to_flakes(relationship: &crate::Relationship, t: i64) -> Vec<Flake> {
-    let subject = relationship_sid(relationship);
-    let entity = |id: uuid::Uuid| FlakeValue::Ref(Sid::new(namespace::DSC, id.to_string()));
-
-    vec![
-        // `rdf:type`, not `dsc:type`: this says what kind of *thing* the node
-        // is in the standard vocabulary, which is what lets Epic 9 export it
-        // without a translation table.
-        Flake::assert(
-            subject.clone(),
-            Sid::new(namespace::RDF, "type"),
-            FlakeValue::Ref(Sid::dsc("Relationship")),
-            t,
-        ),
-        // Endpoints are references so OPST reverse traversal reaches them —
-        // "what feeds this table" is a lookup by object, and a string endpoint
-        // would put it on a sequential scan.
-        Flake::assert(
-            subject.clone(),
-            Sid::dsc("fromEntity"),
-            entity(relationship.from_entity_id),
-            t,
-        ),
-        Flake::assert(
-            subject.clone(),
-            Sid::dsc("toEntity"),
-            entity(relationship.to_entity_id),
-            t,
-        ),
-        Flake::assert(
-            subject.clone(),
-            Sid::dsc("relType"),
-            FlakeValue::String(relationship.relationship_type.clone()),
-            t,
-        ),
-        // The endpoint *kinds* travel with the edge. Without them a traversal
-        // has to resolve both endpoints to learn whether an edge is
-        // table→table or column→column, which is two extra reads per edge on
-        // the hot path.
-        Flake::assert(
-            subject.clone(),
-            Sid::dsc("fromEntityType"),
-            FlakeValue::String(relationship.from_entity_type.clone()),
-            t,
-        ),
-        Flake::assert(
-            subject.clone(),
-            Sid::dsc("toEntityType"),
-            FlakeValue::String(relationship.to_entity_type.clone()),
-            t,
-        ),
-        Flake::assert(
-            subject,
-            Sid::dsc("createdAt"),
-            FlakeValue::Instant(relationship.created_at),
-            t,
-        ),
-    ]
 }
