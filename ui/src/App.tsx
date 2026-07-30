@@ -73,6 +73,14 @@ import { type DiffEdge, diff } from "./graph/diff";
 import { overflowTitle, summarizeOwners } from "./graph/owners";
 import { hierarchy, type TeamNode } from "./admin/hierarchy";
 import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
+import {
+  type Draft as PolicyDraft,
+  type DryRun,
+  type Operation,
+  incomplete as policyIncomplete,
+  toPolicy,
+  verdict as policyVerdict,
+} from "./admin/policy";
 import { type GraphModel, expand, performedExpansions, replay, seed } from "./graph/model";
 import { brand, darkTheme, lightTheme, palette } from "./theme";
 import { GenericSourceMark, PostgresMark } from "./icons";
@@ -2662,6 +2670,237 @@ function ConnectorsPage({ onDone, colors }: { onDone: () => void; colors: (typeo
   );
 }
 
+/** Try the connection before anything is saved — Epic 41 Slice F.
+ *
+ *  **Before**, not after: a test that could only run against a stored config would
+ *  confirm the credential once the mistake was already written. Disabled until the
+ *  required fields are present, because a test that fails for a missing field
+ *  teaches nothing about the connection. */
+function ConnectionTest({
+  values,
+  disabled,
+}: {
+  values: Record<string, unknown>;
+  disabled: boolean;
+}) {
+  const [result, setResult] = useState<{ ok: boolean; detail?: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = () => {
+    setBusy(true);
+    setResult(null);
+    const { password, ...settings } = values;
+    api
+      .testConnector("postgres", {
+        settings,
+        secret: typeof password === "string" ? password : undefined,
+      })
+      .then(setResult)
+      .catch((e: unknown) =>
+        setResult({ ok: false, detail: e instanceof Error ? e.message : "the test could not run" }),
+      )
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <Space direction="vertical" size={8} style={{ width: "100%" }}>
+      <Button onClick={run} loading={busy} disabled={disabled}>
+        Test connection
+      </Button>
+      {result?.ok === true && (
+        <Alert type="success" showIcon title="Connected" description="These settings reach the database." />
+      )}
+      {result?.ok === false && (
+        // **The driver's own message, not "could not connect".** "Could not
+        // connect" tells an admin nothing; `password authentication failed for
+        // user "catalog"` tells them which of five fields is wrong. The server
+        // redacts the secret before it leaves the process.
+        <Alert type="error" showIcon title="Could not connect" description={result.detail} />
+      )}
+    </Space>
+  );
+}
+
+/** Compose a policy and see what it would do — Epic 41 Slice F.
+ *
+ *  The plan's own reason for this screen: "a policy saved without preview is a
+ *  production access change made blind, and this is the one screen where a mistake
+ *  is a security incident." So the dry-run is the feature; the form exists to feed
+ *  it. */
+function PolicyPanel() {
+  const [draft, setDraft] = useState<PolicyDraft>({
+    name: "",
+    ruleName: "",
+    effect: "allow",
+    operations: ["viewBasic"],
+    matcherType: "fqnPrefix",
+    matcherValue: "",
+  });
+  const [roles, setRoles] = useState("analyst");
+  const [run, setRun] = useState<DryRun | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const missing = policyIncomplete(draft);
+  const preview = () => {
+    setBusy(true);
+    setError(null);
+    api
+      .dryRunPolicy(
+        toPolicy(draft),
+        roles.split(",").map((r) => r.trim()).filter((r) => r !== ""),
+      )
+      .then(setRun)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "the dry-run failed"))
+      .finally(() => setBusy(false));
+  };
+
+  const OPERATIONS: Operation[] = [
+    "viewBasic",
+    "viewDetails",
+    "viewSensitive",
+    "create",
+    "editDescription",
+    "editTags",
+    "editOwners",
+    "delete",
+    "restore",
+  ];
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Alert
+        type="info"
+        showIcon
+        title="Policies are previewed here, not saved here"
+        description="There is no write path for policies yet — nothing in the API inserts one. Compose and dry-run to see what a policy would do; applying it is an Epic 13 surface that does not exist."
+      />
+
+      <Card size="small" title="Compose">
+        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+          <Flex gap={8} wrap>
+            <Input
+              placeholder="policy name"
+              value={draft.name}
+              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+              style={{ maxWidth: 200 }}
+            />
+            <Input
+              placeholder="rule name"
+              value={draft.ruleName}
+              onChange={(e) => setDraft({ ...draft, ruleName: e.target.value })}
+              style={{ maxWidth: 240 }}
+            />
+            <select
+              aria-label="Effect"
+              value={draft.effect}
+              onChange={(e) => setDraft({ ...draft, effect: e.target.value as PolicyDraft["effect"] })}
+            >
+              <option value="allow">allow</option>
+              <option value="deny">deny</option>
+            </select>
+          </Flex>
+          <Flex gap={8} wrap align="center">
+            <select
+              aria-label="Applies to"
+              value={draft.matcherType}
+              onChange={(e) =>
+                setDraft({ ...draft, matcherType: e.target.value as PolicyDraft["matcherType"] })
+              }
+            >
+              <option value="all">everything</option>
+              <option value="fqnPrefix">FQN prefix</option>
+              <option value="tagged">tagged</option>
+            </select>
+            {draft.matcherType !== "all" && (
+              <Input
+                placeholder={draft.matcherType === "tagged" ? "tag, e.g. pii" : "prefix, e.g. warehouse."}
+                value={draft.matcherValue}
+                onChange={(e) => setDraft({ ...draft, matcherValue: e.target.value })}
+                style={{ maxWidth: 240 }}
+              />
+            )}
+          </Flex>
+          <Space size={4} wrap>
+            {OPERATIONS.map((op) => (
+              <Tag.CheckableTag
+                key={op}
+                checked={draft.operations.includes(op)}
+                onChange={(on) =>
+                  setDraft({
+                    ...draft,
+                    operations: on
+                      ? [...draft.operations, op]
+                      : draft.operations.filter((o) => o !== op),
+                  })
+                }
+              >
+                {op}
+              </Tag.CheckableTag>
+            ))}
+          </Space>
+          <Flex gap={8} align="center" wrap>
+            <Text type="secondary" style={{ fontSize: 13 }}>
+              Simulate as roles:
+            </Text>
+            <Input
+              value={roles}
+              onChange={(e) => setRoles(e.target.value)}
+              placeholder="analyst, steward"
+              style={{ maxWidth: 220 }}
+            />
+            <Button type="primary" onClick={preview} loading={busy} disabled={missing.length > 0}>
+              Dry run
+            </Button>
+            {missing.length > 0 && (
+              <Text type="secondary" style={{ fontSize: 13 }}>
+                still needed: {missing.join(", ")}
+              </Text>
+            )}
+          </Flex>
+        </Space>
+      </Card>
+
+      {error && <Alert type="error" showIcon title="Dry run failed" description={error} />}
+      {run && <DryRunResult run={run} />}
+    </Space>
+  );
+}
+
+/** What the preview means. The numbers alone cannot distinguish a correct policy
+ *  from one that admits the whole estate, which is why `policyVerdict` exists. */
+function DryRunResult({ run }: { run: DryRun }) {
+  const { warnings } = policyVerdict(run);
+  return (
+    <Card size="small" title="What this policy would do">
+      <Space direction="vertical" size={10} style={{ width: "100%" }}>
+        {warnings.map((warning) => (
+          <Alert key={warning} type="warning" showIcon description={warning} />
+        ))}
+        <Flex gap={24} wrap>
+          <Statistic title="Visible" value={run.admitted} />
+          <Statistic title="Hidden" value={run.denied} />
+          <Statistic title="Total" value={run.total} />
+        </Flex>
+        {run.examples.length > 0 && (
+          <div>
+            <Text type="secondary" style={{ fontSize: 13 }}>
+              For example:
+            </Text>
+            <Space direction="vertical" size={2} style={{ marginTop: 4 }}>
+              {run.examples.map((fqn) => (
+                <Text key={fqn} code style={{ fontSize: 12 }}>
+                  {fqn}
+                </Text>
+              ))}
+            </Space>
+          </div>
+        )}
+      </Space>
+    </Card>
+  );
+}
+
 /** The admin section — Epic 41 Slice F.
  *
  *  **`SchemaForm` is the only form renderer here.** A hundred connectors with
@@ -2684,6 +2923,7 @@ function AdminPage({ colors }: { colors: (typeof palette)["light"] }) {
         items={[
           { key: "principals", label: "People & teams", children: <PrincipalsPanel colors={colors} /> },
           { key: "connectors", label: "Connector config", children: <ConnectorConfigPanel /> },
+          { key: "policies", label: "Policies", children: <PolicyPanel /> },
         ]}
       />
     </Space>
@@ -2993,6 +3233,7 @@ function ConnectorConfigPanel() {
               Still needed: {absent.join(", ")}
             </Text>
           )}
+          <ConnectionTest values={values} disabled={absent.length > 0} />
         </Space>
       </Card>
     </Space>

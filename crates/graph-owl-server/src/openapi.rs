@@ -494,6 +494,15 @@ pub static ROUTES: &[Route] = &[
         true,
     ),
     route(
+        "post",
+        "/connectors/{connector}/test",
+        "Try a connection before saving it; a refused connection is 200 with ok:false",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
         "get",
         "/connectors/{connector}/schema",
         "What a connector needs configured, as JSON Schema",

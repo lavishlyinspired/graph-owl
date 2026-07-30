@@ -439,8 +439,8 @@ is the condition that index exists to catch.
 - [x] Policy dry-run
 - [x] Connector configuration with write-only secrets
 - [~] Admin: the section exists
-- [ ] Policy authoring UI
-- [ ] Connection test before save
+- [ ] Policies can be previewed but not saved, and the console says so.
+- [ ] Job and schedule management
 - [ ] The admin panels are not visually verified.
 
 ### Epic 42 — Semantic Browse, Review Queues & Agent Activity *(Demo 7)*

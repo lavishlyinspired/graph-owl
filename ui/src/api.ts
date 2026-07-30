@@ -438,6 +438,19 @@ export const api = {
       `/users/${encodeURIComponent(id)}`,
       { method: "PUT", body: JSON.stringify(body) },
     ),
+  /** Try a connection **before** saving it. A test that could only run against a
+   *  stored config would confirm the credential after the mistake was made. */
+  testConnector: (connector: string, body: { settings: Record<string, unknown>; secret?: string }) =>
+    request<{ ok: boolean; detail?: string }>(
+      `/connectors/${encodeURIComponent(connector)}/test`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  /** Simulate a policy against a set of roles before it is saved. */
+  dryRunPolicy: (policy: unknown, roles: string[]) =>
+    request<import("./admin/policy").DryRun>("/policies/dry-run", {
+      method: "POST",
+      body: JSON.stringify({ policy, roles }),
+    }),
   /** What a connector needs configured, as its own JSON Schema — so a hundred
    *  connectors do not become a hundred hand-written forms. */
   connectorSchema: (connector: string) =>

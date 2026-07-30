@@ -1616,6 +1616,32 @@
         "summary": "What a connector needs configured, as JSON Schema"
       }
     },
+    "/connectors/{connector}/test": {
+      "post": {
+        "operationId": "post_connectors__connector__test",
+        "responses": {
+          "200": {
+            "description": "Try a connection before saving it; a refused connection is 200 with ok:false"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Try a connection before saving it; a refused connection is 200 with ok:false"
+      }
+    },
     "/contradictions/reviews": {
       "post": {
         "operationId": "post_contradictions_reviews",

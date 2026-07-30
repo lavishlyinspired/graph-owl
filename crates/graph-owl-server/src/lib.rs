@@ -117,6 +117,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/assets/{id}/contradictions", get(list_contradictions))
         .route("/contradictions/reviews", post(review_contradiction))
         .route("/connectors/{connector}/schema", get(connector_schema))
+        .route("/connectors/{connector}/test", post(test_connector))
         .route(
             "/connectors/configs",
             get(list_connector_configs).post(save_connector_config),
@@ -1508,6 +1509,92 @@ impl ValidateBody for ConnectorConfigRequest {
 /// without knowing what a Postgres connection needs. A hundred connectors with
 /// hand-written screens is a hundred places for a field to go missing, and the
 /// one that goes missing is always the optional-looking one somebody needed.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionTestRequest {
+    /// The same settings the form would save. Sent rather than read from a stored
+    /// config **because the point is to test before saving** — a test that could
+    /// only run against what is already persisted would confirm the credential
+    /// after the mistake was made.
+    settings: serde_json::Value,
+    /// Write-only, and never echoed back. Present here because a connection
+    /// cannot be tested without it.
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+impl ValidateBody for ConnectionTestRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Try the connection a form is about to save — Epic 41 Slice F.
+///
+/// **The failure message is passed through.** "Could not connect" tells an admin
+/// nothing; `password authentication failed for user "catalog"` tells them which
+/// of the five fields is wrong. The message comes from the driver and names the
+/// host and user, never the secret.
+async fn test_connector(
+    Auth(principal): Auth,
+    Path(connector): Path<String>,
+    AppJson(payload): AppJson<ConnectionTestRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    if connector != "postgres" {
+        return Err(AppError::NotFound);
+    }
+
+    let get = |key: &str| -> String {
+        payload
+            .settings
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let port = payload
+        .settings
+        .get("port")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(5432);
+    let secret = payload.secret.clone().unwrap_or_default();
+    let connection_string = format!(
+        "postgres://{}:{}@{}:{}/{}",
+        get("username"),
+        secret,
+        get("host"),
+        port,
+        get("database")
+    );
+
+    // `Ok(false)` rather than an error status for a refused connection: the
+    // request succeeded and the answer is "no". A `502` here would make a wrong
+    // password indistinguishable from the catalog being down.
+    match PostgresConnector::connect(&connection_string, get("host")).await {
+        Ok(connector) => match connector.test_connection().await {
+            Ok(()) => Ok(Json(json!({ "ok": true }))),
+            Err(e) => Ok(Json(json!({ "ok": false, "detail": redact(&e.to_string(), &secret) }))),
+        },
+        Err(e) => Ok(Json(json!({ "ok": false, "detail": redact(&e.to_string(), &secret) }))),
+    }
+}
+
+/// Strip the credential out of a driver message before it leaves the process.
+///
+/// sqlx puts the whole connection string in some errors, and the whole point of a
+/// write-only secret is that it never appears in a response. Redacting here rather
+/// than trusting the driver's own masking: a message shape that changes in a patch
+/// release would otherwise leak silently.
+fn redact(message: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        return message.to_string();
+    }
+    message.replace(secret, "***")
+}
+
 async fn connector_schema(
     Auth(principal): Auth,
     Path(connector): Path<String>,
