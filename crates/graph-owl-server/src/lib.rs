@@ -1069,6 +1069,15 @@ impl IntoResponse for AppError {
 #[serde(deny_unknown_fields)]
 struct AssetListQuery {
     kind: Option<String>,
+    /// A user or team id — Epic 11 Slice E. Matches **effective** ownership, so
+    /// a table with no owner of its own is matched by whoever owns its schema.
+    ///
+    /// Not `ownerKind`-qualified: `users.id` and `teams.id` can collide in
+    /// principle, but a filter that matched the wrong one returns a wrong *page*
+    /// rather than assigning accountability to the wrong principal, and requiring
+    /// a second parameter on every steward's bookmarked URL is a worse trade
+    /// than the ambiguity. The write path, where it matters, does require it.
+    owner: Option<String>,
     limit: Option<usize>,
     after: Option<String>,
 }
@@ -1131,7 +1140,9 @@ async fn list_assets(
     let kind = parse_kind(query.kind.as_deref())?;
     let page = PageRequest::new(query.limit, query.after.as_deref())?;
     Ok(Json(
-        catalog.list_assets_for(&principal, kind, &page).await?,
+        catalog
+            .list_assets_for(&principal, kind, query.owner.as_deref(), &page)
+            .await?,
     ))
 }
 

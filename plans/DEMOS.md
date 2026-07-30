@@ -255,10 +255,18 @@ test's scrape had already installed the recorder.
 
   **This was previously deferred to Demo 7 "needs Epic 23's domains", and that reasoning was wrong.** Inheritance walks **containment**, which has existed since Epic 2; domains are a second, *orthogonal* grouping axis and give inheritance nothing it was waiting for. The deferral cost nothing except the delay, but it is the kind of dependency that gets asserted once and then believed
 
+- [x] **Assets are filterable by owner** *(Slice E, 30 July 2026)*. `GET /assets?owner={id}` matches **effective** ownership — direct *and* inherited — so "show me everything my team owns" answers with the whole estate rather than the handful somebody remembered to tag. Combines with `?kind=` and with keyset pagination; an unknown principal is an **empty page, not a `404`**, because a filter is a question and "nothing" is a valid answer; an absent parameter is unfiltered rather than match-nothing, which would otherwise have emptied every existing list.
+
+  **Written over the same SQL expression the read path uses, not as a second walk.** `OWNERS_JSON` became `OWNERS_EXPR` and the filter selects from it, so the filter and the header cannot disagree about who owns a thing — two copies of a nearest-owned-ancestor rule would have agreed right until somebody edited one. `a_nearer_owner_shadows_a_further_one_for_the_filter_too` is the test that would catch the drift: a service owned by one team and the database below it by another means the table's effective owner is the *database's*, and filtering by the service's team must not match it.
+
+  Query-time walk rather than a maintained effective-owner projection, per the plan's own REFACTOR note: a projection buys speed and owes an invalidation problem, and containment is at most five levels deep. Revisit on measurement, not on principle.
+
+  Filtering by a **team** does not expand to its members — a steward asking what their team owns must not be shown a colleague's personal assets.
+
 **Pending in this epic**
 - **There is no endpoint that creates a user**, found while testing Slice C. Users are auto-provisioned on first authentication (Epic 12 Slice A) and `PUT /users/{id}/roles` refuses an unknown id — so **a person who has never signed in cannot be named as an owner at all**. This is the concrete consequence of Epic 41's outstanding *principal and group management*, and it is why Slice C's HTTP tests own assets with the seeded `system` user rather than a named person
 - Slice C's "owner referencing a **soft-deleted** principal → `400`" is not implementable: principals have no soft-delete state. `users` has no `deleted_at`, and the foreign keys hard-delete. That is Slice G's work ("deleting a principal does not orphan assets"), not an omission here
-- **The ownership-gap report** — the query Slice D's `inherited` flag exists to make answerable ("which assets have no owner anywhere up their chain") has no endpoint yet → Slice E, alongside `?owner={id}` filtering, which needs the same effective-owner walk
+- **The ownership-gap report** — "which assets have no owner anywhere up their chain" — still has no endpoint. Slice E built the effective-owner walk it needs and proved it works, but the *gap* is the inverse query (no match at any ancestor) and is not exposed yet
 
 **Deferred**
 - Notification delivery to followers → needs a transport and a consumer

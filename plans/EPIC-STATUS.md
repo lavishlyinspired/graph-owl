@@ -11,8 +11,19 @@ Replaces `_COMPILED_INDEX.md`, deleted 29 July 2026: it named 86 plan
 files of which **60 did not exist**, and used a different epic
 numbering (`08-authorization.md` when Epic 8 is Search).
 
-`—` in **Slices** means the plan exists and `DEMOS.md` tracks no slice
-marks for it yet, which is a different thing from zero of them done.
+**Tracked items are not the plan's slices, and the difference matters.**
+This column counts `DEMOS.md` checkboxes *plus* the bullets under a
+**Pending in this epic** heading — which is deliberate, so an epic
+cannot read complete while the file lists outstanding work. The
+consequence is that the ratio **understates** an epic whose remaining
+work is itemised: Epic 31 shows 2/5 while all five of its plan slices
+(A–E) have domain logic, persistence and an HTTP surface, because two
+of those five items are *pending notes* rather than slices. Read a low
+ratio as "outstanding work is written down", not as "slices unwritten",
+and read the plan for slice-level state.
+
+`—` means the plan exists and `DEMOS.md` tracks no marks for it yet,
+which is a different thing from zero of them done.
 
 **Demo** is which demo an epic serves, from `DEMOS.md`'s coverage
 index. An epic serving more than one shows both — Epic 6 is Demo 4's
@@ -20,7 +31,7 @@ reasoning *and* is recalibrated in Demo 12, and a single number would
 quietly drop the later work. `—` means the epic is in no demo, which
 is the condition that index exists to catch.
 
-| Epic | Demo | Plan | State | Slices | Depends on |
+| Epic | Demo | Plan | State | Tracked items | Depends on |
 |---|---|---|---|---|---|
 | **1** | 1 | [`01-api-conventions.md`](01-api-conventions.md) | **Shipped** | 12/12 | nothing |
 | **2** | 1 | [`02-entity-hierarchy.md`](02-entity-hierarchy.md) | In progress | 6/7 | Epic 1 (conventions, relationship taxonomy) |
@@ -37,7 +48,7 @@ is the condition that index exists to catch.
 | **9** | 8 | [`09-engine-rdf-io.md`](09-engine-rdf-io.md) | Not started | — | Epic 4 (triples to serialize), Epic 7 (CONSTRUCT produces Turtle) |
 | **9a** | 8 | [`09a-lpg-interchange.md`](09a-lpg-interchange.md) | Not started | — | Epic 7c (LPG projection), Epic 9 (RDF I/O — shares the streaming-serializer sha… |
 | **10** | 2 | [`10-operability.md`](10-operability.md) | **Shipped** | 17/17 | Epic 1 (a server, an error model, and a contract to instrument) |
-| **11** | 2 | [`11-people-and-ownership.md`](11-people-and-ownership.md) | In progress | 5/9 (+1 partial) | Epic 3 (envelope carries `owners`) |
+| **11** | 2 | [`11-people-and-ownership.md`](11-people-and-ownership.md) | In progress | 6/10 (+1 partial) | Epic 3 (envelope carries `owners`) |
 | **12** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 15/15 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **13** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 10/10 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **14** | 5 | [`14-mcp-activation.md`](14-mcp-activation.md) | In progress | 3/8 (+1 partial) | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard… |
@@ -85,7 +96,7 @@ is the condition that index exists to catch.
 | **103** | 11 | [`103-in-process-traversal.md`](103-in-process-traversal.md) | Not started | 0/2 | Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger) |
 | **104** | 12 | [`104-ontology-alignment.md`](104-ontology-alignment.md) | Not started | — | Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detecti… |
 
-## Slices, per epic
+## Tracked items, per epic
 
 ### Epic 1 — API Conventions & Contract *(Demo 1)*
 
@@ -225,6 +236,7 @@ is the condition that index exists to catch.
 - [~] Was marked Shipped while teams did not exist
 - [x] Entities have owners — plural, and of two kinds
 - [x] Ownership inherits down `contains`
+- [x] Assets are filterable by owner
 - [ ] There is no endpoint that creates a user
 - [ ] Slice C's "owner referencing a **soft-deleted** principal → `400`" is not implementable:
 - [ ] The ownership-gap report

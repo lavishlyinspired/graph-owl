@@ -183,8 +183,19 @@ def main() -> int:
         "files of which **60 did not exist**, and used a different epic",
         "numbering (`08-authorization.md` when Epic 8 is Search).",
         "",
-        "`—` in **Slices** means the plan exists and `DEMOS.md` tracks no slice",
-        "marks for it yet, which is a different thing from zero of them done.",
+        "**Tracked items are not the plan\'s slices, and the difference matters.**",
+        "This column counts `DEMOS.md` checkboxes *plus* the bullets under a",
+        "**Pending in this epic** heading — which is deliberate, so an epic",
+        "cannot read complete while the file lists outstanding work. The",
+        "consequence is that the ratio **understates** an epic whose remaining",
+        "work is itemised: Epic 31 shows 2/5 while all five of its plan slices",
+        "(A–E) have domain logic, persistence and an HTTP surface, because two",
+        "of those five items are *pending notes* rather than slices. Read a low",
+        "ratio as \"outstanding work is written down\", not as \"slices unwritten\",",
+        "and read the plan for slice-level state.",
+        "",
+        "`—` means the plan exists and `DEMOS.md` tracks no marks for it yet,",
+        "which is a different thing from zero of them done.",
         "",
         "**Demo** is which demo an epic serves, from `DEMOS.md`'s coverage",
         "index. An epic serving more than one shows both — Epic 6 is Demo 4's",
@@ -192,7 +203,7 @@ def main() -> int:
         "quietly drop the later work. `—` means the epic is in no demo, which",
         "is the condition that index exists to catch.",
         "",
-        "| Epic | Demo | Plan | State | Slices | Depends on |",
+        "| Epic | Demo | Plan | State | Tracked items | Depends on |",
         "|---|---|---|---|---|---|",
     ]
     for number in numbers:
@@ -209,7 +220,7 @@ def main() -> int:
             f"| {depends.replace('|', chr(92) + '|')} |"
         )
 
-    out += ["", "## Slices, per epic", ""]
+    out += ["", "## Tracked items, per epic", ""]
     for number in numbers:
         slices = marks.get(number, [])
         if not slices:

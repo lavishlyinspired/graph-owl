@@ -622,9 +622,21 @@ pub trait Storage: Send + Sync {
     /// Separate from `list_assets` so the unfiltered path cannot be reached by
     /// accident from a request handler — a filtered call site that forgets the
     /// predicate is a leak, and this makes forgetting a compile error.
+    /// `owner` matches **effective** ownership — Epic 11 Slice E.
+    ///
+    /// Direct *and* inherited, using the same nearest-owned-ancestor rule the
+    /// read path uses: a table with no owner of its own is owned by whoever owns
+    /// its schema. Matching only direct ownership would make "show me everything
+    /// my team owns" answer "the four things somebody remembered to tag", which
+    /// is the steward workflow this exists for and the one it would quietly
+    /// break.
+    ///
+    /// An id that matches no principal yields an **empty page, not an error**: a
+    /// filter is a question, and "nothing" is a valid answer to it.
     async fn list_assets_visible(
         &self,
         kind: Option<AssetKind>,
+        owner: Option<&str>,
         page: &PageRequest,
         predicate: &AccessPredicate,
     ) -> Result<Page<Asset>, StorageError>;

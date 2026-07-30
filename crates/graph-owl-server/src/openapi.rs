@@ -146,7 +146,7 @@ pub static ROUTES: &[Route] = &[
     route(
         "get",
         "/assets",
-        "List assets",
+        "List assets; `?owner=` filters by effective owner, direct or inherited",
         None,
         Some("Page_Asset"),
         200,

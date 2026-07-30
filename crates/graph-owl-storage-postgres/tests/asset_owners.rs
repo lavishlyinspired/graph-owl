@@ -361,3 +361,242 @@ async fn deleting_a_principal_removes_its_ownership_rather_than_dangling() {
 
     assert!(storage.asset_owners(orders).await.expect("read").is_empty());
 }
+
+// ---- Slice E: assets are filterable by owner ----
+
+/// A three-level estate: service → database → table, so inheritance has somewhere
+/// to travel. Returns `(service, database, table)`.
+async fn estate(storage: &PostgresStorage, prefix: &str) -> (Uuid, Uuid, Uuid) {
+    let now = Utc::now();
+    let mut parent = None;
+    let mut ids = Vec::new();
+    for (kind, name) in [
+        (AssetKind::Service, format!("{prefix}-svc")),
+        (AssetKind::Database, format!("{prefix}-db")),
+        (AssetKind::Table, format!("{prefix}-tbl")),
+    ] {
+        let fqn = match &parent {
+            None => name.clone(),
+            Some(_) => format!(
+                "{}",
+                ids.iter().map(|_| "").collect::<String>() + &format!("{prefix}.{name}")
+            ),
+        };
+        let written = storage
+            .upsert_asset(Asset {
+                id: Uuid::new_v4(),
+                kind,
+                name: name.clone(),
+                fully_qualified_name: fqn,
+                parent_id: parent,
+                description: None,
+                properties: None,
+                owners: Vec::new(),
+                version: EntityVersion::initial(),
+                updated_by: "system".to_string(),
+                change_description: None,
+                deleted: false,
+                deleted_at: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("asset");
+        parent = Some(written.id);
+        ids.push(written.id);
+    }
+    (ids[0], ids[1], ids[2])
+}
+
+fn everything() -> graph_owl_authz::AccessPredicate {
+    graph_owl_authz::AccessPredicate::All
+}
+
+fn first_page() -> graph_owl_core::page::PageRequest {
+    graph_owl_core::page::PageRequest::new(Some(50), None).expect("page")
+}
+
+async fn ids_owned_by(storage: &PostgresStorage, owner: &str) -> Vec<Uuid> {
+    storage
+        .list_assets_visible(None, Some(owner), &first_page(), &everything())
+        .await
+        .expect("list")
+        .data
+        .iter()
+        .map(|asset| asset.id)
+        .collect()
+}
+
+// "Matches directly-owned entities."
+#[tokio::test]
+async fn filtering_by_owner_matches_a_directly_owned_asset() {
+    let (storage, _db, _url) = test_storage().await;
+    let (service, _database, _table) = estate(&storage, "direct").await;
+    let priya = user(&storage, "priya", "Priya").await;
+    storage
+        .set_asset_owners(service, &[priya])
+        .await
+        .expect("set");
+
+    assert!(ids_owned_by(&storage, "priya").await.contains(&service));
+}
+
+// **The criterion that makes this feature worth having.** "Matches inherited
+// ownership (table owned via its schema)." A direct-only filter answers "show me
+// everything my team owns" with "the four things somebody remembered to tag".
+#[tokio::test]
+async fn filtering_by_owner_matches_an_asset_that_only_inherits_its_owner() {
+    let (storage, _db, _url) = test_storage().await;
+    let (service, database, table) = estate(&storage, "inherit").await;
+    let platform = team(&storage, "platform", "Platform").await;
+    storage
+        .set_asset_owners(service, &[platform])
+        .await
+        .expect("set");
+
+    let matched = ids_owned_by(&storage, "platform").await;
+
+    assert!(matched.contains(&service), "the owned service itself");
+    assert!(matched.contains(&database), "the database inherits it");
+    assert!(matched.contains(&table), "and so does the table below it");
+}
+
+// And the negative that makes the test above about *this* owner rather than about
+// a filter that matches everything.
+#[tokio::test]
+async fn filtering_by_an_owner_excludes_assets_owned_by_somebody_else() {
+    let (storage, _db, _url) = test_storage().await;
+    let (mine, _, _) = estate(&storage, "mine").await;
+    let (theirs, _, _) = estate(&storage, "theirs").await;
+    let priya = user(&storage, "priya", "Priya").await;
+    let ravi = user(&storage, "ravi", "Ravi").await;
+    storage.set_asset_owners(mine, &[priya]).await.expect("set");
+    storage
+        .set_asset_owners(theirs, &[ravi])
+        .await
+        .expect("set");
+
+    let matched = ids_owned_by(&storage, "priya").await;
+
+    assert!(matched.contains(&mine));
+    assert!(!matched.contains(&theirs), "somebody else's asset matched");
+}
+
+// **Inheritance stops at the nearest owned ancestor**, and the filter has to agree
+// with the read path about that. If the service is owned by one team and the
+// database below it by another, the table's effective owner is the database's —
+// so filtering by the service's team must not match the table, or the filter and
+// the header would disagree about who owns it.
+#[tokio::test]
+async fn a_nearer_owner_shadows_a_further_one_for_the_filter_too() {
+    let (storage, _db, _url) = test_storage().await;
+    let (service, database, table) = estate(&storage, "shadow").await;
+    let platform = team(&storage, "platform", "Platform").await;
+    let data_eng = team(&storage, "data-eng", "Data Engineering").await;
+    storage
+        .set_asset_owners(service, &[platform])
+        .await
+        .expect("set");
+    storage
+        .set_asset_owners(database, &[data_eng])
+        .await
+        .expect("set");
+
+    let outer = ids_owned_by(&storage, "platform").await;
+    let inner = ids_owned_by(&storage, "data-eng").await;
+
+    assert!(outer.contains(&service));
+    assert!(!outer.contains(&table), "the nearer owner should shadow");
+    assert!(inner.contains(&table), "the nearer owner should match");
+}
+
+// "`?owner={team}` includes assets owned by that team, not by its members
+// individually." A filter that expanded team membership would return a steward's
+// personal assets when they asked what their team owns.
+#[tokio::test]
+async fn filtering_by_a_team_does_not_match_assets_owned_by_its_members() {
+    let (storage, _db, _url) = test_storage().await;
+    let (personal, _, _) = estate(&storage, "personal").await;
+    let priya = user(&storage, "priya", "Priya").await;
+    storage
+        .upsert_team(&graph_owl_storage::Team {
+            id: "platform".to_string(),
+            display_name: "Platform".to_string(),
+            description: None,
+            members: vec!["priya".to_string()],
+        })
+        .await
+        .expect("team");
+    storage
+        .set_asset_owners(personal, &[priya])
+        .await
+        .expect("set");
+
+    let by_team = ids_owned_by(&storage, "platform").await;
+
+    assert!(
+        !by_team.contains(&personal),
+        "a member's own asset is not the team's"
+    );
+}
+
+// "Unknown owner id → empty page, not `404`." A filter is a question, and
+// "nothing" is a valid answer to it.
+#[tokio::test]
+async fn filtering_by_an_unknown_owner_is_an_empty_page_rather_than_an_error() {
+    let (storage, _db, _url) = test_storage().await;
+    estate(&storage, "somebody").await;
+
+    let page = storage
+        .list_assets_visible(None, Some("nobody-at-all"), &first_page(), &everything())
+        .await
+        .expect("an empty page, not an error");
+
+    assert!(page.data.is_empty());
+}
+
+// "Combines with other filters." The kind filter and the owner filter have to
+// intersect rather than one overriding the other.
+#[tokio::test]
+async fn the_owner_filter_combines_with_the_kind_filter() {
+    let (storage, _db, _url) = test_storage().await;
+    let (service, database, table) = estate(&storage, "combined").await;
+    let platform = team(&storage, "platform", "Platform").await;
+    storage
+        .set_asset_owners(service, &[platform])
+        .await
+        .expect("set");
+
+    let tables = storage
+        .list_assets_visible(
+            Some(AssetKind::Table),
+            Some("platform"),
+            &first_page(),
+            &everything(),
+        )
+        .await
+        .expect("list")
+        .data
+        .iter()
+        .map(|a| a.id)
+        .collect::<Vec<_>>();
+
+    assert!(tables.contains(&table), "the owned table");
+    assert!(!tables.contains(&service), "kind filter still applies");
+    assert!(!tables.contains(&database), "kind filter still applies");
+}
+
+// Absent means unfiltered. A filter that treated `None` as "match nothing" would
+// empty every existing list endpoint.
+#[tokio::test]
+async fn no_owner_filter_returns_everything_visible() {
+    let (storage, _db, _url) = test_storage().await;
+    let (service, _, _) = estate(&storage, "unfiltered").await;
+
+    let page = storage
+        .list_assets_visible(None, None, &first_page(), &everything())
+        .await
+        .expect("list");
+
+    assert!(page.data.iter().any(|a| a.id == service));
+}

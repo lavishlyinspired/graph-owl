@@ -336,3 +336,123 @@ async fn setting_owners_echoes_them_as_direct() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["owners"][0]["inherited"], json!(false), "{body}");
 }
+
+// ---- Slice E: filtering by owner at the wire ----
+
+async fn listed_for_owner(app: &axum::Router, owner: &str) -> Vec<String> {
+    let (status, body) = send(
+        app,
+        "GET",
+        &format!("/assets?owner={owner}&limit=100"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["data"]
+        .as_array()
+        .expect("a page")
+        .iter()
+        .map(|a| a["id"].as_str().expect("an id").to_string())
+        .collect()
+}
+
+// The steward workflow this slice exists for: "show me everything my team owns",
+// including the things nobody tagged individually.
+#[tokio::test]
+async fn filtering_by_owner_returns_owned_and_inherited_assets() {
+    let (app, _db, _) = test_app().await;
+    let [service, database, schema, table] = estate(&app).await;
+    team(&app, "platform", "Platform Team").await;
+    let (status, body) = send(
+        &app,
+        "PUT",
+        &format!("/assets/{service}/owners"),
+        Some(json!({ "owners": [{ "id": "platform", "kind": "team" }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let matched = listed_for_owner(&app, "platform").await;
+
+    assert!(matched.contains(&service), "the owned service");
+    assert!(matched.contains(&database), "its database inherits");
+    assert!(matched.contains(&schema), "and its schema");
+    assert!(matched.contains(&table), "and its table, four levels down");
+}
+
+// And the negative: an owner who owns nothing gets an empty page rather than
+// everything, so the test above is about the filter rather than about a list.
+#[tokio::test]
+async fn filtering_by_an_owner_who_owns_nothing_returns_an_empty_page() {
+    let (app, _db, _) = test_app().await;
+    estate(&app).await;
+    team(&app, "platform", "Platform Team").await;
+
+    let matched = listed_for_owner(&app, "platform").await;
+
+    assert!(matched.is_empty(), "expected nothing, got {matched:?}");
+}
+
+// "Unknown owner id → empty page, not `404`." A filter is a question, and
+// "nothing" is a valid answer.
+#[tokio::test]
+async fn filtering_by_an_unknown_principal_is_not_a_404() {
+    let (app, _db, _) = test_app().await;
+    estate(&app).await;
+
+    let (status, body) = send(&app, "GET", "/assets?owner=nobody-at-all", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["data"].as_array().expect("a page").is_empty());
+}
+
+// Absent means unfiltered — a filter that treated a missing parameter as
+// match-nothing would empty the console's asset list.
+#[tokio::test]
+async fn omitting_the_owner_filter_still_lists_assets() {
+    let (app, _db, _) = test_app().await;
+    let [service, _database, _schema, _table] = estate(&app).await;
+
+    let (status, body) = send(&app, "GET", "/assets?limit=100", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<&str> = body["data"]
+        .as_array()
+        .expect("a page")
+        .iter()
+        .map(|a| a["id"].as_str().expect("an id"))
+        .collect();
+    assert!(ids.contains(&service.as_str()));
+}
+
+// Combines with the kind filter rather than one overriding the other.
+#[tokio::test]
+async fn the_owner_filter_combines_with_kind_at_the_wire() {
+    let (app, _db, _) = test_app().await;
+    let [service, _database, _schema, table] = estate(&app).await;
+    team(&app, "platform", "Platform Team").await;
+    send(
+        &app,
+        "PUT",
+        &format!("/assets/{service}/owners"),
+        Some(json!({ "owners": [{ "id": "platform", "kind": "team" }] })),
+    )
+    .await;
+
+    let (status, body) = send(
+        &app,
+        "GET",
+        "/assets?owner=platform&kind=table&limit=100",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<&str> = body["data"]
+        .as_array()
+        .expect("a page")
+        .iter()
+        .map(|a| a["id"].as_str().expect("an id"))
+        .collect();
+    assert_eq!(ids, vec![table.as_str()], "only the table, {body}");
+}

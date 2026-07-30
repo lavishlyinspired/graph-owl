@@ -1118,7 +1118,7 @@ impl Storage for PostgresStorage {
         // and the second implementation is where the disagreement comes from —
         // so there is only one, and inheritance is correct here for free.
         let owners: Option<serde_json::Value> = sqlx::query_scalar(&format!(
-            "SELECT {OWNERS_JSON} FROM assets WHERE assets.id = $1"
+            "SELECT {OWNERS_EXPR} AS owners FROM assets WHERE assets.id = $1"
         ))
         .bind(asset_id)
         .fetch_optional(&self.pool)
@@ -1681,7 +1681,7 @@ impl Storage for PostgresStorage {
     #[tracing::instrument(name = "storage.get_asset", skip_all)]
     async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, StorageError> {
         let row = sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets WHERE id = $1"
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets WHERE id = $1"
         ))
         .bind(id)
         .fetch_optional(&self.pool)
@@ -1693,7 +1693,7 @@ impl Storage for PostgresStorage {
     #[tracing::instrument(name = "storage.get_asset_by_fqn", skip_all)]
     async fn get_asset_by_fqn(&self, fqn: &str) -> Result<Option<Asset>, StorageError> {
         let row = sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets WHERE fully_qualified_name = $1"
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets WHERE fully_qualified_name = $1"
         ))
         .bind(fqn)
         .fetch_optional(&self.pool)
@@ -1711,7 +1711,7 @@ impl Storage for PostgresStorage {
             .unwrap_or(i64::MAX)
             .saturating_add(1);
         let sql = format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
              WHERE NOT deleted
                AND ($1::text IS NULL OR kind = $1)
                AND ($2::text IS NULL OR (fully_qualified_name, id) > ($2, $3))
@@ -1728,7 +1728,7 @@ impl Storage for PostgresStorage {
 
     async fn list_children(&self, parent_id: Option<Uuid>) -> Result<Vec<Asset>, StorageError> {
         let rows = sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
              WHERE NOT deleted AND (($1::uuid IS NULL AND parent_id IS NULL) OR parent_id = $1)
              ORDER BY name"
         ))
@@ -1744,7 +1744,7 @@ impl Storage for PostgresStorage {
         // root-first — which is the order a breadcrumb renders in.
         let rows = sqlx::query(&format!(
             "WITH RECURSIVE chain AS (
-                 SELECT {ASSET_COLUMNS}, {OWNERS_JSON}, 0 AS hops FROM assets WHERE id = $1
+                 SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners, 0 AS hops FROM assets WHERE id = $1
                  UNION ALL
                  SELECT a.id, a.kind, a.name, a.fully_qualified_name, a.parent_id,
                         a.description, a.properties, a.version_major, a.version_minor,
@@ -1752,7 +1752,7 @@ impl Storage for PostgresStorage {
                         a.created_at, a.updated_at, c.hops + 1
                  FROM assets a JOIN chain c ON a.id = c.parent_id
              )
-             SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM chain ORDER BY hops DESC"
+             SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM chain ORDER BY hops DESC"
         ))
         .bind(id)
         .fetch_all(&self.pool)
@@ -1774,7 +1774,7 @@ impl Storage for PostgresStorage {
             .unwrap_or(i64::MAX)
             .saturating_add(1);
         let sql = format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON}, {RANK_KEY} AS sort_key
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners, {RANK_KEY} AS sort_key
              FROM assets, to_tsquery('english', $1) AS q (ts)
              WHERE NOT deleted
                AND assets.search_vector @@ q.ts
@@ -1802,7 +1802,7 @@ impl Storage for PostgresStorage {
         // general form it becomes `fqn LIKE '.%'`, which is false for every
         // real FQN — so "no restriction" would silently return nothing.
         sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
              WHERE deleted = FALSE AND ($1 = ''
                                         OR fully_qualified_name = $1
                                         OR fully_qualified_name LIKE $1 || '.%')"
@@ -1847,7 +1847,7 @@ impl Storage for PostgresStorage {
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
         let before_row = sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets WHERE id = $1 FOR UPDATE"
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets WHERE id = $1 FOR UPDATE"
         ))
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -2109,6 +2109,7 @@ impl Storage for PostgresStorage {
     async fn list_assets_visible(
         &self,
         kind: Option<AssetKind>,
+        owner: Option<&str>,
         page: &PageRequest,
         predicate: &AccessPredicate,
     ) -> Result<Page<Asset>, StorageError> {
@@ -2123,12 +2124,28 @@ impl Storage for PostgresStorage {
         let overfetch = i64::try_from(page.limit)
             .unwrap_or(i64::MAX)
             .saturating_add(1);
+        // **The owner filter is written over `OWNERS_EXPR`, not as a second walk.**
+        // The filter and the read path have to agree about who owns a thing, and
+        // two copies of a nearest-owned-ancestor rule would agree right up until
+        // somebody edited one — so there is one expression and both use it.
+        //
+        // `$7::text IS NULL` makes an absent filter a no-op rather than
+        // match-nothing; without it, adding this parameter would have emptied
+        // every existing list endpoint.
+        //
+        // It recomputes the walk per candidate row. Slice E says query-time until
+        // measurement says otherwise: a maintained effective-owner projection buys
+        // speed and owes an invalidation problem, and containment is at most five
+        // levels deep (service → database → schema → table → column).
         let sql = format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
              WHERE NOT deleted
                AND ($1::text IS NULL OR kind = $1)
                AND ($2::text IS NULL OR (fully_qualified_name, id) > ($2, $3))
                {VISIBILITY}
+               AND ($7::text IS NULL OR EXISTS (
+                     SELECT 1 FROM json_array_elements({OWNERS_EXPR}) AS effective
+                      WHERE effective->>'id' = $7))
              ORDER BY fully_qualified_name, id
              LIMIT $4"
         );
@@ -2138,7 +2155,8 @@ impl Storage for PostgresStorage {
             .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
             .bind(overfetch)
             .bind(&allow)
-            .bind(&deny);
+            .bind(&deny)
+            .bind(owner);
         self.asset_page(query, page).await
     }
 
@@ -2162,7 +2180,7 @@ impl Storage for PostgresStorage {
             .unwrap_or(i64::MAX)
             .saturating_add(1);
         let sql = format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON}, {RANK_KEY} AS sort_key
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners, {RANK_KEY} AS sort_key
              FROM assets, to_tsquery('english', $1) AS q (ts)
              WHERE NOT deleted
                AND assets.search_vector @@ q.ts
@@ -2193,7 +2211,7 @@ impl Storage for PostgresStorage {
             return Ok(Vec::new());
         };
         let rows = sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
              WHERE NOT deleted
                AND (($1::uuid IS NULL AND parent_id IS NULL) OR parent_id = $1)
                AND (fully_qualified_name LIKE ANY($2))
@@ -2248,7 +2266,7 @@ impl Storage for PostgresStorage {
             return Ok(Vec::new());
         };
         sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
              WHERE NOT deleted
                AND (fully_qualified_name LIKE ANY($1))
                AND NOT (fully_qualified_name LIKE ANY($2))
@@ -2410,7 +2428,7 @@ fn asset_from_row(row: PgRow) -> Asset {
 /// and fall back to the id — an owner row can only exist for a live principal
 /// (both columns are foreign keys), so the fallback is unreachable defence rather
 /// than a real case.
-const OWNERS_JSON: &str = "(WITH RECURSIVE ancestry (node, next_up, hops) AS (
+const OWNERS_EXPR: &str = "(WITH RECURSIVE ancestry (node, next_up, hops) AS (
             SELECT seed.id, seed.parent_id, 0 FROM assets seed WHERE seed.id = assets.id
         UNION ALL
             SELECT up.id, up.parent_id, ancestry.hops + 1
@@ -2432,7 +2450,7 @@ const OWNERS_JSON: &str = "(WITH RECURSIVE ancestry (node, next_up, hops) AS (
     FROM nearest
     JOIN asset_owners o ON o.asset_id = nearest.node
     LEFT JOIN users u ON u.id = o.user_id
-    LEFT JOIN teams t ON t.id = o.team_id) AS owners";
+    LEFT JOIN teams t ON t.id = o.team_id)";
 
 const ASSET_COLUMNS: &str = "id, kind, name, fully_qualified_name, parent_id, description, properties, version_major, version_minor, updated_by, change_description, deleted, deleted_at, created_at, updated_at";
 
