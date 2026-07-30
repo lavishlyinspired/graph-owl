@@ -57,7 +57,7 @@ is the condition that index exists to catch.
 | **28** | 7 | [`28-usage.md`](28-usage.md) | Not started | — | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
 | **29** | 7 | [`29-lineage.md`](29-lineage.md) | In progress | 5/8 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
 | **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | Not started | — | Epic 29 (lineage, for propagating trust signals) |
-| **31** | 5 | [`31-memory.md`](31-memory.md) | Not started | 0/3 | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
+| **31** | 5 | [`31-memory.md`](31-memory.md) | In progress | 2/5 (+1 partial) | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
 | **32** | 5 | [`32-agent-capabilities.md`](32-agent-capabilities.md) | Not started | 0/2 | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
 | **33** | 9 | [`33-ontology-packs.md`](33-ontology-packs.md) | Not started | 0/8 | Epic 24 (glossary and taxonomy model), Epic 9 (standards import) |
 | **34** | 9 | [`34-entity-expansion.md`](34-entity-expansion.md) | Not started | — | Epic 8 (each new type indexes for free — the property being demonstrated), Epic… |
@@ -343,9 +343,11 @@ is the condition that index exists to catch.
 
 ### Epic 31 — Organizational Memory ★ *(Demo 5)*
 
-- [ ] Memory objects: kind, content, authorship, confidence, `as_of`
-- [ ] Supersession and contradiction detection
-- [ ] Retrieval with reranking
+- [x] Memory objects: kind, content, authorship, confidence, `as_of`
+- [x] Supersession and contradiction detection
+- [~] Retrieval with reranking
+- [ ] The semantic ranking term
+- [ ] A person cannot author a memory over HTTP yet
 
 ### Epic 32 — Agent Capabilities ★ *(Demo 5)*
 

@@ -479,9 +479,20 @@ actually holds could not be asserted at all.
 - [ ] The thesis test: an agent with only MCP access answers a real question *(Slice G)*
 
 ### Epic 31 — Organizational memory ★
-- [ ] Memory objects: kind, content, authorship, confidence, `as_of`
-- [ ] Supersession and contradiction detection
-- [ ] Retrieval with reranking
+- [x] Memory objects: kind, content, authorship, confidence, `as_of`
+- [x] Supersession and contradiction detection
+- [~] Retrieval with reranking
+
+**Pending in this epic**
+- The semantic ranking term. Blocked on Epic 8, and deliberately: embeddings are
+  generated out of process (`00j`), so the port that matters does not exist —
+  fabricating a lexical similarity and labelling it semantic would destroy the
+  distinction `Score.semantic: Option<f64>` exists to preserve between "measured,
+  not similar" and "never measured".
+- A person cannot author a memory over HTTP yet. `Principal::system()` is the
+  placeholder until Epic 12, so every memory written through the API today is
+  recorded as agent-authored — honestly, but it means the human-confidence default
+  is unit-tested only.
 
 ### Epic 32 — Agent capabilities
 - [ ] Write-back with agent authorship
