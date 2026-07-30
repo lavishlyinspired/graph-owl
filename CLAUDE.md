@@ -108,6 +108,21 @@ One incident already occurred and was reverted during planning (a cache-tier tab
 - **`--lib` blinds the run to whatever only integration tests cover, and the report calls that a survivor.** Measured on `observability.rs`: `observe` and `metrics_endpoint` are HTTP middleware and a handler, exercised only by `tests/observability.rs`, and a `--lib` run reported all three of their mutants as MISSED. Re-run without `--lib`, scoped with `--re`, **all three were caught in 3 minutes**.
   So: `--lib` for code with unit coverage, which is where pure decisions belong anyway; drop it — and pay the container cost, scoped tightly with `--re` — for the thin imperative shells that only an end-to-end test reaches. A MISSED line from a `--lib` run is a question about coverage *shape*, not automatically a gap.
 
+- **Before believing any timing, measure it twice on a quiet machine — contention inflates by 20-70x, not by 20%.** Measured 30 July 2026 on one `graph-owl-server` test binary, same tree, same binary:
+
+  | Conditions | Wall |
+  |---|---|
+  | run directly, right after `pkill`-ing a suite | **205s** |
+  | via `cargo test`, machine busy | **64s** |
+  | run directly, quiet | **3s** |
+  | via `cargo test`, quiet | **4s**, then **1s** |
+
+  The 64s reading led to "each integration binary costs ~60s, so 28 of them is 30 minutes, so the test files must be consolidated". All of that was false, and the conclusion would have been a day's refactor against a problem that does not exist. **The real cost of relinking all 28 binaries after a one-crate change is 17s**, and a warm no-op build is 0.2s.
+
+  So: a suite that takes an hour is a machine with something else running on it. **Do not derive a structural conclusion from a single timing** — take the second reading first.
+
+- **Do not run a full suite to measure a full suite.** The cheap instruments answer the same questions: `touch <one file> && time cargo build --workspace --tests` gives the relink cost, and running one test binary directly out of `target/debug/deps` separates cargo's overhead from the binary's. Both are seconds. A workspace run to find out why workspace runs are slow costs minutes per data point and blocks the person waiting on it.
+
 - **A `TIMEOUT` from `cargo mutants` run beside anything else is an artifact, not a missing test — and the baseline build time is the tell.** Measured 30 July 2026: a 7-mutant `--in-diff` run on `graph-owl-mcp` alongside a full workspace suite reported baseline **222s build** where the same shape costs 9s on an idle machine, and then timed out one mutant at the auto-set 20s test limit. The test had not hung; the binary took longer than 20s to *start* under CPU starvation.
 
   cargo-mutants builds in its own copied tree, so it does not take the workspace build lock — which is exactly why this is easy to miss. **It still competes for CPU and I/O.** So "one cargo at a time" is about the machine, not only the lock, and a separate `CARGO_TARGET_DIR` does not buy an exemption. Before believing any MISSED or TIMEOUT, check the reported baseline build time against what that crate normally costs; if it is an order of magnitude high, the run is measuring contention and has to be repeated on a quiet machine.

@@ -30,7 +30,12 @@ CONTAINER=graph-owl-tests
 # suites, which is a wrong conclusion stacked on a wrong measurement.
 #
 # `pgrep -x cargo` matches the process *name* only, which is what was meant.
-concurrent=$(pgrep -x cargo 2>/dev/null | wc -l | tr -d ' ')
+# `|| true` because **`pgrep` exits 1 when nothing matches**, which under
+# `set -euo pipefail` killed this script silently — and it exits 1 precisely when
+# no cargo is running, i.e. in the healthy case. So the diagnostic worked only
+# when the environment was already broken, which is the one time you do not need
+# it to tell you anything. Found 30 July 2026 after it printed nothing at all.
+concurrent=$(pgrep -x cargo 2>/dev/null | wc -l | tr -d ' ' || true)
 if [ "$concurrent" -gt 1 ]; then
     echo "!! ${concurrent} 'cargo test' processes are running."
     echo "   Two suites racing is the single biggest slowdown this project has had."
@@ -38,8 +43,8 @@ if [ "$concurrent" -gt 1 ]; then
     echo
 fi
 
-running=$(docker ps -q | wc -l | tr -d ' ')
-total=$(docker ps -aq | wc -l | tr -d ' ')
+running=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+total=$(docker ps -aq 2>/dev/null | wc -l | tr -d ' ' || echo 0)
 echo "containers: ${running} running, ${total} total"
 if [ "$running" -gt 10 ]; then
     echo "  ^ that is a lot. Leaked test containers degrade Docker badly."
@@ -56,7 +61,7 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
     exit 0
 fi
 
-port=$(docker port "$CONTAINER" 5432 | cut -d: -f2)
+port=$(docker port "$CONTAINER" 5432 2>/dev/null | cut -d: -f2 || true)
 stale=$(PGPASSWORD=postgres psql -h localhost -p "$port" -U postgres -tAc \
     "SELECT count(*) FROM pg_database WHERE datname LIKE 't%';" 2>/dev/null || echo "?")
 echo "test databases in $CONTAINER: ${stale}"
