@@ -1728,6 +1728,32 @@
         "summary": "Liveness"
       }
     },
+    "/ingest": {
+      "post": {
+        "operationId": "post_ingest",
+        "responses": {
+          "207": {
+            "description": "Push entities in one call; 207 with per-item status, partial success"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Push entities in one call; 207 with per-item status, partial success"
+      }
+    },
     "/lineage": {
       "post": {
         "operationId": "post_lineage",

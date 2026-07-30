@@ -36,6 +36,16 @@ pub enum ConflictKind {
     WaiverExists,
     /// This finding is already assigned. Two owners is no owner.
     AssignmentExists,
+    /// An `Idempotency-Key` was reused for different content, or is in flight —
+    /// Epic 16 Slice B.
+    ///
+    /// **The third variant added because the detail would otherwise be eaten.**
+    /// `AppError`'s renderer returns a fixed sentence per `ConflictKind`, so
+    /// borrowing an existing variant silently replaces whatever the facade wrote.
+    /// That has now happened twice — Slice G lost its counts, this lost the key —
+    /// which makes it a property of the design rather than a slip: **a conflict
+    /// carrying its own detail needs its own kind.**
+    IdempotencyConflict,
     /// This principal still owns assets or parents teams — Epic 11 Slice G.
     ///
     /// Its own variant because the response has to carry *counts by kind*, and
@@ -176,6 +186,27 @@ pub enum PrincipalDeletion {
     StillHolds(Box<Holdings>),
     /// The `reassignTo` target does not exist.
     UnknownTarget,
+}
+
+/// What claiming an idempotency key found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdempotencyClaim {
+    /// The key is new and this caller owns it. Process the request.
+    Claimed,
+    /// The same key and the same request. Replay the original answer verbatim
+    /// rather than doing the work again.
+    Replay {
+        status: u16,
+        body: serde_json::Value,
+    },
+    /// The same key, **different** content. A key identifies a request, not a
+    /// slot, so this is a client bug worth reporting — serving the first
+    /// response would silently drop a push the client believes succeeded.
+    Mismatch,
+    /// Claimed, but the first attempt has not recorded its answer yet. A
+    /// concurrent duplicate, which must not be processed a second time and
+    /// cannot be replayed either.
+    InFlight,
 }
 
 /// What setting an asset's owners did.
@@ -930,6 +961,35 @@ pub trait Storage: Send + Sync {
         principal: &OwnerRef,
         reassign_to: Option<&OwnerRef>,
     ) -> Result<PrincipalDeletion, StorageError>;
+
+    // ---- Epic 16 Slice B: idempotency ----
+
+    /// Claim `key` for a request, or report what was already answered under it.
+    ///
+    /// **Atomic.** Slice B requires that "concurrent identical requests produce
+    /// one effect, not two", and a read-then-write would let two callers both see
+    /// an unclaimed key. The insert *is* the claim.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn claim_idempotency_key(
+        &self,
+        key: &str,
+        request_hash: &str,
+    ) -> Result<IdempotencyClaim, StorageError>;
+
+    /// Record the answer a claimed key produced, so a replay can return it.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn record_idempotent_response(
+        &self,
+        key: &str,
+        status: u16,
+        body: &serde_json::Value,
+    ) -> Result<(), StorageError>;
 
     /// Every verdict, so detection can skip what a human closed and upgrade what
     /// they confirmed.

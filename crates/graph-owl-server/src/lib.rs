@@ -118,6 +118,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/contradictions/reviews", post(review_contradiction))
         .route("/connectors/{connector}/schema", get(connector_schema))
         .route("/connectors/{connector}/test", post(test_connector))
+        .route("/ingest", post(ingest))
         .route(
             "/connectors/configs",
             get(list_connector_configs).post(save_connector_config),
@@ -817,6 +818,10 @@ impl AppError {
                 kind: ConflictKind::PrincipalStillHolds,
                 ..
             } => "principal-still-holds",
+            AppError::Conflict {
+                kind: ConflictKind::IdempotencyConflict,
+                ..
+            } => "idempotency-conflict",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
             AppError::PreconditionFailed { .. } => "version-conflict",
@@ -859,6 +864,10 @@ impl AppError {
                 kind: ConflictKind::PrincipalStillHolds,
                 ..
             } => "This principal still holds things",
+            AppError::Conflict {
+                kind: ConflictKind::IdempotencyConflict,
+                ..
+            } => "Idempotency key conflict",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
             AppError::PreconditionFailed { .. } => "Version precondition failed",
@@ -924,6 +933,13 @@ impl AppError {
             // carry "1 service, 3 schemas, 396 columns".
             AppError::Conflict {
                 kind: ConflictKind::PrincipalStillHolds,
+                detail,
+                ..
+            } => detail.clone(),
+            // Passes through for the same reason: the key and what went wrong with
+            // it are the actionable part, and a canned sentence cannot carry them.
+            AppError::Conflict {
+                kind: ConflictKind::IdempotencyConflict,
                 detail,
                 ..
             } => detail.clone(),
@@ -1576,9 +1592,13 @@ async fn test_connector(
     match PostgresConnector::connect(&connection_string, get("host")).await {
         Ok(connector) => match connector.test_connection().await {
             Ok(()) => Ok(Json(json!({ "ok": true }))),
-            Err(e) => Ok(Json(json!({ "ok": false, "detail": redact(&e.to_string(), &secret) }))),
+            Err(e) => Ok(Json(
+                json!({ "ok": false, "detail": redact(&e.to_string(), &secret) }),
+            )),
         },
-        Err(e) => Ok(Json(json!({ "ok": false, "detail": redact(&e.to_string(), &secret) }))),
+        Err(e) => Ok(Json(
+            json!({ "ok": false, "detail": redact(&e.to_string(), &secret) }),
+        )),
     }
 }
 
@@ -1593,6 +1613,179 @@ fn redact(message: &str, secret: &str) -> String {
         return message.to_string();
     }
     message.replace(secret, "***")
+}
+
+/// **The batch ceiling.** `16-ingestion-apis.md` Slice A: "≤1000 items, larger →
+/// `400`". A request is not a job — decision 2 puts anything bigger behind the
+/// batch-file path, and accepting an unbounded body here would make a 500k-row
+/// push a request that times out after doing half the work.
+const MAX_INGEST_ITEMS: usize = 1000;
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IngestRequest {
+    items: Vec<IngestItemRequest>,
+}
+
+#[derive(Debug, serde::Deserialize, std::hash::Hash)]
+#[serde(rename_all = "camelCase")]
+struct IngestItemRequest {
+    kind: String,
+    name: String,
+    /// The containing entity's FQN. Absent means a root.
+    #[serde(default)]
+    parent_fqn: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    properties: Option<serde_json::Value>,
+}
+
+impl ValidateBody for IngestRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Push a batch — Epic 16 Slice A.
+///
+/// **`207 Multi-Status`, always, when anything was attempted.** A `200` would say
+/// the batch succeeded when item 42 did not, and a `400` would say it failed when
+/// 999 items landed. Neither is true, and a pusher branching on the status needs
+/// the one that means "read the per-item results".
+async fn ingest(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    headers: axum::http::HeaderMap,
+    AppJson(payload): AppJson<IngestRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    // Epic 16 Slice B. Decision 4: mandatory for push, not optional — at-least-once
+    // transport duplicates without it, and a pusher that times out has no way to
+    // know whether the first attempt landed.
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string);
+
+    if let Some(key) = &idempotency_key {
+        // Hashed over the *body*, so the same key with different content is
+        // reported rather than silently served the first answer.
+        let fingerprint = fingerprint(&payload);
+        match catalog.claim_idempotency(key, &fingerprint).await? {
+            graph_owl_storage::IdempotencyClaim::Claimed => {}
+            graph_owl_storage::IdempotencyClaim::Replay { status, body } => {
+                return Ok((
+                    StatusCode::from_u16(status).unwrap_or(StatusCode::MULTI_STATUS),
+                    Json(body),
+                ));
+            }
+            graph_owl_storage::IdempotencyClaim::Mismatch => {
+                return Err(AppError::Conflict {
+                    detail: format!(
+                        "idempotency key `{key}` was already used for a different request. \
+                         A key identifies one request, not a slot — reusing it for new \
+                         content would silently drop this push"
+                    ),
+                    existing_id: None,
+                    kind: ConflictKind::IdempotencyConflict,
+                });
+            }
+            graph_owl_storage::IdempotencyClaim::InFlight => {
+                return Err(AppError::Conflict {
+                    detail: format!(
+                        "idempotency key `{key}` is being processed by another request. \
+                         Retry once it completes; processing it twice is exactly what \
+                         the key exists to prevent"
+                    ),
+                    existing_id: None,
+                    kind: ConflictKind::IdempotencyConflict,
+                });
+            }
+        }
+    }
+
+    if payload.items.len() > MAX_INGEST_ITEMS {
+        return Err(AppError::Validation(vec![FieldError::new(
+            "items",
+            FieldErrorCode::Type,
+            format!(
+                "a push carries at most {MAX_INGEST_ITEMS} items; this one has {}. \
+                 Larger loads go through the batch-file path, because a request \
+                 that big cannot be answered synchronously",
+                payload.items.len()
+            ),
+        )]));
+    }
+
+    let mut items = Vec::with_capacity(payload.items.len());
+    for (index, item) in payload.items.iter().enumerate() {
+        // The kind is parsed up front rather than per item during application:
+        // an unknown kind is a malformed *request*, not a per-item failure, and
+        // reporting it as one would let a typo look like a rejected entity.
+        let kind = parse_kind(Some(&item.kind))?.ok_or_else(|| {
+            AppError::Validation(vec![FieldError::new(
+                format!("items[{index}].kind"),
+                FieldErrorCode::Required,
+                "an item needs a kind",
+            )])
+        })?;
+        items.push(graph_owl_api::IngestItem {
+            kind,
+            name: item.name.clone(),
+            parent_fqn: item.parent_fqn.clone(),
+            description: item.description.clone(),
+            properties: item.properties.clone(),
+        });
+    }
+
+    let outcomes = catalog.ingest(&principal, items).await?;
+    let accepted = outcomes.iter().filter(|o| o.status < 400).count();
+    let body = json!({
+        "accepted": accepted,
+        "rejected": outcomes.len() - accepted,
+        "results": outcomes
+            .iter()
+            .map(|outcome| json!({
+                "index": outcome.index,
+                "status": outcome.status,
+                "id": outcome.id,
+                "problem": outcome.problem,
+            }))
+            .collect::<Vec<_>>(),
+    });
+
+    // Recorded **after** the work, so a replay returns what actually happened
+    // rather than what was intended. A key recorded up front would replay a
+    // success for a push that then failed.
+    if let Some(key) = &idempotency_key {
+        catalog
+            .record_idempotent_response(key, StatusCode::MULTI_STATUS.as_u16(), &body)
+            .await?;
+    }
+
+    Ok((StatusCode::MULTI_STATUS, Json(body)))
+}
+
+/// A stable fingerprint of a push body.
+///
+/// Serialized through `serde_json` rather than hashing the raw bytes: two
+/// semantically identical requests that differ only in key order or whitespace are
+/// the same request, and reporting them as a mismatch would make a client's
+/// formatting choice a `409`.
+fn fingerprint(request: &IngestRequest) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for item in &request.items {
+        item.kind.hash(&mut hasher);
+        item.name.hash(&mut hasher);
+        item.parent_fqn.hash(&mut hasher);
+        item.description.hash(&mut hasher);
+        item.properties
+            .as_ref()
+            .map(ToString::to_string)
+            .hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
 }
 
 async fn connector_schema(

@@ -9,8 +9,8 @@ use graph_owl_core::{
     page::{Cursor, Page, PageRequest},
 };
 use graph_owl_storage::{
-    ConflictKind, FollowOutcome, Holdings, MemoryWrite, OwnersWrite, PrincipalDeletion, Storage,
-    StorageError, StoredUser, SupersedeOutcome, UpdateOutcome,
+    ConflictKind, FollowOutcome, Holdings, IdempotencyClaim, MemoryWrite, OwnersWrite,
+    PrincipalDeletion, Storage, StorageError, StoredUser, SupersedeOutcome, UpdateOutcome,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -1443,6 +1443,85 @@ impl Storage for PostgresStorage {
             .await
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(PrincipalDeletion::Deleted { reassigned })
+    }
+
+    // ---- Epic 16 Slice B ----
+
+    async fn claim_idempotency_key(
+        &self,
+        key: &str,
+        request_hash: &str,
+    ) -> Result<IdempotencyClaim, StorageError> {
+        // Swept here rather than by a background job: this project refuses a
+        // scheduler (Epic 15 decision 5), and a table that only grows is a slow
+        // leak nobody notices until it is large. Bounded work on a bounded index.
+        sqlx::query("DELETE FROM idempotency_keys WHERE created_at < now() - interval '24 hours'")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // **The insert is the claim.** `ON CONFLICT DO NOTHING ... RETURNING`
+        // returns a row only to the caller that actually inserted, so two
+        // concurrent identical requests cannot both believe they are first — a
+        // read-then-write would let exactly that happen, which is the
+        // concurrency criterion.
+        let claimed: Option<(String,)> = sqlx::query_as(
+            "INSERT INTO idempotency_keys (key, request_hash, status, body)
+             VALUES ($1, $2, 0, '{}'::jsonb)
+             ON CONFLICT (key) DO NOTHING
+             RETURNING key",
+        )
+        .bind(key)
+        .bind(request_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        if claimed.is_some() {
+            return Ok(IdempotencyClaim::Claimed);
+        }
+
+        let existing: Option<(String, i16, serde_json::Value)> = sqlx::query_as(
+            "SELECT request_hash, status, body FROM idempotency_keys WHERE key = $1",
+        )
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let Some((stored_hash, status, body)) = existing else {
+            // Expired between the sweep and the read. Treating it as claimable
+            // is right: the original is gone, so there is nothing to replay.
+            return Ok(IdempotencyClaim::Claimed);
+        };
+        if stored_hash != request_hash {
+            return Ok(IdempotencyClaim::Mismatch);
+        }
+        // `status = 0` is the placeholder the claim wrote: the first attempt owns
+        // the key and has not answered yet.
+        if status == 0 {
+            return Ok(IdempotencyClaim::InFlight);
+        }
+        Ok(IdempotencyClaim::Replay {
+            status: u16::try_from(status).unwrap_or(500),
+            body,
+        })
+    }
+
+    async fn record_idempotent_response(
+        &self,
+        key: &str,
+        status: u16,
+        body: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE idempotency_keys SET status = $2, body = $3 WHERE key = $1")
+            .bind(key)
+            .bind(i16::try_from(status).unwrap_or(500))
+            .bind(body)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
     }
 
     async fn upsert_team(&self, team: &graph_owl_storage::Team) -> Result<(), StorageError> {

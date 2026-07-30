@@ -564,9 +564,25 @@ actually holds could not be asserted at all.
 **The claim**: the catalog is populated from every shape of source without duplicating anything.
 
 ### Epic 16 — Ingestion APIs & SDKs
-- [ ] Push API with partial success and idempotency keys
-- [ ] Batch file ingestion
-- [ ] Generated TypeScript and Python SDKs
+- [~] **Push API with partial success** *(Slice A, 30 July 2026)*. `POST /ingest` takes a batch and answers **`207`** with a per-item status — `200` would claim the whole push succeeded when item 42 did not, `400` that it failed when 999 landed, and a pusher branching on the status needs the one that means "read the results". One bad item costs only itself: an all-or-nothing batch makes a pusher re-send everything to fix one typo, and at that size somebody stops retrying.
+
+  **Order is computed, not demanded.** A pusher walking a source emits what it finds when it finds it, so `graph-owl-connectors::ingest::apply_order` sorts the batch so parents land before children — a child submitted first is the normal case, and requiring dependency order would push the catalog's model onto every adapter author (decision 1). Pure, 5/5 mutants caught, and **stable**: independent items keep their submitted order so a `207` reflects the batch back rather than a permutation a client has to re-derive. Indexes are the *submitted* positions, which is the one place a wrong number silently sends somebody to the wrong item.
+
+  Two whole-batch refusals, because neither has a partial success to report: a **duplicate FQN** states two intents for one entity and applying both would make the result depend on submission order; a **containment cycle** would otherwise be an infinite walk. Over **1000 items** is a `400` — a request is not a job (decision 2).
+
+- [x] **Idempotency** *(Slice B, 30 July 2026)*. `Idempotency-Key` on `POST /ingest`: a replay returns the original body and status and creates nothing; the same key with **different content** is a `409`, because a key identifies a request rather than a slot and serving the first answer would silently drop a push the client believes landed. Decision 4 calls this mandatory, not optional — at-least-once transport (Epic 18) duplicates without it.
+
+  **The claim *is* the insert.** `ON CONFLICT DO NOTHING ... RETURNING` returns a row only to the caller that actually inserted, so two concurrent identical pushes cannot both believe they are first; a read-then-write would let exactly that happen, which is the concurrency criterion. The response is recorded **after** the work, so a replay returns what happened rather than what was intended. Keys are swept on write — this project refuses a scheduler (Epic 15 decision 5), and a table that only grows is a leak nobody notices until it is large. Matching is on **content, not bytes**: two requests differing only in key order are the same request, and a `409` over a client's serializer would be wrong.
+
+- [x] **Boundary validation** *(Slice D, 30 July 2026)*. Epic 5's shapes run on a draft **before** it is persisted, so a malformed push is rejected per entity rather than corrupting the graph. Cheaper than expected because `constraint::validate` takes *facts*, not a database: a draft is projected to flakes and checked by the identical code that checks a stored entity, with no second implementation to drift.
+
+  It runs **before the write and therefore before the FQN uniqueness check**, which is the ordering criterion: a draft that is both shape-invalid and FQN-conflicting reports the shape violation, because that is the actionable one — a conflict tells a pusher to rename, the wrong fix for a malformed entity. Only `Violation` rejects; a `Warning` lands, since refusing a push over one would make every shape author's judgement call a hard gate. A shape this server cannot compile is ignored here rather than blocking an unrelated push, because one bad shape should not be an outage.
+
+**Pending in this epic**
+- **Batch file ingestion** (Slice C) — jobs, multipart, per-row errors, a reaper for crashed jobs. The largest remaining piece
+- **Generated TypeScript and Python SDKs** (Slice E) and the **custom adapter guide** (Slice F)
+- **Relationships and lineage in the same call.** Slice A's criteria name them; this landed entities only, so a push still cannot assert an edge
+- **`ConflictKind` eats a conflict's detail unless it has its own variant.** `AppError` renders a fixed sentence per kind, so borrowing an existing one silently replaces whatever the facade wrote. It cost Slice G its counts and Slice B its key before `PrincipalStillHolds` and `IdempotencyConflict` were added — a design trap, not two slips
 
 ### Epic 17 — Entity resolution
 - [ ] Deterministic + probabilistic matching

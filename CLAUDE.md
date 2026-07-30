@@ -108,6 +108,47 @@ One incident already occurred and was reverted during planning (a cache-tier tab
 - **`--lib` blinds the run to whatever only integration tests cover, and the report calls that a survivor.** Measured on `observability.rs`: `observe` and `metrics_endpoint` are HTTP middleware and a handler, exercised only by `tests/observability.rs`, and a `--lib` run reported all three of their mutants as MISSED. Re-run without `--lib`, scoped with `--re`, **all three were caught in 3 minutes**.
   So: `--lib` for code with unit coverage, which is where pure decisions belong anyway; drop it — and pay the container cost, scoped tightly with `--re` — for the thin imperative shells that only an end-to-end test reaches. A MISSED line from a `--lib` run is a question about coverage *shape*, not automatically a gap.
 
+- **Doc-tests are 97% of the workspace suite's wall time. Use `--lib --tests` for the routine gate.** Measured 30 July 2026, warm tree, nothing else running:
+
+  | Command | Wall | Tests passed |
+  |---|---|---|
+  | `cargo test --workspace` | **5198s (87 min)** | 1347 |
+  | `cargo test --workspace --lib --tests` | **152s (2.5 min)** | 1347 |
+
+  **The same 1347 tests pass either way.** Doc-tests cost 5046 seconds and add no behavioural coverage — `rustdoc --test` compiles and links a harness per crate, 28 of them, and `graph-owl-server`'s links a 78 MB rlib. They are worth running (an example that no longer compiles is a lie in the documentation) but they are worth running **before a push, not on every gate**.
+
+  ```
+  cargo test --workspace --lib --tests -- --test-threads=1   # 2.5 min — the gate
+  cargo test --workspace --doc                               # 84 min — before pushing
+  ```
+
+  **Why this took five investigations to find, which is the part worth remembering.** Doc-tests run **`rustdoc`**, not `rustc`. Every check of `pgrep -x rustc` came back zero during the slow stretches, which read as "not compiling" and sent attention to `ps` — where FSEvents at 98% and Gatekeeper at 32% looked like a satisfying answer. Both were real and neither was the cause. The log said so plainly the whole time: `Finished in 0.20s`, zero `Compiling` lines, 75 binaries **and 28 doc-test sections**.
+
+  Three wrong causes were published in this file before the right one: concurrent tooling (real, but not the whole gap), macOS security scanning (wrong), and a rebuild (wrong — cargo reported a 0.20s build). The measurement that settles it in one step, and should be the first move every time:
+
+  ```
+  grep -oE "finished in [0-9.]+s" <log> | awk '{gsub(/[^0-9.]/,"",$3); s+=$3} END {print s}'
+  ```
+
+  **147s of test execution against 5198s of wall clock.** A gap that size is never explained by the thing you are already looking at. Account for *all* the elapsed time before naming a cause, and check `rustdoc` as well as `rustc` before concluding nothing is compiling.
+
+- **Verify once per EPIC, not once per slice — and the build being "slow" is the same complaint.** Measured 30 July 2026, one verification cycle on this workspace:
+
+  | Step | Cost |
+  |---|---|
+  | `cargo build --workspace --tests` after a port change | **1m33s** (everything downstream of `graph-owl-storage` rebuilds and ~40 test binaries relink) |
+  | `cargo clippy --workspace --all-targets` | a second full analysis pass, roughly the build again |
+  | `cargo test --workspace -- --test-threads=1` | **4–5 min** |
+  | **Total** | **~7 minutes** |
+
+  That is the *irreducible* price of one gate run. It is not a bug to diagnose, and three of the four slowdown investigations this session ended in "it was genuinely doing the work". **The only lever is running it fewer times.** Three slices verified separately cost ~21 minutes; the same three verified together cost ~7.
+
+  So: write the whole epic — every slice — then compile, then gate, then commit. Use `CARGO_TARGET_DIR=/tmp/check cargo check -p <crate>` while writing for type feedback, which takes no workspace lock and costs seconds. A slice-by-slice gate is the single largest waste of wall-clock time in this project, and **it has been drifted back into twice after being written down**, which is why it is here rather than in a commit message.
+
+  Two things that make batching safe rather than reckless: `cargo check` against a separate target dir catches type errors immediately, and every cross-crate breakage this project has had was a *compile* error rather than a test failure — so the expensive tier buys much less than the cheap one.
+
+- **Adding a dependency to a workspace crate rebuilds everything downstream of it.** `thiserror` into `graph-owl-connectors` for one error enum cost a full rebuild of `graph-owl-api`, `graph-owl-server` and every test binary. Worth it there; worth *knowing* before doing it mid-slice.
+
 - **"One cargo at a time" is the wrong scope. It is one heavy workload at a time, whatever the toolchain.** Measured 30 July 2026: a workspace suite took **30 minutes** for 57 binaries against a ~4-minute baseline, with a clean environment, one cargo, no second agent, and the log advancing every few seconds — so nothing the existing checks look for. The cause was **`npx stryker run`, three times, while the suite ran**. Stryker spawns **17 test-runner processes**; vitest spawns workers of its own.
 
   None of them take cargo's build lock, which is precisely why the rule as written did not flag them, and why `pgrep -x cargo` returning 1 was reassuring and wrong. They compete for CPU, and this suite runs at ~20% CPU waiting on Docker — it has no headroom to lose.
@@ -251,7 +292,8 @@ One incident already occurred and was reverted during planning (a cache-tier tab
   | `CARGO_TARGET_DIR=/tmp/check cargo check -p <crate>` | seconds, no lock | types, in one crate |
   | `cargo test -p <crate> --lib` | seconds | that crate's own logic |
   | **`cargo build --workspace --tests`** | **65s incremental** | **every cross-crate break** |
-  | `cargo test --workspace -- --test-threads=1` | 241s clean | behaviour against real Postgres |
+  | `cargo test --workspace --lib --tests -- --test-threads=1` | **152s** | behaviour against real Postgres |
+  | `cargo test --workspace --doc` | **84 min — before pushing, not per gate** | examples that no longer compile |
 
   **Every cross-crate breakage in that session was a compile error, not a test
   failure** — five of them: `EdgeRef` gaining a field, `AssetContext` gaining

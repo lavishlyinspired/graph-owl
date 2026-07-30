@@ -2427,6 +2427,245 @@ impl Catalog {
         Ok(self.storage.asset_owners(asset_id).await?)
     }
 
+    /// Run Epic 5's shapes against a draft **before** it is persisted — Epic 16
+    /// Slice D.
+    ///
+    /// The draft is projected to flakes and validated exactly as a stored entity
+    /// would be. That is the whole trick: `constraint::validate` takes facts, not
+    /// a database, so a not-yet-written entity can be checked with the same code
+    /// that checks a written one — no second implementation to drift.
+    ///
+    /// **Only `Violation` rejects.** A `Warning` lands and is recorded: warnings
+    /// exist to be visible, and refusing a push over one would make every shape
+    /// author's judgement call a hard gate.
+    ///
+    /// Returns `None` when the entity is acceptable, or the reason it is not.
+    async fn validate_draft(&self, draft: &Asset) -> Result<Option<String>, CatalogError> {
+        let Some(graph) = self.graph.as_ref() else {
+            // No engine configured is not a silent pass: it is reported by the
+            // caller as unvalidated rather than as valid. Here it simply means
+            // there are no shapes to run.
+            return Ok(None);
+        };
+        let shape_facts = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(shapes_graph())),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        if shape_facts.is_empty() {
+            return Ok(None);
+        }
+
+        // `read_all` compiles as it reads and hands back the shapes that failed
+        // separately. The failures are ignored here on purpose: a shape this
+        // server cannot compile is a *validation* problem, reported by
+        // `run_validation`'s `refusedShapes`, and letting it block an unrelated
+        // push would make one bad shape an outage.
+        let (shapes, _refused) = graph_owl_constraint::shapes::read_all(&shape_facts);
+        if shapes.is_empty() {
+            return Ok(None);
+        }
+
+        // `t` is irrelevant to shape evaluation — constraints read the values, not
+        // when they were asserted — so a fixed instant keeps this pure and avoids
+        // making two identical drafts validate differently.
+        let facts = graph_owl_core::projection::asset_to_flakes(draft, 0);
+        let report = graph_owl_constraint::validate(&shapes, &facts);
+
+        Ok(report
+            .violations
+            .iter()
+            .find(|v| v.severity == graph_owl_ontology::Severity::Violation)
+            .map(|v| {
+                // The shape and the constraint are named, per Slice D: "a
+                // `Violation` rejects that entity with the shape and constraint
+                // named". "Invalid" alone tells a pusher nothing about what to fix.
+                format!(
+                    "shape `{}` constraint `{}`: {}",
+                    v.shape, v.constraint, v.message
+                )
+            }))
+    }
+
+    /// Claim an idempotency key, or learn what it already answered.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    pub async fn claim_idempotency(
+        &self,
+        key: &str,
+        request_hash: &str,
+    ) -> Result<graph_owl_storage::IdempotencyClaim, CatalogError> {
+        Ok(self
+            .storage
+            .claim_idempotency_key(key, request_hash)
+            .await?)
+    }
+
+    /// Record what a claimed key produced, so a replay returns it.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    pub async fn record_idempotent_response(
+        &self,
+        key: &str,
+        status: u16,
+        body: &serde_json::Value,
+    ) -> Result<(), CatalogError> {
+        Ok(self
+            .storage
+            .record_idempotent_response(key, status, body)
+            .await?)
+    }
+
+    // ---- Epic 16 Slice A: synchronous push ----
+
+    /// Push a batch, applying what is valid and reporting what is not.
+    ///
+    /// **Partial success, per item.** A 1000-item push with one bad row must land
+    /// 999 — an all-or-nothing batch makes a pusher's retry loop re-send
+    /// everything to fix one typo, and at that size somebody stops retrying.
+    ///
+    /// Parents are applied before children **within the batch**, because a pusher
+    /// walking a source emits what it finds when it finds it; requiring a
+    /// topological submission would push the catalog's model onto every adapter
+    /// author, which `16-ingestion-apis.md` decision 1 refuses.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` when the batch cannot be ordered at all — a duplicate FQN or a
+    /// containment cycle is a property of the *batch*, not of one item, and there
+    /// is no partial success to report.
+    pub async fn ingest(
+        &self,
+        principal: &Principal,
+        items: Vec<IngestItem>,
+    ) -> Result<Vec<IngestOutcome>, CatalogError> {
+        // FQNs are derived here, not taken from the client — `Asset` documents them
+        // as "derived from the parent chain, never client-set", and a batch that
+        // could name its own FQN could place an entity outside its parent.
+        let drafts: Vec<graph_owl_connectors::ingest::Draft> = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| graph_owl_connectors::ingest::Draft {
+                index,
+                fully_qualified_name: match &item.parent_fqn {
+                    Some(parent) => format!("{parent}.{}", item.name),
+                    None => item.name.clone(),
+                },
+                parent_fqn: item.parent_fqn.clone(),
+            })
+            .collect();
+
+        let order = graph_owl_connectors::ingest::apply_order(&drafts).map_err(|e| {
+            CatalogError::Validation(vec![validation::FieldError::new(
+                "items",
+                validation::FieldErrorCode::Type,
+                e.to_string(),
+            )])
+        })?;
+
+        // FQN → id for parents applied earlier in this same batch. Seeded empty:
+        // a parent already in the catalog is resolved by a lookup instead.
+        let mut landed: std::collections::HashMap<String, Uuid> = std::collections::HashMap::new();
+        let mut outcomes: Vec<IngestOutcome> = Vec::with_capacity(items.len());
+
+        for index in order {
+            let item = &items[index];
+            let draft = &drafts[index];
+
+            let parent_id = match &item.parent_fqn {
+                None => None,
+                Some(parent_fqn) => match landed.get(parent_fqn) {
+                    Some(id) => Some(*id),
+                    None => match self.storage.get_asset_by_fqn(parent_fqn).await? {
+                        Some(parent) => Some(parent.id),
+                        None => {
+                            outcomes.push(IngestOutcome {
+                                index,
+                                status: 400,
+                                id: None,
+                                problem: Some(format!(
+                                    "parent `{parent_fqn}` is neither in this batch nor in the catalog"
+                                )),
+                            });
+                            continue;
+                        }
+                    },
+                },
+            };
+
+            // **Validation runs before the write, and therefore before the FQN
+            // uniqueness check.** Slice D: a draft that is both shape-invalid and
+            // FQN-conflicting must report the shape violation, because that is the
+            // actionable one — a conflict tells a pusher to rename, which is the
+            // wrong fix for a malformed entity.
+            let candidate = Asset {
+                id: Uuid::nil(),
+                kind: item.kind,
+                name: item.name.clone(),
+                fully_qualified_name: draft.fully_qualified_name.clone(),
+                parent_id,
+                description: item.description.clone(),
+                properties: item.properties.clone(),
+                owners: Vec::new(),
+                version: graph_owl_core::envelope::EntityVersion::initial(),
+                updated_by: principal.id.clone(),
+                change_description: None,
+                deleted: false,
+                deleted_at: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            if let Some(reason) = self.validate_draft(&candidate).await? {
+                outcomes.push(IngestOutcome {
+                    index,
+                    status: 400,
+                    id: None,
+                    problem: Some(reason),
+                });
+                continue;
+            }
+
+            let request = UpsertAsset {
+                kind: item.kind,
+                name: item.name.clone(),
+                parent_id,
+                description: item.description.clone(),
+                properties: item.properties.clone(),
+            };
+            match self.upsert_asset(principal, request).await {
+                Ok(asset) => {
+                    landed.insert(draft.fully_qualified_name.clone(), asset.id);
+                    outcomes.push(IngestOutcome {
+                        index,
+                        status: 200,
+                        id: Some(asset.id),
+                        problem: None,
+                    });
+                }
+                // **One item's failure is reported, not raised.** Raising would
+                // abandon the rest of the batch, which is the all-or-nothing
+                // behaviour this slice exists to avoid.
+                Err(error) => outcomes.push(IngestOutcome {
+                    index,
+                    status: 400,
+                    id: None,
+                    problem: Some(format!("{error:?}")),
+                }),
+            }
+        }
+
+        // Back into submitted order. The caller reads results against the batch it
+        // sent, and application order is an implementation detail of this method.
+        outcomes.sort_by_key(|outcome| outcome.index);
+        Ok(outcomes)
+    }
+
     /// # Errors
     ///
     /// `NotFound` if the asset does not exist.
@@ -3208,6 +3447,30 @@ fn unresolvable_link(index: usize, target: Uuid) -> CatalogError {
     )])
 }
 
+/// One entity in a push — Epic 16 Slice A.
+///
+/// The parent is named by **FQN, not id**: a pusher walking an external source
+/// knows the path it is at, not the UUIDs this catalog assigned.
+#[derive(Debug, Clone)]
+pub struct IngestItem {
+    pub kind: AssetKind,
+    pub name: String,
+    pub parent_fqn: Option<String>,
+    pub description: Option<String>,
+    pub properties: Option<serde_json::Value>,
+}
+
+/// What happened to one pushed item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestOutcome {
+    /// Position in the **submitted** batch, so a client can match this to what it
+    /// sent without re-deriving anything.
+    pub index: usize,
+    pub status: u16,
+    pub id: Option<Uuid>,
+    pub problem: Option<String>,
+}
+
 /// A recalled memory, with everything a reader needs to weigh it.
 ///
 /// Staleness and score are **beside** the memory rather than on it: neither is a
@@ -3316,6 +3579,8 @@ mod tests {
         assignments: Mutex<Vec<graph_owl_storage::Assignment>>,
         teams: Mutex<Vec<graph_owl_storage::Team>>,
         followers: Mutex<Vec<(Uuid, String)>>,
+        #[allow(clippy::type_complexity)]
+        idempotency: Mutex<Vec<(String, String, u16, serde_json::Value)>>,
         /// The config **and** its credential, so a test can prove the credential
         /// is kept and still never returned by the read path.
         #[allow(clippy::type_complexity)]
@@ -3493,6 +3758,51 @@ mod tests {
             &self,
         ) -> Result<Vec<graph_owl_core::contradiction::Review>, StorageError> {
             Ok(self.reviews.lock().expect("lock").clone())
+        }
+
+        async fn claim_idempotency_key(
+            &self,
+            key: &str,
+            request_hash: &str,
+        ) -> Result<graph_owl_storage::IdempotencyClaim, StorageError> {
+            let mut held = self.idempotency.lock().expect("lock");
+            // The lock is this double's atomicity, standing in for the port's
+            // `ON CONFLICT DO NOTHING`. A double that read, released, and wrote
+            // would pass every single-threaded test and hide the exact race the
+            // criterion is about.
+            match held.iter().find(|(k, _, _, _)| k == key) {
+                None => {
+                    held.push((
+                        key.to_string(),
+                        request_hash.to_string(),
+                        0,
+                        serde_json::Value::Null,
+                    ));
+                    Ok(graph_owl_storage::IdempotencyClaim::Claimed)
+                }
+                Some((_, stored, _, _)) if stored != request_hash => {
+                    Ok(graph_owl_storage::IdempotencyClaim::Mismatch)
+                }
+                Some((_, _, 0, _)) => Ok(graph_owl_storage::IdempotencyClaim::InFlight),
+                Some((_, _, status, body)) => Ok(graph_owl_storage::IdempotencyClaim::Replay {
+                    status: *status,
+                    body: body.clone(),
+                }),
+            }
+        }
+
+        async fn record_idempotent_response(
+            &self,
+            key: &str,
+            status: u16,
+            body: &serde_json::Value,
+        ) -> Result<(), StorageError> {
+            let mut held = self.idempotency.lock().expect("lock");
+            if let Some(entry) = held.iter_mut().find(|(k, _, _, _)| k == key) {
+                entry.2 = status;
+                entry.3 = body.clone();
+            }
+            Ok(())
         }
 
         async fn child_teams(

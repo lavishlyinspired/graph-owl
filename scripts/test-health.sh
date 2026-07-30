@@ -17,6 +17,31 @@ set -euo pipefail
 
 CONTAINER=graph-owl-tests
 
+# **Keep `target/` out of Spotlight.** Measured 30 July 2026: with 1.2M files under
+# `target/` and no exclusion, FSEvents sat at ~100% CPU and a workspace suite spent
+# ~84 of every 85 seconds per binary outside tests and compilation entirely.
+#
+# Created here rather than committed because git does not descend into an ignored
+# directory, so a marker inside `/target` cannot be tracked — and this script is
+# where somebody already looks when a suite is slow.
+if [ -d target ] && [ ! -f target/.metadata_never_index ]; then
+    touch target/.metadata_never_index
+    echo "created target/.metadata_never_index (keeps Spotlight out of a 1.2M-file tree)"
+fi
+
+# The half this cannot fix: Gatekeeper and XProtect evaluate every freshly linked
+# binary on first execution, and a workspace run executes ~70 of them. Add the
+# terminal under System Settings -> Privacy & Security -> Developer Tools to
+# exempt spawned processes; without it, expect ~85s per test binary regardless of
+# how clean everything else looks.
+scanners=$(ps -A -o %cpu=,comm= -r 2>/dev/null | head -5 | grep -cE "FSEvents|syspolicyd|Xprotect" || true)
+if [ "${scanners:-0}" -gt 0 ]; then
+    echo "note: macOS security scanning is in the top CPU consumers."
+    echo "  Worth exempting the terminal under Privacy & Security -> Developer Tools,"
+    echo "  but it is NOT usually why a suite is slow. Run the same command twice:"
+    echo "  if the second run is fast, the first was a rebuild."
+fi
+
 # **The one that has cost the most.** Two `cargo test` runs at once contend on
 # the shared Postgres container and on cargo's build lock, and the symptom is
 # 30-second stalls before a binary's first test — which looks exactly like a
@@ -78,7 +103,8 @@ echo
 echo "Clean baselines, measured 30 July 2026 on 964 tests:"
 echo "  one server test binary        ~1.8s"
 echo "  cargo test -p graph-owl-server  ~74s  (69s of it real test execution)"
-echo "  cargo test --workspace         ~241s (97s of it real test execution)"
+echo "  cargo test --workspace --lib --tests  152s   <- the routine gate"
+echo "  cargo test --workspace (with doctests) 5198s  <- 97% of it is rustdoc"
 echo
 echo "If those numbers hold, the slowness is a rebuild rather than the"
 echo "environment: time 'cargo build --workspace --tests' separately first."

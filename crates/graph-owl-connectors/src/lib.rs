@@ -6,6 +6,8 @@
 //! `plans/00j-language-boundaries.md`. What stays here is the governance part:
 //! the trait, run scoping, and the ordering guarantee.
 
+pub mod ingest;
+
 use async_trait::async_trait;
 use graph_owl_core::AssetKind;
 use serde::{Deserialize, Serialize};

@@ -493,6 +493,18 @@ pub static ROUTES: &[Route] = &[
         204,
         true,
     ),
+    // Epic 16 Slice A. `207` because a batch has per-item outcomes: `200` would
+    // claim the whole push succeeded, `400` that it failed, and neither is true
+    // when 999 of 1000 landed.
+    route(
+        "post",
+        "/ingest",
+        "Push entities in one call; 207 with per-item status, partial success",
+        None,
+        None,
+        207,
+        true,
+    ),
     route(
         "post",
         "/connectors/{connector}/test",
