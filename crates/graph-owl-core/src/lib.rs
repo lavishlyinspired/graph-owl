@@ -4,6 +4,7 @@ pub mod flake;
 pub mod fqn;
 pub mod lineage;
 pub mod memory;
+pub mod ownership;
 pub mod page;
 pub mod projection;
 pub mod recall;
@@ -66,6 +67,15 @@ pub struct Asset {
     /// and normalising it prematurely loses information the catalog is for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub properties: Option<serde_json::Value>,
+    /// Users and teams accountable for this asset — Epic 11 Slice C.
+    ///
+    /// **Always serialized, empty when unowned**, never omitted. An unowned asset
+    /// is a real and reportable state, and the choice is not cosmetic: `classify`
+    /// treats a *removed* field as a breaking change, so a field that disappeared
+    /// when the last owner was dropped would make a governance event read as a
+    /// schema break.
+    #[serde(default)]
+    pub owners: Vec<crate::ownership::EntityReference>,
     // ---- envelope (Epic 3) ----
     pub version: EntityVersion,
     pub updated_by: String,

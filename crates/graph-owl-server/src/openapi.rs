@@ -356,6 +356,25 @@ pub static ROUTES: &[Route] = &[
     // and contradiction reads return composed envelopes rather than a single
     // domain type, so they carry no `response` name — the same choice the other
     // composed reads in this table already make.
+    // Epic 11 Slice C. `PUT` because the body is the complete owner list.
+    route(
+        "put",
+        "/assets/{id}/owners",
+        "Set who owns this asset; an empty list makes it unowned",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/assets/{id}/owners",
+        "Who owns this asset",
+        None,
+        None,
+        200,
+        true,
+    ),
     route(
         "post",
         "/memories",

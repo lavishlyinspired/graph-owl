@@ -97,6 +97,14 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/memories", post(create_memory))
         .route("/memories/{id}", get(get_memory))
         .route("/memories/{id}/supersede", post(supersede_memory))
+        // `PUT`, not `PATCH`: the body is the complete owner list, so the verb
+        // that means "make it this" is the honest one. `PATCH` would imply a
+        // delta, and a delta cannot express "this asset now has no owner" — which
+        // is the operation the ownership-gap report depends on being reachable.
+        .route(
+            "/assets/{id}/owners",
+            put(set_asset_owners).get(get_asset_owners),
+        )
         .route("/assets/{id}/memories", get(recall_memories))
         .route("/assets/{id}/contradictions", get(list_contradictions))
         .route("/contradictions/reviews", post(review_contradiction))
@@ -1777,6 +1785,49 @@ async fn review_contradiction(
         )
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OwnersRequest {
+    /// The complete list. An empty array is a legitimate request that makes the
+    /// asset unowned — a real, reportable state.
+    owners: Vec<graph_owl_core::ownership::OwnerRef>,
+}
+
+impl ValidateBody for OwnersRequest {
+    /// Shape only. "This principal exists" is a fact about the estate that only
+    /// the facade can check, and a rule stated in two places is a rule that will
+    /// disagree with itself.
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Set who owns an asset — Epic 11 Slice C.
+///
+/// Ownership is a governance statement about accountability, so who may set it is
+/// an administrative question rather than a cataloguing one.
+async fn set_asset_owners(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<OwnersRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let owners = catalog.set_asset_owners(id, &payload.owners).await?;
+    Ok(Json(json!({ "owners": owners })))
+}
+
+/// Who owns this asset.
+async fn get_asset_owners(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    Ok(Json(json!({ "owners": catalog.asset_owners(id).await? })))
 }
 
 /// Create or update a team — Epic 11.

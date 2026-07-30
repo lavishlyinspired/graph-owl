@@ -48,6 +48,7 @@ async fn subject(storage: &PostgresStorage, name: &str) -> Uuid {
         parent_id: None,
         description: None,
         properties: None,
+        owners: Vec::new(),
         version: EntityVersion::initial(),
         updated_by: "system".to_string(),
         change_description: None,

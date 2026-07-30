@@ -5,6 +5,7 @@ use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
     contradiction::Review,
     memory::Memory,
+    ownership::{EntityReference, OwnerRef},
     page::{Page, PageRequest},
 };
 use serde::{Deserialize, Serialize};
@@ -117,6 +118,25 @@ pub enum SupersedeOutcome {
     UnknownLinkTarget {
         index: usize,
         target: Uuid,
+    },
+}
+
+/// What setting an asset's owners did.
+///
+/// Not a `Result<(), StorageError>`: an owner naming a principal that does not
+/// exist is a **client** mistake with a specific fix, and Slice C requires the
+/// response to name *which* owner — `owners[1].id`. Folding it into
+/// `Unexpected(String)` would leave a client re-reading prose to find out which
+/// of three owners to correct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnersWrite {
+    /// The new owner list, resolved to display names.
+    Set(Vec<EntityReference>),
+    NotFound,
+    /// No such user or team. `index` is the position in the submitted list.
+    UnknownPrincipal {
+        index: usize,
+        id: String,
     },
 }
 
@@ -741,4 +761,33 @@ pub trait Storage: Send + Sync {
     ///
     /// [`StorageError::Unexpected`] if the read fails.
     async fn contradiction_reviews(&self) -> Result<Vec<Review>, StorageError>;
+
+    // ---- Epic 11 Slice C: ownership ----
+
+    /// Replace an asset's owners, preserving submitted order.
+    ///
+    /// **Replace, not merge.** A partial update cannot express "this asset has no
+    /// owner any more", and dropping the last owner is the operation that has to
+    /// work — an unowned asset is a real, reportable state, and the ownership-gap
+    /// report is only meaningful if it can be reached.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn set_asset_owners(
+        &self,
+        asset_id: Uuid,
+        owners: &[OwnerRef],
+    ) -> Result<OwnersWrite, StorageError>;
+
+    /// An asset's owners, in submitted order, with display names resolved.
+    ///
+    /// Resolved at read time rather than stored, so a renamed team shows its new
+    /// name everywhere instead of whatever it was called when ownership was
+    /// assigned.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn asset_owners(&self, asset_id: Uuid) -> Result<Vec<EntityReference>, StorageError>;
 }

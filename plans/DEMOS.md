@@ -248,8 +248,15 @@ test's scrape had already installed the recorder.
 - [x] **Teams exist** *(30 July 2026)* — a `teams` table with membership, and `owner_team_id` on assets **beside** `owner_id`, not instead of it. Two columns rather than a polymorphic `(kind, id)` pair, because the two reference different tables and a polymorphic key cannot be a foreign key: losing referential integrity to save a column would let a deleted team stay named as an owner. **Both may be set** — "the platform team owns this, and Priya is the person to ask" is the normal case, and forcing a choice pushes one into a description field where nothing can query it. Membership is **replaced, not merged**: a partial update cannot express "remove everybody", and a team somebody has left is an owner who no longer exists. A member must be a known user, checked at the facade for the message and by a foreign key for the guarantee
 - [~] **Was marked Shipped while teams did not exist** *(found 30 July 2026)*. This epic read **Shipped** at 2/2 while its own title names teams and no table, type or port method for one had ever been written. The marking was wrong, not the plan: two slices covering users and `owner_id` were counted as the whole epic. Two other lines are correctly blocked on it and looked like *their* problem — Epic 39's owner-and-team display, and Epic 41's violation assignment, which now assigns to a `users.id` because a team is not addressable. **An epic marked complete while a thing it is named for is missing is the failure this index exists to prevent**, and it survived because the count came from the slice marks rather than from the plan's own acceptance criteria
 
+- [x] **Entities have owners — plural, and of two kinds** *(Slice C, 30 July 2026)*. `owners: Vec<EntityReference>` on the envelope, backed by an `asset_owners` join table, aggregated into every asset read in SQL so a list of N assets costs one query rather than N+1. `00c`: "**single-owner models fail immediately** — every real asset has a producing team and an accountable individual". **`V16` drops `assets.owner_id` and `assets.owner_team_id`**, added by `V5` and `V13` and never once read or written — two columns that looked like the answer to "who owns this", held nothing, and could not express the plural model
+
+**Pending in this epic**
+- **There is no endpoint that creates a user**, found while testing Slice C. Users are auto-provisioned on first authentication (Epic 12 Slice A) and `PUT /users/{id}/roles` refuses an unknown id — so **a person who has never signed in cannot be named as an owner at all**. This is the concrete consequence of Epic 41's outstanding *principal and group management*, and it is why Slice C's HTTP tests own assets with the seeded `system` user rather than a named person
+- Slice C's "owner referencing a **soft-deleted** principal → `400`" is not implementable: principals have no soft-delete state. `users` has no `deleted_at`, and the foreign keys hard-delete. That is Slice G's work ("deleting a principal does not orphan assets"), not an omission here
+- Ownership inheritance and the ownership gap report → Demo 7, where domains land and give inheritance something to inherit along
+
 **Deferred**
-- Teams, ownership inheritance, and the ownership gap report → Demo 7, where domains land and give inheritance something to inherit along
+- Ownership inheritance down `contains` → Demo 7 (needs Epic 23's domains)
 
 ### Epic 12 — Authentication
 - [x] JWT verification (HS256, shared secret); a forged token is rejected
@@ -316,7 +323,7 @@ test's scrape had already installed the recorder.
 - [x] **OIDC/PKCE sign-in**, S256 challenge, tokens in memory only. The state and verifier are parked in `sessionStorage` **because they must survive a full-page redirect** — holding them in memory made the callback's guard unsatisfiable and login could never complete. That is not a weakening of the token rule: a verifier is single-use, lives for seconds, and is worthless without the matching authorization code
 - [x] **Three outcomes, three screens** — signed out, denied (`403`, signed in without a role), and mid-exchange each render distinctly. A failed sign-in shows *why*, rather than returning silently to the panel the user just used
 - [x] The token has **one owner**. `api.ts` reads it through an injected source rather than holding a second copy; two modules each holding "the" token meant every request went out unauthenticated after a successful sign-in
-- Owner and team display → blocked on Epic 11's teams
+- [~] **Owner and team display** — the API half landed with Epic 11 Slice C (30 July 2026): every asset read carries `owners` with denormalized names and kinds, so there is now something to render. The console component itself is outstanding
 
 **The demo moment — verified live against the 124-asset bank estate:**
 

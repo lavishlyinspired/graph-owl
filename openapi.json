@@ -49,6 +49,13 @@
           "name": {
             "type": "string"
           },
+          "owners": {
+            "description": "Users and teams accountable for this asset — Epic 11 Slice C.\n\n**Always serialized, empty when unowned**, never omitted. An unowned asset\nis a real and reportable state, and the choice is not cosmetic: `classify`\ntreats a *removed* field as a breaking change, so a field that disappeared\nwhen the last owner was dropped would make a governance event read as a\nschema break.",
+            "items": {
+              "$ref": "#/components/schemas/EntityReference"
+            },
+            "type": "array"
+          },
           "parentId": {
             "format": "uuid",
             "type": [
@@ -283,6 +290,27 @@
         ],
         "type": "object"
       },
+      "EntityReference": {
+        "description": "A denormalized pointer to an owning principal.\n\n**Denormalized on purpose.** `00c` requires responses to carry \"name, FQN,\ntype, not bare ids\": a console rendering an owner list should not have to make\nN follow-up requests to turn ids into names, and an agent given bare ids\nreports ids to a human.\n\nThere is no separate `fullyQualifiedName`. For a principal the id **is** the\nqualified name — `users.id` and `teams.id` are globally unique, human-chosen\ntext — and a second field that always equals the first is a field that will\neventually disagree with it.",
+        "properties": {
+          "displayName": {
+            "description": "What a reader sees. Resolved at read time from the principal's record, so\na renamed team shows its new name everywhere rather than whatever it was\ncalled when ownership was assigned.",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/OwnerKind"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "displayName"
+        ],
+        "type": "object"
+      },
       "EntityVersion": {
         "description": "`Major.Minor`, starting at `0.1`.\n\nMinor for backward-compatible change (description, tags, owners); Major for\nbreaking change (a column dropped, a type changed, a rename). The split\nmatters because a consumer can subscribe to Major alone and get exactly the\nchanges that could break it.",
         "properties": {
@@ -422,6 +450,14 @@
           "target"
         ],
         "type": "object"
+      },
+      "OwnerKind": {
+        "description": "What kind of principal owns something.\n\nDeliberately **not** [`crate::PrincipalKind`], which answers a different\nquestion — who is *calling* (User/Service/System). An owner is a person or a\nteam; a service cannot be accountable for an asset, because accountability\nmeans somebody can be asked.",
+        "enum": [
+          "user",
+          "team"
+        ],
+        "type": "string"
       },
       "Page_Asset": {
         "properties": {
@@ -1158,6 +1194,98 @@
           }
         ],
         "summary": "What we know about this asset, best first, each flagged for staleness"
+      }
+    },
+    "/assets/{id}/owners": {
+      "get": {
+        "operationId": "get_assets__id__owners",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Who owns this asset"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Who owns this asset"
+      },
+      "put": {
+        "operationId": "put_assets__id__owners",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Set who owns this asset; an empty list makes it unowned"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Set who owns this asset; an empty list makes it unowned"
       }
     },
     "/assets/{id}/restore": {

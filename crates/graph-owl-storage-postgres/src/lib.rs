@@ -2,13 +2,15 @@ use async_trait::async_trait;
 use graph_owl_authz::{AccessPredicate, Policy};
 use graph_owl_core::contradiction::{Review, Verdict};
 use graph_owl_core::memory::{Authorship, LinkRelation, Memory, MemoryKind, MemoryLink};
+use graph_owl_core::ownership::{EntityReference, OwnerKind, OwnerRef};
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
     envelope::{ChangeDescription, EntityVersion, classify},
     page::{Cursor, Page, PageRequest},
 };
 use graph_owl_storage::{
-    ConflictKind, MemoryWrite, Storage, StorageError, StoredUser, SupersedeOutcome, UpdateOutcome,
+    ConflictKind, MemoryWrite, OwnersWrite, Storage, StorageError, StoredUser, SupersedeOutcome,
+    UpdateOutcome,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -1003,6 +1005,155 @@ impl Storage for PostgresStorage {
             .collect()
     }
 
+    // ---- Epic 11 Slice C: ownership ----
+
+    async fn set_asset_owners(
+        &self,
+        asset_id: Uuid,
+        owners: &[OwnerRef],
+    ) -> Result<OwnersWrite, StorageError> {
+        // One transaction: an asset whose old owners were deleted and whose new
+        // ones failed to write is an asset that silently became unowned, and
+        // "unowned" is a state the gap report acts on.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM assets WHERE id = $1)")
+            .bind(asset_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if !exists {
+            return Ok(OwnersWrite::NotFound);
+        }
+
+        // **Every principal is resolved before anything is written**, so a bad
+        // owner at index 2 does not leave indexes 0 and 1 applied. Resolution also
+        // produces the display name the read path needs, so the lookup is not
+        // wasted work.
+        let mut resolved = Vec::with_capacity(owners.len());
+        for (index, owner) in owners.iter().enumerate() {
+            let table = match owner.kind {
+                OwnerKind::User => "SELECT display_name FROM users WHERE id = $1",
+                OwnerKind::Team => "SELECT display_name FROM teams WHERE id = $1",
+            };
+            let display_name: Option<String> = sqlx::query_scalar(table)
+                .bind(&owner.id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            let Some(display_name) = display_name else {
+                tx.rollback()
+                    .await
+                    .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+                return Ok(OwnersWrite::UnknownPrincipal {
+                    index,
+                    id: owner.id.clone(),
+                });
+            };
+            resolved.push(EntityReference {
+                id: owner.id.clone(),
+                kind: owner.kind,
+                display_name,
+            });
+        }
+
+        sqlx::query("DELETE FROM asset_owners WHERE asset_id = $1")
+            .bind(asset_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        for (ordinal, owner) in owners.iter().enumerate() {
+            let ordinal = i32::try_from(ordinal).map_err(|_| {
+                StorageError::Unexpected("more owners than an asset can have".to_string())
+            })?;
+            let (user_id, team_id) = match owner.kind {
+                OwnerKind::User => (Some(&owner.id), None),
+                OwnerKind::Team => (None, Some(&owner.id)),
+            };
+            sqlx::query(
+                "INSERT INTO asset_owners (asset_id, user_id, team_id, ordinal)
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(asset_id)
+            .bind(user_id)
+            .bind(team_id)
+            .bind(ordinal)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                // The unique indexes catch "the same principal twice", which is a
+                // client mistake rather than an internal failure — but it is not
+                // an *index* mistake, so it does not reuse `UnknownPrincipal`.
+                if e.as_database_error()
+                    .is_some_and(|d| d.is_unique_violation())
+                {
+                    StorageError::Conflict {
+                        detail: format!("{} is listed as an owner more than once", owner.id),
+                        existing_id: None,
+                        kind: ConflictKind::AssignmentExists,
+                    }
+                } else {
+                    StorageError::Unexpected(e.to_string())
+                }
+            })?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(OwnersWrite::Set(resolved))
+    }
+
+    async fn asset_owners(&self, asset_id: Uuid) -> Result<Vec<EntityReference>, StorageError> {
+        // Display names come from the principal's own row, joined at read time —
+        // a renamed team shows its new name everywhere rather than the label it
+        // had when ownership was assigned.
+        let rows: Vec<(
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT o.user_id, u.display_name, o.team_id, t.display_name
+                 FROM asset_owners o
+                 LEFT JOIN users u ON u.id = o.user_id
+                 LEFT JOIN teams t ON t.id = o.team_id
+                 WHERE o.asset_id = $1
+                 ORDER BY o.ordinal",
+        )
+        .bind(asset_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        rows.into_iter()
+            .map(|(user_id, user_name, team_id, team_name)| {
+                // The CHECK guarantees exactly one side is set, so a row with
+                // neither is corrupt rather than a shape to paper over.
+                match (user_id, team_id) {
+                    (Some(id), None) => Ok(EntityReference {
+                        display_name: user_name.unwrap_or_else(|| id.clone()),
+                        id,
+                        kind: OwnerKind::User,
+                    }),
+                    (None, Some(id)) => Ok(EntityReference {
+                        display_name: team_name.unwrap_or_else(|| id.clone()),
+                        id,
+                        kind: OwnerKind::Team,
+                    }),
+                    _ => Err(StorageError::Unexpected(format!(
+                        "asset_owners row for {asset_id} names neither a user nor a team"
+                    ))),
+                }
+            })
+            .collect()
+    }
+
     async fn upsert_team(&self, team: &graph_owl_storage::Team) -> Result<(), StorageError> {
         // One transaction: a team whose row was written and whose membership
         // was not is a team that silently owns things on nobody's behalf.
@@ -1540,23 +1691,30 @@ impl Storage for PostgresStorage {
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-        Ok(asset_from_row(row))
+        // `RETURNING` cannot carry the owners subquery — it has no `assets` alias
+        // to correlate against — so this path reads them. One extra query on a
+        // write, rather than a response that reports an owned asset as unowned.
+        let mut written = asset_from_row(row);
+        written.owners = self.asset_owners(written.id).await?;
+        Ok(written)
     }
 
     #[tracing::instrument(name = "storage.get_asset", skip_all)]
     async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, StorageError> {
-        let row = sqlx::query(&format!("SELECT {ASSET_COLUMNS} FROM assets WHERE id = $1"))
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let row = sqlx::query(&format!(
+            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets WHERE id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(row.map(asset_from_row))
     }
 
     #[tracing::instrument(name = "storage.get_asset_by_fqn", skip_all)]
     async fn get_asset_by_fqn(&self, fqn: &str) -> Result<Option<Asset>, StorageError> {
         let row = sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS} FROM assets WHERE fully_qualified_name = $1"
+            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets WHERE fully_qualified_name = $1"
         ))
         .bind(fqn)
         .fetch_optional(&self.pool)
@@ -1574,7 +1732,7 @@ impl Storage for PostgresStorage {
             .unwrap_or(i64::MAX)
             .saturating_add(1);
         let sql = format!(
-            "SELECT {ASSET_COLUMNS} FROM assets
+            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets
              WHERE NOT deleted
                AND ($1::text IS NULL OR kind = $1)
                AND ($2::text IS NULL OR (fully_qualified_name, id) > ($2, $3))
@@ -1591,7 +1749,7 @@ impl Storage for PostgresStorage {
 
     async fn list_children(&self, parent_id: Option<Uuid>) -> Result<Vec<Asset>, StorageError> {
         let rows = sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS} FROM assets
+            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets
              WHERE NOT deleted AND (($1::uuid IS NULL AND parent_id IS NULL) OR parent_id = $1)
              ORDER BY name"
         ))
@@ -1607,7 +1765,7 @@ impl Storage for PostgresStorage {
         // root-first — which is the order a breadcrumb renders in.
         let rows = sqlx::query(&format!(
             "WITH RECURSIVE chain AS (
-                 SELECT {ASSET_COLUMNS}, 0 AS hops FROM assets WHERE id = $1
+                 SELECT {ASSET_COLUMNS}, {OWNERS_JSON}, 0 AS hops FROM assets WHERE id = $1
                  UNION ALL
                  SELECT a.id, a.kind, a.name, a.fully_qualified_name, a.parent_id,
                         a.description, a.properties, a.version_major, a.version_minor,
@@ -1615,7 +1773,7 @@ impl Storage for PostgresStorage {
                         a.created_at, a.updated_at, c.hops + 1
                  FROM assets a JOIN chain c ON a.id = c.parent_id
              )
-             SELECT {ASSET_COLUMNS} FROM chain ORDER BY hops DESC"
+             SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM chain ORDER BY hops DESC"
         ))
         .bind(id)
         .fetch_all(&self.pool)
@@ -1637,7 +1795,7 @@ impl Storage for PostgresStorage {
             .unwrap_or(i64::MAX)
             .saturating_add(1);
         let sql = format!(
-            "SELECT {ASSET_COLUMNS}, {RANK_KEY} AS sort_key
+            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON}, {RANK_KEY} AS sort_key
              FROM assets, to_tsquery('english', $1) AS q (ts)
              WHERE NOT deleted
                AND assets.search_vector @@ q.ts
@@ -1665,7 +1823,7 @@ impl Storage for PostgresStorage {
         // general form it becomes `fqn LIKE '.%'`, which is false for every
         // real FQN — so "no restriction" would silently return nothing.
         sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS} FROM assets
+            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets
              WHERE deleted = FALSE AND ($1 = ''
                                         OR fully_qualified_name = $1
                                         OR fully_qualified_name LIKE $1 || '.%')"
@@ -1710,7 +1868,7 @@ impl Storage for PostgresStorage {
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
         let before_row = sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS} FROM assets WHERE id = $1 FOR UPDATE"
+            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets WHERE id = $1 FOR UPDATE"
         ))
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -1792,6 +1950,12 @@ impl Storage for PostgresStorage {
             .await
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
+        // After the commit, for the same reason as `upsert_asset`. Read outside
+        // the transaction deliberately: this path never changes owners, so the
+        // committed state is the right answer and reading inside would have seen
+        // the same rows anyway.
+        let mut updated = updated;
+        updated.owners = self.asset_owners(updated.id).await?;
         Ok(UpdateOutcome::Updated(Box::new(updated)))
     }
 
@@ -1981,7 +2145,7 @@ impl Storage for PostgresStorage {
             .unwrap_or(i64::MAX)
             .saturating_add(1);
         let sql = format!(
-            "SELECT {ASSET_COLUMNS} FROM assets
+            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets
              WHERE NOT deleted
                AND ($1::text IS NULL OR kind = $1)
                AND ($2::text IS NULL OR (fully_qualified_name, id) > ($2, $3))
@@ -2019,7 +2183,7 @@ impl Storage for PostgresStorage {
             .unwrap_or(i64::MAX)
             .saturating_add(1);
         let sql = format!(
-            "SELECT {ASSET_COLUMNS}, {RANK_KEY} AS sort_key
+            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON}, {RANK_KEY} AS sort_key
              FROM assets, to_tsquery('english', $1) AS q (ts)
              WHERE NOT deleted
                AND assets.search_vector @@ q.ts
@@ -2050,7 +2214,7 @@ impl Storage for PostgresStorage {
             return Ok(Vec::new());
         };
         let rows = sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS} FROM assets
+            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets
              WHERE NOT deleted
                AND (($1::uuid IS NULL AND parent_id IS NULL) OR parent_id = $1)
                AND (fully_qualified_name LIKE ANY($2))
@@ -2105,7 +2269,7 @@ impl Storage for PostgresStorage {
             return Ok(Vec::new());
         };
         sqlx::query(&format!(
-            "SELECT {ASSET_COLUMNS} FROM assets
+            "SELECT {ASSET_COLUMNS}, {OWNERS_JSON} FROM assets
              WHERE NOT deleted
                AND (fully_qualified_name LIKE ANY($1))
                AND NOT (fully_qualified_name LIKE ANY($2))
@@ -2227,10 +2391,44 @@ fn asset_from_row(row: PgRow) -> Asset {
         parent_id: row.get("parent_id"),
         description: row.get("description"),
         properties: row.get("properties"),
+        // `try_get`, because the two `RETURNING` paths do not carry this column —
+        // a correlated subquery in `RETURNING` cannot see `assets` under that
+        // alias. Those paths read owners separately rather than silently
+        // reporting none.
+        owners: row
+            .try_get::<serde_json::Value, _>("owners")
+            .ok()
+            .and_then(|raw| serde_json::from_value(raw).ok())
+            .unwrap_or_default(),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
 }
+
+/// Owners as a JSON array, aggregated **in SQL**.
+///
+/// A correlated subquery rather than a join, because a join multiplies asset rows
+/// by owner count and every caller would then have to de-duplicate — and rather
+/// than a second query per asset, because a list of 200 assets would become 201
+/// round trips against Docker's mapped port at ~30ms each.
+///
+/// `coalesce(..., '[]')` so an unowned asset yields an empty array rather than
+/// `NULL`: the domain's `owners` is always a list, and the two must agree or the
+/// version classifier sees a field appear and disappear.
+///
+/// Display names are joined here so a renamed team reads correctly everywhere,
+/// and fall back to the id — an owner row can only exist for a live principal
+/// (both columns are foreign keys), so the fallback is unreachable defence rather
+/// than a real case.
+const OWNERS_JSON: &str = "(SELECT coalesce(json_agg(json_build_object(
+        'id',          coalesce(o.user_id, o.team_id),
+        'kind',        CASE WHEN o.user_id IS NOT NULL THEN 'user' ELSE 'team' END,
+        'displayName', coalesce(u.display_name, t.display_name, o.user_id, o.team_id)
+    ) ORDER BY o.ordinal), '[]'::json)
+    FROM asset_owners o
+    LEFT JOIN users u ON u.id = o.user_id
+    LEFT JOIN teams t ON t.id = o.team_id
+    WHERE o.asset_id = assets.id) AS owners";
 
 const ASSET_COLUMNS: &str = "id, kind, name, fully_qualified_name, parent_id, description, properties, version_major, version_minor, updated_by, change_description, deleted, deleted_at, created_at, updated_at";
 

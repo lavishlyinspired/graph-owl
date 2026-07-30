@@ -1141,6 +1141,7 @@ impl Catalog {
                 parent_id: request.parent_id,
                 description: request.description,
                 properties: request.properties,
+                owners: Vec::new(),
                 version: EntityVersion::initial(),
                 updated_by: principal.id.clone(),
                 // No diff on the initial version: there was nothing before it,
@@ -2169,6 +2170,50 @@ impl Catalog {
             .await?)
     }
 
+    // ---- Epic 11 Slice C: ownership ----
+
+    /// Replace an asset's owners.
+    ///
+    /// **Replace, not merge**, and an empty list is a legitimate request: an
+    /// unowned asset is a real, reportable state, and the ownership-gap report is
+    /// only meaningful if that state can be reached deliberately.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the asset does not exist. `Validation` naming the offending
+    /// entry **by index** — `owners[1].id` — because "one of your owners is
+    /// wrong" is not actionable with three of them. `Conflict` if the same
+    /// principal is listed twice.
+    pub async fn set_asset_owners(
+        &self,
+        asset_id: Uuid,
+        owners: &[graph_owl_core::ownership::OwnerRef],
+    ) -> Result<Vec<graph_owl_core::ownership::EntityReference>, CatalogError> {
+        match self.storage.set_asset_owners(asset_id, owners).await? {
+            graph_owl_storage::OwnersWrite::Set(resolved) => Ok(resolved),
+            graph_owl_storage::OwnersWrite::NotFound => Err(CatalogError::NotFound),
+            graph_owl_storage::OwnersWrite::UnknownPrincipal { index, id } => {
+                Err(CatalogError::Validation(vec![validation::FieldError::new(
+                    format!("owners[{index}].id"),
+                    validation::FieldErrorCode::Type,
+                    format!("{id} is neither a known user nor a known team"),
+                )]))
+            }
+        }
+    }
+
+    /// Who owns this asset, in the order ownership was recorded.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn asset_owners(
+        &self,
+        asset_id: Uuid,
+    ) -> Result<Vec<graph_owl_core::ownership::EntityReference>, CatalogError> {
+        Ok(self.storage.asset_owners(asset_id).await?)
+    }
+
     /// # Errors
     ///
     /// `NotFound` if the asset does not exist.
@@ -3075,6 +3120,10 @@ mod tests {
         lineage: Mutex<Vec<graph_owl_core::lineage::LineageEdge>>,
         memories: Mutex<Vec<graph_owl_core::memory::Memory>>,
         reviews: Mutex<Vec<graph_owl_core::contradiction::Review>>,
+        /// `(asset, owners)` in submitted order — order is part of the contract,
+        /// because validation reports failures by index.
+        #[allow(clippy::type_complexity)]
+        owners: Mutex<Vec<(Uuid, Vec<graph_owl_core::ownership::EntityReference>)>>,
     }
 
     impl InMemoryStorage {
@@ -3230,6 +3279,71 @@ mod tests {
             &self,
         ) -> Result<Vec<graph_owl_core::contradiction::Review>, StorageError> {
             Ok(self.reviews.lock().expect("lock").clone())
+        }
+
+        async fn set_asset_owners(
+            &self,
+            asset_id: Uuid,
+            owners: &[graph_owl_core::ownership::OwnerRef],
+        ) -> Result<graph_owl_storage::OwnersWrite, StorageError> {
+            self.guard_write("set_asset_owners");
+            let assets = self.assets.lock().expect("lock");
+            if !assets.iter().any(|asset| asset.id == asset_id) {
+                return Ok(graph_owl_storage::OwnersWrite::NotFound);
+            }
+            drop(assets);
+
+            // As strict as the port: every principal is resolved before anything
+            // is written, so a bad owner at index 2 does not leave 0 and 1
+            // applied. A double that skipped this would hide the exact bug the
+            // index-naming error exists to report.
+            let users = self.users.lock().expect("lock");
+            let teams = self.teams.lock().expect("lock");
+            let mut resolved = Vec::with_capacity(owners.len());
+            for (index, owner) in owners.iter().enumerate() {
+                let found = match owner.kind {
+                    graph_owl_core::ownership::OwnerKind::User => users
+                        .iter()
+                        .find(|user| user.id == owner.id)
+                        .map(|user| user.display_name.clone()),
+                    graph_owl_core::ownership::OwnerKind::Team => teams
+                        .iter()
+                        .find(|team| team.id == owner.id)
+                        .map(|team| team.display_name.clone()),
+                };
+                let Some(display_name) = found else {
+                    return Ok(graph_owl_storage::OwnersWrite::UnknownPrincipal {
+                        index,
+                        id: owner.id.clone(),
+                    });
+                };
+                resolved.push(graph_owl_core::ownership::EntityReference {
+                    id: owner.id.clone(),
+                    kind: owner.kind,
+                    display_name,
+                });
+            }
+            drop(users);
+            drop(teams);
+
+            let mut held = self.owners.lock().expect("lock");
+            held.retain(|(id, _)| *id != asset_id);
+            held.push((asset_id, resolved.clone()));
+            Ok(graph_owl_storage::OwnersWrite::Set(resolved))
+        }
+
+        async fn asset_owners(
+            &self,
+            asset_id: Uuid,
+        ) -> Result<Vec<graph_owl_core::ownership::EntityReference>, StorageError> {
+            Ok(self
+                .owners
+                .lock()
+                .expect("lock")
+                .iter()
+                .find(|(id, _)| *id == asset_id)
+                .map(|(_, owners)| owners.clone())
+                .unwrap_or_default())
         }
 
         async fn upsert_connector_config(

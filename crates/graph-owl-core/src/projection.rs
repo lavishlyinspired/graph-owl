@@ -170,6 +170,7 @@ mod projection_tests {
             parent_id: Some(Uuid::from_u128(2)),
             description: Some("UPI transaction ledger".to_string()),
             properties: None,
+            owners: Vec::new(),
             version: EntityVersion { major: 0, minor: 1 },
             updated_by: "asha".to_string(),
             change_description: None,
@@ -858,6 +859,13 @@ pub fn asset_from_flakes(id: uuid::Uuid, flakes: &[Flake]) -> Option<Asset> {
             Some(FlakeValue::Json(raw)) => serde_json::from_str(raw).ok(),
             _ => None,
         },
+        // **Empty on a historical read, and that is the honest answer.** Owners
+        // live in a relational join table, not in the triple projection, so a
+        // reconstruction from flakes has nothing to read. Filling them from the
+        // *current* owners would attribute today's ownership to a past version,
+        // which is exactly the misattribution `change_description: None` below
+        // refuses for the same reason.
+        owners: Vec::new(),
         version,
         updated_by: text("updatedBy").unwrap_or_else(|| "system".to_string()),
         // A historical read reconstructs *state*, not the diff that produced
