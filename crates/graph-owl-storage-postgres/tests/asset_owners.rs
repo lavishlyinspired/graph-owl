@@ -418,7 +418,14 @@ fn first_page() -> graph_owl_core::page::PageRequest {
 
 async fn ids_owned_by(storage: &PostgresStorage, owner: &str) -> Vec<Uuid> {
     storage
-        .list_assets_visible(None, Some(owner), &first_page(), &everything())
+        .list_assets_visible(
+            &graph_owl_storage::AssetFilter {
+                owner: Some(owner),
+                ..Default::default()
+            },
+            &first_page(),
+            &everything(),
+        )
         .await
         .expect("list")
         .data
@@ -548,7 +555,14 @@ async fn filtering_by_an_unknown_owner_is_an_empty_page_rather_than_an_error() {
     estate(&storage, "somebody").await;
 
     let page = storage
-        .list_assets_visible(None, Some("nobody-at-all"), &first_page(), &everything())
+        .list_assets_visible(
+            &graph_owl_storage::AssetFilter {
+                owner: Some("nobody-at-all"),
+                ..Default::default()
+            },
+            &first_page(),
+            &everything(),
+        )
         .await
         .expect("an empty page, not an error");
 
@@ -569,8 +583,11 @@ async fn the_owner_filter_combines_with_the_kind_filter() {
 
     let tables = storage
         .list_assets_visible(
-            Some(AssetKind::Table),
-            Some("platform"),
+            &graph_owl_storage::AssetFilter {
+                kind: Some(AssetKind::Table),
+                owner: Some("platform"),
+                ..Default::default()
+            },
             &first_page(),
             &everything(),
         )
@@ -594,9 +611,145 @@ async fn no_owner_filter_returns_everything_visible() {
     let (service, _, _) = estate(&storage, "unfiltered").await;
 
     let page = storage
-        .list_assets_visible(None, None, &first_page(), &everything())
+        .list_assets_visible(
+            &graph_owl_storage::AssetFilter::default(),
+            &first_page(),
+            &everything(),
+        )
         .await
         .expect("list");
 
     assert!(page.data.iter().any(|a| a.id == service));
+}
+
+// ---- The ownership-gap report ----
+//
+// "Which assets have no owner anywhere up their chain" is the query Slice D's
+// `inherited` flag exists to make answerable: inheriting *without* saying so turns
+// a 5,000-table catalog that nobody has assigned into one that reads as fully
+// owned, and then the gap report has nothing to report.
+
+async fn unowned_ids(storage: &PostgresStorage) -> Vec<Uuid> {
+    storage
+        .list_assets_visible(
+            &graph_owl_storage::AssetFilter {
+                unowned: true,
+                ..Default::default()
+            },
+            &first_page(),
+            &everything(),
+        )
+        .await
+        .expect("list")
+        .data
+        .iter()
+        .map(|asset| asset.id)
+        .collect()
+}
+
+#[tokio::test]
+async fn the_gap_report_lists_an_asset_nobody_owns() {
+    let (storage, _db, _url) = test_storage().await;
+    let (service, database, table) = estate(&storage, "orphan").await;
+
+    let gaps = unowned_ids(&storage).await;
+
+    assert!(gaps.contains(&service));
+    assert!(gaps.contains(&database));
+    assert!(gaps.contains(&table));
+}
+
+// **The criterion that makes the report worth having.** An owner on the service
+// covers everything beneath it, so none of the chain is a gap — a report that
+// only checked direct ownership would list every table in the estate and be
+// ignored within a day.
+#[tokio::test]
+async fn an_inherited_owner_closes_the_gap_for_everything_below_it() {
+    let (storage, _db, _url) = test_storage().await;
+    let (service, database, table) = estate(&storage, "covered").await;
+    let platform = team(&storage, "platform", "Platform").await;
+    storage
+        .set_asset_owners(service, &[platform])
+        .await
+        .expect("set");
+
+    let gaps = unowned_ids(&storage).await;
+
+    assert!(!gaps.contains(&service), "owned directly");
+    assert!(!gaps.contains(&database), "covered by inheritance");
+    assert!(!gaps.contains(&table), "covered by inheritance");
+}
+
+// The gap is the exact inverse of the owner filter over the same estate: every
+// asset is in one set or the other, never both and never neither. If the two ever
+// disagree, one of them is lying about effective ownership.
+#[tokio::test]
+async fn the_gap_report_is_the_inverse_of_the_owner_filter() {
+    let (storage, _db, _url) = test_storage().await;
+    let (owned_service, owned_db, owned_table) = estate(&storage, "has").await;
+    let (bare_service, bare_db, bare_table) = estate(&storage, "hasnt").await;
+    let platform = team(&storage, "platform", "Platform").await;
+    storage
+        .set_asset_owners(owned_service, &[platform])
+        .await
+        .expect("set");
+
+    let gaps = unowned_ids(&storage).await;
+    let owned = ids_owned_by(&storage, "platform").await;
+
+    for id in [owned_service, owned_db, owned_table] {
+        assert!(owned.contains(&id), "should be owned");
+        assert!(!gaps.contains(&id), "and so not a gap");
+    }
+    for id in [bare_service, bare_db, bare_table] {
+        assert!(gaps.contains(&id), "should be a gap");
+        assert!(!owned.contains(&id), "and so not owned");
+    }
+}
+
+// Removing the last owner reopens the gap. Ownership is not a one-way ratchet, and
+// a report that cached the answer would keep an asset closed after its owner left.
+#[tokio::test]
+async fn dropping_the_last_owner_reopens_the_gap() {
+    let (storage, _db, _url) = test_storage().await;
+    let (service, _database, table) = estate(&storage, "reopened").await;
+    let platform = team(&storage, "platform", "Platform").await;
+    storage
+        .set_asset_owners(service, &[platform])
+        .await
+        .expect("set");
+    assert!(!unowned_ids(&storage).await.contains(&table));
+
+    storage.set_asset_owners(service, &[]).await.expect("clear");
+
+    assert!(unowned_ids(&storage).await.contains(&table));
+}
+
+// Composes with the kind filter, so "which *tables* has nobody claimed" is one
+// request rather than a client-side intersection.
+#[tokio::test]
+async fn the_gap_report_combines_with_the_kind_filter() {
+    let (storage, _db, _url) = test_storage().await;
+    let (service, database, table) = estate(&storage, "bykind").await;
+
+    let tables = storage
+        .list_assets_visible(
+            &graph_owl_storage::AssetFilter {
+                kind: Some(AssetKind::Table),
+                unowned: true,
+                ..Default::default()
+            },
+            &first_page(),
+            &everything(),
+        )
+        .await
+        .expect("list")
+        .data
+        .iter()
+        .map(|a| a.id)
+        .collect::<Vec<_>>();
+
+    assert!(tables.contains(&table));
+    assert!(!tables.contains(&service), "kind filter still applies");
+    assert!(!tables.contains(&database), "kind filter still applies");
 }

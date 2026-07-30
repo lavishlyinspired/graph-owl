@@ -146,7 +146,7 @@ pub static ROUTES: &[Route] = &[
     route(
         "get",
         "/assets",
-        "List assets; `?owner=` filters by effective owner, direct or inherited",
+        "List assets; `?owner=` filters by effective owner, `?unowned=true` is the ownership-gap report",
         None,
         Some("Page_Asset"),
         200,

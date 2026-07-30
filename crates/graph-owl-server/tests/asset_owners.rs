@@ -456,3 +456,94 @@ async fn the_owner_filter_combines_with_kind_at_the_wire() {
         .collect();
     assert_eq!(ids, vec![table.as_str()], "only the table, {body}");
 }
+
+// ---- The ownership-gap report at the wire ----
+
+async fn unowned_listed(app: &axum::Router) -> Vec<String> {
+    let (status, body) = send(app, "GET", "/assets?unowned=true&limit=100", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["data"]
+        .as_array()
+        .expect("a page")
+        .iter()
+        .map(|a| a["id"].as_str().expect("an id").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_gap_report_lists_assets_nobody_owns() {
+    let (app, _db, _) = test_app().await;
+    let [service, _database, _schema, table] = estate(&app).await;
+
+    let gaps = unowned_listed(&app).await;
+
+    assert!(gaps.contains(&service));
+    assert!(gaps.contains(&table));
+}
+
+// An owner high in the chain closes the gap for everything beneath it. A report
+// that only checked direct ownership would list every table in the estate, and
+// would be ignored within a day.
+#[tokio::test]
+async fn an_owner_above_closes_the_gap_below_at_the_wire() {
+    let (app, _db, _) = test_app().await;
+    let [service, database, schema, table] = estate(&app).await;
+    team(&app, "platform", "Platform Team").await;
+    send(
+        &app,
+        "PUT",
+        &format!("/assets/{service}/owners"),
+        Some(json!({ "owners": [{ "id": "platform", "kind": "team" }] })),
+    )
+    .await;
+
+    let gaps = unowned_listed(&app).await;
+
+    for id in [&service, &database, &schema, &table] {
+        assert!(!gaps.contains(id), "{id} should be covered, gaps: {gaps:?}");
+    }
+}
+
+// **Contradictory, so refused rather than silently empty.** "Owned by X and owned
+// by nobody" has no answer, and an empty page would look like a real result — the
+// client would conclude X owns nothing.
+#[tokio::test]
+async fn asking_for_both_an_owner_and_unowned_is_refused() {
+    let (app, _db, _) = test_app().await;
+
+    let (status, body) = send(&app, "GET", "/assets?owner=platform&unowned=true", None).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("unowned"), "{body}");
+}
+
+// `unowned=false` is not the same request as omitting it, and must not be treated
+// as the gap report. A client sending the parameter explicitly off wants the
+// unfiltered list.
+#[tokio::test]
+async fn unowned_false_is_the_unfiltered_list() {
+    let (app, _db, _) = test_app().await;
+    let [service, _database, _schema, _table] = estate(&app).await;
+    team(&app, "platform", "Platform Team").await;
+    send(
+        &app,
+        "PUT",
+        &format!("/assets/{service}/owners"),
+        Some(json!({ "owners": [{ "id": "platform", "kind": "team" }] })),
+    )
+    .await;
+
+    let (status, body) = send(&app, "GET", "/assets?unowned=false&limit=100", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<&str> = body["data"]
+        .as_array()
+        .expect("a page")
+        .iter()
+        .map(|a| a["id"].as_str().expect("an id"))
+        .collect();
+    assert!(
+        ids.contains(&service.as_str()),
+        "an owned asset should still be listed"
+    );
+}

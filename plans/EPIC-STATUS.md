@@ -48,7 +48,7 @@ is the condition that index exists to catch.
 | **9** | 8 | [`09-engine-rdf-io.md`](09-engine-rdf-io.md) | Not started | — | Epic 4 (triples to serialize), Epic 7 (CONSTRUCT produces Turtle) |
 | **9a** | 8 | [`09a-lpg-interchange.md`](09a-lpg-interchange.md) | Not started | — | Epic 7c (LPG projection), Epic 9 (RDF I/O — shares the streaming-serializer sha… |
 | **10** | 2 | [`10-operability.md`](10-operability.md) | **Shipped** | 17/17 | Epic 1 (a server, an error model, and a contract to instrument) |
-| **11** | 2 | [`11-people-and-ownership.md`](11-people-and-ownership.md) | In progress | 6/10 (+1 partial) | Epic 3 (envelope carries `owners`) |
+| **11** | 2 | [`11-people-and-ownership.md`](11-people-and-ownership.md) | In progress | 7/11 (+1 partial) | Epic 3 (envelope carries `owners`) |
 | **12** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 15/15 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **13** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 10/10 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **14** | 5 | [`14-mcp-activation.md`](14-mcp-activation.md) | In progress | 3/8 (+1 partial) | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard… |
@@ -231,15 +231,16 @@ is the condition that index exists to catch.
 ### Epic 11 — Users, Teams & Ownership *(Demo 2)*
 
 - [x] `User` with roles; auto-provisioned on first sight
-- [x] `owner_id` on assets (nullable, so the gap is visible rather than prevented)
+- [x] ~~`owner_id` on assets~~ — **superseded by Slice C**, which replaced it with an `asset_o
 - [x] Teams exist
 - [~] Was marked Shipped while teams did not exist
 - [x] Entities have owners — plural, and of two kinds
 - [x] Ownership inherits down `contains`
 - [x] Assets are filterable by owner
+- [ ] Teams do not nest.
 - [ ] There is no endpoint that creates a user
 - [ ] Slice C's "owner referencing a **soft-deleted** principal → `400`" is not implementable:
-- [ ] The ownership-gap report
+- [x] The ownership-gap report
 
 ### Epic 12 — Authentication & Authorization *(Demo 2)*
 

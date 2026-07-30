@@ -1743,8 +1743,18 @@ impl Storage for PostgresStorage {
         // Recursive CTE walking parent_id upward, then reversed so callers get
         // root-first — which is the order a breadcrumb renders in.
         let rows = sqlx::query(&format!(
+            // **Owners are projected once, outside the CTE.** Two reasons, and
+            // both were live bugs: computing them in the non-recursive branch gave
+            // it one more column than the recursive branch, which a `UNION ALL`
+            // rejects outright; and `OWNERS_EXPR` correlates on `assets.id`, so
+            // the outer `SELECT` needs an `assets` in scope — reading `FROM chain`
+            // made the reference unresolvable and every ancestors request a 500.
+            //
+            // `chain AS assets` is what supplies that scope. Aliasing the CTE to
+            // the table name the expression expects keeps the expression shared
+            // rather than forking a second copy that takes a different alias.
             "WITH RECURSIVE chain AS (
-                 SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners, 0 AS hops FROM assets WHERE id = $1
+                 SELECT {ASSET_COLUMNS}, 0 AS hops FROM assets WHERE id = $1
                  UNION ALL
                  SELECT a.id, a.kind, a.name, a.fully_qualified_name, a.parent_id,
                         a.description, a.properties, a.version_major, a.version_minor,
@@ -1752,7 +1762,8 @@ impl Storage for PostgresStorage {
                         a.created_at, a.updated_at, c.hops + 1
                  FROM assets a JOIN chain c ON a.id = c.parent_id
              )
-             SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM chain ORDER BY hops DESC"
+             SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners
+               FROM chain AS assets ORDER BY hops DESC"
         ))
         .bind(id)
         .fetch_all(&self.pool)
@@ -2108,8 +2119,7 @@ impl Storage for PostgresStorage {
     #[tracing::instrument(name = "storage.list_assets_visible", skip_all)]
     async fn list_assets_visible(
         &self,
-        kind: Option<AssetKind>,
-        owner: Option<&str>,
+        filter: &graph_owl_storage::AssetFilter<'_>,
         page: &PageRequest,
         predicate: &AccessPredicate,
     ) -> Result<Page<Asset>, StorageError> {
@@ -2146,17 +2156,19 @@ impl Storage for PostgresStorage {
                AND ($7::text IS NULL OR EXISTS (
                      SELECT 1 FROM json_array_elements({OWNERS_EXPR}) AS effective
                       WHERE effective->>'id' = $7))
+               AND ($8::bool IS NOT TRUE OR json_array_length({OWNERS_EXPR}) = 0)
              ORDER BY fully_qualified_name, id
              LIMIT $4"
         );
         let query = sqlx::query(&sql)
-            .bind(kind.map(AssetKind::as_str))
+            .bind(filter.kind.map(AssetKind::as_str))
             .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
             .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
             .bind(overfetch)
             .bind(&allow)
             .bind(&deny)
-            .bind(owner);
+            .bind(filter.owner)
+            .bind(filter.unowned);
         self.asset_page(query, page).await
     }
 

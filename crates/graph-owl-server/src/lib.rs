@@ -1078,6 +1078,15 @@ struct AssetListQuery {
     /// a second parameter on every steward's bookmarked URL is a worse trade
     /// than the ambiguity. The write path, where it matters, does require it.
     owner: Option<String>,
+    /// The ownership-gap report: only assets with **no effective owner anywhere up
+    /// their chain** — the query Slice D's `inherited` flag exists to make
+    /// answerable, since inheriting without saying so turns a catalog nobody has
+    /// assigned into one that reads as fully owned.
+    ///
+    /// A separate parameter rather than `owner=none`, because a sentinel would
+    /// collide with a principal actually called `none`, and it lets the
+    /// contradictory combination be refused rather than answered.
+    unowned: Option<bool>,
     limit: Option<usize>,
     after: Option<String>,
 }
@@ -1139,10 +1148,24 @@ async fn list_assets(
 ) -> Result<Json<Page<Asset>>, AppError> {
     let kind = parse_kind(query.kind.as_deref())?;
     let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    // **Contradictory, so refused rather than silently empty.** "Owned by X and
+    // owned by nobody" has no answer, and returning an empty page for it would
+    // look like a real result — the client would conclude X owns nothing.
+    if query.owner.is_some() && query.unowned.unwrap_or(false) {
+        return Err(AppError::Validation(vec![FieldError::new(
+            "unowned",
+            FieldErrorCode::Type,
+            "`unowned` and `owner` cannot both be given: an asset cannot be owned by \
+             a named principal and by nobody",
+        )]));
+    }
+    let filter = graph_owl_storage::AssetFilter {
+        kind,
+        owner: query.owner.as_deref(),
+        unowned: query.unowned.unwrap_or(false),
+    };
     Ok(Json(
-        catalog
-            .list_assets_for(&principal, kind, query.owner.as_deref(), &page)
-            .await?,
+        catalog.list_assets_for(&principal, &filter, &page).await?,
     ))
 }
 

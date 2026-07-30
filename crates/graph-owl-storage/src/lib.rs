@@ -253,6 +253,34 @@ pub struct Assignment {
     pub assigned_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// What a caller wants from a list of assets.
+///
+/// A struct rather than a growing positional tail: `list_assets_visible(kind,
+/// owner, unowned, page, predicate)` puts an `Option<&str>` next to a `bool` next
+/// to two references, which is a signature that gets called wrong and still
+/// compiles. Named fields also give the mutually-exclusive combination one place
+/// to be rejected.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AssetFilter<'a> {
+    pub kind: Option<AssetKind>,
+    /// Matches **effective** ownership — direct *and* inherited, using the same
+    /// nearest-owned-ancestor rule the read path uses (Epic 11 Slice E). Matching
+    /// only direct ownership would make "show me everything my team owns" answer
+    /// "the four things somebody remembered to tag".
+    ///
+    /// An id matching no principal yields an **empty page, not an error**: a
+    /// filter is a question, and "nothing" is a valid answer to it.
+    pub owner: Option<&'a str>,
+    /// Only assets with **no effective owner anywhere up their chain** — the
+    /// ownership-gap report.
+    ///
+    /// This is the query Slice D's `inherited` flag exists to make answerable. It
+    /// is deliberately not spelled `owner=none`: a sentinel would collide with a
+    /// principal actually called `none`, and "no owner" is a different *kind* of
+    /// question from "this owner" rather than a special value of it.
+    pub unowned: bool,
+}
+
 /// What slice of the queue a caller wants.
 #[derive(Debug, Clone, Default)]
 pub struct ValidationFilter {
@@ -622,21 +650,10 @@ pub trait Storage: Send + Sync {
     /// Separate from `list_assets` so the unfiltered path cannot be reached by
     /// accident from a request handler — a filtered call site that forgets the
     /// predicate is a leak, and this makes forgetting a compile error.
-    /// `owner` matches **effective** ownership — Epic 11 Slice E.
-    ///
-    /// Direct *and* inherited, using the same nearest-owned-ancestor rule the
-    /// read path uses: a table with no owner of its own is owned by whoever owns
-    /// its schema. Matching only direct ownership would make "show me everything
-    /// my team owns" answer "the four things somebody remembered to tag", which
-    /// is the steward workflow this exists for and the one it would quietly
-    /// break.
-    ///
-    /// An id that matches no principal yields an **empty page, not an error**: a
-    /// filter is a question, and "nothing" is a valid answer to it.
+    /// Lists assets matching `filter`, visible under `predicate`.
     async fn list_assets_visible(
         &self,
-        kind: Option<AssetKind>,
-        owner: Option<&str>,
+        filter: &AssetFilter<'_>,
         page: &PageRequest,
         predicate: &AccessPredicate,
     ) -> Result<Page<Asset>, StorageError>;

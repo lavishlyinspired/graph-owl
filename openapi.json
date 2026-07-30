@@ -711,11 +711,11 @@
                 }
               }
             },
-            "description": "List assets; `?owner=` filters by effective owner, direct or inherited"
+            "description": "List assets; `?owner=` filters by effective owner, `?unowned=true` is the ownership-gap report"
           }
         },
         "security": [],
-        "summary": "List assets; `?owner=` filters by effective owner, direct or inherited"
+        "summary": "List assets; `?owner=` filters by effective owner, `?unowned=true` is the ownership-gap report"
       },
       "post": {
         "operationId": "post_assets",

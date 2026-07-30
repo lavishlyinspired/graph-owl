@@ -1455,9 +1455,7 @@ impl Catalog {
     pub async fn list_assets_for(
         &self,
         principal: &Principal,
-        kind: Option<AssetKind>,
-        // Effective owner — direct or inherited (Epic 11 Slice E).
-        owner: Option<&str>,
+        filter: &graph_owl_storage::AssetFilter<'_>,
         page: &PageRequest,
     ) -> Result<Page<Asset>, CatalogError> {
         let predicate = self
@@ -1465,7 +1463,7 @@ impl Catalog {
             .await?;
         Ok(self
             .storage
-            .list_assets_visible(kind, owner, page, &predicate)
+            .list_assets_visible(filter, page, &predicate)
             .await?)
     }
 
@@ -3993,12 +3991,12 @@ mod tests {
 
         async fn list_assets_visible(
             &self,
-            kind: Option<AssetKind>,
-            owner: Option<&str>,
+            filter: &graph_owl_storage::AssetFilter<'_>,
             page: &PageRequest,
             predicate: &AccessPredicate,
         ) -> Result<Page<Asset>, StorageError> {
-            let all = self.list_assets(kind, page).await?;
+            let owner = filter.owner;
+            let all = self.list_assets(filter.kind, page).await?;
             // **Effective ownership, walked, as the port specifies.** A double
             // that ignored `owner` — or matched only direct ownership — would
             // pass every facade test while the real adapter did something else,
@@ -7696,7 +7694,7 @@ mod projection_isolation_tests {
 
             // Warm the cache, so the next answer would be served from it.
             catalog
-                .list_assets_for(&asha, None, None, &page())
+                .list_assets_for(&asha, &graph_owl_storage::AssetFilter::default(), &page())
                 .await
                 .expect("first");
             let warmed = reads(&storage);
@@ -7707,7 +7705,7 @@ mod projection_isolation_tests {
                 .expect("revoke");
 
             catalog
-                .list_assets_for(&asha, None, None, &page())
+                .list_assets_for(&asha, &graph_owl_storage::AssetFilter::default(), &page())
                 .await
                 .expect("after revocation");
 
@@ -7743,12 +7741,12 @@ mod projection_isolation_tests {
                 .expect("revoke");
 
             catalog
-                .list_assets_for(&asha, None, None, &page())
+                .list_assets_for(&asha, &graph_owl_storage::AssetFilter::default(), &page())
                 .await
                 .expect("first");
             let after_first = reads(&storage);
             catalog
-                .list_assets_for(&asha, None, None, &page())
+                .list_assets_for(&asha, &graph_owl_storage::AssetFilter::default(), &page())
                 .await
                 .expect("second");
 
@@ -7810,12 +7808,12 @@ mod projection_isolation_tests {
             let asha = analyst(&["analyst"]);
 
             catalog
-                .list_assets_for(&asha, None, None, &page())
+                .list_assets_for(&asha, &graph_owl_storage::AssetFilter::default(), &page())
                 .await
                 .expect("first");
             let after_first = reads(&storage);
             catalog
-                .list_assets_for(&asha, None, None, &page())
+                .list_assets_for(&asha, &graph_owl_storage::AssetFilter::default(), &page())
                 .await
                 .expect("second");
 
@@ -7836,11 +7834,19 @@ mod projection_isolation_tests {
             let (catalog, _storage) = catalog_with_policy().await;
 
             let permitted = catalog
-                .list_assets_for(&analyst(&["analyst"]), None, None, &page())
+                .list_assets_for(
+                    &analyst(&["analyst"]),
+                    &graph_owl_storage::AssetFilter::default(),
+                    &page(),
+                )
                 .await
                 .expect("permitted");
             let unpermitted = catalog
-                .list_assets_for(&analyst(&["nobody"]), None, None, &page())
+                .list_assets_for(
+                    &analyst(&["nobody"]),
+                    &graph_owl_storage::AssetFilter::default(),
+                    &page(),
+                )
                 .await
                 .expect("unpermitted");
 
@@ -7860,7 +7866,11 @@ mod projection_isolation_tests {
             let (catalog, _storage) = catalog_with_policy().await;
 
             let restricted = catalog
-                .list_assets_for(&analyst(&["nobody"]), None, None, &page())
+                .list_assets_for(
+                    &analyst(&["nobody"]),
+                    &graph_owl_storage::AssetFilter::default(),
+                    &page(),
+                )
                 .await
                 .expect("restricted");
             assert!(restricted.data.is_empty());
@@ -7868,7 +7878,7 @@ mod projection_isolation_tests {
             let mut admin = analyst(&["nobody"]);
             admin.is_admin = true;
             let full = catalog
-                .list_assets_for(&admin, None, None, &page())
+                .list_assets_for(&admin, &graph_owl_storage::AssetFilter::default(), &page())
                 .await
                 .expect("admin");
 
@@ -7882,14 +7892,14 @@ mod projection_isolation_tests {
             let (catalog, storage) = catalog_with_policy().await;
             let asha = analyst(&["analyst"]);
             catalog
-                .list_assets_for(&asha, None, None, &page())
+                .list_assets_for(&asha, &graph_owl_storage::AssetFilter::default(), &page())
                 .await
                 .expect("first");
             let after_first = reads(&storage);
 
             catalog.invalidate_authorization();
             catalog
-                .list_assets_for(&asha, None, None, &page())
+                .list_assets_for(&asha, &graph_owl_storage::AssetFilter::default(), &page())
                 .await
                 .expect("second");
 
@@ -7907,7 +7917,7 @@ mod projection_isolation_tests {
             let asha = analyst(&["analyst"]);
             assert_eq!(
                 catalog
-                    .list_assets_for(&asha, None, None, &page())
+                    .list_assets_for(&asha, &graph_owl_storage::AssetFilter::default(), &page())
                     .await
                     .expect("before")
                     .data
@@ -7920,7 +7930,7 @@ mod projection_isolation_tests {
 
             assert!(
                 catalog
-                    .list_assets_for(&asha, None, None, &page())
+                    .list_assets_for(&asha, &graph_owl_storage::AssetFilter::default(), &page())
                     .await
                     .expect("after")
                     .data
