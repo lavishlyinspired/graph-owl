@@ -66,10 +66,13 @@ import {
   isUnauthenticated,
   isForbidden,
   setRefreshHandler,
+  type Team,
 } from "./api";
 import { AuthProvider, useAuth, tryRefresh } from "./auth";
 import { type DiffEdge, diff } from "./graph/diff";
 import { overflowTitle, summarizeOwners } from "./graph/owners";
+import { hierarchy, type TeamNode } from "./admin/hierarchy";
+import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
 import { type GraphModel, expand, performedExpansions, replay, seed } from "./graph/model";
 import { brand, darkTheme, lightTheme, palette } from "./theme";
 import { GenericSourceMark, PostgresMark } from "./icons";
@@ -112,7 +115,7 @@ import watermarkImg from "./assets/watermark1.png";
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
 
-type Section = "overview" | "explore" | "connectors" | "governance" | "workbench";
+type Section = "overview" | "explore" | "connectors" | "governance" | "workbench" | "admin";
 
 const KIND_ICON: Record<AssetKind, React.ReactNode> = {
   service: <CloudServerOutlined />,
@@ -2659,6 +2662,343 @@ function ConnectorsPage({ onDone, colors }: { onDone: () => void; colors: (typeo
   );
 }
 
+/** The admin section — Epic 41 Slice F.
+ *
+ *  **`SchemaForm` is the only form renderer here.** A hundred connectors with
+ *  hand-written forms is a hundred places for a field to go missing, and the one
+ *  that goes missing is always the optional-looking one somebody needed. The
+ *  structural test in `admin.test.ts` asserts this file grows no second renderer.
+ */
+function AdminPage({ colors }: { colors: (typeof palette)["light"] }) {
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <div>
+        <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+          Admin
+        </Title>
+        <Text type="secondary">Principals, teams, and connector configuration.</Text>
+      </div>
+      <Tabs
+        defaultActiveKey={readParam("adminTab") ?? "principals"}
+        onChange={(key) => writeParam("adminTab", key === "principals" ? null : key)}
+        items={[
+          { key: "principals", label: "People & teams", children: <PrincipalsPanel colors={colors} /> },
+          { key: "connectors", label: "Connector config", children: <ConnectorConfigPanel /> },
+        ]}
+      />
+    </Space>
+  );
+}
+
+/** People and teams, with the hierarchy drawn from `parentTeamId`.
+ *
+ *  Orphans and cycles are **shown, not hidden**: `hierarchy()` separates them, and
+ *  an admin screen that quietly promoted an orphan to a root would assert it is
+ *  top-level. A cycle is data the server refuses to create, so seeing one means
+ *  something else wrote it — which is worth saying out loud. */
+function PrincipalsPanel({ colors }: { colors: (typeof palette)["light"] }) {
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    api
+      .teams()
+      .then((t) => {
+        // **Shape checked at the boundary, not assumed from the type.** A
+        // `Team[]` annotation is a claim about this build, not a guarantee about
+        // whichever server answers — the asset page went blank when an older one
+        // omitted `owners`, and `hierarchy()` would throw the same way on a
+        // non-array. An explicit message beats a white screen.
+        if (!Array.isArray(t)) {
+          setError("the server returned an unexpected shape for /teams");
+          return;
+        }
+        setTeams(t);
+        setError(null);
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "could not load teams"));
+  }, []);
+  useEffect(load, [load]);
+
+  const tree = useMemo(() => hierarchy(teams), [teams]);
+
+  const rows = (nodes: readonly TeamNode[]): { node: TeamNode }[] =>
+    nodes.flatMap((node) => [{ node }, ...rows(node.children)]);
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      {error && <Alert type="error" showIcon title="Could not load teams" description={error} />}
+
+      <NewTeamForm teams={teams} onSaved={load} />
+
+      {tree.cyclic.length > 0 && (
+        <Alert
+          type="error"
+          showIcon
+          title="A team reports into itself"
+          description={`${tree.cyclic.join(", ")} could not be placed: following their parents leads back to themselves. The API refuses to create this, so something else wrote it.`}
+        />
+      )}
+      {tree.orphans.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          title="Reports into a team you cannot see"
+          description={`${tree.orphans.map((o) => o.displayName).join(", ")} name a parent that is not in this list — either filtered by policy, or deleted since.`}
+        />
+      )}
+
+      <Card size="small" title={`Teams (${teams.length})`}>
+        <Table
+          size="small"
+          rowKey={({ node }) => node.team.id}
+          dataSource={rows(tree.roots)}
+          pagination={false}
+          locale={{ emptyText: "No teams yet. Create one above to own assets by group." }}
+          columns={[
+            {
+              title: "Team",
+              key: "team",
+              render: (_: unknown, { node }: { node: TeamNode }) => (
+                <span style={{ paddingLeft: node.depth * 20 }}>
+                  <TeamOutlined style={{ color: colors.textMuted, marginRight: 6 }} />
+                  <Text style={{ fontWeight: node.depth === 0 ? 600 : 400 }}>
+                    {node.team.displayName}
+                  </Text>
+                  <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+                    {node.team.id}
+                  </Text>
+                </span>
+              ),
+            },
+            {
+              title: "Members",
+              key: "members",
+              width: 220,
+              render: (_: unknown, { node }: { node: TeamNode }) =>
+                node.team.members.length === 0 ? (
+                  <Text type="secondary" style={{ fontSize: 13 }}>
+                    nobody yet
+                  </Text>
+                ) : (
+                  <Space size={4} wrap>
+                    {node.team.members.map((m) => (
+                      <Tag key={m} icon={<UserOutlined />}>
+                        {m}
+                      </Tag>
+                    ))}
+                  </Space>
+                ),
+            },
+            {
+              title: "",
+              key: "actions",
+              width: 90,
+              render: (_: unknown, { node }: { node: TeamNode }) => (
+                <Button
+                  size="small"
+                  type="text"
+                  danger
+                  loading={busy}
+                  onClick={() => {
+                    setBusy(true);
+                    api
+                      .deletePrincipal("team", node.team.id)
+                      .then(load)
+                      // **The server's refusal is shown verbatim.** It carries the
+                      // counts by kind, which is the actionable part — "1 service,
+                      // 3 schemas, 396 columns" says reassign the service. A
+                      // generic "could not delete" would throw that away.
+                      .catch((e: unknown) =>
+                        setError(e instanceof Error ? e.message : "could not delete"),
+                      )
+                      .finally(() => setBusy(false));
+                  }}
+                >
+                  Delete
+                </Button>
+              ),
+            },
+          ]}
+        />
+      </Card>
+    </Space>
+  );
+}
+
+/** Create a team, optionally under a parent.
+ *
+ *  The parent picker offers existing teams only, so the common mistake is a
+ *  cycle rather than a typo — and the server refuses cycles at any depth, which
+ *  this surfaces rather than duplicating. A second cycle check here would be a
+ *  second implementation to keep in step. */
+function NewTeamForm({ teams, onSaved }: { teams: Team[]; onSaved: () => void }) {
+  const [id, setId] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [parent, setParent] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  const save = () => {
+    setBusy(true);
+    setProblem(null);
+    api
+      .upsertTeam({
+        id: id.trim(),
+        displayName: displayName.trim(),
+        members: [],
+        parentTeamId: parent,
+      })
+      .then(() => {
+        setId("");
+        setDisplayName("");
+        setParent(null);
+        onSaved();
+      })
+      .catch((e: unknown) => setProblem(e instanceof Error ? e.message : "could not save"))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <Card size="small" title="New team">
+      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+        <Flex gap={8} wrap>
+          <Input
+            placeholder="id, e.g. platform"
+            value={id}
+            onChange={(e) => setId(e.target.value)}
+            style={{ maxWidth: 200 }}
+          />
+          <Input
+            placeholder="Display name"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            style={{ maxWidth: 260 }}
+          />
+          <select
+            value={parent ?? ""}
+            onChange={(e) => setParent(e.target.value === "" ? null : e.target.value)}
+            style={{ minWidth: 180 }}
+            aria-label="Parent team"
+          >
+            <option value="">no parent (top level)</option>
+            {teams.map((t) => (
+              <option key={t.id} value={t.id}>
+                under {t.displayName}
+              </option>
+            ))}
+          </select>
+          <Button
+            type="primary"
+            loading={busy}
+            disabled={id.trim() === "" || displayName.trim() === ""}
+            onClick={save}
+          >
+            Create
+          </Button>
+        </Flex>
+        {problem && <Alert type="error" showIcon title="Could not save" description={problem} />}
+      </Space>
+    </Card>
+  );
+}
+
+/** Connector configuration, rendered from the connector's own JSON Schema.
+ *
+ *  **The only form renderer in admin.** Fields, requiredness, secrets and what
+ *  cannot be rendered are all decided in `admin/schemaForm.ts` and tested there;
+ *  this draws what it is handed and nothing else. */
+function ConnectorConfigPanel() {
+  const [schema, setSchema] = useState<Record<string, unknown> | null>(null);
+  const [values, setValues] = useState<Record<string, unknown>>({});
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .connectorSchema("postgres")
+      .then((s) => {
+        setSchema(s);
+        setError(null);
+      })
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : "could not load the connector schema"),
+      );
+  }, []);
+
+  if (error) return <Alert type="error" showIcon title="Could not load" description={error} />;
+  if (!schema) return <Spin />;
+
+  const check = renderable(schema as Parameters<typeof renderable>[0]);
+  const drawn = schemaFields(schema as Parameters<typeof schemaFields>[0], values);
+  const absent = schemaMissing(
+    schema as Parameters<typeof schemaMissing>[0],
+    values,
+    // No secret is stored yet in this panel, so a required secret is genuinely
+    // missing rather than excused.
+    false,
+  );
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      {!check.ok && (
+        <Alert
+          type="warning"
+          showIcon
+          title="This connector declares fields this build cannot render"
+          description={`${check.blocking.join(", ")} — configure it through the API until the console understands them. A field drawn as the wrong type would submit the wrong value.`}
+        />
+      )}
+      <Card size="small" title="PostgreSQL connector">
+        <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          {drawn.map((field) => (
+            <Flex key={field.name} gap={10} align="center">
+              <Text style={{ minWidth: 190 }}>
+                {field.label}
+                {field.required && <Text type="danger"> *</Text>}
+              </Text>
+              {field.kind === "unsupported" ? (
+                <Tag color="orange">not renderable</Tag>
+              ) : field.kind === "boolean" ? (
+                <input
+                  type="checkbox"
+                  aria-label={field.label}
+                  checked={values[field.name] === true}
+                  onChange={(e) =>
+                    setValues({ ...values, [field.name]: e.target.checked })
+                  }
+                />
+              ) : (
+                <Input
+                  aria-label={field.label}
+                  // **A secret is never populated, even from a stored value.**
+                  // `schemaForm` refuses to supply one and this refuses to show
+                  // one — write-only means write-only.
+                  type={field.kind === "secret" ? "password" : "text"}
+                  placeholder={field.kind === "secret" ? "write-only" : undefined}
+                  value={String(values[field.name] ?? field.initial ?? "")}
+                  onChange={(e) => setValues({ ...values, [field.name]: e.target.value })}
+                  style={{ maxWidth: 340 }}
+                />
+              )}
+              {field.description && (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {field.description}
+                </Text>
+              )}
+            </Flex>
+          ))}
+          {absent.length > 0 && (
+            <Text type="secondary" style={{ fontSize: 13 }}>
+              Still needed: {absent.join(", ")}
+            </Text>
+          )}
+        </Space>
+      </Card>
+    </Space>
+  );
+}
+
 export default function App() {
   return <AuthProvider><AppShell /></AuthProvider>;
 }
@@ -2677,6 +3017,7 @@ function AppShell() {
   const [section, setSectionRaw] = useState<Section>(() => {
     const named = readParam("section");
     if (
+      named === "admin" ||
       named === "connectors" ||
       named === "explore" ||
       named === "overview" ||
@@ -3046,6 +3387,7 @@ function AppShell() {
                   },
                   { key: "workbench", icon: <ThunderboltOutlined />, label: "Workbench" },
                   { key: "connectors", icon: <PlusOutlined />, label: "Connectors" },
+                  { key: "admin", icon: <TeamOutlined />, label: "Admin" },
                 ]}
               />
             </Sider>
@@ -3111,6 +3453,8 @@ function AppShell() {
                 <WorkbenchPage colors={colors} />
               ) : section === "connectors" ? (
                 <ConnectorsPage onDone={refresh} colors={colors} />
+              ) : section === "admin" ? (
+                <AdminPage colors={colors} />
               ) : results !== null ? (
                 <Row gutter={24} style={{ width: "100%" }}>
                   <Col flex="200px">

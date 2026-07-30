@@ -80,7 +80,7 @@ is the condition that index exists to catch.
 | **38** | 9 | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | — | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
 | **39** | 1 | [`39-ui-foundation.md`](39-ui-foundation.md) | **Shipped** | 23/23 | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
 | **40** | 3 | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | **Shipped** | 11/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
-| **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | In progress | 10/11 (+1 partial) | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
+| **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | In progress | 10/14 (+1 partial) | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
 | **42** | 7 | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | Not started | 0/3 | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
 | **43** | 5 | [`43-framework-integrations.md`](43-framework-integrations.md) | Not started | 0/4 | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
 | **93** | 3 | [`93-console-overview.md`](93-console-overview.md) | Not started | — | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
@@ -438,7 +438,10 @@ is the condition that index exists to catch.
 - [x] The derivation chain rendered beside a derived fact
 - [x] Policy dry-run
 - [x] Connector configuration with write-only secrets
-- [~] Admin: the rest of the section
+- [~] Admin: the section exists
+- [ ] Policy authoring UI
+- [ ] Connection test before save
+- [ ] The admin panels are not visually verified.
 
 ### Epic 42 — Semantic Browse, Review Queues & Agent Activity *(Demo 7)*
 

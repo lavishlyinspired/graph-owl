@@ -408,6 +408,41 @@ export const api = {
     request<{ s: string; p: string; o: string; t: number }[]>(
       `/reasoning/derived?subject=${encodeURIComponent(subject)}`,
     ),
+  // ---- Admin: principals and teams (Epic 41 Slice F over Epic 11) ----
+  teams: () => request<Team[]>("/teams"),
+  upsertTeam: (body: {
+    id: string;
+    displayName: string;
+    description?: string | null;
+    members: string[];
+    parentTeamId?: string | null;
+  }) => request<Team>("/teams", { method: "POST", body: JSON.stringify(body) }),
+  childTeams: (id: string) => request<Team[]>(`/teams/${encodeURIComponent(id)}/children`),
+  /** `reassignToKind` is required alongside `reassignTo`: a user and a team can
+   *  share an id, and guessing would transfer an estate to the wrong principal. */
+  deletePrincipal: (
+    kind: OwnerKind,
+    id: string,
+    reassign?: { to: string; kind: OwnerKind },
+  ) => {
+    const collection = kind === "team" ? "teams" : "users";
+    const query = reassign
+      ? `?reassignTo=${encodeURIComponent(reassign.to)}&reassignToKind=${reassign.kind}`
+      : "";
+    return request<void>(`/${collection}/${encodeURIComponent(id)}${query}`, {
+      method: "DELETE",
+    });
+  },
+  upsertUser: (id: string, body: { displayName: string; email?: string | null }) =>
+    request<{ id: string; displayName: string; email: string | null; roles: string[] }>(
+      `/users/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
+  /** What a connector needs configured, as its own JSON Schema — so a hundred
+   *  connectors do not become a hundred hand-written forms. */
+  connectorSchema: (connector: string) =>
+    request<Record<string, unknown>>(`/connectors/${encodeURIComponent(connector)}/schema`),
+
   /** Why a fact holds, all the way down to the assertions under it. */
   explain: (s: string, p: string, o: string) =>
     request<Explanation>(
