@@ -37,7 +37,7 @@ is the condition that index exists to catch.
 | **9** | 8 | [`09-engine-rdf-io.md`](09-engine-rdf-io.md) | Not started | — | Epic 4 (triples to serialize), Epic 7 (CONSTRUCT produces Turtle) |
 | **9a** | 8 | [`09a-lpg-interchange.md`](09a-lpg-interchange.md) | Not started | — | Epic 7c (LPG projection), Epic 9 (RDF I/O — shares the streaming-serializer sha… |
 | **10** | 2 | [`10-operability.md`](10-operability.md) | **Shipped** | 17/17 | Epic 1 (a server, an error model, and a contract to instrument) |
-| **11** | 2 | [`11-people-and-ownership.md`](11-people-and-ownership.md) | In progress | 4/8 (+1 partial) | Epic 3 (envelope carries `owners`) |
+| **11** | 2 | [`11-people-and-ownership.md`](11-people-and-ownership.md) | In progress | 5/9 (+1 partial) | Epic 3 (envelope carries `owners`) |
 | **12** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 15/15 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **13** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 10/10 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **14** | 5 | [`14-mcp-activation.md`](14-mcp-activation.md) | In progress | 3/8 (+1 partial) | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard… |
@@ -67,7 +67,7 @@ is the condition that index exists to catch.
 | **37b** | 9 | [`37b-portability.md`](37b-portability.md) | Not started | — | Epic 3 (history is part of what must survive) |
 | **37c** | 9 | [`37c-embeddable.md`](37c-embeddable.md) | Not started | — | Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate again… |
 | **38** | 9 | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | — | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
-| **39** | 1 | [`39-ui-foundation.md`](39-ui-foundation.md) | In progress | 22/23 (+1 partial) | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
+| **39** | 1 | [`39-ui-foundation.md`](39-ui-foundation.md) | **Shipped** | 23/23 | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
 | **40** | 3 | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | **Shipped** | 11/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
 | **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | In progress | 10/11 (+1 partial) | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
 | **42** | 7 | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | Not started | 0/3 | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
@@ -224,9 +224,10 @@ is the condition that index exists to catch.
 - [x] Teams exist
 - [~] Was marked Shipped while teams did not exist
 - [x] Entities have owners — plural, and of two kinds
+- [x] Ownership inherits down `contains`
 - [ ] There is no endpoint that creates a user
 - [ ] Slice C's "owner referencing a **soft-deleted** principal → `400`" is not implementable:
-- [ ] Ownership inheritance and the ownership gap report → Demo 7, where domains land and give
+- [ ] The ownership-gap report
 
 ### Epic 12 — Authentication & Authorization *(Demo 2)*
 
@@ -393,7 +394,7 @@ is the condition that index exists to catch.
 - [x] OIDC/PKCE sign-in
 - [x] Three outcomes, three screens
 - [x] The token has **one owner**
-- [~] Owner and team display
+- [x] Owner and team display
 
 ### Epic 40 — Graph Explorer, Lineage & Time Travel ★ *(Demo 3)*
 
