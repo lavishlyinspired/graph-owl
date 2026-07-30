@@ -30,4 +30,9 @@
 
 # Frontend build output and dependencies
 /ui/node_modules/
+# The console's tooling lives in `ui/`, but a stray `npx`/`vitest` run from the
+# repo root creates a cache here instead. Ignored so it cannot be committed by a
+# broad `git add -A` — which is exactly how an untracked file got swept into
+# somebody else's commit on 30 July 2026.
+/node_modules/
 /ui/dist/

@@ -24,6 +24,23 @@ export interface ChangeDescription {
   fieldsDeleted: FieldChange[];
 }
 
+export type OwnerKind = "user" | "team";
+
+/** A denormalized owner reference — Epic 11 Slices C and D. The server
+ *  resolves `displayName` at read time, so a renamed team shows correctly
+ *  here without a follow-up request. */
+export interface EntityReference {
+  id: string;
+  kind: OwnerKind;
+  displayName: string;
+  /** Found by walking up the containment hierarchy rather than recorded on
+   *  this entity itself. Always present — an older server that predates
+   *  inheritance is not the same fact as "recorded directly", and collapsing
+   *  the two would make a console read a 5,000-table catalog as fully owned
+   *  when nobody has named an owner below the database. */
+  inherited: boolean;
+}
+
 export interface Asset {
   id: string;
   kind: AssetKind;
@@ -32,6 +49,15 @@ export interface Asset {
   parentId: string | null;
   description: string | null;
   properties?: Record<string, unknown> | null;
+  /** `[]` when unowned — an asset with no owner is a real, reportable state,
+   *  not an absent field.
+   *
+   *  **Optional here even though the server always sends it.** A required type
+   *  is a claim about the build, not about whichever server is answering: when
+   *  this was declared required, an older server omitting the field took the
+   *  whole asset page down. The optionality is what forces every reader to
+   *  decide what an absent field means rather than assume `[]`. */
+  owners?: EntityReference[];
   version: EntityVersion;
   updatedBy: string;
   changeDescription?: ChangeDescription | null;

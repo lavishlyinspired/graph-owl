@@ -48,6 +48,7 @@ import TagOutlined from "@ant-design/icons/es/icons/TagOutlined";
 import ThunderboltOutlined from "@ant-design/icons/es/icons/ThunderboltOutlined";
 import EditOutlined from "@ant-design/icons/es/icons/EditOutlined";
 import HistoryOutlined from "@ant-design/icons/es/icons/HistoryOutlined";
+import TeamOutlined from "@ant-design/icons/es/icons/TeamOutlined";
 import UserOutlined from "@ant-design/icons/es/icons/UserOutlined";
 import {
   type Asset,
@@ -68,6 +69,7 @@ import {
 } from "./api";
 import { AuthProvider, useAuth, tryRefresh } from "./auth";
 import { type DiffEdge, diff } from "./graph/diff";
+import { overflowTitle, summarizeOwners } from "./graph/owners";
 import { type GraphModel, expand, performedExpansions, replay, seed } from "./graph/model";
 import { brand, darkTheme, lightTheme, palette } from "./theme";
 import { GenericSourceMark, PostgresMark } from "./icons";
@@ -186,6 +188,65 @@ function useTheme() {
 /** What the catalog knows about an asset's trustworthiness. Each item either
  *  carries a fact or says plainly that nothing is known yet — a confident-
  *  looking blank is worse than an admission. */
+/** Who owns this asset — Epic 39, the console half of Epic 11 Slice C/D. All
+ *  the logic that decides *what* to show lives in `graph/owners.ts`, tested
+ *  there without rendering anything; this only draws what it is handed. */
+function OwnerChips({ owners }: { owners: Asset["owners"] }) {
+  const summary = summarizeOwners(owners);
+
+  // The server never mentioned owners — an older build, or a read that did not
+  // include them. Rendering nothing is the only honest option: "no owner
+  // recorded" would be a claim about an estate we were not told about.
+  if (summary.unknown) return null;
+
+  // Unowned is a real, reportable state per Epic 11 — not a loading gap — so
+  // it is said plainly rather than left as a blank space a reader might
+  // mistake for "not loaded yet".
+  if (summary.unowned) {
+    return (
+      <Text type="secondary" style={{ fontSize: 13 }}>
+        <UserOutlined /> no owner recorded
+      </Text>
+    );
+  }
+
+  return (
+    <Space size={4} wrap>
+      {summary.chips.map((chip) => (
+        <Tooltip
+          key={chip.key}
+          title={chip.inherited ? "inherited from an ancestor — not recorded on this asset itself" : undefined}
+        >
+          <Tag
+            icon={chip.kind === "team" ? <TeamOutlined /> : <UserOutlined />}
+            // Dashed rather than solid for an inherited owner: the same visual
+            // language a draft or a placeholder uses elsewhere in this
+            // console, so "not recorded here" reads consistently.
+            style={chip.inherited ? { borderStyle: "dashed" } : undefined}
+          >
+            {chip.label}
+          </Tag>
+        </Tooltip>
+      ))}
+      {summary.overflow > 0 && (
+        <Tooltip title={overflowTitle(owners)}>
+          <Tag>+{summary.overflow} more</Tag>
+        </Tooltip>
+      )}
+      {/* **Words, not just a dashed border.** Verified in the browser that the
+          border alone was indistinguishable at real size on both a parent and
+          its child, which defeats the point of the flag: "nobody named an owner
+          here" and "somebody did" are the two answers a steward needs, and one
+          of them was invisible. */}
+      {summary.inheritance !== "none" && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {summary.inheritance === "all" ? "inherited" : "partly inherited"}
+        </Text>
+      )}
+    </Space>
+  );
+}
+
 function TrustBar({ asset }: { asset: Asset }) {
   const version = `v${asset.version.major}.${asset.version.minor}`;
   return (
@@ -1573,6 +1634,7 @@ function AssetDetail({
         </Tag>
       </Flex>
       <Fqn>{asset.fullyQualifiedName}</Fqn>
+      <OwnerChips owners={asset.owners} />
 
       <TrustBar asset={asset} />
 
