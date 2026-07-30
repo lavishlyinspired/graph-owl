@@ -578,10 +578,16 @@ actually holds could not be asserted at all.
 
   It runs **before the write and therefore before the FQN uniqueness check**, which is the ordering criterion: a draft that is both shape-invalid and FQN-conflicting reports the shape violation, because that is the actionable one — a conflict tells a pusher to rename, the wrong fix for a malformed entity. Only `Violation` rejects; a `Warning` lands, since refusing a push over one would make every shape author's judgement call a hard gate. A shape this server cannot compile is ignored here rather than blocking an unrelated push, because one bad shape should not be an outage.
 
+
+- [x] **Relationships and lineage in a push** *(Slice A completed, 30 July 2026)*. Edges are applied **after every entity**, because an endpoint may be an item submitted after the edge that names it — ordering entities among themselves is a containment problem with one answer, ordering an edge against them is not. Endpoints resolve against the batch first and the catalog second, and edge indexes continue past the entity range so one numbering addresses the whole request.
+
+  **Every pushed edge is lineage, and the alternative was removed rather than left as a trap.** `Relationship` operates on the `tables` relation; a push creates *assets*, so a plain relationship between two pushed assets can never resolve — it failed with `NotFound`, which reads as a missing entity rather than a mismatched model. It was offered as an option until a test proved it always failed. An option that can never succeed is worse than no option.
+
+  The ceiling counts entities and edges together, or a caller could double the cost by splitting work across two fields; edges are part of the idempotency fingerprint, since two pushes with the same entities and different edges are different requests.
 **Pending in this epic**
 - **Batch file ingestion** (Slice C) — jobs, multipart, per-row errors, a reaper for crashed jobs. The largest remaining piece
 - **Generated TypeScript and Python SDKs** (Slice E) and the **custom adapter guide** (Slice F)
-- **Relationships and lineage in the same call.** Slice A's criteria name them; this landed entities only, so a push still cannot assert an edge
+
 - **`ConflictKind` eats a conflict's detail unless it has its own variant.** `AppError` renders a fixed sentence per kind, so borrowing an existing one silently replaces whatever the facade wrote. It cost Slice G its counts and Slice B its key before `PrincipalStillHolds` and `IdempotencyConflict` were added — a design trap, not two slips
 
 ### Epic 17 — Entity resolution
