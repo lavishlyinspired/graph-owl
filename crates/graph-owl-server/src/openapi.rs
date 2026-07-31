@@ -215,6 +215,15 @@ pub static ROUTES: &[Route] = &[
         200,
         true,
     ),
+    route(
+        "get",
+        "/auth/config",
+        "How to authenticate against this server",
+        None,
+        None,
+        200,
+        false,
+    ),
     route("get", "/health", "Liveness", None, None, 200, false),
     route("get", "/ready", "Readiness", None, None, 200, false),
     route(

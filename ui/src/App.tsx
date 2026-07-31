@@ -1299,7 +1299,19 @@ function TimeControl({
  *  Pasting a bearer token is a stopgap, and is labelled as one. Epic 12's
  *  OIDC/PKCE replaces this panel with a real flow; what does not change is
  *  that "refused" and "empty" stay different screens. */
-function SignIn({ onSignIn, error }: { onSignIn: () => void; error?: string | null }) {
+function SignIn({
+  onSignIn,
+  onToken,
+  strategy,
+  error,
+}: {
+  onSignIn: () => void;
+  onToken: (token: string) => void;
+  strategy: "provider" | "token" | "open";
+  error?: string | null;
+}) {
+  const [pasted, setPasted] = useState("");
+
   return (
     <Flex align="center" justify="center" style={{ height: "100%" }}>
       <Card style={{ maxWidth: 460, width: "100%" }}>
@@ -1317,15 +1329,40 @@ function SignIn({ onSignIn, error }: { onSignIn: () => void; error?: string | nu
               Sign in to graph-owl
             </Title>
             <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
-              This server requires authentication. Sign in with your
-              organisation's identity provider to access the catalog — your
-              data is not empty, it is simply waiting for you to identify
-              yourself.
+              {strategy === "token"
+                ? "This server verifies a shared secret, so there is no identity provider to sign in with. Paste a bearer token — ./scripts/demo.sh --secure prints one for each principal."
+                : "This server requires authentication. Sign in with your organisation's identity provider to access the catalog — your data is not empty, it is simply waiting for you to identify yourself."}
             </Paragraph>
           </div>
-          <Button type="primary" size="large" block onClick={onSignIn}>
-            Sign in with Auth0
-          </Button>
+          {/* The button offered is the one that can succeed. Showing the
+              provider button against a shared-secret server is what produced
+              the sign-in loop: the provider authenticated the user perfectly
+              and the server then refused every token it issued. */}
+          {strategy === "token" ? (
+            <>
+              <Input.Password
+                size="large"
+                placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…"
+                aria-label="Bearer token"
+                value={pasted}
+                onChange={(event) => setPasted(event.target.value)}
+                onPressEnter={() => onToken(pasted)}
+              />
+              <Button
+                type="primary"
+                size="large"
+                block
+                disabled={pasted.trim().length === 0}
+                onClick={() => onToken(pasted)}
+              >
+                Use this token
+              </Button>
+            </>
+          ) : (
+            <Button type="primary" size="large" block onClick={onSignIn}>
+              Sign in with your identity provider
+            </Button>
+          )}
         </Space>
       </Card>
     </Flex>
@@ -3557,7 +3594,7 @@ function AppShell() {
                   identity to drop, and an inert control implying otherwise is
                   worse than no control. Switching principals is Demo 2's whole
                   moment: the same search, two identities, different results. */}
-              {auth.state.status === "authenticated" && (
+              {auth.state.status === "authenticated" && auth.state.strategy !== "open" && (
                 <Tooltip title="Sign out and return to the login screen">
                   <Button
                     type="text"
@@ -3600,7 +3637,12 @@ function AppShell() {
               </Content>
             ) : refused || auth.state.error ? (
               <Content style={{ padding: 24 }}>
-                <SignIn onSignIn={() => auth.login()} error={auth.state.error} />
+                <SignIn
+                  onSignIn={() => auth.login()}
+                  onToken={(token) => auth.signInWithToken(token)}
+                  strategy={auth.state.strategy}
+                  error={auth.state.error}
+                />
               </Content>
             ) : (
               <>

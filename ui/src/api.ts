@@ -288,6 +288,23 @@ export function authToken(): string | null {
   return _tokenSource();
 }
 
+/** What this server will accept as a credential, read before anything else.
+ *
+ *  **Deliberately not routed through `request`.** This is the call that decides
+ *  whether a credential is needed at all, so it must not be able to trigger the
+ *  401-and-refresh path it is trying to configure — and against a server old
+ *  enough to lack the endpoint it 404s with a body that is not problem+json,
+ *  which `request` would fail to parse rather than report.
+ *
+ *  Rejects rather than returning a default. The caller owns the fallback,
+ *  because "the server did not answer" and "the server said open" must not
+ *  arrive at the same branch. */
+export async function fetchAuthConfig(): Promise<unknown> {
+  const response = await fetch(`${BASE}/auth/config`);
+  if (!response.ok) throw new Error(`auth configuration unavailable: ${response.status}`);
+  return (await response.json()) as unknown;
+}
+
 async function request<T>(path: string, init?: RequestInit, retried?: boolean): Promise<T> {
   const token = authToken();
   const response = await fetch(`${BASE}${path}`, {

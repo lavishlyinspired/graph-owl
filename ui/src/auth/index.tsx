@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, useSyncExternalStore } from "react";
-import { setTokenSource } from "../api";
+import { fetchAuthConfig, setTokenSource } from "../api";
+import { readServerAuth, type ProviderFallback, type ServerAuth } from "./mode";
 import {
   authorizeUrl,
   base64UrlEncode,
@@ -15,14 +16,25 @@ import { rememberSession, storedSession } from "./session";
  *  A public SPA client id is not a secret, but a tenant baked into source is
  *  still a code change for every deployment that is not this one — and the
  *  fallbacks below are a development tenant, which is exactly the value that
- *  must not silently ship to production. */
-const AUTH0_DOMAIN =
-  import.meta.env.VITE_OIDC_DOMAIN ?? "dev-uzuxwkbcozynti2m.us.auth0.com";
-const CLIENT_ID =
-  import.meta.env.VITE_OIDC_CLIENT_ID ?? "1YagciKTz39X5IlvZnYjFylGgzJRVkI6";
-const AUDIENCE = import.meta.env.VITE_OIDC_AUDIENCE ?? "https://graph-owl.dev/api";
+ *  must not silently ship to production.
+ *
+ *  **These are now a fallback rather than the answer.** The server reports what
+ *  it will actually verify (`GET /auth/config`); these are what the console uses
+ *  when it cannot ask — an older server, or an unreadable reply. See `mode.ts`
+ *  for why that fallback is a provider and never "open". */
+const BUILT_IN: ProviderFallback = {
+  domain: import.meta.env.VITE_OIDC_DOMAIN ?? "dev-uzuxwkbcozynti2m.us.auth0.com",
+  clientId: import.meta.env.VITE_OIDC_CLIENT_ID ?? "1YagciKTz39X5IlvZnYjFylGgzJRVkI6",
+  audience: import.meta.env.VITE_OIDC_AUDIENCE ?? "https://graph-owl.dev/api",
+};
 const SCOPE = "openid profile email offline_access";
 const REDIRECT_URI = `${window.location.origin}/callback`;
+
+/** The provider actually in use. Module-level because the token exchange and
+ *  the refresh both run outside React, and a redirect destroys the component
+ *  that discovered it. Starts as the built-in tenant so a callback that lands
+ *  before discovery finishes still has somewhere to exchange its code. */
+let _provider: ProviderFallback = BUILT_IN;
 
 function randomVerifier(): string {
   const array = new Uint8Array(32);
@@ -38,12 +50,20 @@ async function challengeFor(verifier: string): Promise<string> {
 export interface AuthState {
   status: "loading" | "authenticated" | "unauthenticated";
   error: string | null;
+  /** How this server wants a credential obtained, which decides *which* screen
+   *  `unauthenticated` shows — an identity provider button is useless against a
+   *  server that verifies a shared secret. `open` never reaches
+   *  `unauthenticated` at all. */
+  strategy: "provider" | "token" | "open";
 }
 
 interface AuthContextValue {
   state: AuthState;
   login: () => void;
   logout: () => void;
+  /** Accept a token supplied by hand. Shared-secret servers only: no
+   *  interactive provider can mint one, and `demo.sh --secure` prints two. */
+  signInWithToken: (token: string) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -85,10 +105,10 @@ export function getTokenSnapshot(): string | null {
 
 function startUrl(state: string, challenge: string): string {
   return authorizeUrl({
-    domain: AUTH0_DOMAIN,
-    clientId: CLIENT_ID,
+    domain: _provider.domain,
+    clientId: _provider.clientId,
     redirectUri: REDIRECT_URI,
-    audience: AUDIENCE,
+    audience: _provider.audience,
     scope: SCOPE,
     state,
     challenge,
@@ -96,12 +116,12 @@ function startUrl(state: string, challenge: string): string {
 }
 
 async function exchangeCode(code: string, codeVerifier: string): Promise<void> {
-  const response = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
+  const response = await fetch(`https://${_provider.domain}/oauth/token`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "authorization_code",
-      client_id: CLIENT_ID,
+      client_id: _provider.clientId,
       code,
       redirect_uri: REDIRECT_URI,
       code_verifier: codeVerifier,
@@ -128,12 +148,12 @@ async function refreshAccessToken(): Promise<boolean> {
     if (!rt) return false;
 
     try {
-      const response = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
+      const response = await fetch(`https://${_provider.domain}/oauth/token`, {
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
           grant_type: "refresh_token",
-          client_id: CLIENT_ID,
+          client_id: _provider.clientId,
           refresh_token: rt,
         }),
       });
@@ -259,15 +279,61 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       );
   }, []);
 
-  const authState: AuthState = token
-    ? { status: "authenticated", error: null }
-    : exchange.status === "exchanging"
-      ? { status: "loading", error: null }
-      : { status: "unauthenticated", error: exchange.error };
+  // What the *server* will verify, which is the question the console never
+  // previously asked. `null` means the answer has not arrived yet.
+  const [server, setServer] = useState<ServerAuth | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    fetchAuthConfig()
+      .then((raw) => (live ? readServerAuth(raw, BUILT_IN) : null))
+      .catch(() =>
+        // A server too old to answer, or an unreadable reply. Both degrade to
+        // the behaviour that shipped before this endpoint existed rather than
+        // to an unauthenticated console — see `mode.ts`.
+        live ? ({ kind: "provider", ...BUILT_IN } as ServerAuth) : null,
+      )
+      .then((resolved) => {
+        if (!live || resolved === null) return;
+        if (resolved.kind === "provider") {
+          _provider = {
+            domain: resolved.domain,
+            audience: resolved.audience,
+            clientId: resolved.clientId,
+          };
+        }
+        setServer(resolved);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const authState: AuthState = ((): AuthState => {
+    // Discovery is a loading state, not a signed-out one. Rendering the sign-in
+    // screen first would flash the very screen this whole change exists to stop
+    // people bouncing off.
+    if (server === null) return { status: "loading", error: null, strategy: "provider" };
+
+    // An open server authenticates nobody, so there is nothing to wait for and
+    // no credential to collect.
+    if (server.kind === "open") return { status: "authenticated", error: null, strategy: "open" };
+
+    const strategy = server.kind === "token" ? "token" : "provider";
+    if (token) return { status: "authenticated", error: null, strategy };
+    if (exchange.status === "exchanging") return { status: "loading", error: null, strategy };
+    return { status: "unauthenticated", error: exchange.error, strategy };
+  })();
 
   const value: AuthContextValue = {
     state: authState,
     login: async () => {
+      // Only a provider flow is a redirect. Against a shared-secret server the
+      // sign-in screen collects a token directly, and against an open one there
+      // is nothing to do — starting a redirect in either case is what produced
+      // the loop.
+      if (authState.strategy !== "provider") return;
+
       const state = randomVerifier();
       const verifier = randomVerifier();
       const challenge = await challengeFor(verifier);
@@ -280,17 +346,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       window.location.href = startUrl(state, challenge);
     },
+    signInWithToken: (pasted: string) => {
+      const trimmed = pasted.trim();
+      if (trimmed.length === 0) return;
+      _accessToken = trimmed;
+      // No refresh token, and none is invented. A hand-supplied token has no
+      // grant behind it, so when it expires the honest answer is to ask for
+      // another one rather than to attempt a refresh that cannot succeed.
+      _refreshToken = null;
+      rememberSession(window.sessionStorage, null);
+      notify();
+    },
     logout: () => {
       _accessToken = null;
       _refreshToken = null;
       rememberSession(window.sessionStorage, null);
       notify();
 
+      // Only a provider has a session of its own to end. Redirecting a
+      // shared-secret console to an identity provider's logout endpoint would
+      // send it to a tenant it never signed in to, which lands on that
+      // provider's error page rather than back here.
+      if (authState.strategy !== "provider") return;
+
       const params = new URLSearchParams({
-        client_id: CLIENT_ID,
+        client_id: _provider.clientId,
         returnTo: window.location.origin,
       });
-      window.location.href = `https://${AUTH0_DOMAIN}/v2/logout?${params}`;
+      window.location.href = `https://${_provider.domain}/v2/logout?${params}`;
     },
   };
 

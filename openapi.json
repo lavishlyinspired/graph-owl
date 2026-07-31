@@ -1478,6 +1478,18 @@
         "summary": "An asset's version history"
       }
     },
+    "/auth/config": {
+      "get": {
+        "operationId": "get_auth_config",
+        "responses": {
+          "200": {
+            "description": "How to authenticate against this server"
+          }
+        },
+        "security": [],
+        "summary": "How to authenticate against this server"
+      }
+    },
     "/connectors/configs": {
       "get": {
         "operationId": "get_connectors_configs",

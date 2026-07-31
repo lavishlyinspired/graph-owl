@@ -131,6 +131,10 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             "/connectors/configs",
             get(list_connector_configs).post(save_connector_config),
         )
+        // Unauthenticated by necessity rather than by design: this is what a
+        // client reads *before* it holds a token, so requiring one would be
+        // circular.
+        .route("/auth/config", get(auth_configuration_endpoint))
         // Unauthenticated by design: an orchestrator's probe must not depend
         // on the identity provider being reachable.
         .route("/health", get(health))
@@ -447,6 +451,73 @@ pub fn auth_mode(shared_secret: bool, oidc: bool) -> AuthMode {
         (true, _) => AuthMode::Oidc,
         (false, true) => AuthMode::SharedSecret,
         (false, false) => AuthMode::Open,
+    }
+}
+
+/// What a browser must know before it can authenticate against this server.
+///
+/// Served unauthenticated, because requiring a token to discover how to obtain
+/// a token is circular. It carries no secret: in shared-secret mode the only
+/// credential is server-side, and a mode name is not one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthConfig {
+    /// `oidc`, `sharedSecret`, or `open`.
+    pub mode: &'static str,
+    /// Omitted entirely unless the mode is `oidc` — see [`auth_config`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+}
+
+/// Describe this server's authentication to the console.
+///
+/// **The issuer is reported only in OIDC mode, and that is the whole point of
+/// the function.** The natural implementation reports whatever `OIDC_ISSUER`
+/// holds and lets the console decide, which reintroduces the bug this was
+/// written for: a developer's `.env` keeps its OIDC settings across every run,
+/// so a server started in shared-secret mode still has an issuer in its
+/// environment. A console told about that issuer signs the user in against it,
+/// receives a perfectly valid RS256 token, and hands it to a server that will
+/// only ever accept HS256 — a loop in which every individual step succeeds.
+///
+/// So the rule is that the *verifier* decides. An issuer this server would not
+/// verify against is not reported, because reporting it is an instruction to go
+/// and fail.
+#[must_use]
+pub fn auth_config(
+    mode: AuthMode,
+    oidc: Option<(String, String)>,
+    console_client_id: Option<String>,
+) -> AuthConfig {
+    match mode {
+        AuthMode::Oidc => {
+            let (issuer, audience) = oidc.unzip();
+            AuthConfig {
+                mode: "oidc",
+                issuer,
+                audience,
+                client_id: console_client_id,
+            }
+        }
+        // Both non-OIDC modes discard the provider details deliberately. See
+        // above: the absence of an issuer is the signal that no interactive
+        // provider can produce a token this server accepts.
+        AuthMode::SharedSecret => AuthConfig {
+            mode: "sharedSecret",
+            issuer: None,
+            audience: None,
+            client_id: None,
+        },
+        AuthMode::Open => AuthConfig {
+            mode: "open",
+            issuer: None,
+            audience: None,
+            client_id: None,
+        },
     }
 }
 
@@ -3582,6 +3653,29 @@ async fn restore_asset(
 
 // ---- operability (Epic 10) ----
 
+/// How to authenticate against this server.
+///
+/// Unauthenticated by necessity — it is what a client reads *before* it has a
+/// token. See [`auth_config`] for why a configured issuer is withheld unless
+/// this server would actually verify against it.
+///
+/// `OIDC_CONSOLE_CLIENT_ID` is deliberately its own variable rather than a
+/// reuse of `OIDC_CLIENT_ID`. The latter is a confidential machine-to-machine
+/// credential — `demo.sh` exchanges it for a token with a client secret — and a
+/// browser needs the *public* single-page-app client. Publishing the M2M client
+/// id to every anonymous caller would leak which credential is worth attacking,
+/// and it would not work anyway: the two are different applications.
+async fn auth_configuration_endpoint() -> Json<AuthConfig> {
+    let oidc = oidc_config();
+    Json(auth_config(
+        auth_mode(signing_secret().is_some(), oidc.is_some()),
+        oidc,
+        std::env::var("OIDC_CONSOLE_CLIENT_ID")
+            .ok()
+            .filter(|value| !value.is_empty()),
+    ))
+}
+
 /// Liveness. Deliberately checks nothing: a dependency outage must not
 /// trigger a restart loop across the whole fleet.
 async fn health() -> Json<serde_json::Value> {
@@ -3652,6 +3746,120 @@ mod auth_configuration {
         #[test]
         fn oidc_wins_when_both_are_configured_rather_than_the_cheaper_check() {
             assert_eq!(auth_mode(true, true), AuthMode::Oidc);
+        }
+    }
+
+    /// What the console is told about how to sign in.
+    ///
+    /// **This exists because the console could not previously ask.** It ran an
+    /// OIDC authorization-code flow unconditionally, against a tenant compiled
+    /// into the bundle, whatever the server was actually configured to verify.
+    /// Against a server in shared-secret mode that produces a sign-in loop with
+    /// no error anywhere: the provider authenticates the person perfectly, the
+    /// server rejects the resulting token because it is not HS256, and the
+    /// console reads the `401` as "signed out" and returns them to the sign-in
+    /// screen they just completed. Nothing is broken enough to log.
+    mod what_the_console_is_told {
+        use super::*;
+
+        fn oidc_details() -> (String, String) {
+            (
+                "https://tenant.example/".to_string(),
+                "https://graph-owl.dev/api".to_string(),
+            )
+        }
+
+        #[test]
+        fn oidc_mode_names_the_issuer_the_console_must_use() {
+            let config = auth_config(AuthMode::Oidc, Some(oidc_details()), Some("spa-abc".into()));
+
+            assert_eq!(config.mode, "oidc");
+            assert_eq!(config.issuer.as_deref(), Some("https://tenant.example/"));
+            assert_eq!(
+                config.audience.as_deref(),
+                Some("https://graph-owl.dev/api")
+            );
+            assert_eq!(config.client_id.as_deref(), Some("spa-abc"));
+        }
+
+        /// **The test that fixes the reported bug.** A server verifying HS256
+        /// must not hand the console an issuer, *even when one is configured in
+        /// its environment* — which is exactly the situation `demo.sh --secure`
+        /// creates, because a developer's `.env` still holds the OIDC settings
+        /// used by every other run.
+        ///
+        /// Sending the console to that provider would be sending it to earn a
+        /// token this server is guaranteed to reject. The absence of an issuer
+        /// is the signal that no interactive provider can help here.
+        #[test]
+        fn shared_secret_mode_names_no_issuer_even_when_one_is_configured() {
+            let config = auth_config(
+                AuthMode::SharedSecret,
+                Some(oidc_details()),
+                Some("spa".into()),
+            );
+
+            assert_eq!(config.mode, "sharedSecret");
+            assert_eq!(config.issuer, None);
+            assert_eq!(config.audience, None);
+            assert_eq!(config.client_id, None);
+        }
+
+        /// Same rule, and the same reason: an open server accepts everyone as
+        /// the system principal, so a sign-in would be a ceremony that changes
+        /// nothing and can only fail.
+        #[test]
+        fn open_mode_names_no_issuer_even_when_one_is_configured() {
+            let config = auth_config(AuthMode::Open, Some(oidc_details()), Some("spa".into()));
+
+            assert_eq!(config.mode, "open");
+            assert_eq!(config.issuer, None);
+            assert_eq!(config.audience, None);
+            assert_eq!(config.client_id, None);
+        }
+
+        /// OIDC with no console client id configured still reports the mode.
+        /// The console falls back to its build-time value, which is the setup
+        /// every deployment before this endpoint existed was already running.
+        #[test]
+        fn oidc_without_a_console_client_id_still_reports_oidc() {
+            let config = auth_config(AuthMode::Oidc, Some(oidc_details()), None);
+
+            assert_eq!(config.mode, "oidc");
+            assert_eq!(config.client_id, None);
+            assert_eq!(config.issuer.as_deref(), Some("https://tenant.example/"));
+        }
+
+        /// The three names the console switches on. A typo here is invisible
+        /// server-side and sends the console down its fallback path forever.
+        #[test]
+        fn each_mode_has_its_own_wire_name() {
+            let names: std::collections::HashSet<_> =
+                [AuthMode::Oidc, AuthMode::SharedSecret, AuthMode::Open]
+                    .into_iter()
+                    .map(|mode| auth_config(mode, None, None).mode)
+                    .collect();
+
+            assert_eq!(
+                names.len(),
+                3,
+                "a shared name makes two modes indistinguishable"
+            );
+        }
+
+        /// The body is read by an unauthenticated browser, so what it omits
+        /// matters more than what it carries. `null` fields are dropped rather
+        /// than serialized: a `"clientId": null` reads as "configured, empty".
+        #[test]
+        fn a_mode_needing_no_provider_serializes_to_the_mode_alone() {
+            let body = serde_json::to_value(auth_config(
+                AuthMode::SharedSecret,
+                Some(oidc_details()),
+                None,
+            ))
+            .expect("serializes");
+
+            assert_eq!(body, serde_json::json!({ "mode": "sharedSecret" }));
         }
     }
 
