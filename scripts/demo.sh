@@ -55,7 +55,20 @@ fi
 if [ -n "${OIDC_ISSUER:-}" ]; then OIDC_MODE=true; OIDC_ISSUER_URL="${OIDC_ISSUER}"; fi
 if [ -n "${OIDC_AUDIENCE:-}" ]; then OIDC_AUDIENCE_URL="${OIDC_AUDIENCE}"; fi
 
-# Acquire a token for OIDC-authenticated requests
+# Acquire a token for OIDC-authenticated requests.
+#
+# This is auto-cataloguing's credential, not sign-in's — a human never sees it.
+# It has to be a Machine-to-Machine application authorized in Auth0's dashboard
+# for this API; the interactive SPA client the browser uses for PKCE login is a
+# different application by design (Auth0 will not issue client_credentials
+# tokens to it), so pointing OIDC_CLIENT_ID at the SPA client id fails here even
+# though sign-in through that same client works fine.
+#
+# **Not fatal.** This step exists purely to save you clicking through the
+# connector form once; failing it must not block the one thing that matters —
+# reaching the console and signing in. A stale or missing M2M credential
+# degrades to an empty catalog with a clear note, not a dead script.
+OIDC_CATALOG_SKIPPED=false
 if [ "${OIDC_MODE}" = true ]; then
   OIDC_ACCESS_TOKEN="${OIDC_TOKEN:-}"
   if [ -z "$OIDC_ACCESS_TOKEN" ]; then
@@ -64,15 +77,33 @@ if [ "${OIDC_MODE}" = true ]; then
     [ -z "$_cid" ] && _cid="${OIDC_CLIENT_ID:-}"
     [ -z "$_cs" ] && _cs="${OIDC_CLIENT_SECRET:-}"
     if [ -n "$_cid" ] && [ -n "$_cs" ]; then
+      # `|| true` on the assignment, and a `try/except` inside the parser
+      # rather than a bare `['access_token']` lookup: a 403 here must not take
+      # the whole script down with it under `set -e`, and must not print a raw
+      # traceback where a two-line warning would do.
       OIDC_ACCESS_TOKEN=$(curl -fsS -X POST "${OIDC_ISSUER_URL}oauth/token" \
         -H 'content-type: application/json' \
         -d "{\"client_id\":\"$_cid\",\"client_secret\":\"$_cs\",\"audience\":\"${OIDC_AUDIENCE_URL}\",\"grant_type\":\"client_credentials\"}" \
-        | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+        2>/dev/null | python3 -c "
+import sys, json
+try:
+    print(json.load(sys.stdin).get('access_token', ''))
+except Exception:
+    pass
+" 2>/dev/null) || true
     fi
   fi
   if [ -z "$OIDC_ACCESS_TOKEN" ]; then
-    die "OIDC is configured but no token is available.
-  Either set OIDC_TOKEN, or add OIDC_CLIENT_ID and OIDC_CLIENT_SECRET to .env"
+    echo
+    echo "  ⚠ could not obtain an auto-catalogue token (client_credentials was" \
+         "refused). The console will still start and Auth0 sign-in still" \
+         "works — only auto-cataloguing the demo estate is skipped."
+    echo "  Likely cause: OIDC_CLIENT_ID in .env names the browser's SPA" \
+         "client, which Auth0 will not issue client_credentials tokens to." \
+         "It needs its own Machine-to-Machine application, authorized for" \
+         "${OIDC_AUDIENCE_URL} in the Auth0 dashboard."
+    echo "  Or set OIDC_TOKEN yourself to skip acquisition entirely."
+    OIDC_CATALOG_SKIPPED=true
   fi
 fi
 
@@ -146,24 +177,32 @@ print((msg + b"." + sig).decode())
 PY
 }
 
-say "Cataloguing the estate"
-BODY="{\"connectionString\":\"${PG_URL}\",\"serviceName\":\"hdfc-core\",\"includeSchemas\":[\"core_banking\",\"payments\",\"lending\",\"risk\",\"regulatory\"]}"
-if [ "${OIDC_MODE}" = true ]; then
-  RUN=$(curl -fsS -X POST "http://localhost:${APP_PORT}/connectors/postgres/runs" \
-    -H "authorization: Bearer ${OIDC_ACCESS_TOKEN}" -H 'content-type: application/json' -d "${BODY}")
-elif [ "${SECURE}" = true ]; then
-  RUN=$(curl -fsS -X POST "http://localhost:${APP_PORT}/connectors/postgres/runs" \
-    -H "authorization: Bearer $(token root)" -H 'content-type: application/json' -d "${BODY}")
+if [ "${OIDC_CATALOG_SKIPPED}" = true ]; then
+  say "Skipping auto-catalogue (no M2M token — see the warning above)"
 else
-  RUN=$(curl -fsS -X POST "http://localhost:${APP_PORT}/connectors/postgres/runs" \
-    -H 'content-type: application/json' -d "${BODY}")
+  say "Cataloguing the estate"
+  BODY="{\"connectionString\":\"${PG_URL}\",\"serviceName\":\"hdfc-core\",\"includeSchemas\":[\"core_banking\",\"payments\",\"lending\",\"risk\",\"regulatory\"]}"
+  if [ "${OIDC_MODE}" = true ]; then
+    RUN=$(curl -fsS -X POST "http://localhost:${APP_PORT}/connectors/postgres/runs" \
+      -H "authorization: Bearer ${OIDC_ACCESS_TOKEN}" -H 'content-type: application/json' -d "${BODY}")
+  elif [ "${SECURE}" = true ]; then
+    RUN=$(curl -fsS -X POST "http://localhost:${APP_PORT}/connectors/postgres/runs" \
+      -H "authorization: Bearer $(token root)" -H 'content-type: application/json' -d "${BODY}")
+  else
+    RUN=$(curl -fsS -X POST "http://localhost:${APP_PORT}/connectors/postgres/runs" \
+      -H 'content-type: application/json' -d "${BODY}")
+  fi
+  echo "${RUN}" | python3 -c "import sys,json;d=json.load(sys.stdin);print(f\"  {d['created']} assets, {d['failed']} failed\")"
 fi
-echo "${RUN}" | python3 -c "import sys,json;d=json.load(sys.stdin);print(f\"  {d['created']} assets, {d['failed']} failed\")"
 
 if [ "${OIDC_MODE}" = true ]; then
   say "OIDC authentication active"
+  echo "  Sign in through the console with your identity provider"
   echo "  Token subject is automatically provisioned on first request"
   echo "  Admin status from GRAPH_OWL_ADMIN_SUBJECTS in .env"
+  if [ "${OIDC_CATALOG_SKIPPED}" = true ]; then
+    echo "  Catalogue is empty — auto-cataloguing was skipped, see the warning above"
+  fi
 elif [ "${SECURE}" = true ]; then
   say "Configuring two principals"
   P() { docker exec ${CONTAINER} psql -U postgres -d graphowl -qtAc "$1" >/dev/null; }
