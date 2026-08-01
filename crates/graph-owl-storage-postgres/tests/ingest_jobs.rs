@@ -49,12 +49,14 @@ async fn stop_reporting(connection_string: &str, id: Uuid, seconds_ago: i64) {
     let pool = sqlx::PgPool::connect(connection_string)
         .await
         .expect("connect");
-    sqlx::query("UPDATE ingest_jobs SET heartbeat_at = now() - ($2 || ' seconds')::interval WHERE id = $1")
-        .bind(id)
-        .bind(seconds_ago.to_string())
-        .execute(&pool)
-        .await
-        .expect("backdate the heartbeat");
+    sqlx::query(
+        "UPDATE ingest_jobs SET heartbeat_at = now() - ($2 || ' seconds')::interval WHERE id = $1",
+    )
+    .bind(id)
+    .bind(seconds_ago.to_string())
+    .execute(&pool)
+    .await
+    .expect("backdate the heartbeat");
 }
 
 // **The crash test.** A job whose worker stopped reporting must not stay
@@ -67,10 +69,7 @@ async fn a_job_that_stopped_reporting_is_failed_rather_than_left_running() {
     storage.create_ingest_job(&job).await.expect("create");
     stop_reporting(&connection_string, job.id, 600).await;
 
-    let reaped = storage
-        .reap_abandoned_ingest_jobs(300)
-        .await
-        .expect("reap");
+    let reaped = storage.reap_abandoned_ingest_jobs(300).await.expect("reap");
 
     assert_eq!(reaped, 1);
     let after = storage
@@ -100,10 +99,7 @@ async fn a_job_still_reporting_is_left_alone() {
     let job = running_job();
     storage.create_ingest_job(&job).await.expect("create");
 
-    let reaped = storage
-        .reap_abandoned_ingest_jobs(300)
-        .await
-        .expect("reap");
+    let reaped = storage.reap_abandoned_ingest_jobs(300).await.expect("reap");
 
     assert_eq!(reaped, 0);
     let after = storage
@@ -183,7 +179,10 @@ async fn a_settled_job_is_never_reaped_however_stale() {
         .await
         .expect("read")
         .expect("job");
-    assert_eq!(after.state, "succeeded", "a settled verdict is not rewritten");
+    assert_eq!(
+        after.state, "succeeded",
+        "a settled verdict is not rewritten"
+    );
 }
 
 // Cancelling is a request the worker honours, so it must not itself settle the

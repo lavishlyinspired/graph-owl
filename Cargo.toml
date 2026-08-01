@@ -39,6 +39,11 @@ sha2 = "0.10"
 # Pattern constraints (Epic 5). MIT/Apache-2.0, and `00l-build-vs-adopt.md`
 # is unambiguous here: a regex engine is the canonical thing to adopt.
 regex = "1"
+# Jaro-Winkler for name-similarity scoring (Epic 17 Slice C). MIT, already
+# in the tree transitively (`darling_core`) — a string-metric function is
+# not spec-governed the way a parser or reasoner is, so `00l` does not
+# apply; it is small and well-known enough to adopt rather than reimplement.
+strsim = "0.11"
 utoipa = { version = "5", features = ["uuid", "chrono", "preserve_order"] }
 graph-owl-core = { path = "crates/graph-owl-core" }
 graph-owl-events = { path = "crates/graph-owl-events" }

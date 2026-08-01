@@ -10,6 +10,10 @@ workspace = true
 [dependencies]
 graph-owl-core = { path = "../graph-owl-core" }
 graph-owl-engine = { path = "../graph-owl-engine" }
+graph-owl-storage = { path = "../graph-owl-storage" }
 async-trait.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
+uuid.workspace = true
+serde.workspace = true
+strsim.workspace = true

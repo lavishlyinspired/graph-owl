@@ -10,7 +10,8 @@ use graph_owl_core::{
 };
 use graph_owl_storage::{
     ConflictKind, FollowOutcome, Holdings, IdempotencyClaim, MemoryWrite, OwnersWrite,
-    PrincipalDeletion, Storage, StorageError, StoredUser, SupersedeOutcome, UpdateOutcome,
+    PrincipalDeletion, ReviewQueueFilter, SplitOutcome, Storage, StorageError, StoredUser,
+    SupersedeOutcome, UpdateOutcome,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -421,6 +422,85 @@ impl PostgresStorage {
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
         Ok(Self { pool })
+    }
+
+    /// The underlying pool, for tests that need to set up fixture data
+    /// beneath what the `Storage` trait exposes (e.g. a bulk load for a
+    /// query-plan assertion).
+    #[must_use]
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    /// Recomputes and upserts `asset`'s four blocking keys (Epic 17 Slice B).
+    ///
+    /// Called from `upsert_asset` itself rather than left for a caller to
+    /// remember, so "computed on every write" and "recomputed on rename" are
+    /// both true structurally: there is only one write path, and this is
+    /// part of it.
+    ///
+    /// A written `Column` also refreshes its **parent**'s keys, one level
+    /// up, because the parent table's column-hash key depends on its
+    /// children — this is the one case a plain "recompute the row that was
+    /// just written" would miss. The recursion stops there: a table has no
+    /// column-hash dependency on *its* parent, so there is nothing further to
+    /// refresh.
+    async fn recompute_blocking_keys(&self, asset: &Asset) -> Result<(), StorageError> {
+        let column_hash = if asset.kind == AssetKind::Table {
+            let rows = sqlx::query(
+                "SELECT name FROM assets WHERE parent_id = $1 AND kind = 'column' AND NOT deleted",
+            )
+            .bind(asset.id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            let columns: Vec<String> = rows.iter().map(|r| r.get::<String, _>(0)).collect();
+            graph_owl_core::blocking::column_hash_key(&columns)
+        } else {
+            graph_owl_core::blocking::column_hash_key(&[])
+        };
+
+        let keys = [
+            (
+                "normalized_fqn",
+                graph_owl_core::blocking::normalized_fqn_key(&asset.fully_qualified_name),
+            ),
+            (
+                "name_parent",
+                graph_owl_core::blocking::name_parent_key(
+                    &asset.name,
+                    graph_owl_core::fqn::parent(&asset.fully_qualified_name),
+                ),
+            ),
+            (
+                "soundex_name",
+                graph_owl_core::blocking::soundex(&asset.name),
+            ),
+            ("column_hash", column_hash),
+        ];
+
+        for (key_type, key_value) in keys {
+            sqlx::query(
+                "INSERT INTO entity_blocking_keys (asset_id, key_type, key_value)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (asset_id, key_type) DO UPDATE SET key_value = EXCLUDED.key_value",
+            )
+            .bind(asset.id)
+            .bind(key_type)
+            .bind(key_value)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        if asset.kind == AssetKind::Column
+            && let Some(parent_id) = asset.parent_id
+            && let Some(parent) = self.get_asset(parent_id).await?
+        {
+            Box::pin(self.recompute_blocking_keys(&parent)).await?;
+        }
+
+        Ok(())
     }
 }
 
@@ -2337,6 +2417,7 @@ impl Storage for PostgresStorage {
         // write, rather than a response that reports an owned asset as unowned.
         let mut written = asset_from_row(row);
         written.owners = self.asset_owners(written.id).await?;
+        self.recompute_blocking_keys(&written).await?;
         Ok(written)
     }
 
@@ -2501,6 +2582,282 @@ impl Storage for PostgresStorage {
                     .map(|kind| (kind, row.get::<i64, _>("n")))
             })
             .collect())
+    }
+
+    #[tracing::instrument(name = "storage.resolution_candidates", skip_all)]
+    async fn resolution_candidates(&self, asset_id: Uuid) -> Result<Vec<Asset>, StorageError> {
+        let rows = sqlx::query(&resolution_candidates_sql())
+            .bind(asset_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(asset_from_row).collect())
+    }
+
+    #[tracing::instrument(name = "storage.create_merge_record", skip_all)]
+    async fn create_merge_record(
+        &self,
+        record: graph_owl_core::resolution::MergeRecord,
+    ) -> Result<graph_owl_core::resolution::MergeRecord, StorageError> {
+        let evidence = serde_json::to_value(&record.evidence)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let decided_by = serde_json::to_value(&record.decided_by)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO merge_records (id, canonical_id, merged_id, evidence, confidence, decided_by, decided_at, merged_at_t, split_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(record.id)
+        .bind(record.canonical)
+        .bind(record.merged)
+        .bind(evidence)
+        .bind(record.confidence)
+        .bind(decided_by)
+        .bind(record.decided_at)
+        .bind(record.merged_at_t)
+        .bind(record.split_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(record)
+    }
+
+    #[tracing::instrument(name = "storage.get_merge_record", skip_all)]
+    async fn get_merge_record(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::resolution::MergeRecord>, StorageError> {
+        let row = sqlx::query("SELECT * FROM merge_records WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        row.map(merge_record_from_row).transpose()
+    }
+
+    #[tracing::instrument(name = "storage.split_merge_record", skip_all)]
+    async fn split_merge_record(
+        &self,
+        id: Uuid,
+        split_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<SplitOutcome, StorageError> {
+        // Atomic for the common path: the `WHERE split_at IS NULL` makes a
+        // concurrent double-split lose the race at the database rather than
+        // between a Rust-side read and write.
+        let row = sqlx::query(
+            "UPDATE merge_records SET split_at = $2 WHERE id = $1 AND split_at IS NULL RETURNING *",
+        )
+        .bind(id)
+        .bind(split_at)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        if let Some(row) = row {
+            return Ok(SplitOutcome::Split(Box::new(merge_record_from_row(row)?)));
+        }
+
+        // Not updated: either the id is unknown, or it was already split.
+        // Only this (rarer) path needs the extra read to tell the two apart.
+        match self.get_merge_record(id).await? {
+            None => Ok(SplitOutcome::NotFound),
+            Some(existing) => Ok(SplitOutcome::AlreadySplit {
+                split_at: existing
+                    .split_at
+                    .expect("not updated by the statement above because it is already split"),
+            }),
+        }
+    }
+
+    #[tracing::instrument(name = "storage.most_recent_split_between", skip_all)]
+    async fn most_recent_split_between(
+        &self,
+        a: Uuid,
+        b: Uuid,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError> {
+        sqlx::query_scalar(
+            "SELECT MAX(split_at) FROM merge_records
+             WHERE split_at IS NOT NULL
+               AND ((canonical_id = $1 AND merged_id = $2) OR (canonical_id = $2 AND merged_id = $1))",
+        )
+        .bind(a)
+        .bind(b)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    #[tracing::instrument(name = "storage.queue_for_review", skip_all)]
+    async fn queue_for_review(
+        &self,
+        entry: graph_owl_core::resolution::ReviewQueueEntry,
+    ) -> Result<graph_owl_core::resolution::ReviewQueueEntry, StorageError> {
+        let evidence = serde_json::to_value(&entry.evidence)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let decided_by = entry
+            .decided_by
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let row = sqlx::query(
+            "INSERT INTO resolution_queue
+                 (id, target_id, candidate_id, score, evidence, status, decided_by, decided_at, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (target_id, candidate_id) DO UPDATE SET
+                 target_id = resolution_queue.target_id
+             RETURNING *",
+        )
+        .bind(entry.id)
+        .bind(entry.target)
+        .bind(entry.candidate)
+        .bind(entry.score)
+        .bind(evidence)
+        .bind(review_status_str(entry.status))
+        .bind(decided_by)
+        .bind(entry.decided_at)
+        .bind(entry.created_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        review_queue_entry_from_row(row)
+    }
+
+    #[tracing::instrument(name = "storage.list_review_queue", skip_all)]
+    async fn list_review_queue(
+        &self,
+        filter: &ReviewQueueFilter,
+    ) -> Result<(Vec<graph_owl_core::resolution::ReviewQueueEntry>, i64), StorageError> {
+        let status = filter.status.map_or("pending", review_status_str);
+        let kind = filter.kind.map(AssetKind::as_str);
+
+        let where_clause = "rq.status = $1
+              AND ($2::text IS NULL OR a.kind = $2)
+              AND ($3::double precision IS NULL OR rq.score >= $3)
+              AND ($4::double precision IS NULL OR rq.score <= $4)";
+
+        let total: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM resolution_queue rq
+             JOIN assets a ON a.id = rq.target_id
+             WHERE {where_clause}"
+        ))
+        .bind(status)
+        .bind(kind)
+        .bind(filter.min_score)
+        .bind(filter.max_score)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let limit = i64::try_from(filter.limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(filter.offset).unwrap_or(0);
+        let rows = sqlx::query(&format!(
+            "SELECT rq.* FROM resolution_queue rq
+             JOIN assets a ON a.id = rq.target_id
+             WHERE {where_clause}
+             ORDER BY rq.score DESC, rq.id
+             LIMIT $5 OFFSET $6"
+        ))
+        .bind(status)
+        .bind(kind)
+        .bind(filter.min_score)
+        .bind(filter.max_score)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let entries = rows
+            .into_iter()
+            .map(review_queue_entry_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((entries, total))
+    }
+
+    #[tracing::instrument(name = "storage.get_review_queue_entry", skip_all)]
+    async fn get_review_queue_entry(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::resolution::ReviewQueueEntry>, StorageError> {
+        let row = sqlx::query("SELECT * FROM resolution_queue WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        row.map(review_queue_entry_from_row).transpose()
+    }
+
+    #[tracing::instrument(name = "storage.decide_review_queue_entry", skip_all)]
+    async fn decide_review_queue_entry(
+        &self,
+        id: Uuid,
+        status: graph_owl_core::resolution::ReviewStatus,
+        decided_by: graph_owl_core::resolution::MergeDecidedBy,
+        decided_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<graph_owl_core::resolution::ReviewQueueEntry>, StorageError> {
+        let decided_by_json = serde_json::to_value(&decided_by)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        // Atomic and one-shot: the `WHERE status = 'pending'` is what stops a
+        // second decide call from overwriting the first decision, without a
+        // separate read-then-write race window.
+        let row = sqlx::query(
+            "UPDATE resolution_queue
+             SET status = $2, decided_by = $3, decided_at = $4
+             WHERE id = $1 AND status = 'pending'
+             RETURNING *",
+        )
+        .bind(id)
+        .bind(review_status_str(status))
+        .bind(decided_by_json)
+        .bind(decided_at)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        match row {
+            Some(row) => Ok(Some(review_queue_entry_from_row(row)?)),
+            // Either unknown, or already decided — either way the caller gets
+            // the current row (or nothing) rather than a write that silently
+            // did not happen.
+            None => self.get_review_queue_entry(id).await,
+        }
+    }
+
+    #[tracing::instrument(name = "storage.record_mention_resolution", skip_all)]
+    async fn record_mention_resolution(
+        &self,
+        resolution: graph_owl_core::resolution::MentionResolution,
+    ) -> Result<graph_owl_core::resolution::MentionResolution, StorageError> {
+        sqlx::query(
+            "INSERT INTO mention_resolutions (id, source_id, text, entity_id, confidence, resolved_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(resolution.id)
+        .bind(resolution.source)
+        .bind(&resolution.text)
+        .bind(resolution.entity)
+        .bind(resolution.confidence)
+        .bind(resolution.resolved_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(resolution)
+    }
+
+    #[tracing::instrument(name = "storage.mention_resolutions_for_source", skip_all)]
+    async fn mention_resolutions_for_source(
+        &self,
+        source: Uuid,
+    ) -> Result<Vec<graph_owl_core::resolution::MentionResolution>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT * FROM mention_resolutions WHERE source_id = $1 ORDER BY resolved_at DESC",
+        )
+        .bind(source)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(mention_resolution_from_row).collect())
     }
 
     // ---- envelope (Epic 3) ----
@@ -3865,6 +4222,85 @@ fn asset_from_row(row: PgRow) -> Asset {
     }
 }
 
+fn merge_record_from_row(
+    row: PgRow,
+) -> Result<graph_owl_core::resolution::MergeRecord, StorageError> {
+    Ok(graph_owl_core::resolution::MergeRecord {
+        id: row.get("id"),
+        canonical: row.get("canonical_id"),
+        merged: row.get("merged_id"),
+        evidence: serde_json::from_value(row.get("evidence"))
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?,
+        confidence: row.get("confidence"),
+        decided_by: serde_json::from_value(row.get("decided_by"))
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?,
+        decided_at: row.get("decided_at"),
+        merged_at_t: row.get("merged_at_t"),
+        split_at: row.get("split_at"),
+    })
+}
+
+/// The wire spelling of a review status.
+///
+/// A `match` rather than a `Serialize` round-trip, matching
+/// [`memory_kind_str`]: the column has a `CHECK` listing these exact
+/// strings, so a rename that forgets the migration fails to compile rather
+/// than fails at 3am on the first write.
+const fn review_status_str(status: graph_owl_core::resolution::ReviewStatus) -> &'static str {
+    use graph_owl_core::resolution::ReviewStatus;
+    match status {
+        ReviewStatus::Pending => "pending",
+        ReviewStatus::Confirmed => "confirmed",
+        ReviewStatus::Rejected => "rejected",
+    }
+}
+
+fn review_status_from_str(
+    value: &str,
+) -> Result<graph_owl_core::resolution::ReviewStatus, StorageError> {
+    use graph_owl_core::resolution::ReviewStatus;
+    match value {
+        "pending" => Ok(ReviewStatus::Pending),
+        "confirmed" => Ok(ReviewStatus::Confirmed),
+        "rejected" => Ok(ReviewStatus::Rejected),
+        other => Err(StorageError::Unexpected(format!(
+            "unknown review status '{other}' in resolution_queue"
+        ))),
+    }
+}
+
+fn review_queue_entry_from_row(
+    row: PgRow,
+) -> Result<graph_owl_core::resolution::ReviewQueueEntry, StorageError> {
+    Ok(graph_owl_core::resolution::ReviewQueueEntry {
+        id: row.get("id"),
+        target: row.get("target_id"),
+        candidate: row.get("candidate_id"),
+        score: row.get("score"),
+        evidence: serde_json::from_value(row.get("evidence"))
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?,
+        status: review_status_from_str(row.get::<&str, _>("status"))?,
+        decided_by: row
+            .get::<Option<serde_json::Value>, _>("decided_by")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?,
+        decided_at: row.get("decided_at"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn mention_resolution_from_row(row: PgRow) -> graph_owl_core::resolution::MentionResolution {
+    graph_owl_core::resolution::MentionResolution {
+        id: row.get("id"),
+        source: row.get("source_id"),
+        text: row.get("text"),
+        entity: row.get("entity_id"),
+        confidence: row.get("confidence"),
+        resolved_at: row.get("resolved_at"),
+    }
+}
+
 /// Effective owners as a JSON array, aggregated **in SQL**.
 ///
 /// A correlated subquery rather than a join, because a join multiplies asset rows
@@ -3917,7 +4353,50 @@ const OWNERS_EXPR: &str = "(WITH RECURSIVE ancestry (node, next_up, hops) AS (
 
 const ASSET_COLUMNS: &str = "id, kind, name, fully_qualified_name, parent_id, description, properties, version_major, version_minor, updated_by, change_description, deleted, deleted_at, created_at, updated_at";
 
+/// The exact query `resolution_candidates` runs, built once so `EXPLAIN`ing
+/// it (Epic 17 Slice B's index-scan acceptance criterion) explains the real
+/// query rather than a lookalike — the same reasoning
+/// `PostgresTripleStore::explain` documents for the engine's own plan
+/// assertions.
+fn resolution_candidates_sql() -> String {
+    format!(
+        "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
+         WHERE NOT deleted
+           AND id IN (
+               SELECT DISTINCT ebk2.asset_id
+               FROM entity_blocking_keys ebk1
+               JOIN entity_blocking_keys ebk2
+                 ON ebk2.key_type = ebk1.key_type AND ebk2.key_value = ebk1.key_value
+               WHERE ebk1.asset_id = $1
+                 AND ebk2.asset_id <> $1
+                 AND ebk1.key_value <> ''
+           )"
+    )
+}
+
 impl PostgresStorage {
+    /// The query plan `resolution_candidates` would use for `asset_id`, as
+    /// plain text.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError::Unexpected` if the plan cannot be produced.
+    pub async fn explain_resolution_candidates(
+        &self,
+        asset_id: Uuid,
+    ) -> Result<String, StorageError> {
+        let rows = sqlx::query(&format!("EXPLAIN {}", resolution_candidates_sql()))
+            .bind(asset_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows
+            .iter()
+            .map(|row| row.get::<String, _>(0))
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+
     async fn asset_page(
         &self,
         query: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,

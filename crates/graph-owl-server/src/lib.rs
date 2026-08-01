@@ -150,6 +150,17 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/memories", post(create_memory))
         .route("/memories/{id}", get(get_memory))
         .route("/memories/{id}/supersede", post(supersede_memory))
+        // Epic 17 Slice G: mention resolution. `{id}` is the mention's
+        // source.
+        .route("/memories/{id}/mentions", post(resolve_mention))
+        // Epic 17 Slice E: a merge is a record with a `split_at`, and this is
+        // what sets it — never a delete of the `MergeRecord` itself.
+        .route("/merges/{id}/split", post(split_merge))
+        // Epic 17 Slice F: the review queue.
+        .route("/resolution/queue", get(review_queue))
+        .route("/resolution/queue/bulk", post(bulk_decide_review))
+        .route("/resolution/queue/{id}/confirm", post(confirm_review))
+        .route("/resolution/queue/{id}/reject", post(reject_review))
         // `PUT`, not `PATCH`: the body is the complete owner list, so the verb
         // that means "make it this" is the honest one. `PATCH` would imply a
         // delta, and a delta cannot express "this asset now has no owner" — which
@@ -208,6 +219,10 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         )
         .route("/assets/{id}/versions", get(asset_versions))
         .route("/assets/{id}/restore", post(restore_asset))
+        // Epic 17 Slices A, C, D: resolve this asset against its blocking-key
+        // candidates. The only path that ever creates a `MergeRecord` — Slice
+        // E's split has nothing to reverse until this has run.
+        .route("/assets/{id}/resolve", post(resolve_asset))
         .route("/assets/{id}/children", get(list_asset_children))
         .route("/assets/{id}/graph", get(asset_graph))
         .route("/assets/{id}/ancestors", get(asset_ancestors))
@@ -950,6 +965,14 @@ impl AppError {
                 kind: ConflictKind::GlossaryHasTerms,
                 ..
             } => "glossary-has-terms",
+            AppError::Conflict {
+                kind: ConflictKind::MergeAlreadySplit,
+                ..
+            } => "merge-already-split",
+            AppError::Conflict {
+                kind: ConflictKind::ReviewAlreadyDecided,
+                ..
+            } => "review-already-decided",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
             AppError::PreconditionFailed { .. } => "version-conflict",
@@ -1000,6 +1023,14 @@ impl AppError {
                 kind: ConflictKind::GlossaryHasTerms,
                 ..
             } => "This glossary still has terms",
+            AppError::Conflict {
+                kind: ConflictKind::MergeAlreadySplit,
+                ..
+            } => "This merge has already been split",
+            AppError::Conflict {
+                kind: ConflictKind::ReviewAlreadyDecided,
+                ..
+            } => "This review entry has already been decided",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
             AppError::PreconditionFailed { .. } => "Version precondition failed",
@@ -1079,6 +1110,18 @@ impl AppError {
             // `PrincipalStillHolds`.
             AppError::Conflict {
                 kind: ConflictKind::GlossaryHasTerms,
+                detail,
+                ..
+            } => detail.clone(),
+            // The original split time is the actionable part — same rule as
+            // `PrincipalStillHolds`.
+            AppError::Conflict {
+                kind: ConflictKind::MergeAlreadySplit,
+                detail,
+                ..
+            } => detail.clone(),
+            AppError::Conflict {
+                kind: ConflictKind::ReviewAlreadyDecided,
                 detail,
                 ..
             } => detail.clone(),
@@ -3018,6 +3061,169 @@ async fn supersede_memory(
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ResolveMentionRequest {
+    text: String,
+    expected_type: Option<graph_owl_core::AssetKind>,
+    #[serde(default)]
+    context: String,
+}
+
+impl ValidateBody for ResolveMentionRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("text"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// `POST /memories/{id}/mentions` — Epic 17 Slice G. `id` is the mention's
+/// source (the memory it was found in). **Never a merge** — a `null`
+/// resolution (no candidate cleared the threshold) is a normal `200`, not an
+/// error.
+async fn resolve_mention(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<ResolveMentionRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mention = graph_owl_core::resolution::TextMention {
+        text: payload.text,
+        expected_type: payload.expected_type,
+        context: payload.context,
+    };
+    let resolution = catalog.resolve_mention(&principal, id, mention).await?;
+    Ok(Json(json!({ "resolution": resolution })))
+}
+
+/// `POST /merges/{id}/split` — Epic 17 Slice E. Restores both entities;
+/// splitting an already-split merge is a `409` (`ConflictKind::MergeAlreadySplit`).
+async fn split_merge(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_core::resolution::MergeRecord>, AppError> {
+    let record = catalog.split_merge(&principal, id).await?;
+    Ok(Json(record))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewQueueQuery {
+    status: Option<graph_owl_core::resolution::ReviewStatus>,
+    kind: Option<graph_owl_core::AssetKind>,
+    min_score: Option<f64>,
+    max_score: Option<f64>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+/// `GET /resolution/queue` — Epic 17 Slice F. Pending by default; a queue is
+/// worked from the top, so a larger default limit would ship rows nobody
+/// scrolls to (matching `validation_report`'s reasoning).
+async fn review_queue(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Query(query): Query<ReviewQueueQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    let filter = graph_owl_storage::ReviewQueueFilter {
+        status: query.status,
+        kind: query.kind,
+        min_score: query.min_score,
+        max_score: query.max_score,
+        limit,
+        offset: query.offset.unwrap_or(0),
+    };
+    let (entries, total) = catalog.review_queue(&principal, &filter).await?;
+    Ok(Json(json!({ "data": entries, "total": total })))
+}
+
+/// `POST /resolution/queue/{id}/confirm` — Epic 17 Slice F. Writes the merge
+/// `decided_by: Human`; `409` if this entry was already decided.
+async fn confirm_review(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_core::resolution::Resolution>, AppError> {
+    let resolution = catalog.confirm_review(&principal, id).await?;
+    Ok(Json(resolution))
+}
+
+/// `POST /resolution/queue/{id}/reject` — Epic 17 Slice F. Records the
+/// decision so the pair is not re-queued by a later re-resolution.
+async fn reject_review(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    catalog.reject_review(&principal, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkReviewDecision {
+    ids: Vec<Uuid>,
+    decision: BulkDecisionKind,
+}
+
+impl ValidateBody for BulkReviewDecision {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        if value
+            .get("ids")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(std::vec::Vec::is_empty)
+        {
+            errors.push(FieldError::new(
+                "ids",
+                FieldErrorCode::Required,
+                "at least one id is required".to_string(),
+            ));
+        }
+        errors
+    }
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum BulkDecisionKind {
+    Confirm,
+    Reject,
+}
+
+/// `POST /resolution/queue/bulk` — Epic 17 Slice F's bulk confirm/reject.
+///
+/// One request, N independent decisions: each id's outcome is reported on
+/// its own rather than the whole batch failing for one bad id, which is
+/// what makes "confirm these 40, three of which someone already rejected"
+/// a normal result instead of a client having to resubmit the other 37.
+async fn bulk_decide_review(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<BulkReviewDecision>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mut results = Vec::with_capacity(payload.ids.len());
+    for id in payload.ids {
+        let outcome = match payload.decision {
+            BulkDecisionKind::Confirm => catalog.confirm_review(&principal, id).await.map(|_| ()),
+            BulkDecisionKind::Reject => catalog.reject_review(&principal, id).await,
+        };
+        results.push(json!({
+            "id": id,
+            "ok": outcome.is_ok(),
+            "problem": outcome.err().map(|e| AppError::from(e).detail()),
+        }));
+    }
+    Ok(Json(json!({ "data": results })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RecallQuery {
     /// The words to rank against. Absent is legitimate — "everything we know
     /// about this table" is a real question — and scores zero on the lexical
@@ -4356,6 +4562,18 @@ async fn restore_asset(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let affected = catalog.restore_asset(&principal, id).await?;
     Ok(Json(json!({ "restored": affected })))
+}
+
+/// `POST /assets/{id}/resolve` — Epic 17. Deterministic match auto-merges;
+/// `>= 0.9` auto-merges if enabled; `0.6`–`0.9` returns `Ambiguous`, creating
+/// nothing; below that, `New`.
+async fn resolve_asset(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_core::resolution::Resolution>, AppError> {
+    let resolution = catalog.resolve_asset(&principal, id).await?;
+    Ok(Json(resolution))
 }
 
 // ---- operability (Epic 10) ----

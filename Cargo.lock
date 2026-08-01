@@ -868,6 +868,7 @@ dependencies = [
  "graph-owl-ontology",
  "graph-owl-query",
  "graph-owl-reasoning",
+ "graph-owl-resolution",
  "graph-owl-storage",
  "graph-owl-traversal",
  "serde",
@@ -1062,7 +1063,11 @@ dependencies = [
  "chrono",
  "graph-owl-core",
  "graph-owl-engine",
+ "graph-owl-storage",
+ "serde",
+ "strsim",
  "thiserror 2.0.19",
+ "uuid",
 ]
 
 [[package]]

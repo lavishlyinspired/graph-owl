@@ -5,8 +5,9 @@ use graph_owl_authz::{
     AccessPredicate, DecisionCache, DecisionKey, MetadataOperation, Policy, Subject, compile,
 };
 use graph_owl_connectors::DeletionPlan;
-use graph_owl_core::flake::Flake;
+use graph_owl_core::flake::{Flake, FlakeValue, Sid, TriplePattern, namespace};
 use graph_owl_core::projection;
+use graph_owl_core::resolution::{Candidate, Evidence, MergeDecidedBy, MergeRecord, Resolution};
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
     envelope::{ChangeDescription, EntityVersion},
@@ -17,7 +18,12 @@ use graph_owl_core::{
 use graph_owl_engine::TripleStore;
 use graph_owl_events::{ChangeEvent, EventSink, EventSubject};
 use graph_owl_reasoning as reasoning;
-use graph_owl_storage::{ConflictKind, Storage, StorageError, StoredUser, UpdateOutcome};
+use graph_owl_resolution::bands::{ConfidenceBands, Decision, decide};
+use graph_owl_resolution::normalize::is_deterministic_match;
+use graph_owl_resolution::score::{EntityView, ScoreWeights, evidence, score};
+use graph_owl_storage::{
+    ConflictKind, SplitOutcome, Storage, StorageError, StoredUser, UpdateOutcome,
+};
 use graph_owl_traversal::{Bounds, Direction, EdgeFilter, Subgraph, TraversalEngine};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -476,6 +482,18 @@ pub struct Catalog {
     /// nothing to decide.
     #[allow(clippy::type_complexity)]
     shape_cache: Arc<Mutex<Option<(i64, Vec<graph_owl_constraint::CompiledShape>, usize)>>>,
+    /// Whether the `>= 0.9` band writes a merge automatically, or is
+    /// downgraded to a queued `Ambiguous` for a human to confirm — Slice D's
+    /// "auto-merge is disableable per deployment". **Defaults to disabled**
+    /// per the plan's own pre-PR quality gate ("auto-merge is off by default
+    /// in the shipped config; enabling it is a deliberate operator
+    /// decision") — a deployment opts in explicitly via
+    /// [`Self::with_auto_merge_enabled`], rather than every deployment
+    /// silently getting automatic merges the day this field was added.
+    ///
+    /// Deterministic FQN matching (Slice A) is unaffected either way — it is
+    /// a different, more certain mechanism than this confidence-band toggle.
+    auto_merge_enabled: bool,
 }
 
 impl Catalog {
@@ -487,7 +505,17 @@ impl Catalog {
             events: None,
             decisions: Arc::new(DecisionCache::default()),
             shape_cache: Arc::new(Mutex::new(None)),
+            auto_merge_enabled: false,
         }
+    }
+
+    /// Disables (or re-enables) automatic merging of `>= 0.9` matches. When
+    /// disabled, a would-be auto-merge is downgraded to `Ambiguous` instead —
+    /// still surfaced, never silently dropped.
+    #[must_use]
+    pub fn with_auto_merge_enabled(mut self, enabled: bool) -> Self {
+        self.auto_merge_enabled = enabled;
+        self
     }
 
     /// The catalog, projecting into a graph as it writes.
@@ -2855,6 +2883,545 @@ impl Catalog {
         .await
     }
 
+    // ---- Epic 17: entity resolution ----
+
+    /// The column names of a `Table` asset, for the scorer's structural-
+    /// overlap term. Empty for every other kind — a column has no children
+    /// of its own, and asking would just be an empty query every time.
+    async fn column_names(&self, asset: &Asset) -> Result<Vec<String>, CatalogError> {
+        if asset.kind != AssetKind::Table {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .storage
+            .list_children(Some(asset.id))
+            .await?
+            .into_iter()
+            .filter(|child| child.kind == AssetKind::Column)
+            .map(|child| child.name)
+            .collect())
+    }
+
+    fn entity_view<'a>(asset: &'a Asset, columns: &'a [String]) -> EntityView<'a> {
+        EntityView {
+            name: &asset.name,
+            parent_fqn: fqn::parent(&asset.fully_qualified_name),
+            // Not yet tracked on `Asset` (Epic 17 Slice B's design note) — the
+            // term never fires until a source-system field exists to compare.
+            source_system: None,
+            column_names: columns,
+        }
+    }
+
+    /// Resolves `asset_id` against its blocking-key candidates: a
+    /// deterministic FQN match short-circuits (Slice A); otherwise the
+    /// probabilistic scorer (Slice C) picks the best-scoring candidate and
+    /// the confidence bands (Slice D) decide what happens to it.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if `asset_id` does not exist. `Storage` if the decision
+    /// would auto-merge and no graph engine is configured — a merge without
+    /// a graph to retract/assert against cannot honour Slice D's contract.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: the one `expect` below is reached only when
+    /// `candidates` is non-empty, which is checked immediately above it.
+    pub async fn resolve_asset(
+        &self,
+        principal: &Principal,
+        asset_id: Uuid,
+    ) -> Result<Resolution, CatalogError> {
+        let _ = principal;
+
+        let target = self
+            .storage
+            .get_asset(asset_id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        let all_candidates = self.storage.resolution_candidates(asset_id).await?;
+
+        // A recently-split pair is excluded before *any* decision is made —
+        // deterministic or scored — or a case-different FQN would re-merge
+        // through the short-circuit on the very next write, ignoring the
+        // cooldown entirely (Slice E's "does not immediately re-merge").
+        let mut candidates = Vec::with_capacity(all_candidates.len());
+        for candidate in all_candidates {
+            let cooled_down = self
+                .storage
+                .most_recent_split_between(target.id, candidate.id)
+                .await?
+                .is_some();
+            if !cooled_down {
+                candidates.push(candidate);
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(Resolution::New);
+        }
+
+        // Deterministic match short-circuits scoring entirely (Slice A's
+        // contract: a scorer bug must never affect an exact match).
+        for candidate in &candidates {
+            if is_deterministic_match(
+                &target.fully_qualified_name,
+                &candidate.fully_qualified_name,
+            ) {
+                return self
+                    .merge(
+                        candidate.id,
+                        target.id,
+                        1.0,
+                        vec![Evidence::NormalizedFqn],
+                        MergeDecidedBy::Auto,
+                    )
+                    .await;
+            }
+        }
+
+        let weights = ScoreWeights::default();
+        let target_columns = self.column_names(&target).await?;
+        let target_view = Self::entity_view(&target, &target_columns);
+
+        // Each candidate's own columns are kept alongside it — needed again
+        // below for its evidence, and an `EntityView` borrows them, so they
+        // cannot be dropped between scoring and reporting.
+        let mut scored: Vec<(Asset, Vec<String>, f64)> = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let columns = self.column_names(&candidate).await?;
+            let candidate_view = Self::entity_view(&candidate, &columns);
+            let candidate_score = score(&target_view, &candidate_view, &weights);
+            scored.push((candidate, columns, candidate_score));
+        }
+
+        let best_index = scored
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.2.total_cmp(&b.2))
+            .map(|(index, _)| index)
+            .expect("scored is non-empty because candidates was non-empty");
+        let (best, best_columns, best_score) = &scored[best_index];
+        let bands = ConfidenceBands::default();
+        let decision = decide(*best_score, &bands);
+
+        // **`Decision::AutoMerge` is unreachable through this branch given
+        // the current wiring, and that is provable rather than a missing
+        // test.** `same_source_system` is always `0` here (`entity_view`
+        // hard-codes `source_system: None` — `Asset` does not track one
+        // yet), so with the weights `(0.5, 0.3, 0.1, 0.1)` the maximum score
+        // without an exact (case-insensitive) name match is
+        // `0.5·sim + 0.3 + 0.1 = 0.4 + 0.5·sim` — reaching `0.9` needs
+        // `sim = 1.0` exactly, and a name that similar under a shared parent
+        // is already a normalized-FQN match, which returns via the
+        // deterministic short-circuit above and never reaches here. `cargo
+        // mutants` reports `==`/`&&` mutations on this line as MISSED, and
+        // that is expected for the same reason `column_overlap`'s `&&`/`||`
+        // in `graph-owl-resolution` is: no input can currently distinguish
+        // the two. Wiring a real `source_system` onto `Asset` would make
+        // this branch reachable and give a mutant here real teeth again.
+        if decision == Decision::AutoMerge && self.auto_merge_enabled {
+            let best_view = Self::entity_view(best, best_columns);
+            let merge_evidence = evidence(&target_view, &best_view);
+            return self
+                .merge(
+                    best.id,
+                    target.id,
+                    *best_score,
+                    merge_evidence,
+                    MergeDecidedBy::Auto,
+                )
+                .await;
+        }
+
+        if decision == Decision::New {
+            return Ok(Resolution::New);
+        }
+
+        // `AutoMerge` while disabled, and `Review`, both surface every
+        // scored candidate for a human to decide — creating no merge and no
+        // new entity, per Slice D's strictest acceptance criterion. Queuing
+        // (Slice F) is the one side effect that *is* expected here: it is
+        // neither, and `queue_for_review`'s idempotency is what keeps a
+        // repeated resolution from re-litigating an already-decided pair.
+        let mut reported = Vec::with_capacity(scored.len());
+        for (candidate, columns, candidate_score) in &scored {
+            let candidate_evidence = evidence(&target_view, &Self::entity_view(candidate, columns));
+            self.storage
+                .queue_for_review(graph_owl_core::resolution::ReviewQueueEntry {
+                    id: Uuid::new_v4(),
+                    target: target.id,
+                    candidate: candidate.id,
+                    score: *candidate_score,
+                    evidence: candidate_evidence.clone(),
+                    status: graph_owl_core::resolution::ReviewStatus::Pending,
+                    decided_by: None,
+                    decided_at: None,
+                    created_at: chrono::Utc::now(),
+                })
+                .await?;
+            reported.push(Candidate {
+                entity: candidate.id,
+                fqn: candidate.fully_qualified_name.clone(),
+                score: *candidate_score,
+                evidence: candidate_evidence,
+            });
+        }
+        Ok(Resolution::Ambiguous {
+            candidates: reported,
+        })
+    }
+
+    /// Writes a merge: retracts `merged`'s flakes, asserts `sameAs` toward
+    /// `canonical`, and records the decision. `merged`'s relational row is
+    /// untouched — only its graph projection changes — which is what makes
+    /// a split (below) a matter of reversing two flake operations rather
+    /// than restoring relationships, tags or owners that were never moved.
+    async fn merge(
+        &self,
+        canonical: Uuid,
+        merged: Uuid,
+        confidence: f64,
+        merge_evidence: Vec<Evidence>,
+        decided_by: MergeDecidedBy,
+    ) -> Result<Resolution, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let merged_sid = Sid::new(namespace::DSC, merged.to_string());
+        let canonical_sid = Sid::new(namespace::DSC, canonical.to_string());
+        let same_as = Sid::new(namespace::OWL, "sameAs");
+
+        let current = graph
+            .query_pattern(&TriplePattern {
+                s: Some(merged_sid.clone()),
+                cx: Some(None),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let t = graph
+            .next_time()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let retractions: Vec<Flake> = current.iter().map(|f| f.retracted_at(t)).collect();
+        graph
+            .retract_flakes(&retractions)
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        graph
+            .assert_flakes(&[Flake::assert(
+                merged_sid,
+                same_as,
+                FlakeValue::Ref(canonical_sid),
+                t,
+            )])
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let record = self
+            .storage
+            .create_merge_record(MergeRecord {
+                id: Uuid::new_v4(),
+                canonical,
+                merged,
+                evidence: merge_evidence,
+                confidence,
+                decided_by,
+                decided_at: chrono::Utc::now(),
+                merged_at_t: t,
+                split_at: None,
+            })
+            .await?;
+
+        Ok(Resolution::Existing {
+            entity: record.canonical,
+            confidence: record.confidence,
+        })
+    }
+
+    /// Reverses a merge (Epic 17 Slice E): retracts the `sameAs` and
+    /// re-asserts exactly the flakes the merge retracted, read via
+    /// time-travel at `merged_at_t - 1` — the instant before the merge's own
+    /// write — rather than reconstructed by any other means. That is what
+    /// makes the round trip exact rather than approximate.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the merge record does not exist. `Conflict` if it was
+    /// already split. `Storage` if no graph engine is configured.
+    pub async fn split_merge(
+        &self,
+        principal: &Principal,
+        merge_id: Uuid,
+    ) -> Result<MergeRecord, CatalogError> {
+        let _ = principal;
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let existing = self
+            .storage
+            .get_merge_record(merge_id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        if existing.split_at.is_some() {
+            return Err(CatalogError::Conflict {
+                detail: "this merge has already been split".to_string(),
+                existing_id: Some(merge_id),
+                kind: ConflictKind::MergeAlreadySplit,
+            });
+        }
+
+        let merged_sid = Sid::new(namespace::DSC, existing.merged.to_string());
+        let same_as = Sid::new(namespace::OWL, "sameAs");
+
+        // The pre-merge state, exactly: everything true of `merged` the
+        // instant before its merge transaction wrote.
+        let before_merge = graph
+            .query_pattern(&TriplePattern {
+                s: Some(merged_sid.clone()),
+                cx: Some(None),
+                as_of: Some(existing.merged_at_t - 1),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let t = graph
+            .next_time()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let retract_same_as = Flake::assert(
+            merged_sid,
+            same_as,
+            FlakeValue::Ref(Sid::new(namespace::DSC, existing.canonical.to_string())),
+            existing.merged_at_t,
+        )
+        .retracted_at(t);
+        graph
+            .retract_flakes(&[retract_same_as])
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let restored: Vec<Flake> = before_merge
+            .into_iter()
+            .map(|f| Flake::assert(f.s, f.p, f.o, t))
+            .collect();
+        graph
+            .assert_flakes(&restored)
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        match self
+            .storage
+            .split_merge_record(merge_id, chrono::Utc::now())
+            .await?
+        {
+            SplitOutcome::Split(record) => Ok(*record),
+            SplitOutcome::AlreadySplit { split_at } => Err(CatalogError::Conflict {
+                detail: format!("this merge was already split at {split_at}"),
+                existing_id: Some(merge_id),
+                kind: ConflictKind::MergeAlreadySplit,
+            }),
+            SplitOutcome::NotFound => Err(CatalogError::NotFound),
+        }
+    }
+
+    /// The review queue (Epic 17 Slice F) — pending by default; `filter`
+    /// narrows to a specific status, entity kind, or score range.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::Storage`] if the query fails.
+    pub async fn review_queue(
+        &self,
+        principal: &Principal,
+        filter: &graph_owl_storage::ReviewQueueFilter,
+    ) -> Result<(Vec<graph_owl_core::resolution::ReviewQueueEntry>, i64), CatalogError> {
+        let _ = principal;
+        Ok(self.storage.list_review_queue(filter).await?)
+    }
+
+    /// Confirms a queued pair: writes the merge, `decided_by: Human`.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the entry does not exist. `Storage` if no graph engine
+    /// is configured.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the entry does not exist. `Conflict` if it was already
+    /// confirmed or rejected — checked *before* deciding, so a second confirm
+    /// can never write a second `MergeRecord` for the same pair. `Storage`
+    /// if no graph engine is configured.
+    pub async fn confirm_review(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<Resolution, CatalogError> {
+        let entry = self
+            .storage
+            .get_review_queue_entry(id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        if entry.status != graph_owl_core::resolution::ReviewStatus::Pending {
+            return Err(CatalogError::Conflict {
+                detail: "this review entry has already been decided".to_string(),
+                existing_id: Some(id),
+                kind: ConflictKind::ReviewAlreadyDecided,
+            });
+        }
+        let decided_by = MergeDecidedBy::Human {
+            user_id: principal.id.clone(),
+        };
+        self.storage
+            .decide_review_queue_entry(
+                id,
+                graph_owl_core::resolution::ReviewStatus::Confirmed,
+                decided_by.clone(),
+                chrono::Utc::now(),
+            )
+            .await?;
+        self.merge(
+            entry.candidate,
+            entry.target,
+            entry.score,
+            entry.evidence,
+            decided_by,
+        )
+        .await
+    }
+
+    /// Rejects a queued pair. The decision persists — Slice F's "rejection
+    /// is not re-queued on the next re-ingestion of the same draft" is
+    /// exactly [`graph_owl_storage::Storage::queue_for_review`]'s
+    /// idempotency, applied to a row this leaves in a non-pending state.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the entry does not exist. `Conflict` if it was already
+    /// confirmed — a merged pair cannot be un-merged by rejecting the queue
+    /// entry; that is what splitting the merge is for.
+    pub async fn reject_review(&self, principal: &Principal, id: Uuid) -> Result<(), CatalogError> {
+        let entry = self
+            .storage
+            .get_review_queue_entry(id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        if entry.status == graph_owl_core::resolution::ReviewStatus::Confirmed {
+            return Err(CatalogError::Conflict {
+                detail: "this review entry has already been confirmed".to_string(),
+                existing_id: Some(id),
+                kind: ConflictKind::ReviewAlreadyDecided,
+            });
+        }
+        let decided_by = MergeDecidedBy::Human {
+            user_id: principal.id.clone(),
+        };
+        self.storage
+            .decide_review_queue_entry(
+                id,
+                graph_owl_core::resolution::ReviewStatus::Rejected,
+                decided_by,
+                chrono::Utc::now(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    // ---- Epic 17 Slice G: mention resolution ----
+
+    /// Resolves a textual mention against the catalog — **never a merge**.
+    /// `source` is what the mention was found in (a memory, most commonly);
+    /// `Ok(None)` means no candidate cleared
+    /// [`graph_owl_resolution::mention::MENTION_THRESHOLD`], which is a
+    /// normal outcome, not an error.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::Storage`] if a query or the write fails.
+    pub async fn resolve_mention(
+        &self,
+        principal: &Principal,
+        source: Uuid,
+        mention: graph_owl_core::resolution::TextMention,
+    ) -> Result<Option<graph_owl_core::resolution::MentionResolution>, CatalogError> {
+        let _ = principal;
+        let candidates = self
+            .storage
+            .search_assets(
+                &mention.text,
+                mention.expected_type,
+                &graph_owl_core::page::PageRequest {
+                    limit: 50,
+                    after: None,
+                },
+            )
+            .await?;
+
+        let mut best: Option<(Asset, f64)> = None;
+        for candidate in candidates.data {
+            let ancestor_names: Vec<String> = self
+                .storage
+                .ancestors_of(candidate.id)
+                .await?
+                .into_iter()
+                .filter(|a| a.id != candidate.id)
+                .map(|a| a.name)
+                .collect();
+            let score = graph_owl_resolution::mention::score_mention(
+                &mention.text,
+                &mention.context,
+                &candidate.name,
+                &ancestor_names,
+            );
+            // `>` rather than `>=`: on an exact tie, the earlier-found
+            // candidate wins. Untested at the exact tie boundary on
+            // purpose — `search_assets`'s ordering is not part of this
+            // module's contract, so a test pinning "candidate A beats
+            // candidate B on a tie" would be asserting an ordering this
+            // code does not promise, not a real requirement. Which
+            // candidate wins a genuine tie is not specified by the plan;
+            // that any winner is chosen deterministically, and that a
+            // clear winner (this loop's normal case) is picked, are.
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_score)| score > *best_score)
+            {
+                best = Some((candidate, score));
+            }
+        }
+
+        let Some((candidate, score)) = best else {
+            return Ok(None);
+        };
+        if !graph_owl_resolution::mention::clears_threshold(score) {
+            return Ok(None);
+        }
+
+        let resolution = graph_owl_core::resolution::MentionResolution {
+            id: Uuid::new_v4(),
+            source,
+            text: mention.text,
+            entity: candidate.id,
+            confidence: score,
+            resolved_at: chrono::Utc::now(),
+        };
+        Ok(Some(
+            self.storage.record_mention_resolution(resolution).await?,
+        ))
+    }
+
     // ---- envelope (Epic 3) ----
 
     /// Applies a partial update, advancing the version by the size of the change.
@@ -4764,7 +5331,93 @@ mod tests {
         }
         found
     }
-    use graph_owl_storage::Storage;
+    /// The fake's blocking-key computation (Epic 17 Slice B) — derived
+    /// on demand from the current `assets` list rather than a second store
+    /// kept in sync, since the fake already rebuilds every read from that
+    /// one list. Must derive identically to `PostgresStorage`'s stored keys,
+    /// so this calls the exact same pure functions rather than a
+    /// reimplementation that could quietly disagree.
+    fn asset_blocking_key_values(asset: &Asset, all: &[Asset]) -> [String; 4] {
+        let column_hash = if asset.kind == AssetKind::Table {
+            let columns: Vec<String> = all
+                .iter()
+                .filter(|a| {
+                    a.parent_id == Some(asset.id) && a.kind == AssetKind::Column && !a.deleted
+                })
+                .map(|a| a.name.clone())
+                .collect();
+            graph_owl_core::blocking::column_hash_key(&columns)
+        } else {
+            graph_owl_core::blocking::column_hash_key(&[])
+        };
+        [
+            graph_owl_core::blocking::normalized_fqn_key(&asset.fully_qualified_name),
+            graph_owl_core::blocking::name_parent_key(
+                &asset.name,
+                graph_owl_core::fqn::parent(&asset.fully_qualified_name),
+            ),
+            graph_owl_core::blocking::soundex(&asset.name),
+            column_hash,
+        ]
+    }
+
+    /// The fake must derive the same candidates Postgres would (Epic 17
+    /// Slice B), since `graph_owl_resolution` will eventually run against
+    /// either backend interchangeably — proven directly against
+    /// `InMemoryStorage`, mirroring `graph-owl-storage-postgres`'s own
+    /// `entity_blocking_keys` repository tests rather than only against
+    /// `Catalog`, which has no resolution-facing method yet.
+    #[tokio::test]
+    async fn fake_storage_computes_resolution_candidates_via_blocking_keys() {
+        let storage = InMemoryStorage::default();
+        let now = chrono::Utc::now();
+        let make = |name: &str, fqn: &str| Asset {
+            id: Uuid::new_v4(),
+            kind: AssetKind::Service,
+            name: name.to_string(),
+            fully_qualified_name: fqn.to_string(),
+            parent_id: None,
+            description: None,
+            properties: None,
+            owners: Vec::new(),
+            version: graph_owl_core::envelope::EntityVersion::initial(),
+            updated_by: "system".to_string(),
+            change_description: None,
+            deleted: false,
+            deleted_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let lower = storage
+            .upsert_asset(make("orders", "svc.orders"))
+            .await
+            .expect("lower");
+        let upper = storage
+            .upsert_asset(make("ORDERS", "SVC.ORDERS"))
+            .await
+            .expect("upper");
+        let unrelated = storage
+            .upsert_asset(make("zzqxw", "svc.zzqxw"))
+            .await
+            .expect("unrelated");
+
+        let candidates = storage
+            .resolution_candidates(lower.id)
+            .await
+            .expect("candidates");
+
+        assert!(
+            candidates.iter().any(|a| a.id == upper.id),
+            "a case-variant FQN should be a candidate via the normalized-FQN key"
+        );
+        assert!(
+            !candidates.iter().any(|a| a.id == unrelated.id),
+            "an unrelated asset must not appear as a candidate"
+        );
+    }
+
+    use graph_owl_storage::{ReviewQueueFilter, SplitOutcome, Storage};
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -4816,6 +5469,9 @@ mod tests {
         /// `(term_id, target_fqn)`.
         term_attachments: Mutex<Vec<(Uuid, String)>>,
         metrics: Mutex<Vec<graph_owl_storage::MetricRecord>>,
+        pub(super) merge_records: Mutex<Vec<graph_owl_core::resolution::MergeRecord>>,
+        pub(super) resolution_queue: Mutex<Vec<graph_owl_core::resolution::ReviewQueueEntry>>,
+        pub(super) mention_resolutions: Mutex<Vec<graph_owl_core::resolution::MentionResolution>>,
     }
 
     impl InMemoryStorage {
@@ -5788,6 +6444,194 @@ mod tests {
                 })
                 .filter(|(_, n)| *n > 0)
                 .collect())
+        }
+
+        async fn resolution_candidates(&self, asset_id: Uuid) -> Result<Vec<Asset>, StorageError> {
+            let assets = self.assets.lock().unwrap();
+            let Some(target) = assets.iter().find(|a| a.id == asset_id) else {
+                return Ok(Vec::new());
+            };
+            let target_keys = asset_blocking_key_values(target, &assets);
+            Ok(assets
+                .iter()
+                .filter(|a| a.id != asset_id && !a.deleted)
+                .filter(|a| {
+                    let keys = asset_blocking_key_values(a, &assets);
+                    target_keys
+                        .iter()
+                        .any(|k| !k.is_empty() && keys.contains(k))
+                })
+                .cloned()
+                .collect())
+        }
+
+        async fn create_merge_record(
+            &self,
+            record: graph_owl_core::resolution::MergeRecord,
+        ) -> Result<graph_owl_core::resolution::MergeRecord, StorageError> {
+            self.guard_write("create_merge_record");
+            self.merge_records.lock().unwrap().push(record.clone());
+            Ok(record)
+        }
+
+        async fn get_merge_record(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_core::resolution::MergeRecord>, StorageError> {
+            Ok(self
+                .merge_records
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.id == id)
+                .cloned())
+        }
+
+        async fn split_merge_record(
+            &self,
+            id: Uuid,
+            split_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<SplitOutcome, StorageError> {
+            self.guard_write("split_merge_record");
+            let mut records = self.merge_records.lock().unwrap();
+            let Some(record) = records.iter_mut().find(|r| r.id == id) else {
+                return Ok(SplitOutcome::NotFound);
+            };
+            if let Some(already) = record.split_at {
+                return Ok(SplitOutcome::AlreadySplit { split_at: already });
+            }
+            record.split_at = Some(split_at);
+            Ok(SplitOutcome::Split(Box::new(record.clone())))
+        }
+
+        async fn most_recent_split_between(
+            &self,
+            a: Uuid,
+            b: Uuid,
+        ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError> {
+            Ok(self
+                .merge_records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| {
+                    (r.canonical == a && r.merged == b) || (r.canonical == b && r.merged == a)
+                })
+                .filter_map(|r| r.split_at)
+                .max())
+        }
+
+        async fn queue_for_review(
+            &self,
+            entry: graph_owl_core::resolution::ReviewQueueEntry,
+        ) -> Result<graph_owl_core::resolution::ReviewQueueEntry, StorageError> {
+            let mut queue = self.resolution_queue.lock().unwrap();
+            if let Some(existing) = queue
+                .iter()
+                .find(|e| e.target == entry.target && e.candidate == entry.candidate)
+            {
+                return Ok(existing.clone());
+            }
+            queue.push(entry.clone());
+            Ok(entry)
+        }
+
+        async fn list_review_queue(
+            &self,
+            filter: &ReviewQueueFilter,
+        ) -> Result<(Vec<graph_owl_core::resolution::ReviewQueueEntry>, i64), StorageError>
+        {
+            use graph_owl_core::resolution::ReviewStatus;
+            let assets = self.assets.lock().unwrap();
+            let status = filter.status.unwrap_or(ReviewStatus::Pending);
+            let matching: Vec<_> = self
+                .resolution_queue
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e.status == status)
+                .filter(|e| {
+                    filter.kind.is_none_or(|kind| {
+                        assets
+                            .iter()
+                            .find(|a| a.id == e.target)
+                            .is_some_and(|a| a.kind == kind)
+                    })
+                })
+                .filter(|e| filter.min_score.is_none_or(|min| e.score >= min))
+                .filter(|e| filter.max_score.is_none_or(|max| e.score <= max))
+                .cloned()
+                .collect();
+            let mut sorted = matching;
+            sorted.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
+            let total = i64::try_from(sorted.len()).unwrap_or(i64::MAX);
+            let page = sorted
+                .into_iter()
+                .skip(filter.offset)
+                .take(filter.limit)
+                .collect();
+            Ok((page, total))
+        }
+
+        async fn get_review_queue_entry(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_core::resolution::ReviewQueueEntry>, StorageError> {
+            Ok(self
+                .resolution_queue
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|e| e.id == id)
+                .cloned())
+        }
+
+        async fn decide_review_queue_entry(
+            &self,
+            id: Uuid,
+            status: graph_owl_core::resolution::ReviewStatus,
+            decided_by: graph_owl_core::resolution::MergeDecidedBy,
+            decided_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Option<graph_owl_core::resolution::ReviewQueueEntry>, StorageError> {
+            use graph_owl_core::resolution::ReviewStatus;
+            let mut queue = self.resolution_queue.lock().unwrap();
+            let Some(entry) = queue.iter_mut().find(|e| e.id == id) else {
+                return Ok(None);
+            };
+            if entry.status != ReviewStatus::Pending {
+                return Ok(Some(entry.clone()));
+            }
+            entry.status = status;
+            entry.decided_by = Some(decided_by);
+            entry.decided_at = Some(decided_at);
+            Ok(Some(entry.clone()))
+        }
+
+        async fn record_mention_resolution(
+            &self,
+            resolution: graph_owl_core::resolution::MentionResolution,
+        ) -> Result<graph_owl_core::resolution::MentionResolution, StorageError> {
+            self.mention_resolutions
+                .lock()
+                .unwrap()
+                .push(resolution.clone());
+            Ok(resolution)
+        }
+
+        async fn mention_resolutions_for_source(
+            &self,
+            source: Uuid,
+        ) -> Result<Vec<graph_owl_core::resolution::MentionResolution>, StorageError> {
+            let mut found: Vec<_> = self
+                .mention_resolutions
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.source == source)
+                .cloned()
+                .collect();
+            found.sort_by(|a, b| b.resolved_at.cmp(&a.resolved_at));
+            Ok(found)
         }
 
         // The fake honours the same envelope contract as Postgres, including
@@ -9947,6 +10791,962 @@ mod validation_decides_before_it_stores {
 
         assert_eq!(mine.2, 1);
         assert_eq!(theirs.2, 0);
+    }
+}
+
+#[cfg(test)]
+mod resolution_decides_before_it_merges {
+    //! Epic 17 Slices D, E and F at the **facade**.
+    //!
+    //! `RecordingGraph` resolves current state (including `as_of`) the same
+    //! way Postgres does (`projection_isolation_tests`'s own doc comment),
+    //! which is what makes it trustworthy for the split round-trip test
+    //! below — a double that only recorded calls without resolving them
+    //! could not prove the pre-merge state was restored.
+
+    use super::*;
+    use graph_owl_core::flake::{Sid, namespace};
+    use graph_owl_core::resolution::{Evidence, MergeDecidedBy, Resolution, ReviewStatus};
+    use graph_owl_storage::ReviewQueueFilter;
+    use projection_isolation_tests::RecordingGraph;
+    use tests::InMemoryStorage;
+
+    fn asset_req(kind: AssetKind, name: &str, parent_id: Option<Uuid>) -> UpsertAsset {
+        UpsertAsset {
+            kind,
+            name: name.to_string(),
+            parent_id,
+            description: None,
+            properties: None,
+        }
+    }
+
+    fn seeded() -> (Catalog, Arc<InMemoryStorage>, Arc<RecordingGraph>) {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage.clone()).with_graph(graph.clone());
+        (catalog, storage, graph)
+    }
+
+    /// One schema, reachable only through the full containment chain
+    /// (`upsert_asset` requires a `Table`'s parent to be a `Schema`, a
+    /// `Schema`'s a `Database`, and so on) — needed so two tables can share
+    /// a real parent for the `same_parent` term.
+    async fn a_schema(catalog: &Catalog, principal: &Principal) -> Uuid {
+        let svc = catalog
+            .upsert_asset(principal, asset_req(AssetKind::Service, "svc", None))
+            .await
+            .expect("service");
+        let db = catalog
+            .upsert_asset(
+                principal,
+                asset_req(AssetKind::Database, "db", Some(svc.id)),
+            )
+            .await
+            .expect("database");
+        let schema = catalog
+            .upsert_asset(principal, asset_req(AssetKind::Schema, "sch", Some(db.id)))
+            .await
+            .expect("schema");
+        schema.id
+    }
+
+    fn only_merge_record(storage: &InMemoryStorage) -> graph_owl_core::resolution::MergeRecord {
+        let records = storage.merge_records.lock().unwrap();
+        assert_eq!(records.len(), 1, "expected exactly one merge record");
+        records[0].clone()
+    }
+
+    /// `ReviewQueueFilter::default()`'s `limit` is `0` (the zero value of
+    /// `usize`), which would return no rows regardless of matches — every
+    /// test needs a real limit, matching `ValidationFilter`'s own test
+    /// helper in `validation_decides_before_it_stores`.
+    fn all_pending() -> ReviewQueueFilter {
+        ReviewQueueFilter {
+            limit: 50,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_case_variant_fqn_merges_and_records_the_decision() {
+        let (catalog, storage, graph) = seeded();
+        let principal = Principal::system();
+
+        let lower = catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "orders", None))
+            .await
+            .expect("lower");
+        let upper = catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "ORDERS", None))
+            .await
+            .expect("upper");
+
+        let resolution = catalog
+            .resolve_asset(&principal, upper.id)
+            .await
+            .expect("resolve");
+
+        match resolution {
+            Resolution::Existing { entity, confidence } => {
+                assert_eq!(entity, lower.id);
+                assert!((confidence - 1.0).abs() < 1e-9);
+            }
+            other => panic!("expected Existing, got {other:?}"),
+        }
+
+        let upper_sid = Sid::new(namespace::DSC, upper.id.to_string());
+        let lower_sid = Sid::new(namespace::DSC, lower.id.to_string());
+        assert!(
+            graph.retracted_flakes().iter().any(|f| f.s == upper_sid),
+            "the merged entity's own flakes should have been retracted"
+        );
+        assert!(
+            !graph.retracted_flakes().iter().any(|f| f.s == lower_sid),
+            "the canonical entity's own flakes must not be touched by the merge \
+             — proves the retraction query was scoped to the merged subject, \
+             not every entity in the graph"
+        );
+        let same_as = Sid::new(namespace::OWL, "sameAs");
+        assert!(
+            graph
+                .asserted_flakes()
+                .iter()
+                .any(|f| f.s == upper_sid && f.p == same_as),
+            "a sameAs assertion should point the merged entity at the canonical one"
+        );
+
+        let record = only_merge_record(&storage);
+        assert_eq!(record.canonical, lower.id);
+        assert_eq!(record.merged, upper.id);
+        assert_eq!(record.evidence, vec![Evidence::NormalizedFqn]);
+        assert_eq!(record.decided_by, MergeDecidedBy::Auto);
+        assert_eq!(record.split_at, None);
+    }
+
+    /// A merge only touches the merged entity's facts **in the default
+    /// graph**. Something like a SHACL shape or a reasoning derivation lives
+    /// in a named graph and must survive a merge undisturbed — proven by
+    /// seeding one directly and checking it after.
+    #[tokio::test]
+    async fn a_merge_does_not_touch_the_merged_entitys_named_graph_facts() {
+        let (catalog, _storage, graph) = seeded();
+        let principal = Principal::system();
+
+        catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "orders", None))
+            .await
+            .expect("lower");
+        let upper = catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "ORDERS", None))
+            .await
+            .expect("upper");
+
+        let upper_sid = Sid::new(namespace::DSC, upper.id.to_string());
+        let named_graph = Sid::dsc("some-named-graph");
+        let t = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[Flake {
+                s: upper_sid.clone(),
+                p: Sid::dsc("extra"),
+                o: graph_owl_core::flake::FlakeValue::Boolean(true),
+                cx: Some(named_graph.clone()),
+                t,
+                op: true,
+            }])
+            .await
+            .expect("seed a named-graph fact");
+
+        catalog
+            .resolve_asset(&principal, upper.id)
+            .await
+            .expect("resolve");
+
+        let still_there = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                s: Some(upper_sid),
+                cx: Some(Some(named_graph)),
+                ..Default::default()
+            })
+            .await
+            .expect("query the named graph");
+        assert_eq!(
+            still_there.len(),
+            1,
+            "a merge must only retract the default-graph facts, not a named graph's"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deterministic_match_merges_even_when_auto_merge_is_disabled() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage.clone())
+            .with_graph(graph.clone())
+            .with_auto_merge_enabled(false);
+        let principal = Principal::system();
+
+        let lower = catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "orders", None))
+            .await
+            .expect("lower");
+        let upper = catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "ORDERS", None))
+            .await
+            .expect("upper");
+
+        let resolution = catalog
+            .resolve_asset(&principal, upper.id)
+            .await
+            .expect("resolve");
+
+        // Deterministic matching is a different, more certain mechanism than
+        // the confidence-band decision the toggle governs (Slice A's
+        // short-circuit is unconditional) — disabling auto-merge must not
+        // reach into it.
+        assert!(matches!(resolution, Resolution::Existing { entity, .. } if entity == lower.id));
+    }
+
+    #[tokio::test]
+    async fn a_review_band_score_creates_nothing_and_reports_evidence() {
+        let (catalog, storage, graph) = seeded();
+        let principal = Principal::system();
+        let schema = a_schema(&catalog, &principal).await;
+
+        let a = catalog
+            .upsert_asset(
+                &principal,
+                asset_req(AssetKind::Table, "orders", Some(schema)),
+            )
+            .await
+            .expect("table a");
+        let b = catalog
+            .upsert_asset(
+                &principal,
+                asset_req(AssetKind::Table, "orders_v2", Some(schema)),
+            )
+            .await
+            .expect("table b");
+        for (parent, col) in [
+            (a.id, "id"),
+            (a.id, "amount"),
+            (b.id, "id"),
+            (b.id, "amount"),
+        ] {
+            catalog
+                .upsert_asset(&principal, asset_req(AssetKind::Column, col, Some(parent)))
+                .await
+                .expect("column");
+        }
+
+        // Captured after all the setup writes above (which project their own
+        // flakes) and before the call under test, so any *new* assert/retract
+        // can only have come from `resolve_asset` itself.
+        let asserted_before = graph.asserted_flakes().len();
+        let retracted_before = graph.retracted_flakes().len();
+
+        let resolution = catalog
+            .resolve_asset(&principal, b.id)
+            .await
+            .expect("resolve");
+
+        match resolution {
+            Resolution::Ambiguous { candidates } => {
+                assert_eq!(candidates.len(), 1);
+                assert_eq!(candidates[0].entity, a.id);
+                assert!(
+                    (0.6..0.9).contains(&candidates[0].score),
+                    "expected a review-band score, got {}",
+                    candidates[0].score
+                );
+                // Exact counts, not just "some overlap was reported" — proves
+                // the real column list flowed through rather than some fixed
+                // placeholder both sides would coincidentally agree on.
+                assert!(
+                    candidates[0]
+                        .evidence
+                        .contains(&Evidence::StructuralOverlap {
+                            shared_columns: 2,
+                            total: 2,
+                        }),
+                    "expected exactly the two real shared columns, got {:?}",
+                    candidates[0].evidence
+                );
+                assert!(candidates[0].evidence.contains(&Evidence::SameParent));
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+
+        assert!(
+            storage.merge_records.lock().unwrap().is_empty(),
+            "a review-band resolution must create nothing"
+        );
+        assert_eq!(
+            graph.asserted_flakes().len(),
+            asserted_before,
+            "a review-band resolution must not assert anything to the graph"
+        );
+        assert_eq!(
+            graph.retracted_flakes().len(),
+            retracted_before,
+            "a review-band resolution must not retract anything from the graph"
+        );
+    }
+
+    #[tokio::test]
+    async fn dissimilar_entities_resolve_to_new() {
+        let (catalog, _storage, _graph) = seeded();
+        let principal = Principal::system();
+
+        catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "orders", None))
+            .await
+            .expect("a");
+        let b = catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "zzqxw", None))
+            .await
+            .expect("b");
+
+        // Different soundex, different name+parent, different normalized
+        // FQN — `b` shares no blocking key with anything, so it has no
+        // candidates at all.
+        let resolution = catalog
+            .resolve_asset(&principal, b.id)
+            .await
+            .expect("resolve");
+        assert_eq!(resolution, Resolution::New);
+    }
+
+    #[tokio::test]
+    async fn resolving_an_unknown_asset_is_not_found() {
+        let (catalog, _storage, _graph) = seeded();
+        let principal = Principal::system();
+
+        let result = catalog.resolve_asset(&principal, Uuid::new_v4()).await;
+        assert!(matches!(result, Err(CatalogError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn split_restores_exactly_the_pre_merge_state() {
+        let (catalog, storage, graph) = seeded();
+        let principal = Principal::system();
+
+        catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "orders", None))
+            .await
+            .expect("lower");
+        let upper = catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "ORDERS", None))
+            .await
+            .expect("upper");
+
+        let upper_sid = Sid::new(namespace::DSC, upper.id.to_string());
+        let before_merge = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                s: Some(upper_sid.clone()),
+                cx: Some(None),
+                ..Default::default()
+            })
+            .await
+            .expect("state before merge");
+        assert!(
+            !before_merge.is_empty(),
+            "the merged entity must have real flakes to restore"
+        );
+
+        catalog
+            .resolve_asset(&principal, upper.id)
+            .await
+            .expect("resolve");
+        let merge_id = only_merge_record(&storage).id;
+
+        let restored = catalog
+            .split_merge(&principal, merge_id)
+            .await
+            .expect("split");
+        assert!(restored.split_at.is_some());
+
+        let after_split = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                s: Some(upper_sid),
+                cx: Some(None),
+                ..Default::default()
+            })
+            .await
+            .expect("state after split");
+
+        let mut before_sorted = before_merge;
+        let mut after_sorted = after_split;
+        before_sorted.sort_by_key(|f| format!("{:?}", f.p));
+        after_sorted.sort_by_key(|f| format!("{:?}", f.p));
+        assert_eq!(
+            before_sorted
+                .iter()
+                .map(|f| (&f.p, &f.o))
+                .collect::<Vec<_>>(),
+            after_sorted
+                .iter()
+                .map(|f| (&f.p, &f.o))
+                .collect::<Vec<_>>(),
+            "the state after a split must equal the state before its merge"
+        );
+    }
+
+    /// A split's restoration query must be scoped to exactly the merged
+    /// entity's **default-graph** facts — not every entity in the graph, and
+    /// not a named graph's facts, which a merge never touched in the first
+    /// place (see the sibling merge test) and a split must not move into the
+    /// default graph either.
+    #[tokio::test]
+    async fn split_only_restores_the_merged_entitys_default_graph_facts() {
+        let (catalog, storage, graph) = seeded();
+        let principal = Principal::system();
+
+        let lower = catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "orders", None))
+            .await
+            .expect("lower");
+        let upper = catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "ORDERS", None))
+            .await
+            .expect("upper");
+
+        let upper_sid = Sid::new(namespace::DSC, upper.id.to_string());
+        let lower_sid = Sid::new(namespace::DSC, lower.id.to_string());
+        let named_graph = Sid::dsc("some-named-graph");
+        let t = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[Flake {
+                s: upper_sid.clone(),
+                p: Sid::dsc("extra"),
+                o: graph_owl_core::flake::FlakeValue::Boolean(true),
+                cx: Some(named_graph.clone()),
+                t,
+                op: true,
+            }])
+            .await
+            .expect("seed a named-graph fact");
+
+        catalog
+            .resolve_asset(&principal, upper.id)
+            .await
+            .expect("resolve");
+        let merge_id = only_merge_record(&storage).id;
+
+        let asserted_before_split = graph.asserted_flakes().len();
+        catalog
+            .split_merge(&principal, merge_id)
+            .await
+            .expect("split");
+        let newly_asserted = graph.asserted_flakes()[asserted_before_split..].to_vec();
+
+        assert!(
+            newly_asserted.iter().all(|f| f.s == upper_sid),
+            "a split must only reassert the merged entity's own facts, not \
+             the canonical's — proves the restoration query was scoped to \
+             the merged subject: {newly_asserted:?}"
+        );
+        assert!(
+            !newly_asserted.iter().any(|f| f.s == lower_sid),
+            "the canonical entity's facts must not be reasserted by a split"
+        );
+
+        let leaked_into_default_graph = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                s: Some(upper_sid),
+                p: Some(Sid::dsc("extra")),
+                cx: Some(None),
+                ..Default::default()
+            })
+            .await
+            .expect("query the default graph");
+        assert!(
+            leaked_into_default_graph.is_empty(),
+            "a named-graph fact must not be restored into the default graph"
+        );
+    }
+
+    #[tokio::test]
+    async fn splitting_an_already_split_merge_is_a_conflict() {
+        let (catalog, storage, _graph) = seeded();
+        let principal = Principal::system();
+
+        catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "orders", None))
+            .await
+            .expect("lower");
+        let upper = catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "ORDERS", None))
+            .await
+            .expect("upper");
+        catalog
+            .resolve_asset(&principal, upper.id)
+            .await
+            .expect("resolve");
+        let merge_id = only_merge_record(&storage).id;
+
+        catalog
+            .split_merge(&principal, merge_id)
+            .await
+            .expect("first split");
+        let second = catalog.split_merge(&principal, merge_id).await;
+
+        assert!(matches!(
+            second,
+            Err(CatalogError::Conflict {
+                kind: ConflictKind::MergeAlreadySplit,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn splitting_an_unknown_merge_is_not_found() {
+        let (catalog, _storage, _graph) = seeded();
+        let principal = Principal::system();
+
+        let result = catalog.split_merge(&principal, Uuid::new_v4()).await;
+        assert!(matches!(result, Err(CatalogError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn a_split_pair_is_not_immediately_re_merged() {
+        let (catalog, storage, _graph) = seeded();
+        let principal = Principal::system();
+
+        catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "orders", None))
+            .await
+            .expect("lower");
+        let upper = catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "ORDERS", None))
+            .await
+            .expect("upper");
+        catalog
+            .resolve_asset(&principal, upper.id)
+            .await
+            .expect("resolve");
+        let merge_id = only_merge_record(&storage).id;
+        catalog
+            .split_merge(&principal, merge_id)
+            .await
+            .expect("split");
+
+        // Re-resolving right after the split must not immediately re-merge
+        // what a human (or, here, the test) just took apart — the pair is
+        // excluded for the cooldown, not merely downgraded to a review.
+        let resolution = catalog
+            .resolve_asset(&principal, upper.id)
+            .await
+            .expect("resolve again");
+        assert_eq!(resolution, Resolution::New);
+        assert_eq!(
+            storage.merge_records.lock().unwrap().len(),
+            1,
+            "no second merge record should have been created"
+        );
+    }
+
+    // ---- Epic 17 Slice F: the review queue ----
+
+    #[tokio::test]
+    async fn an_ambiguous_resolution_queues_the_candidate_as_pending() {
+        let (catalog, _storage, _graph) = seeded();
+        let principal = Principal::system();
+        let schema = a_schema(&catalog, &principal).await;
+
+        let a = catalog
+            .upsert_asset(
+                &principal,
+                asset_req(AssetKind::Table, "orders", Some(schema)),
+            )
+            .await
+            .expect("table a");
+        let b = catalog
+            .upsert_asset(
+                &principal,
+                asset_req(AssetKind::Table, "orders_v2", Some(schema)),
+            )
+            .await
+            .expect("table b");
+        for (parent, col) in [
+            (a.id, "id"),
+            (a.id, "amount"),
+            (b.id, "id"),
+            (b.id, "amount"),
+        ] {
+            catalog
+                .upsert_asset(&principal, asset_req(AssetKind::Column, col, Some(parent)))
+                .await
+                .expect("column");
+        }
+
+        catalog
+            .resolve_asset(&principal, b.id)
+            .await
+            .expect("resolve");
+
+        let (entries, total) = catalog
+            .review_queue(&principal, &all_pending())
+            .await
+            .expect("queue");
+        assert_eq!(total, 1);
+        assert_eq!(entries[0].target, b.id);
+        assert_eq!(entries[0].candidate, a.id);
+        assert_eq!(entries[0].status, ReviewStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn rejecting_a_queued_pair_is_not_re_queued_by_a_later_resolution() {
+        let (catalog, _storage, _graph) = seeded();
+        let principal = Principal::system();
+        let schema = a_schema(&catalog, &principal).await;
+
+        let a = catalog
+            .upsert_asset(
+                &principal,
+                asset_req(AssetKind::Table, "orders", Some(schema)),
+            )
+            .await
+            .expect("table a");
+        let b = catalog
+            .upsert_asset(
+                &principal,
+                asset_req(AssetKind::Table, "orders_v2", Some(schema)),
+            )
+            .await
+            .expect("table b");
+        for (parent, col) in [
+            (a.id, "id"),
+            (a.id, "amount"),
+            (b.id, "id"),
+            (b.id, "amount"),
+        ] {
+            catalog
+                .upsert_asset(&principal, asset_req(AssetKind::Column, col, Some(parent)))
+                .await
+                .expect("column");
+        }
+
+        catalog
+            .resolve_asset(&principal, b.id)
+            .await
+            .expect("first resolve");
+        let (entries, _) = catalog
+            .review_queue(&principal, &all_pending())
+            .await
+            .expect("queue");
+        let entry_id = entries[0].id;
+
+        catalog
+            .reject_review(&principal, entry_id)
+            .await
+            .expect("reject");
+
+        // Re-ingestion of the same draft re-runs resolution, which recomputes
+        // the identical candidate — this is the rejection-persistence test
+        // Slice F's RED demands: without idempotent queuing, this would
+        // create a second, fresh `pending` entry for the same pair.
+        catalog
+            .resolve_asset(&principal, b.id)
+            .await
+            .expect("second resolve");
+
+        let (pending, pending_total) = catalog
+            .review_queue(&principal, &all_pending())
+            .await
+            .expect("pending queue");
+        assert_eq!(
+            pending_total, 0,
+            "a rejected pair must not reappear as pending: {pending:?}"
+        );
+
+        let (all_rejected, rejected_total) = catalog
+            .review_queue(
+                &principal,
+                &ReviewQueueFilter {
+                    status: Some(ReviewStatus::Rejected),
+                    limit: 50,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("rejected queue");
+        assert_eq!(rejected_total, 1);
+        assert_eq!(all_rejected[0].id, entry_id);
+    }
+
+    #[tokio::test]
+    async fn confirming_a_queued_pair_writes_the_merge() {
+        let (catalog, storage, graph) = seeded();
+        let principal = Principal::system();
+        let schema = a_schema(&catalog, &principal).await;
+
+        let a = catalog
+            .upsert_asset(
+                &principal,
+                asset_req(AssetKind::Table, "orders", Some(schema)),
+            )
+            .await
+            .expect("table a");
+        let b = catalog
+            .upsert_asset(
+                &principal,
+                asset_req(AssetKind::Table, "orders_v2", Some(schema)),
+            )
+            .await
+            .expect("table b");
+        for (parent, col) in [
+            (a.id, "id"),
+            (a.id, "amount"),
+            (b.id, "id"),
+            (b.id, "amount"),
+        ] {
+            catalog
+                .upsert_asset(&principal, asset_req(AssetKind::Column, col, Some(parent)))
+                .await
+                .expect("column");
+        }
+        catalog
+            .resolve_asset(&principal, b.id)
+            .await
+            .expect("resolve");
+        let (entries, _) = catalog
+            .review_queue(&principal, &all_pending())
+            .await
+            .expect("queue");
+        let entry_id = entries[0].id;
+
+        let resolution = catalog
+            .confirm_review(&principal, entry_id)
+            .await
+            .expect("confirm");
+        match resolution {
+            Resolution::Existing { entity, .. } => assert_eq!(entity, a.id),
+            other => panic!("expected Existing, got {other:?}"),
+        }
+
+        let record = only_merge_record(&storage);
+        assert_eq!(record.canonical, a.id);
+        assert_eq!(record.merged, b.id);
+        assert_eq!(
+            record.decided_by,
+            MergeDecidedBy::Human {
+                user_id: principal.id.clone()
+            }
+        );
+        let b_sid = Sid::new(namespace::DSC, b.id.to_string());
+        assert!(graph.retracted_flakes().iter().any(|f| f.s == b_sid));
+    }
+
+    #[tokio::test]
+    async fn confirming_an_already_decided_entry_is_a_conflict() {
+        let (catalog, _storage, _graph) = seeded();
+        let principal = Principal::system();
+        let schema = a_schema(&catalog, &principal).await;
+
+        let a = catalog
+            .upsert_asset(
+                &principal,
+                asset_req(AssetKind::Table, "orders", Some(schema)),
+            )
+            .await
+            .expect("table a");
+        let b = catalog
+            .upsert_asset(
+                &principal,
+                asset_req(AssetKind::Table, "orders_v2", Some(schema)),
+            )
+            .await
+            .expect("table b");
+        for (parent, col) in [
+            (a.id, "id"),
+            (a.id, "amount"),
+            (b.id, "id"),
+            (b.id, "amount"),
+        ] {
+            catalog
+                .upsert_asset(&principal, asset_req(AssetKind::Column, col, Some(parent)))
+                .await
+                .expect("column");
+        }
+        catalog
+            .resolve_asset(&principal, b.id)
+            .await
+            .expect("resolve");
+        let (entries, _) = catalog
+            .review_queue(&principal, &all_pending())
+            .await
+            .expect("queue");
+        let entry_id = entries[0].id;
+
+        catalog
+            .confirm_review(&principal, entry_id)
+            .await
+            .expect("first confirm");
+        let second = catalog.confirm_review(&principal, entry_id).await;
+
+        assert!(matches!(
+            second,
+            Err(CatalogError::Conflict {
+                kind: ConflictKind::ReviewAlreadyDecided,
+                ..
+            })
+        ));
+    }
+
+    // ---- Epic 17 Slice G: mention resolution ----
+
+    fn mention(text: &str, context: &str) -> graph_owl_core::resolution::TextMention {
+        graph_owl_core::resolution::TextMention {
+            text: text.to_string(),
+            expected_type: None,
+            context: context.to_string(),
+        }
+    }
+
+    async fn two_same_named_tables_in_different_schemas(
+        catalog: &Catalog,
+        principal: &Principal,
+    ) -> (Uuid, Uuid) {
+        let service = catalog
+            .upsert_asset(principal, asset_req(AssetKind::Service, "svc", None))
+            .await
+            .expect("service");
+        let database = catalog
+            .upsert_asset(
+                principal,
+                asset_req(AssetKind::Database, "db", Some(service.id)),
+            )
+            .await
+            .expect("database");
+        let staging = catalog
+            .upsert_asset(
+                principal,
+                asset_req(AssetKind::Schema, "staging", Some(database.id)),
+            )
+            .await
+            .expect("staging schema");
+        let prod = catalog
+            .upsert_asset(
+                principal,
+                asset_req(AssetKind::Schema, "prod", Some(database.id)),
+            )
+            .await
+            .expect("prod schema");
+        let in_staging = catalog
+            .upsert_asset(
+                principal,
+                asset_req(AssetKind::Table, "orders", Some(staging.id)),
+            )
+            .await
+            .expect("table in staging");
+        let in_prod = catalog
+            .upsert_asset(
+                principal,
+                asset_req(AssetKind::Table, "orders", Some(prod.id)),
+            )
+            .await
+            .expect("table in prod");
+        (in_staging.id, in_prod.id)
+    }
+
+    #[tokio::test]
+    async fn context_resolves_a_mention_to_the_matching_schema() {
+        let (catalog, _storage, _graph) = seeded();
+        let principal = Principal::system();
+        let (in_staging, _in_prod) =
+            two_same_named_tables_in_different_schemas(&catalog, &principal).await;
+        let source = Uuid::new_v4();
+
+        let resolution = catalog
+            .resolve_mention(
+                &principal,
+                source,
+                mention("orders", "the orders table in staging"),
+            )
+            .await
+            .expect("resolve_mention")
+            .expect("should resolve");
+
+        assert_eq!(resolution.entity, in_staging);
+        assert_eq!(resolution.source, source);
+        assert!(resolution.confidence > 0.5);
+    }
+
+    #[tokio::test]
+    async fn a_mention_never_creates_a_merge_record() {
+        let (catalog, storage, graph) = seeded();
+        let principal = Principal::system();
+        two_same_named_tables_in_different_schemas(&catalog, &principal).await;
+
+        let asserted_before = graph.asserted_flakes().len();
+        let retracted_before = graph.retracted_flakes().len();
+
+        catalog
+            .resolve_mention(
+                &principal,
+                Uuid::new_v4(),
+                mention("orders", "the orders table in staging"),
+            )
+            .await
+            .expect("resolve_mention");
+
+        assert!(
+            storage.merge_records.lock().unwrap().is_empty(),
+            "a mention must never write a MergeRecord — mentions link, entities merge"
+        );
+        assert_eq!(
+            graph.asserted_flakes().len(),
+            asserted_before,
+            "a mention must not touch the graph"
+        );
+        assert_eq!(graph.retracted_flakes().len(), retracted_before);
+    }
+
+    #[tokio::test]
+    async fn a_mention_with_no_matching_candidate_resolves_to_none() {
+        let (catalog, _storage, _graph) = seeded();
+        let principal = Principal::system();
+        catalog
+            .upsert_asset(&principal, asset_req(AssetKind::Service, "orders", None))
+            .await
+            .expect("orders");
+
+        let resolution = catalog
+            .resolve_mention(&principal, Uuid::new_v4(), mention("zzqxw", ""))
+            .await
+            .expect("resolve_mention");
+
+        assert_eq!(resolution, None);
+    }
+
+    #[tokio::test]
+    async fn a_resolved_mention_is_recorded_against_its_source() {
+        let (catalog, _storage, _graph) = seeded();
+        let principal = Principal::system();
+        let (in_staging, _) =
+            two_same_named_tables_in_different_schemas(&catalog, &principal).await;
+        let source = Uuid::new_v4();
+
+        catalog
+            .resolve_mention(
+                &principal,
+                source,
+                mention("orders", "the orders table in staging"),
+            )
+            .await
+            .expect("resolve_mention")
+            .expect("should resolve");
+
+        let recorded = catalog
+            .storage
+            .mention_resolutions_for_source(source)
+            .await
+            .expect("recorded mentions");
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].entity, in_staging);
+        assert_eq!(recorded[0].text, "orders");
     }
 }
 

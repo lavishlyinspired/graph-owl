@@ -64,6 +64,15 @@ pub enum ConflictKind {
     /// and a canned per-kind sentence would eat it the way it twice ate
     /// others before this enum grew a rule about it.
     GlossaryHasTerms,
+    /// A merge was already split — Epic 17 Slice E's `409`. Its own variant
+    /// for the same reason every other conflict-with-detail here has one:
+    /// the original split time is the actionable detail, and reusing a
+    /// generic kind would eat it.
+    MergeAlreadySplit,
+    /// A review-queue entry was already confirmed or rejected — Epic 17
+    /// Slice F. Its own variant so a second confirm cannot double-merge and
+    /// a reject-after-confirm cannot silently do nothing.
+    ReviewAlreadyDecided,
 }
 
 #[derive(Debug, Error)]
@@ -96,6 +105,22 @@ pub enum UpdateOutcome {
     /// The guard did not match. Carries what the version actually is, so the
     /// caller can show the reader what they were about to overwrite.
     VersionMismatch(EntityVersion),
+}
+
+/// What splitting a merge did (Epic 17 Slice E).
+///
+/// `AlreadySplit` is distinct from a plain error: splitting twice is a
+/// **client** mistake with a specific fix (`409`, per the plan's own
+/// acceptance criterion), not a backend failure, and it carries the original
+/// `split_at` so the caller can report when the merge was undone rather than
+/// just that it was.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SplitOutcome {
+    Split(Box<graph_owl_core::resolution::MergeRecord>),
+    NotFound,
+    AlreadySplit {
+        split_at: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 /// What saving a memory did.
@@ -446,6 +471,22 @@ pub struct ValidationFilter {
     pub offset: usize,
 }
 
+/// What slice of the review queue a caller wants — Epic 17 Slice F.
+#[derive(Debug, Clone, Default)]
+pub struct ReviewQueueFilter {
+    /// `None` — the common case for the working queue — means "pending
+    /// only"; every other status has to be asked for explicitly, or a
+    /// decided entry no one is acting on would clutter the queue forever.
+    pub status: Option<graph_owl_core::resolution::ReviewStatus>,
+    /// The **target** asset's kind. A steward triages by what kind of thing
+    /// is duplicated, not by what it might be a duplicate of.
+    pub kind: Option<AssetKind>,
+    pub min_score: Option<f64>,
+    pub max_score: Option<f64>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
 /// Connection-pool occupancy, for the operational gauge.
 ///
 /// `idle` rather than `in_use`, because that is what a pool can report without
@@ -651,6 +692,139 @@ pub trait Storage: Send + Sync {
     async fn list_assets_under_fqn(&self, prefix: &str) -> Result<Vec<Asset>, StorageError>;
 
     async fn count_assets_by_kind(&self) -> Result<Vec<(AssetKind, i64)>, StorageError>;
+
+    /// Entities sharing at least one blocking key with `asset_id` (Epic 17
+    /// Slice B) — the candidate set a resolver scores, never the full table.
+    /// Blocking keys are computed and kept current by `upsert_asset` itself,
+    /// so every write (including a rename) is reflected here without a
+    /// separate call.
+    ///
+    /// Excludes `asset_id` itself and any tombstoned asset. Empty when
+    /// nothing shares a key with it — that is a normal outcome, not an
+    /// error: an isolated entity has no duplicates to find.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn resolution_candidates(&self, asset_id: Uuid) -> Result<Vec<Asset>, StorageError>;
+
+    /// Writes a merge (Epic 17 Slice D). The caller has already retracted
+    /// the merged entity's flakes and asserted `sameAs` — this only records
+    /// the decision, which is what makes it reviewable and splittable later.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn create_merge_record(
+        &self,
+        record: graph_owl_core::resolution::MergeRecord,
+    ) -> Result<graph_owl_core::resolution::MergeRecord, StorageError>;
+
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn get_merge_record(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::resolution::MergeRecord>, StorageError>;
+
+    /// Marks a merge split at `split_at`, without deleting the record
+    /// (Slice E decision: a split is a fact about the merge, not its
+    /// erasure).
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn split_merge_record(
+        &self,
+        id: Uuid,
+        split_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<SplitOutcome, StorageError>;
+
+    /// The most recent split between this pair, in either role — the
+    /// cooldown check Slice E's acceptance criteria require, so auto-merge
+    /// does not immediately re-merge what a human just split.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn most_recent_split_between(
+        &self,
+        a: Uuid,
+        b: Uuid,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError>;
+
+    /// Queues a candidate pair for review (Epic 17 Slice F), or does nothing
+    /// if the pair is already queued.
+    ///
+    /// **Idempotent by design, not merely by accident**: an existing entry —
+    /// pending, confirmed, or rejected — is returned unchanged. This is the
+    /// entire mechanism behind "a rejection is not re-queued on the next
+    /// re-ingestion of the same draft": there is nothing that resets it,
+    /// because the write that would have re-created it saw the row already
+    /// there and stopped.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn queue_for_review(
+        &self,
+        entry: graph_owl_core::resolution::ReviewQueueEntry,
+    ) -> Result<graph_owl_core::resolution::ReviewQueueEntry, StorageError>;
+
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn list_review_queue(
+        &self,
+        filter: &ReviewQueueFilter,
+    ) -> Result<(Vec<graph_owl_core::resolution::ReviewQueueEntry>, i64), StorageError>;
+
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn get_review_queue_entry(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::resolution::ReviewQueueEntry>, StorageError>;
+
+    /// Decides a pending entry. A entry that is already decided is returned
+    /// unchanged rather than overwritten — a decision, once made, does not
+    /// flip back and forth because a client called this twice.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn decide_review_queue_entry(
+        &self,
+        id: Uuid,
+        status: graph_owl_core::resolution::ReviewStatus,
+        decided_by: graph_owl_core::resolution::MergeDecidedBy,
+        decided_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<graph_owl_core::resolution::ReviewQueueEntry>, StorageError>;
+
+    /// Persists a mention resolution (Epic 17 Slice G). Never a merge — a
+    /// mention links text to an entity, and this is the record of that link,
+    /// not of any identity claim.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn record_mention_resolution(
+        &self,
+        resolution: graph_owl_core::resolution::MentionResolution,
+    ) -> Result<graph_owl_core::resolution::MentionResolution, StorageError>;
+
+    /// Every mention resolved from one source (e.g. a memory), most recent
+    /// first.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn mention_resolutions_for_source(
+        &self,
+        source: Uuid,
+    ) -> Result<Vec<graph_owl_core::resolution::MentionResolution>, StorageError>;
 
     // ---- envelope (Epic 3) ----
 

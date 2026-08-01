@@ -41,22 +41,25 @@ pub enum MemoryKind {
 /// there is nothing to send.
 // `rename_all` on an enum renames the **variants**, not their fields, so this
 // serialized `agent_id` and `user_id` in snake_case while every other type on the
-// wire was camelCase. `rename_all_fields` is the one that reaches the fields.
+// wire was camelCase. `rename_all_fields` is the one that reaches the fields for
+// *serde* — but utoipa 5's schema derive does not read that attribute, so the
+// generated OpenAPI schema kept documenting `agent_id`/`user_id` even after the
+// wire format was fixed (found while adding `graph_owl_core::resolution`'s own
+// struct-variant enums, which hit the identical gap). Explicit per-field
+// `#[serde(rename = "...")]` is what both serde and utoipa agree on.
 // Caught by the HTTP test, and by nothing else: the domain tests compare Rust
 // values, and the repository tests compare columns — neither looks at the JSON.
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Authorship {
     Human {
+        #[serde(rename = "userId")]
         user_id: String,
     },
     /// An agent, named. Not "a machine" — which agent matters when its
     /// conclusions turn out to be wrong and somebody has to find the rest.
     Agent {
+        #[serde(rename = "agentId")]
         agent_id: String,
         model: String,
     },

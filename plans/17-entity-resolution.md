@@ -1,7 +1,7 @@
 # Plan: Entity Resolution & Deduplication (Epic 17)
 
 **Branch**: feat/entity-resolution
-**Status**: Not started
+**Status**: Slices A, B, C, D, E, F, G shipped. A2 explicitly deferred, blocked on Epic 95 (inverse-functional properties / `owl:hasKey` do not exist yet).
 **Depends on**: Epic 4 (`sameAs` in the graph), Epic 15 + 16 (two write paths make this necessary)
 **Crate**: `graph-owl-resolution`
 
@@ -110,6 +110,8 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: Table-driven normalization tests including the quoted-segment case from Epic 2's tokenizer. A test asserting the scorer is *not* called on an exact match (call counter) — this is a correctness matter, not just performance, because a scorer bug must not affect exact matches. Mutator watch: case-sensitive comparison must fail; skipping the short-circuit must fail the call-count assertion.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Shipped**: `graph-owl-resolution::normalize` — tokenize/decode/lowercase, `is_deterministic_match`, `resolve_pair` short-circuit. 0 missed mutants (15 mutants, 1 unviable).
+
 ### Slice A2: Key-based identity, before any scoring
 
 **Value**: Two records carrying the same declared identifier are the same
@@ -165,17 +167,23 @@ identity that disagree.
 **RED**: Query-plan test asserting index use, not sequential scan — the difference between viable and unusable. A recompute-on-rename test: a renamed entity must be findable under its new blocking key. Mutator watch: a scan-based generator must fail the plan test; stale blocking keys after rename must fail the recompute test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Shipped**: four keys (`normalized_fqn`, `name_parent`, `soundex_name`, `column_hash`) computed inside `upsert_asset`'s Postgres path and stored in `entity_blocking_keys` (`V21`), so "computed on write" and "recomputed on rename" are structural rather than a second call sites has to remember. A written `Column` also refreshes its parent table's `column_hash` (the one case a plain same-row recompute misses). `resolution_candidates` is one query joining a target's own keys against the index; verified by `EXPLAIN` against 40k bulk-loaded rows (`entity_blocking_keys_lookup` index, no seq scan) — the p95 latency claim was not separately load-tested, consistent with this project's practice of not chasing wall-clock assertions elsewhere. 0 missed mutants across the pure key functions (21) and the Postgres wiring (8 real + 3 unviable).
+
 ### Slice C: Probabilistic scoring (pure)
 
 **Acceptance criteria**: score is a pure function of two entity views; each term isolated by a test holding the others equal; identical names in different parents score below identical names in the same parent; structural overlap uses column-name Jaccard, and 0 shared columns contributes 0 not a division error; score is in `[0,1]`; weights are configurable.
 **RED**: One isolating test per term — the only way to prove a weight is applied. A zero-column edge case (empty Jaccard denominator). Mutator watch: a zeroed weight must fail its isolating test; an unguarded Jaccard divide must panic on the zero-column case.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Shipped**: `graph-owl-resolution::score` — `score()` plus `evidence()` (the per-term breakdown a `MergeRecord`/review-queue entry needs, added alongside since a merge that only kept the number would not be diagnosable). 32/33 mutants caught; the one MISSED (`column_overlap`'s `&&`/`||` empty-set guard) is a documented equivalent mutant.
+
 ### Slice D: Confidence bands and auto-merge
 
 **Acceptance criteria**: ≥0.9 auto-merges and writes a `MergeRecord`; 0.6–0.9 returns `Ambiguous` and queues, creating nothing; <0.6 returns `New`; band boundaries are inclusive as documented and tested at exactly 0.9 and 0.6; auto-merge is disableable per deployment; a merge retracts the merged entity's flakes and asserts `sameAs`.
 **RED**: Boundary tests at exactly 0.9 and 0.6. A test asserting the 0.85 case creates **nothing** — neither a merge nor a new entity — because a queued ambiguity that silently created a duplicate would defeat the epic. Mutator watch: `>` for `>=` must fail the boundary; auto-merging the review band must fail the creates-nothing test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**Shipped**: `graph-owl-resolution::bands` (pure, 0 missed) plus `Catalog::resolve_asset`/`merge` orchestration. **Auto-merge defaults to *disabled***, per this plan's own pre-PR gate ("off by default … enabling it is a deliberate operator decision") — opt in via `Catalog::with_auto_merge_enabled(true)`. Deterministic matching (Slice A) bypasses the toggle entirely, by design: it is a different, more certain mechanism than the confidence-band decision the toggle governs. One documented, provably-unreachable branch: with `same_source_system` always `0` (`Asset` does not track a source-system field yet), the scored path can only reach the `>=0.9` band at exactly `sim=1.0`, which is already caught by the deterministic short-circuit above it — so `Decision::AutoMerge` is unreachable through the scored branch given the current schema, and the two mutants there are equivalent, not missing coverage.
 
 ### Slice E: Merges are reversible
 
@@ -184,17 +192,23 @@ identity that disagree.
 **RED**: The round-trip equivalence test — state before merge and after split must match, which is the reversibility contract. The cooldown test: without it, auto-merge re-merges what a human just split, which is the most frustrating possible behaviour. Mutator watch: deleting the merge record must fail the `409`; missing cooldown must fail the re-merge test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Shipped**: `merge_records` (`V22`, adds `merged_at_t` beyond the plan's sketch — the engine transaction time the merge itself wrote at, so a split can restore exactly `merged_at_t - 1` via time-travel rather than reconstructing pre-merge state from wall-clock time). `POST /merges/{id}/split`. The cooldown check moved to filter candidates *before* the deterministic-match loop, not only around the scored auto-merge branch — a recently-split pair sharing a case-different FQN would otherwise re-merge through the short-circuit, ignoring the cooldown entirely (found via mutation testing, not anticipated). Round-trip equivalence and named-graph-untouched properties both verified against `RecordingGraph` (facade) and a real Postgres + engine (HTTP). 0 missed mutants (16 real + 5 unviable across storage; 10 real + 21 unviable at the facade).
+
 ### Slice F: Review queue
 
 **Acceptance criteria**: `GET /resolution/queue` lists ambiguous pairs with evidence and scores, paginated; confirm merges with `decided_by: Human`; reject records the decision so the pair is not re-queued; rejection persists across re-ingestion of the same draft; queue is filterable by entity type and score range; bulk confirm/reject.
 **RED**: A rejection-persistence test: reject a pair, re-run the ingestion that produced it, assert it is not re-queued. Without this the queue refills with the same decisions forever. Mutator watch: a rejection that only deletes the queue entry must fail it.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Shipped**: `resolution_queue` (`V23`), `UNIQUE (target_id, candidate_id)` plus `ON CONFLICT DO UPDATE SET target_id = target_id` (a no-op update, so `RETURNING` still yields the pre-existing row on conflict) — the whole rejection-persistence mechanism is this one constraint, not application logic that could drift. `GET /resolution/queue`, `POST /resolution/queue/{id}/confirm` (writes the merge, `decided_by: Human`), `POST /resolution/queue/{id}/reject`, `POST /resolution/queue/bulk` (independent per-id results in one request). A new `ConflictKind::ReviewAlreadyDecided` — confirming or rejecting an already-decided entry is `409`, checked before deciding so a double-confirm can never write a second `MergeRecord`. Filterable by status (pending by default), kind, and score range. 0 missed mutants (18 real + 24 unviable storage; 20 real + 10 unviable facade — plus 2 pre-existing Slice D equivalents; 10 real + 26 unviable server).
+
 ### Slice G: Mention resolution
 
 **Acceptance criteria**: `resolve_mention` takes text, expected type, and surrounding context; returns ranked candidates with confidence; **never auto-merges** — mentions link, entities merge; a mention with no candidate above 0.5 resolves to `None` rather than guessing; context disambiguates ("the orders table in staging" vs "in prod"); resolution is recorded as a `mentionedIn` edge with confidence.
 **RED**: A context-disambiguation test with two same-named tables in different schemas, asserting the contextual hint selects correctly. A test asserting no merge occurs from mention resolution. Mutator watch: ignoring context must fail the disambiguation; merging from a mention must fail — it would conflate an entity with a passing reference to it.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**Shipped**: `graph-owl-resolution::mention` (pure: `score_mention` — 0.5 name similarity + 0.5 context-substring agreement, `clears_threshold` at strictly `>0.5`; 25/25 mutants). `Catalog::resolve_mention` finds candidates via `search_assets`, scores each against the mention's text and context using its ancestor-name path, and picks the best above threshold — never calling `merge`. **One deliberate departure from the plan's wording**: "recorded as a `mentionedIn` edge" is implemented as a relational record (`mention_resolutions`, `V24`) rather than a graph flake — this project's flake model has no edge-property mechanism yet (no reification), and a `mentionedIn` flake alone could not carry `confidence`; a second, correlated flake to carry it would be reification by another name. The relational record gives the same audit/query properties (`mention_resolutions_for_source`) without inventing that mechanism now. `POST /memories/{id}/mentions` (`{id}` is the mention's source). 0 missed mutants (18 real + 24 unviable storage, shared count with Slice F's run; 25 + 10 unviable facade — plus the 2 pre-existing Slice D equivalents and 1 documented tie-break note; 10 real + 26 unviable server).
 
 ## Explicitly deferred (with destination)
 

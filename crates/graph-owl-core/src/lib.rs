@@ -1,3 +1,4 @@
+pub mod blocking;
 pub mod contradiction;
 pub mod envelope;
 pub mod flake;
@@ -11,6 +12,7 @@ pub mod page;
 pub mod projection;
 pub mod recall;
 pub mod relationship_type;
+pub mod resolution;
 
 use chrono::{DateTime, Utc};
 use envelope::{ChangeDescription, EntityVersion};
