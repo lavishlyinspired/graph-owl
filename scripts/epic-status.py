@@ -72,7 +72,17 @@ def slices_by_epic() -> dict[str, list[tuple[str, str]]]:
     # failure the old one had. Bullets under that heading count as open.
     pending_block = False
     for line in (PLANS / "DEMOS.md").read_text().splitlines():
-        heading = re.match(r"^###\s+Epics?\s+([0-9a-z,\s/–—-]+?)\s*[—–-]", line)
+        # The terminator requires *surrounding* whitespace so it only matches
+        # a title separator (" — Description", spaced both sides) and not a
+        # bare numeric range like "25–30" or "37a–c", where the dash sits
+        # tight against its digits. The lazy capture group used to stop at
+        # the first dash of either kind, so "Epics 22, 23, 25–30" read as
+        # epics 22, 23 and 25 only — 26 through 30 silently vanished from
+        # this heading's marks. Found while Epic 24 restructured this exact
+        # heading and the epics after it turned up with no marks at all.
+        heading = re.match(
+            r"^###\s+Epics?\s+([0-9a-z,\s/–—-]+?)(?:\s+[—–]\s|\s*$)", line
+        )
         if heading:
             current = re.findall(r"\d+[a-z]?", heading.group(1))
             pending_block = False

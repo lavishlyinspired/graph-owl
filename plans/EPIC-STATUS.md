@@ -41,43 +41,43 @@ is the condition that index exists to catch.
 | **6** | 4, 12 | [`06-engine-reasoning.md`](06-engine-reasoning.md) | In progress | 7/8 (+1 partial) | Epic 4 (triples), Epic 5 (ontology types) |
 | **7** | 3 | [`07-engine-query.md`](07-engine-query.md) | In progress | 8/9 | Epic 4 (triples), Epic 13 (authorization to compile into queries), **Epic 7a**… |
 | **7a** | 3 | [`07a-engine-traversal.md`](07a-engine-traversal.md) | **Shipped** | 5/5 | Epic 4 (triples, SPOT/POST/OPST indexes) |
-| **7b** | 8 | [`07b-engine-cypher.md`](07b-engine-cypher.md) | Not started | — | Epic 7 (SPARQL plan is the lowering target), Epic 7a (traversal), **Epic 7c (LP… |
-| **7c** | 8 | [`07c-engine-lpg.md`](07c-engine-lpg.md) | Not started | — | Epic 4 (flakes), Epic 1 (relationship taxonomy) |
-| **7d** | 8 | [`07d-engine-bolt.md`](07d-engine-bolt.md) | Not started | — | Epic 7b (Cypher), Epic 7c (LPG projection), Epic 12 (auth), Epic 13 (authorizat… |
+| **7b** | 8 | [`07b-engine-cypher.md`](07b-engine-cypher.md) | Not started | 0/5 | Epic 7 (SPARQL plan is the lowering target), Epic 7a (traversal), **Epic 7c (LP… |
+| **7c** | 8 | [`07c-engine-lpg.md`](07c-engine-lpg.md) | Not started | 0/5 | Epic 4 (flakes), Epic 1 (relationship taxonomy) |
+| **7d** | 8 | [`07d-engine-bolt.md`](07d-engine-bolt.md) | Not started | 0/5 | Epic 7b (Cypher), Epic 7c (LPG projection), Epic 12 (auth), Epic 13 (authorizat… |
 | **8** | 2 | [`08-engine-search.md`](08-engine-search.md) | In progress | 6/8 | Epic 3 (change events to subscribe to), Epic 2 (FQNs to rank on), Epic 25 (tags… |
-| **9** | 8 | [`09-engine-rdf-io.md`](09-engine-rdf-io.md) | Not started | — | Epic 4 (triples to serialize), Epic 7 (CONSTRUCT produces Turtle) |
-| **9a** | 8 | [`09a-lpg-interchange.md`](09a-lpg-interchange.md) | Not started | — | Epic 7c (LPG projection), Epic 9 (RDF I/O — shares the streaming-serializer sha… |
+| **9** | 8 | [`09-engine-rdf-io.md`](09-engine-rdf-io.md) | Not started | 0/5 | Epic 4 (triples to serialize), Epic 7 (CONSTRUCT produces Turtle) |
+| **9a** | 8 | [`09a-lpg-interchange.md`](09a-lpg-interchange.md) | Not started | 0/5 | Epic 7c (LPG projection), Epic 9 (RDF I/O — shares the streaming-serializer sha… |
 | **10** | 2 | [`10-operability.md`](10-operability.md) | **Shipped** | 17/17 | Epic 1 (a server, an error model, and a contract to instrument) |
 | **11** | 2 | [`11-people-and-ownership.md`](11-people-and-ownership.md) | In progress | 11/14 (+1 partial) | Epic 3 (envelope carries `owners`) |
 | **12** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 15/15 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **13** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 10/10 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **14** | 5 | [`14-mcp-activation.md`](14-mcp-activation.md) | In progress | 3/8 (+1 partial) | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard… |
 | **15** | 1 | [`15-connectors.md`](15-connectors.md) | In progress | 13/17 | Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable) |
-| **16** | 6 | [`16-ingestion-apis.md`](16-ingestion-apis.md) | In progress | 5/8 (+2 partial) | Epic 1 (contract), Epic 15 (upsert semantics) |
+| **16** | 6 | [`16-ingestion-apis.md`](16-ingestion-apis.md) | In progress | 3/7 (+1 partial) | Epic 1 (contract), Epic 15 (upsert semantics) |
 | **17** | 6 | [`17-entity-resolution.md`](17-entity-resolution.md) | Not started | 0/3 | Epic 4 (`sameAs` in the graph), Epic 15 + 16 (two write paths make this necessa… |
 | **18** | 6 | [`18-inbound-events.md`](18-inbound-events.md) | Not started | 0/2 | Epic 16 (ingestion contract), Epic 17 (resolution, so pushes do not duplicate) |
 | **19** | 6 | [`19-streaming.md`](19-streaming.md) | Not started | 0/2 | Epic 16 (ingestion contract), Epic 18 (dedup and ordering machinery) |
 | **20** | 6 | [`20-metadata-as-code.md`](20-metadata-as-code.md) | Not started | 0/2 | Epic 15 (idempotent upsert and reconciliation machinery) |
 | **21** | 6 | [`21-document-ingestion.md`](21-document-ingestion.md) | Not started | 0/2 | Epic 16 (ingestion), Epic 17 (mention resolution) |
-| **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | Not started | 0/9 | Epic 3 (the envelope's `extension` field) |
-| **23** | 7 | [`23-domains.md`](23-domains.md) | Not started | — | Epic 11 (domains and products are owned) |
-| **24** | 7 | [`24-business-semantics.md`](24-business-semantics.md) | Not started | — | Epic 2 (FQN derivation and the hierarchy terms attach to), Epic 11 (term review… |
-| **25** | 7 | [`25-classification.md`](25-classification.md) | Not started | — | Epic 3 (envelope carries `tags`), Epic 11 (term reviewers are users) |
+| **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | Not started | 0/8 | Epic 3 (the envelope's `extension` field) |
+| **23** | 7 | [`23-domains.md`](23-domains.md) | Not started | 0/8 | Epic 11 (domains and products are owned) |
+| **24** | 7 | [`24-business-semantics.md`](24-business-semantics.md) | In progress | 8/9 (+1 partial) | Epic 2 (FQN derivation and the hierarchy terms attach to), Epic 11 (term review… |
+| **25** | 7 | [`25-classification.md`](25-classification.md) | Not started | 0/8 | Epic 3 (envelope carries `tags`), Epic 11 (term reviewers are users) |
 | **26** | 7 | [`26-lifecycle-certification.md`](26-lifecycle-certification.md) | Not started | — | Epic 11 (issuers are principals), Epic 24 (metrics are certifiable) |
 | **27** | 7 | [`27-contracts.md`](27-contracts.md) | Not started | — | Epic 2 (schemas to guarantee), Epic 3 (version diffs detect breakage) |
 | **28** | 7 | [`28-usage.md`](28-usage.md) | Not started | — | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
 | **29** | 7 | [`29-lineage.md`](29-lineage.md) | In progress | 5/8 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
-| **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | Not started | — | Epic 29 (lineage, for propagating trust signals) |
+| **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | Not started | 0/8 | Epic 29 (lineage, for propagating trust signals) |
 | **31** | 5 | [`31-memory.md`](31-memory.md) | In progress | 2/5 (+1 partial) | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
 | **32** | 5 | [`32-agent-capabilities.md`](32-agent-capabilities.md) | Not started | 0/2 | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
 | **33** | 9 | [`33-ontology-packs.md`](33-ontology-packs.md) | Not started | 0/8 | Epic 24 (glossary and taxonomy model), Epic 9 (standards import) |
 | **34** | 9 | [`34-entity-expansion.md`](34-entity-expansion.md) | Not started | — | Epic 8 (each new type indexes for free — the property being demonstrated), Epic… |
 | **35** | 9 | [`35-collaboration.md`](35-collaboration.md) | Not started | — | Epic 11 (users), Epic 12 (real identity on posts) |
-| **36** | 9 | [`36-reference-apps.md`](36-reference-apps.md) | Not started | — | Epic 14 (MCP), Epic 16 (SDKs), Epic 29 (graph API) |
-| **37a** | 9 | [`37a-scale.md`](37a-scale.md) | Not started | — | Epic 34 (a realistic entity mix to generate) |
+| **36** | 9 | [`36-reference-apps.md`](36-reference-apps.md) | Not started | 0/8 | Epic 14 (MCP), Epic 16 (SDKs), Epic 29 (graph API) |
+| **37a** | 9 | [`37a-scale.md`](37a-scale.md) | Not started | 0/8 | Epic 34 (a realistic entity mix to generate) |
 | **37b** | 9 | [`37b-portability.md`](37b-portability.md) | Not started | — | Epic 3 (history is part of what must survive) |
 | **37c** | 9 | [`37c-embeddable.md`](37c-embeddable.md) | Not started | — | Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate again… |
-| **38** | 9 | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | — | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
+| **38** | 9 | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | 0/8 | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
 | **39** | 1 | [`39-ui-foundation.md`](39-ui-foundation.md) | **Shipped** | 23/23 | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
 | **40** | 3 | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | **Shipped** | 11/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
 | **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | In progress | 10/14 (+1 partial) | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
@@ -197,6 +197,30 @@ is the condition that index exists to catch.
 - [x] `as_of` on every walk, so time-travelling traversal is free
 - [x] `shortest_path`, `all_paths`, `detect_cycles` *(Slices C, D)* — deterministic tiebreak, 
 
+### Epic 7b — Cypher Query Support *(Demo 8)*
+
+- [ ] 7c
+- [ ] 7b
+- [ ] 7d
+- [ ] 9
+- [ ] 9a
+
+### Epic 7c — Labelled Property Graph Projection ★ *(Demo 8)*
+
+- [ ] 7c
+- [ ] 7b
+- [ ] 7d
+- [ ] 9
+- [ ] 9a
+
+### Epic 7d — Bolt Protocol Server ★ *(Demo 8)*
+
+- [ ] 7c
+- [ ] 7b
+- [ ] 7d
+- [ ] 9
+- [ ] 9a
+
 ### Epic 8 — Vector & Hybrid Search ★ *(Demo 2)*
 
 - [x] Facets by kind and schema, computed over the **visible** set
@@ -207,6 +231,22 @@ is the condition that index exists to catch.
 - [x] The rank key *is* the pagination cursor
 - [ ] Decision 5's full relevance ordering (exact FQN > exact name > prefix > fuzzy > descript
 - [ ] Snippets: a hit shows the asset, not the matched fragment of its description
+
+### Epic 9 — RDF Interop & Open Standards *(Demo 8)*
+
+- [ ] 7c
+- [ ] 7b
+- [ ] 7d
+- [ ] 9
+- [ ] 9a
+
+### Epic 9a — Property-Graph Interchange & External Store Sync *(Demo 8)*
+
+- [ ] 7c
+- [ ] 7b
+- [ ] 7d
+- [ ] 9
+- [ ] 9a
 
 ### Epic 10 — Operability & Resource Budget ★ *(Demo 2)*
 
@@ -313,17 +353,9 @@ is the condition that index exists to catch.
 - [x] Idempotency
 - [x] Boundary validation
 - [x] Relationships and lineage in a push
-- [~] Batch file ingestion — job, reaper and cancel land; **not multipart, no Parquet, no RSS assertion** (below)
-- [x] Generated TypeScript and Python SDKs
-- [x] Custom adapter guide and runnable example
+- [ ] Batch file ingestion
+- [ ] Generated TypeScript and Python SDKs
 - [ ] `ConflictKind` eats a conflict's detail unless it has its own variant.
-
-**Three of Slice C's acceptance criteria were met differently than written, and one was not met at all.** Recorded here rather than ticked, because each is a decision a later reader would otherwise have to rediscover:
-
-- **Raw body, not `multipart/form-data`.** Every pusher on this path is a program (decision 1 puts adapters out of process), and multipart is a browser form encoding — it would cost each SDK a dependency to encode something no browser sends. `POST /ingest/batch` takes `application/x-ndjson` or `text/csv` directly.
-- **No Parquet.** It is columnar, so any reader must materialise a row group at a time — which contradicts the *same slice's* bounded-memory criterion — and it costs the `arrow`+`parquet` dependency pair for a format any pusher converts from in one line. `Format::parse` refuses it **by name** rather than falling through to the line parser, so the answer is "this build does not read Parquet" and not 500k parse errors.
-- **Bounded memory is structural, not asserted.** `rows()` returns an iterator over a `BufRead` and nothing in the path ever holds more than one row, so a 500k-row file and a 5-row file cost the same. The plan asked for a peak-RSS assertion on a generated large file; that test does not exist, and the property currently rests on the type signature.
-- **The error cap is decided and unit-tested, but no end-to-end test drives a file past 1000 errors.** `should_halt` is covered at 100% mutation; the wiring is not covered by an integration test.
 
 ### Epic 17 — Entity Resolution & Deduplication *(Demo 6)*
 
@@ -355,7 +387,40 @@ is the condition that index exists to catch.
 
 - [ ] 22
 - [ ] 23
-- [ ] 24
+- [ ] 25
+- [ ] 26
+- [ ] 27
+- [ ] 28
+- [ ] 29
+- [ ] 30
+
+### Epic 23 — Domains & Data Products *(Demo 7)*
+
+- [ ] 22
+- [ ] 23
+- [ ] 25
+- [ ] 26
+- [ ] 27
+- [ ] 28
+- [ ] 29
+- [ ] 30
+
+### Epic 24 — Business Semantics *(Demo 7)*
+
+- [x] A
+- [x] A
+- [x] A
+- [x] Every term is created `Draft`; the core review workflow (`can_transition`,
+- [x] B
+- [x] C
+- [x] D
+- [x] E
+- [~] F
+
+### Epic 25 — Tags & Classification *(Demo 7)*
+
+- [ ] 22
+- [ ] 23
 - [ ] 25
 - [ ] 26
 - [ ] 27
@@ -374,6 +439,17 @@ is the condition that index exists to catch.
 - [ ] E
 - [ ] F
 
+### Epic 30 — Quality Signals & Incidents *(Demo 7)*
+
+- [ ] 22
+- [ ] 23
+- [ ] 25
+- [ ] 26
+- [ ] 27
+- [ ] 28
+- [ ] 29
+- [ ] 30
+
 ### Epic 31 — Organizational Memory ★ *(Demo 5)*
 
 - [x] Memory objects: kind, content, authorship, confidence, `as_of`
@@ -388,6 +464,39 @@ is the condition that index exists to catch.
 - [ ] Investigation and remediation proposals
 
 ### Epic 33 — Domain Ontology Packs *(Demo 9)*
+
+- [ ] 33
+- [ ] 34
+- [ ] 35
+- [ ] 36
+- [ ] 37a
+- [ ] 37b
+- [ ] 37c
+- [ ] 38
+
+### Epic 36 — Reference Applications *(Demo 9)*
+
+- [ ] 33
+- [ ] 34
+- [ ] 35
+- [ ] 36
+- [ ] 37a
+- [ ] 37b
+- [ ] 37c
+- [ ] 38
+
+### Epic 37a — Scale Validation *(Demo 9)*
+
+- [ ] 33
+- [ ] 34
+- [ ] 35
+- [ ] 36
+- [ ] 37a
+- [ ] 37b
+- [ ] 37c
+- [ ] 38
+
+### Epic 38 — Graph Analytics *(Demo 9)*
 
 - [ ] 33
 - [ ] 34
