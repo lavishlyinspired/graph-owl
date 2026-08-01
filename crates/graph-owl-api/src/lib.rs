@@ -1475,12 +1475,17 @@ impl Catalog {
             return Err(CatalogError::Unauthenticated);
         }
 
+        // `sender_event_id` stays `None` until Slice C's declarative mapping
+        // can extract one from the payload — every delivery through this
+        // pipeline is content-hash deduped today, which `dedup_key` already
+        // does correctly with no sender id to prefer.
         let event = graph_owl_core::webhook::InboundEvent {
             id: Uuid::new_v4(),
             endpoint: endpoint.id,
             sender_event_id: None,
             sender_timestamp: None,
             received_at: chrono::Utc::now(),
+            dedup_key: graph_owl_core::webhook::dedup_key(None, raw_body),
             raw: raw_body.to_vec(),
             state: graph_owl_core::webhook::EventState::Received,
         };
@@ -6322,9 +6327,20 @@ mod tests {
 
         async fn create_inbound_event(
             &self,
-            event: graph_owl_core::webhook::InboundEvent,
+            mut event: graph_owl_core::webhook::InboundEvent,
         ) -> Result<graph_owl_core::webhook::InboundEvent, StorageError> {
-            self.inbound_events.lock().unwrap().push(event.clone());
+            let mut held = self.inbound_events.lock().unwrap();
+            // Mirrors the Postgres impl's dedup marker: the lock held across
+            // the check and the push is what makes this atomic for a single
+            // process, the same way `(endpoint_id, dedup_key)`'s primary key
+            // makes it atomic across connections.
+            if held
+                .iter()
+                .any(|e| e.endpoint == event.endpoint && e.dedup_key == event.dedup_key)
+            {
+                event.state = graph_owl_core::webhook::EventState::Duplicate;
+            }
+            held.push(event.clone());
             Ok(event)
         }
 
@@ -12210,6 +12226,122 @@ mod webhooks_are_verified_before_they_are_believed {
             .expect("list endpoints");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, registered.id);
+    }
+}
+
+#[cfg(test)]
+mod redelivered_webhooks_are_deduped_not_reapplied {
+    //! Epic 18 Slice B at the **facade**.
+    //!
+    //! `sender_event_id`/`sender_timestamp` extraction from a payload is
+    //! Slice C's declarative-mapping problem, not this slice's — so every
+    //! delivery through `Catalog::receive_webhook` today has no sender id,
+    //! which means content-hash dedup is the only path this facade can
+    //! exercise end-to-end. The sender-id path and the last-writer-wins
+    //! comparison itself are proven in isolation in `graph-owl-core`
+    //! (`dedup_key`, `compare_timestamps`); this proves the *storage-backed
+    //! mechanism* — that a real redelivery is recognized and recorded as
+    //! `Duplicate` rather than reapplied.
+
+    use super::*;
+    use graph_owl_storage::{SignatureScheme, WebhookEndpoint};
+    use tests::InMemoryStorage;
+
+    fn endpoint() -> WebhookEndpoint {
+        let now = chrono::Utc::now();
+        WebhookEndpoint {
+            id: Uuid::new_v4(),
+            path: "dbt".to_string(),
+            source: "dbt-bot".to_string(),
+            signature_scheme: SignatureScheme::HmacSha256 {
+                header: "X-Signature".to_string(),
+                prefix: "sha256=".to_string(),
+            },
+            mapping: "dbt-run-completed".to_string(),
+            event_filter: vec!["run.completed".to_string()],
+            enabled: true,
+            has_secret: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn hmac_sign(secret: &[u8], body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
+        mac.update(body);
+        let bytes = mac.finalize().into_bytes();
+        format!(
+            "sha256={}",
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        )
+    }
+
+    #[tokio::test]
+    async fn a_redelivered_payload_is_recorded_as_duplicate_not_reapplied() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let secret = b"shared-secret";
+        let registered = catalog
+            .register_webhook_endpoint(endpoint(), Some(secret))
+            .await
+            .expect("register");
+
+        let body = br#"{"event":"run.completed","run_id":42}"#;
+        let signature = hmac_sign(secret, body);
+
+        let first = catalog
+            .receive_webhook(&registered, Some(&signature), body)
+            .await
+            .expect("first delivery should verify and record");
+        assert_eq!(first.state, graph_owl_core::webhook::EventState::Received);
+
+        let second = catalog
+            .receive_webhook(&registered, Some(&signature), body)
+            .await
+            .expect("a redelivery still verifies; it is a duplicate, not a rejection");
+        assert_eq!(second.state, graph_owl_core::webhook::EventState::Duplicate);
+        assert_ne!(
+            second.id, first.id,
+            "the redelivery is its own recorded row, not the same event returned twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_different_payloads_to_the_same_endpoint_are_not_deduped_against_each_other() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let secret = b"shared-secret";
+        let registered = catalog
+            .register_webhook_endpoint(endpoint(), Some(secret))
+            .await
+            .expect("register");
+
+        let first_body = br#"{"event":"run.completed","run_id":1}"#;
+        let second_body = br#"{"event":"run.completed","run_id":2}"#;
+
+        let first = catalog
+            .receive_webhook(
+                &registered,
+                Some(&hmac_sign(secret, first_body)),
+                first_body,
+            )
+            .await
+            .expect("first delivery");
+        let second = catalog
+            .receive_webhook(
+                &registered,
+                Some(&hmac_sign(secret, second_body)),
+                second_body,
+            )
+            .await
+            .expect("second delivery");
+
+        assert_eq!(first.state, graph_owl_core::webhook::EventState::Received);
+        assert_eq!(
+            second.state,
+            graph_owl_core::webhook::EventState::Received,
+            "different content must not collide with an unrelated delivery's dedup key"
+        );
     }
 }
 

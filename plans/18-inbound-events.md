@@ -1,7 +1,7 @@
 # Plan: Inbound Events & Webhooks (Epic 18)
 
 **Branch**: feat/inbound-events
-**Status**: In progress (Slice A shipped)
+**Status**: In progress (Slices A-B shipped)
 **Depends on**: Epic 16 (ingestion contract), Epic 17 (resolution, so pushes do not duplicate)
 **Crates**: `graph-owl-connectors` (webhook receiver, declarative mapping) · `graph-owl-server` (endpoints, signature verification, rate limits) · `graph-owl-core` (InboundEvent) — no new crates
 
@@ -57,8 +57,8 @@ Declarative field-path mapping from payload JSON to `EntityDraft` / `LineageDraf
 
 - [x] Endpoint registration with secret, scheme, mapping, and event filter.
 - [x] Signature verified before the payload is parsed; a bad signature is `401` and logged.
-- [ ] Redelivery of the same event is a no-op recorded as `Duplicate`.
-- [ ] An out-of-order event describing older state does not overwrite newer state.
+- [x] Redelivery of the same event is a no-op recorded as `Duplicate`.
+- [ ] An out-of-order event describing older state does not overwrite newer state. **Deliberately deferred to Slice C** — see Slice B's shipped note: no entity identity exists to compare "current state" against until then. The pure comparison (`compare_timestamps`) is built and tested; wiring it against real state is not.
 - [ ] Mapping failure sends the event to a dead-letter queue, replayable after fixing the mapping.
 - [ ] Replay over a time window re-processes without duplicating applied effects.
 - [ ] Rate limits and payload caps enforced per endpoint.
@@ -85,6 +85,14 @@ HTTP layer: `POST`/`GET /webhooks/endpoints` (admin-gated, modeled on `save_conn
 **Acceptance criteria**: same `sender_event_id` twice → second recorded `Duplicate`, no effect; no sender id → content-hash dedup; an event with an older `sender_timestamp` than the entity's current state does not overwrite it; an event with no timestamp falls back to arrival order and records a warning; concurrent duplicate deliveries produce one effect.
 **RED**: The out-of-order test is the important one: apply event at T2, then deliver event at T1, assert T2's state survives. Concurrency test for simultaneous duplicates. Mutator watch: arrival-order LWW must fail the out-of-order test — this is the bug that silently reverts fresh metadata to stale.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**Shipped, partially — the out-of-order criterion is deliberately deferred, not met.** Before writing this slice, a real fork surfaced: "an event with an older `sender_timestamp` than the entity's current state does not overwrite it" presupposes an identified entity, and nothing before Slice C's mapping says *which* entity a payload describes. Asked and decided: defer real LWW enforcement to Slice C, where entity identity actually exists, rather than inventing an unspecified subject key now or approximating with a coarser one (e.g. per-endpoint) that would incorrectly make unrelated entities from the same source compete.
+
+What *is* shipped and fully verified: `graph_owl_core::webhook::dedup_key` (sender's own id when given, else a `sha256` content hash of the raw bytes, prefixed `id:`/`hash:` so the two spaces cannot collide) and `compare_timestamps`/`Freshness` (the pure LWW comparison — `Newer`/`Older`/`Ambiguous`, the last for a missing `sender_timestamp`, which is Slice C's wiring point for "falls back to arrival order and records a warning"). Both pure, 0 missed mutants (5 caught, 1 unviable).
+
+`InboundEvent` gained a stored `dedup_key` field (computed once, not recomputed — so a later replay compares against exactly the key a redelivery was judged against). `Storage::create_inbound_event` now inserts the event row, then attempts an `inbound_event_dedup` marker keyed `(endpoint_id, dedup_key)` (`V27`); a conflict downgrades that row's own `state` to `Duplicate` before commit — never a second effect for an already-claimed key, and never blocking two different entities' events even when their sender picked the same event id (scoped per endpoint, verified). Row-order matters here for a reason worth remembering: the marker's `first_event_id` is a real foreign key, so the event row must exist *before* the marker references it — inserting the marker first fails against an empty table every time (found immediately by the integration suite, not by inspection). 0 missed mutants — though only 2 were generated at all (both the whole-function replacement, both unviable): cargo-mutants has no built-in mutator for an `Option::is_none()` method-call condition the way it does for bare `!` negation, so the reordering's correctness rests on the four-test integration matrix (redelivery, distinct keys, distinct endpoints, and a real `tokio::spawn` concurrency test asserting exactly one `Received` and one `Duplicate`) rather than on a generated mutant — worth knowing before trusting a thin mutant count as "little to test" here.
+
+Every delivery reaching `Catalog::receive_webhook` today has `sender_event_id: None` (extraction from a payload is Slice C's own declarative-mapping problem, not this slice's), so content-hash dedup is the only path exercised end-to-end through the live facade; the sender-id path is proven directly against `dedup_key` and against storage with a hand-constructed event. 0 missed mutants at the facade (1 generated, unviable).
 
 ### Slice C: Declarative mapping
 

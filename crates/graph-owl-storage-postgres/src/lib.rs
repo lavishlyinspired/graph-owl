@@ -1078,15 +1078,30 @@ impl Storage for PostgresStorage {
             .map_err(|e| StorageError::Unexpected(e.to_string()))
     }
 
+    // The event row is inserted before the dedup marker — `first_event_id`
+    // is a real foreign key, so the row it points to must already exist.
+    // Both statements run in one transaction so "concurrent duplicate
+    // deliveries produce one effect" is true under real concurrency, not
+    // just in a single-threaded test: two transactions racing on the same
+    // `(endpoint_id, dedup_key)` serialize on the marker table's primary
+    // key, and only the one that wins keeps the caller's `state` — the
+    // other's own row (already written) is updated to `Duplicate` before
+    // either one commits.
     #[tracing::instrument(name = "storage.create_inbound_event", skip_all)]
     async fn create_inbound_event(
         &self,
-        event: graph_owl_core::webhook::InboundEvent,
+        mut event: graph_owl_core::webhook::InboundEvent,
     ) -> Result<graph_owl_core::webhook::InboundEvent, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
         sqlx::query(
             "INSERT INTO inbound_events
-                 (id, endpoint_id, sender_event_id, sender_timestamp, received_at, raw, state)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                 (id, endpoint_id, sender_event_id, sender_timestamp, received_at, raw, state, dedup_key)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(event.id)
         .bind(event.endpoint)
@@ -1095,9 +1110,37 @@ impl Storage for PostgresStorage {
         .bind(event.received_at)
         .bind(&event.raw)
         .bind(event_state_str(event.state))
-        .execute(&self.pool)
+        .bind(&event.dedup_key)
+        .execute(&mut *tx)
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let claimed = sqlx::query(
+            "INSERT INTO inbound_event_dedup (endpoint_id, dedup_key, first_event_id)
+                 VALUES ($1, $2, $3)
+             ON CONFLICT (endpoint_id, dedup_key) DO NOTHING
+             RETURNING first_event_id",
+        )
+        .bind(event.endpoint)
+        .bind(&event.dedup_key)
+        .bind(event.id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        if claimed.is_none() {
+            event.state = graph_owl_core::webhook::EventState::Duplicate;
+            sqlx::query("UPDATE inbound_events SET state = $1 WHERE id = $2")
+                .bind(event_state_str(event.state))
+                .bind(event.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(event)
     }
 
@@ -4500,6 +4543,7 @@ fn inbound_event_from_row(
         received_at: row.get("received_at"),
         raw: row.get("raw"),
         state: event_state_from_str(row.get::<&str, _>("state"))?,
+        dedup_key: row.get("dedup_key"),
     })
 }
 
