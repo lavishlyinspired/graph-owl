@@ -13,6 +13,7 @@ pub mod projection;
 pub mod recall;
 pub mod relationship_type;
 pub mod resolution;
+pub mod webhook;
 
 use chrono::{DateTime, Utc};
 use envelope::{ChangeDescription, EntityVersion};

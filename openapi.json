@@ -4852,6 +4852,68 @@
         ],
         "summary": "Withdraw a waiver, returning the finding to the queue"
       }
+    },
+    "/webhooks/endpoints": {
+      "get": {
+        "operationId": "get_webhooks_endpoints",
+        "responses": {
+          "200": {
+            "description": "Every registered webhook endpoint, without secrets"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every registered webhook endpoint, without secrets"
+      },
+      "post": {
+        "operationId": "post_webhooks_endpoints",
+        "responses": {
+          "201": {
+            "description": "Register a webhook endpoint; the secret is write-only"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Register a webhook endpoint; the secret is write-only"
+      }
+    },
+    "/webhooks/receive/{path}": {
+      "post": {
+        "operationId": "post_webhooks_receive__path_",
+        "responses": {
+          "201": {
+            "description": "Receive a webhook delivery; the raw body is verified before parsing"
+          }
+        },
+        "security": [],
+        "summary": "Receive a webhook delivery; the raw body is verified before parsing"
+      }
     }
   },
   "servers": [

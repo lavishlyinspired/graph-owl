@@ -961,6 +961,159 @@ impl Storage for PostgresStorage {
             .map_err(|e| StorageError::Unexpected(e.to_string()))
     }
 
+    #[tracing::instrument(name = "storage.upsert_webhook_endpoint", skip_all)]
+    async fn upsert_webhook_endpoint(
+        &self,
+        endpoint: graph_owl_storage::WebhookEndpoint,
+        secret: Option<&[u8]>,
+    ) -> Result<graph_owl_storage::WebhookEndpoint, StorageError> {
+        let (scheme, header, prefix) = scheme_columns(&endpoint.signature_scheme);
+        let row = sqlx::query(
+            "INSERT INTO webhook_endpoints
+                 (id, path, source, scheme, scheme_header, scheme_prefix, mapping, event_filter, enabled, secret)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (id) DO UPDATE SET
+                 path          = EXCLUDED.path,
+                 source        = EXCLUDED.source,
+                 scheme        = EXCLUDED.scheme,
+                 scheme_header = EXCLUDED.scheme_header,
+                 scheme_prefix = EXCLUDED.scheme_prefix,
+                 mapping       = EXCLUDED.mapping,
+                 event_filter  = EXCLUDED.event_filter,
+                 enabled       = EXCLUDED.enabled,
+                 -- `None` means leave an existing key alone — same reasoning
+                 -- as `upsert_connector_config`.
+                 secret        = COALESCE($10, webhook_endpoints.secret),
+                 updated_at    = now()
+             RETURNING id, path, source, scheme, scheme_header, scheme_prefix,
+                       mapping, event_filter, enabled, (secret IS NOT NULL) AS has_secret,
+                       created_at, updated_at",
+        )
+        .bind(endpoint.id)
+        .bind(&endpoint.path)
+        .bind(&endpoint.source)
+        .bind(scheme)
+        .bind(header)
+        .bind(prefix)
+        .bind(&endpoint.mapping)
+        .bind(&endpoint.event_filter)
+        .bind(endpoint.enabled)
+        .bind(secret)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some(UNIQUE_VIOLATION) => {
+                StorageError::Conflict {
+                    detail: format!("path '{}' is already registered", endpoint.path),
+                    existing_id: None,
+                    kind: ConflictKind::WebhookPathExists,
+                }
+            }
+            _ => StorageError::Unexpected(e.to_string()),
+        })?;
+        Ok(webhook_endpoint_from_row(row))
+    }
+
+    #[tracing::instrument(name = "storage.get_webhook_endpoint", skip_all)]
+    async fn get_webhook_endpoint(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::WebhookEndpoint>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, path, source, scheme, scheme_header, scheme_prefix,
+                    mapping, event_filter, enabled, (secret IS NOT NULL) AS has_secret,
+                    created_at, updated_at
+             FROM webhook_endpoints WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(webhook_endpoint_from_row))
+    }
+
+    #[tracing::instrument(name = "storage.get_webhook_endpoint_by_path", skip_all)]
+    async fn get_webhook_endpoint_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<graph_owl_storage::WebhookEndpoint>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, path, source, scheme, scheme_header, scheme_prefix,
+                    mapping, event_filter, enabled, (secret IS NOT NULL) AS has_secret,
+                    created_at, updated_at
+             FROM webhook_endpoints WHERE path = $1",
+        )
+        .bind(path)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(webhook_endpoint_from_row))
+    }
+
+    #[tracing::instrument(name = "storage.list_webhook_endpoints", skip_all)]
+    async fn list_webhook_endpoints(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::WebhookEndpoint>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, path, source, scheme, scheme_header, scheme_prefix,
+                    mapping, event_filter, enabled, (secret IS NOT NULL) AS has_secret,
+                    created_at, updated_at
+             FROM webhook_endpoints ORDER BY path",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(webhook_endpoint_from_row).collect())
+    }
+
+    #[tracing::instrument(name = "storage.webhook_secret", skip_all)]
+    async fn webhook_secret(&self, id: Uuid) -> Result<Option<Vec<u8>>, StorageError> {
+        // The only place key material is read. Deliberately its own method so
+        // a reviewer auditing where secrets go has one signature to grep for.
+        sqlx::query_scalar("SELECT secret FROM webhook_endpoints WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map(Option::flatten)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    #[tracing::instrument(name = "storage.create_inbound_event", skip_all)]
+    async fn create_inbound_event(
+        &self,
+        event: graph_owl_core::webhook::InboundEvent,
+    ) -> Result<graph_owl_core::webhook::InboundEvent, StorageError> {
+        sqlx::query(
+            "INSERT INTO inbound_events
+                 (id, endpoint_id, sender_event_id, sender_timestamp, received_at, raw, state)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(event.id)
+        .bind(event.endpoint)
+        .bind(&event.sender_event_id)
+        .bind(event.sender_timestamp)
+        .bind(event.received_at)
+        .bind(&event.raw)
+        .bind(event_state_str(event.state))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(event)
+    }
+
+    #[tracing::instrument(name = "storage.get_inbound_event", skip_all)]
+    async fn get_inbound_event(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::webhook::InboundEvent>, StorageError> {
+        let row = sqlx::query("SELECT * FROM inbound_events WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        row.map(inbound_event_from_row).transpose()
+    }
+
     #[tracing::instrument(name = "storage.upsert_team", skip_all)]
     // ---- Epic 31: organizational memory ----
 
@@ -4267,6 +4420,87 @@ fn review_status_from_str(
             "unknown review status '{other}' in resolution_queue"
         ))),
     }
+}
+
+/// Splits a `SignatureScheme` into the three columns it is stored across.
+/// `prefix` is `None` for `Ed25519`, which carries no such label.
+fn scheme_columns(
+    scheme: &graph_owl_storage::SignatureScheme,
+) -> (&'static str, &str, Option<&str>) {
+    use graph_owl_storage::SignatureScheme;
+    match scheme {
+        SignatureScheme::HmacSha256 { header, prefix } => {
+            ("hmac_sha256", header.as_str(), Some(prefix.as_str()))
+        }
+        SignatureScheme::Ed25519 { header } => ("ed25519", header.as_str(), None),
+    }
+}
+
+fn webhook_endpoint_from_row(row: PgRow) -> graph_owl_storage::WebhookEndpoint {
+    use graph_owl_storage::SignatureScheme;
+    let scheme: &str = row.get("scheme");
+    let header: String = row.get("scheme_header");
+    let signature_scheme = if scheme == "ed25519" {
+        SignatureScheme::Ed25519 { header }
+    } else {
+        SignatureScheme::HmacSha256 {
+            header,
+            prefix: row
+                .get::<Option<String>, _>("scheme_prefix")
+                .unwrap_or_default(),
+        }
+    };
+    graph_owl_storage::WebhookEndpoint {
+        id: row.get("id"),
+        path: row.get("path"),
+        source: row.get("source"),
+        signature_scheme,
+        mapping: row.get("mapping"),
+        event_filter: row.get("event_filter"),
+        enabled: row.get("enabled"),
+        has_secret: row.get("has_secret"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+const fn event_state_str(state: graph_owl_core::webhook::EventState) -> &'static str {
+    use graph_owl_core::webhook::EventState;
+    match state {
+        EventState::Received => "received",
+        EventState::Mapped => "mapped",
+        EventState::Applied => "applied",
+        EventState::Failed => "failed",
+        EventState::Duplicate => "duplicate",
+    }
+}
+
+fn event_state_from_str(value: &str) -> Result<graph_owl_core::webhook::EventState, StorageError> {
+    use graph_owl_core::webhook::EventState;
+    match value {
+        "received" => Ok(EventState::Received),
+        "mapped" => Ok(EventState::Mapped),
+        "applied" => Ok(EventState::Applied),
+        "failed" => Ok(EventState::Failed),
+        "duplicate" => Ok(EventState::Duplicate),
+        other => Err(StorageError::Unexpected(format!(
+            "unknown event state '{other}' in inbound_events"
+        ))),
+    }
+}
+
+fn inbound_event_from_row(
+    row: PgRow,
+) -> Result<graph_owl_core::webhook::InboundEvent, StorageError> {
+    Ok(graph_owl_core::webhook::InboundEvent {
+        id: row.get("id"),
+        endpoint: row.get("endpoint_id"),
+        sender_event_id: row.get("sender_event_id"),
+        sender_timestamp: row.get("sender_timestamp"),
+        received_at: row.get("received_at"),
+        raw: row.get("raw"),
+        state: event_state_from_str(row.get::<&str, _>("state"))?,
+    })
 }
 
 fn review_queue_entry_from_row(

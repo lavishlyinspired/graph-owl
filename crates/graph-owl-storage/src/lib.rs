@@ -73,6 +73,11 @@ pub enum ConflictKind {
     /// Slice F. Its own variant so a second confirm cannot double-merge and
     /// a reject-after-confirm cannot silently do nothing.
     ReviewAlreadyDecided,
+    /// A webhook endpoint's `path` is already registered to a different
+    /// endpoint — Epic 18 Slice A. Its own variant because the path itself
+    /// is the actionable detail: "conflict" alone does not tell a caller
+    /// which URL segment to pick instead.
+    WebhookPathExists,
 }
 
 #[derive(Debug, Error)]
@@ -396,6 +401,47 @@ pub struct ConnectorConfig {
     /// able to tell "configured" from "configured and unusable", and that
     /// question does not need the value to answer it.
     pub has_secret: bool,
+}
+
+/// How an inbound webhook's signature is verified — Epic 18 Slice A.
+///
+/// `header` is which request header carries the signature; `prefix` is
+/// HMAC's sender-specific label before the hex digest (GitHub's `sha256=`,
+/// for instance) — Ed25519 signatures carry no such label.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum SignatureScheme {
+    HmacSha256 { header: String, prefix: String },
+    Ed25519 { header: String },
+}
+
+/// A registered webhook receiver, **without its secret**.
+///
+/// Same reasoning as [`ConnectorConfig`]: no field for the key material, so
+/// a `Debug` derive or a `..` spread can never leak it into a log line or a
+/// response body. The verification path reads it through
+/// [`Storage::webhook_secret`], the one call site anybody has to review.
+///
+/// For `Ed25519`, what is stored is the sender's *public* verifying key —
+/// not sensitive on its own, but kept behind the same seam as the HMAC case
+/// rather than special-cased, so there is one rule to audit, not two.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookEndpoint {
+    pub id: Uuid,
+    /// The URL path segment this endpoint receives on; unique, so two
+    /// senders cannot collide on one receiver.
+    pub path: String,
+    /// Which bot/source principal events from this endpoint are attributed
+    /// to.
+    pub source: String,
+    pub signature_scheme: SignatureScheme,
+    pub mapping: String,
+    pub event_filter: Vec<String>,
+    pub enabled: bool,
+    pub has_secret: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// A group of people who own things together.
@@ -991,6 +1037,75 @@ pub trait Storage: Send + Sync {
     ///
     /// [`StorageError`] if the read fails.
     async fn connector_secret(&self, id: Uuid) -> Result<Option<String>, StorageError>;
+
+    /// Registers or updates a webhook endpoint.
+    ///
+    /// `secret` is `None` to **leave an existing key alone** — same reasoning
+    /// as [`Self::upsert_connector_config`]: an edit-then-save round trip
+    /// cannot resend a secret it was never given back.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Conflict`] if `path` is already registered to a
+    /// different endpoint; [`StorageError::Unexpected`] if the write fails.
+    async fn upsert_webhook_endpoint(
+        &self,
+        endpoint: WebhookEndpoint,
+        secret: Option<&[u8]>,
+    ) -> Result<WebhookEndpoint, StorageError>;
+
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn get_webhook_endpoint(&self, id: Uuid)
+    -> Result<Option<WebhookEndpoint>, StorageError>;
+
+    /// The endpoint a request arrived on, by its URL path — what the
+    /// receiver handler looks up before it can even attempt verification.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn get_webhook_endpoint_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<WebhookEndpoint>, StorageError>;
+
+    /// Every registered endpoint, without secrets.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn list_webhook_endpoints(&self) -> Result<Vec<WebhookEndpoint>, StorageError>;
+
+    /// The stored key material, for the verification path only.
+    ///
+    /// **The one call site that sees a secret** — the point of it being
+    /// separate from [`Self::get_webhook_endpoint`], the same reasoning as
+    /// [`Self::connector_secret`].
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn webhook_secret(&self, id: Uuid) -> Result<Option<Vec<u8>>, StorageError>;
+
+    /// Persists a received (already signature-verified) inbound event.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the write fails.
+    async fn create_inbound_event(
+        &self,
+        event: graph_owl_core::webhook::InboundEvent,
+    ) -> Result<graph_owl_core::webhook::InboundEvent, StorageError>;
+
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn get_inbound_event(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::webhook::InboundEvent>, StorageError>;
 
     /// Create or update a team, replacing its membership.
     ///

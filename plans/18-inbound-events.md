@@ -1,7 +1,7 @@
 # Plan: Inbound Events & Webhooks (Epic 18)
 
 **Branch**: feat/inbound-events
-**Status**: Not started
+**Status**: In progress (Slice A shipped)
 **Depends on**: Epic 16 (ingestion contract), Epic 17 (resolution, so pushes do not duplicate)
 **Crates**: `graph-owl-connectors` (webhook receiver, declarative mapping) · `graph-owl-server` (endpoints, signature verification, rate limits) · `graph-owl-core` (InboundEvent) — no new crates
 
@@ -55,8 +55,8 @@ Declarative field-path mapping from payload JSON to `EntityDraft` / `LineageDraf
 
 ## Acceptance criteria
 
-- [ ] Endpoint registration with secret, scheme, mapping, and event filter.
-- [ ] Signature verified before the payload is parsed; a bad signature is `401` and logged.
+- [x] Endpoint registration with secret, scheme, mapping, and event filter.
+- [x] Signature verified before the payload is parsed; a bad signature is `401` and logged.
 - [ ] Redelivery of the same event is a no-op recorded as `Duplicate`.
 - [ ] An out-of-order event describing older state does not overwrite newer state.
 - [ ] Mapping failure sends the event to a dead-letter queue, replayable after fixing the mapping.
@@ -73,6 +73,12 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **Acceptance criteria**: register with URL path, secret, scheme, mapping ref; secret stored hashed, shown once, never retrievable; HMAC-SHA256 with configurable header and prefix; Ed25519 supported; a bad signature → `401` **before** deserialization; a missing signature header → `401`; timing-safe comparison; signature covers the raw body bytes, not a re-serialization.
 **RED**: A test asserting the parser is never invoked on a bad signature (parse counter or a payload that would panic the parser). A raw-bytes test: a body that re-serializes differently must still verify. Mutator watch: parsing before verifying must fail the counter test; `==` instead of a constant-time compare must fail a timing-safety lint; verifying re-serialized bytes must fail the raw-bytes test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**Shipped**: `graph-owl-connectors::webhook_signature` — pure `verify_hmac_sha256` (`hmac`/`sha2`, constant-time via `Mac::verify_slice`) and `verify_ed25519` (`ed25519-dalek` v2), 0 missed mutants (13/13 caught). `graph_owl_storage::{SignatureScheme, WebhookEndpoint}` — the endpoint type carries no secret field at all (`has_secret: bool` only), matching `ConnectorConfig`'s existing pattern; the raw key material is readable through exactly one method, `Storage::webhook_secret`. Postgres-backed (`V25`/`V26`), `ON CONFLICT (id) DO UPDATE` with a separate `UNIQUE (path)` violation mapped to its own `ConflictKind::WebhookPathExists` rather than silently reattaching a colliding path to the wrong row. 0 missed mutants at the repository layer (28 mutants: 23 caught, 5 unviable).
+
+**One deliberate departure from the plan's own wording**: "secret stored hashed" is not implementable as written — HMAC verification recomputes the MAC from the raw key, which a hash cannot supply, and Ed25519's "secret" here is the sender's *public* verifying key, which is not sensitive on its own. The secret is stored as raw key material instead, behind the same one-read-path seam a hash would have used. `Catalog::receive_webhook` orchestrates: a disabled endpoint reads `404` (pulled forward from Slice E's own reasoning — an existence signal is unnecessary), a bad or missing signature is `401` (`CatalogError::Unauthenticated`, a new variant distinct from `Forbidden` per RFC 9110's 401-vs-403), and a verification failure is logged at `warn` naming only the endpoint id — never the secret, header value, or body. 0 missed mutants at the facade (12 real + further unviable across two rounds — the second round closed a gap where `webhook_endpoint`/`webhook_endpoint_by_path`/`list_webhook_endpoints` had no test distinguishing their real reads from `Ok(None)`/`Ok(vec![])`).
+
+HTTP layer: `POST`/`GET /webhooks/endpoints` (admin-gated, modeled on `save_connector_config`/`list_connector_configs`), `POST /webhooks/receive/{path}` — `axum::body::Bytes` read before any JSON parsing, the signature header named by the endpoint's own configured scheme. Not `authenticated` in the OpenAPI route table (the sender carries no bearer token; the endpoint's own signature scheme stands in for it), documented inline so the omitted `401` entry reads as a deliberate distinction rather than a gap. 0 missed mutants (12 caught, 7 unviable) — reached only by running the *un-scoped* integration suite for this diff (`--lib` is blind to these handlers, which only `tests/webhooks.rs` and `tests/openapi.rs` exercise; see CLAUDE.md's `--lib`-blindness note), with `--test-threads=1` passed through as `-- -- --test-threads=1` to avoid the documented default-parallelism container contention in cargo-mutants' own baseline check.
 
 ### Slice B: Dedup and ordering
 

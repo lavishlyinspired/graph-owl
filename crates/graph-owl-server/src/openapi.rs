@@ -872,6 +872,39 @@ pub static ROUTES: &[Route] = &[
     ),
     route(
         "post",
+        "/webhooks/endpoints",
+        "Register a webhook endpoint; the secret is write-only",
+        None,
+        None,
+        201,
+        true,
+    ),
+    route(
+        "get",
+        "/webhooks/endpoints",
+        "Every registered webhook endpoint, without secrets",
+        None,
+        None,
+        200,
+        true,
+    ),
+    // Not `authenticated`: the sender carries no bearer token, and this is
+    // the mechanism-level meaning that flag has everywhere else in this
+    // table (see `/health`, `/ready`, `/metrics`). The endpoint can still
+    // answer `401` on a bad or missing signature — checked by
+    // `Catalog::receive_webhook`, not by the bearer-token machinery this
+    // flag documents — which is why that response is not listed here.
+    route(
+        "post",
+        "/webhooks/receive/{path}",
+        "Receive a webhook delivery; the raw body is verified before parsing",
+        None,
+        None,
+        201,
+        false,
+    ),
+    route(
+        "post",
         "/teams",
         "Create or update a team, replacing its membership",
         None,

@@ -44,6 +44,14 @@ regex = "1"
 # not spec-governed the way a parser or reasoner is, so `00l` does not
 # apply; it is small and well-known enough to adopt rather than reimplement.
 strsim = "0.11"
+# Webhook signature verification (Epic 18 Slice A). Both MIT/Apache-2.0.
+# Hand-rolled HMAC/Ed25519 verification is the canonical security anti-pattern
+# this rule exists to prevent — constant-time comparison is easy to get wrong
+# and `hmac`'s own `verify_slice` already does it correctly; there is no
+# "build" side to this decision.
+hmac = "0.12"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
 utoipa = { version = "5", features = ["uuid", "chrono", "preserve_order"] }
 graph-owl-core = { path = "crates/graph-owl-core" }
 graph-owl-events = { path = "crates/graph-owl-events" }

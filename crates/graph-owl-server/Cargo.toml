@@ -44,6 +44,8 @@ sqlx.workspace = true
 tower.workspace = true
 testcontainers-modules.workspace = true
 testcontainers.workspace = true
+hmac.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

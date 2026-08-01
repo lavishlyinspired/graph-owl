@@ -187,6 +187,18 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             "/connectors/configs",
             get(list_connector_configs).post(save_connector_config),
         )
+        // Epic 18 Slice A: registered webhook receivers, admin-gated the same
+        // way connector configs are — both hold a credential.
+        .route(
+            "/webhooks/endpoints",
+            get(list_webhook_endpoints).post(register_webhook_endpoint),
+        )
+        // A distinct prefix from `/webhooks/endpoints` rather than
+        // `/webhooks/{path}`, so a registered path can never collide with the
+        // literal segment `endpoints`. Unauthenticated by necessity: the
+        // sender is not a graph-owl principal, and the endpoint's own
+        // signature scheme is what verifies it instead.
+        .route("/webhooks/receive/{path}", post(receive_webhook))
         // Unauthenticated by necessity rather than by design: this is what a
         // client reads *before* it holds a token, so requiring one would be
         // circular.
@@ -973,6 +985,10 @@ impl AppError {
                 kind: ConflictKind::ReviewAlreadyDecided,
                 ..
             } => "review-already-decided",
+            AppError::Conflict {
+                kind: ConflictKind::WebhookPathExists,
+                ..
+            } => "webhook-path-exists",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
             AppError::PreconditionFailed { .. } => "version-conflict",
@@ -1031,6 +1047,10 @@ impl AppError {
                 kind: ConflictKind::ReviewAlreadyDecided,
                 ..
             } => "This review entry has already been decided",
+            AppError::Conflict {
+                kind: ConflictKind::WebhookPathExists,
+                ..
+            } => "This path is already registered to another endpoint",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
             AppError::PreconditionFailed { .. } => "Version precondition failed",
@@ -1122,6 +1142,15 @@ impl AppError {
             } => detail.clone(),
             AppError::Conflict {
                 kind: ConflictKind::ReviewAlreadyDecided,
+                detail,
+                ..
+            } => detail.clone(),
+            // The path itself is the actionable detail — same rule as
+            // `PrincipalStillHolds`. Passed through rather than wrapped: the
+            // storage layer's message ("path '…' is already registered") is
+            // already a complete sentence.
+            AppError::Conflict {
+                kind: ConflictKind::WebhookPathExists,
                 detail,
                 ..
             } => detail.clone(),
@@ -1231,6 +1260,7 @@ impl From<CatalogError> for AppError {
                 to: to.as_str(),
             },
             CatalogError::Forbidden => AppError::Forbidden,
+            CatalogError::Unauthenticated => AppError::Unauthenticated,
             CatalogError::Storage(storage_error) => storage_error.into(),
         }
     }
@@ -2221,6 +2251,141 @@ async fn list_connector_configs(
         return Err(AppError::NotFound);
     }
     Ok(Json(catalog.connector_configs().await?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebhookEndpointRequest {
+    path: String,
+    source: String,
+    signature_scheme: graph_owl_storage::SignatureScheme,
+    mapping: String,
+    #[serde(default)]
+    event_filter: Vec<String>,
+    /// Absent means "usable immediately" — a freshly registered endpoint has
+    /// no prior state for a client to be preserving.
+    #[serde(default = "default_webhook_enabled")]
+    enabled: bool,
+    /// Required on first registration; write-only and never echoed back.
+    /// `Option` for the same reason as [`ConnectorConfigRequest::secret`] —
+    /// there is no update path for this endpoint yet (Slice A only
+    /// registers), so today this is always `Some`, but the field stays
+    /// optional so a future edit form can omit it to keep the existing key.
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+fn default_webhook_enabled() -> bool {
+    true
+}
+
+impl ValidateBody for WebhookEndpointRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("path"),
+            &mut errors,
+        );
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("source"),
+            &mut errors,
+        );
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("mapping"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// Register a webhook endpoint — Epic 18 Slice A.
+///
+/// Admin-only: a webhook endpoint holds a secret and decides what an external
+/// system may write into the catalog, which is administration rather than
+/// cataloguing — same reasoning as [`save_connector_config`].
+async fn register_webhook_endpoint(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<WebhookEndpointRequest>,
+) -> Result<(StatusCode, Json<graph_owl_storage::WebhookEndpoint>), AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let now = chrono::Utc::now();
+    let endpoint = graph_owl_storage::WebhookEndpoint {
+        id: Uuid::new_v4(),
+        path: payload.path,
+        source: payload.source,
+        signature_scheme: payload.signature_scheme,
+        mapping: payload.mapping,
+        event_filter: payload.event_filter,
+        enabled: payload.enabled,
+        // Ignored on the way in — `upsert_webhook_endpoint` returns the real
+        // value from `secret IS NOT NULL`, not this placeholder.
+        has_secret: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let saved = catalog
+        .register_webhook_endpoint(endpoint, payload.secret.as_deref().map(str::as_bytes))
+        .await?;
+    // `WebhookEndpoint` has no field for the secret, so this response cannot
+    // carry one — the guarantee is the type, not this handler remembering.
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+/// Every registered endpoint, without secrets.
+async fn list_webhook_endpoints(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<Vec<graph_owl_storage::WebhookEndpoint>>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.list_webhook_endpoints().await?))
+}
+
+/// Receive a webhook delivery — Epic 18 Slice A.
+///
+/// **Raw bytes, read before any JSON parsing.** Plan decision 2: an
+/// unverified payload is never deserialized, since parsing untrusted bytes is
+/// the attack surface. `body` is `axum::body::Bytes`, so the signature is
+/// checked against exactly what the sender sent — never a re-serialization,
+/// which could differ in whitespace or key order and silently break
+/// verification.
+///
+/// **No [`Auth`] extractor.** The sender is not a graph-owl principal and
+/// carries no bearer token; what stands in its place is the endpoint's own
+/// configured signature scheme, checked inside [`Catalog::receive_webhook`].
+/// A path that names no registered endpoint, and a disabled one, both read
+/// as `404` — an unregistered path and a disabled one are indistinguishable
+/// to an outside caller by design (Slice E's reasoning, pulled forward
+/// because it falls out of `enabled` for free).
+async fn receive_webhook(
+    State(catalog): State<Catalog>,
+    Path(path): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let endpoint = catalog
+        .webhook_endpoint_by_path(&path)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let header_name = match &endpoint.signature_scheme {
+        graph_owl_storage::SignatureScheme::HmacSha256 { header, .. }
+        | graph_owl_storage::SignatureScheme::Ed25519 { header } => header,
+    };
+    let signature = headers
+        .get(header_name.as_str())
+        .and_then(|value| value.to_str().ok());
+    let event = catalog.receive_webhook(&endpoint, signature, &body).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": event.id, "state": event.state })),
+    ))
 }
 
 #[derive(Debug, serde::Deserialize)]

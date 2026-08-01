@@ -185,6 +185,12 @@ pub enum CatalogError {
     /// request would be accepted from a different, permitted caller, so the
     /// fix is not a different value but a different actor.
     Forbidden,
+    /// The caller has not proven who they claim to be — Epic 18's webhook
+    /// signature verification. Distinct from `Forbidden`: a bad or missing
+    /// signature is "we do not believe this is who it says it is", not "we
+    /// know who this is and they may not do this" — the `401` vs `403`
+    /// distinction RFC 9110 draws.
+    Unauthenticated,
     Storage(StorageError),
 }
 
@@ -1366,6 +1372,119 @@ impl Catalog {
         &self,
     ) -> Result<Vec<graph_owl_storage::ConnectorConfig>, CatalogError> {
         Ok(self.storage.connector_configs().await?)
+    }
+
+    // ---- Epic 18 Slice A: webhooks ----
+
+    /// Registers or updates a webhook endpoint. `secret` is the raw key
+    /// material (an HMAC shared secret, or an Ed25519 public verifying
+    /// key); `None` leaves an existing one alone.
+    ///
+    /// # Errors
+    ///
+    /// `Conflict` if `path` is already registered to a different endpoint.
+    #[tracing::instrument(name = "catalog.register_webhook_endpoint", skip_all)]
+    pub async fn register_webhook_endpoint(
+        &self,
+        endpoint: graph_owl_storage::WebhookEndpoint,
+        secret: Option<&[u8]>,
+    ) -> Result<graph_owl_storage::WebhookEndpoint, CatalogError> {
+        Ok(self
+            .storage
+            .upsert_webhook_endpoint(endpoint, secret)
+            .await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn webhook_endpoint(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::WebhookEndpoint>, CatalogError> {
+        Ok(self.storage.get_webhook_endpoint(id).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn webhook_endpoint_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<graph_owl_storage::WebhookEndpoint>, CatalogError> {
+        Ok(self.storage.get_webhook_endpoint_by_path(path).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn list_webhook_endpoints(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::WebhookEndpoint>, CatalogError> {
+        Ok(self.storage.list_webhook_endpoints().await?)
+    }
+
+    /// Verifies an inbound delivery's signature and, if it verifies, records
+    /// it. The HTTP layer is responsible for reading `raw_body` before any
+    /// JSON parsing and for extracting exactly the header `endpoint`'s own
+    /// scheme names — this function has no notion of an HTTP request, only
+    /// of the bytes an unverified one might have lied about.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if `endpoint` is disabled — an existence signal is
+    /// unnecessary (Slice E). `Unauthenticated` if the signature is missing
+    /// or does not verify. `Storage` if the write fails.
+    #[tracing::instrument(name = "catalog.receive_webhook", skip_all)]
+    pub async fn receive_webhook(
+        &self,
+        endpoint: &graph_owl_storage::WebhookEndpoint,
+        signature_header_value: Option<&str>,
+        raw_body: &[u8],
+    ) -> Result<graph_owl_core::webhook::InboundEvent, CatalogError> {
+        if !endpoint.enabled {
+            return Err(CatalogError::NotFound);
+        }
+
+        let secret = self
+            .storage
+            .webhook_secret(endpoint.id)
+            .await?
+            .unwrap_or_default();
+        let verified = match &endpoint.signature_scheme {
+            graph_owl_storage::SignatureScheme::HmacSha256 { prefix, .. } => signature_header_value
+                .is_some_and(|value| {
+                    graph_owl_connectors::webhook_signature::verify_hmac_sha256(
+                        &secret, raw_body, value, prefix,
+                    )
+                }),
+            graph_owl_storage::SignatureScheme::Ed25519 { .. } => signature_header_value
+                .is_some_and(|value| {
+                    secret.as_slice().try_into().is_ok_and(|key: [u8; 32]| {
+                        graph_owl_connectors::webhook_signature::verify_ed25519(
+                            &key, raw_body, value,
+                        )
+                    })
+                }),
+        };
+        if !verified {
+            // Named by endpoint id only — never the secret, the header value,
+            // or the body, all of which an operator's log aggregator would
+            // otherwise persist indefinitely.
+            tracing::warn!(endpoint = %endpoint.id, "webhook delivery did not verify");
+            return Err(CatalogError::Unauthenticated);
+        }
+
+        let event = graph_owl_core::webhook::InboundEvent {
+            id: Uuid::new_v4(),
+            endpoint: endpoint.id,
+            sender_event_id: None,
+            sender_timestamp: None,
+            received_at: chrono::Utc::now(),
+            raw: raw_body.to_vec(),
+            state: graph_owl_core::webhook::EventState::Received,
+        };
+        Ok(self.storage.create_inbound_event(event).await?)
     }
 
     /// Create or update a team.
@@ -5194,6 +5313,7 @@ fn batch_detail(error: &CatalogError) -> String {
             "the entity changed while this batch was in flight".to_string()
         }
         CatalogError::Forbidden => "not permitted".to_string(),
+        CatalogError::Unauthenticated => "signature verification failed".to_string(),
         CatalogError::Storage(inner) => inner.to_string(),
     }
 }
@@ -5472,6 +5592,12 @@ mod tests {
         pub(super) merge_records: Mutex<Vec<graph_owl_core::resolution::MergeRecord>>,
         pub(super) resolution_queue: Mutex<Vec<graph_owl_core::resolution::ReviewQueueEntry>>,
         pub(super) mention_resolutions: Mutex<Vec<graph_owl_core::resolution::MentionResolution>>,
+        /// `(endpoint, secret)` — the secret kept beside the public record so
+        /// a test can prove it is kept and still never returned by the read
+        /// path, matching the `connectors` field's own precedent.
+        #[allow(clippy::type_complexity)]
+        webhook_endpoints: Mutex<Vec<(graph_owl_storage::WebhookEndpoint, Option<Vec<u8>>)>>,
+        inbound_events: Mutex<Vec<graph_owl_core::webhook::InboundEvent>>,
     }
 
     impl InMemoryStorage {
@@ -6114,6 +6240,105 @@ mod tests {
                 .iter()
                 .find(|(c, _)| c.id == id)
                 .and_then(|(_, s)| s.clone()))
+        }
+
+        async fn upsert_webhook_endpoint(
+            &self,
+            endpoint: graph_owl_storage::WebhookEndpoint,
+            secret: Option<&[u8]>,
+        ) -> Result<graph_owl_storage::WebhookEndpoint, StorageError> {
+            let mut held = self.webhook_endpoints.lock().unwrap();
+            if held
+                .iter()
+                .any(|(e, _)| e.path == endpoint.path && e.id != endpoint.id)
+            {
+                return Err(StorageError::Conflict {
+                    detail: format!("path '{}' is already registered", endpoint.path),
+                    existing_id: None,
+                    kind: ConflictKind::WebhookPathExists,
+                });
+            }
+            // `None` leaves an existing key alone, matching
+            // `upsert_connector_config`'s own fake exactly.
+            let existing_secret = held
+                .iter()
+                .find(|(e, _)| e.id == endpoint.id)
+                .and_then(|(_, s)| s.clone());
+            held.retain(|(e, _)| e.id != endpoint.id);
+            let kept = secret.map(<[u8]>::to_vec).or(existing_secret);
+            let mut stored = endpoint;
+            stored.has_secret = kept.is_some();
+            held.push((stored.clone(), kept));
+            Ok(stored)
+        }
+
+        async fn get_webhook_endpoint(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_storage::WebhookEndpoint>, StorageError> {
+            Ok(self
+                .webhook_endpoints
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(e, _)| e.id == id)
+                .map(|(e, _)| e.clone()))
+        }
+
+        async fn get_webhook_endpoint_by_path(
+            &self,
+            path: &str,
+        ) -> Result<Option<graph_owl_storage::WebhookEndpoint>, StorageError> {
+            Ok(self
+                .webhook_endpoints
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(e, _)| e.path == path)
+                .map(|(e, _)| e.clone()))
+        }
+
+        async fn list_webhook_endpoints(
+            &self,
+        ) -> Result<Vec<graph_owl_storage::WebhookEndpoint>, StorageError> {
+            Ok(self
+                .webhook_endpoints
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(e, _)| e.clone())
+                .collect())
+        }
+
+        async fn webhook_secret(&self, id: Uuid) -> Result<Option<Vec<u8>>, StorageError> {
+            Ok(self
+                .webhook_endpoints
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(e, _)| e.id == id)
+                .and_then(|(_, s)| s.clone()))
+        }
+
+        async fn create_inbound_event(
+            &self,
+            event: graph_owl_core::webhook::InboundEvent,
+        ) -> Result<graph_owl_core::webhook::InboundEvent, StorageError> {
+            self.inbound_events.lock().unwrap().push(event.clone());
+            Ok(event)
+        }
+
+        async fn get_inbound_event(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_core::webhook::InboundEvent>, StorageError> {
+            Ok(self
+                .inbound_events
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|e| e.id == id)
+                .cloned())
         }
 
         async fn upsert_team(&self, team: &graph_owl_storage::Team) -> Result<(), StorageError> {
@@ -11747,6 +11972,244 @@ mod resolution_decides_before_it_merges {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].entity, in_staging);
         assert_eq!(recorded[0].text, "orders");
+    }
+}
+
+#[cfg(test)]
+mod webhooks_are_verified_before_they_are_believed {
+    //! Epic 18 Slice A at the **facade**.
+    //!
+    //! The Postgres repository tests (`webhook_endpoints.rs`) prove the
+    //! schema; the connector crate's own tests prove HMAC/Ed25519
+    //! verification is correct in isolation. This proves the
+    //! **orchestration**: that `Catalog::receive_webhook` actually calls
+    //! into that verification rather than trusting the caller, and that a
+    //! disabled endpoint and a bad signature produce the right *kind* of
+    //! refusal.
+
+    use super::*;
+    use graph_owl_storage::{SignatureScheme, WebhookEndpoint};
+    use tests::InMemoryStorage;
+
+    fn endpoint(scheme: SignatureScheme) -> WebhookEndpoint {
+        let now = chrono::Utc::now();
+        WebhookEndpoint {
+            id: Uuid::new_v4(),
+            path: "dbt".to_string(),
+            source: "dbt-bot".to_string(),
+            signature_scheme: scheme,
+            mapping: "dbt-run-completed".to_string(),
+            event_filter: vec!["run.completed".to_string()],
+            enabled: true,
+            has_secret: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn hmac_scheme() -> SignatureScheme {
+        SignatureScheme::HmacSha256 {
+            header: "X-Signature".to_string(),
+            prefix: "sha256=".to_string(),
+        }
+    }
+
+    fn hmac_sign(secret: &[u8], body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
+        mac.update(body);
+        let bytes = mac.finalize().into_bytes();
+        format!(
+            "sha256={}",
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        )
+    }
+
+    #[tokio::test]
+    async fn a_correctly_signed_delivery_is_recorded() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let secret = b"shared-secret";
+        let registered = catalog
+            .register_webhook_endpoint(endpoint(hmac_scheme()), Some(secret))
+            .await
+            .expect("register");
+
+        let body = br#"{"event":"run.completed"}"#;
+        let signature = hmac_sign(secret, body);
+
+        let event = catalog
+            .receive_webhook(&registered, Some(&signature), body)
+            .await
+            .expect("verified delivery should be recorded");
+
+        assert_eq!(event.endpoint, registered.id);
+        assert_eq!(event.raw, body);
+        assert_eq!(event.state, graph_owl_core::webhook::EventState::Received);
+    }
+
+    #[tokio::test]
+    async fn a_bad_signature_is_unauthenticated_and_records_nothing() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let registered = catalog
+            .register_webhook_endpoint(endpoint(hmac_scheme()), Some(b"the-real-secret"))
+            .await
+            .expect("register");
+
+        let body = br#"{"event":"run.completed"}"#;
+        let wrong_signature = hmac_sign(b"a-guessed-secret", body);
+
+        let result = catalog
+            .receive_webhook(&registered, Some(&wrong_signature), body)
+            .await;
+
+        assert!(matches!(result, Err(CatalogError::Unauthenticated)));
+    }
+
+    #[tokio::test]
+    async fn a_missing_signature_header_is_unauthenticated() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let registered = catalog
+            .register_webhook_endpoint(endpoint(hmac_scheme()), Some(b"secret"))
+            .await
+            .expect("register");
+
+        let result = catalog
+            .receive_webhook(&registered, None, br#"{"event":"run.completed"}"#)
+            .await;
+
+        assert!(matches!(result, Err(CatalogError::Unauthenticated)));
+    }
+
+    #[tokio::test]
+    async fn a_tampered_body_is_unauthenticated() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let secret = b"shared-secret";
+        let registered = catalog
+            .register_webhook_endpoint(endpoint(hmac_scheme()), Some(secret))
+            .await
+            .expect("register");
+
+        let signature = hmac_sign(secret, br#"{"amount":10}"#);
+        let result = catalog
+            .receive_webhook(&registered, Some(&signature), br#"{"amount":99999}"#)
+            .await;
+
+        assert!(matches!(result, Err(CatalogError::Unauthenticated)));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_endpoint_is_not_found_not_forbidden() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let secret = b"shared-secret";
+        let mut disabled = endpoint(hmac_scheme());
+        disabled.enabled = false;
+        let registered = catalog
+            .register_webhook_endpoint(disabled, Some(secret))
+            .await
+            .expect("register");
+
+        let body = br#"{"event":"run.completed"}"#;
+        let signature = hmac_sign(secret, body);
+        let result = catalog
+            .receive_webhook(&registered, Some(&signature), body)
+            .await;
+
+        // An existence signal is unnecessary here (Slice E's own reasoning,
+        // applied a slice early since it falls out of `enabled` for free):
+        // a disabled endpoint reads the same as one that was never
+        // registered.
+        assert!(matches!(result, Err(CatalogError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn an_ed25519_delivery_verifies_against_the_stored_public_key() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use rand::rngs::OsRng;
+
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let registered = catalog
+            .register_webhook_endpoint(
+                endpoint(SignatureScheme::Ed25519 {
+                    header: "X-Signature-Ed25519".to_string(),
+                }),
+                Some(&public_key),
+            )
+            .await
+            .expect("register");
+
+        let body = br#"{"event":"dag.completed"}"#;
+        let signature = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(signing_key.sign(body).to_bytes())
+        };
+
+        let event = catalog
+            .receive_webhook(&registered, Some(&signature), body)
+            .await
+            .expect("verified delivery should be recorded");
+        assert_eq!(event.endpoint, registered.id);
+    }
+
+    #[tokio::test]
+    async fn registering_a_taken_path_is_a_conflict() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        catalog
+            .register_webhook_endpoint(endpoint(hmac_scheme()), Some(b"secret-a"))
+            .await
+            .expect("first registration");
+
+        let result = catalog
+            .register_webhook_endpoint(endpoint(hmac_scheme()), Some(b"secret-b"))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(CatalogError::Conflict {
+                kind: ConflictKind::WebhookPathExists,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_registered_endpoint_is_found_by_id_by_path_and_in_the_list() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let registered = catalog
+            .register_webhook_endpoint(endpoint(hmac_scheme()), Some(b"secret"))
+            .await
+            .expect("register");
+
+        let by_id = catalog
+            .webhook_endpoint(registered.id)
+            .await
+            .expect("read by id")
+            .expect("endpoint exists");
+        assert_eq!(by_id.id, registered.id);
+
+        let by_path = catalog
+            .webhook_endpoint_by_path(&registered.path)
+            .await
+            .expect("read by path")
+            .expect("endpoint exists");
+        assert_eq!(by_path.id, registered.id);
+
+        assert!(
+            catalog
+                .webhook_endpoint(Uuid::new_v4())
+                .await
+                .expect("read by id")
+                .is_none()
+        );
+
+        let listed = catalog
+            .list_webhook_endpoints()
+            .await
+            .expect("list endpoints");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, registered.id);
     }
 }
 
