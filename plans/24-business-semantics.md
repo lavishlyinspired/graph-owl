@@ -1,7 +1,7 @@
 # Plan: Business Semantics (Epic 24)
 
 **Branch**: feat/business-semantics
-**Status**: Not started
+**Status**: In progress — Slice A shipped (glossary + term CRUD, scoped uniqueness, search); Slices B–F not started
 **Depends on**: Epic 2 (FQN derivation and the hierarchy terms attach to), Epic 11 (term reviewers), Epic 4 (taxonomy relations as triples)
 **Supersedes**: glossary content in `25-classification.md`
 **Crates**: `graph-owl-core` (GlossaryTerm, SkosRelation, Metric) · `graph-owl-ontology` (SKOS vocabulary) · `graph-owl-storage-postgres` · `graph-owl-api` · `graph-owl-server`
@@ -78,6 +78,20 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **Acceptance criteria**: CRUD for both; term FQN derived (`{glossary}.{term}`, reusing Epic 2); unique within a glossary, not globally; synonyms and abbreviations as string lists, both searchable; deleting a glossary with terms → `409` unless recursive.
 **RED**: Scoped-uniqueness pair — same term name in two glossaries must both succeed. A search test asserting a synonym match finds the term. Mutator watch: global uniqueness must fail the two-glossary case; synonyms excluded from the indexed document must fail the search test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**Shipped.** Storage (`Storage::insert_glossary`/`insert_term`/etc. in
+`graph-owl-storage` and `graph-owl-storage-postgres`), facade
+(`Catalog::create_glossary`/`create_term`/etc.) and HTTP
+(`/glossaries`, `/glossaries/{id}/terms`, `/glossary-terms/{id}`,
+`/glossary-terms/search`) all land in this slice. Verified at three layers:
+19 HTTP tests (`graph-owl-server/tests/glossary.rs`), 19 repository tests
+against real Postgres (`graph-owl-storage-postgres/tests/glossary_repository.rs`),
+17 facade unit tests. Mutation-tested to 0 missed across all three crates —
+the Postgres adapter's `delete_glossary` was simplified to drop a
+`term_count > 0` guard around the child-row cleanup that was optimisation-only
+and had no correctness value to test for, rather than adding a test that
+could never fail. Reviewers/status/relations are not reachable over HTTP yet
+(Slices B, C); `Metric` has no storage or routes (Slices E, F).
 
 ### Slice B: SKOS relations with inverse consistency
 

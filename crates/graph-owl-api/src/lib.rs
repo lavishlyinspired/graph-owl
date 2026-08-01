@@ -1556,6 +1556,203 @@ impl Catalog {
         Ok(self.storage.teams().await?)
     }
 
+    // ---- Epic 24 Slice A: glossary and terms ----
+
+    /// Create a glossary.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the name is blank. `Conflict` if the derived FQN
+    /// collides with an existing one.
+    #[tracing::instrument(name = "catalog.create_glossary", skip_all)]
+    pub async fn create_glossary(
+        &self,
+        name: &str,
+        description: Option<String>,
+    ) -> Result<graph_owl_storage::Glossary, CatalogError> {
+        if name.trim().is_empty() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "name",
+                FieldErrorCode::Empty,
+                "a glossary needs a name".to_string(),
+            )]));
+        }
+        let fully_qualified_name = graph_owl_core::fqn::derive(&[name]).map_err(|e| {
+            CatalogError::Validation(vec![FieldError::new(
+                "name",
+                FieldErrorCode::Type,
+                e.to_string(),
+            )])
+        })?;
+        let now = Utc::now();
+        let glossary = graph_owl_storage::Glossary {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            description,
+            fully_qualified_name,
+            created_at: now,
+            updated_at: now,
+        };
+        Ok(self.storage.insert_glossary(glossary).await?)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn get_glossary(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::Glossary>, CatalogError> {
+        Ok(self.storage.get_glossary(id).await?)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn list_glossaries(&self) -> Result<Vec<graph_owl_storage::Glossary>, CatalogError> {
+        Ok(self.storage.list_glossaries().await?)
+    }
+
+    /// Delete a glossary. `recursive` deletes its terms first rather than
+    /// refusing.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if it does not exist. `Conflict` (`kind:
+    /// GlossaryHasTerms`) if it still has terms and `recursive` was not
+    /// asked for.
+    #[tracing::instrument(name = "catalog.delete_glossary", skip_all)]
+    pub async fn delete_glossary(&self, id: Uuid, recursive: bool) -> Result<(), CatalogError> {
+        match self.storage.delete_glossary(id, recursive).await? {
+            graph_owl_storage::GlossaryDeletion::Deleted => Ok(()),
+            graph_owl_storage::GlossaryDeletion::NotFound => Err(CatalogError::NotFound),
+            graph_owl_storage::GlossaryDeletion::HasTerms { term_count } => {
+                Err(CatalogError::Conflict {
+                    detail: format!(
+                        "this glossary still has {term_count} term(s); pass \
+                         `recursive=true` to delete them with it"
+                    ),
+                    existing_id: Some(id),
+                    kind: ConflictKind::GlossaryHasTerms,
+                })
+            }
+        }
+    }
+
+    /// Create a term under a glossary.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the glossary does not exist. `Validation` if the name
+    /// is blank. `Conflict` if the name is already used within this
+    /// glossary — checked by FQN, so a term with the same name in a
+    /// *different* glossary succeeds (decision 1).
+    #[tracing::instrument(name = "catalog.create_term", skip_all)]
+    pub async fn create_term(
+        &self,
+        glossary_id: Uuid,
+        name: &str,
+        definition: String,
+        synonyms: Vec<String>,
+        abbreviations: Vec<String>,
+    ) -> Result<graph_owl_storage::GlossaryTermRecord, CatalogError> {
+        let Some(glossary) = self.storage.get_glossary(glossary_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        if name.trim().is_empty() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "name",
+                FieldErrorCode::Empty,
+                "a term needs a name".to_string(),
+            )]));
+        }
+        let fully_qualified_name =
+            graph_owl_core::fqn::child_of(&glossary.fully_qualified_name, name).map_err(|e| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "name",
+                    FieldErrorCode::Type,
+                    e.to_string(),
+                )])
+            })?;
+        let now = Utc::now();
+        let term = graph_owl_storage::GlossaryTermRecord {
+            id: Uuid::new_v4(),
+            glossary_id,
+            name: name.to_string(),
+            fully_qualified_name,
+            definition,
+            // Every term is born `Draft`; only Slice C's workflow moves it.
+            status: graph_owl_core::glossary::TermStatus::Draft,
+            synonyms,
+            abbreviations,
+            created_at: now,
+            updated_at: now,
+        };
+        Ok(self.storage.insert_term(term).await?)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn get_term(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::GlossaryTermRecord>, CatalogError> {
+        Ok(self.storage.get_term(id).await?)
+    }
+
+    /// Every term in one glossary.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the glossary does not exist.
+    pub async fn list_terms(
+        &self,
+        glossary_id: Uuid,
+    ) -> Result<Vec<graph_owl_storage::GlossaryTermRecord>, CatalogError> {
+        if self.storage.get_glossary(glossary_id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self.storage.list_terms(glossary_id).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the term does not exist.
+    pub async fn update_term(
+        &self,
+        id: Uuid,
+        update: graph_owl_storage::GlossaryTermUpdate,
+    ) -> Result<graph_owl_storage::GlossaryTermRecord, CatalogError> {
+        self.storage
+            .update_term(id, update)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the term does not exist.
+    pub async fn delete_term(&self, id: Uuid) -> Result<(), CatalogError> {
+        if self.storage.delete_term(id).await? {
+            Ok(())
+        } else {
+            Err(CatalogError::NotFound)
+        }
+    }
+
+    /// Search terms by name, synonym, abbreviation, or definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn search_terms(
+        &self,
+        query: &str,
+    ) -> Result<Vec<graph_owl_storage::GlossaryTermRecord>, CatalogError> {
+        Ok(self.storage.search_terms(query).await?)
+    }
+
     /// Change what roles a user holds.
     ///
     /// **Invalidates the decision cache, and that is the entire point.** A
@@ -4101,6 +4298,8 @@ mod tests {
         #[allow(clippy::type_complexity)]
         owners: Mutex<Vec<(Uuid, Vec<graph_owl_core::ownership::EntityReference>)>>,
         jobs: Mutex<Vec<graph_owl_storage::IngestJob>>,
+        glossaries: Mutex<Vec<graph_owl_storage::Glossary>>,
+        glossary_terms: Mutex<Vec<graph_owl_storage::GlossaryTermRecord>>,
     }
 
     impl InMemoryStorage {
@@ -5578,6 +5777,171 @@ mod tests {
             relationships.retain(|relationship| relationship.id != id);
             Ok(relationships.len() != original_len)
         }
+
+        // ---- Epic 24 Slice A: glossary and terms ----
+
+        async fn insert_glossary(
+            &self,
+            glossary: graph_owl_storage::Glossary,
+        ) -> Result<graph_owl_storage::Glossary, StorageError> {
+            let mut held = self.glossaries.lock().unwrap();
+            if held
+                .iter()
+                .any(|g| g.fully_qualified_name == glossary.fully_qualified_name)
+            {
+                return Err(StorageError::Conflict {
+                    detail: glossary.fully_qualified_name.clone(),
+                    existing_id: None,
+                    kind: ConflictKind::Fqn,
+                });
+            }
+            held.push(glossary.clone());
+            Ok(glossary)
+        }
+
+        async fn get_glossary(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_storage::Glossary>, StorageError> {
+            Ok(self
+                .glossaries
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|g| g.id == id)
+                .cloned())
+        }
+
+        async fn list_glossaries(&self) -> Result<Vec<graph_owl_storage::Glossary>, StorageError> {
+            let mut glossaries = self.glossaries.lock().unwrap().clone();
+            glossaries.sort_by(|a, b| a.fully_qualified_name.cmp(&b.fully_qualified_name));
+            Ok(glossaries)
+        }
+
+        async fn delete_glossary(
+            &self,
+            id: Uuid,
+            recursive: bool,
+        ) -> Result<graph_owl_storage::GlossaryDeletion, StorageError> {
+            let mut glossaries = self.glossaries.lock().unwrap();
+            if !glossaries.iter().any(|g| g.id == id) {
+                return Ok(graph_owl_storage::GlossaryDeletion::NotFound);
+            }
+            let mut terms = self.glossary_terms.lock().unwrap();
+            let term_count = i64::try_from(terms.iter().filter(|t| t.glossary_id == id).count())
+                .unwrap_or(i64::MAX);
+            if term_count > 0 && !recursive {
+                return Ok(graph_owl_storage::GlossaryDeletion::HasTerms { term_count });
+            }
+            terms.retain(|t| t.glossary_id != id);
+            glossaries.retain(|g| g.id != id);
+            Ok(graph_owl_storage::GlossaryDeletion::Deleted)
+        }
+
+        async fn insert_term(
+            &self,
+            term: graph_owl_storage::GlossaryTermRecord,
+        ) -> Result<graph_owl_storage::GlossaryTermRecord, StorageError> {
+            let mut held = self.glossary_terms.lock().unwrap();
+            if held
+                .iter()
+                .any(|t| t.fully_qualified_name == term.fully_qualified_name)
+            {
+                return Err(StorageError::Conflict {
+                    detail: term.fully_qualified_name.clone(),
+                    existing_id: None,
+                    kind: ConflictKind::Fqn,
+                });
+            }
+            held.push(term.clone());
+            Ok(term)
+        }
+
+        async fn get_term(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_storage::GlossaryTermRecord>, StorageError> {
+            Ok(self
+                .glossary_terms
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|t| t.id == id)
+                .cloned())
+        }
+
+        async fn list_terms(
+            &self,
+            glossary_id: Uuid,
+        ) -> Result<Vec<graph_owl_storage::GlossaryTermRecord>, StorageError> {
+            let mut terms: Vec<_> = self
+                .glossary_terms
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|t| t.glossary_id == glossary_id)
+                .cloned()
+                .collect();
+            terms.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(terms)
+        }
+
+        async fn update_term(
+            &self,
+            id: Uuid,
+            update: graph_owl_storage::GlossaryTermUpdate,
+        ) -> Result<Option<graph_owl_storage::GlossaryTermRecord>, StorageError> {
+            let mut terms = self.glossary_terms.lock().unwrap();
+            let Some(term) = terms.iter_mut().find(|t| t.id == id) else {
+                return Ok(None);
+            };
+            if let Some(definition) = update.definition {
+                term.definition = definition;
+            }
+            if let Some(synonyms) = update.synonyms {
+                term.synonyms = synonyms;
+            }
+            if let Some(abbreviations) = update.abbreviations {
+                term.abbreviations = abbreviations;
+            }
+            term.updated_at = Utc::now();
+            Ok(Some(term.clone()))
+        }
+
+        async fn delete_term(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut terms = self.glossary_terms.lock().unwrap();
+            let original_len = terms.len();
+            terms.retain(|t| t.id != id);
+            Ok(terms.len() != original_len)
+        }
+
+        async fn search_terms(
+            &self,
+            query: &str,
+        ) -> Result<Vec<graph_owl_storage::GlossaryTermRecord>, StorageError> {
+            // A substring match over the same fields the migration's
+            // `search_vector` indexes. Not ranked the way Postgres's
+            // `ts_rank_cd` is — this fake only has to prove the facade wires
+            // the query through, not reproduce full-text relevance.
+            let needle = query.to_lowercase();
+            Ok(self
+                .glossary_terms
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|t| {
+                    t.name.to_lowercase().contains(&needle)
+                        || t.definition.to_lowercase().contains(&needle)
+                        || t.synonyms
+                            .iter()
+                            .any(|s| s.to_lowercase().contains(&needle))
+                        || t.abbreviations
+                            .iter()
+                            .any(|a| a.to_lowercase().contains(&needle))
+                })
+                .cloned()
+                .collect())
+        }
     }
 
     fn mock_create_table_request() -> CreateTable {
@@ -5758,6 +6122,364 @@ mod tests {
             .expect("delete_table should succeed");
 
         assert!(!deleted);
+    }
+
+    // ---- Epic 24 Slice A: glossary and terms ----
+
+    #[tokio::test]
+    async fn a_glossarys_fqn_is_derived_from_its_name() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let created = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+
+        assert_eq!(created.fully_qualified_name, "Finance");
+    }
+
+    #[tokio::test]
+    async fn a_created_glossary_can_be_fetched_by_id() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let created = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+
+        let found = catalog
+            .get_glossary(created.id)
+            .await
+            .expect("get_glossary should succeed");
+
+        assert_eq!(found, Some(created));
+    }
+
+    #[tokio::test]
+    async fn every_created_glossary_is_listed() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        catalog
+            .create_glossary("Support", None)
+            .await
+            .expect("create_glossary should succeed");
+
+        let listed = catalog
+            .list_glossaries()
+            .await
+            .expect("list_glossaries should succeed");
+
+        assert_eq!(listed.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_glossary_needs_a_name() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let error = catalog
+            .create_glossary("   ", None)
+            .await
+            .expect_err("a blank name should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn a_terms_fqn_nests_under_its_glossary() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let finance = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+
+        let term = catalog
+            .create_term(
+                finance.id,
+                "Customer",
+                "a paying party".to_string(),
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("create_term should succeed");
+
+        assert_eq!(term.fully_qualified_name, "Finance.Customer");
+        assert_eq!(term.status, graph_owl_core::glossary::TermStatus::Draft);
+    }
+
+    #[tokio::test]
+    async fn a_created_term_can_be_fetched_by_id() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let finance = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let created = catalog
+            .create_term(finance.id, "Customer", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        let found = catalog
+            .get_term(created.id)
+            .await
+            .expect("get_term should succeed");
+
+        assert_eq!(found, Some(created));
+    }
+
+    #[tokio::test]
+    async fn every_term_in_a_glossary_is_listed() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let finance = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        catalog
+            .create_term(finance.id, "Customer", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        catalog
+            .create_term(finance.id, "Revenue", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        let listed = catalog
+            .list_terms(finance.id)
+            .await
+            .expect("list_terms should succeed");
+
+        assert_eq!(listed.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_term_under_an_unknown_glossary_is_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let error = catalog
+            .create_term(Uuid::new_v4(), "Customer", String::new(), vec![], vec![])
+            .await
+            .expect_err("an unknown glossary should refuse the term");
+
+        assert!(matches!(error, CatalogError::NotFound));
+    }
+
+    // **The scoped-uniqueness pair the plan names**: the same term name in two
+    // different glossaries must both succeed, because the FQN each one derives
+    // to is different even though `name` is not.
+    #[tokio::test]
+    async fn the_same_term_name_in_two_glossaries_both_succeed() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let finance = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let support = catalog
+            .create_glossary("Support", None)
+            .await
+            .expect("create_glossary should succeed");
+
+        let first = catalog
+            .create_term(finance.id, "Customer", String::new(), vec![], vec![])
+            .await
+            .expect("the first glossary's term should succeed");
+        let second = catalog
+            .create_term(support.id, "Customer", String::new(), vec![], vec![])
+            .await
+            .expect("the second glossary's term should succeed");
+
+        assert_eq!(first.fully_qualified_name, "Finance.Customer");
+        assert_eq!(second.fully_qualified_name, "Support.Customer");
+    }
+
+    // And the negative: within one glossary the same name collides.
+    #[tokio::test]
+    async fn the_same_term_name_twice_in_one_glossary_conflicts() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let finance = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        catalog
+            .create_term(finance.id, "Customer", String::new(), vec![], vec![])
+            .await
+            .expect("the first term should succeed");
+
+        let error = catalog
+            .create_term(finance.id, "Customer", String::new(), vec![], vec![])
+            .await
+            .expect_err("a duplicate name in the same glossary should conflict");
+
+        assert!(matches!(error, CatalogError::Conflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn deleting_a_glossary_with_terms_is_refused_without_recursive() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let finance = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        catalog
+            .create_term(finance.id, "Customer", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        let error = catalog
+            .delete_glossary(finance.id, false)
+            .await
+            .expect_err("a glossary with terms should refuse a non-recursive delete");
+
+        assert!(matches!(
+            error,
+            CatalogError::Conflict {
+                kind: ConflictKind::GlossaryHasTerms,
+                ..
+            }
+        ));
+    }
+
+    // The positive half: the same request, recursively, succeeds and takes the
+    // term with it. Written beside the refusal above because an unconditional
+    // "glossary has terms" check would pass the test above and fail only here.
+    #[tokio::test]
+    async fn deleting_a_glossary_recursively_takes_its_terms_with_it() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let finance = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(finance.id, "Customer", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        catalog
+            .delete_glossary(finance.id, true)
+            .await
+            .expect("a recursive delete should succeed");
+
+        assert_eq!(
+            catalog.get_term(term.id).await.expect("get_term"),
+            None,
+            "the term should be gone with its glossary"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_an_unknown_glossary_is_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let error = catalog
+            .delete_glossary(Uuid::new_v4(), false)
+            .await
+            .expect_err("an unknown glossary should not be found");
+
+        assert!(matches!(error, CatalogError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn updating_a_term_changes_only_the_provided_fields() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let finance = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let created = catalog
+            .create_term(
+                finance.id,
+                "Customer",
+                "original".to_string(),
+                vec!["client".to_string()],
+                vec![],
+            )
+            .await
+            .expect("create_term should succeed");
+
+        let updated = catalog
+            .update_term(
+                created.id,
+                graph_owl_storage::GlossaryTermUpdate {
+                    definition: Some("revised".to_string()),
+                    synonyms: None,
+                    abbreviations: None,
+                },
+            )
+            .await
+            .expect("update_term should succeed");
+
+        assert_eq!(updated.definition, "revised");
+        assert_eq!(updated.synonyms, vec!["client".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_term_removes_it() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let finance = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let created = catalog
+            .create_term(finance.id, "Customer", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        catalog
+            .delete_term(created.id)
+            .await
+            .expect("delete_term should succeed");
+
+        assert_eq!(catalog.get_term(created.id).await.expect("get_term"), None);
+    }
+
+    #[tokio::test]
+    async fn a_synonym_match_finds_the_term() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let finance = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        catalog
+            .create_term(
+                finance.id,
+                "Customer",
+                String::new(),
+                vec!["client".to_string()],
+                vec![],
+            )
+            .await
+            .expect("create_term should succeed");
+
+        let hits = catalog
+            .search_terms("client")
+            .await
+            .expect("search_terms should succeed");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "Customer");
+    }
+
+    // The negative half: an unrelated word must not match, or a search that
+    // returns everything would pass the positive test above too.
+    #[tokio::test]
+    async fn an_unrelated_word_does_not_match() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let finance = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        catalog
+            .create_term(finance.id, "Customer", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        let hits = catalog
+            .search_terms("zzzznomatch")
+            .await
+            .expect("search_terms should succeed");
+
+        assert!(hits.is_empty());
     }
 
     #[tokio::test]

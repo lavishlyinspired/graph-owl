@@ -625,16 +625,52 @@ actually holds could not be asserted at all.
 
 **The claim**: the catalog carries what the business means, not just what the database contains.
 
-### Epics 22–30
+### Epics 22, 23, 25–30
 - [ ] **22** Custom properties, JSON-Schema validated
 - [ ] **23** Domains and data products
-- [ ] **24** Glossary with SKOS relations; metrics as entities
 - [ ] **25** Classifications with mutual exclusivity — the PII taxonomy
 - [ ] **26** Lifecycle and certification with issuer and expiry
 - [ ] **27** Data contracts and compatibility
 - [ ] **28** Usage and popularity signals
 - [ ] **29** Lineage: table, column, with SQL and pipeline payload
 - [ ] **30** Quality: test definitions, suites, results, incidents
+
+### Epic 24 — Business semantics
+
+The decidable half (the transition matrix, SKOS inversion, metric lineage
+reconciliation) was written first, in `graph-owl-core`, because it is the
+part that can be *wrong* and mutates fastest there. Slice A wires it to
+Postgres, the facade and HTTP.
+
+- [x] **A** Glossary and term CRUD — `POST/GET /glossaries`, `GET/DELETE
+  /glossaries/{id}`, `POST/GET /glossaries/{id}/terms`, `GET/PATCH/DELETE
+  /glossary-terms/{id}`. Term FQN is derived (`{glossary}.{term}` via
+  `fqn::child_of`) and **scoped by glossary, not global** — the same term
+  name in two glossaries derives two different FQNs and both succeed; the
+  same name twice in *one* glossary collides, verified at the HTTP layer,
+  the facade, and the Postgres adapter
+- [x] **A** Synonyms and abbreviations are string lists, both indexed by the
+  migration's weighted `search_vector`, reachable at `GET
+  /glossary-terms/search?q=`
+- [x] **A** Deleting a glossary with terms is a `409` naming the count,
+  unless `recursive=true` — the same "refuse unless asked" contract as the
+  asset subtree delete
+- [x] Every term is created `Draft`; the core review workflow (`can_transition`,
+  reviewer rules) and SKOS relation logic (`inverse_of`, `visible_relations`,
+  `would_cycle`) already exist in `graph-owl-core`, unit-tested to 0 missed
+  mutants — **not yet reachable over HTTP** (Slices B and C)
+- [ ] **B** SKOS relations at the wire — `broader`/`narrower`/`related`,
+  cycle rejection, poly-hierarchy
+- [ ] **C** Review workflow at the wire — transitions, reviewer assignment,
+  version bump, event emission
+- [ ] **D** Terms attach to assets and columns via `TagLabel`; only
+  `Approved` terms attach
+- [ ] **E** `Metric` as a first-class entity — the domain logic (`gaps`,
+  `CalculationType`) exists in `graph-owl-core`; no storage, facade or
+  routes yet
+- [ ] **F** Metric lineage reconciliation (`reconcile_lineage` exists in
+  `graph-owl-core`) wired into the facade so `source_assets` drives
+  `derivedFrom` edges
 
 ### Epic 42 — Semantic surfaces
 - [ ] One vocabulary browser over glossary, tags, domains, packs

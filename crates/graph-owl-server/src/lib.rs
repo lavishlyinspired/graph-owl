@@ -92,6 +92,23 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/teams", get(list_teams).post(upsert_team))
         .route("/teams/{id}/children", get(list_child_teams))
         .route("/teams/{id}", delete(delete_team))
+        // Epic 24 Slice A: glossary and terms.
+        .route("/glossaries", get(list_glossaries).post(create_glossary))
+        .route(
+            "/glossaries/{id}",
+            get(get_glossary).delete(delete_glossary),
+        )
+        .route(
+            "/glossaries/{id}/terms",
+            get(list_glossary_terms).post(create_glossary_term),
+        )
+        .route("/glossary-terms/search", get(search_glossary_terms))
+        .route(
+            "/glossary-terms/{id}",
+            get(get_glossary_term)
+                .patch(update_glossary_term)
+                .delete(delete_glossary_term),
+        )
         .route("/users/{id}", put(upsert_user).delete(delete_user))
         .route("/users/{id}/follows", get(list_follows))
         .route(
@@ -901,6 +918,10 @@ impl AppError {
                 kind: ConflictKind::IdempotencyConflict,
                 ..
             } => "idempotency-conflict",
+            AppError::Conflict {
+                kind: ConflictKind::GlossaryHasTerms,
+                ..
+            } => "glossary-has-terms",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
             AppError::PreconditionFailed { .. } => "version-conflict",
@@ -947,6 +968,10 @@ impl AppError {
                 kind: ConflictKind::IdempotencyConflict,
                 ..
             } => "Idempotency key conflict",
+            AppError::Conflict {
+                kind: ConflictKind::GlossaryHasTerms,
+                ..
+            } => "This glossary still has terms",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
             AppError::PreconditionFailed { .. } => "Version precondition failed",
@@ -1019,6 +1044,13 @@ impl AppError {
             // it are the actionable part, and a canned sentence cannot carry them.
             AppError::Conflict {
                 kind: ConflictKind::IdempotencyConflict,
+                detail,
+                ..
+            } => detail.clone(),
+            // The term count is the actionable part — same rule as
+            // `PrincipalStillHolds`.
+            AppError::Conflict {
+                kind: ConflictKind::GlossaryHasTerms,
                 detail,
                 ..
             } => detail.clone(),
@@ -2156,6 +2188,217 @@ fn team_body(team: &graph_owl_storage::Team) -> serde_json::Value {
         // nesting" — the same argument as `inherited` on an owner.
         "parentTeamId": team.parent_team_id,
     })
+}
+
+// ---- Epic 24 Slice A: glossary and terms ----
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GlossaryRequest {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+impl ValidateBody for GlossaryRequest {
+    /// Shape only. "A glossary needs a name" is a fact the facade checks
+    /// against the estate (a blank name derives no FQN), not a rule stated
+    /// twice.
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+fn glossary_body(glossary: &graph_owl_storage::Glossary) -> serde_json::Value {
+    json!({
+        "id": glossary.id,
+        "name": glossary.name,
+        "description": glossary.description,
+        "fullyQualifiedName": glossary.fully_qualified_name,
+        "createdAt": glossary.created_at,
+        "updatedAt": glossary.updated_at,
+    })
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GlossaryTermRequest {
+    name: String,
+    #[serde(default)]
+    definition: String,
+    #[serde(default)]
+    synonyms: Vec<String>,
+    #[serde(default)]
+    abbreviations: Vec<String>,
+}
+
+impl ValidateBody for GlossaryTermRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// A field-level change to a term. No `id`, no `glossaryId`, no `status` —
+/// structural rather than validated, the same reason `TableUpdate` has no
+/// `id`: there is nothing here for a client to send that could move the
+/// term or skip its review workflow (Slice C).
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GlossaryTermUpdateRequest {
+    #[serde(default)]
+    definition: Option<String>,
+    #[serde(default)]
+    synonyms: Option<Vec<String>>,
+    #[serde(default)]
+    abbreviations: Option<Vec<String>>,
+}
+
+impl ValidateBody for GlossaryTermUpdateRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+fn term_body(term: &graph_owl_storage::GlossaryTermRecord) -> serde_json::Value {
+    json!({
+        "id": term.id,
+        "glossaryId": term.glossary_id,
+        "name": term.name,
+        "fullyQualifiedName": term.fully_qualified_name,
+        "definition": term.definition,
+        "status": term.status.as_str(),
+        "synonyms": term.synonyms,
+        "abbreviations": term.abbreviations,
+        "createdAt": term.created_at,
+        "updatedAt": term.updated_at,
+    })
+}
+
+async fn create_glossary(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppJson(payload): AppJson<GlossaryRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let glossary = catalog
+        .create_glossary(&payload.name, payload.description)
+        .await?;
+    Ok((StatusCode::CREATED, Json(glossary_body(&glossary))))
+}
+
+async fn list_glossaries(
+    State(catalog): State<Catalog>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let glossaries = catalog.list_glossaries().await?;
+    Ok(Json(json!(
+        glossaries.iter().map(glossary_body).collect::<Vec<_>>()
+    )))
+}
+
+async fn get_glossary(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    catalog
+        .get_glossary(id)
+        .await?
+        .map(|glossary| Json(glossary_body(&glossary)))
+        .ok_or(AppError::NotFound)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteGlossaryQuery {
+    #[serde(default)]
+    recursive: bool,
+}
+
+async fn delete_glossary(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<DeleteGlossaryQuery>,
+) -> Result<StatusCode, AppError> {
+    catalog.delete_glossary(id, query.recursive).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn create_glossary_term(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(glossary_id): Path<Uuid>,
+    AppJson(payload): AppJson<GlossaryTermRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let term = catalog
+        .create_term(
+            glossary_id,
+            &payload.name,
+            payload.definition,
+            payload.synonyms,
+            payload.abbreviations,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(term_body(&term))))
+}
+
+async fn list_glossary_terms(
+    State(catalog): State<Catalog>,
+    Path(glossary_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let terms = catalog.list_terms(glossary_id).await?;
+    Ok(Json(json!(terms.iter().map(term_body).collect::<Vec<_>>())))
+}
+
+async fn get_glossary_term(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    catalog
+        .get_term(id)
+        .await?
+        .map(|term| Json(term_body(&term)))
+        .ok_or(AppError::NotFound)
+}
+
+async fn update_glossary_term(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<GlossaryTermUpdateRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let term = catalog
+        .update_term(
+            id,
+            graph_owl_storage::GlossaryTermUpdate {
+                definition: payload.definition,
+                synonyms: payload.synonyms,
+                abbreviations: payload.abbreviations,
+            },
+        )
+        .await?;
+    Ok(Json(term_body(&term)))
+}
+
+async fn delete_glossary_term(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    catalog.delete_term(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchGlossaryTermsQuery {
+    q: String,
+}
+
+async fn search_glossary_terms(
+    State(catalog): State<Catalog>,
+    AppQuery(query): AppQuery<SearchGlossaryTermsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let terms = catalog.search_terms(&query.q).await?;
+    Ok(Json(json!(terms.iter().map(term_body).collect::<Vec<_>>())))
 }
 
 // ---- Epic 31: organizational memory ----

@@ -280,6 +280,40 @@ fn table_from_row(row: PgRow) -> Table {
 }
 
 #[allow(clippy::needless_pass_by_value)]
+fn glossary_from_row(row: PgRow) -> graph_owl_storage::Glossary {
+    graph_owl_storage::Glossary {
+        id: row.get("id"),
+        name: row.get("name"),
+        description: row.get("description"),
+        fully_qualified_name: row.get("fully_qualified_name"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+const TERM_COLUMNS: &str = "id, glossary_id, name, fully_qualified_name, definition, status,
+     synonyms, abbreviations, created_at, updated_at";
+
+#[allow(clippy::needless_pass_by_value)]
+fn term_from_row(row: PgRow) -> graph_owl_storage::GlossaryTermRecord {
+    graph_owl_storage::GlossaryTermRecord {
+        id: row.get("id"),
+        glossary_id: row.get("glossary_id"),
+        name: row.get("name"),
+        fully_qualified_name: row.get("fully_qualified_name"),
+        definition: row.get("definition"),
+        // The CHECK constraint pins the vocabulary; a value that somehow
+        // fails to parse falls back to `Draft` rather than panicking a read.
+        status: graph_owl_core::glossary::TermStatus::parse(row.get::<&str, _>("status"))
+            .unwrap_or(graph_owl_core::glossary::TermStatus::Draft),
+        synonyms: row.get("synonyms"),
+        abbreviations: row.get("abbreviations"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
 fn relationship_from_row(row: PgRow) -> Relationship {
     Relationship {
         id: row.get("id"),
@@ -2882,6 +2916,269 @@ impl Storage for PostgresStorage {
                     .map(|kind| (kind, row.get::<i64, _>("n")))
             })
             .collect())
+    }
+
+    // ---- Epic 24 Slice A: glossary and terms ----
+
+    async fn insert_glossary(
+        &self,
+        glossary: graph_owl_storage::Glossary,
+    ) -> Result<graph_owl_storage::Glossary, StorageError> {
+        let result = sqlx::query(
+            "INSERT INTO glossaries (id, name, description, fully_qualified_name, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(glossary.id)
+        .bind(&glossary.name)
+        .bind(&glossary.description)
+        .bind(&glossary.fully_qualified_name)
+        .bind(glossary.created_at)
+        .bind(glossary.updated_at)
+        .execute(&self.pool)
+        .await;
+
+        if let Err(e) = result {
+            return Err(match &e {
+                sqlx::Error::Database(db_err)
+                    if db_err.code().as_deref() == Some(UNIQUE_VIOLATION) =>
+                {
+                    let existing_id = sqlx::query_scalar(
+                        "SELECT id FROM glossaries WHERE fully_qualified_name = $1",
+                    )
+                    .bind(&glossary.fully_qualified_name)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .ok()
+                    .flatten();
+                    StorageError::Conflict {
+                        detail: glossary.fully_qualified_name.clone(),
+                        existing_id,
+                        kind: ConflictKind::Fqn,
+                    }
+                }
+                _ => StorageError::Unexpected(e.to_string()),
+            });
+        }
+        Ok(glossary)
+    }
+
+    async fn get_glossary(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::Glossary>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, name, description, fully_qualified_name, created_at, updated_at
+             FROM glossaries WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(glossary_from_row))
+    }
+
+    async fn list_glossaries(&self) -> Result<Vec<graph_owl_storage::Glossary>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, name, description, fully_qualified_name, created_at, updated_at
+             FROM glossaries ORDER BY fully_qualified_name",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(glossary_from_row).collect())
+    }
+
+    async fn delete_glossary(
+        &self,
+        id: Uuid,
+        recursive: bool,
+    ) -> Result<graph_owl_storage::GlossaryDeletion, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM glossaries WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if exists.is_none() {
+            return Ok(graph_owl_storage::GlossaryDeletion::NotFound);
+        }
+
+        let term_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM glossary_terms WHERE glossary_id = $1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // Refused rather than cascaded by default: a glossary with terms is
+        // asked for explicitly, the same "unless recursive" contract as the
+        // asset subtree delete (Epic 3).
+        if term_count > 0 && !recursive {
+            return Ok(graph_owl_storage::GlossaryDeletion::HasTerms { term_count });
+        }
+
+        // No `term_count > 0` guard: deleting zero rows is a correct no-op,
+        // and a guard here would only be an optimisation with no correctness
+        // value to test for.
+        //
+        // Every child table cascades from `glossary_terms` on its own FK, so
+        // deleting the terms is enough to take the rest with them.
+        sqlx::query("DELETE FROM glossary_terms WHERE glossary_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        sqlx::query("DELETE FROM glossaries WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(graph_owl_storage::GlossaryDeletion::Deleted)
+    }
+
+    async fn insert_term(
+        &self,
+        term: graph_owl_storage::GlossaryTermRecord,
+    ) -> Result<graph_owl_storage::GlossaryTermRecord, StorageError> {
+        let result = sqlx::query(
+            "INSERT INTO glossary_terms
+                (id, glossary_id, name, fully_qualified_name, definition, status,
+                 synonyms, abbreviations, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(term.id)
+        .bind(term.glossary_id)
+        .bind(&term.name)
+        .bind(&term.fully_qualified_name)
+        .bind(&term.definition)
+        .bind(term.status.as_str())
+        .bind(&term.synonyms)
+        .bind(&term.abbreviations)
+        .bind(term.created_at)
+        .bind(term.updated_at)
+        .execute(&self.pool)
+        .await;
+
+        if let Err(e) = result {
+            return Err(match &e {
+                sqlx::Error::Database(db_err)
+                    if db_err.code().as_deref() == Some(UNIQUE_VIOLATION) =>
+                {
+                    // Either the FQN or the scoped `(glossary_id, name)` pair
+                    // collided; both are the same conflict from a caller's
+                    // point of view — a term already exists at that address.
+                    let existing_id = sqlx::query_scalar(
+                        "SELECT id FROM glossary_terms WHERE fully_qualified_name = $1",
+                    )
+                    .bind(&term.fully_qualified_name)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .ok()
+                    .flatten();
+                    StorageError::Conflict {
+                        detail: term.fully_qualified_name.clone(),
+                        existing_id,
+                        kind: ConflictKind::Fqn,
+                    }
+                }
+                _ => StorageError::Unexpected(e.to_string()),
+            });
+        }
+        Ok(term)
+    }
+
+    async fn get_term(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::GlossaryTermRecord>, StorageError> {
+        let row = sqlx::query(&format!(
+            "SELECT {TERM_COLUMNS} FROM glossary_terms WHERE id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(term_from_row))
+    }
+
+    async fn list_terms(
+        &self,
+        glossary_id: Uuid,
+    ) -> Result<Vec<graph_owl_storage::GlossaryTermRecord>, StorageError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {TERM_COLUMNS} FROM glossary_terms WHERE glossary_id = $1 ORDER BY name"
+        ))
+        .bind(glossary_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(term_from_row).collect())
+    }
+
+    async fn update_term(
+        &self,
+        id: Uuid,
+        update: graph_owl_storage::GlossaryTermUpdate,
+    ) -> Result<Option<graph_owl_storage::GlossaryTermRecord>, StorageError> {
+        let row = sqlx::query(&format!(
+            "UPDATE glossary_terms
+             SET definition = COALESCE($2, definition),
+                 synonyms = COALESCE($3, synonyms),
+                 abbreviations = COALESCE($4, abbreviations),
+                 updated_at = now()
+             WHERE id = $1
+             RETURNING {TERM_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(&update.definition)
+        .bind(&update.synonyms)
+        .bind(&update.abbreviations)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(term_from_row))
+    }
+
+    async fn delete_term(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM glossary_terms WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn search_terms(
+        &self,
+        query: &str,
+    ) -> Result<Vec<graph_owl_storage::GlossaryTermRecord>, StorageError> {
+        // Matches the empty-query handling `search_assets` uses: `to_tsquery`
+        // raises rather than returning zero rows, so an all-punctuation query
+        // is answered without asking Postgres at all.
+        let terms: Vec<&str> = query.split_whitespace().collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(&format!(
+            "SELECT {TERM_COLUMNS} FROM glossary_terms
+             WHERE search_vector @@ websearch_to_tsquery('english', $1)
+             ORDER BY ts_rank_cd(search_vector, websearch_to_tsquery('english', $1)) DESC, name"
+        ))
+        .bind(query)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(term_from_row).collect())
     }
 }
 

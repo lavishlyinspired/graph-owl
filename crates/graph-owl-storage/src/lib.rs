@@ -58,6 +58,12 @@ pub enum ConflictKind {
     /// the collision — and "your memory id collided" needs a different response
     /// from "that name is taken".
     MemoryExists,
+    /// A glossary still has terms and the caller did not ask for a recursive
+    /// delete — Epic 24 Slice A. Its own variant for the same reason
+    /// `PrincipalStillHolds` has one: the term count is the actionable detail,
+    /// and a canned per-kind sentence would eat it the way it twice ate
+    /// others before this enum grew a rule about it.
+    GlossaryHasTerms,
 }
 
 #[derive(Debug, Error)]
@@ -450,6 +456,64 @@ pub struct PoolStats {
     /// Connections the pool currently holds, idle or not.
     pub connections: u32,
     pub idle: u32,
+}
+
+/// A named vocabulary of business terms — Epic 24 Slice A.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Glossary {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    /// Derived with `fqn::derive`, same as every other addressable entity.
+    /// Terms below it derive theirs with `fqn::child_of`.
+    pub fully_qualified_name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A term as stored. The review workflow (Slice C) and SKOS relations (Slice
+/// B) wire onto this by id; this type only carries what Slice A's CRUD needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlossaryTermRecord {
+    pub id: Uuid,
+    pub glossary_id: Uuid,
+    pub name: String,
+    /// `{glossary}.{term}` — **globally unique as an FQN**, even though `name`
+    /// is only unique *within* its glossary (decision 1: "Customer" in Finance
+    /// and "Customer" in Support are different terms with different
+    /// addresses).
+    pub fully_qualified_name: String,
+    pub definition: String,
+    pub status: graph_owl_core::glossary::TermStatus,
+    pub synonyms: Vec<String>,
+    pub abbreviations: Vec<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A field-level change to a term. `None` means "leave alone" — the same
+/// partial-update shape as [`graph_owl_core::TableUpdate`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GlossaryTermUpdate {
+    pub definition: Option<String>,
+    pub synonyms: Option<Vec<String>>,
+    pub abbreviations: Option<Vec<String>>,
+}
+
+/// What deleting a glossary did.
+///
+/// Not a `bool`: "it still has terms" needs a count a caller can report, and
+/// folding that into `StorageError::Conflict` would make the facade's 409
+/// detail the adapter's job to word rather than the facade's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlossaryDeletion {
+    Deleted,
+    NotFound,
+    /// Refused: it still has terms and the caller did not ask for a recursive
+    /// delete.
+    HasTerms {
+        term_count: i64,
+    },
 }
 
 #[async_trait]
@@ -1153,4 +1217,67 @@ pub trait Storage: Send + Sync {
     ///
     /// [`StorageError::Unexpected`] if the read fails.
     async fn asset_owners(&self, asset_id: Uuid) -> Result<Vec<EntityReference>, StorageError>;
+
+    // ---- Epic 24 Slice A: glossary and terms ----
+
+    /// # Errors
+    /// [`StorageError::Conflict`] (`kind: Fqn`) if the FQN is already taken.
+    async fn insert_glossary(&self, glossary: Glossary) -> Result<Glossary, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_glossary(&self, id: Uuid) -> Result<Option<Glossary>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_glossaries(&self) -> Result<Vec<Glossary>, StorageError>;
+
+    /// Delete a glossary. `recursive` deletes its terms first rather than
+    /// refusing — see [`GlossaryDeletion::HasTerms`].
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn delete_glossary(
+        &self,
+        id: Uuid,
+        recursive: bool,
+    ) -> Result<GlossaryDeletion, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Conflict`] (`kind: Fqn`) if the FQN is already taken,
+    /// which covers both a duplicate name within the glossary and a
+    /// cross-glossary FQN collision.
+    async fn insert_term(
+        &self,
+        term: GlossaryTermRecord,
+    ) -> Result<GlossaryTermRecord, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_term(&self, id: Uuid) -> Result<Option<GlossaryTermRecord>, StorageError>;
+
+    /// Every term in one glossary.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_terms(&self, glossary_id: Uuid) -> Result<Vec<GlossaryTermRecord>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn update_term(
+        &self,
+        id: Uuid,
+        update: GlossaryTermUpdate,
+    ) -> Result<Option<GlossaryTermRecord>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn delete_term(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Full-text search over name, synonyms, abbreviations and definition —
+    /// the same weighting the migration's `search_vector` encodes.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn search_terms(&self, query: &str) -> Result<Vec<GlossaryTermRecord>, StorageError>;
 }
