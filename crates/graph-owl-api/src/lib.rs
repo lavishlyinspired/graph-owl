@@ -1492,6 +1492,121 @@ impl Catalog {
         Ok(self.storage.create_inbound_event(event).await?)
     }
 
+    /// Records a new version of a mapping — Epic 18 Slice C.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    #[tracing::instrument(name = "catalog.upsert_mapping", skip_all)]
+    pub async fn upsert_mapping(
+        &self,
+        mapping: graph_owl_storage::Mapping,
+    ) -> Result<graph_owl_storage::Mapping, CatalogError> {
+        Ok(self.storage.upsert_mapping(mapping).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn mapping(
+        &self,
+        name: &str,
+    ) -> Result<Option<graph_owl_storage::Mapping>, CatalogError> {
+        Ok(self.storage.get_mapping(name).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn mapping_versions(
+        &self,
+        name: &str,
+    ) -> Result<Vec<graph_owl_storage::Mapping>, CatalogError> {
+        Ok(self.storage.list_mapping_versions(name).await?)
+    }
+
+    /// Applies a mapping to a sample payload **without writing anything** —
+    /// Epic 18 Slice C's dry-run criterion. Every outcome here is a value,
+    /// not a `CatalogError`: `Err` is reserved for infrastructure failure
+    /// (the mapping name does not exist, or storage fails), because a
+    /// mapping that does not fit this payload is exactly what a dry run
+    /// exists to discover.
+    ///
+    /// **Reuses [`Catalog::validate_draft`] rather than a second
+    /// implementation.** That is Epic 16 Slice D's own mechanism for
+    /// checking a not-yet-persisted entity against Epic 5's shapes — a
+    /// draft is projected to flakes and validated exactly as a stored one
+    /// would be, so there is one shape-checking code path, not two that
+    /// could drift.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if no mapping is registered under `mapping_name`.
+    /// `Storage` if a read fails.
+    #[tracing::instrument(name = "catalog.dry_run_mapping", skip_all)]
+    pub async fn dry_run_mapping(
+        &self,
+        mapping_name: &str,
+        payload: &serde_json::Value,
+    ) -> Result<MappingOutcome, CatalogError> {
+        let mapping = self
+            .storage
+            .get_mapping(mapping_name)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+
+        let draft = match graph_owl_connectors::webhook_mapping::apply_mapping(&mapping, payload) {
+            Ok(draft) => draft,
+            Err(graph_owl_connectors::webhook_mapping::MappingError { field, .. }) => {
+                return Ok(MappingOutcome::MissingField { field });
+            }
+        };
+
+        let Ok(kind) = AssetKind::parse(&draft.kind) else {
+            return Ok(MappingOutcome::InvalidKind { kind: draft.kind });
+        };
+
+        let parent_id = match &draft.parent_fqn {
+            None => None,
+            Some(parent_fqn) => self
+                .storage
+                .get_asset_by_fqn(parent_fqn)
+                .await?
+                .map(|parent| parent.id),
+        };
+        let fully_qualified_name = match &draft.parent_fqn {
+            Some(parent) => format!("{parent}.{}", draft.name),
+            None => draft.name.clone(),
+        };
+        let now = chrono::Utc::now();
+        let candidate = Asset {
+            id: Uuid::nil(),
+            kind,
+            name: draft.name.clone(),
+            fully_qualified_name,
+            parent_id,
+            description: draft.description.clone(),
+            properties: draft.properties.clone(),
+            owners: Vec::new(),
+            version: graph_owl_core::envelope::EntityVersion::initial(),
+            // Attributed to `system`, the same principal every other
+            // machine-originated write uses — this candidate is never
+            // persisted, so the value only matters if a shape happens to
+            // constrain it.
+            updated_by: "system".to_string(),
+            change_description: None,
+            deleted: false,
+            deleted_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        if let Some(reason) = self.validate_draft(&candidate).await? {
+            return Ok(MappingOutcome::ShapeViolation { reason });
+        }
+
+        Ok(MappingOutcome::Draft(draft))
+    }
+
     /// Create or update a team.
     ///
     /// # Errors
@@ -5346,6 +5461,26 @@ pub struct IngestEdge {
     pub description: Option<String>,
 }
 
+/// What applying a mapping to a payload produced — Epic 18 Slice C.
+///
+/// Every variant is a legitimate result of a dry run, not an error: a
+/// mapping that does not fit a sample payload is exactly what dry-running it
+/// is for, and collapsing these into a single `CatalogError` would lose the
+/// distinction a client needs to know *what* to fix — the mapping's field
+/// paths, or the shapes the resulting entity would violate.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MappingOutcome {
+    /// Every required field resolved and the draft passed shape validation.
+    Draft(graph_owl_connectors::batch::RowDraft),
+    /// A required field's path resolved to nothing.
+    MissingField { field: &'static str },
+    /// `kind` resolved to a string that names no known asset kind.
+    InvalidKind { kind: String },
+    /// The draft resolved but a shape rejected it — names the shape and
+    /// constraint, from [`Catalog::validate_draft`].
+    ShapeViolation { reason: String },
+}
+
 /// What happened to one pushed item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestOutcome {
@@ -5603,6 +5738,7 @@ mod tests {
         #[allow(clippy::type_complexity)]
         webhook_endpoints: Mutex<Vec<(graph_owl_storage::WebhookEndpoint, Option<Vec<u8>>)>>,
         inbound_events: Mutex<Vec<graph_owl_core::webhook::InboundEvent>>,
+        mapping_versions: Mutex<Vec<graph_owl_storage::Mapping>>,
     }
 
     impl InMemoryStorage {
@@ -6355,6 +6491,54 @@ mod tests {
                 .iter()
                 .find(|e| e.id == id)
                 .cloned())
+        }
+
+        async fn upsert_mapping(
+            &self,
+            mut mapping: graph_owl_storage::Mapping,
+        ) -> Result<graph_owl_storage::Mapping, StorageError> {
+            self.guard_write("upsert_mapping");
+            let mut held = self.mapping_versions.lock().unwrap();
+            mapping.version = held
+                .iter()
+                .filter(|m| m.name == mapping.name)
+                .map(|m| m.version)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            mapping.created_at = chrono::Utc::now();
+            held.push(mapping.clone());
+            Ok(mapping)
+        }
+
+        async fn get_mapping(
+            &self,
+            name: &str,
+        ) -> Result<Option<graph_owl_storage::Mapping>, StorageError> {
+            Ok(self
+                .mapping_versions
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.name == name)
+                .max_by_key(|m| m.version)
+                .cloned())
+        }
+
+        async fn list_mapping_versions(
+            &self,
+            name: &str,
+        ) -> Result<Vec<graph_owl_storage::Mapping>, StorageError> {
+            let mut versions: Vec<_> = self
+                .mapping_versions
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.name == name)
+                .cloned()
+                .collect();
+            versions.sort_by_key(|m| std::cmp::Reverse(m.version));
+            Ok(versions)
         }
 
         async fn upsert_team(&self, team: &graph_owl_storage::Team) -> Result<(), StorageError> {
@@ -12342,6 +12526,287 @@ mod redelivered_webhooks_are_deduped_not_reapplied {
             graph_owl_core::webhook::EventState::Received,
             "different content must not collide with an unrelated delivery's dedup key"
         );
+    }
+}
+
+#[cfg(test)]
+mod mappings_turn_payloads_into_drafts {
+    //! Epic 18 Slice C at the **facade**.
+    //!
+    //! The expression evaluator itself is proven in isolation
+    //! (`graph-owl-connectors::webhook_mapping`); this proves the
+    //! *orchestration* — that `Catalog::dry_run_mapping` looks up the right
+    //! mapping, reports a missing field or an invalid kind without
+    //! guessing, reuses `validate_draft` rather than a second shape check,
+    //! and never writes anything regardless of outcome.
+
+    use super::*;
+    use graph_owl_core::flake::{FlakeValue, Sid, namespace};
+    use projection_isolation_tests::RecordingGraph;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use tests::InMemoryStorage;
+
+    fn path(pointer: &str) -> graph_owl_storage::Expression {
+        graph_owl_storage::Expression::Path {
+            pointer: pointer.to_string(),
+        }
+    }
+
+    fn mapping(name: &str) -> graph_owl_storage::Mapping {
+        graph_owl_storage::Mapping {
+            name: name.to_string(),
+            version: 0, // ignored on write
+            kind: path("/kind"),
+            entity_name: path("/tableName"),
+            parent_fqn: None,
+            description: Some(path("/description")),
+            properties: BTreeMap::new(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_complete_payload_produces_a_draft() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        catalog
+            .upsert_mapping(mapping("dbt-run-completed"))
+            .await
+            .expect("register mapping");
+
+        let payload = json!({"kind": "table", "tableName": "orders"});
+        let outcome = catalog
+            .dry_run_mapping("dbt-run-completed", &payload)
+            .await
+            .expect("dry run");
+
+        match outcome {
+            MappingOutcome::Draft(draft) => {
+                assert_eq!(draft.kind, "table");
+                assert_eq!(draft.name, "orders");
+            }
+            other => panic!("expected a draft, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_required_path_names_the_field_not_just_invalid() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        catalog
+            .upsert_mapping(mapping("dbt-run-completed"))
+            .await
+            .expect("register mapping");
+
+        // No `tableName` in the payload — the mapping's `entity_name` path
+        // resolves to nothing.
+        let payload = json!({"kind": "table"});
+        let outcome = catalog
+            .dry_run_mapping("dbt-run-completed", &payload)
+            .await
+            .expect("dry run");
+
+        assert_eq!(outcome, MappingOutcome::MissingField { field: "name" });
+    }
+
+    #[tokio::test]
+    async fn a_kind_that_names_no_known_asset_kind_is_reported() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        catalog
+            .upsert_mapping(mapping("dbt-run-completed"))
+            .await
+            .expect("register mapping");
+
+        let payload = json!({"kind": "dbt_run", "tableName": "orders"});
+        let outcome = catalog
+            .dry_run_mapping("dbt-run-completed", &payload)
+            .await
+            .expect("dry run");
+
+        assert_eq!(
+            outcome,
+            MappingOutcome::InvalidKind {
+                kind: "dbt_run".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_mapping_name_is_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let result = catalog.dry_run_mapping("no-such-mapping", &json!({})).await;
+
+        assert!(matches!(result, Err(CatalogError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_never_writes_anything() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage.clone());
+        catalog
+            .upsert_mapping(mapping("dbt-run-completed"))
+            .await
+            .expect("register mapping");
+        storage.forbid_writes();
+
+        let payload = json!({"kind": "table", "tableName": "orders"});
+        let outcome = catalog
+            .dry_run_mapping("dbt-run-completed", &payload)
+            .await
+            .expect("dry run");
+
+        assert!(matches!(outcome, MappingOutcome::Draft(_)));
+    }
+
+    // ---- shape rejection: reuses `validate_draft`, not a second check ----
+
+    fn a(id: &str) -> Sid {
+        Sid::dsc(id)
+    }
+    fn sh(term: &str) -> Sid {
+        Sid::new(namespace::SHACL, term)
+    }
+    fn rdf_type() -> Sid {
+        Sid::new(namespace::RDF, "type")
+    }
+
+    /// Every entity that has a kind at all (every asset) needs a
+    /// `description`, stated in the shapes graph.
+    fn shape_facts(t: i64) -> Vec<graph_owl_core::flake::Flake> {
+        let in_shapes = |s: Sid, p: Sid, o: FlakeValue| graph_owl_core::flake::Flake {
+            s,
+            p,
+            o,
+            cx: Some(shapes_graph()),
+            t,
+            op: true,
+        };
+        vec![
+            in_shapes(
+                a("TableNeedsDescription"),
+                rdf_type(),
+                FlakeValue::Ref(sh("NodeShape")),
+            ),
+            // `targetClass` selects on literal `rdf:type`, which
+            // `asset_to_flakes` never asserts — an asset's kind is its own
+            // `dsc("type")` predicate, a different one. `targetSubjectsOf`
+            // selects any subject with that predicate at all, which every
+            // projected asset has.
+            in_shapes(
+                a("TableNeedsDescription"),
+                sh("targetSubjectsOf"),
+                FlakeValue::Ref(a("type")),
+            ),
+            in_shapes(
+                a("TableNeedsDescription"),
+                sh("property"),
+                FlakeValue::Ref(a("TableNeedsDescription/description")),
+            ),
+            in_shapes(
+                a("TableNeedsDescription/description"),
+                sh("path"),
+                FlakeValue::Ref(a("description")),
+            ),
+            in_shapes(
+                a("TableNeedsDescription/description"),
+                sh("minCount"),
+                FlakeValue::Int(1),
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_draft_that_would_violate_a_shape_is_rejected_naming_it() {
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&shape_facts(1))
+            .await
+            .expect("seed the shape");
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+        catalog
+            .upsert_mapping(mapping("dbt-run-completed"))
+            .await
+            .expect("register mapping");
+
+        // No `description` in the payload, and the mapping's own
+        // `description` field is `None` for anything absent — the
+        // resulting draft has no description, which the shape refuses.
+        let payload = json!({"kind": "table", "tableName": "orders"});
+        let outcome = catalog
+            .dry_run_mapping("dbt-run-completed", &payload)
+            .await
+            .expect("dry run");
+
+        match outcome {
+            MappingOutcome::ShapeViolation { reason } => {
+                assert!(reason.contains("TableNeedsDescription"), "{reason}");
+            }
+            other => panic!("expected a shape violation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_draft_that_satisfies_every_shape_is_returned() {
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&shape_facts(1))
+            .await
+            .expect("seed the shape");
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+        let mut m = mapping("dbt-run-completed");
+        m.description = Some(path("/description"));
+        catalog.upsert_mapping(m).await.expect("register mapping");
+
+        let payload = json!({
+            "kind": "table",
+            "tableName": "orders",
+            "description": "one row per order",
+        });
+        let outcome = catalog
+            .dry_run_mapping("dbt-run-completed", &payload)
+            .await
+            .expect("dry run");
+
+        assert!(matches!(outcome, MappingOutcome::Draft(_)), "{outcome:?}");
+    }
+
+    // ---- versioning: every update is a new version, auditable ----
+
+    #[tokio::test]
+    async fn updating_a_mapping_adds_a_version_rather_than_overwriting() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let first = catalog
+            .upsert_mapping(mapping("dbt-run-completed"))
+            .await
+            .expect("first version");
+        assert_eq!(first.version, 1);
+
+        let second = catalog
+            .upsert_mapping(mapping("dbt-run-completed"))
+            .await
+            .expect("second version");
+        assert_eq!(second.version, 2);
+
+        let latest = catalog
+            .mapping("dbt-run-completed")
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(latest.version, 2, "the latest read is the newest version");
+
+        let history = catalog
+            .mapping_versions("dbt-run-completed")
+            .await
+            .expect("history");
+        assert_eq!(
+            history.len(),
+            2,
+            "the old version is still there, not overwritten"
+        );
+        assert_eq!(history[0].version, 2, "newest first");
+        assert_eq!(history[1].version, 1);
     }
 }
 

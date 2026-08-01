@@ -10,6 +10,7 @@ pub mod batch;
 pub mod ingest;
 pub mod job;
 pub mod rows;
+pub mod webhook_mapping;
 pub mod webhook_signature;
 
 use async_trait::async_trait;

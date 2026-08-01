@@ -4903,6 +4903,110 @@
         "summary": "Register a webhook endpoint; the secret is write-only"
       }
     },
+    "/webhooks/mappings": {
+      "post": {
+        "operationId": "post_webhooks_mappings",
+        "responses": {
+          "201": {
+            "description": "Register a new version of a payload-to-draft mapping"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Register a new version of a payload-to-draft mapping"
+      }
+    },
+    "/webhooks/mappings/{name}": {
+      "get": {
+        "operationId": "get_webhooks_mappings__name_",
+        "responses": {
+          "200": {
+            "description": "The latest version of a mapping"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "The latest version of a mapping"
+      }
+    },
+    "/webhooks/mappings/{name}/dry-run": {
+      "post": {
+        "operationId": "post_webhooks_mappings__name__dry-run",
+        "responses": {
+          "200": {
+            "description": "Apply a mapping to a sample payload without writing anything"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Apply a mapping to a sample payload without writing anything"
+      }
+    },
+    "/webhooks/mappings/{name}/versions": {
+      "get": {
+        "operationId": "get_webhooks_mappings__name__versions",
+        "responses": {
+          "200": {
+            "description": "Every version of a mapping, newest first"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every version of a mapping, newest first"
+      }
+    },
     "/webhooks/receive/{path}": {
       "post": {
         "operationId": "post_webhooks_receive__path_",

@@ -444,6 +444,64 @@ pub struct WebhookEndpoint {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A closed expression for extracting or composing a value from a webhook
+/// payload — Epic 18 Slice C.
+///
+/// Five variants and no more, deliberately: a general scripting language can
+/// hang the receiver forever, and every variant here recurses into a
+/// strictly smaller, owned sub-expression, so evaluation terminates by
+/// construction — there is no "repeat" or "while" construct to misuse into
+/// one that does not.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum Expression {
+    /// A JSON Pointer (RFC 6901) into the payload, e.g. `/run/id`.
+    Path { pointer: String },
+    /// A fixed string, independent of the payload.
+    Literal { value: String },
+    /// The string results of each sub-expression, joined with nothing
+    /// between them.
+    Concat { parts: Vec<Expression> },
+    /// The lowercased string result of one sub-expression.
+    Lowercase { of: Box<Expression> },
+    /// `pattern` with each `{name}` replaced by `bindings[name]`'s evaluated
+    /// result, exactly once. Never re-scanned: a bound value that itself
+    /// contains `{...}` must not trigger a second substitution pass, which
+    /// is the shape an unbounded template evaluator's loop risk takes.
+    Template {
+        pattern: String,
+        bindings: std::collections::BTreeMap<String, Expression>,
+    },
+}
+
+/// A registered webhook payload-to-draft mapping, versioned — Epic 18 Slice C.
+///
+/// Every update is a new version, never an overwrite: "mappings are
+/// versioned so a fix is auditable" means the old rule stays readable next
+/// to the new one, not merely that a counter increments somewhere nobody can
+/// see the history of.
+///
+/// `kind` and `entity_name` are required — every entity-draft path in this
+/// codebase needs both (see `graph_owl_connectors::batch::RowDraft`, the
+/// batch-ingestion equivalent this mirrors). `parent_fqn`/`description` are
+/// optional expressions, and `properties` builds a free-form object the same
+/// way an unrecognised batch column does.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mapping {
+    pub name: String,
+    pub version: u32,
+    pub kind: Expression,
+    pub entity_name: Expression,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_fqn: Option<Expression>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<Expression>,
+    #[serde(default)]
+    pub properties: std::collections::BTreeMap<String, Expression>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// A group of people who own things together.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Team {
@@ -1106,6 +1164,33 @@ pub trait Storage: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<graph_owl_core::webhook::InboundEvent>, StorageError>;
+
+    /// Records a new version of a mapping — Epic 18 Slice C. `version` and
+    /// `created_at` on the argument are ignored; the real values (the
+    /// existing max version for this name, plus one, and the write's own
+    /// timestamp) come back on the returned value. Never an update in
+    /// place: every call adds a version, so a fix is auditable against what
+    /// it replaced.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the write fails.
+    async fn upsert_mapping(&self, mapping: Mapping) -> Result<Mapping, StorageError>;
+
+    /// The latest version of a mapping by name.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn get_mapping(&self, name: &str) -> Result<Option<Mapping>, StorageError>;
+
+    /// Every version of a mapping, newest first — the audit trail "mappings
+    /// are versioned" exists for.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn list_mapping_versions(&self, name: &str) -> Result<Vec<Mapping>, StorageError>;
 
     /// Create or update a team, replacing its membership.
     ///

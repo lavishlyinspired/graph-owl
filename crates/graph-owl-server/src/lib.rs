@@ -199,6 +199,15 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         // sender is not a graph-owl principal, and the endpoint's own
         // signature scheme is what verifies it instead.
         .route("/webhooks/receive/{path}", post(receive_webhook))
+        // Epic 18 Slice C: versioned payload-to-draft mappings, admin-gated
+        // for the same reason webhook endpoints are.
+        .route("/webhooks/mappings", post(register_mapping))
+        .route("/webhooks/mappings/{name}", get(get_mapping))
+        .route(
+            "/webhooks/mappings/{name}/versions",
+            get(list_mapping_versions),
+        )
+        .route("/webhooks/mappings/{name}/dry-run", post(dry_run_mapping))
         // Unauthenticated by necessity rather than by design: this is what a
         // client reads *before* it holds a token, so requiring one would be
         // circular.
@@ -2386,6 +2395,128 @@ async fn receive_webhook(
         StatusCode::CREATED,
         Json(json!({ "id": event.id, "state": event.state })),
     ))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MappingRequest {
+    name: String,
+    kind: graph_owl_storage::Expression,
+    entity_name: graph_owl_storage::Expression,
+    #[serde(default)]
+    parent_fqn: Option<graph_owl_storage::Expression>,
+    #[serde(default)]
+    description: Option<graph_owl_storage::Expression>,
+    #[serde(default)]
+    properties: std::collections::BTreeMap<String, graph_owl_storage::Expression>,
+}
+
+impl ValidateBody for MappingRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("name"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// Records a new version of a mapping — Epic 18 Slice C.
+///
+/// Admin-only: a mapping decides how an external payload becomes a catalog
+/// entity, which is administration rather than cataloguing.
+async fn register_mapping(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<MappingRequest>,
+) -> Result<(StatusCode, Json<graph_owl_storage::Mapping>), AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let now = chrono::Utc::now();
+    let mapping = graph_owl_storage::Mapping {
+        name: payload.name,
+        version: 0, // ignored on write; storage computes the real next version
+        kind: payload.kind,
+        entity_name: payload.entity_name,
+        parent_fqn: payload.parent_fqn,
+        description: payload.description,
+        properties: payload.properties,
+        created_at: now,
+    };
+    let saved = catalog.upsert_mapping(mapping).await?;
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+/// The latest version of a mapping.
+async fn get_mapping(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(name): Path<String>,
+) -> Result<Json<graph_owl_storage::Mapping>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    catalog
+        .mapping(&name)
+        .await?
+        .map(Json)
+        .ok_or(AppError::NotFound)
+}
+
+/// Every version of a mapping, newest first — the audit trail versioning
+/// exists for.
+async fn list_mapping_versions(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<graph_owl_storage::Mapping>>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.mapping_versions(&name).await?))
+}
+
+/// Applies a mapping to a sample payload without writing anything — Epic 18
+/// Slice C's dry-run criterion.
+///
+/// **The body is the sample payload itself**, not a request DTO wrapping
+/// it — a dry run tests exactly what a real delivery would send, so
+/// wrapping it would test a shape a sender never produces.
+async fn dry_run_mapping(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(name): Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let outcome = catalog.dry_run_mapping(&name, &payload).await?;
+    Ok(Json(match outcome {
+        graph_owl_api::MappingOutcome::Draft(draft) => json!({
+            "outcome": "draft",
+            "kind": draft.kind,
+            "name": draft.name,
+            "parentFqn": draft.parent_fqn,
+            "description": draft.description,
+            "properties": draft.properties,
+        }),
+        graph_owl_api::MappingOutcome::MissingField { field } => json!({
+            "outcome": "missingField",
+            "field": field,
+        }),
+        graph_owl_api::MappingOutcome::InvalidKind { kind } => json!({
+            "outcome": "invalidKind",
+            "kind": kind,
+        }),
+        graph_owl_api::MappingOutcome::ShapeViolation { reason } => json!({
+            "outcome": "shapeViolation",
+            "reason": reason,
+        }),
+    }))
 }
 
 #[derive(Debug, serde::Deserialize)]

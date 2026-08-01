@@ -1157,6 +1157,96 @@ impl Storage for PostgresStorage {
         row.map(inbound_event_from_row).transpose()
     }
 
+    // The next version is computed inside the `INSERT` itself, not read then
+    // written: a subquery in the `SELECT` list is one round trip and one
+    // statement, so there is no window between reading the current max and
+    // writing the new row for a second writer to land in. Admin-only
+    // configuration, not a hot path, so this is not wrapped in a
+    // serializable transaction on top of that — a genuine simultaneous
+    // double-register of the same mapping name is vanishingly unlikely, and
+    // the failure mode if it ever happened is a `UNIQUE` violation, not a
+    // silently wrong version.
+    #[tracing::instrument(name = "storage.upsert_mapping", skip_all)]
+    async fn upsert_mapping(
+        &self,
+        mapping: graph_owl_storage::Mapping,
+    ) -> Result<graph_owl_storage::Mapping, StorageError> {
+        let kind_expr = serde_json::to_value(&mapping.kind)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let name_expr = serde_json::to_value(&mapping.entity_name)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let parent_fqn_expr = mapping
+            .parent_fqn
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let description_expr = mapping
+            .description
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let properties_exprs = serde_json::to_value(&mapping.properties)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let row = sqlx::query(
+            "INSERT INTO mapping_versions
+                 (id, name, version, kind_expr, name_expr, parent_fqn_expr,
+                  description_expr, properties_exprs)
+             SELECT $1, $2,
+                    COALESCE((SELECT MAX(version) FROM mapping_versions WHERE name = $2), 0) + 1,
+                    $3, $4, $5, $6, $7
+             RETURNING id, name, version, kind_expr, name_expr, parent_fqn_expr,
+                       description_expr, properties_exprs, created_at",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&mapping.name)
+        .bind(kind_expr)
+        .bind(name_expr)
+        .bind(parent_fqn_expr)
+        .bind(description_expr)
+        .bind(properties_exprs)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        mapping_from_row(row)
+    }
+
+    #[tracing::instrument(name = "storage.get_mapping", skip_all)]
+    async fn get_mapping(
+        &self,
+        name: &str,
+    ) -> Result<Option<graph_owl_storage::Mapping>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, name, version, kind_expr, name_expr, parent_fqn_expr,
+                    description_expr, properties_exprs, created_at
+             FROM mapping_versions WHERE name = $1 ORDER BY version DESC LIMIT 1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        row.map(mapping_from_row).transpose()
+    }
+
+    #[tracing::instrument(name = "storage.list_mapping_versions", skip_all)]
+    async fn list_mapping_versions(
+        &self,
+        name: &str,
+    ) -> Result<Vec<graph_owl_storage::Mapping>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, name, version, kind_expr, name_expr, parent_fqn_expr,
+                    description_expr, properties_exprs, created_at
+             FROM mapping_versions WHERE name = $1 ORDER BY version DESC",
+        )
+        .bind(name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        rows.into_iter().map(mapping_from_row).collect()
+    }
+
     #[tracing::instrument(name = "storage.upsert_team", skip_all)]
     // ---- Epic 31: organizational memory ----
 
@@ -4544,6 +4634,39 @@ fn inbound_event_from_row(
         raw: row.get("raw"),
         state: event_state_from_str(row.get::<&str, _>("state"))?,
         dedup_key: row.get("dedup_key"),
+    })
+}
+
+fn mapping_from_row(row: PgRow) -> Result<graph_owl_storage::Mapping, StorageError> {
+    let kind = serde_json::from_value(row.get("kind_expr"))
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+    let entity_name = serde_json::from_value(row.get("name_expr"))
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+    let parent_fqn = row
+        .get::<Option<serde_json::Value>, _>("parent_fqn_expr")
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+    let description = row
+        .get::<Option<serde_json::Value>, _>("description_expr")
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+    let properties = serde_json::from_value(row.get("properties_exprs"))
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+    Ok(graph_owl_storage::Mapping {
+        name: row.get("name"),
+        version: {
+            let version: i32 = row.get("version");
+            u32::try_from(version).map_err(|e| StorageError::Unexpected(e.to_string()))?
+        },
+        kind,
+        entity_name,
+        parent_fqn,
+        description,
+        properties,
+        created_at: row.get("created_at"),
     })
 }
 
