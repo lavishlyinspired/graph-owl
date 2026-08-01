@@ -292,7 +292,7 @@ fn glossary_from_row(row: PgRow) -> graph_owl_storage::Glossary {
 }
 
 const TERM_COLUMNS: &str = "id, glossary_id, name, fully_qualified_name, definition, status,
-     synonyms, abbreviations, created_at, updated_at";
+     synonyms, abbreviations, version_major, version_minor, created_at, updated_at";
 
 #[allow(clippy::needless_pass_by_value)]
 fn term_from_row(row: PgRow) -> graph_owl_storage::GlossaryTermRecord {
@@ -308,8 +308,78 @@ fn term_from_row(row: PgRow) -> graph_owl_storage::GlossaryTermRecord {
             .unwrap_or(graph_owl_core::glossary::TermStatus::Draft),
         synonyms: row.get("synonyms"),
         abbreviations: row.get("abbreviations"),
+        version: EntityVersion {
+            major: u32::try_from(row.get::<i32, _>("version_major")).unwrap_or(1),
+            minor: u32::try_from(row.get::<i32, _>("version_minor")).unwrap_or(0),
+        },
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    }
+}
+
+/// `source_assets` is a correlated subquery rather than a join, because a
+/// `LEFT JOIN metric_sources` would need every other column in the `GROUP
+/// BY` — the same reason `OWNERS_EXPR` is a subquery rather than a join.
+const METRIC_SELECT: &str = "SELECT id, name, fully_qualified_name, definition, formula, unit,
+     granularity, calculation_type, defined_by, created_at, updated_at,
+     COALESCE(
+         (SELECT ARRAY_AGG(source_fqn ORDER BY source_fqn)
+            FROM metric_sources WHERE metric_id = metrics.id),
+         '{}'
+     ) AS source_assets
+     FROM metrics";
+
+#[allow(clippy::needless_pass_by_value)]
+fn metric_from_row(row: PgRow) -> graph_owl_storage::MetricRecord {
+    graph_owl_storage::MetricRecord {
+        id: row.get("id"),
+        name: row.get("name"),
+        fully_qualified_name: row.get("fully_qualified_name"),
+        definition: row.get("definition"),
+        formula: row.get("formula"),
+        unit: row.get("unit"),
+        granularity: row.get("granularity"),
+        // The CHECK constraint pins the vocabulary; a value that somehow
+        // fails to parse falls back to `Simple` rather than panicking a read.
+        calculation_type: graph_owl_core::metric::CalculationType::parse(
+            row.get::<&str, _>("calculation_type"),
+        )
+        .unwrap_or(graph_owl_core::metric::CalculationType::Simple),
+        defined_by: row.get("defined_by"),
+        source_assets: row.get("source_assets"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+/// The wire spelling of a relation's kind — the `term_relations.kind` CHECK
+/// vocabulary, distinct from [`SkosRelation::predicate`]'s `skos:` form.
+const fn relation_kind_str(relation: &graph_owl_core::glossary::SkosRelation) -> &'static str {
+    use graph_owl_core::glossary::SkosRelation;
+    match relation {
+        SkosRelation::Broader(_) => "broader",
+        SkosRelation::Narrower(_) => "narrower",
+        SkosRelation::Related(_) => "related",
+        SkosRelation::ExactMatch(_) => "exactMatch",
+        SkosRelation::CloseMatch(_) => "closeMatch",
+    }
+}
+
+/// The inverse of [`relation_kind_str`]. `None` for a kind the CHECK
+/// constraint would never let through — a row this crate wrote should never
+/// fail this, so it is a defensive `Option` rather than a panic.
+fn relation_from_kind(
+    kind: &str,
+    target: String,
+) -> Option<graph_owl_core::glossary::SkosRelation> {
+    use graph_owl_core::glossary::SkosRelation;
+    match kind {
+        "broader" => Some(SkosRelation::Broader(target)),
+        "narrower" => Some(SkosRelation::Narrower(target)),
+        "related" => Some(SkosRelation::Related(target)),
+        "exactMatch" => Some(SkosRelation::ExactMatch(target)),
+        "closeMatch" => Some(SkosRelation::CloseMatch(target)),
+        _ => None,
     }
 }
 
@@ -3179,6 +3249,532 @@ impl Storage for PostgresStorage {
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(rows.into_iter().map(term_from_row).collect())
+    }
+
+    // ---- Epic 24 Slice B: SKOS relations ----
+
+    async fn insert_term_relation(
+        &self,
+        term_id: Uuid,
+        relation: graph_owl_core::glossary::SkosRelation,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO term_relations (term_id, kind, target)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (term_id, kind, target) DO NOTHING",
+        )
+        .bind(term_id)
+        .bind(relation_kind_str(&relation))
+        .bind(relation.target())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete_term_relation(
+        &self,
+        term_id: Uuid,
+        relation: &graph_owl_core::glossary::SkosRelation,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM term_relations WHERE term_id = $1 AND kind = $2 AND target = $3",
+        )
+        .bind(term_id)
+        .bind(relation_kind_str(relation))
+        .bind(relation.target())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn term_relations_touching(
+        &self,
+        term_id: Uuid,
+    ) -> Result<Vec<(String, graph_owl_core::glossary::SkosRelation)>, StorageError> {
+        let id_text = term_id.to_string();
+        let rows = sqlx::query(
+            "SELECT term_id, kind, target FROM term_relations
+             WHERE term_id = $1 OR target = $2",
+        )
+        .bind(term_id)
+        .bind(&id_text)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let owner: Uuid = row.get("term_id");
+                let kind: &str = row.get("kind");
+                let target: String = row.get("target");
+                relation_from_kind(kind, target).map(|relation| (owner.to_string(), relation))
+            })
+            .collect())
+    }
+
+    async fn broader_edges(&self) -> Result<Vec<(String, String)>, StorageError> {
+        let rows = sqlx::query("SELECT term_id, target FROM term_relations WHERE kind = 'broader'")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let owner: Uuid = row.get("term_id");
+                let target: String = row.get("target");
+                (owner.to_string(), target)
+            })
+            .collect())
+    }
+
+    // ---- Epic 24 Slice C: review workflow ----
+
+    async fn set_term_reviewers(
+        &self,
+        term_id: Uuid,
+        reviewers: &[String],
+    ) -> Result<(), StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // Replaced, not merged — same reason `upsert_team`'s membership is:
+        // a partial update cannot express "nobody reviews this any more".
+        sqlx::query("DELETE FROM term_reviewers WHERE term_id = $1")
+            .bind(term_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        for reviewer in reviewers {
+            sqlx::query("INSERT INTO term_reviewers (term_id, user_id) VALUES ($1, $2)")
+                .bind(term_id)
+                .bind(reviewer)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    if e.as_database_error()
+                        .is_some_and(sqlx::error::DatabaseError::is_foreign_key_violation)
+                    {
+                        StorageError::Unexpected(format!(
+                            "`{reviewer}` is not a known user; a reviewer nobody can \
+                             resolve is an approval nobody can act on"
+                        ))
+                    } else {
+                        StorageError::Unexpected(e.to_string())
+                    }
+                })?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    async fn term_reviewers(&self, term_id: Uuid) -> Result<Vec<String>, StorageError> {
+        sqlx::query_scalar("SELECT user_id FROM term_reviewers WHERE term_id = $1 ORDER BY user_id")
+            .bind(term_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    async fn transition_term(
+        &self,
+        term_id: Uuid,
+        from: graph_owl_core::glossary::TermStatus,
+        to: graph_owl_core::glossary::TermStatus,
+        actor: &str,
+        reason: Option<String>,
+        successor_term_id: Option<Uuid>,
+    ) -> Result<Option<graph_owl_storage::GlossaryTermRecord>, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let row = sqlx::query(&format!(
+            "UPDATE glossary_terms
+             SET status = $2,
+                 deprecation_reason = $3,
+                 successor_term_id = $4,
+                 version_minor = version_minor + 1,
+                 updated_at = now()
+             WHERE id = $1
+             RETURNING {TERM_COLUMNS}"
+        ))
+        .bind(term_id)
+        .bind(to.as_str())
+        .bind(&reason)
+        .bind(successor_term_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let updated = term_from_row(row);
+
+        sqlx::query(
+            "INSERT INTO term_transitions (id, term_id, from_status, to_status, actor, reason)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(term_id)
+        .bind(from.as_str())
+        .bind(to.as_str())
+        .bind(actor)
+        .bind(&reason)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(Some(updated))
+    }
+
+    // ---- Epic 24 Slice D: terms attach to assets and columns ----
+
+    async fn attach_term(
+        &self,
+        term_id: Uuid,
+        target_fqn: &str,
+        attached_by: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO term_attachments (term_id, target_fqn, attached_by)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (term_id, target_fqn) DO NOTHING",
+        )
+        .bind(term_id)
+        .bind(target_fqn)
+        .bind(attached_by)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn detach_term(&self, term_id: Uuid, target_fqn: &str) -> Result<bool, StorageError> {
+        let result =
+            sqlx::query("DELETE FROM term_attachments WHERE term_id = $1 AND target_fqn = $2")
+                .bind(term_id)
+                .bind(target_fqn)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn term_usage(
+        &self,
+        term_id: Uuid,
+        page: &PageRequest,
+    ) -> Result<Page<String>, StorageError> {
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+
+        // No per-row id of its own, so the term's own id fills the cursor's
+        // tie-break slot — harmless, because `target_fqn` is already unique
+        // within one term's attachments and a tie never occurs.
+        let rows: Vec<String> = match &page.after {
+            Some(cursor) => {
+                sqlx::query_scalar(
+                    "SELECT target_fqn FROM term_attachments
+                     WHERE term_id = $1 AND target_fqn > $2
+                     ORDER BY target_fqn
+                     LIMIT $3",
+                )
+                .bind(term_id)
+                .bind(&cursor.sort_key)
+                .bind(overfetch)
+                .fetch_all(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query_scalar(
+                    "SELECT target_fqn FROM term_attachments
+                     WHERE term_id = $1
+                     ORDER BY target_fqn
+                     LIMIT $2",
+                )
+                .bind(term_id)
+                .bind(overfetch)
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(Page::from_overfetch(rows, page.limit, |fqn: &String| {
+            Cursor::new(fqn.clone(), term_id)
+        }))
+    }
+
+    // ---- Epic 24 Slice E: Metric as a first-class entity ----
+
+    async fn insert_metric(
+        &self,
+        metric: graph_owl_storage::MetricRecord,
+    ) -> Result<graph_owl_storage::MetricRecord, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let result = sqlx::query(
+            "INSERT INTO metrics
+                (id, name, fully_qualified_name, definition, formula, unit, granularity,
+                 calculation_type, defined_by, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(metric.id)
+        .bind(&metric.name)
+        .bind(&metric.fully_qualified_name)
+        .bind(&metric.definition)
+        .bind(&metric.formula)
+        .bind(&metric.unit)
+        .bind(&metric.granularity)
+        .bind(metric.calculation_type.as_str())
+        .bind(metric.defined_by)
+        .bind(metric.created_at)
+        .bind(metric.updated_at)
+        .execute(&mut *tx)
+        .await;
+
+        if let Err(e) = result {
+            return Err(match &e {
+                sqlx::Error::Database(db_err)
+                    if db_err.code().as_deref() == Some(UNIQUE_VIOLATION) =>
+                {
+                    let existing_id = sqlx::query_scalar(
+                        "SELECT id FROM metrics WHERE fully_qualified_name = $1",
+                    )
+                    .bind(&metric.fully_qualified_name)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .ok()
+                    .flatten();
+                    StorageError::Conflict {
+                        detail: metric.fully_qualified_name.clone(),
+                        existing_id,
+                        kind: ConflictKind::Fqn,
+                    }
+                }
+                _ => StorageError::Unexpected(e.to_string()),
+            });
+        }
+
+        for source in &metric.source_assets {
+            sqlx::query("INSERT INTO metric_sources (metric_id, source_fqn) VALUES ($1, $2)")
+                .bind(metric.id)
+                .bind(source)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(metric)
+    }
+
+    async fn get_metric(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::MetricRecord>, StorageError> {
+        let row = sqlx::query(&format!("{METRIC_SELECT} WHERE id = $1"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(metric_from_row))
+    }
+
+    async fn list_metrics(
+        &self,
+        page: &PageRequest,
+    ) -> Result<Page<graph_owl_storage::MetricRecord>, StorageError> {
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+
+        let rows = match &page.after {
+            Some(cursor) => {
+                sqlx::query(&format!(
+                    "{METRIC_SELECT} WHERE (fully_qualified_name, id) > ($1, $2)
+                     ORDER BY fully_qualified_name, id
+                     LIMIT $3"
+                ))
+                .bind(&cursor.sort_key)
+                .bind(cursor.id)
+                .bind(overfetch)
+                .fetch_all(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query(&format!(
+                    "{METRIC_SELECT} ORDER BY fully_qualified_name, id LIMIT $1"
+                ))
+                .bind(overfetch)
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let metrics: Vec<graph_owl_storage::MetricRecord> =
+            rows.into_iter().map(metric_from_row).collect();
+        Ok(Page::from_overfetch(metrics, page.limit, |metric| {
+            Cursor::new(metric.fully_qualified_name.clone(), metric.id)
+        }))
+    }
+
+    async fn update_metric(
+        &self,
+        id: Uuid,
+        update: graph_owl_storage::MetricUpdate,
+    ) -> Result<Option<graph_owl_storage::MetricRecord>, StorageError> {
+        let row = sqlx::query(&format!(
+            "UPDATE metrics
+             SET definition = COALESCE($2, definition),
+                 formula = COALESCE($3, formula),
+                 unit = COALESCE($4, unit),
+                 granularity = COALESCE($5, granularity),
+                 calculation_type = COALESCE($6, calculation_type),
+                 updated_at = now()
+             WHERE id = $1
+             RETURNING id"
+        ))
+        .bind(id)
+        .bind(&update.definition)
+        .bind(&update.formula)
+        .bind(&update.unit)
+        .bind(&update.granularity)
+        .bind(
+            update
+                .calculation_type
+                .map(graph_owl_core::metric::CalculationType::as_str),
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        if row.is_none() {
+            return Ok(None);
+        }
+        self.get_metric(id).await
+    }
+
+    async fn delete_metric(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM metrics WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn search_metrics(
+        &self,
+        query: &str,
+    ) -> Result<Vec<graph_owl_storage::MetricRecord>, StorageError> {
+        let terms: Vec<&str> = query.split_whitespace().collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Not `METRIC_SELECT`: the migration's `search_vector` is a
+        // **generated** column, and Postgres generated columns cannot read
+        // another table's row — so "searchable... by defining term" (Slice
+        // E) has to reach the defining term's own `search_vector` through a
+        // join at read time rather than through the metric's own column.
+        let rows = sqlx::query(
+            "SELECT metrics.id, metrics.name, metrics.fully_qualified_name, metrics.definition,
+                    metrics.formula, metrics.unit, metrics.granularity, metrics.calculation_type,
+                    metrics.defined_by, metrics.created_at, metrics.updated_at,
+                    COALESCE(
+                        (SELECT ARRAY_AGG(source_fqn ORDER BY source_fqn)
+                           FROM metric_sources WHERE metric_id = metrics.id),
+                        '{}'
+                    ) AS source_assets
+               FROM metrics
+               LEFT JOIN glossary_terms term ON term.id = metrics.defined_by
+              WHERE metrics.search_vector @@ websearch_to_tsquery('english', $1)
+                 OR (term.id IS NOT NULL
+                     AND term.search_vector @@ websearch_to_tsquery('english', $1))
+              ORDER BY metrics.name",
+        )
+        .bind(query)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(metric_from_row).collect())
+    }
+
+    async fn update_metric_sources(
+        &self,
+        metric_id: Uuid,
+        sources: &[String],
+    ) -> Result<Option<graph_owl_storage::MetricRecord>, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM metrics WHERE id = $1")
+            .bind(metric_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if exists.is_none() {
+            return Ok(None);
+        }
+
+        // Replaced wholesale rather than diffed here: the facade already
+        // reconciled the *content* (dedup, self-reference excluded) via
+        // `graph_owl_core::metric::reconcile_lineage` before calling this,
+        // so this is a plain "make the stored set match" — every row here is
+        // metric-declared, so there is no hand-drawn edge in this table for
+        // a diff to protect.
+        sqlx::query("DELETE FROM metric_sources WHERE metric_id = $1")
+            .bind(metric_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        for source in sources {
+            sqlx::query("INSERT INTO metric_sources (metric_id, source_fqn) VALUES ($1, $2)")
+                .bind(metric_id)
+                .bind(source)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        let row = sqlx::query(&format!("{METRIC_SELECT} WHERE id = $1"))
+            .bind(metric_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(metric_from_row))
     }
 }
 

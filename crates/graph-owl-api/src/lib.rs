@@ -173,6 +173,12 @@ pub enum CatalogError {
     PreconditionFailed {
         current: EntityVersion,
     },
+    /// The caller is known and the thing they asked for is visible, but they
+    /// specifically may not do this — Epic 24 Slice C's "only an assigned
+    /// reviewer may approve, others `403`". Distinct from `Validation`: the
+    /// request would be accepted from a different, permitted caller, so the
+    /// fix is not a different value but a different actor.
+    Forbidden,
     Storage(StorageError),
 }
 
@@ -1685,6 +1691,10 @@ impl Catalog {
             status: graph_owl_core::glossary::TermStatus::Draft,
             synonyms,
             abbreviations,
+            // The migration's own default (`1.0`) — a workflow move, not a
+            // field edit, so it does not share Epic 3's asset envelope's
+            // `0.1` starting point.
+            version: EntityVersion { major: 1, minor: 0 },
             created_at: now,
             updated_at: now,
         };
@@ -1751,6 +1761,495 @@ impl Catalog {
         query: &str,
     ) -> Result<Vec<graph_owl_storage::GlossaryTermRecord>, CatalogError> {
         Ok(self.storage.search_terms(query).await?)
+    }
+
+    // ---- Epic 24 Slice B: SKOS relations ----
+
+    /// Assert a SKOS relation, owned by `term_id`.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if `term_id` does not exist. `Validation` if: the relation
+    /// is `narrower` (derived only, never stored directly — decision:
+    /// storing both directions gives two rows that can disagree); an
+    /// internal relation's target is not a known term; or a `broader`
+    /// assertion would close a cycle at any depth.
+    #[tracing::instrument(name = "catalog.add_term_relation", skip_all)]
+    pub async fn add_term_relation(
+        &self,
+        term_id: Uuid,
+        relation: graph_owl_core::glossary::SkosRelation,
+    ) -> Result<(), CatalogError> {
+        use graph_owl_core::glossary::SkosRelation;
+
+        if self.storage.get_term(term_id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+
+        if matches!(relation, SkosRelation::Narrower(_)) {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "kind",
+                FieldErrorCode::Type,
+                "`narrower` is derived from the other term's `broader` and cannot be \
+                 asserted directly; assert `broader` from that term instead"
+                    .to_string(),
+            )]));
+        }
+
+        // Internal relations point at another term in this catalog; a match
+        // relation points at an external IRI and is deliberately **not**
+        // checked for reachability (decision 2's whole point — a vocabulary
+        // that must be online for a term to be valid is a vocabulary whose
+        // terms fail when somebody else's server does).
+        if relation.is_internal() {
+            let target_id = Uuid::parse_str(relation.target()).map_err(|_| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "target",
+                    FieldErrorCode::Type,
+                    format!("`{}` is not a valid term id", relation.target()),
+                )])
+            })?;
+            if self.storage.get_term(target_id).await?.is_none() {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "target",
+                    FieldErrorCode::Type,
+                    format!("`{}` is not a known term", relation.target()),
+                )]));
+            }
+        }
+
+        // **Cycle detection, at any depth** — Slice B, reusing Epic 11's
+        // detector. `would_cycle` is a pure walk over every stored `broader`
+        // edge; poly-hierarchy is legitimate SKOS, so it follows every
+        // parent rather than assuming one.
+        if let SkosRelation::Broader(target) = &relation {
+            let edges = self.storage.broader_edges().await?;
+            if graph_owl_core::glossary::would_cycle(&term_id.to_string(), target, &edges) {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "target",
+                    FieldErrorCode::Type,
+                    format!(
+                        "making `{target}` broader than `{term_id}` would close a cycle \
+                         in the term hierarchy"
+                    ),
+                )]));
+            }
+        }
+
+        self.storage.insert_term_relation(term_id, relation).await?;
+        Ok(())
+    }
+
+    /// Every relation visible on a term — what it declared, and what points
+    /// at it, derived inverses included — without a second stored edge for
+    /// the derived half.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if `term_id` does not exist.
+    pub async fn term_relations(
+        &self,
+        term_id: Uuid,
+    ) -> Result<Vec<graph_owl_core::glossary::SkosRelation>, CatalogError> {
+        if self.storage.get_term(term_id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        let stored = self.storage.term_relations_touching(term_id).await?;
+        Ok(graph_owl_core::glossary::visible_relations(
+            &term_id.to_string(),
+            &stored,
+        ))
+    }
+
+    /// Retract a relation `term_id` owns.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if no such stored row exists — including when `relation`
+    /// is only visible on `term_id` as a derived inverse, which was never a
+    /// row of its own to delete.
+    pub async fn remove_term_relation(
+        &self,
+        term_id: Uuid,
+        relation: &graph_owl_core::glossary::SkosRelation,
+    ) -> Result<(), CatalogError> {
+        if self.storage.delete_term_relation(term_id, relation).await? {
+            Ok(())
+        } else {
+            Err(CatalogError::NotFound)
+        }
+    }
+
+    // ---- Epic 24 Slice C: review workflow ----
+
+    /// Replace a term's assigned reviewers.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the term does not exist. `Validation` if a named
+    /// reviewer is not a known user.
+    pub async fn set_term_reviewers(
+        &self,
+        term_id: Uuid,
+        reviewers: Vec<String>,
+    ) -> Result<(), CatalogError> {
+        if self.storage.get_term(term_id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        for reviewer in &reviewers {
+            if self.storage.find_user(reviewer).await?.is_none() {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "reviewers",
+                    FieldErrorCode::Type,
+                    format!("`{reviewer}` is not a known user"),
+                )]));
+            }
+        }
+        self.storage.set_term_reviewers(term_id, &reviewers).await?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the term does not exist.
+    pub async fn term_reviewers(&self, term_id: Uuid) -> Result<Vec<String>, CatalogError> {
+        if self.storage.get_term(term_id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self.storage.term_reviewers(term_id).await?)
+    }
+
+    /// Move a term to `to`.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the term does not exist. `Validation` if the move is
+    /// not in the transition matrix, naming both ends; or if approval is
+    /// attempted with no reviewer assigned; or if `successor_term_id` is
+    /// given and is not a known term. `Forbidden` if `actor` is not an
+    /// assigned reviewer and the move is an approval — the request would be
+    /// accepted from a different, permitted caller.
+    #[tracing::instrument(name = "catalog.transition_term", skip_all)]
+    pub async fn transition_term(
+        &self,
+        term_id: Uuid,
+        to: graph_owl_core::glossary::TermStatus,
+        actor: &str,
+        reason: Option<String>,
+        successor_term_id: Option<Uuid>,
+    ) -> Result<graph_owl_storage::GlossaryTermRecord, CatalogError> {
+        use graph_owl_core::glossary::TransitionError;
+
+        let Some(term) = self.storage.get_term(term_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+
+        let reviewers = self.storage.term_reviewers(term_id).await?;
+        if let Err(error) = graph_owl_core::glossary::transition(term.status, to, actor, &reviewers)
+        {
+            return Err(match &error {
+                // The request would be accepted from a different, permitted
+                // caller — a `Forbidden`, not a `Validation` a retry with a
+                // different value could fix.
+                TransitionError::NotAReviewer => CatalogError::Forbidden,
+                TransitionError::NotPermitted { .. } => {
+                    CatalogError::Validation(vec![FieldError::new(
+                        "status",
+                        FieldErrorCode::Type,
+                        error.to_string(),
+                    )])
+                }
+                TransitionError::NoReviewer => CatalogError::Validation(vec![FieldError::new(
+                    "reviewers",
+                    FieldErrorCode::Required,
+                    error.to_string(),
+                )]),
+            });
+        }
+
+        if let Some(successor) = successor_term_id {
+            if self.storage.get_term(successor).await?.is_none() {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "successorTermId",
+                    FieldErrorCode::Type,
+                    format!("`{successor}` is not a known term"),
+                )]));
+            }
+        }
+
+        self.storage
+            .transition_term(term_id, term.status, to, actor, reason, successor_term_id)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    // ---- Epic 24 Slice D: terms attach to assets and columns ----
+
+    /// Attach a term to an asset or column, addressed by FQN.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the term does not exist. `Validation` naming the
+    /// term's status if it is not `Approved` — a draft definition attached
+    /// to a thousand columns becomes the de facto definition regardless of
+    /// what its status says (decision 4).
+    pub async fn attach_term(
+        &self,
+        term_id: Uuid,
+        target_fqn: &str,
+        attached_by: &str,
+    ) -> Result<(), CatalogError> {
+        let Some(term) = self.storage.get_term(term_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        if !graph_owl_core::glossary::is_attachable(term.status) {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "status",
+                FieldErrorCode::Type,
+                format!(
+                    "only an approved term may be attached; this term is {}",
+                    term.status.as_str()
+                ),
+            )]));
+        }
+        self.storage
+            .attach_term(term_id, target_fqn, attached_by)
+            .await?;
+        Ok(())
+    }
+
+    /// Detach a term from an asset or column.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if no such attachment exists.
+    pub async fn detach_term(&self, term_id: Uuid, target_fqn: &str) -> Result<(), CatalogError> {
+        if self.storage.detach_term(term_id, target_fqn).await? {
+            Ok(())
+        } else {
+            Err(CatalogError::NotFound)
+        }
+    }
+
+    /// Every asset or column a term is attached to, paginated.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the term does not exist.
+    pub async fn term_usage(
+        &self,
+        term_id: Uuid,
+        page: &PageRequest,
+    ) -> Result<Page<String>, CatalogError> {
+        if self.storage.get_term(term_id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self.storage.term_usage(term_id, page).await?)
+    }
+
+    // ---- Epic 24 Slice E: Metric as a first-class entity ----
+
+    /// Create a metric.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the name or definition is blank; if `defined_by`
+    /// does not reference a known, `Approved` term; or if a named source is
+    /// not a known asset. `Conflict` if the derived FQN collides.
+    ///
+    /// A metric with **no** `source_assets` is permitted — it is the
+    /// commonest metric there is, and the gap is reported on the response
+    /// rather than refused (`graph_owl_core::metric::gaps`).
+    #[tracing::instrument(name = "catalog.create_metric", skip_all)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_metric(
+        &self,
+        name: &str,
+        definition: String,
+        formula: Option<String>,
+        unit: Option<String>,
+        granularity: Option<String>,
+        calculation_type: graph_owl_core::metric::CalculationType,
+        source_assets: Vec<String>,
+        defined_by: Option<Uuid>,
+    ) -> Result<graph_owl_storage::MetricRecord, CatalogError> {
+        if name.trim().is_empty() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "name",
+                FieldErrorCode::Empty,
+                "a metric needs a name".to_string(),
+            )]));
+        }
+        if definition.trim().is_empty() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "definition",
+                FieldErrorCode::Empty,
+                "a metric whose definition is blank is a name, and a name is what the \
+                 ambiguity was in the first place"
+                    .to_string(),
+            )]));
+        }
+        // Namespaced away from tables (decision — Slice E): `metric.revenue`
+        // and a table called `revenue` are different things, and a shared
+        // FQN space would make one of them unaddressable.
+        let fully_qualified_name = graph_owl_core::fqn::derive(&["metric", name]).map_err(|e| {
+            CatalogError::Validation(vec![FieldError::new(
+                "name",
+                FieldErrorCode::Type,
+                e.to_string(),
+            )])
+        })?;
+
+        if let Some(term_id) = defined_by {
+            let Some(term) = self.storage.get_term(term_id).await? else {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "definedBy",
+                    FieldErrorCode::Type,
+                    format!("`{term_id}` is not a known term"),
+                )]));
+            };
+            if !graph_owl_core::glossary::is_attachable(term.status) {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "definedBy",
+                    FieldErrorCode::Type,
+                    format!(
+                        "a metric may only be defined by an approved term; `{term_id}` is {}",
+                        term.status.as_str()
+                    ),
+                )]));
+            }
+        }
+
+        for source in &source_assets {
+            if self.storage.get_asset_by_fqn(source).await?.is_none() {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "sourceAssets",
+                    FieldErrorCode::Type,
+                    format!("`{source}` is not a known asset"),
+                )]));
+            }
+        }
+
+        let now = Utc::now();
+        let metric = graph_owl_storage::MetricRecord {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            fully_qualified_name,
+            definition,
+            formula,
+            unit,
+            granularity,
+            calculation_type,
+            defined_by,
+            source_assets,
+            created_at: now,
+            updated_at: now,
+        };
+        Ok(self.storage.insert_metric(metric).await?)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn get_metric(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::MetricRecord>, CatalogError> {
+        Ok(self.storage.get_metric(id).await?)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn list_metrics(
+        &self,
+        page: &PageRequest,
+    ) -> Result<Page<graph_owl_storage::MetricRecord>, CatalogError> {
+        Ok(self.storage.list_metrics(page).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the metric does not exist.
+    pub async fn update_metric(
+        &self,
+        id: Uuid,
+        update: graph_owl_storage::MetricUpdate,
+    ) -> Result<graph_owl_storage::MetricRecord, CatalogError> {
+        self.storage
+            .update_metric(id, update)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the metric does not exist.
+    pub async fn delete_metric(&self, id: Uuid) -> Result<(), CatalogError> {
+        if self.storage.delete_metric(id).await? {
+            Ok(())
+        } else {
+            Err(CatalogError::NotFound)
+        }
+    }
+
+    /// Search metrics by name, definition, or defining term.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    pub async fn search_metrics(
+        &self,
+        query: &str,
+    ) -> Result<Vec<graph_owl_storage::MetricRecord>, CatalogError> {
+        Ok(self.storage.search_metrics(query).await?)
+    }
+
+    // ---- Epic 24 Slice F: metric lineage reconciliation ----
+
+    /// Replace what a metric declares as its sources.
+    ///
+    /// Runs the declared list through
+    /// [`graph_owl_core::metric::reconcile_lineage`] before storing —
+    /// deduplicated, and a metric naming itself excluded, the same rule the
+    /// core function applies everywhere it is used. **Scoped to
+    /// `metric_sources`**, not `lineage_edges` (see
+    /// [`graph_owl_storage::Storage::update_metric_sources`]'s doc): a
+    /// metric is not an asset, so this is not yet reachable by Epic 29
+    /// traversal.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the metric does not exist. `Validation` if a named
+    /// source is not a known asset.
+    #[tracing::instrument(name = "catalog.set_metric_sources", skip_all)]
+    pub async fn set_metric_sources(
+        &self,
+        metric_id: Uuid,
+        sources: Vec<String>,
+    ) -> Result<graph_owl_storage::MetricRecord, CatalogError> {
+        if self.storage.get_metric(metric_id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        for source in &sources {
+            if self.storage.get_asset_by_fqn(source).await?.is_none() {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "sourceAssets",
+                    FieldErrorCode::Type,
+                    format!("`{source}` is not a known asset"),
+                )]));
+            }
+        }
+
+        let metric_id_str = metric_id.to_string();
+        let plan = graph_owl_core::metric::reconcile_lineage(&metric_id_str, &sources, &[]);
+        let mut resolved: Vec<String> = plan.to_add.into_iter().map(|edge| edge.from).collect();
+        resolved.sort();
+
+        self.storage
+            .update_metric_sources(metric_id, &resolved)
+            .await?
+            .ok_or(CatalogError::NotFound)
     }
 
     /// Change what roles a user holds.
@@ -4127,6 +4626,7 @@ fn batch_detail(error: &CatalogError) -> String {
         CatalogError::PreconditionFailed { .. } => {
             "the entity changed while this batch was in flight".to_string()
         }
+        CatalogError::Forbidden => "not permitted".to_string(),
         CatalogError::Storage(inner) => inner.to_string(),
     }
 }
@@ -4240,6 +4740,15 @@ mod tests {
     use super::*;
     use graph_owl_core::page::Cursor;
 
+    // `Forbidden` cannot currently arise from anything `batch_detail` reports
+    // on (no ingest path returns it), so it needs its own direct test rather
+    // than one reached through a batch run — the only way to prove the arm
+    // is not `todo!()`.
+    #[test]
+    fn batch_detail_reports_forbidden() {
+        assert_eq!(batch_detail(&CatalogError::Forbidden), "not permitted");
+    }
+
     /// An asset and everything beneath it. Used by the fake's cascade, which
     /// must match Postgres's recursive CTE or a cascade bug passes here.
     fn descendants(assets: &[Asset], root: Uuid) -> Vec<Uuid> {
@@ -4300,6 +4809,13 @@ mod tests {
         jobs: Mutex<Vec<graph_owl_storage::IngestJob>>,
         glossaries: Mutex<Vec<graph_owl_storage::Glossary>>,
         glossary_terms: Mutex<Vec<graph_owl_storage::GlossaryTermRecord>>,
+        /// `(owner, relation)`, exactly the shape the port carries.
+        #[allow(clippy::type_complexity)]
+        term_relations: Mutex<Vec<(Uuid, graph_owl_core::glossary::SkosRelation)>>,
+        term_reviewers: Mutex<Vec<(Uuid, Vec<String>)>>,
+        /// `(term_id, target_fqn)`.
+        term_attachments: Mutex<Vec<(Uuid, String)>>,
+        metrics: Mutex<Vec<graph_owl_storage::MetricRecord>>,
     }
 
     impl InMemoryStorage {
@@ -5942,6 +6458,284 @@ mod tests {
                 .cloned()
                 .collect())
         }
+
+        // ---- Epic 24 Slice B: SKOS relations ----
+
+        async fn insert_term_relation(
+            &self,
+            term_id: Uuid,
+            relation: graph_owl_core::glossary::SkosRelation,
+        ) -> Result<(), StorageError> {
+            let mut held = self.term_relations.lock().unwrap();
+            if !held.iter().any(|(id, r)| *id == term_id && *r == relation) {
+                held.push((term_id, relation));
+            }
+            Ok(())
+        }
+
+        async fn delete_term_relation(
+            &self,
+            term_id: Uuid,
+            relation: &graph_owl_core::glossary::SkosRelation,
+        ) -> Result<bool, StorageError> {
+            let mut held = self.term_relations.lock().unwrap();
+            let original_len = held.len();
+            held.retain(|(id, r)| !(*id == term_id && r == relation));
+            Ok(held.len() != original_len)
+        }
+
+        async fn term_relations_touching(
+            &self,
+            term_id: Uuid,
+        ) -> Result<Vec<(String, graph_owl_core::glossary::SkosRelation)>, StorageError> {
+            use graph_owl_core::glossary::SkosRelation;
+            let id_text = term_id.to_string();
+            Ok(self
+                .term_relations
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(owner, relation)| *owner == term_id || relation.target() == id_text)
+                .map(|(owner, relation): &(Uuid, SkosRelation)| {
+                    (owner.to_string(), relation.clone())
+                })
+                .collect())
+        }
+
+        async fn broader_edges(&self) -> Result<Vec<(String, String)>, StorageError> {
+            use graph_owl_core::glossary::SkosRelation;
+            Ok(self
+                .term_relations
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|(owner, relation)| match relation {
+                    SkosRelation::Broader(target) => Some((owner.to_string(), target.clone())),
+                    _ => None,
+                })
+                .collect())
+        }
+
+        // ---- Epic 24 Slice C: review workflow ----
+
+        async fn set_term_reviewers(
+            &self,
+            term_id: Uuid,
+            reviewers: &[String],
+        ) -> Result<(), StorageError> {
+            let mut held = self.term_reviewers.lock().unwrap();
+            held.retain(|(id, _)| *id != term_id);
+            held.push((term_id, reviewers.to_vec()));
+            Ok(())
+        }
+
+        async fn term_reviewers(&self, term_id: Uuid) -> Result<Vec<String>, StorageError> {
+            Ok(self
+                .term_reviewers
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| *id == term_id)
+                .map(|(_, reviewers)| reviewers.clone())
+                .unwrap_or_default())
+        }
+
+        async fn transition_term(
+            &self,
+            term_id: Uuid,
+            _from: graph_owl_core::glossary::TermStatus,
+            to: graph_owl_core::glossary::TermStatus,
+            _actor: &str,
+            _reason: Option<String>,
+            _successor_term_id: Option<Uuid>,
+        ) -> Result<Option<graph_owl_storage::GlossaryTermRecord>, StorageError> {
+            let mut terms = self.glossary_terms.lock().unwrap();
+            let Some(term) = terms.iter_mut().find(|t| t.id == term_id) else {
+                return Ok(None);
+            };
+            term.status = to;
+            term.version.minor += 1;
+            term.updated_at = Utc::now();
+            Ok(Some(term.clone()))
+        }
+
+        // ---- Epic 24 Slice D: terms attach to assets and columns ----
+
+        async fn attach_term(
+            &self,
+            term_id: Uuid,
+            target_fqn: &str,
+            _attached_by: &str,
+        ) -> Result<(), StorageError> {
+            let mut held = self.term_attachments.lock().unwrap();
+            if !held
+                .iter()
+                .any(|(id, fqn)| *id == term_id && fqn == target_fqn)
+            {
+                held.push((term_id, target_fqn.to_string()));
+            }
+            Ok(())
+        }
+
+        async fn detach_term(&self, term_id: Uuid, target_fqn: &str) -> Result<bool, StorageError> {
+            let mut held = self.term_attachments.lock().unwrap();
+            let original_len = held.len();
+            held.retain(|(id, fqn)| !(*id == term_id && fqn == target_fqn));
+            Ok(held.len() != original_len)
+        }
+
+        async fn term_usage(
+            &self,
+            term_id: Uuid,
+            page: &PageRequest,
+        ) -> Result<Page<String>, StorageError> {
+            let mut fqns: Vec<String> = self
+                .term_attachments
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| *id == term_id)
+                .map(|(_, fqn)| fqn.clone())
+                .collect();
+            fqns.sort();
+            if let Some(cursor) = &page.after {
+                fqns.retain(|fqn| fqn.as_str() > cursor.sort_key.as_str());
+            }
+            fqns.truncate(page.limit + 1);
+            Ok(Page::from_overfetch(fqns, page.limit, |fqn: &String| {
+                Cursor::new(fqn.clone(), term_id)
+            }))
+        }
+
+        // ---- Epic 24 Slice E: Metric as a first-class entity ----
+
+        async fn insert_metric(
+            &self,
+            metric: graph_owl_storage::MetricRecord,
+        ) -> Result<graph_owl_storage::MetricRecord, StorageError> {
+            let mut held = self.metrics.lock().unwrap();
+            if held
+                .iter()
+                .any(|m| m.fully_qualified_name == metric.fully_qualified_name)
+            {
+                return Err(StorageError::Conflict {
+                    detail: metric.fully_qualified_name.clone(),
+                    existing_id: None,
+                    kind: ConflictKind::Fqn,
+                });
+            }
+            held.push(metric.clone());
+            Ok(metric)
+        }
+
+        async fn get_metric(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_storage::MetricRecord>, StorageError> {
+            Ok(self
+                .metrics
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|m| m.id == id)
+                .cloned())
+        }
+
+        async fn list_metrics(
+            &self,
+            page: &PageRequest,
+        ) -> Result<Page<graph_owl_storage::MetricRecord>, StorageError> {
+            let mut metrics = self.metrics.lock().unwrap().clone();
+            metrics.sort_by(|a, b| {
+                a.fully_qualified_name
+                    .cmp(&b.fully_qualified_name)
+                    .then(a.id.cmp(&b.id))
+            });
+            if let Some(cursor) = &page.after {
+                metrics.retain(|m| {
+                    (m.fully_qualified_name.as_str(), m.id) > (cursor.sort_key.as_str(), cursor.id)
+                });
+            }
+            metrics.truncate(page.limit + 1);
+            Ok(Page::from_overfetch(metrics, page.limit, |m| {
+                Cursor::new(m.fully_qualified_name.clone(), m.id)
+            }))
+        }
+
+        async fn update_metric(
+            &self,
+            id: Uuid,
+            update: graph_owl_storage::MetricUpdate,
+        ) -> Result<Option<graph_owl_storage::MetricRecord>, StorageError> {
+            let mut metrics = self.metrics.lock().unwrap();
+            let Some(metric) = metrics.iter_mut().find(|m| m.id == id) else {
+                return Ok(None);
+            };
+            if let Some(definition) = update.definition {
+                metric.definition = definition;
+            }
+            if let Some(formula) = update.formula {
+                metric.formula = Some(formula);
+            }
+            if let Some(unit) = update.unit {
+                metric.unit = Some(unit);
+            }
+            if let Some(granularity) = update.granularity {
+                metric.granularity = Some(granularity);
+            }
+            if let Some(calculation_type) = update.calculation_type {
+                metric.calculation_type = calculation_type;
+            }
+            metric.updated_at = Utc::now();
+            Ok(Some(metric.clone()))
+        }
+
+        async fn delete_metric(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut metrics = self.metrics.lock().unwrap();
+            let original_len = metrics.len();
+            metrics.retain(|m| m.id != id);
+            Ok(metrics.len() != original_len)
+        }
+
+        async fn search_metrics(
+            &self,
+            query: &str,
+        ) -> Result<Vec<graph_owl_storage::MetricRecord>, StorageError> {
+            let needle = query.to_lowercase();
+            let terms = self.glossary_terms.lock().unwrap();
+            Ok(self
+                .metrics
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| {
+                    m.name.to_lowercase().contains(&needle)
+                        || m.definition.to_lowercase().contains(&needle)
+                        || m.defined_by.is_some_and(|term_id| {
+                            terms
+                                .iter()
+                                .any(|t| t.id == term_id && t.name.to_lowercase().contains(&needle))
+                        })
+                })
+                .cloned()
+                .collect())
+        }
+
+        // ---- Epic 24 Slice F: metric lineage reconciliation ----
+
+        async fn update_metric_sources(
+            &self,
+            metric_id: Uuid,
+            sources: &[String],
+        ) -> Result<Option<graph_owl_storage::MetricRecord>, StorageError> {
+            let mut metrics = self.metrics.lock().unwrap();
+            let Some(metric) = metrics.iter_mut().find(|m| m.id == metric_id) else {
+                return Ok(None);
+            };
+            metric.source_assets = sources.to_vec();
+            metric.updated_at = Utc::now();
+            Ok(Some(metric.clone()))
+        }
     }
 
     fn mock_create_table_request() -> CreateTable {
@@ -6480,6 +7274,1313 @@ mod tests {
             .expect("search_terms should succeed");
 
         assert!(hits.is_empty());
+    }
+
+    // ---- Epic 24 Slice B: SKOS relations ----
+
+    async fn glossary_and_two_terms(
+        catalog: &Catalog,
+    ) -> (
+        graph_owl_storage::GlossaryTermRecord,
+        graph_owl_storage::GlossaryTermRecord,
+    ) {
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let child = catalog
+            .create_term(
+                glossary.id,
+                "Checking Account",
+                String::new(),
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("create_term should succeed");
+        let parent = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        (child, parent)
+    }
+
+    #[tokio::test]
+    async fn broader_implies_narrower_without_a_second_stored_edge() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let (child, parent) = glossary_and_two_terms(&catalog).await;
+
+        catalog
+            .add_term_relation(
+                child.id,
+                graph_owl_core::glossary::SkosRelation::Broader(parent.id.to_string()),
+            )
+            .await
+            .expect("add_term_relation should succeed");
+
+        let on_parent = catalog
+            .term_relations(parent.id)
+            .await
+            .expect("term_relations should succeed");
+
+        assert_eq!(
+            on_parent,
+            vec![graph_owl_core::glossary::SkosRelation::Narrower(
+                child.id.to_string()
+            )]
+        );
+    }
+
+    // Asserting `narrower` directly would be the second stored edge for the
+    // same fact the test above proves is derived — refused structurally.
+    #[tokio::test]
+    async fn narrower_cannot_be_asserted_directly() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let (child, parent) = glossary_and_two_terms(&catalog).await;
+
+        let error = catalog
+            .add_term_relation(
+                parent.id,
+                graph_owl_core::glossary::SkosRelation::Narrower(child.id.to_string()),
+            )
+            .await
+            .expect_err("narrower should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn a_term_cannot_be_its_own_broader() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        let error = catalog
+            .add_term_relation(
+                term.id,
+                graph_owl_core::glossary::SkosRelation::Broader(term.id.to_string()),
+            )
+            .await
+            .expect_err("a self-loop should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    // Depth 3, because a check that compares only the immediate parent
+    // passes depth 1 and fails here.
+    #[tokio::test]
+    async fn a_three_term_cycle_is_refused() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let a = catalog
+            .create_term(glossary.id, "A", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        let b = catalog
+            .create_term(glossary.id, "B", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        let c = catalog
+            .create_term(glossary.id, "C", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        catalog
+            .add_term_relation(
+                a.id,
+                graph_owl_core::glossary::SkosRelation::Broader(b.id.to_string()),
+            )
+            .await
+            .expect("a broader b should succeed");
+        catalog
+            .add_term_relation(
+                b.id,
+                graph_owl_core::glossary::SkosRelation::Broader(c.id.to_string()),
+            )
+            .await
+            .expect("b broader c should succeed");
+
+        let error = catalog
+            .add_term_relation(
+                c.id,
+                graph_owl_core::glossary::SkosRelation::Broader(a.id.to_string()),
+            )
+            .await
+            .expect_err("closing the loop should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    // **Poly-hierarchy is legitimate SKOS** — the negative beside the cycle
+    // tests above, so a checker that refused every second `broader` would
+    // fail here rather than only passing the cycle cases.
+    #[tokio::test]
+    async fn a_term_may_have_more_than_one_broader_parent() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let child = catalog
+            .create_term(
+                glossary.id,
+                "Savings Account",
+                String::new(),
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("create_term should succeed");
+        let first_parent = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        let second_parent = catalog
+            .create_term(
+                glossary.id,
+                "Financial Product",
+                String::new(),
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("create_term should succeed");
+
+        catalog
+            .add_term_relation(
+                child.id,
+                graph_owl_core::glossary::SkosRelation::Broader(first_parent.id.to_string()),
+            )
+            .await
+            .expect("the first parent should succeed");
+        catalog
+            .add_term_relation(
+                child.id,
+                graph_owl_core::glossary::SkosRelation::Broader(second_parent.id.to_string()),
+            )
+            .await
+            .expect("the second parent should also succeed");
+
+        let relations = catalog
+            .term_relations(child.id)
+            .await
+            .expect("term_relations should succeed");
+        assert_eq!(relations.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn related_is_symmetric_on_read() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let a = catalog
+            .create_term(glossary.id, "A", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        let b = catalog
+            .create_term(glossary.id, "B", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        catalog
+            .add_term_relation(
+                a.id,
+                graph_owl_core::glossary::SkosRelation::Related(b.id.to_string()),
+            )
+            .await
+            .expect("add_term_relation should succeed");
+
+        let on_b = catalog
+            .term_relations(b.id)
+            .await
+            .expect("term_relations should succeed");
+
+        assert_eq!(
+            on_b,
+            vec![graph_owl_core::glossary::SkosRelation::Related(
+                a.id.to_string()
+            )]
+        );
+    }
+
+    // `exactMatch`/`closeMatch` point at an external IRI and are **not**
+    // validated for reachability (decision 2) — an unresolvable-looking IRI
+    // must still be accepted.
+    #[tokio::test]
+    async fn an_exact_match_to_an_external_iri_is_not_checked_for_reachability() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        catalog
+            .add_term_relation(
+                term.id,
+                graph_owl_core::glossary::SkosRelation::ExactMatch(
+                    "http://example.invalid/does-not-exist".to_string(),
+                ),
+            )
+            .await
+            .expect("an external IRI should not be checked for reachability");
+    }
+
+    #[tokio::test]
+    async fn a_broader_target_that_is_not_a_known_term_is_refused() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        let error = catalog
+            .add_term_relation(
+                term.id,
+                graph_owl_core::glossary::SkosRelation::Broader(Uuid::new_v4().to_string()),
+            )
+            .await
+            .expect_err("an unknown target term should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn asserting_a_relation_on_an_unknown_term_is_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let error = catalog
+            .add_term_relation(
+                Uuid::new_v4(),
+                graph_owl_core::glossary::SkosRelation::ExactMatch("http://x.example/1".into()),
+            )
+            .await
+            .expect_err("an unknown term should be not found");
+
+        assert!(matches!(error, CatalogError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn removing_a_relation_the_term_declared_deletes_it() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let (child, parent) = glossary_and_two_terms(&catalog).await;
+        let relation = graph_owl_core::glossary::SkosRelation::Broader(parent.id.to_string());
+        catalog
+            .add_term_relation(child.id, relation.clone())
+            .await
+            .expect("add_term_relation should succeed");
+
+        catalog
+            .remove_term_relation(child.id, &relation)
+            .await
+            .expect("remove_term_relation should succeed");
+
+        assert!(
+            catalog
+                .term_relations(child.id)
+                .await
+                .expect("term_relations")
+                .is_empty()
+        );
+    }
+
+    // The derived half is not a row: attempting to remove `narrower` from the
+    // parent (which never stored it) must be `NotFound`, not a silent no-op
+    // that happens to leave the graph looking right.
+    #[tokio::test]
+    async fn removing_a_derived_relation_that_was_never_stored_is_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let (child, parent) = glossary_and_two_terms(&catalog).await;
+        catalog
+            .add_term_relation(
+                child.id,
+                graph_owl_core::glossary::SkosRelation::Broader(parent.id.to_string()),
+            )
+            .await
+            .expect("add_term_relation should succeed");
+
+        let error = catalog
+            .remove_term_relation(
+                parent.id,
+                &graph_owl_core::glossary::SkosRelation::Narrower(child.id.to_string()),
+            )
+            .await
+            .expect_err("the derived inverse was never a row to delete");
+
+        assert!(matches!(error, CatalogError::NotFound));
+    }
+
+    // ---- Epic 24 Slice C: review workflow ----
+
+    async fn seed_user(catalog: &Catalog, id: &str) {
+        catalog
+            .storage
+            .upsert_user(&graph_owl_storage::StoredUser {
+                id: id.to_string(),
+                display_name: id.to_string(),
+                email: None,
+                is_admin: false,
+                is_bot: false,
+                roles: vec![],
+            })
+            .await
+            .expect("a user");
+    }
+
+    #[tokio::test]
+    async fn a_term_walks_the_workflow_in_order() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        seed_user(&catalog, "alice").await;
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        catalog
+            .set_term_reviewers(term.id, vec!["alice".to_string()])
+            .await
+            .expect("set_term_reviewers should succeed");
+
+        let in_review = catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::InReview,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect("draft to in-review should succeed");
+        assert_eq!(
+            in_review.status,
+            graph_owl_core::glossary::TermStatus::InReview
+        );
+
+        let approved = catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::Approved,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect("in-review to approved should succeed");
+        assert_eq!(
+            approved.status,
+            graph_owl_core::glossary::TermStatus::Approved
+        );
+    }
+
+    // **The illegal move that matters.** Skipping review is the whole
+    // mechanism a workflow exists to enforce.
+    #[tokio::test]
+    async fn a_term_cannot_skip_review() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        let error = catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::Approved,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect_err("draft to approved should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn approval_with_no_reviewer_assigned_is_refused() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::InReview,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect("draft to in-review should succeed");
+
+        let error = catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::Approved,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect_err("approval with no reviewer assigned should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    // **Anyone approving their own term makes the reviewer list decoration**
+    // — the negative that gives Slice C's `403` its meaning.
+    #[tokio::test]
+    async fn a_non_reviewer_cannot_approve() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        seed_user(&catalog, "alice").await;
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        catalog
+            .set_term_reviewers(term.id, vec!["alice".to_string()])
+            .await
+            .expect("set_term_reviewers should succeed");
+        catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::InReview,
+                "mallory",
+                None,
+                None,
+            )
+            .await
+            .expect("draft to in-review should succeed");
+
+        let error = catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::Approved,
+                "mallory",
+                None,
+                None,
+            )
+            .await
+            .expect_err("mallory was not assigned");
+
+        assert!(matches!(error, CatalogError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn each_transition_bumps_the_version() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        let before = term.version;
+
+        let after = catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::InReview,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect("draft to in-review should succeed");
+
+        assert!(after.version.minor > before.minor);
+    }
+
+    #[tokio::test]
+    async fn deprecation_carries_a_reason_and_an_optional_successor() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        seed_user(&catalog, "alice").await;
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let old_term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        let new_term = catalog
+            .create_term(glossary.id, "Account V2", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        catalog
+            .set_term_reviewers(old_term.id, vec!["alice".to_string()])
+            .await
+            .expect("set_term_reviewers should succeed");
+        catalog
+            .transition_term(
+                old_term.id,
+                graph_owl_core::glossary::TermStatus::InReview,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect("draft to in-review should succeed");
+        catalog
+            .transition_term(
+                old_term.id,
+                graph_owl_core::glossary::TermStatus::Approved,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect("in-review to approved should succeed");
+
+        let deprecated = catalog
+            .transition_term(
+                old_term.id,
+                graph_owl_core::glossary::TermStatus::Deprecated,
+                "alice",
+                Some("superseded".to_string()),
+                Some(new_term.id),
+            )
+            .await
+            .expect("approved to deprecated should succeed");
+
+        assert_eq!(
+            deprecated.status,
+            graph_owl_core::glossary::TermStatus::Deprecated
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successor_that_is_not_a_known_term_is_refused() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        seed_user(&catalog, "alice").await;
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        catalog
+            .set_term_reviewers(term.id, vec!["alice".to_string()])
+            .await
+            .expect("set_term_reviewers should succeed");
+        catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::InReview,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect("draft to in-review should succeed");
+        catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::Approved,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect("in-review to approved should succeed");
+
+        let error = catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::Deprecated,
+                "alice",
+                Some("superseded".to_string()),
+                Some(Uuid::new_v4()),
+            )
+            .await
+            .expect_err("an unknown successor should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn transitioning_an_unknown_term_is_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let error = catalog
+            .transition_term(
+                Uuid::new_v4(),
+                graph_owl_core::glossary::TermStatus::InReview,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect_err("an unknown term should be not found");
+
+        assert!(matches!(error, CatalogError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn assigning_an_unknown_user_as_reviewer_is_refused() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        let error = catalog
+            .set_term_reviewers(term.id, vec!["nobody".to_string()])
+            .await
+            .expect_err("an unknown reviewer should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn setting_reviewers_replaces_rather_than_merges() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        seed_user(&catalog, "alice").await;
+        seed_user(&catalog, "bob").await;
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        catalog
+            .set_term_reviewers(term.id, vec!["alice".to_string()])
+            .await
+            .expect("set_term_reviewers should succeed");
+
+        catalog
+            .set_term_reviewers(term.id, vec!["bob".to_string()])
+            .await
+            .expect("set_term_reviewers should succeed");
+
+        let reviewers = catalog
+            .term_reviewers(term.id)
+            .await
+            .expect("term_reviewers should succeed");
+        assert_eq!(reviewers, vec!["bob".to_string()]);
+    }
+
+    // ---- Epic 24 Slice D: terms attach to assets and columns ----
+
+    async fn approved_term(catalog: &Catalog) -> graph_owl_storage::GlossaryTermRecord {
+        seed_user(catalog, "alice").await;
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+        catalog
+            .set_term_reviewers(term.id, vec!["alice".to_string()])
+            .await
+            .expect("set_term_reviewers should succeed");
+        catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::InReview,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect("draft to in-review should succeed");
+        catalog
+            .transition_term(
+                term.id,
+                graph_owl_core::glossary::TermStatus::Approved,
+                "alice",
+                None,
+                None,
+            )
+            .await
+            .expect("in-review to approved should succeed")
+    }
+
+    #[tokio::test]
+    async fn an_approved_term_can_be_attached() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let term = approved_term(&catalog).await;
+
+        catalog
+            .attach_term(term.id, "warehouse.public.orders", "alice")
+            .await
+            .expect("attach_term should succeed");
+
+        let page = catalog
+            .term_usage(term.id, &PageRequest::new(None, None).expect("valid"))
+            .await
+            .expect("term_usage should succeed");
+        assert_eq!(page.data, vec!["warehouse.public.orders".to_string()]);
+    }
+
+    // **Only `Approved` terms attach** (decision 4) — the negative half.
+    #[tokio::test]
+    async fn a_draft_term_cannot_be_attached() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Account", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        let error = catalog
+            .attach_term(term.id, "warehouse.public.orders", "alice")
+            .await
+            .expect_err("a draft term should refuse attachment");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn attaching_an_unknown_term_is_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let error = catalog
+            .attach_term(Uuid::new_v4(), "warehouse.public.orders", "alice")
+            .await
+            .expect_err("an unknown term should be not found");
+
+        assert!(matches!(error, CatalogError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn detaching_a_term_removes_it_from_usage() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let term = approved_term(&catalog).await;
+        catalog
+            .attach_term(term.id, "warehouse.public.orders", "alice")
+            .await
+            .expect("attach_term should succeed");
+
+        catalog
+            .detach_term(term.id, "warehouse.public.orders")
+            .await
+            .expect("detach_term should succeed");
+
+        let page = catalog
+            .term_usage(term.id, &PageRequest::new(None, None).expect("valid"))
+            .await
+            .expect("term_usage should succeed");
+        assert!(page.data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn detaching_something_never_attached_is_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let term = approved_term(&catalog).await;
+
+        let error = catalog
+            .detach_term(term.id, "warehouse.public.orders")
+            .await
+            .expect_err("nothing was attached");
+
+        assert!(matches!(error, CatalogError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn usage_of_an_unknown_term_is_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let error = catalog
+            .term_usage(
+                Uuid::new_v4(),
+                &PageRequest::new(None, None).expect("valid"),
+            )
+            .await
+            .expect_err("an unknown term should be not found");
+
+        assert!(matches!(error, CatalogError::NotFound));
+    }
+
+    // ---- Epic 24 Slice E: Metric as a first-class entity ----
+
+    #[tokio::test]
+    async fn a_metrics_fqn_is_namespaced_away_from_tables() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let metric = catalog
+            .create_metric(
+                "revenue",
+                "total recognised revenue".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![],
+                None,
+            )
+            .await
+            .expect("create_metric should succeed");
+
+        assert_eq!(metric.fully_qualified_name, "metric.revenue");
+    }
+
+    #[tokio::test]
+    async fn a_metric_needs_a_name() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let error = catalog
+            .create_metric(
+                "  ",
+                "definition".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![],
+                None,
+            )
+            .await
+            .expect_err("a blank name should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn a_metric_needs_a_definition() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let error = catalog
+            .create_metric(
+                "revenue",
+                String::new(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![],
+                None,
+            )
+            .await
+            .expect_err("a blank definition should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    // **A source-less metric is permitted**, not refused — it is the
+    // commonest metric there is and the one most worth cataloguing.
+    #[tokio::test]
+    async fn a_metric_with_no_sources_is_permitted() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let metric = catalog
+            .create_metric(
+                "revenue",
+                "total recognised revenue".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![],
+                None,
+            )
+            .await
+            .expect("a source-less metric should be permitted");
+
+        assert!(metric.source_assets.is_empty());
+        let gaps = graph_owl_core::metric::gaps(&graph_owl_core::metric::MetricClaims {
+            source_assets: &metric.source_assets,
+            defined_by: None,
+            formula: metric.formula.as_deref(),
+        });
+        assert!(gaps.contains(&graph_owl_core::metric::MetricGap::NoSources));
+    }
+
+    #[tokio::test]
+    async fn a_source_that_is_not_a_known_asset_is_refused() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let error = catalog
+            .create_metric(
+                "revenue",
+                "total recognised revenue".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec!["warehouse.public.orders".to_string()],
+                None,
+            )
+            .await
+            .expect_err("an unknown source asset should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn a_known_source_asset_is_accepted() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let asset = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Service,
+                    name: "orders-service".to_string(),
+                    parent_id: None,
+                    description: None,
+                    properties: None,
+                },
+            )
+            .await
+            .expect("upsert_asset should succeed");
+
+        let metric = catalog
+            .create_metric(
+                "revenue",
+                "total recognised revenue".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![asset.fully_qualified_name.clone()],
+                None,
+            )
+            .await
+            .expect("a known source asset should be accepted");
+
+        assert_eq!(metric.source_assets, vec![asset.fully_qualified_name]);
+    }
+
+    #[tokio::test]
+    async fn defined_by_must_reference_an_approved_term() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let glossary = catalog
+            .create_glossary("Finance", None)
+            .await
+            .expect("create_glossary should succeed");
+        let term = catalog
+            .create_term(glossary.id, "Revenue", String::new(), vec![], vec![])
+            .await
+            .expect("create_term should succeed");
+
+        let error = catalog
+            .create_metric(
+                "revenue",
+                "total recognised revenue".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![],
+                Some(term.id),
+            )
+            .await
+            .expect_err("a draft defining term should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn defined_by_an_approved_term_is_accepted() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let term = approved_term(&catalog).await;
+
+        let metric = catalog
+            .create_metric(
+                "revenue",
+                "total recognised revenue".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![],
+                Some(term.id),
+            )
+            .await
+            .expect("an approved defining term should be accepted");
+
+        assert_eq!(metric.defined_by, Some(term.id));
+    }
+
+    #[tokio::test]
+    async fn a_created_metric_can_be_fetched_updated_and_deleted() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let created = catalog
+            .create_metric(
+                "revenue",
+                "total recognised revenue".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![],
+                None,
+            )
+            .await
+            .expect("create_metric should succeed");
+
+        let found = catalog
+            .get_metric(created.id)
+            .await
+            .expect("get_metric should succeed");
+        assert_eq!(found, Some(created.clone()));
+
+        let updated = catalog
+            .update_metric(
+                created.id,
+                graph_owl_storage::MetricUpdate {
+                    definition: Some("revised definition".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update_metric should succeed");
+        assert_eq!(updated.definition, "revised definition");
+
+        catalog
+            .delete_metric(created.id)
+            .await
+            .expect("delete_metric should succeed");
+        assert_eq!(
+            catalog.get_metric(created.id).await.expect("get_metric"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn every_created_metric_is_listed() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        catalog
+            .create_metric(
+                "revenue",
+                "d".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![],
+                None,
+            )
+            .await
+            .expect("create_metric should succeed");
+        catalog
+            .create_metric(
+                "churn",
+                "d".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Ratio,
+                vec![],
+                None,
+            )
+            .await
+            .expect("create_metric should succeed");
+
+        let page = catalog
+            .list_metrics(&PageRequest::new(None, None).expect("valid"))
+            .await
+            .expect("list_metrics should succeed");
+
+        assert_eq!(page.data.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_metric_is_found_by_its_defining_terms_name() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let term = approved_term(&catalog).await;
+        catalog
+            .create_metric(
+                "revenue",
+                "total recognised revenue".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![],
+                Some(term.id),
+            )
+            .await
+            .expect("create_metric should succeed");
+
+        let hits = catalog
+            .search_metrics(&term.name)
+            .await
+            .expect("search_metrics should succeed");
+
+        assert_eq!(hits.len(), 1);
+    }
+
+    // ---- Epic 24 Slice F: metric lineage reconciliation ----
+
+    async fn asset_fqn(catalog: &Catalog, name: &str) -> String {
+        catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Service,
+                    name: name.to_string(),
+                    parent_id: None,
+                    description: None,
+                    properties: None,
+                },
+            )
+            .await
+            .expect("upsert_asset should succeed")
+            .fully_qualified_name
+    }
+
+    #[tokio::test]
+    async fn declaring_sources_is_reflected_on_the_metric() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let orders = asset_fqn(&catalog, "orders").await;
+        let metric = catalog
+            .create_metric(
+                "revenue",
+                "d".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![],
+                None,
+            )
+            .await
+            .expect("create_metric should succeed");
+
+        let updated = catalog
+            .set_metric_sources(metric.id, vec![orders.clone()])
+            .await
+            .expect("set_metric_sources should succeed");
+
+        assert_eq!(updated.source_assets, vec![orders]);
+    }
+
+    #[tokio::test]
+    async fn removing_a_source_retracts_it() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let orders = asset_fqn(&catalog, "orders").await;
+        let metric = catalog
+            .create_metric(
+                "revenue",
+                "d".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![orders],
+                None,
+            )
+            .await
+            .expect("create_metric should succeed");
+
+        let updated = catalog
+            .set_metric_sources(metric.id, vec![])
+            .await
+            .expect("set_metric_sources should succeed");
+
+        assert!(updated.source_assets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_source_named_twice_is_deduplicated() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let orders = asset_fqn(&catalog, "orders").await;
+        let metric = catalog
+            .create_metric(
+                "revenue",
+                "d".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![],
+                None,
+            )
+            .await
+            .expect("create_metric should succeed");
+
+        let updated = catalog
+            .set_metric_sources(metric.id, vec![orders.clone(), orders])
+            .await
+            .expect("set_metric_sources should succeed");
+
+        assert_eq!(updated.source_assets.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_source_that_is_not_a_known_asset_is_refused_on_reconciliation() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let metric = catalog
+            .create_metric(
+                "revenue",
+                "d".to_string(),
+                None,
+                None,
+                None,
+                graph_owl_core::metric::CalculationType::Simple,
+                vec![],
+                None,
+            )
+            .await
+            .expect("create_metric should succeed");
+
+        let error = catalog
+            .set_metric_sources(metric.id, vec!["warehouse.public.orders".to_string()])
+            .await
+            .expect_err("an unknown asset should be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn setting_sources_on_an_unknown_metric_is_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let error = catalog
+            .set_metric_sources(Uuid::new_v4(), vec![])
+            .await
+            .expect_err("an unknown metric should be not found");
+
+        assert!(matches!(error, CatalogError::NotFound));
     }
 
     #[tokio::test]

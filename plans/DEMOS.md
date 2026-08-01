@@ -639,8 +639,13 @@ actually holds could not be asserted at all.
 
 The decidable half (the transition matrix, SKOS inversion, metric lineage
 reconciliation) was written first, in `graph-owl-core`, because it is the
-part that can be *wrong* and mutates fastest there. Slice A wires it to
-Postgres, the facade and HTTP.
+part that can be *wrong* and mutates fastest there. Slices A–F wire it to
+Postgres, the facade and HTTP, each verified at all three layers and
+mutation-tested to 0 missed. Two gaps were found only by implementing, not
+by planning, and are recorded at their slices below rather than hidden:
+event emission on a term transition, and metric lineage as a
+graph-traversable edge — both need a real design decision bigger than one
+slice.
 
 - [x] **A** Glossary and term CRUD — `POST/GET /glossaries`, `GET/DELETE
   /glossaries/{id}`, `POST/GET /glossaries/{id}/terms`, `GET/PATCH/DELETE
@@ -658,19 +663,59 @@ Postgres, the facade and HTTP.
 - [x] Every term is created `Draft`; the core review workflow (`can_transition`,
   reviewer rules) and SKOS relation logic (`inverse_of`, `visible_relations`,
   `would_cycle`) already exist in `graph-owl-core`, unit-tested to 0 missed
-  mutants — **not yet reachable over HTTP** (Slices B and C)
-- [ ] **B** SKOS relations at the wire — `broader`/`narrower`/`related`,
-  cycle rejection, poly-hierarchy
-- [ ] **C** Review workflow at the wire — transitions, reviewer assignment,
-  version bump, event emission
-- [ ] **D** Terms attach to assets and columns via `TagLabel`; only
-  `Approved` terms attach
-- [ ] **E** `Metric` as a first-class entity — the domain logic (`gaps`,
-  `CalculationType`) exists in `graph-owl-core`; no storage, facade or
-  routes yet
-- [ ] **F** Metric lineage reconciliation (`reconcile_lineage` exists in
-  `graph-owl-core`) wired into the facade so `source_assets` drives
-  `derivedFrom` edges
+  mutants
+- [x] **B** SKOS relations at the wire — `POST/GET/DELETE
+  /glossary-terms/{id}/relations`. `broader`/`related`/`exactMatch`/`closeMatch`
+  may be asserted; `narrower` is refused with a `400` naming that it must be
+  asserted as `broader` from the other term instead — the single-stored-edge
+  invariant enforced structurally. Cycle rejection at any depth reuses
+  `would_cycle` fed by a `broader_edges()` read, the same shape as Team's own
+  detector; poly-hierarchy (two `broader` parents) is permitted, verified
+  alongside the cycle tests so a checker that refused every second `broader`
+  would fail there and only there
+- [x] **C** Review workflow at the wire — `PUT/GET
+  /glossary-terms/{id}/reviewers`, `POST /glossary-terms/{id}/transitions`,
+  reusing `graph_owl_core::glossary::transition` directly. A non-reviewer's
+  approval attempt is a genuine `403` (`CatalogError::Forbidden`, the first
+  thing in this facade to earn that variant) — proven with two
+  JWT-distinguished identities, since open mode's `Principal::system()`
+  cannot express "someone else". The version bump is real:
+  `GlossaryTermRecord` carries a `version: EntityVersion` reading the
+  migration's existing columns, bumped on every transition. **Event
+  emission is not built** — `ChangeEvent`'s `EventSubject.kind: AssetKind`
+  is Asset-specific and a term is deliberately not an asset, so this needs a
+  design decision rather than a call to an existing method. Illegal
+  transitions return `400`, matching Team's own cycle refusal rather than
+  the `422` the plan names — a pre-existing `00d`/code drift this epic
+  follows rather than deepens
+- [x] **D** Terms attach to assets and columns — `POST/GET/DELETE
+  /glossary-terms/{id}/usage`, paginated. Built against the migration's own
+  `term_attachments` table rather than `TagLabel`, because `TagLabel` is
+  Epic 25's type and Epic 25 does not exist yet. Only `Approved` terms
+  attach, `400` naming the actual status
+- [x] **E** `Metric` as a first-class entity — full CRUD on
+  `/business-metrics` (deliberately not `/metrics`, which already serves
+  Prometheus exposition; axum panics at startup on a duplicate route,
+  caught by `cargo check` before it ever ran). `source_assets` validated
+  against the asset table; `defined_by` must name an `Approved` term.
+  Searchable by name, definition, **and defining term** — the last one
+  needed a runtime join against `glossary_terms` rather than the metric's
+  own `search_vector`, because that column is `GENERATED ALWAYS` and cannot
+  read another table's row. A source-less metric is permitted; `gaps`
+  (`graph_owl_core::metric::gaps`) rides every response body rather than a
+  separate endpoint — full `TrustSummary` integration is Epic 14's, which
+  does not know about metrics yet
+- [~] **F** Metric lineage reconciliation — `PUT
+  /business-metrics/{id}/sources` runs the declared list through
+  `reconcile_lineage` (dedup, self-reference excluded) and replaces
+  `metric_sources`. **Scoped down from the plan, decided with the user
+  rather than assumed**: `lineage_edges.to_asset_id`/`from_asset_id` both
+  carry a hard FK to `assets(id)`, and `Metric` is deliberately not an
+  asset, so a metric-to-asset edge cannot be written to that table today —
+  metric lineage is not yet reachable by Epic 29 traversal. Closing this
+  needs a real schema decision (give `Metric` an `AssetKind`, or widen
+  `lineage_edges`' endpoint typing) that belongs to a future epic, not one
+  slice deciding it as a side effect
 
 ### Epic 42 — Semantic surfaces
 - [ ] One vocabulary browser over glossary, tags, domains, packs

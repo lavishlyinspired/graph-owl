@@ -109,6 +109,34 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
                 .patch(update_glossary_term)
                 .delete(delete_glossary_term),
         )
+        .route(
+            "/glossary-terms/{id}/relations",
+            get(list_term_relations)
+                .post(add_term_relation)
+                .delete(delete_term_relation),
+        )
+        .route(
+            "/glossary-terms/{id}/reviewers",
+            get(list_term_reviewers).put(set_term_reviewers),
+        )
+        .route(
+            "/glossary-terms/{id}/transitions",
+            post(create_term_transition),
+        )
+        .route(
+            "/glossary-terms/{id}/usage",
+            get(term_usage).post(attach_term).delete(detach_term),
+        )
+        // `/business-metrics`, not `/metrics` — that path is already the
+        // Prometheus exposition endpoint (Epic 10), and axum panics at
+        // startup on a duplicate route rather than silently shadowing one.
+        .route("/business-metrics", get(list_metrics).post(create_metric))
+        .route("/business-metrics/search", get(search_metrics))
+        .route(
+            "/business-metrics/{id}",
+            get(get_metric).patch(update_metric).delete(delete_metric),
+        )
+        .route("/business-metrics/{id}/sources", put(set_metric_sources))
         .route("/users/{id}", put(upsert_user).delete(delete_user))
         .route("/users/{id}/follows", get(list_follows))
         .route(
@@ -1159,6 +1187,7 @@ impl From<CatalogError> for AppError {
                 relationship: relationship.as_str(),
                 to: to.as_str(),
             },
+            CatalogError::Forbidden => AppError::Forbidden,
             CatalogError::Storage(storage_error) => storage_error.into(),
         }
     }
@@ -2269,6 +2298,7 @@ fn term_body(term: &graph_owl_storage::GlossaryTermRecord) -> serde_json::Value 
         "status": term.status.as_str(),
         "synonyms": term.synonyms,
         "abbreviations": term.abbreviations,
+        "version": format!("{}.{}", term.version.major, term.version.minor),
         "createdAt": term.created_at,
         "updatedAt": term.updated_at,
     })
@@ -2399,6 +2429,440 @@ async fn search_glossary_terms(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let terms = catalog.search_terms(&query.q).await?;
     Ok(Json(json!(terms.iter().map(term_body).collect::<Vec<_>>())))
+}
+
+// ---- Epic 24 Slice B: SKOS relations ----
+
+/// `kind`/`target` rather than the tagged-enum wire shape
+/// [`graph_owl_core::glossary::SkosRelation`] itself serializes to: `kind` is
+/// validated against the vocabulary *here*, with a field name a client can
+/// act on, rather than surfacing serde's untagged-variant error.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SkosRelationRequest {
+    kind: String,
+    target: String,
+}
+
+impl ValidateBody for SkosRelationRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Parse a wire `kind`/`target` pair into the domain relation.
+///
+/// # Errors
+///
+/// [`AppError::Validation`] naming `kind` if it is not one of the five SKOS
+/// relations this catalog knows.
+fn parse_skos_relation(
+    kind: &str,
+    target: String,
+) -> Result<graph_owl_core::glossary::SkosRelation, AppError> {
+    use graph_owl_core::glossary::SkosRelation;
+    match kind {
+        "broader" => Ok(SkosRelation::Broader(target)),
+        "narrower" => Ok(SkosRelation::Narrower(target)),
+        "related" => Ok(SkosRelation::Related(target)),
+        "exactMatch" => Ok(SkosRelation::ExactMatch(target)),
+        "closeMatch" => Ok(SkosRelation::CloseMatch(target)),
+        other => Err(AppError::Validation(vec![FieldError::new(
+            "kind",
+            FieldErrorCode::Type,
+            format!("`{other}` is not a recognised SKOS relation kind"),
+        )])),
+    }
+}
+
+/// `SkosRelation` already derives `Serialize` with this exact
+/// `kind`/`target` shape, so a response is just `Json(relation)` — this
+/// exists only to render a `Vec` the same way a single relation renders.
+fn relation_body(relation: &graph_owl_core::glossary::SkosRelation) -> serde_json::Value {
+    json!(relation)
+}
+
+async fn add_term_relation(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<SkosRelationRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let relation = parse_skos_relation(&payload.kind, payload.target)?;
+    catalog.add_term_relation(id, relation.clone()).await?;
+    Ok((StatusCode::CREATED, Json(relation_body(&relation))))
+}
+
+async fn list_term_relations(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let relations = catalog.term_relations(id).await?;
+    Ok(Json(json!(
+        relations.iter().map(relation_body).collect::<Vec<_>>()
+    )))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeleteRelationQuery {
+    kind: String,
+    target: String,
+}
+
+async fn delete_term_relation(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<DeleteRelationQuery>,
+) -> Result<StatusCode, AppError> {
+    let relation = parse_skos_relation(&query.kind, query.target)?;
+    catalog.remove_term_relation(id, &relation).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- Epic 24 Slice C: review workflow ----
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetReviewersRequest {
+    #[serde(default)]
+    reviewers: Vec<String>,
+}
+
+impl ValidateBody for SetReviewersRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+fn reviewers_body(reviewers: &[String]) -> serde_json::Value {
+    json!({ "reviewers": reviewers })
+}
+
+async fn set_term_reviewers(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<SetReviewersRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    catalog.set_term_reviewers(id, payload.reviewers).await?;
+    let reviewers = catalog.term_reviewers(id).await?;
+    Ok(Json(reviewers_body(&reviewers)))
+}
+
+async fn list_term_reviewers(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let reviewers = catalog.term_reviewers(id).await?;
+    Ok(Json(reviewers_body(&reviewers)))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TermTransitionRequest {
+    to: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    successor_term_id: Option<Uuid>,
+}
+
+impl ValidateBody for TermTransitionRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Move a term to a new status — Slice C. `actor` is the authenticated
+/// principal, never a body field: a request that could name its own author
+/// could forge one, and "only an assigned reviewer may approve" means
+/// nothing if a caller can approve as somebody else.
+async fn create_term_transition(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<TermTransitionRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let to = graph_owl_core::glossary::TermStatus::parse(&payload.to).map_err(|raw| {
+        AppError::Validation(vec![FieldError::new(
+            "to",
+            FieldErrorCode::Type,
+            format!("`{raw}` is not a recognised term status"),
+        )])
+    })?;
+    let term = catalog
+        .transition_term(
+            id,
+            to,
+            &principal.id,
+            payload.reason,
+            payload.successor_term_id,
+        )
+        .await?;
+    Ok(Json(term_body(&term)))
+}
+
+// ---- Epic 24 Slice D: terms attach to assets and columns ----
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AttachTermRequest {
+    target_fqn: String,
+}
+
+impl ValidateBody for AttachTermRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+async fn attach_term(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<AttachTermRequest>,
+) -> Result<StatusCode, AppError> {
+    catalog
+        .attach_term(id, &payload.target_fqn, &principal.id)
+        .await?;
+    Ok(StatusCode::CREATED)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DetachTermQuery {
+    target_fqn: String,
+}
+
+async fn detach_term(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<DetachTermQuery>,
+) -> Result<StatusCode, AppError> {
+    catalog.detach_term(id, &query.target_fqn).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn term_usage(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<ListQuery>,
+) -> Result<Json<Page<String>>, AppError> {
+    let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    Ok(Json(catalog.term_usage(id, &page).await?))
+}
+
+// ---- Epic 24 Slice E: Metric as a first-class entity ----
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MetricRequest {
+    name: String,
+    definition: String,
+    #[serde(default)]
+    formula: Option<String>,
+    #[serde(default)]
+    unit: Option<String>,
+    #[serde(default)]
+    granularity: Option<String>,
+    #[serde(default = "default_calculation_type")]
+    calculation_type: String,
+    #[serde(default)]
+    source_assets: Vec<String>,
+    #[serde(default)]
+    defined_by: Option<Uuid>,
+}
+
+fn default_calculation_type() -> String {
+    "simple".to_string()
+}
+
+impl ValidateBody for MetricRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+fn parse_calculation_type(raw: &str) -> Result<graph_owl_core::metric::CalculationType, AppError> {
+    graph_owl_core::metric::CalculationType::parse(raw).map_err(|other| {
+        AppError::Validation(vec![FieldError::new(
+            "calculationType",
+            FieldErrorCode::Type,
+            format!("`{other}` is not a recognised calculation type"),
+        )])
+    })
+}
+
+fn metric_body(metric: &graph_owl_storage::MetricRecord) -> serde_json::Value {
+    let gaps = graph_owl_core::metric::gaps(&graph_owl_core::metric::MetricClaims {
+        source_assets: &metric.source_assets,
+        defined_by: metric.defined_by.map(|_| "_").as_deref(),
+        formula: metric.formula.as_deref(),
+    });
+    json!({
+        "id": metric.id,
+        "name": metric.name,
+        "fullyQualifiedName": metric.fully_qualified_name,
+        "definition": metric.definition,
+        "formula": metric.formula,
+        "unit": metric.unit,
+        "granularity": metric.granularity,
+        "calculationType": metric.calculation_type.as_str(),
+        "definedBy": metric.defined_by,
+        "sourceAssets": metric.source_assets,
+        "gaps": gaps.iter().map(|g| g.as_str()).collect::<Vec<_>>(),
+        "createdAt": metric.created_at,
+        "updatedAt": metric.updated_at,
+    })
+}
+
+async fn create_metric(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppJson(payload): AppJson<MetricRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let calculation_type = parse_calculation_type(&payload.calculation_type)?;
+    let metric = catalog
+        .create_metric(
+            &payload.name,
+            payload.definition,
+            payload.formula,
+            payload.unit,
+            payload.granularity,
+            calculation_type,
+            payload.source_assets,
+            payload.defined_by,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(metric_body(&metric))))
+}
+
+async fn list_metrics(
+    State(catalog): State<Catalog>,
+    AppQuery(query): AppQuery<ListQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    let page = catalog.list_metrics(&page).await?;
+    Ok(Json(json!({
+        "data": page.data.iter().map(metric_body).collect::<Vec<_>>(),
+        "paging": page.paging,
+    })))
+}
+
+async fn get_metric(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    catalog
+        .get_metric(id)
+        .await?
+        .map(|metric| Json(metric_body(&metric)))
+        .ok_or(AppError::NotFound)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MetricUpdateRequest {
+    #[serde(default)]
+    definition: Option<String>,
+    #[serde(default)]
+    formula: Option<String>,
+    #[serde(default)]
+    unit: Option<String>,
+    #[serde(default)]
+    granularity: Option<String>,
+    #[serde(default)]
+    calculation_type: Option<String>,
+}
+
+impl ValidateBody for MetricUpdateRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+async fn update_metric(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<MetricUpdateRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let calculation_type = payload
+        .calculation_type
+        .as_deref()
+        .map(parse_calculation_type)
+        .transpose()?;
+    let metric = catalog
+        .update_metric(
+            id,
+            graph_owl_storage::MetricUpdate {
+                definition: payload.definition,
+                formula: payload.formula,
+                unit: payload.unit,
+                granularity: payload.granularity,
+                calculation_type,
+            },
+        )
+        .await?;
+    Ok(Json(metric_body(&metric)))
+}
+
+async fn delete_metric(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    catalog.delete_metric(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SearchMetricsQuery {
+    q: String,
+}
+
+async fn search_metrics(
+    State(catalog): State<Catalog>,
+    AppQuery(query): AppQuery<SearchMetricsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let metrics = catalog.search_metrics(&query.q).await?;
+    Ok(Json(json!(
+        metrics.iter().map(metric_body).collect::<Vec<_>>()
+    )))
+}
+
+// ---- Epic 24 Slice F: metric lineage reconciliation ----
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MetricSourcesRequest {
+    #[serde(default)]
+    source_assets: Vec<String>,
+}
+
+impl ValidateBody for MetricSourcesRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Replace a metric's declared sources — Slice F. Scoped to
+/// `metric_sources`, not yet a graph-traversable lineage edge; see
+/// [`graph_owl_api::Catalog::set_metric_sources`]'s doc for why.
+async fn set_metric_sources(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<MetricSourcesRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let metric = catalog
+        .set_metric_sources(id, payload.source_assets)
+        .await?;
+    Ok(Json(metric_body(&metric)))
 }
 
 // ---- Epic 31: organizational memory ----

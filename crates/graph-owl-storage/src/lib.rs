@@ -487,6 +487,11 @@ pub struct GlossaryTermRecord {
     pub status: graph_owl_core::glossary::TermStatus,
     pub synonyms: Vec<String>,
     pub abbreviations: Vec<String>,
+    /// Bumped by Slice C's review workflow — a workflow move, not a field
+    /// edit, so it starts at `1.0` (the migration's default) rather than
+    /// [`EntityVersion::initial`]'s `0.1`; the two entities version for
+    /// different reasons and there is no shared "first version" to agree on.
+    pub version: EntityVersion,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -498,6 +503,45 @@ pub struct GlossaryTermUpdate {
     pub definition: Option<String>,
     pub synonyms: Option<Vec<String>>,
     pub abbreviations: Option<Vec<String>>,
+}
+
+/// `Metric` as stored — Epic 24 Slice E.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetricRecord {
+    pub id: Uuid,
+    pub name: String,
+    /// **Namespaced away from tables** (decision — Slice E). A metric called
+    /// `revenue` and a table called `revenue` are different things, and a
+    /// shared FQN space would make one of them unaddressable.
+    pub fully_qualified_name: String,
+    pub definition: String,
+    /// Prose, never evaluated (`graph_owl_core::metric` decision 3).
+    pub formula: Option<String>,
+    pub unit: Option<String>,
+    pub granularity: Option<String>,
+    pub calculation_type: graph_owl_core::metric::CalculationType,
+    /// The glossary term that defines this metric. Must be `Approved` at
+    /// creation; enforced by the facade, where the term's status can be read.
+    pub defined_by: Option<Uuid>,
+    /// What this metric claims as its sources. Slice F derives `derivedFrom`
+    /// edges from this list rather than requiring both, which would invite
+    /// the two to diverge.
+    pub source_assets: Vec<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A field-level change to a metric. `None` means "leave alone". Does not
+/// carry `source_assets` or `defined_by` — those go through their own path
+/// because changing them means reconciling lineage (Slice F) or re-checking
+/// the defining term's status, not merely replacing a value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MetricUpdate {
+    pub definition: Option<String>,
+    pub formula: Option<String>,
+    pub unit: Option<String>,
+    pub granularity: Option<String>,
+    pub calculation_type: Option<graph_owl_core::metric::CalculationType>,
 }
 
 /// What deleting a glossary did.
@@ -1280,4 +1324,177 @@ pub trait Storage: Send + Sync {
     /// # Errors
     /// [`StorageError::Unexpected`] if the read fails.
     async fn search_terms(&self, query: &str) -> Result<Vec<GlossaryTermRecord>, StorageError>;
+
+    // ---- Epic 24 Slice B: SKOS relations ----
+
+    /// Assert one relation, owned by `term_id`.
+    ///
+    /// **Idempotent** — asserting the same relation twice is the same fact,
+    /// not a conflict, so a repeat is a no-op success rather than an error.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn insert_term_relation(
+        &self,
+        term_id: Uuid,
+        relation: graph_owl_core::glossary::SkosRelation,
+    ) -> Result<(), StorageError>;
+
+    /// Retract a relation `term_id` owns. Returns `false` if no such row
+    /// exists — including when `relation` is one only visible on `term_id`
+    /// as a *derived* inverse (e.g. `narrower`), which was never a row to
+    /// delete in the first place.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn delete_term_relation(
+        &self,
+        term_id: Uuid,
+        relation: &graph_owl_core::glossary::SkosRelation,
+    ) -> Result<bool, StorageError>;
+
+    /// Every stored relation with `term_id` on **either** end — what it
+    /// declared, and what points at it — keyed by the declaring term's id.
+    /// This is exactly the `stored` shape
+    /// [`graph_owl_core::glossary::visible_relations`] takes to compute the
+    /// full picture including derived inverses.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn term_relations_touching(
+        &self,
+        term_id: Uuid,
+    ) -> Result<Vec<(String, graph_owl_core::glossary::SkosRelation)>, StorageError>;
+
+    /// Every stored `broader` edge, as `(child, parent)` pairs — what
+    /// [`graph_owl_core::glossary::would_cycle`] walks before a new one is
+    /// accepted.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn broader_edges(&self) -> Result<Vec<(String, String)>, StorageError>;
+
+    // ---- Epic 24 Slice C: review workflow ----
+
+    /// Replace a term's assigned reviewers. Replace, not merge — same reason
+    /// as `Team`'s membership replace: a partial update cannot express
+    /// "nobody reviews this any more".
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn set_term_reviewers(
+        &self,
+        term_id: Uuid,
+        reviewers: &[String],
+    ) -> Result<(), StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn term_reviewers(&self, term_id: Uuid) -> Result<Vec<String>, StorageError>;
+
+    /// Move a term to `to`, recording who did it, why, and bumping its
+    /// version. `None` if the term does not exist.
+    ///
+    /// **Records the transition and writes the new status atomically** — a
+    /// status change with no account of how it got there is the one thing a
+    /// reviewer is for.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn transition_term(
+        &self,
+        term_id: Uuid,
+        from: graph_owl_core::glossary::TermStatus,
+        to: graph_owl_core::glossary::TermStatus,
+        actor: &str,
+        reason: Option<String>,
+        successor_term_id: Option<Uuid>,
+    ) -> Result<Option<GlossaryTermRecord>, StorageError>;
+
+    // ---- Epic 24 Slice D: terms attach to assets and columns ----
+
+    /// Attach a term to `target_fqn` — an asset or an individual column,
+    /// both addressed by FQN since a column has no row of its own until
+    /// Epic 22. **Idempotent**: re-attaching what is already attached is the
+    /// same fact, not a conflict.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn attach_term(
+        &self,
+        term_id: Uuid,
+        target_fqn: &str,
+        attached_by: &str,
+    ) -> Result<(), StorageError>;
+
+    /// Detach a term from `target_fqn`. `false` if no such attachment
+    /// exists.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn detach_term(&self, term_id: Uuid, target_fqn: &str) -> Result<bool, StorageError>;
+
+    /// Every asset or column this term is attached to, paginated.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn term_usage(
+        &self,
+        term_id: Uuid,
+        page: &PageRequest,
+    ) -> Result<Page<String>, StorageError>;
+
+    // ---- Epic 24 Slice E: Metric as a first-class entity ----
+
+    /// # Errors
+    /// [`StorageError::Conflict`] (`kind: Fqn`) if the FQN is already taken.
+    async fn insert_metric(&self, metric: MetricRecord) -> Result<MetricRecord, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_metric(&self, id: Uuid) -> Result<Option<MetricRecord>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_metrics(&self, page: &PageRequest) -> Result<Page<MetricRecord>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn update_metric(
+        &self,
+        id: Uuid,
+        update: MetricUpdate,
+    ) -> Result<Option<MetricRecord>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn delete_metric(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Full-text search over name, definition and defining term — the same
+    /// weighting the migration's `search_vector` encodes.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn search_metrics(&self, query: &str) -> Result<Vec<MetricRecord>, StorageError>;
+
+    // ---- Epic 24 Slice F: metric lineage reconciliation ----
+
+    /// Replace what a metric declares as its sources.
+    ///
+    /// **Scoped to `metric_sources`, not `lineage_edges`.** A metric is not
+    /// an asset — `lineage_edges.to_asset_id` has a hard FK to `assets(id)`
+    /// — so this reconciles the metric's own claim about its sources; it
+    /// does not yet create a graph-traversable lineage edge. That needs a
+    /// schema decision (give `Metric` an `AssetKind`, or widen
+    /// `lineage_edges`' endpoint type) that is bigger than this slice.
+    ///
+    /// `None` if the metric does not exist.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn update_metric_sources(
+        &self,
+        metric_id: Uuid,
+        sources: &[String],
+    ) -> Result<Option<MetricRecord>, StorageError>;
 }
