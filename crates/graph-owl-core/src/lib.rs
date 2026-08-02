@@ -1,6 +1,7 @@
 pub mod blocking;
 pub mod contradiction;
 pub mod custom_property;
+pub mod domain;
 pub mod envelope;
 pub mod extraction;
 pub mod extraction_run;

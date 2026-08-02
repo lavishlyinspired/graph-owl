@@ -5,6 +5,7 @@ use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
     contradiction::Review,
     custom_property::CustomProperty,
+    domain::{DataProduct, Domain, DomainAssignment},
     memory::Memory,
     ownership::{EntityReference, OwnerRef},
     page::{Page, PageRequest},
@@ -47,6 +48,15 @@ pub enum ConflictKind {
     /// which makes it a property of the design rather than a slip: **a conflict
     /// carrying its own detail needs its own kind.**
     IdempotencyConflict,
+    /// An asset is already assigned to a different domain — Epic 23 Slice B.
+    ///
+    /// Its own kind because the response has to name the *current* domain, and
+    /// the server's canned sentence for a borrowed kind would replace it. That
+    /// has now happened twice in this codebase, which makes it a property of the
+    /// design: a conflict carrying its own detail needs its own kind.
+    DomainAssigned,
+    /// A domain still holds assets, products or child domains — Epic 23 Slice F.
+    DomainInUse,
     /// This principal still owns assets or parents teams — Epic 11 Slice G.
     ///
     /// Its own variant because the response has to carry *counts by kind*, and
@@ -234,6 +244,79 @@ pub enum PrincipalDeletion {
     StillHolds(Box<Holdings>),
     /// The `reassignTo` target does not exist.
     UnknownTarget,
+}
+
+/// What deleting a domain found — Epic 23 Slice F.
+///
+/// Mirrors [`PrincipalDeletion`] deliberately: the two operations have the same
+/// shape (a thing other things point at, deletable only when nothing does or
+/// when a target is named) and giving them different shapes would mean two
+/// almost-identical handlers a reader has to diff to trust.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DomainDeletion {
+    Deleted {
+        /// Assets moved to the reassignment target.
+        reassigned_assets: i64,
+        /// Data products moved to it.
+        reassigned_products: i64,
+    },
+    NotFound,
+    /// It still holds things and no `reassignTo` was given.
+    StillHolds(Box<DomainHoldings>),
+    /// The `reassignTo` target does not exist.
+    UnknownTarget,
+    /// It has child domains, which must be handled explicitly — reassigning
+    /// *assets* says nothing about where the sub-domains should go, and
+    /// silently reparenting them to the target would restructure the
+    /// accountability tree as a side effect of a delete.
+    HasChildren {
+        children: i64,
+    },
+}
+
+/// What a domain still holds, by kind, so a `409` can say whether this is a
+/// five-minute cleanup or a quarter's work.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DomainHoldings {
+    /// Assets assigned **directly**. Inherited ones are not counted: they are
+    /// not held by this domain, they are held by an ancestor of theirs that is,
+    /// and deleting this domain does not orphan them.
+    pub assets: i64,
+    pub data_products: i64,
+}
+
+/// A change to a domain — absent means "not declared", the same PATCH rule the
+/// rest of the envelope follows.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DomainUpdate {
+    pub name: Option<String>,
+    pub description: Option<Option<String>>,
+    pub domain_type: Option<Option<String>>,
+    pub experts: Option<Vec<String>>,
+    /// Reparenting. `Some(None)` promotes the domain to a root.
+    pub parent_id: Option<Option<Uuid>>,
+}
+
+/// A change to a data product.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DataProductUpdate {
+    pub name: Option<String>,
+    pub description: Option<Option<String>>,
+    pub purpose: Option<Option<String>>,
+    pub domain_id: Option<Option<Uuid>>,
+}
+
+/// Why an asset could not be added to a data product.
+///
+/// Two reasons rather than one boolean, because they need different fixes: a
+/// caller who sent a typo'd id and a caller who sent a tombstoned asset are
+/// making different mistakes, and "asset not found" for the second is a lie
+/// that sends them looking for the wrong thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipRefusal {
+    NoSuchProduct,
+    NoSuchAsset,
+    AssetDeleted,
 }
 
 /// What claiming an idempotency key found.
@@ -589,6 +672,16 @@ pub struct AssetFilter<'a> {
     /// repeated parameters. Two bounds on one property is how a range is
     /// expressed, and it falls out of that rule rather than needing its own.
     pub extension: &'a [ExtensionFilter],
+    /// Assets whose resolved domain is this one — Epic 23 Slice E.
+    ///
+    /// **Direct *and* inherited.** "Show me everything in the payments domain"
+    /// is the query this epic exists for, and answering it with only the
+    /// handful of assets somebody assigned by hand would report a governed
+    /// estate as almost empty — the exact opposite of the truth, and the more
+    /// dangerous direction to be wrong in.
+    pub domain: Option<Uuid>,
+    /// Assets belonging to this data product.
+    pub data_product: Option<Uuid>,
 }
 
 /// One condition on a custom property's value — Epic 22 Slice D.
@@ -2367,6 +2460,200 @@ pub trait Storage: Send + Sync {
         property: &CustomProperty,
         previous_name: &str,
     ) -> Result<bool, StorageError>;
+
+    // ---- Epic 23: domains and data products ----
+
+    /// Create a domain. The FQN is derived by the adapter from the parent
+    /// chain, so a caller cannot make the path and the parent disagree.
+    ///
+    /// `None` means `parent_id` named a domain that does not exist — said with
+    /// an `Option` rather than a new `StorageError` variant, because that is
+    /// the shape every other lookup in this port already uses and a variant
+    /// would ripple through every adapter for one case.
+    ///
+    /// # Errors
+    /// [`StorageError::Conflict`] if the derived FQN is taken.
+    async fn create_domain(
+        &self,
+        id: Uuid,
+        name: &str,
+        parent_id: Option<Uuid>,
+        description: Option<&str>,
+        domain_type: Option<&str>,
+        experts: &[String],
+        updated_by: &str,
+    ) -> Result<Option<Domain>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_domain(&self, id: Uuid) -> Result<Option<Domain>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_domain_by_fqn(&self, fqn: &str) -> Result<Option<Domain>, StorageError>;
+
+    /// Live domains, name-ordered.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_domains(&self, page: &PageRequest) -> Result<Page<Domain>, StorageError>;
+
+    /// Apply a partial update, advancing the version by the size of the change.
+    ///
+    /// **Renaming re-derives the whole subtree's FQNs**, transactionally. A
+    /// rename that moved only its own path would leave every descendant
+    /// claiming to sit under a domain that no longer has that name, and every
+    /// FQN lookup below it would then miss.
+    ///
+    /// # Errors
+    /// [`StorageError::Conflict`] if the new path is taken, or if reparenting
+    /// would close a cycle.
+    async fn update_domain(
+        &self,
+        id: Uuid,
+        update: &DomainUpdate,
+        updated_by: &str,
+    ) -> Result<Option<Domain>, StorageError>;
+
+    /// Whether making `parent` the parent of `domain` would close a cycle.
+    ///
+    /// **Walks the proposed parent's whole ancestry, not its immediate
+    /// parent.** A depth-1 check passes `A → B → C → A` and leaves an ancestor
+    /// walk that never terminates.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn domain_would_cycle(&self, domain: Uuid, parent: Uuid) -> Result<bool, StorageError>;
+
+    /// Direct children of `parent`, or the roots when `None`.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn child_domains(&self, parent: Option<Uuid>) -> Result<Vec<Domain>, StorageError>;
+
+    /// Assign an asset to a domain directly, or clear the assignment.
+    ///
+    /// Returns the asset as it stands after the write, or `NotFound`. Clearing
+    /// does not make the asset domainless — it makes it *inherit* again, which
+    /// is a different and usually better answer.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn assign_asset_domain(
+        &self,
+        asset_id: Uuid,
+        domain_id: Option<Uuid>,
+        updated_by: &str,
+    ) -> Result<Option<Asset>, StorageError>;
+
+    /// The domain an asset falls under, directly or by inheritance.
+    ///
+    /// **The nearest assigned ancestor wins, and the walk stops there.**
+    /// Accumulating every assigned ancestor would answer "which domains is this
+    /// under" — a question with several answers, which is exactly the shared
+    /// accountability decision 1 refuses.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn resolve_asset_domain(
+        &self,
+        asset_id: Uuid,
+    ) -> Result<Option<DomainAssignment>, StorageError>;
+
+    /// How many live assets resolve to `domain`, directly or by inheritance.
+    ///
+    /// The number a reassignment reports. Counting only direct assignments
+    /// would tell an operator a database moved one asset when it moved five
+    /// thousand.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn count_assets_in_domain(&self, domain: Uuid) -> Result<i64, StorageError>;
+
+    /// Delete a domain, refusing while it holds things unless a target is
+    /// named.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if any part of the transaction fails.
+    async fn delete_domain(
+        &self,
+        id: Uuid,
+        reassign_to: Option<Uuid>,
+        updated_by: &str,
+    ) -> Result<DomainDeletion, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Conflict`] if the name is taken.
+    async fn create_data_product(
+        &self,
+        id: Uuid,
+        name: &str,
+        description: Option<&str>,
+        purpose: Option<&str>,
+        domain_id: Option<Uuid>,
+        updated_by: &str,
+    ) -> Result<DataProduct, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_data_product(&self, id: Uuid) -> Result<Option<DataProduct>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_data_products(
+        &self,
+        page: &PageRequest,
+    ) -> Result<Page<DataProduct>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn update_data_product(
+        &self,
+        id: Uuid,
+        update: &DataProductUpdate,
+        updated_by: &str,
+    ) -> Result<Option<DataProduct>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the delete fails.
+    async fn delete_data_product(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Add an asset to a product. Idempotent: adding it twice is one edge.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn add_product_asset(
+        &self,
+        product_id: Uuid,
+        asset_id: Uuid,
+    ) -> Result<Result<(), MembershipRefusal>, StorageError>;
+
+    /// Remove an asset from a product. **Never deletes the asset** — a product
+    /// is a view of things that exist independently of it.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn remove_product_asset(
+        &self,
+        product_id: Uuid,
+        asset_id: Uuid,
+    ) -> Result<bool, StorageError>;
+
+    /// The assets in a product, paginated.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn product_assets(
+        &self,
+        product_id: Uuid,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, StorageError>;
+
+    /// The products an asset belongs to.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn asset_products(&self, asset_id: Uuid) -> Result<Vec<DataProduct>, StorageError>;
 
     /// Delete a definition **and every value of it**, transactionally, bumping
     /// the version of each entity that held one. Returns how many entities

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use graph_owl_authz::{AccessPredicate, Policy};
 use graph_owl_core::contradiction::{Review, Verdict};
 use graph_owl_core::custom_property::CustomProperty;
+use graph_owl_core::domain::{DataProduct, Domain, DomainAssignment, domain_fqn};
 use graph_owl_core::memory::{Authorship, LinkRelation, Memory, MemoryKind, MemoryLink};
 use graph_owl_core::ownership::{EntityReference, OwnerKind, OwnerRef};
 use graph_owl_core::{
@@ -10,8 +11,9 @@ use graph_owl_core::{
     page::{Cursor, Page, PageRequest},
 };
 use graph_owl_storage::{
-    ConflictKind, DiscardedClaimRecord, ExtractionRunRecord, FollowOutcome, Holdings,
-    IdempotencyClaim, MemoryWrite, OwnersWrite, PrincipalDeletion, QueuedClaimRecord,
+    ConflictKind, DataProductUpdate, DiscardedClaimRecord, DomainDeletion, DomainHoldings,
+    DomainUpdate, ExtractionRunRecord, FollowOutcome, Holdings, IdempotencyClaim,
+    MembershipRefusal, MemoryWrite, OwnersWrite, PrincipalDeletion, QueuedClaimRecord,
     ReviewQueueFilter, SplitOutcome, Storage, StorageError, StoredUser, SupersedeOutcome,
     UpdateOutcome,
 };
@@ -404,6 +406,57 @@ pub struct PostgresStorage {
 }
 
 impl PostgresStorage {
+    /// The named experts on a domain, ordered as they were given.
+    ///
+    /// Order is preserved because it is meaningful — the first expert is
+    /// usually the one to ask first — and a set would lose it.
+    async fn read_experts(&self, domain: Uuid) -> Result<Vec<String>, StorageError> {
+        sqlx::query_scalar(
+            "SELECT user_id FROM domain_experts WHERE domain_id = $1 ORDER BY ordinal, user_id",
+        )
+        .bind(domain)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    async fn read_experts_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        domain: Uuid,
+    ) -> Result<Vec<String>, StorageError> {
+        sqlx::query_scalar(
+            "SELECT user_id FROM domain_experts WHERE domain_id = $1 ORDER BY ordinal, user_id",
+        )
+        .bind(domain)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    /// **`ON CONFLICT DO NOTHING`, not an error.** Naming the same person twice
+    /// in one request is a client's duplicate, not a state worth refusing — the
+    /// answer they asked for is "this person is an expert", which is already
+    /// true after the first row.
+    async fn write_experts(
+        tx: &mut Transaction<'_, Postgres>,
+        domain: Uuid,
+        experts: &[String],
+    ) -> Result<(), StorageError> {
+        for (ordinal, user) in experts.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO domain_experts (domain_id, user_id, ordinal)
+                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            )
+            .bind(domain)
+            .bind(user)
+            .bind(i32::try_from(ordinal).unwrap_or(i32::MAX))
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// # Errors
     ///
     /// Returns `StorageError::Unexpected` if the connection or migrations fail.
@@ -3780,7 +3833,7 @@ impl Storage for PostgresStorage {
         // measurement says otherwise: a maintained effective-owner projection buys
         // speed and owes an invalidation problem, and containment is at most five
         // levels deep (service → database → schema → table → column).
-        let extension = extension_clauses(filter.extension, 9);
+        let extension = extension_clauses(filter.extension, 11);
         let sql = format!(
             "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
              WHERE NOT deleted
@@ -3791,6 +3844,10 @@ impl Storage for PostgresStorage {
                      SELECT 1 FROM json_array_elements({OWNERS_EXPR}) AS effective
                       WHERE effective->>'id' = $7))
                AND ($8::bool IS NOT TRUE OR json_array_length({OWNERS_EXPR}) = 0)
+               AND ($9::uuid IS NULL OR {DOMAIN_ID_EXPR} = $9)
+               AND ($10::uuid IS NULL OR EXISTS (
+                     SELECT 1 FROM data_product_assets m
+                      WHERE m.asset_id = assets.id AND m.data_product_id = $10))
                {extension}
              ORDER BY fully_qualified_name, id
              LIMIT $4"
@@ -3803,7 +3860,9 @@ impl Storage for PostgresStorage {
             .bind(&allow)
             .bind(&deny)
             .bind(filter.owner)
-            .bind(filter.unowned);
+            .bind(filter.unowned)
+            .bind(filter.domain)
+            .bind(filter.data_product);
         for condition in filter.extension {
             query = query.bind(&condition.name).bind(&condition.value);
         }
@@ -3829,7 +3888,7 @@ impl Storage for PostgresStorage {
         let overfetch = i64::try_from(page.limit)
             .unwrap_or(i64::MAX)
             .saturating_add(1);
-        let extension = extension_clauses(filter.extension, 8);
+        let extension = extension_clauses(filter.extension, 10);
         let sql = format!(
             "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners, {RANK_KEY} AS sort_key
              FROM assets, to_tsquery('english', $1) AS q (ts)
@@ -3838,6 +3897,10 @@ impl Storage for PostgresStorage {
                AND ($2::text IS NULL OR kind = $2)
                AND ($3::text IS NULL OR ({RANK_KEY}, id) > ($3, $4))
                {VISIBILITY_SEARCH}
+               AND ($8::uuid IS NULL OR {DOMAIN_ID_EXPR} = $8)
+               AND ($9::uuid IS NULL OR EXISTS (
+                     SELECT 1 FROM data_product_assets m
+                      WHERE m.asset_id = assets.id AND m.data_product_id = $9))
                {extension}
              ORDER BY {RANK_KEY}, id
              LIMIT $5"
@@ -3849,7 +3912,9 @@ impl Storage for PostgresStorage {
             .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
             .bind(overfetch)
             .bind(&allow)
-            .bind(&deny);
+            .bind(&deny)
+            .bind(filter.domain)
+            .bind(filter.data_product);
         for condition in filter.extension {
             q = q.bind(&condition.name).bind(&condition.value);
         }
@@ -5076,6 +5141,844 @@ impl Storage for PostgresStorage {
         Ok(done.rows_affected() > 0)
     }
 
+    // ---- Epic 23: domains and data products ----
+
+    async fn create_domain(
+        &self,
+        id: Uuid,
+        name: &str,
+        parent_id: Option<Uuid>,
+        description: Option<&str>,
+        domain_type: Option<&str>,
+        experts: &[String],
+        updated_by: &str,
+    ) -> Result<Option<Domain>, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // The parent's path, read under the transaction, so a concurrent rename
+        // cannot land between deriving the FQN and writing it.
+        let parent_fqn: Option<String> = match parent_id {
+            None => None,
+            Some(parent) => {
+                let found: Option<String> =
+                    sqlx::query_scalar("SELECT fully_qualified_name FROM domains WHERE id = $1")
+                        .bind(parent)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+                let Some(found) = found else {
+                    return Ok(None);
+                };
+                Some(found)
+            }
+        };
+        let fqn = domain_fqn(parent_fqn.as_deref(), name);
+
+        let row = sqlx::query(&format!(
+            "INSERT INTO domains (id, name, fully_qualified_name, parent_id, description,
+                                  domain_type, updated_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING {DOMAIN_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(name)
+        .bind(&fqn)
+        .bind(parent_id)
+        .bind(description)
+        .bind(domain_type)
+        .bind(updated_by)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| {
+            if e.as_database_error()
+                .is_some_and(|d| d.is_unique_violation())
+            {
+                StorageError::Conflict {
+                    detail: format!("a domain already exists at `{fqn}`"),
+                    existing_id: None,
+                    kind: ConflictKind::Fqn,
+                }
+            } else {
+                StorageError::Unexpected(e.to_string())
+            }
+        })?;
+
+        Self::write_experts(&mut tx, id, experts).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut domain = domain_from_row(&row);
+        domain.experts = experts.to_vec();
+        Ok(Some(domain))
+    }
+
+    async fn get_domain(&self, id: Uuid) -> Result<Option<Domain>, StorageError> {
+        let row = sqlx::query(&format!(
+            "SELECT {DOMAIN_COLUMNS} FROM domains WHERE id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        match row {
+            None => Ok(None),
+            Some(row) => {
+                let mut domain = domain_from_row(&row);
+                domain.experts = self.read_experts(id).await?;
+                Ok(Some(domain))
+            }
+        }
+    }
+
+    async fn get_domain_by_fqn(&self, fqn: &str) -> Result<Option<Domain>, StorageError> {
+        let row = sqlx::query(&format!(
+            "SELECT {DOMAIN_COLUMNS} FROM domains WHERE fully_qualified_name = $1"
+        ))
+        .bind(fqn)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        match row {
+            None => Ok(None),
+            Some(row) => {
+                let id: Uuid = row.get("id");
+                let mut domain = domain_from_row(&row);
+                domain.experts = self.read_experts(id).await?;
+                Ok(Some(domain))
+            }
+        }
+    }
+
+    async fn list_domains(&self, page: &PageRequest) -> Result<Page<Domain>, StorageError> {
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let rows = sqlx::query(&format!(
+            "SELECT {DOMAIN_COLUMNS} FROM domains
+              WHERE NOT deleted
+                AND ($1::text IS NULL OR (fully_qualified_name, id) > ($1, $2))
+              ORDER BY fully_qualified_name, id
+              LIMIT $3"
+        ))
+        .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
+        .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
+        .bind(overfetch)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut domains = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id: Uuid = row.get("id");
+            let mut domain = domain_from_row(row);
+            domain.experts = self.read_experts(id).await?;
+            domains.push(domain);
+        }
+        Ok(Page::from_overfetch(domains, page.limit, |d: &Domain| {
+            Cursor::new(d.fully_qualified_name.clone(), d.id)
+        }))
+    }
+
+    async fn update_domain(
+        &self,
+        id: Uuid,
+        update: &DomainUpdate,
+        updated_by: &str,
+    ) -> Result<Option<Domain>, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let Some(before_row) = sqlx::query(&format!(
+            "SELECT {DOMAIN_COLUMNS} FROM domains WHERE id = $1 FOR UPDATE"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let mut before = domain_from_row(&before_row);
+        before.experts = Self::read_experts_tx(&mut tx, id).await?;
+
+        let mut after = before.clone();
+        if let Some(name) = &update.name {
+            after.name = name.clone();
+        }
+        if let Some(description) = &update.description {
+            after.description = description.clone();
+        }
+        if let Some(domain_type) = &update.domain_type {
+            after.domain_type = domain_type.clone();
+        }
+        if let Some(experts) = &update.experts {
+            after.experts = experts.clone();
+        }
+        if let Some(parent_id) = &update.parent_id {
+            after.parent_id = *parent_id;
+        }
+
+        // Re-derived whenever the name or the parent moved, because the FQN is
+        // a function of both. Deriving it from only one is how a reparented
+        // domain keeps its old path.
+        let parent_fqn: Option<String> = match after.parent_id {
+            None => None,
+            Some(parent) => {
+                sqlx::query_scalar("SELECT fully_qualified_name FROM domains WHERE id = $1")
+                    .bind(parent)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| StorageError::Unexpected(e.to_string()))?
+            }
+        };
+        after.fully_qualified_name = domain_fqn(parent_fqn.as_deref(), &after.name);
+
+        let diff = ChangeDescription::between(
+            &serde_json::to_value(&before).unwrap_or_default(),
+            &serde_json::to_value(&after).unwrap_or_default(),
+        );
+        let kind = classify(&diff);
+        if matches!(kind, graph_owl_core::envelope::ChangeKind::None) {
+            tx.rollback()
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            return Ok(Some(before));
+        }
+        let next = before.version.bump(kind);
+
+        let updated_row = sqlx::query(&format!(
+            "UPDATE domains SET name = $2, fully_qualified_name = $3, parent_id = $4,
+                 description = $5, domain_type = $6, version_major = $7, version_minor = $8,
+                 updated_by = $9, change_description = $10, updated_at = now()
+             WHERE id = $1
+             RETURNING {DOMAIN_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(&after.name)
+        .bind(&after.fully_qualified_name)
+        .bind(after.parent_id)
+        .bind(&after.description)
+        .bind(&after.domain_type)
+        .bind(i32::try_from(next.major).unwrap_or(i32::MAX))
+        .bind(i32::try_from(next.minor).unwrap_or(i32::MAX))
+        .bind(updated_by)
+        .bind(serde_json::to_value(&diff).ok())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| {
+            if e.as_database_error()
+                .is_some_and(|d| d.is_unique_violation())
+            {
+                StorageError::Conflict {
+                    detail: format!(
+                        "a domain already exists at `{}`",
+                        after.fully_qualified_name
+                    ),
+                    existing_id: None,
+                    kind: ConflictKind::Fqn,
+                }
+            } else {
+                StorageError::Unexpected(e.to_string())
+            }
+        })?;
+
+        if update.experts.is_some() {
+            sqlx::query("DELETE FROM domain_experts WHERE domain_id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            Self::write_experts(&mut tx, id, &after.experts).await?;
+        }
+
+        // **The subtree's paths move with it**, in the same transaction. A
+        // rename that moved only its own path would leave every descendant
+        // claiming to sit under a name that no longer exists, and every
+        // FQN lookup below it would miss — with no error anywhere.
+        if before.fully_qualified_name != after.fully_qualified_name {
+            sqlx::query(
+                "WITH RECURSIVE subtree (id) AS (
+                         SELECT id FROM domains WHERE parent_id = $1
+                     UNION ALL
+                         SELECT d.id FROM domains d JOIN subtree ON d.parent_id = subtree.id
+                 )
+                 UPDATE domains
+                    SET fully_qualified_name = $3 || substring(fully_qualified_name from length($2) + 1)
+                  WHERE id IN (SELECT id FROM subtree)",
+            )
+            .bind(id)
+            .bind(&before.fully_qualified_name)
+            .bind(&after.fully_qualified_name)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        sqlx::query(
+            "INSERT INTO domain_versions
+                 (domain_id, version_major, version_minor, snapshot, change_description, updated_by, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, now())
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(i32::try_from(next.major).unwrap_or(i32::MAX))
+        .bind(i32::try_from(next.minor).unwrap_or(i32::MAX))
+        .bind(serde_json::to_value(&after).unwrap_or_default())
+        .bind(serde_json::to_value(&diff).ok())
+        .bind(updated_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut result = domain_from_row(&updated_row);
+        result.experts = after.experts;
+        Ok(Some(result))
+    }
+
+    async fn domain_would_cycle(&self, domain: Uuid, parent: Uuid) -> Result<bool, StorageError> {
+        // **Walk the proposed parent's whole ancestry.** A depth-1 check passes
+        // `A → B → C → A` and leaves an ancestor walk that never terminates.
+        // The depth-0 case is also a database constraint, but it is checked
+        // here so the caller gets a sentence rather than a constraint violation.
+        if domain == parent {
+            return Ok(true);
+        }
+        let closes: bool = sqlx::query_scalar(
+            "WITH RECURSIVE ancestry (node) AS (
+                     SELECT $2::uuid
+                 UNION
+                     SELECT d.parent_id FROM domains d
+                       JOIN ancestry ON d.id = ancestry.node
+                      WHERE d.parent_id IS NOT NULL
+             )
+             SELECT EXISTS (SELECT 1 FROM ancestry WHERE node = $1)",
+        )
+        .bind(domain)
+        .bind(parent)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(closes)
+    }
+
+    async fn child_domains(&self, parent: Option<Uuid>) -> Result<Vec<Domain>, StorageError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {DOMAIN_COLUMNS} FROM domains
+              WHERE NOT deleted
+                AND ($1::uuid IS NULL AND parent_id IS NULL OR parent_id = $1)
+              ORDER BY name, id"
+        ))
+        .bind(parent)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut children = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id: Uuid = row.get("id");
+            let mut domain = domain_from_row(row);
+            domain.experts = self.read_experts(id).await?;
+            children.push(domain);
+        }
+        Ok(children)
+    }
+
+    async fn assign_asset_domain(
+        &self,
+        asset_id: Uuid,
+        domain_id: Option<Uuid>,
+        updated_by: &str,
+    ) -> Result<Option<Asset>, StorageError> {
+        // **A version bump, because an assignment is a change to the asset.**
+        // The accountability for a table moving is exactly the kind of edit a
+        // history exists to record, and one that left no version would be
+        // invisible to every consumer watching for changes.
+        let row = sqlx::query(&format!(
+            "UPDATE assets
+                SET domain_id = $2, version_minor = version_minor + 1,
+                    updated_by = $3, updated_at = now()
+              WHERE id = $1
+              RETURNING {ASSET_COLUMNS}"
+        ))
+        .bind(asset_id)
+        .bind(domain_id)
+        .bind(updated_by)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let Some(row) = row else { return Ok(None) };
+        let mut asset = asset_from_row(row);
+        asset.owners = self.asset_owners(asset.id).await?;
+        Ok(Some(asset))
+    }
+
+    async fn resolve_asset_domain(
+        &self,
+        asset_id: Uuid,
+    ) -> Result<Option<DomainAssignment>, StorageError> {
+        let resolved: Option<serde_json::Value> = sqlx::query_scalar(&format!(
+            "SELECT {DOMAIN_EXPR} FROM assets WHERE assets.id = $1"
+        ))
+        .bind(asset_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        .flatten();
+
+        Ok(resolved.and_then(|value| serde_json::from_value(value).ok()))
+    }
+
+    async fn count_assets_in_domain(&self, domain: Uuid) -> Result<i64, StorageError> {
+        let count: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM assets
+              WHERE NOT deleted AND {DOMAIN_ID_EXPR} = $1"
+        ))
+        .bind(domain)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(count)
+    }
+
+    async fn delete_domain(
+        &self,
+        id: Uuid,
+        reassign_to: Option<Uuid>,
+        updated_by: &str,
+    ) -> Result<DomainDeletion, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM domains WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if exists.is_none() {
+            return Ok(DomainDeletion::NotFound);
+        }
+
+        // **Children first, and never reassigned implicitly.** Where the
+        // *assets* go says nothing about where the sub-domains should go, and
+        // reparenting them to the target would restructure the accountability
+        // tree as a side effect of a delete.
+        let children: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE parent_id = $1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if children > 0 {
+            return Ok(DomainDeletion::HasChildren { children });
+        }
+
+        // Direct assignments only. An asset that merely *inherits* this domain
+        // is held by an ancestor of its own, and deleting this domain does not
+        // orphan it — counting it would refuse a delete over data nobody holds.
+        let assets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE domain_id = $1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let products: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM data_products WHERE domain_id = $1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let Some(target) = reassign_to else {
+            if assets > 0 || products > 0 {
+                return Ok(DomainDeletion::StillHolds(Box::new(DomainHoldings {
+                    assets,
+                    data_products: products,
+                })));
+            }
+            sqlx::query("DELETE FROM domains WHERE id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            return Ok(DomainDeletion::Deleted {
+                reassigned_assets: 0,
+                reassigned_products: 0,
+            });
+        };
+
+        let target_exists: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM domains WHERE id = $1 AND NOT deleted")
+                .bind(target)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if target_exists.is_none() {
+            return Ok(DomainDeletion::UnknownTarget);
+        }
+
+        // Transactional, so a failure halfway leaves neither a half-moved
+        // estate nor a domain that was deleted while things still pointed at it.
+        let moved_assets = sqlx::query(
+            "UPDATE assets
+                SET domain_id = $2, version_minor = version_minor + 1,
+                    updated_by = $3, updated_at = now()
+              WHERE domain_id = $1",
+        )
+        .bind(id)
+        .bind(target)
+        .bind(updated_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        .rows_affected();
+
+        let moved_products = sqlx::query(
+            "UPDATE data_products
+                SET domain_id = $2, version_minor = version_minor + 1,
+                    updated_by = $3, updated_at = now()
+              WHERE domain_id = $1",
+        )
+        .bind(id)
+        .bind(target)
+        .bind(updated_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        .rows_affected();
+
+        sqlx::query("DELETE FROM domains WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(DomainDeletion::Deleted {
+            reassigned_assets: i64::try_from(moved_assets).unwrap_or(i64::MAX),
+            reassigned_products: i64::try_from(moved_products).unwrap_or(i64::MAX),
+        })
+    }
+
+    async fn create_data_product(
+        &self,
+        id: Uuid,
+        name: &str,
+        description: Option<&str>,
+        purpose: Option<&str>,
+        domain_id: Option<Uuid>,
+        updated_by: &str,
+    ) -> Result<DataProduct, StorageError> {
+        let row = sqlx::query(&format!(
+            "INSERT INTO data_products
+                 (id, name, fully_qualified_name, description, purpose, domain_id, updated_by)
+             VALUES ($1, $2, $2, $3, $4, $5, $6)
+             RETURNING {PRODUCT_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(name)
+        .bind(description)
+        .bind(purpose)
+        .bind(domain_id)
+        .bind(updated_by)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| {
+            if e.as_database_error()
+                .is_some_and(|d| d.is_unique_violation())
+            {
+                StorageError::Conflict {
+                    detail: format!("a data product named `{name}` already exists"),
+                    existing_id: None,
+                    kind: ConflictKind::Fqn,
+                }
+            } else {
+                StorageError::Unexpected(e.to_string())
+            }
+        })?;
+        Ok(product_from_row(&row))
+    }
+
+    async fn get_data_product(&self, id: Uuid) -> Result<Option<DataProduct>, StorageError> {
+        let row = sqlx::query(&format!(
+            "SELECT {PRODUCT_COLUMNS} FROM data_products WHERE id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.as_ref().map(product_from_row))
+    }
+
+    async fn list_data_products(
+        &self,
+        page: &PageRequest,
+    ) -> Result<Page<DataProduct>, StorageError> {
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let rows = sqlx::query(&format!(
+            "SELECT {PRODUCT_COLUMNS} FROM data_products
+              WHERE NOT deleted
+                AND ($1::text IS NULL OR (fully_qualified_name, id) > ($1, $2))
+              ORDER BY fully_qualified_name, id
+              LIMIT $3"
+        ))
+        .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
+        .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
+        .bind(overfetch)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(Page::from_overfetch(
+            rows.iter().map(product_from_row).collect(),
+            page.limit,
+            |p: &DataProduct| Cursor::new(p.fully_qualified_name.clone(), p.id),
+        ))
+    }
+
+    async fn update_data_product(
+        &self,
+        id: Uuid,
+        update: &DataProductUpdate,
+        updated_by: &str,
+    ) -> Result<Option<DataProduct>, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let Some(before_row) = sqlx::query(&format!(
+            "SELECT {PRODUCT_COLUMNS} FROM data_products WHERE id = $1 FOR UPDATE"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let before = product_from_row(&before_row);
+
+        let mut after = before.clone();
+        if let Some(name) = &update.name {
+            after.name = name.clone();
+            after.fully_qualified_name = name.clone();
+        }
+        if let Some(description) = &update.description {
+            after.description = description.clone();
+        }
+        if let Some(purpose) = &update.purpose {
+            after.purpose = purpose.clone();
+        }
+        if let Some(domain_id) = &update.domain_id {
+            after.domain_id = *domain_id;
+        }
+
+        let diff = ChangeDescription::between(
+            &serde_json::to_value(&before).unwrap_or_default(),
+            &serde_json::to_value(&after).unwrap_or_default(),
+        );
+        let kind = classify(&diff);
+        if matches!(kind, graph_owl_core::envelope::ChangeKind::None) {
+            tx.rollback()
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            return Ok(Some(before));
+        }
+        let next = before.version.bump(kind);
+
+        let updated_row = sqlx::query(&format!(
+            "UPDATE data_products SET name = $2, fully_qualified_name = $3, description = $4,
+                 purpose = $5, domain_id = $6, version_major = $7, version_minor = $8,
+                 updated_by = $9, change_description = $10, updated_at = now()
+             WHERE id = $1
+             RETURNING {PRODUCT_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(&after.name)
+        .bind(&after.fully_qualified_name)
+        .bind(&after.description)
+        .bind(&after.purpose)
+        .bind(after.domain_id)
+        .bind(i32::try_from(next.major).unwrap_or(i32::MAX))
+        .bind(i32::try_from(next.minor).unwrap_or(i32::MAX))
+        .bind(updated_by)
+        .bind(serde_json::to_value(&diff).ok())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| {
+            if e.as_database_error()
+                .is_some_and(|d| d.is_unique_violation())
+            {
+                StorageError::Conflict {
+                    detail: format!("a data product named `{}` already exists", after.name),
+                    existing_id: None,
+                    kind: ConflictKind::Fqn,
+                }
+            } else {
+                StorageError::Unexpected(e.to_string())
+            }
+        })?;
+
+        sqlx::query(
+            "INSERT INTO data_product_versions
+                 (data_product_id, version_major, version_minor, snapshot, change_description, updated_by, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, now())
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(i32::try_from(next.major).unwrap_or(i32::MAX))
+        .bind(i32::try_from(next.minor).unwrap_or(i32::MAX))
+        .bind(serde_json::to_value(&after).unwrap_or_default())
+        .bind(serde_json::to_value(&diff).ok())
+        .bind(updated_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(Some(product_from_row(&updated_row)))
+    }
+
+    async fn delete_data_product(&self, id: Uuid) -> Result<bool, StorageError> {
+        // The membership edges go with it by `ON DELETE CASCADE`, and the
+        // assets do not: a product is a *view* of things that exist
+        // independently of it.
+        let done = sqlx::query("DELETE FROM data_products WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn add_product_asset(
+        &self,
+        product_id: Uuid,
+        asset_id: Uuid,
+    ) -> Result<Result<(), MembershipRefusal>, StorageError> {
+        let product: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM data_products WHERE id = $1 AND NOT deleted")
+                .bind(product_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if product.is_none() {
+            return Ok(Err(MembershipRefusal::NoSuchProduct));
+        }
+
+        // **Tombstoned is a different refusal from absent.** A caller who sent
+        // a typo'd id and one who sent a deleted asset are making different
+        // mistakes, and "no such asset" for the second sends them looking for
+        // the wrong thing.
+        let asset: Option<bool> = sqlx::query_scalar("SELECT deleted FROM assets WHERE id = $1")
+            .bind(asset_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        match asset {
+            None => return Ok(Err(MembershipRefusal::NoSuchAsset)),
+            Some(true) => return Ok(Err(MembershipRefusal::AssetDeleted)),
+            Some(false) => {}
+        }
+
+        // `ON CONFLICT DO NOTHING` against the primary key is what makes this
+        // idempotent without a read-then-write race: two concurrent adds both
+        // see "not a member" and one of them would otherwise fail on the key.
+        sqlx::query(
+            "INSERT INTO data_product_assets (data_product_id, asset_id)
+             VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(product_id)
+        .bind(asset_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(Ok(()))
+    }
+
+    async fn remove_product_asset(
+        &self,
+        product_id: Uuid,
+        asset_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let done = sqlx::query(
+            "DELETE FROM data_product_assets WHERE data_product_id = $1 AND asset_id = $2",
+        )
+        .bind(product_id)
+        .bind(asset_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn product_assets(
+        &self,
+        product_id: Uuid,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, StorageError> {
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let sql = format!(
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
+               JOIN data_product_assets m ON m.asset_id = assets.id
+              WHERE m.data_product_id = $1
+                AND NOT assets.deleted
+                AND ($2::text IS NULL OR (fully_qualified_name, assets.id) > ($2, $3))
+              ORDER BY fully_qualified_name, assets.id
+              LIMIT $4"
+        );
+        let query = sqlx::query(&sql)
+            .bind(product_id)
+            .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
+            .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
+            .bind(overfetch);
+        self.asset_page(query, page).await
+    }
+
+    async fn asset_products(&self, asset_id: Uuid) -> Result<Vec<DataProduct>, StorageError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {PRODUCT_COLUMNS} FROM data_products p
+               JOIN data_product_assets m ON m.data_product_id = p.id
+              WHERE m.asset_id = $1 AND NOT p.deleted
+              ORDER BY p.fully_qualified_name, p.id"
+        ))
+        .bind(asset_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.iter().map(product_from_row).collect())
+    }
+
     async fn custom_property_values(
         &self,
         entity_type: &str,
@@ -5371,6 +6274,107 @@ const VISIBILITY_SEARCH: &str =
 /// suffix makes the ordering total regardless — so the digits only have to
 /// separate results a reader could actually tell apart.
 const RANK_KEY: &str = "lpad((9999 - (ts_rank_cd(assets.search_vector, q.ts, 32) * 9999)::int)::text, 4, '0') || ':' || assets.fully_qualified_name";
+
+/// The domain an asset falls under, as JSON, or `null`.
+///
+/// **The nearest assigned ancestor wins and the walk stops there** — the same
+/// shape as [`OWNERS_EXPR`], and for the same reason. Accumulating every
+/// assigned ancestor would answer "which domains is this under", a question
+/// with several answers, which is the shared accountability decision 1 refuses.
+///
+/// Correlated on `assets.id`, so it composes into any query that already has
+/// the `assets` row in scope without a second round trip per row.
+const DOMAIN_EXPR: &str = "(WITH RECURSIVE ancestry (node, next_up, hops) AS (
+            SELECT seed.id, seed.parent_id, 0 FROM assets seed WHERE seed.id = assets.id
+        UNION ALL
+            SELECT up.id, up.parent_id, ancestry.hops + 1
+              FROM assets up JOIN ancestry ON up.id = ancestry.next_up
+    ),
+    nearest AS (
+        SELECT a.domain_id, ancestry.hops
+          FROM ancestry JOIN assets a ON a.id = ancestry.node
+         WHERE a.domain_id IS NOT NULL
+         ORDER BY ancestry.hops
+         LIMIT 1
+    )
+    SELECT json_build_object(
+        'id',                 d.id,
+        'name',               d.name,
+        'fullyQualifiedName', d.fully_qualified_name,
+        'inherited',          nearest.hops > 0
+    )
+    FROM nearest JOIN domains d ON d.id = nearest.domain_id)";
+
+/// Just the resolved domain id, for filtering. The same walk as
+/// [`DOMAIN_EXPR`] without building the object — a filter that compared
+/// against the JSON would have to parse it per row.
+const DOMAIN_ID_EXPR: &str = "(WITH RECURSIVE ancestry (node, next_up, hops) AS (
+            SELECT seed.id, seed.parent_id, 0 FROM assets seed WHERE seed.id = assets.id
+        UNION ALL
+            SELECT up.id, up.parent_id, ancestry.hops + 1
+              FROM assets up JOIN ancestry ON up.id = ancestry.next_up
+    )
+    SELECT a.domain_id
+      FROM ancestry JOIN assets a ON a.id = ancestry.node
+     WHERE a.domain_id IS NOT NULL
+     ORDER BY ancestry.hops
+     LIMIT 1)";
+
+const DOMAIN_COLUMNS: &str = "id, name, fully_qualified_name, parent_id, description, domain_type, \
+     version_major, version_minor, updated_by, change_description, deleted, deleted_at, created_at, updated_at";
+
+const PRODUCT_COLUMNS: &str = "id, name, fully_qualified_name, description, purpose, domain_id, \
+     version_major, version_minor, updated_by, change_description, deleted, deleted_at, created_at, updated_at";
+
+fn domain_from_row(row: &PgRow) -> Domain {
+    Domain {
+        id: row.get("id"),
+        name: row.get("name"),
+        fully_qualified_name: row.get("fully_qualified_name"),
+        parent_id: row.get("parent_id"),
+        description: row.get("description"),
+        domain_type: row.get("domain_type"),
+        // Filled by the caller, which is the only layer that knows whether the
+        // query joined them. A `Vec::new()` here that silently meant "none"
+        // would make a domain with experts look like one without.
+        experts: Vec::new(),
+        version: EntityVersion {
+            major: u32::try_from(row.get::<i32, _>("version_major")).unwrap_or(0),
+            minor: u32::try_from(row.get::<i32, _>("version_minor")).unwrap_or(1),
+        },
+        updated_by: row.get("updated_by"),
+        change_description: row
+            .get::<Option<serde_json::Value>, _>("change_description")
+            .and_then(|v| serde_json::from_value(v).ok()),
+        deleted: row.get("deleted"),
+        deleted_at: row.get("deleted_at"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn product_from_row(row: &PgRow) -> DataProduct {
+    DataProduct {
+        id: row.get("id"),
+        name: row.get("name"),
+        fully_qualified_name: row.get("fully_qualified_name"),
+        description: row.get("description"),
+        purpose: row.get("purpose"),
+        domain_id: row.get("domain_id"),
+        version: EntityVersion {
+            major: u32::try_from(row.get::<i32, _>("version_major")).unwrap_or(0),
+            minor: u32::try_from(row.get::<i32, _>("version_minor")).unwrap_or(1),
+        },
+        updated_by: row.get("updated_by"),
+        change_description: row
+            .get::<Option<serde_json::Value>, _>("change_description")
+            .and_then(|v| serde_json::from_value(v).ok()),
+        deleted: row.get("deleted"),
+        deleted_at: row.get("deleted_at"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
 
 fn asset_from_row(row: PgRow) -> Asset {
     Asset {

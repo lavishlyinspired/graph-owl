@@ -89,6 +89,42 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             "/custom-properties/{id}",
             patch(update_custom_property).delete(delete_custom_property),
         )
+        // Epic 23. Domains are the accountability axis; data products are the
+        // consumable one. Both are entities with envelopes, so both get
+        // ordinary entity routes rather than a bespoke shape.
+        .route("/domains", get(list_domains).post(create_domain))
+        .route(
+            "/domains/{id}",
+            get(get_domain).patch(update_domain).delete(delete_domain),
+        )
+        .route("/domains/{id}/children", get(child_domains))
+        .route("/domains/{id}/assets/count", get(count_domain_assets))
+        // The assignment is a sub-resource of the *asset*, not of the domain:
+        // it is a fact about the asset, it versions with the asset, and a
+        // `POST /domains/{id}/assets` would read as though the domain owned the
+        // list.
+        .route(
+            "/assets/{id}/domain",
+            get(get_asset_domain)
+                .post(assign_asset_domain)
+                .delete(clear_asset_domain),
+        )
+        .route("/assets/{id}/data-products", get(get_asset_products))
+        .route(
+            "/data-products",
+            get(list_data_products).post(create_data_product),
+        )
+        .route(
+            "/data-products/{id}",
+            get(get_data_product)
+                .patch(update_data_product)
+                .delete(delete_data_product),
+        )
+        .route("/data-products/{id}/assets", get(list_product_assets))
+        .route(
+            "/data-products/{id}/assets/{assetId}",
+            put(add_product_asset).delete(remove_product_asset),
+        )
         // Epic 21. `/extraction/runs` is the surface an out-of-process worker
         // submits to; the queue and the decision are what a human does with
         // what it proposed.
@@ -1086,6 +1122,14 @@ impl AppError {
                 ..
             } => "relationship-conflict",
             AppError::Conflict {
+                kind: ConflictKind::DomainAssigned,
+                ..
+            } => "domain-already-assigned",
+            AppError::Conflict {
+                kind: ConflictKind::DomainInUse,
+                ..
+            } => "domain-in-use",
+            AppError::Conflict {
                 kind: ConflictKind::WaiverExists,
                 ..
             } => "waiver-exists",
@@ -1156,6 +1200,14 @@ impl AppError {
                 kind: ConflictKind::RelationshipTuple,
                 ..
             } => "Relationship already exists",
+            AppError::Conflict {
+                kind: ConflictKind::DomainAssigned,
+                ..
+            } => "This asset already belongs to a domain",
+            AppError::Conflict {
+                kind: ConflictKind::DomainInUse,
+                ..
+            } => "This domain still holds things",
             AppError::Conflict {
                 kind: ConflictKind::WaiverExists,
                 ..
@@ -1248,6 +1300,16 @@ impl AppError {
                 kind: ConflictKind::RelationshipTuple,
                 ..
             } => format!("the relationship '{detail}' already exists"),
+            // **Both pass the detail through**, for the reason the codebase has
+            // now learned twice: a canned sentence per kind silently replaces
+            // whatever the facade wrote, and here that is the name of the
+            // current domain and the counts it still holds — the only parts an
+            // operator can act on.
+            AppError::Conflict {
+                kind: ConflictKind::DomainAssigned | ConflictKind::DomainInUse,
+                detail,
+                ..
+            } => detail.clone(),
             AppError::Conflict {
                 kind: ConflictKind::WaiverExists,
                 ..
@@ -1578,8 +1640,12 @@ fn percent_decode(raw: &str) -> String {
 
 // ---- asset hierarchy (Epic 2) ----
 
+/// `rename_all` beside `deny_unknown_fields`: every field here was a single
+/// lowercase word until `dataProduct`, so the wire happened to be camelCase by
+/// accident rather than by rule — and the first two-word filter shipped
+/// `data_product` next to a wire that is camelCase everywhere else.
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AssetListQuery {
     kind: Option<String>,
     /// A user or team id — Epic 11 Slice E. Matches **effective** ownership, so
@@ -1600,15 +1666,28 @@ struct AssetListQuery {
     /// collide with a principal actually called `none`, and it lets the
     /// contradictory combination be refused rather than answered.
     unowned: Option<bool>,
+    /// The accountability axis — Epic 23 Slice E. Matches **direct and
+    /// inherited** assignment: "show me everything in the payments domain" is
+    /// the query the epic exists for, and answering it with only the handful
+    /// somebody assigned by hand would report a governed estate as almost
+    /// empty.
+    domain: Option<Uuid>,
+    /// Membership of a data product.
+    data_product: Option<Uuid>,
     limit: Option<usize>,
     after: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AssetSearchQuery {
     q: String,
     kind: Option<String>,
+    /// The same two filters the list endpoint takes, so a client does not have
+    /// to learn two filtering languages — and so the one that got it wrong is
+    /// not the one that silently returns more.
+    domain: Option<Uuid>,
+    data_product: Option<Uuid>,
     limit: Option<usize>,
     after: Option<String>,
 }
@@ -1677,11 +1756,14 @@ async fn list_assets(
     // Resolved against the definitions before the query runs, so an undefined
     // name is a `400` rather than an empty page that reads like an answer.
     let extension = catalog.extension_filters(kind, &requested).await?;
+    let (domain, data_product) = (query.domain, query.data_product);
     let filter = graph_owl_storage::AssetFilter {
         kind,
         owner: query.owner.as_deref(),
         unowned: query.unowned.unwrap_or(false),
         extension: &extension,
+        domain,
+        data_product,
     };
     Ok(Json(
         catalog.list_assets_for(&principal, &filter, &page).await?,
@@ -1696,11 +1778,14 @@ async fn search_assets(
     let kind = parse_kind(query.kind.as_deref())?;
     let page = PageRequest::new(query.limit, query.after.as_deref())?;
     let extension = catalog.extension_filters(kind, &requested).await?;
+    let (domain, data_product) = (query.domain, query.data_product);
     let filter = graph_owl_storage::AssetFilter {
         kind,
         owner: None,
         unowned: false,
         extension: &extension,
+        domain,
+        data_product,
     };
     let page_result = catalog
         .search_assets_for(&principal, &query.q, &filter, &page)
@@ -5643,6 +5728,430 @@ async fn delete_custom_property(
     catalog
         .delete_custom_property(&principal, id, query.force.unwrap_or(false))
         .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- Epic 23: domains and data products ----
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateDomainBody {
+    name: String,
+    #[serde(default)]
+    parent_id: Option<Uuid>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    domain_type: Option<String>,
+    #[serde(default)]
+    experts: Vec<String>,
+}
+
+impl ValidateBody for CreateDomainBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("name"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// **No `fullyQualifiedName`.** It is derived from the parent chain, and a
+/// client-supplied path is a path that can disagree with the parent — the same
+/// immutability-by-DTO-shape the asset hierarchy uses.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateDomainBody {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "optional_double_option")]
+    description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "optional_double_option")]
+    domain_type: Option<Option<String>>,
+    #[serde(default)]
+    experts: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "optional_double_option")]
+    parent_id: Option<Option<Uuid>>,
+}
+
+impl ValidateBody for UpdateDomainBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        if let Some(name) = value.get("name")
+            && name.as_str().is_none_or(|found| found.trim().is_empty())
+        {
+            errors.push(FieldError::new(
+                "name",
+                FieldErrorCode::Required,
+                "`name` cannot be blank; omit it to leave the name alone",
+            ));
+        }
+        errors
+    }
+}
+
+async fn create_domain(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<CreateDomainBody>,
+) -> Result<(StatusCode, Json<graph_owl_core::domain::Domain>), AppError> {
+    let domain = catalog
+        .create_domain(
+            &principal,
+            graph_owl_api::CreateDomain {
+                name: payload.name,
+                parent_id: payload.parent_id,
+                description: payload.description,
+                domain_type: payload.domain_type,
+                experts: payload.experts,
+            },
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(domain)))
+}
+
+async fn list_domains(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppQuery(query): AppQuery<ListQuery>,
+) -> Result<Json<Page<graph_owl_core::domain::Domain>>, AppError> {
+    let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    Ok(Json(catalog.list_domains(&page).await?))
+}
+
+async fn get_domain(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_core::domain::Domain>, AppError> {
+    catalog
+        .get_domain(id)
+        .await?
+        .map(Json)
+        .ok_or(AppError::NotFound)
+}
+
+async fn child_domains(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<graph_owl_core::domain::Domain>>, AppError> {
+    // A 404 for an absent parent rather than an empty list: "this domain has no
+    // children" and "there is no such domain" are different answers, and a
+    // client that cannot tell them apart will render an empty tree for a typo.
+    if catalog.get_domain(id).await?.is_none() {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.child_domains(Some(id)).await?))
+}
+
+async fn update_domain(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<UpdateDomainBody>,
+) -> Result<Json<graph_owl_core::domain::Domain>, AppError> {
+    Ok(Json(
+        catalog
+            .update_domain(
+                &principal,
+                id,
+                graph_owl_storage::DomainUpdate {
+                    name: payload.name,
+                    description: payload.description,
+                    domain_type: payload.domain_type,
+                    experts: payload.experts,
+                    parent_id: payload.parent_id,
+                },
+            )
+            .await?,
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeleteDomainQuery {
+    #[serde(default)]
+    reassign_to: Option<Uuid>,
+}
+
+async fn delete_domain(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<DeleteDomainQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let outcome = catalog
+        .delete_domain(&principal, id, query.reassign_to)
+        .await?;
+    // Reports what moved. A delete that silently reassigned five thousand
+    // assets and returned 204 would leave an operator unable to tell whether it
+    // did what they meant.
+    let graph_owl_storage::DomainDeletion::Deleted {
+        reassigned_assets,
+        reassigned_products,
+    } = outcome
+    else {
+        // Every other variant became an error in the facade; reaching here would
+        // mean that mapping had a hole, and a silent 200 would hide it.
+        return Err(AppError::Internal(
+            "domain deletion reported an outcome the facade should have refused".to_string(),
+        ));
+    };
+    Ok(Json(json!({
+        "reassignedAssets": reassigned_assets,
+        "reassignedDataProducts": reassigned_products,
+    })))
+}
+
+async fn count_domain_assets(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if catalog.get_domain(id).await?.is_none() {
+        return Err(AppError::NotFound);
+    }
+    let total = catalog.count_assets_in_domain(id).await?;
+    Ok(Json(json!({ "total": total })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AssignDomainBody {
+    domain_id: Uuid,
+}
+
+impl ValidateBody for AssignDomainBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("domainId"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// `?replace=true` on an assignment.
+///
+/// A query parameter rather than a second endpoint, for the same reason Epic
+/// 22's `?force=true` is one: it is a flag on the operation saying the caller
+/// meant it, not data about the thing being assigned.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceQuery {
+    #[serde(default)]
+    replace: Option<bool>,
+}
+
+async fn assign_asset_domain(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<ReplaceQuery>,
+    AppJson(payload): AppJson<AssignDomainBody>,
+) -> Result<Json<Asset>, AppError> {
+    Ok(Json(
+        catalog
+            .assign_asset_domain(
+                &principal,
+                id,
+                payload.domain_id,
+                query.replace.unwrap_or(false),
+            )
+            .await?,
+    ))
+}
+
+async fn clear_asset_domain(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Asset>, AppError> {
+    Ok(Json(catalog.clear_asset_domain(&principal, id).await?))
+}
+
+async fn get_asset_domain(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if catalog.get_asset(id).await?.is_none() {
+        return Err(AppError::NotFound);
+    }
+    // `null` rather than a 404 when nothing resolves: "this asset is in no
+    // domain" is a real and reportable state — it is the assignment-gap report
+    // — and a 404 would make it indistinguishable from a bad id.
+    let resolved = catalog.resolve_asset_domain(id).await?;
+    Ok(Json(
+        serde_json::to_value(resolved).unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+async fn get_asset_products(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<graph_owl_core::domain::DataProduct>>, AppError> {
+    if catalog.get_asset(id).await?.is_none() {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.asset_products(id).await?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateDataProductBody {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    domain_id: Option<Uuid>,
+}
+
+impl ValidateBody for CreateDataProductBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("name"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateDataProductBody {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "optional_double_option")]
+    description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "optional_double_option")]
+    purpose: Option<Option<String>>,
+    #[serde(default, deserialize_with = "optional_double_option")]
+    domain_id: Option<Option<Uuid>>,
+}
+
+impl ValidateBody for UpdateDataProductBody {
+    fn validate_body(_value: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+async fn create_data_product(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<CreateDataProductBody>,
+) -> Result<(StatusCode, Json<graph_owl_core::domain::DataProduct>), AppError> {
+    let product = catalog
+        .create_data_product(
+            &principal,
+            graph_owl_api::CreateDataProduct {
+                name: payload.name,
+                description: payload.description,
+                purpose: payload.purpose,
+                domain_id: payload.domain_id,
+            },
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(product)))
+}
+
+async fn list_data_products(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppQuery(query): AppQuery<ListQuery>,
+) -> Result<Json<Page<graph_owl_core::domain::DataProduct>>, AppError> {
+    let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    Ok(Json(catalog.list_data_products(&page).await?))
+}
+
+async fn get_data_product(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_core::domain::DataProduct>, AppError> {
+    catalog
+        .get_data_product(id)
+        .await?
+        .map(Json)
+        .ok_or(AppError::NotFound)
+}
+
+async fn update_data_product(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<UpdateDataProductBody>,
+) -> Result<Json<graph_owl_core::domain::DataProduct>, AppError> {
+    Ok(Json(
+        catalog
+            .update_data_product(
+                &principal,
+                id,
+                graph_owl_storage::DataProductUpdate {
+                    name: payload.name,
+                    description: payload.description,
+                    purpose: payload.purpose,
+                    domain_id: payload.domain_id,
+                },
+            )
+            .await?,
+    ))
+}
+
+async fn delete_data_product(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    catalog.delete_data_product(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_product_assets(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<ListQuery>,
+) -> Result<Json<Page<Asset>>, AppError> {
+    if catalog.get_data_product(id).await?.is_none() {
+        return Err(AppError::NotFound);
+    }
+    let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    Ok(Json(catalog.product_assets(id, &page).await?))
+}
+
+/// `PUT`, because adding an asset that is already a member is the state the
+/// caller asked for rather than an error — the same idempotency rule Epic 11's
+/// follow endpoint follows.
+async fn add_product_asset(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path((id, asset_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    catalog.add_product_asset(id, asset_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remove_product_asset(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path((id, asset_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    // **Removes the edge, never the asset.** A product is a view of things that
+    // exist independently of it, and a membership removal that deleted the
+    // table would be catastrophic and irreversible.
+    catalog.remove_product_asset(id, asset_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

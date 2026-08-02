@@ -1040,6 +1040,409 @@ impl Catalog {
             })
     }
 
+    // ---- Epic 23: domains and data products ----
+
+    /// Define a domain, optionally under a parent.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the name cannot exist. `NotFound` if `parent_id` names
+    /// no domain. `Conflict` if the derived path is taken.
+    pub async fn create_domain(
+        &self,
+        principal: &Principal,
+        request: CreateDomain,
+    ) -> Result<graph_owl_core::domain::Domain, CatalogError> {
+        graph_owl_core::domain::validate_domain_name(&request.name).map_err(|detail| {
+            CatalogError::Validation(vec![FieldError::new("name", FieldErrorCode::Value, detail)])
+        })?;
+
+        self.storage
+            .create_domain(
+                Uuid::new_v4(),
+                &request.name,
+                request.parent_id,
+                request.description.as_deref(),
+                request.domain_type.as_deref(),
+                &request.experts,
+                &principal.id,
+            )
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn get_domain(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::domain::Domain>, CatalogError> {
+        Ok(self.storage.get_domain(id).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn list_domains(
+        &self,
+        page: &PageRequest,
+    ) -> Result<Page<graph_owl_core::domain::Domain>, CatalogError> {
+        Ok(self.storage.list_domains(page).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn child_domains(
+        &self,
+        parent: Option<Uuid>,
+    ) -> Result<Vec<graph_owl_core::domain::Domain>, CatalogError> {
+        Ok(self.storage.child_domains(parent).await?)
+    }
+
+    /// Change a domain, refusing a reparent that would close a cycle.
+    ///
+    /// **The cycle check walks the proposed parent's whole ancestry**, not its
+    /// immediate parent. A depth-1 check passes `A → B → C → A` and leaves an
+    /// ancestor walk that never terminates — which surfaces as a hung request,
+    /// not as an error.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the domain does not exist. `Validation` if the new name
+    /// cannot exist, or if the reparent would close a cycle. `Conflict` if the
+    /// resulting path is taken.
+    pub async fn update_domain(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        update: graph_owl_storage::DomainUpdate,
+    ) -> Result<graph_owl_core::domain::Domain, CatalogError> {
+        if let Some(name) = &update.name {
+            graph_owl_core::domain::validate_domain_name(name).map_err(|detail| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "name",
+                    FieldErrorCode::Value,
+                    detail,
+                )])
+            })?;
+        }
+
+        if let Some(Some(parent)) = update.parent_id
+            && self.storage.domain_would_cycle(id, parent).await?
+        {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "parentId",
+                FieldErrorCode::Value,
+                "that parent sits under this domain, so the move would make the \
+                 hierarchy a loop with no root",
+            )]));
+        }
+
+        self.storage
+            .update_domain(id, &update, &principal.id)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// Assign an asset to a domain.
+    ///
+    /// **A second, different direct assignment is a `409`.** Decision 1 makes a
+    /// domain an exclusive accountability boundary, so quietly overwriting one
+    /// would move accountability without anyone choosing to — `replace` is how
+    /// a caller says they meant it.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the asset or the domain does not exist. `Conflict` if the
+    /// asset is already directly assigned elsewhere and `replace` is false.
+    pub async fn assign_asset_domain(
+        &self,
+        principal: &Principal,
+        asset_id: Uuid,
+        domain_id: Uuid,
+        replace: bool,
+    ) -> Result<Asset, CatalogError> {
+        let asset = self
+            .storage
+            .get_asset(asset_id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        let domain = self
+            .storage
+            .get_domain(domain_id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+
+        // Read from the resolution, which reports whether it was inherited: an
+        // *inherited* domain is not a competing assignment, it is the default
+        // this call is overriding, and refusing it would make the first
+        // assignment under any assigned ancestor impossible.
+        let current = self.storage.resolve_asset_domain(asset_id).await?;
+        if let Some(current) = &current
+            && !current.inherited
+            && current.id != domain_id
+            && !replace
+        {
+            return Err(CatalogError::Conflict {
+                detail: format!(
+                    "`{}` is already assigned to `{}`; an asset belongs to at most one \
+                     domain, so re-send with `?replace=true` to move it",
+                    asset.fully_qualified_name, current.fully_qualified_name
+                ),
+                existing_id: Some(current.id),
+                kind: ConflictKind::DomainAssigned,
+            });
+        }
+
+        let updated = self
+            .storage
+            .assign_asset_domain(asset_id, Some(domain.id), &principal.id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        Ok(updated)
+    }
+
+    /// Clear an asset's direct assignment.
+    ///
+    /// It does not become domainless — it goes back to **inheriting**, which is
+    /// a different and usually better answer than none.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the asset does not exist.
+    pub async fn clear_asset_domain(
+        &self,
+        principal: &Principal,
+        asset_id: Uuid,
+    ) -> Result<Asset, CatalogError> {
+        self.storage
+            .assign_asset_domain(asset_id, None, &principal.id)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn resolve_asset_domain(
+        &self,
+        asset_id: Uuid,
+    ) -> Result<Option<graph_owl_core::domain::DomainAssignment>, CatalogError> {
+        Ok(self.storage.resolve_asset_domain(asset_id).await?)
+    }
+
+    /// How many live assets fall under a domain, directly or by inheritance.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn count_assets_in_domain(&self, domain: Uuid) -> Result<i64, CatalogError> {
+        Ok(self.storage.count_assets_in_domain(domain).await?)
+    }
+
+    /// Delete a domain, refusing while it holds things unless a target is named.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if it does not exist. `Conflict` if it still holds assets,
+    /// products or child domains and no usable `reassign_to` was given.
+    /// `Validation` if `reassign_to` names no domain.
+    pub async fn delete_domain(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        reassign_to: Option<Uuid>,
+    ) -> Result<graph_owl_storage::DomainDeletion, CatalogError> {
+        use graph_owl_storage::DomainDeletion;
+        let outcome = self
+            .storage
+            .delete_domain(id, reassign_to, &principal.id)
+            .await?;
+        match &outcome {
+            DomainDeletion::NotFound => Err(CatalogError::NotFound),
+            DomainDeletion::UnknownTarget => Err(CatalogError::Validation(vec![FieldError::new(
+                "reassignTo",
+                FieldErrorCode::Value,
+                "that domain does not exist, so nothing could be moved to it",
+            )])),
+            // **Children are never reassigned implicitly.** Where the *assets*
+            // go says nothing about where the sub-domains should go, and
+            // reparenting them to the target would restructure the
+            // accountability tree as a side effect of a delete.
+            DomainDeletion::HasChildren { children } => Err(CatalogError::Conflict {
+                detail: format!(
+                    "this domain has {children} sub-domain(s); move or delete them \
+                     first — where its assets go says nothing about where they should"
+                ),
+                existing_id: Some(id),
+                kind: ConflictKind::DomainInUse,
+            }),
+            DomainDeletion::StillHolds(holdings) => Err(CatalogError::Conflict {
+                detail: format!(
+                    "this domain still holds {} asset(s) and {} data product(s); \
+                     re-send with `?reassignTo=` to move them, or clear them first",
+                    holdings.assets, holdings.data_products
+                ),
+                existing_id: Some(id),
+                kind: ConflictKind::DomainInUse,
+            }),
+            DomainDeletion::Deleted { .. } => Ok(outcome),
+        }
+    }
+
+    /// # Errors
+    ///
+    /// `Validation` if the name is blank. `Conflict` if it is taken.
+    pub async fn create_data_product(
+        &self,
+        principal: &Principal,
+        request: CreateDataProduct,
+    ) -> Result<graph_owl_core::domain::DataProduct, CatalogError> {
+        if request.name.trim().is_empty() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "name",
+                FieldErrorCode::Required,
+                "a data product needs a name",
+            )]));
+        }
+        Ok(self
+            .storage
+            .create_data_product(
+                Uuid::new_v4(),
+                &request.name,
+                request.description.as_deref(),
+                request.purpose.as_deref(),
+                request.domain_id,
+                &principal.id,
+            )
+            .await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn get_data_product(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::domain::DataProduct>, CatalogError> {
+        Ok(self.storage.get_data_product(id).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn list_data_products(
+        &self,
+        page: &PageRequest,
+    ) -> Result<Page<graph_owl_core::domain::DataProduct>, CatalogError> {
+        Ok(self.storage.list_data_products(page).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the product does not exist.
+    pub async fn update_data_product(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        update: graph_owl_storage::DataProductUpdate,
+    ) -> Result<graph_owl_core::domain::DataProduct, CatalogError> {
+        self.storage
+            .update_data_product(id, &update, &principal.id)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the product does not exist.
+    pub async fn delete_data_product(&self, id: Uuid) -> Result<(), CatalogError> {
+        if self.storage.delete_data_product(id).await? {
+            Ok(())
+        } else {
+            Err(CatalogError::NotFound)
+        }
+    }
+
+    /// Add an asset to a product.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the product does not exist. `Validation` if the asset does
+    /// not exist or is tombstoned — a product listing a deleted table promises
+    /// a consumer something that is not there.
+    pub async fn add_product_asset(
+        &self,
+        product_id: Uuid,
+        asset_id: Uuid,
+    ) -> Result<(), CatalogError> {
+        use graph_owl_storage::MembershipRefusal;
+        match self.storage.add_product_asset(product_id, asset_id).await? {
+            Ok(()) => Ok(()),
+            Err(MembershipRefusal::NoSuchProduct) => Err(CatalogError::NotFound),
+            Err(MembershipRefusal::NoSuchAsset) => {
+                Err(CatalogError::Validation(vec![FieldError::new(
+                    "assetId",
+                    FieldErrorCode::Value,
+                    "that asset does not exist",
+                )]))
+            }
+            // A distinct message, because it is a distinct mistake: the caller
+            // has the right id and the wrong expectation, and "does not exist"
+            // would send them looking for a typo that is not there.
+            Err(MembershipRefusal::AssetDeleted) => {
+                Err(CatalogError::Validation(vec![FieldError::new(
+                    "assetId",
+                    FieldErrorCode::Value,
+                    "that asset is deleted; a product listing it would promise a \
+                     consumer something that is not there",
+                )]))
+            }
+        }
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the asset was not a member.
+    pub async fn remove_product_asset(
+        &self,
+        product_id: Uuid,
+        asset_id: Uuid,
+    ) -> Result<(), CatalogError> {
+        if self
+            .storage
+            .remove_product_asset(product_id, asset_id)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(CatalogError::NotFound)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn product_assets(
+        &self,
+        product_id: Uuid,
+        page: &PageRequest,
+    ) -> Result<Page<Asset>, CatalogError> {
+        Ok(self.storage.product_assets(product_id, page).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn asset_products(
+        &self,
+        asset_id: Uuid,
+    ) -> Result<Vec<graph_owl_core::domain::DataProduct>, CatalogError> {
+        Ok(self.storage.asset_products(asset_id).await?)
+    }
+
     // ---- Epic 21: the surface an out-of-process worker submits to ----
 
     /// Accept a worker's extraction output and apply the policy to it.
@@ -6608,6 +7011,30 @@ fn note_mention<'a>(
     entry.push_str(evidence);
 }
 
+/// What a client sends to define a domain.
+#[derive(Debug, Clone, Default)]
+pub struct CreateDomain {
+    pub name: String,
+    pub parent_id: Option<Uuid>,
+    pub description: Option<String>,
+    pub domain_type: Option<String>,
+    pub experts: Vec<String>,
+}
+
+/// What a client sends to define a data product.
+///
+/// **No `assets`.** Membership is its own operation with its own refusals — a
+/// create that also bulk-added members would have to decide what to do when one
+/// of them is tombstoned, and either answer (fail the whole create, or silently
+/// skip) is worse than adding them one at a time and being told.
+#[derive(Debug, Clone, Default)]
+pub struct CreateDataProduct {
+    pub name: String,
+    pub description: Option<String>,
+    pub purpose: Option<String>,
+    pub domain_id: Option<Uuid>,
+}
+
 /// A query-string value, as the property's declared type.
 ///
 /// `None` when the text cannot be that type — which is a `400`, because a
@@ -7181,6 +7608,10 @@ mod tests {
         entity_last_applied:
             Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
         custom_properties: Mutex<Vec<(Uuid, graph_owl_core::custom_property::CustomProperty)>>,
+        domains: Mutex<Vec<graph_owl_core::domain::Domain>>,
+        data_products: Mutex<Vec<graph_owl_core::domain::DataProduct>>,
+        product_members: Mutex<Vec<(Uuid, Uuid)>>,
+        asset_domains: Mutex<Vec<(Uuid, Uuid)>>,
         extraction_runs: Mutex<Vec<graph_owl_storage::ExtractionRunRecord>>,
         extraction_claims: Mutex<Vec<graph_owl_storage::QueuedClaimRecord>>,
         extraction_discards: Mutex<Vec<graph_owl_storage::DiscardedClaimRecord>>,
@@ -9786,6 +10217,570 @@ mod tests {
             let before = held.len();
             held.retain(|(held_id, _)| *held_id != id);
             Ok(held.len() < before)
+        }
+
+        // ---- Epic 23, and as strict as the port ----
+        //
+        // In particular the **inheritance walk is real** here. A double that
+        // answered only direct assignments would make every multi-hop test pass
+        // against a resolver that does not walk, and the walk is the whole of
+        // decision 2 — which is what makes adoption possible at all.
+
+        async fn create_domain(
+            &self,
+            id: Uuid,
+            name: &str,
+            parent_id: Option<Uuid>,
+            description: Option<&str>,
+            domain_type: Option<&str>,
+            experts: &[String],
+            updated_by: &str,
+        ) -> Result<Option<graph_owl_core::domain::Domain>, StorageError> {
+            self.guard_write("create_domain");
+            let mut domains = self.domains.lock().unwrap();
+            let parent_fqn = match parent_id {
+                None => None,
+                Some(parent) => match domains.iter().find(|d| d.id == parent) {
+                    None => return Ok(None),
+                    Some(found) => Some(found.fully_qualified_name.clone()),
+                },
+            };
+            let fqn = graph_owl_core::domain::domain_fqn(parent_fqn.as_deref(), name);
+            if domains.iter().any(|d| d.fully_qualified_name == fqn) {
+                return Err(StorageError::Conflict {
+                    detail: format!("a domain already exists at `{fqn}`"),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::Fqn,
+                });
+            }
+            let now = Utc::now();
+            let domain = graph_owl_core::domain::Domain {
+                id,
+                name: name.to_string(),
+                fully_qualified_name: fqn,
+                parent_id,
+                description: description.map(str::to_string),
+                domain_type: domain_type.map(str::to_string),
+                experts: experts.to_vec(),
+                version: EntityVersion::initial(),
+                updated_by: updated_by.to_string(),
+                change_description: None,
+                deleted: false,
+                deleted_at: None,
+                created_at: now,
+                updated_at: now,
+            };
+            domains.push(domain.clone());
+            Ok(Some(domain))
+        }
+
+        async fn get_domain(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_core::domain::Domain>, StorageError> {
+            let domains = self.domains.lock().unwrap();
+            Ok(domains.iter().find(|d| d.id == id).cloned())
+        }
+
+        async fn get_domain_by_fqn(
+            &self,
+            fqn: &str,
+        ) -> Result<Option<graph_owl_core::domain::Domain>, StorageError> {
+            let domains = self.domains.lock().unwrap();
+            Ok(domains
+                .iter()
+                .find(|d| d.fully_qualified_name == fqn)
+                .cloned())
+        }
+
+        async fn list_domains(
+            &self,
+            page: &PageRequest,
+        ) -> Result<Page<graph_owl_core::domain::Domain>, StorageError> {
+            let domains = self.domains.lock().unwrap();
+            let mut live: Vec<graph_owl_core::domain::Domain> =
+                domains.iter().filter(|d| !d.deleted).cloned().collect();
+            live.sort_by(|a, b| a.fully_qualified_name.cmp(&b.fully_qualified_name));
+            Ok(Page::from_overfetch(
+                live,
+                page.limit,
+                |d: &graph_owl_core::domain::Domain| {
+                    Cursor::new(d.fully_qualified_name.clone(), d.id)
+                },
+            ))
+        }
+
+        async fn update_domain(
+            &self,
+            id: Uuid,
+            update: &graph_owl_storage::DomainUpdate,
+            updated_by: &str,
+        ) -> Result<Option<graph_owl_core::domain::Domain>, StorageError> {
+            self.guard_write("update_domain");
+            let mut domains = self.domains.lock().unwrap();
+            let Some(index) = domains.iter().position(|d| d.id == id) else {
+                return Ok(None);
+            };
+            let before = domains[index].clone();
+            let mut after = before.clone();
+            if let Some(name) = &update.name {
+                after.name = name.clone();
+            }
+            if let Some(description) = &update.description {
+                after.description = description.clone();
+            }
+            if let Some(domain_type) = &update.domain_type {
+                after.domain_type = domain_type.clone();
+            }
+            if let Some(experts) = &update.experts {
+                after.experts = experts.clone();
+            }
+            if let Some(parent_id) = &update.parent_id {
+                after.parent_id = *parent_id;
+            }
+            let parent_fqn = after.parent_id.and_then(|parent| {
+                domains
+                    .iter()
+                    .find(|d| d.id == parent)
+                    .map(|d| d.fully_qualified_name.clone())
+            });
+            after.fully_qualified_name =
+                graph_owl_core::domain::domain_fqn(parent_fqn.as_deref(), &after.name);
+
+            if after == before {
+                return Ok(Some(before));
+            }
+            after.version = before
+                .version
+                .bump(graph_owl_core::envelope::ChangeKind::Minor);
+            after.updated_by = updated_by.to_string();
+            after.updated_at = Utc::now();
+
+            // The subtree's paths move with it, exactly as the SQL adapter does
+            // — a double that skipped it would let a rename pass every test
+            // here while orphaning every descendant path in Postgres.
+            let (old_prefix, new_prefix) = (
+                before.fully_qualified_name.clone(),
+                after.fully_qualified_name.clone(),
+            );
+            domains[index] = after.clone();
+            if old_prefix != new_prefix {
+                let moved: Vec<Uuid> = domains
+                    .iter()
+                    .filter(|d| {
+                        d.id != id
+                            && d.fully_qualified_name
+                                .starts_with(&format!("{old_prefix}."))
+                    })
+                    .map(|d| d.id)
+                    .collect();
+                for child in moved {
+                    if let Some(slot) = domains.iter_mut().find(|d| d.id == child) {
+                        slot.fully_qualified_name = format!(
+                            "{new_prefix}{}",
+                            &slot.fully_qualified_name[old_prefix.len()..]
+                        );
+                    }
+                }
+            }
+            Ok(Some(after))
+        }
+
+        async fn domain_would_cycle(
+            &self,
+            domain: Uuid,
+            parent: Uuid,
+        ) -> Result<bool, StorageError> {
+            if domain == parent {
+                return Ok(true);
+            }
+            // The **whole** ancestry, not the immediate parent: a depth-1 check
+            // passes `A → B → C → A` and leaves an ancestor walk that never
+            // terminates, which is a hung request rather than an error.
+            let domains = self.domains.lock().unwrap();
+            let mut node = Some(parent);
+            while let Some(current) = node {
+                if current == domain {
+                    return Ok(true);
+                }
+                node = domains
+                    .iter()
+                    .find(|d| d.id == current)
+                    .and_then(|d| d.parent_id);
+            }
+            Ok(false)
+        }
+
+        async fn child_domains(
+            &self,
+            parent: Option<Uuid>,
+        ) -> Result<Vec<graph_owl_core::domain::Domain>, StorageError> {
+            let domains = self.domains.lock().unwrap();
+            Ok(domains
+                .iter()
+                .filter(|d| !d.deleted && d.parent_id == parent)
+                .cloned()
+                .collect())
+        }
+
+        async fn assign_asset_domain(
+            &self,
+            asset_id: Uuid,
+            domain_id: Option<Uuid>,
+            updated_by: &str,
+        ) -> Result<Option<Asset>, StorageError> {
+            self.guard_write("assign_asset_domain");
+            let mut assets = self.assets.lock().expect("lock");
+            let Some(asset) = assets.iter_mut().find(|a| a.id == asset_id) else {
+                return Ok(None);
+            };
+            asset.version = asset
+                .version
+                .bump(graph_owl_core::envelope::ChangeKind::Minor);
+            asset.updated_by = updated_by.to_string();
+            asset.updated_at = Utc::now();
+            let updated = asset.clone();
+            drop(assets);
+
+            let mut links = self.asset_domains.lock().unwrap();
+            links.retain(|(a, _)| *a != asset_id);
+            if let Some(domain) = domain_id {
+                links.push((asset_id, domain));
+            }
+            Ok(Some(updated))
+        }
+
+        async fn resolve_asset_domain(
+            &self,
+            asset_id: Uuid,
+        ) -> Result<Option<graph_owl_core::domain::DomainAssignment>, StorageError> {
+            let assets = self.assets.lock().expect("lock");
+            let links = self.asset_domains.lock().unwrap();
+            let domains = self.domains.lock().unwrap();
+
+            // **Stops at the nearest assigned ancestor.** Accumulating every
+            // assigned ancestor would answer "which domains is this under" — a
+            // question with several answers, which is the shared accountability
+            // decision 1 refuses.
+            let mut node = Some(asset_id);
+            let mut hops = 0_usize;
+            while let Some(current) = node {
+                if let Some((_, domain_id)) = links.iter().find(|(a, _)| *a == current) {
+                    return Ok(domains.iter().find(|d| d.id == *domain_id).map(|d| {
+                        graph_owl_core::domain::DomainAssignment {
+                            id: d.id,
+                            name: d.name.clone(),
+                            fully_qualified_name: d.fully_qualified_name.clone(),
+                            inherited: hops > 0,
+                        }
+                    }));
+                }
+                node = assets
+                    .iter()
+                    .find(|a| a.id == current)
+                    .and_then(|a| a.parent_id);
+                hops += 1;
+            }
+            Ok(None)
+        }
+
+        async fn count_assets_in_domain(&self, domain: Uuid) -> Result<i64, StorageError> {
+            let ids: Vec<Uuid> = {
+                let assets = self.assets.lock().expect("lock");
+                assets.iter().filter(|a| !a.deleted).map(|a| a.id).collect()
+            };
+            let mut total = 0_i64;
+            for id in ids {
+                if self
+                    .resolve_asset_domain(id)
+                    .await?
+                    .is_some_and(|a| a.id == domain)
+                {
+                    total += 1;
+                }
+            }
+            Ok(total)
+        }
+
+        async fn delete_domain(
+            &self,
+            id: Uuid,
+            reassign_to: Option<Uuid>,
+            _updated_by: &str,
+        ) -> Result<graph_owl_storage::DomainDeletion, StorageError> {
+            use graph_owl_storage::{DomainDeletion, DomainHoldings};
+            self.guard_write("delete_domain");
+            let children = {
+                let domains = self.domains.lock().unwrap();
+                if !domains.iter().any(|d| d.id == id) {
+                    return Ok(DomainDeletion::NotFound);
+                }
+                i64::try_from(domains.iter().filter(|d| d.parent_id == Some(id)).count())
+                    .unwrap_or(i64::MAX)
+            };
+            if children > 0 {
+                return Ok(DomainDeletion::HasChildren { children });
+            }
+
+            let held_assets: Vec<Uuid> = {
+                let links = self.asset_domains.lock().unwrap();
+                links
+                    .iter()
+                    .filter(|(_, d)| *d == id)
+                    .map(|(a, _)| *a)
+                    .collect()
+            };
+            let held_products: Vec<Uuid> = {
+                let products = self.data_products.lock().unwrap();
+                products
+                    .iter()
+                    .filter(|p| p.domain_id == Some(id))
+                    .map(|p| p.id)
+                    .collect()
+            };
+
+            let Some(target) = reassign_to else {
+                if !held_assets.is_empty() || !held_products.is_empty() {
+                    return Ok(DomainDeletion::StillHolds(Box::new(DomainHoldings {
+                        assets: i64::try_from(held_assets.len()).unwrap_or(i64::MAX),
+                        data_products: i64::try_from(held_products.len()).unwrap_or(i64::MAX),
+                    })));
+                }
+                self.domains.lock().unwrap().retain(|d| d.id != id);
+                return Ok(DomainDeletion::Deleted {
+                    reassigned_assets: 0,
+                    reassigned_products: 0,
+                });
+            };
+
+            if !self
+                .domains
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|d| d.id == target && !d.deleted)
+            {
+                return Ok(DomainDeletion::UnknownTarget);
+            }
+
+            {
+                let mut links = self.asset_domains.lock().unwrap();
+                for link in links.iter_mut().filter(|(_, d)| *d == id) {
+                    link.1 = target;
+                }
+            }
+            {
+                let mut products = self.data_products.lock().unwrap();
+                for product in products.iter_mut().filter(|p| p.domain_id == Some(id)) {
+                    product.domain_id = Some(target);
+                }
+            }
+            self.domains.lock().unwrap().retain(|d| d.id != id);
+
+            Ok(DomainDeletion::Deleted {
+                reassigned_assets: i64::try_from(held_assets.len()).unwrap_or(i64::MAX),
+                reassigned_products: i64::try_from(held_products.len()).unwrap_or(i64::MAX),
+            })
+        }
+
+        async fn create_data_product(
+            &self,
+            id: Uuid,
+            name: &str,
+            description: Option<&str>,
+            purpose: Option<&str>,
+            domain_id: Option<Uuid>,
+            updated_by: &str,
+        ) -> Result<graph_owl_core::domain::DataProduct, StorageError> {
+            self.guard_write("create_data_product");
+            let mut products = self.data_products.lock().unwrap();
+            if products.iter().any(|p| p.name == name) {
+                return Err(StorageError::Conflict {
+                    detail: format!("a data product named `{name}` already exists"),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::Fqn,
+                });
+            }
+            let now = Utc::now();
+            let product = graph_owl_core::domain::DataProduct {
+                id,
+                name: name.to_string(),
+                fully_qualified_name: name.to_string(),
+                description: description.map(str::to_string),
+                purpose: purpose.map(str::to_string),
+                domain_id,
+                version: EntityVersion::initial(),
+                updated_by: updated_by.to_string(),
+                change_description: None,
+                deleted: false,
+                deleted_at: None,
+                created_at: now,
+                updated_at: now,
+            };
+            products.push(product.clone());
+            Ok(product)
+        }
+
+        async fn get_data_product(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_core::domain::DataProduct>, StorageError> {
+            let products = self.data_products.lock().unwrap();
+            Ok(products.iter().find(|p| p.id == id).cloned())
+        }
+
+        async fn list_data_products(
+            &self,
+            page: &PageRequest,
+        ) -> Result<Page<graph_owl_core::domain::DataProduct>, StorageError> {
+            let products = self.data_products.lock().unwrap();
+            let mut live: Vec<graph_owl_core::domain::DataProduct> =
+                products.iter().filter(|p| !p.deleted).cloned().collect();
+            live.sort_by(|a, b| a.fully_qualified_name.cmp(&b.fully_qualified_name));
+            Ok(Page::from_overfetch(
+                live,
+                page.limit,
+                |p: &graph_owl_core::domain::DataProduct| {
+                    Cursor::new(p.fully_qualified_name.clone(), p.id)
+                },
+            ))
+        }
+
+        async fn update_data_product(
+            &self,
+            id: Uuid,
+            update: &graph_owl_storage::DataProductUpdate,
+            updated_by: &str,
+        ) -> Result<Option<graph_owl_core::domain::DataProduct>, StorageError> {
+            self.guard_write("update_data_product");
+            let mut products = self.data_products.lock().unwrap();
+            let Some(product) = products.iter_mut().find(|p| p.id == id) else {
+                return Ok(None);
+            };
+            if let Some(name) = &update.name {
+                product.name = name.clone();
+                product.fully_qualified_name = name.clone();
+            }
+            if let Some(description) = &update.description {
+                product.description = description.clone();
+            }
+            if let Some(purpose) = &update.purpose {
+                product.purpose = purpose.clone();
+            }
+            if let Some(domain_id) = &update.domain_id {
+                product.domain_id = *domain_id;
+            }
+            product.version = product
+                .version
+                .bump(graph_owl_core::envelope::ChangeKind::Minor);
+            product.updated_by = updated_by.to_string();
+            product.updated_at = Utc::now();
+            Ok(Some(product.clone()))
+        }
+
+        async fn delete_data_product(&self, id: Uuid) -> Result<bool, StorageError> {
+            self.guard_write("delete_data_product");
+            let mut products = self.data_products.lock().unwrap();
+            let before = products.len();
+            products.retain(|p| p.id != id);
+            // The membership edges go with it; the assets do not.
+            self.product_members
+                .lock()
+                .unwrap()
+                .retain(|(p, _)| *p != id);
+            Ok(products.len() < before)
+        }
+
+        async fn add_product_asset(
+            &self,
+            product_id: Uuid,
+            asset_id: Uuid,
+        ) -> Result<Result<(), graph_owl_storage::MembershipRefusal>, StorageError> {
+            use graph_owl_storage::MembershipRefusal;
+            self.guard_write("add_product_asset");
+            if !self
+                .data_products
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.id == product_id && !p.deleted)
+            {
+                return Ok(Err(MembershipRefusal::NoSuchProduct));
+            }
+            let deleted = {
+                let assets = self.assets.lock().expect("lock");
+                match assets.iter().find(|a| a.id == asset_id) {
+                    None => return Ok(Err(MembershipRefusal::NoSuchAsset)),
+                    Some(asset) => asset.deleted,
+                }
+            };
+            if deleted {
+                return Ok(Err(MembershipRefusal::AssetDeleted));
+            }
+            let mut members = self.product_members.lock().unwrap();
+            // Idempotent: adding twice is one edge, which is the state the
+            // caller asked for rather than an error.
+            if !members.contains(&(product_id, asset_id)) {
+                members.push((product_id, asset_id));
+            }
+            Ok(Ok(()))
+        }
+
+        async fn remove_product_asset(
+            &self,
+            product_id: Uuid,
+            asset_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            self.guard_write("remove_product_asset");
+            let mut members = self.product_members.lock().unwrap();
+            let before = members.len();
+            members.retain(|edge| *edge != (product_id, asset_id));
+            Ok(members.len() < before)
+        }
+
+        async fn product_assets(
+            &self,
+            product_id: Uuid,
+            page: &PageRequest,
+        ) -> Result<Page<Asset>, StorageError> {
+            let members: Vec<Uuid> = self
+                .product_members
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| *p == product_id)
+                .map(|(_, a)| *a)
+                .collect();
+            let assets = self.assets.lock().expect("lock");
+            let mut found: Vec<Asset> = assets
+                .iter()
+                .filter(|a| !a.deleted && members.contains(&a.id))
+                .cloned()
+                .collect();
+            found.sort_by(|a, b| a.fully_qualified_name.cmp(&b.fully_qualified_name));
+            Ok(Page::from_overfetch(found, page.limit, |a: &Asset| {
+                Cursor::new(a.fully_qualified_name.clone(), a.id)
+            }))
+        }
+
+        async fn asset_products(
+            &self,
+            asset_id: Uuid,
+        ) -> Result<Vec<graph_owl_core::domain::DataProduct>, StorageError> {
+            let members: Vec<Uuid> = self
+                .product_members
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, a)| *a == asset_id)
+                .map(|(p, _)| *p)
+                .collect();
+            let products = self.data_products.lock().unwrap();
+            Ok(products
+                .iter()
+                .filter(|p| !p.deleted && members.contains(&p.id))
+                .cloned()
+                .collect())
         }
 
         async fn custom_property_values(

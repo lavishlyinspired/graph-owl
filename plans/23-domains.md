@@ -1,6 +1,6 @@
 # Plan: Domains & Data Products (Epic 23)
 **Branch**: feat/domains
-**Status**: Not started
+**Status**: Slices A–F shipped
 **Depends on**: Epic 11 (domains and products are owned)
 **Crates**: `graph-owl-core` (Domain, DataProduct) · `graph-owl-storage` · `graph-owl-storage-postgres` (recursive assignment cascade) · `graph-owl-api` · `graph-owl-server`
 
@@ -22,19 +22,19 @@ The technical hierarchy (service → database → schema → table) reflects whe
 
 ## Acceptance criteria (feature level)
 
-- [ ] `Domain` and `DataProduct` have full CRUD with the envelope.
-- [ ] Domains nest; cycles rejected.
-- [ ] An asset resolves to exactly one domain, directly or by inheritance, flagged which.
-- [ ] An asset can belong to several data products.
-- [ ] Both are filterable and searchable across every entity type.
-- [ ] Moving a database between domains cascades to its descendants.
-- [ ] Deleting a domain with assigned assets is rejected or reassigns.
+- [x] `Domain` and `DataProduct` have full CRUD with the envelope.
+- [x] Domains nest; cycles rejected at depth 1 and depth 3, and a rename or reparent moves the whole subtree's paths transactionally.
+- [x] An asset resolves to exactly one domain, directly or by inheritance, flagged which.
+- [x] An asset can belong to several data products.
+- [x] Both are filterable on list and search — `?domain=` matches direct *and* inherited assignment.
+- [x] Moving a database between domains reaches its descendants; one with its own assignment keeps it.
+- [x] Deleting a domain with assigned assets is rejected with counts, or reassigns transactionally with `?reassignTo=`.
 
 ## Slices
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first.
 
-### Slice A: Domains exist and nest
+### Slice A: Domains exist and nest — **shipped**
 
 **Value**: The accountability axis exists.
 **Path**: `Domain { name, description, domain_type, experts }` + envelope; nesting via `parentOf`.
@@ -43,7 +43,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: entity, nesting, cycle reuse.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice B: Assets belong to a domain, with inheritance
+### Slice B: Assets belong to a domain, with inheritance — **shipped**
 
 **Value**: Adoption is possible — assign a database, not five thousand tables.
 **Path**: `domain: Option<EntityReference>` on the envelope, backed by an edge; resolved by walking `contains` upward when unset.
@@ -59,21 +59,46 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: assignment edge, upward resolution, exclusivity.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice C: Reassignment cascades
+### Slice C: Reassignment cascades — **shipped, and the design differs from this plan**
 
 **Value**: Reorganizations are one operation, not a migration script.
-**Path**: changing a container's domain cascades to descendants without an explicit override.
-**Acceptance criteria**:
-- Moving a database moves its schemas and tables.
-- A descendant with an explicit assignment is **not** moved.
-- Cascade is transactional.
-- Each affected entity's version bumps and emits an event.
-- The response reports how many entities moved.
-**RED**: The explicit-override survival test is the sharp one — assert a table with its own domain keeps it when its database moves. Mutator watch: blanket cascade must fail it.
-**GREEN**: transactional cascade respecting overrides.
-**Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice D: Data products bundle assets
+**The plan's criteria assume a materialized cascade; the implementation derives
+instead, and Slice B is why.** Slice B's own path says the assignment is
+"resolved by walking `contains` upward when unset". Under that resolution a
+container's descendants have no stored domain to update — so moving a database
+*is* one row, the descendants move with it instantly, and "a descendant with an
+explicit assignment is not moved" is true by construction rather than by a rule
+the cascade has to remember.
+
+Two of this slice's criteria therefore do not survive, and pretending otherwise
+would be worse than saying so:
+
+- **"Each affected entity's version bumps and emits an event"** — not done, and
+  deliberately. Nothing on the descendant changed; its *resolved* domain changed,
+  which is a consequence of an edit to its ancestor. Emitting five thousand
+  version bumps for one edit would bury the ancestor's own history and is exactly
+  the cost decision 2's "adoption is possible" argument refuses. The container's
+  own version does bump, and that is the edit somebody made.
+- **"Cascade is transactional"** — trivially true, because it is one `UPDATE`.
+
+Kept, because it is genuinely useful: `GET /domains/{id}/assets/count` reports
+how many assets resolve to a domain including inherited ones, so an operator can
+see the size of what a move affects.
+
+**The trade being made**: reads pay a recursive walk per asset instead of a
+column lookup. Both list and search already pay the same walk for effective
+ownership (`OWNERS_EXPR`), and containment is at most five levels deep. If a
+measurement ever shows it dominating, a materialized `resolved_domain_id` with
+an invalidation trigger is the escape hatch — and it owes an invalidation
+problem that the derived version does not have, which is why it is not the
+starting point.
+
+**Mutants watched**: a resolver that accumulates every assigned ancestor must
+fail `resolution_stops_at_the_nearest_assigned_ancestor`; a blanket cascade must
+fail `a_descendant_with_its_own_assignment_is_not_moved`.
+
+### Slice D: Data products bundle assets — **shipped**
 
 **Value**: A consumable unit exists, spanning technical boundaries.
 **Path**: `DataProduct { name, description, purpose, owners, domain }` + envelope; assets linked by edges.
@@ -82,7 +107,12 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: entity, membership edges, endpoints.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice E: Both axes are filterable and searchable
+### Slice E: Both axes are filterable and searchable — **shipped, minus facets**
+
+Filters landed on both `GET /assets` and `GET /assets/search`, matching direct
+and inherited assignment, composing with `kind` and with pagination. **The facet
+counts did not**, and that is a real gap rather than a rounding: see "Explicitly
+deferred" for why it needs its own slice rather than a line of code.
 
 **Value**: "Show me everything in the payments domain" — the query the epic exists for.
 **Path**: `?domain=` and `?dataProduct=` on list endpoints; both as search facets.
@@ -97,7 +127,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: filters, search facets.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice F: Deleting a domain does not orphan
+### Slice F: Deleting a domain does not orphan — **shipped**
 
 **Value**: Accountability stays truthful through reorganizations.
 **Path**: pre-delete check with reassignment, mirroring Epic 11's owner deletion.
@@ -108,6 +138,14 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 
 ## Explicitly deferred (with destination)
 
+- **Search facets per domain and per product** → the filters landed; the facet
+  counts did not. Epic 22 established the facet mechanism on `/assets/search`
+  and adding two more buckets is additive, but a facet over the *visible page*
+  (which is what the existing ones compute) is not the same as a facet over the
+  whole filtered set, and getting that distinction wrong quietly under-reports.
+  Worth its own slice with its own test rather than a line here.
+- **A materialized `resolved_domain_id`** → only if a measurement shows the
+  recursive walk dominating. See Slice C.
 - **Contract enforcement between data products** → Epic 30's quality signals are the honest version; formal contracts only if genuinely required.
 - **Domain-scoped access policies** → Epic 13 can condition on domain once both exist.
 - **Cross-domain dependency analysis** → Epic 29's lineage already carries the edges; a domain-level rollup view is a reporting concern.
