@@ -39,6 +39,7 @@ fn asset(kind: AssetKind, name: &str, fqn: &str, parent_id: Option<Uuid>) -> Ass
         parent_id,
         description: None,
         properties: None,
+        extension: None,
         owners: Vec::new(),
         version: EntityVersion::initial(),
         updated_by: "system".to_string(),

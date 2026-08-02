@@ -4,6 +4,7 @@ use graph_owl_core::envelope::EntityVersion;
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
     contradiction::Review,
+    custom_property::CustomProperty,
     memory::Memory,
     ownership::{EntityReference, OwnerRef},
     page::{Page, PageRequest},
@@ -83,6 +84,12 @@ pub enum ConflictKind {
     /// as `WebhookPathExists`: the pair is the actionable detail a caller
     /// needs back, not a generic "conflict".
     StreamSubscriptionExists,
+    /// A custom property with this name is already defined **on this entity
+    /// type** — Epic 22 Slice A. Its own variant for the reason this enum has
+    /// a rule about: the actionable detail is the *pair*, because the same
+    /// name on a different type is allowed and a caller told only "conflict"
+    /// cannot tell which of the two it needs to change.
+    CustomPropertyExists,
 }
 
 #[derive(Debug, Error)]
@@ -2226,6 +2233,64 @@ pub trait Storage: Send + Sync {
     /// # Errors
     /// [`StorageError::Unexpected`] if the delete fails.
     async fn delete_extraction_run(&self, run_id: Uuid) -> Result<bool, StorageError>;
+
+    // ---- Epic 22: organization-defined custom properties ----
+
+    /// Define a property on an entity type.
+    ///
+    /// # Errors
+    /// [`StorageError::Conflict`] if the name is already defined **on that
+    /// type** — the same name on a different type is a different property and
+    /// is allowed.
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn define_custom_property(
+        &self,
+        id: Uuid,
+        property: &CustomProperty,
+    ) -> Result<(), StorageError>;
+
+    /// Every definition, or only those for one entity type.
+    ///
+    /// **Unfiltered is the common call**, because validating a write needs the
+    /// definitions for that entity's type and nothing else knows the type until
+    /// the entity is in hand.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_custom_properties(
+        &self,
+        entity_type: Option<&str>,
+    ) -> Result<Vec<(Uuid, CustomProperty)>, StorageError>;
+
+    /// One definition by id.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_custom_property(&self, id: Uuid) -> Result<Option<CustomProperty>, StorageError>;
+
+    /// How many entities currently hold a value for this property.
+    ///
+    /// **The number a `409` reports.** "Cannot delete, values exist" tells an
+    /// operator nothing about whether this is a five-minute cleanup or a
+    /// quarter's work; the count does.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn count_custom_property_values(
+        &self,
+        entity_type: &str,
+        name: &str,
+    ) -> Result<i64, StorageError>;
+
+    /// Delete a definition. `false` if it did not exist.
+    ///
+    /// **Does not touch values** — the facade refuses the delete while any
+    /// exist (decision 5), so a cascade here would turn a guarded operation
+    /// into a silent one if that check were ever bypassed.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the delete fails.
+    async fn delete_custom_property(&self, id: Uuid) -> Result<bool, StorageError>;
 }
 
 /// A stored extraction run.

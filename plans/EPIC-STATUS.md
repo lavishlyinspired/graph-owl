@@ -59,7 +59,7 @@ is the condition that index exists to catch.
 | **19** | 6 | [`19-streaming.md`](19-streaming.md) | In progress | 5/6 (+1 partial) | Epic 16 (ingestion contract), Epic 18 (dedup and ordering machinery) |
 | **20** | 6 | [`20-metadata-as-code.md`](20-metadata-as-code.md) | **Shipped** | 2/2 | Epic 15 (idempotent upsert and reconciliation machinery) |
 | **21** | 6 | [`21-document-ingestion.md`](21-document-ingestion.md) | **Shipped** | 3/3 | Epic 16 (ingestion), Epic 17 (mention resolution) |
-| **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | Not started | 0/8 | Epic 3 (the envelope's `extension` field) |
+| **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | In progress | 1/10 (+1 partial) | Epic 3 (the envelope's `extension` field) |
 | **23** | 7 | [`23-domains.md`](23-domains.md) | Not started | 0/8 | Epic 11 (domains and products are owned) |
 | **24** | 7 | [`24-business-semantics.md`](24-business-semantics.md) | In progress | 8/9 (+1 partial) | Epic 2 (FQN derivation and the hierarchy terms attach to), Epic 11 (term review… |
 | **25** | 7 | [`25-classification.md`](25-classification.md) | Not started | 0/8 | Epic 3 (envelope carries `tags`), Epic 11 (term reviewers are users) |
@@ -401,6 +401,8 @@ is the condition that index exists to catch.
 - [ ] 28
 - [ ] 29
 - [ ] 30
+- [x] Typed, per-entity-type property definitions
+- [~] Values validated on write
 
 ### Epic 23 — Domains & Data Products *(Demo 7)*
 

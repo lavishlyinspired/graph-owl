@@ -9,8 +9,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 /// Why a field failed. Machine-readable and stable — a client branches on this,
-/// and the three cases need different fixes: supply it, fill it in, or fix its
-/// type. Collapsing them into one code makes the response undiagnosable.
+/// and the cases need different fixes: supply it, fill it in, fix its type, or
+/// change the value itself. Collapsing them into one code makes the response
+/// undiagnosable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldErrorCode {
@@ -20,6 +21,15 @@ pub enum FieldErrorCode {
     Empty,
     /// The field was present but of the wrong JSON type.
     Type,
+    /// The field was present and of the right type, but the value itself is
+    /// not allowed — outside a range, absent from an enum, or naming a custom
+    /// property nobody defined (Epic 22).
+    ///
+    /// **Its own code rather than `Type`**, because the fix is different: a
+    /// `type` error means send a different *kind* of value, a `value` error
+    /// means send a different *one*. A client that retried a range violation by
+    /// casting would loop.
+    Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

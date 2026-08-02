@@ -131,6 +131,7 @@ mod tests {
             fully_qualified_name: "warehouse.public.orders".into(),
             parent_id: None,
             description: Some("customer orders".into()),
+            extension: None,
             properties: None,
             owners,
             version: EntityVersion::initial(),

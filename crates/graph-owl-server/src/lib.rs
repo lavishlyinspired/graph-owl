@@ -79,6 +79,13 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/lineage", post(assert_lineage))
         .route("/lineage/{id}", delete(remove_lineage))
         .route("/lineage/asset/{id}", get(lineage_graph))
+        // Epic 22. Definitions are the vocabulary; values ride on the entity
+        // itself in `extension`, so there is no endpoint for a value.
+        .route(
+            "/custom-properties",
+            get(list_custom_properties).post(define_custom_property),
+        )
+        .route("/custom-properties/{id}", delete(delete_custom_property))
         // Epic 21. `/extraction/runs` is the surface an out-of-process worker
         // submits to; the queue and the decision are what a human does with
         // what it proposed.
@@ -1048,6 +1055,10 @@ impl AppError {
                 kind: ConflictKind::StreamSubscriptionExists,
                 ..
             } => "stream-subscription-exists",
+            AppError::Conflict {
+                kind: ConflictKind::CustomPropertyExists,
+                ..
+            } => "custom-property-exists",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
             AppError::PreconditionFailed { .. } => "version-conflict",
@@ -1115,6 +1126,10 @@ impl AppError {
                 kind: ConflictKind::StreamSubscriptionExists,
                 ..
             } => "This topic and consumer group are already registered to another subscription",
+            AppError::Conflict {
+                kind: ConflictKind::CustomPropertyExists,
+                ..
+            } => "That custom property is already defined on this entity type",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
             AppError::PreconditionFailed { .. } => "Version precondition failed",
@@ -1224,6 +1239,14 @@ impl AppError {
             // message already names the topic and consumer group.
             AppError::Conflict {
                 kind: ConflictKind::StreamSubscriptionExists,
+                detail,
+                ..
+            } => detail.clone(),
+            // The detail names the *pair*, because the same name on a
+            // different entity type is allowed — a caller told only "conflict"
+            // cannot tell which of the two it needs to change.
+            AppError::Conflict {
+                kind: ConflictKind::CustomPropertyExists,
                 detail,
                 ..
             } => detail.clone(),
@@ -5160,6 +5183,151 @@ async fn assert_lineage(
         [(axum::http::header::LOCATION, location)],
         Json(edge),
     ))
+}
+
+// ---- Epic 22: organization-defined custom properties ----
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DefineCustomProperty {
+    name: String,
+    entity_type: String,
+    /// A wire name, parsed here rather than deserialized straight into the
+    /// enum: serde's own error for an unknown variant does not list what *is*
+    /// supported, and a client told only "unsupported" has to go and find the
+    /// documentation.
+    property_type: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    constraints: graph_owl_core::custom_property::Constraints,
+}
+
+impl ValidateBody for DefineCustomProperty {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        for field in ["name", "entityType", "propertyType"] {
+            if value
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|found| found.trim().is_empty())
+            {
+                errors.push(FieldError::new(
+                    field,
+                    FieldErrorCode::Required,
+                    format!("`{field}` is required"),
+                ));
+            }
+        }
+
+        if let Some(kind) = value.get("entityType").and_then(serde_json::Value::as_str)
+            && AssetKind::parse(kind).is_err()
+        {
+            errors.push(FieldError::new(
+                "entityType",
+                FieldErrorCode::Value,
+                format!("`{kind}` is not an entity type"),
+            ));
+        }
+
+        if let Some(name) = value
+            .get("propertyType")
+            .and_then(serde_json::Value::as_str)
+            && graph_owl_core::custom_property::PropertyType::parse(name).is_err()
+        {
+            // **The supported set is listed.** Decision 4 is a closed type set
+            // on purpose, so a client that named one outside it needs to know
+            // what the alternatives are — not merely that it guessed wrong.
+            let supported: Vec<&str> = graph_owl_core::custom_property::PropertyType::all()
+                .iter()
+                .map(|property_type| property_type.as_str())
+                .collect();
+            errors.push(FieldError::new(
+                "propertyType",
+                FieldErrorCode::Value,
+                format!(
+                    "`{name}` is not a supported type; supported: {}",
+                    supported.join(", ")
+                ),
+            ));
+        }
+
+        errors
+    }
+}
+
+async fn define_custom_property(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<DefineCustomProperty>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let _ = principal;
+    let property_type = graph_owl_core::custom_property::PropertyType::parse(
+        &payload.property_type,
+    )
+    .map_err(|unknown| {
+        AppError::Validation(vec![FieldError::new(
+            "propertyType",
+            FieldErrorCode::Value,
+            format!("`{unknown}` is not a supported type"),
+        )])
+    })?;
+
+    let (id, property) = catalog
+        .define_custom_property(graph_owl_core::custom_property::CustomProperty {
+            name: payload.name,
+            entity_type: payload.entity_type,
+            property_type,
+            description: payload.description,
+            constraints: payload.constraints,
+        })
+        .await?;
+
+    let mut body = serde_json::to_value(&property).unwrap_or(serde_json::Value::Null);
+    if let Some(object) = body.as_object_mut() {
+        object.insert("id".to_string(), serde_json::json!(id));
+    }
+    Ok((StatusCode::CREATED, Json(body)))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomPropertyQuery {
+    entity_type: Option<String>,
+}
+
+async fn list_custom_properties(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Query(query): Query<CustomPropertyQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let _ = principal;
+    let properties = catalog
+        .list_custom_properties(query.entity_type.as_deref())
+        .await?;
+
+    Ok(Json(
+        properties
+            .into_iter()
+            .map(|(id, property)| {
+                let mut body = serde_json::to_value(&property).unwrap_or(serde_json::Value::Null);
+                if let Some(object) = body.as_object_mut() {
+                    object.insert("id".to_string(), serde_json::json!(id));
+                }
+                body
+            })
+            .collect(),
+    ))
+}
+
+async fn delete_custom_property(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    let _ = principal;
+    catalog.delete_custom_property(id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---- Epic 21: the surface an out-of-process worker submits to ----

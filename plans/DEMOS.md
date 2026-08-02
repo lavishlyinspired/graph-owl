@@ -684,6 +684,19 @@ actually holds could not be asserted at all.
 - [ ] **29** Lineage: table, column, with SQL and pipeline payload
 - [ ] **30** Quality: test definitions, suites, results, incidents
 
+### Epic 22 — Custom properties
+- [x] **Typed, per-entity-type property definitions** *(Slice A, 2 August 2026)*. `costCenter` on a service, `retentionDays` on a table — defined through `POST /custom-properties`, validated before the write so a definition that could never be satisfied never reaches the table. A closed type set (decision 4), and an unsupported type is refused *with the supported ones listed*, because a client told only "unsupported" has to go and find the documentation.
+
+  **Uniqueness is scoped to the entity type, enforced by the index itself.** The same name on two types is two different properties; a globally-scoped unique index would silently forbid that, and nothing below the database would notice. A name colliding with a built-in envelope field is refused outright — a custom `description` would shadow the real one, and every reader would then get one of two values depending on which layer answered.
+
+- [~] **Values validated on write** *(Slice B, create path only)*. An undefined name is a `400`, never a silently kept value — a bag accepted untyped is the description field again with extra steps, which is the whole failure this epic exists to prevent. Every bad value in one write is reported together. A constraint violation is a `value` error rather than a `type` error, because the fix is different: `type` means send a different *kind* of value, `value` means send a different *one*, and a client that retried a range violation by casting would loop. **Not yet done**: PATCH carries no `extension`, and a value change does not appear in `changeDescription`.
+
+- **The plan's stated dependency did not exist, and the difference mattered.** Epic 22 was to give the envelope's reserved `extension` field a schema. The envelope had `properties` instead — and `properties` is what the **source system** reported, replaced wholesale by every connector run. `extension` is what the **organization** curated. Putting custom properties in `properties` would have wiped every hand-set `costCenter` on the first nightly connector run, silently. So `extension` is a new column with the opposite update rule: a connector sending none leaves it alone. Two columns wanting opposite semantics is the clearest evidence they were never the same field.
+
+- **A tooling failure worth recording, because the recovery is the lesson.** Adding a field to `Asset` broke ~30 struct literals. A script that auto-inserted the field by searching for a nearby line inserted 48 duplicates and 12 into the *wrong struct* — it had no idea where each literal ended. The fix was not to patch the patcher's heuristic but to change what it keyed on: track braces from the opening `{` the compiler named to its match, and insert before that. Unambiguous, and it cannot land in a neighbouring struct. Recovering meant `git checkout` on the mangled file and redoing the four intentional edits by hand — cheaper than unpicking sixty bad ones.
+
+- **`ValidateBody` is not optional, and forgetting it fails three layers away.** `AppJson<T>` requires it; without it the error is "handler does not implement `Handler`" at the route. Same shape as the `&dyn Fn` non-`Send` failure in Epic 21 — axum's trait bounds report *where the handler is registered*, never what is missing from it.
+
 ### Epic 24 — Business semantics
 
 The decidable half (the transition matrix, SKOS inversion, metric lineage

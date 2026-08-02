@@ -1,5 +1,6 @@
 pub mod blocking;
 pub mod contradiction;
+pub mod custom_property;
 pub mod envelope;
 pub mod extraction;
 pub mod extraction_run;
@@ -74,6 +75,20 @@ pub struct Asset {
     /// and normalising it prematurely loses information the catalog is for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub properties: Option<serde_json::Value>,
+    /// Organization-defined fields — Epic 22.
+    ///
+    /// **A different field from `properties`, and the separation is
+    /// load-bearing.** `properties` is what the *source system* reported and a
+    /// connector run replaces it wholesale; `extension` is what the
+    /// *organization* added. Had custom properties gone into `properties`, the
+    /// next connector run would have silently wiped every hand-curated
+    /// `costCenter`.
+    ///
+    /// `Option` rather than a bare map so that PATCH can tell "leave the bag
+    /// alone" from "the bag is now empty" — the same distinction every other
+    /// optional field on this envelope draws.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<serde_json::Map<String, serde_json::Value>>,
     /// Users and teams accountable for this asset — Epic 11 Slice C.
     ///
     /// **Always serialized, empty when unowned**, never omitted. An unowned asset

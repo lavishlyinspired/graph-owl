@@ -262,6 +262,33 @@ pub static ROUTES: &[Route] = &[
         200,
         true,
     ),
+    route(
+        "post",
+        "/custom-properties",
+        "Define an organization-specific property on an entity type",
+        None,
+        None,
+        201,
+        true,
+    ),
+    route(
+        "get",
+        "/custom-properties",
+        "Custom property definitions, optionally for one entity type",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "delete",
+        "/custom-properties/{id}",
+        "Delete a custom property definition, refused while values exist",
+        None,
+        None,
+        204,
+        true,
+    ),
     // Epic 21. The submission endpoint is what an out-of-process worker — PDF,
     // OCR, LLM — talks to, so it is the one path in this document most likely
     // to be read by somebody with no access to this repository.

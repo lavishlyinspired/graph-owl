@@ -64,6 +64,11 @@ pub struct UpsertAsset {
     pub parent_id: Option<Uuid>,
     pub description: Option<String>,
     pub properties: Option<serde_json::Value>,
+    /// Organization-defined fields — Epic 22. Validated against the
+    /// definitions for `kind` before anything is stored; an undefined name is
+    /// a `400`, never a silently kept value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl ValidateBody for UpsertAsset {
@@ -771,6 +776,150 @@ impl Catalog {
     /// present there and absent here is drift by definition, however it got
     /// that way.
     ///
+    // ---- Epic 22: organization-defined custom properties ----
+
+    /// Define a property on an entity type.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the definition cannot exist — a reserved name, an enum
+    /// with no values, bounds that cross. `Conflict` if the name is already
+    /// defined **on that type**.
+    pub async fn define_custom_property(
+        &self,
+        property: graph_owl_core::custom_property::CustomProperty,
+    ) -> Result<(Uuid, graph_owl_core::custom_property::CustomProperty), CatalogError> {
+        // Validated before the write, so a definition that could never be
+        // satisfied never reaches the table. Once values exist under a bad
+        // definition every fix is a migration.
+        property.validate().map_err(|error| {
+            CatalogError::Validation(vec![FieldError::new(
+                "name",
+                FieldErrorCode::Value,
+                error.to_string(),
+            )])
+        })?;
+
+        let id = Uuid::new_v4();
+        self.storage
+            .define_custom_property(id, &property)
+            .await
+            .map_err(CatalogError::from)?;
+        Ok((id, property))
+    }
+
+    /// Definitions, optionally for one entity type.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn list_custom_properties(
+        &self,
+        entity_type: Option<&str>,
+    ) -> Result<Vec<(Uuid, graph_owl_core::custom_property::CustomProperty)>, CatalogError> {
+        self.storage
+            .list_custom_properties(entity_type)
+            .await
+            .map_err(CatalogError::from)
+    }
+
+    /// Delete a definition, refusing while values exist.
+    ///
+    /// **Decision 5: removing a definition does not silently delete data.** The
+    /// `409` reports the count, because "values exist" tells an operator
+    /// nothing about whether this is a five-minute cleanup or a quarter's work.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if no such definition; `Conflict` if values still exist.
+    pub async fn delete_custom_property(&self, id: Uuid) -> Result<(), CatalogError> {
+        let property = self
+            .storage
+            .get_custom_property(id)
+            .await
+            .map_err(CatalogError::from)?
+            .ok_or(CatalogError::NotFound)?;
+
+        let held = self
+            .storage
+            .count_custom_property_values(&property.entity_type, &property.name)
+            .await
+            .map_err(CatalogError::from)?;
+        if held > 0 {
+            return Err(CatalogError::Conflict {
+                detail: format!(
+                    "`{}` still holds values on {held} {} entities; \
+                     deleting the definition would orphan them",
+                    property.name, property.entity_type
+                ),
+                existing_id: Some(id),
+                kind: ConflictKind::CustomPropertyExists,
+            });
+        }
+
+        self.storage
+            .delete_custom_property(id)
+            .await
+            .map_err(CatalogError::from)?;
+        Ok(())
+    }
+
+    /// Check an `extension` bag against the definitions for an entity type.
+    ///
+    /// **Called before every write that carries one**, which is what keeps an
+    /// undefined name a `400` rather than a silently stored value. A bag
+    /// accepted untyped is the description field again, with extra steps —
+    /// which is the whole failure this epic exists to prevent.
+    async fn check_extension(
+        &self,
+        kind: AssetKind,
+        extension: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<(), CatalogError> {
+        let Some(bag) = extension else {
+            return Ok(());
+        };
+        if bag.is_empty() {
+            return Ok(());
+        }
+
+        let definitions: Vec<graph_owl_core::custom_property::CustomProperty> = self
+            .storage
+            .list_custom_properties(Some(kind.as_str()))
+            .await
+            .map_err(CatalogError::from)?
+            .into_iter()
+            .map(|(_, property)| property)
+            .collect();
+
+        graph_owl_core::custom_property::validate_extension(&definitions, kind.as_str(), bag)
+            .map_err(|errors| {
+                // **Every failure, not the first.** A bag with four bad values
+                // is a realistic first attempt, and one fix per round trip is
+                // the cost this codebase's accumulating validators exist to
+                // avoid.
+                CatalogError::Validation(
+                    errors
+                        .into_iter()
+                        .map(|error| {
+                            use graph_owl_core::custom_property::ValueError;
+                            // `type` and `value` are different fixes: one says
+                            // send a different *kind* of value, the other says
+                            // send a different *one*. A client that retried a
+                            // range violation by casting would loop.
+                            let (name, code) = match &error {
+                                ValueError::WrongType { name, .. } => (name, FieldErrorCode::Type),
+                                ValueError::Undefined { name, .. }
+                                | ValueError::Constraint { name, .. } => {
+                                    (name, FieldErrorCode::Value)
+                                }
+                            };
+                            FieldError::new(&format!("extension.{name}"), code, error.to_string())
+                        })
+                        .collect(),
+                )
+            })
+    }
+
     // ---- Epic 21: the surface an out-of-process worker submits to ----
 
     /// Accept a worker's extraction output and apply the policy to it.
@@ -1261,6 +1410,12 @@ impl Catalog {
     ) -> Result<Asset, CatalogError> {
         let _ = principal;
 
+        // **Before anything is written.** An `extension` value that reached
+        // storage unvalidated would be the description field again with extra
+        // steps, and removing it later is a migration rather than a fix.
+        self.check_extension(request.kind, request.extension.as_ref())
+            .await?;
+
         // Containment is checked against the *actual* parent, not a claim in
         // the request: a column under a schema is a hierarchy corruption every
         // later traversal has to cope with.
@@ -1332,6 +1487,7 @@ impl Catalog {
                 parent_id: request.parent_id,
                 description: request.description,
                 properties: request.properties,
+                extension: request.extension.clone(),
                 owners: Vec::new(),
                 version: EntityVersion::initial(),
                 updated_by: principal.id.clone(),
@@ -1814,6 +1970,7 @@ impl Catalog {
             parent_id,
             description: draft.description.clone(),
             properties: draft.properties.clone(),
+            extension: None,
             owners: Vec::new(),
             version: graph_owl_core::envelope::EntityVersion::initial(),
             // Attributed to `system`, the same principal every other
@@ -1979,6 +2136,7 @@ impl Catalog {
             parent_id,
             description: draft.description,
             properties: draft.properties,
+            extension: None,
         };
         // `Validation`/`Conflict` are the write refusing *this draft* —
         // exactly what "mapping or validation failure moves the event to
@@ -2172,6 +2330,7 @@ impl Catalog {
             parent_id,
             description: draft.description,
             properties: draft.properties,
+            extension: None,
         };
         let asset = self.upsert_asset(&principal, request).await?;
         self.resolve_asset(&principal, asset.id).await?;
@@ -3766,6 +3925,7 @@ impl Catalog {
                 parent_id,
                 description,
                 properties,
+                extension: None,
             },
         )
         .await
@@ -5032,6 +5192,7 @@ impl Catalog {
                 deleted_at: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
+                extension: None,
             };
             if let Some(reason) = self.validate_draft(&candidate).await? {
                 outcomes.push(IngestOutcome {
@@ -5049,6 +5210,7 @@ impl Catalog {
                 parent_id,
                 description: item.description.clone(),
                 properties: item.properties.clone(),
+                extension: None,
             };
             match self.upsert_asset(principal, request).await {
                 Ok(asset) => {
@@ -6334,6 +6496,7 @@ mod tests {
             deleted_at: None,
             created_at: now,
             updated_at: now,
+            extension: None,
         };
 
         let lower = storage
@@ -6432,6 +6595,7 @@ mod tests {
         mapping_versions: Mutex<Vec<graph_owl_storage::Mapping>>,
         entity_last_applied:
             Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
+        custom_properties: Mutex<Vec<(Uuid, graph_owl_core::custom_property::CustomProperty)>>,
         extraction_runs: Mutex<Vec<graph_owl_storage::ExtractionRunRecord>>,
         extraction_claims: Mutex<Vec<graph_owl_storage::QueuedClaimRecord>>,
         extraction_discards: Mutex<Vec<graph_owl_storage::DiscardedClaimRecord>>,
@@ -8951,6 +9115,92 @@ mod tests {
                 .cloned())
         }
 
+        // ---- Epic 22, and as strict as the port ----
+        //
+        // Uniqueness is scoped to the entity type here too. A double with
+        // *global* uniqueness would refuse a definition the real index accepts,
+        // so decision 2 would look enforced in unit tests and be untested where
+        // it actually lives.
+
+        async fn define_custom_property(
+            &self,
+            id: Uuid,
+            property: &graph_owl_core::custom_property::CustomProperty,
+        ) -> Result<(), StorageError> {
+            self.guard_write("define_custom_property");
+            let mut held = self.custom_properties.lock().unwrap();
+            if held.iter().any(|(_, existing)| {
+                existing.name == property.name && existing.entity_type == property.entity_type
+            }) {
+                return Err(StorageError::Conflict {
+                    detail: format!(
+                        "`{}` is already defined on `{}`",
+                        property.name, property.entity_type
+                    ),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::CustomPropertyExists,
+                });
+            }
+            held.push((id, property.clone()));
+            Ok(())
+        }
+
+        async fn list_custom_properties(
+            &self,
+            entity_type: Option<&str>,
+        ) -> Result<Vec<(Uuid, graph_owl_core::custom_property::CustomProperty)>, StorageError>
+        {
+            let held = self.custom_properties.lock().unwrap();
+            Ok(held
+                .iter()
+                .filter(|(_, property)| {
+                    entity_type.is_none_or(|wanted| property.entity_type == wanted)
+                })
+                .cloned()
+                .collect())
+        }
+
+        async fn get_custom_property(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_core::custom_property::CustomProperty>, StorageError> {
+            let held = self.custom_properties.lock().unwrap();
+            Ok(held
+                .iter()
+                .find(|(held_id, _)| *held_id == id)
+                .map(|(_, property)| property.clone()))
+        }
+
+        async fn count_custom_property_values(
+            &self,
+            entity_type: &str,
+            name: &str,
+        ) -> Result<i64, StorageError> {
+            let assets = self.assets.lock().expect("lock");
+            // A property explicitly set to null has been *cleared*, so it does
+            // not count — counting it would refuse a delete over values nobody
+            // holds, which is the kind of guard that teaches people to force.
+            let count = assets
+                .iter()
+                .filter(|asset| {
+                    asset.kind.as_str() == entity_type
+                        && asset
+                            .extension
+                            .as_ref()
+                            .and_then(|bag| bag.get(name))
+                            .is_some_and(|value| !value.is_null())
+                })
+                .count();
+            Ok(i64::try_from(count).unwrap_or(i64::MAX))
+        }
+
+        async fn delete_custom_property(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut held = self.custom_properties.lock().unwrap();
+            let before = held.len();
+            held.retain(|(held_id, _)| *held_id != id);
+            Ok(held.len() < before)
+        }
+
         async fn find_extraction_run_by_id(
             &self,
             run_id: Uuid,
@@ -10566,6 +10816,7 @@ mod tests {
                     parent_id: None,
                     description: None,
                     properties: None,
+                    extension: None,
                 },
             )
             .await
@@ -10760,6 +11011,7 @@ mod tests {
                     parent_id: None,
                     description: None,
                     properties: None,
+                    extension: None,
                 },
             )
             .await
@@ -11291,6 +11543,7 @@ mod validation_decides_before_it_stores {
             parent_id: None,
             description: None,
             properties: None,
+            extension: None,
         }
     }
 
@@ -12273,6 +12526,7 @@ mod resolution_decides_before_it_merges {
             parent_id,
             description: None,
             properties: None,
+            extension: None,
         }
     }
 
@@ -14674,6 +14928,7 @@ mod streamed_messages_are_mapped_applied_and_resolved {
                     parent_id: None,
                     description: None,
                     properties: None,
+                    extension: None,
                 },
             )
             .await
@@ -15278,6 +15533,7 @@ mod projection_isolation_tests {
             parent_id: None,
             description: None,
             properties: None,
+            extension: None,
         }
     }
 
@@ -15394,6 +15650,7 @@ mod projection_isolation_tests {
                     parent_id: Some(root.id),
                     description: None,
                     properties: None,
+                    extension: None,
                 },
             )
             .await
@@ -16050,6 +16307,7 @@ mod projection_isolation_tests {
                             parent_id: Some(service.id),
                             description: None,
                             properties: None,
+                            extension: None,
                         },
                     )
                     .await
@@ -16130,6 +16388,7 @@ mod projection_isolation_tests {
                             parent_id: Some(service.id),
                             description: None,
                             properties: None,
+                            extension: None,
                         },
                     )
                     .await
@@ -16143,6 +16402,7 @@ mod projection_isolation_tests {
                             parent_id: Some(db.id),
                             description: None,
                             properties: None,
+                            extension: None,
                         },
                     )
                     .await
@@ -16156,6 +16416,7 @@ mod projection_isolation_tests {
                             parent_id: Some(schema.id),
                             description: None,
                             properties: None,
+                            extension: None,
                         },
                     )
                     .await
@@ -16192,6 +16453,7 @@ mod projection_isolation_tests {
                         parent_id: Some(service.id),
                         description: None,
                         properties: None,
+                        extension: None,
                     },
                 )
                 .await
@@ -16205,6 +16467,7 @@ mod projection_isolation_tests {
                         parent_id: Some(db.id),
                         description: None,
                         properties: None,
+                        extension: None,
                     },
                 )
                 .await
@@ -16221,6 +16484,7 @@ mod projection_isolation_tests {
                             parent_id: Some(schema.id),
                             description: None,
                             properties: None,
+                            extension: None,
                         },
                     )
                     .await
@@ -17062,6 +17326,7 @@ mod projection_isolation_tests {
                 parent_id: None,
                 description: None,
                 properties: None,
+                extension: None,
             };
             let outcome = catalog.upsert_asset(&Principal::system(), orphan).await;
 

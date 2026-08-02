@@ -35,6 +35,17 @@
               "null"
             ]
           },
+          "extension": {
+            "additionalProperties": {},
+            "description": "Organization-defined fields — Epic 22.\n\n**A different field from `properties`, and the separation is\nload-bearing.** `properties` is what the *source system* reported and a\nconnector run replaces it wholesale; `extension` is what the\n*organization* added. Had custom properties gone into `properties`, the\nnext connector run would have silently wiped every hand-curated\n`costCenter`.\n\n`Option` rather than a bare map so that PATCH can tell \"leave the bag\nalone\" from \"the bag is now empty\" — the same distinction every other\noptional field on this envelope draws.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "fullyQualifiedName": {
             "description": "Derived from the parent chain, never client-set.",
             "type": "string"
@@ -997,6 +1008,17 @@
           "description": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "extension": {
+            "additionalProperties": {},
+            "description": "Organization-defined fields — Epic 22. Validated against the\ndefinitions for `kind` before anything is stored; an undefined name is\na `400`, never a silently kept value.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": [
+              "object",
               "null"
             ]
           },
@@ -2289,6 +2311,103 @@
           }
         ],
         "summary": "Confirm or dismiss a candidate contradiction; confirming does not close it"
+      }
+    },
+    "/custom-properties": {
+      "get": {
+        "operationId": "get_custom-properties",
+        "responses": {
+          "200": {
+            "description": "Custom property definitions, optionally for one entity type"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Custom property definitions, optionally for one entity type"
+      },
+      "post": {
+        "operationId": "post_custom-properties",
+        "responses": {
+          "201": {
+            "description": "Define an organization-specific property on an entity type"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Define an organization-specific property on an entity type"
+      }
+    },
+    "/custom-properties/{id}": {
+      "delete": {
+        "operationId": "delete_custom-properties__id_",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Delete a custom property definition, refused while values exist"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete a custom property definition, refused while values exist"
       }
     },
     "/docs/": {

@@ -222,6 +222,10 @@ pub fn asset_from_flakes(id: uuid::Uuid, flakes: &[Flake]) -> Option<Asset> {
         fully_qualified_name,
         parent_id,
         description: text("description"),
+        // Not projected: the graph view holds catalog facts, and an
+        // organization's own fields are not among them until a slice decides
+        // which predicate each one lowers to.
+        extension: None,
         properties: match find("properties") {
             Some(FlakeValue::Json(raw)) => serde_json::from_str(raw).ok(),
             _ => None,
@@ -338,6 +342,7 @@ mod projection_tests {
             fully_qualified_name: "hdfc-core.postgres.payments.upi_transactions".to_string(),
             parent_id: Some(Uuid::from_u128(2)),
             description: Some("UPI transaction ledger".to_string()),
+            extension: None,
             properties: None,
             owners: Vec::new(),
             version: EntityVersion { major: 0, minor: 1 },

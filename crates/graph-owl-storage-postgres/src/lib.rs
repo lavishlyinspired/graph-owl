@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use graph_owl_authz::{AccessPredicate, Policy};
 use graph_owl_core::contradiction::{Review, Verdict};
+use graph_owl_core::custom_property::CustomProperty;
 use graph_owl_core::memory::{Authorship, LinkRelation, Memory, MemoryKind, MemoryLink};
 use graph_owl_core::ownership::{EntityReference, OwnerKind, OwnerRef};
 use graph_owl_core::{
@@ -2979,13 +2980,23 @@ impl Storage for PostgresStorage {
         // (15-connectors.md decision 3).
         let row = sqlx::query(&format!(
             "INSERT INTO assets (id, kind, name, fully_qualified_name, parent_id, description,
-                 properties, version_major, version_minor, updated_by, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 1, $10, $8, $9)
+                 properties, extension, version_major, version_minor, updated_by, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($11, '{{}}'::jsonb), 0, 1, $10, $8, $9)
              ON CONFLICT (fully_qualified_name) DO UPDATE SET
                  name = EXCLUDED.name,
                  parent_id = EXCLUDED.parent_id,
                  description = COALESCE(EXCLUDED.description, assets.description),
                  properties = COALESCE(EXCLUDED.properties, assets.properties),
+                 -- **A connector cannot blank the organization\'s own fields.**
+                 -- `properties` above is what the source reported and a re-run
+                 -- may legitimately replace it; `extension` is what a person
+                 -- curated, and a connector that sends none must leave it
+                 -- alone. Without this guard the nightly run would wipe every
+                 -- costCenter in the catalog, silently, on the first night.
+                 extension = CASE
+                     WHEN $11 IS NULL THEN assets.extension
+                     ELSE EXCLUDED.extension
+                 END,
                  updated_by = EXCLUDED.updated_by,
                  -- A re-ingest of a live asset does not resurrect a tombstone:
                  -- deletion is a governance decision and a connector must not
@@ -3003,6 +3014,7 @@ impl Storage for PostgresStorage {
         .bind(asset.created_at)
         .bind(asset.updated_at)
         .bind(&asset.updated_by)
+        .bind(asset.extension.clone().map(serde_json::Value::Object))
         .fetch_one(&self.pool)
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
@@ -3080,6 +3092,7 @@ impl Storage for PostgresStorage {
     async fn ancestors_of(&self, id: Uuid) -> Result<Vec<Asset>, StorageError> {
         // Recursive CTE walking parent_id upward, then reversed so callers get
         // root-first — which is the order a breadcrumb renders in.
+        let recursive_columns = asset_columns_as("a");
         let rows = sqlx::query(&format!(
             // **Owners are projected once, outside the CTE.** Two reasons, and
             // both were live bugs: computing them in the non-recursive branch gave
@@ -3094,10 +3107,7 @@ impl Storage for PostgresStorage {
             "WITH RECURSIVE chain AS (
                  SELECT {ASSET_COLUMNS}, 0 AS hops FROM assets WHERE id = $1
                  UNION ALL
-                 SELECT a.id, a.kind, a.name, a.fully_qualified_name, a.parent_id,
-                        a.description, a.properties, a.version_major, a.version_minor,
-                        a.updated_by, a.change_description, a.deleted, a.deleted_at,
-                        a.created_at, a.updated_at, c.hops + 1
+                 SELECT {recursive_columns}, c.hops + 1
                  FROM assets a JOIN chain c ON a.id = c.parent_id
              )
              SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners
@@ -4939,6 +4949,114 @@ impl Storage for PostgresStorage {
             .collect())
     }
 
+    // ---- Epic 22: organization-defined custom properties ----
+
+    async fn define_custom_property(
+        &self,
+        id: Uuid,
+        property: &CustomProperty,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO custom_properties
+                (id, name, entity_type, property_type, description, constraints)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(id)
+        .bind(&property.name)
+        .bind(&property.entity_type)
+        .bind(property.property_type.as_str())
+        .bind(&property.description)
+        .bind(serde_json::to_value(&property.constraints).unwrap_or_default())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            if e.as_database_error()
+                .is_some_and(|d| d.is_unique_violation())
+            {
+                // The unique index is on `(entity_type, name)`, so this fires
+                // only for a genuine collision on that pair — the same name on
+                // a different type is a different property and inserts fine.
+                StorageError::Conflict {
+                    detail: format!(
+                        "`{}` is already defined on `{}`",
+                        property.name, property.entity_type
+                    ),
+                    existing_id: None,
+                    kind: ConflictKind::CustomPropertyExists,
+                }
+            } else {
+                StorageError::Unexpected(e.to_string())
+            }
+        })?;
+        Ok(())
+    }
+
+    async fn list_custom_properties(
+        &self,
+        entity_type: Option<&str>,
+    ) -> Result<Vec<(Uuid, CustomProperty)>, StorageError> {
+        // One query with a null-guard rather than two: `$1 IS NULL OR ...` lets
+        // the filtered and unfiltered reads share a plan and a code path, and
+        // the index on `entity_type` still applies when it is supplied.
+        let rows = sqlx::query(
+            "SELECT id, name, entity_type, property_type, description, constraints
+             FROM custom_properties
+             WHERE $1::text IS NULL OR entity_type = $1
+             ORDER BY entity_type, name",
+        )
+        .bind(entity_type)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|row| (row.get("id"), custom_property_from_row(row)))
+            .collect())
+    }
+
+    async fn get_custom_property(&self, id: Uuid) -> Result<Option<CustomProperty>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, name, entity_type, property_type, description, constraints
+             FROM custom_properties WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(row.as_ref().map(custom_property_from_row))
+    }
+
+    async fn count_custom_property_values(
+        &self,
+        entity_type: &str,
+        name: &str,
+    ) -> Result<i64, StorageError> {
+        // `? ` asks whether the key is present at all, which is the right
+        // question: a property explicitly set to null has been cleared, and
+        // counting it would refuse a delete over values nobody holds.
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM assets
+             WHERE kind::text = $1 AND extension ? $2 AND extension -> $2 <> 'null'::jsonb",
+        )
+        .bind(entity_type)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(count)
+    }
+
+    async fn delete_custom_property(&self, id: Uuid) -> Result<bool, StorageError> {
+        let done = sqlx::query("DELETE FROM custom_properties WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(done.rows_affected() > 0)
+    }
+
     async fn delete_extraction_run(&self, run_id: Uuid) -> Result<bool, StorageError> {
         // The claims and discards go with it by `ON DELETE CASCADE`, which is
         // what makes "a bad run is deletable wholesale" a schema guarantee
@@ -4949,6 +5067,22 @@ impl Storage for PostgresStorage {
             .await
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(done.rows_affected() > 0)
+    }
+}
+
+fn custom_property_from_row(row: &PgRow) -> CustomProperty {
+    let property_type: String = row.get("property_type");
+    CustomProperty {
+        name: row.get("name"),
+        entity_type: row.get("entity_type"),
+        // A stored type outside the supported set means the column was written
+        // by something other than this code. Defaulting to `String` keeps the
+        // read working rather than failing every list call, and the value is
+        // still validated on every write.
+        property_type: graph_owl_core::custom_property::PropertyType::parse(&property_type)
+            .unwrap_or(graph_owl_core::custom_property::PropertyType::String),
+        description: row.get("description"),
+        constraints: serde_json::from_value(row.get("constraints")).unwrap_or_default(),
     }
 }
 
@@ -5035,6 +5169,16 @@ fn asset_from_row(row: PgRow) -> Asset {
         deleted_at: row.get("deleted_at"),
         id: row.get("id"),
         kind: AssetKind::parse(row.get::<&str, _>("kind")).unwrap_or(AssetKind::Table),
+        // `{}` on the wire is indistinguishable from absent, and both mean
+        // "this entity holds no organization-defined values" — so an empty
+        // bag is normalised to `None` rather than serialized as noise on
+        // every asset in every list response.
+        extension: row
+            .get::<Option<serde_json::Value>, _>("extension")
+            .and_then(|value| match value {
+                serde_json::Value::Object(map) if !map.is_empty() => Some(map),
+                _ => None,
+            }),
         name: row.get("name"),
         fully_qualified_name: row.get("fully_qualified_name"),
         parent_id: row.get("parent_id"),
@@ -5397,8 +5541,25 @@ const OWNERS_EXPR: &str = "(WITH RECURSIVE ancestry (node, next_up, hops) AS (
     LEFT JOIN users u ON u.id = o.user_id
     LEFT JOIN teams t ON t.id = o.team_id)";
 
-const ASSET_COLUMNS: &str = "id, kind, name, fully_qualified_name, parent_id, description, properties, version_major, version_minor, updated_by, change_description, deleted, deleted_at, created_at, updated_at";
+const ASSET_COLUMNS: &str = "id, kind, name, fully_qualified_name, parent_id, description, properties, extension, version_major, version_minor, updated_by, change_description, deleted, deleted_at, created_at, updated_at";
 
+/// [`ASSET_COLUMNS`] with every name qualified by a table alias.
+///
+/// **Derived rather than written out a second time.** A recursive CTE's two
+/// branches must project identical column counts, and the recursive half needs
+/// its columns qualified while the non-recursive half does not — so the
+/// obvious thing is to hand-write the qualified list. That copy then drifts the
+/// moment a column is added to the envelope, and Postgres rejects the `UNION
+/// ALL` with an error naming neither the column nor the caller: every
+/// `/ancestors` request becomes a 500. That has now happened twice, which makes
+/// it a property of hand-copying rather than a slip.
+fn asset_columns_as(alias: &str) -> String {
+    ASSET_COLUMNS
+        .split(", ")
+        .map(|column| format!("{alias}.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 /// The exact query `resolution_candidates` runs, built once so `EXPLAIN`ing
 /// it (Epic 17 Slice B's index-scan acceptance criterion) explains the real
 /// query rather than a lookalike — the same reasoning

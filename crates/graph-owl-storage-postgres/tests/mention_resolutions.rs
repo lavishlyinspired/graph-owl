@@ -29,6 +29,7 @@ async fn asset(storage: &PostgresStorage, name: &str) -> Uuid {
             parent_id: None,
             description: None,
             properties: None,
+            extension: None,
             owners: Vec::new(),
             version: EntityVersion::initial(),
             updated_by: "system".to_string(),

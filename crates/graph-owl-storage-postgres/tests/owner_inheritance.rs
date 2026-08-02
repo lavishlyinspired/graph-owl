@@ -46,6 +46,7 @@ async fn child(
             parent_id,
             description: None,
             properties: None,
+            extension: None,
             owners: Vec::new(),
             version: EntityVersion::initial(),
             updated_by: "system".to_string(),
