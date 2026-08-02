@@ -939,43 +939,185 @@ impl Catalog {
         extractor: &str,
         version: &str,
     ) -> Result<extraction::SubmissionOutcome, CatalogError> {
-        // Resolved for the **distinct** subjects this document names, before
-        // the policy runs. Two things this is not: not a query per claim (a
-        // document naming one table forty times would pay forty round trips to
-        // answer the same question), and not a page of every asset in the
-        // catalog (bounded by the catalog's size rather than the document's,
-        // and silently wrong past the first page).
-        let mut wanted: Vec<&str> = result
-            .claims
-            .iter()
-            .map(|claim| claim.subject.as_str())
-            .collect();
-        wanted.sort_unstable();
-        wanted.dedup();
-
-        let mut subjects = std::collections::HashSet::new();
-        for fqn in wanted {
-            if self
-                .storage
-                .get_asset_by_fqn(fqn)
-                .await
-                .map_err(CatalogError::from)?
-                .is_some()
-            {
-                subjects.insert(fqn.to_string());
-            }
+        // **Idempotence before resolution, not only inside `submit`.**
+        // Resolution costs a search and an ancestor walk per distinct mention;
+        // a re-submitted document should cost one indexed read. `submit`
+        // checks again, because its guarantee should not depend on which
+        // caller reached it.
+        let fingerprint =
+            graph_owl_core::extraction_run::content_fingerprint(document.text.as_bytes());
+        if let Some(previous) = self
+            .storage
+            .find_extraction_run(&document.source_id, &fingerprint, extractor, version)
+            .await
+            .map_err(CatalogError::from)?
+        {
+            return Ok(extraction::SubmissionOutcome::AlreadyExtracted {
+                run_id: previous.id,
+            });
         }
 
-        extraction::submit(
+        // Generated here rather than inside `submit`, because the mention
+        // resolutions this run records are attributed to it — and a resolution
+        // that could not name the run that caused it would answer "which
+        // document decided this fact is about this table" with nothing.
+        let run_id = Uuid::new_v4();
+        let resolved = self
+            .resolve_extraction_mentions(run_id, document, &result)
+            .await?;
+
+        let (outcome, asserted) = extraction::submit(
             self.storage.as_ref(),
+            run_id,
             document,
             result,
             extractor,
             version,
-            &|fqn: &str| subjects.contains(fqn),
+            &resolved,
         )
         .await
-        .map_err(CatalogError::from)
+        .map_err(CatalogError::from)?;
+
+        // **Decision 2's real guarantee, made real.** Until this, an asserted
+        // claim stopped at `extraction_claims` and reasoning could not see it
+        // — which held the containment rule for the wrong reason: the facts
+        // were not in the graph at all, so "confirmed extraction is
+        // reason-able" was never true either.
+        self.project_extraction_claims(&asserted, &resolved).await;
+
+        Ok(outcome)
+    }
+
+    /// Every mention this result makes, resolved to the entity it refers to.
+    ///
+    /// **Both endpoints.** A claim's subject is always a mention; its object is
+    /// one too when the predicate is reference-shaped (`feeds`, `derivedFrom`,
+    /// `dependsOn`, `owner`, `term`). `description "append-only"` is prose, and
+    /// searching the catalog for prose would be a query with no answer.
+    ///
+    /// The context each mention is scored against is the evidence sentence it
+    /// appeared in, joined where a document names the same thing more than
+    /// once: disambiguating signal ("the orders table **in staging**") sits in
+    /// one sentence and not the others, and scoring against only the first
+    /// occurrence throws away the sentence that would have decided it.
+    async fn resolve_extraction_mentions(
+        &self,
+        run_id: Uuid,
+        document: &graph_owl_core::extraction::ParsedDocument,
+        result: &graph_owl_core::extraction::ExtractionResult,
+    ) -> Result<extraction::ResolvedMentions, CatalogError> {
+        use extraction::{ObjectShape, object_shape};
+
+        // Ordered, so a document that names two things resolves them in a
+        // stable order — an unordered map would make the recorded resolutions
+        // (and any failure among them) depend on hash iteration order.
+        let mut mentions: std::collections::BTreeMap<&str, String> =
+            std::collections::BTreeMap::new();
+
+        for claim in &result.claims {
+            let evidence = claim
+                .provenance
+                .evidence
+                .resolve(&document.text)
+                .unwrap_or_default();
+            note_mention(&mut mentions, &claim.subject, evidence);
+            if object_shape(&claim.predicate) == Some(ObjectShape::Reference) {
+                note_mention(&mut mentions, &claim.object, evidence);
+            }
+        }
+
+        let mut resolved = extraction::ResolvedMentions::new();
+        for (text, context) in mentions {
+            if let Some(entity) = self
+                .resolve_extraction_mention(run_id, text, &context)
+                .await?
+            {
+                resolved.insert(text.to_string(), entity);
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// One mention, through the catalog's existing resolution mechanism.
+    ///
+    /// An **exact fully-qualified name is an identity, not a mention**: a
+    /// worker that emits one is not guessing, and putting it through fuzzy
+    /// scoring would be strictly worse at the only case it is certain about.
+    /// Everything else goes through Epic 17's scorer and Epic 17's threshold —
+    /// the same code path `POST /memories/{id}/mentions` uses, which is what
+    /// stops extraction inventing a second answer to "which entity is this".
+    ///
+    /// A scored resolution is **recorded**, so the link from a document's words
+    /// to an entity is answerable later. Without it, "why is this fact attached
+    /// to this table" has no answer but "the extractor said so".
+    async fn resolve_extraction_mention(
+        &self,
+        run_id: Uuid,
+        text: &str,
+        context: &str,
+    ) -> Result<Option<Uuid>, CatalogError> {
+        if let Some(asset) = self.storage.get_asset_by_fqn(text).await? {
+            return Ok(Some(asset.id));
+        }
+
+        let Some((candidate, score)) = self.best_mention_candidate(text, context, None).await?
+        else {
+            return Ok(None);
+        };
+        if !graph_owl_resolution::mention::clears_threshold(score) {
+            return Ok(None);
+        }
+
+        let entity = candidate.id;
+        self.storage
+            .record_mention_resolution(graph_owl_core::resolution::MentionResolution {
+                id: Uuid::new_v4(),
+                source: run_id,
+                text: text.to_string(),
+                entity,
+                confidence: score,
+                resolved_at: Utc::now(),
+            })
+            .await?;
+        Ok(Some(entity))
+    }
+
+    /// Write claims into `graph:extraction`.
+    ///
+    /// **Best-effort and logged, never propagated** — decision 6, the same rule
+    /// [`Catalog::project`] follows. Failing a submission because the graph
+    /// view could not be updated would make the graph a single point of failure
+    /// for ingestion; the claims are stored either way, and deleting the run
+    /// remains the undo.
+    async fn project_extraction_claims(
+        &self,
+        claims: &[graph_owl_storage::QueuedClaimRecord],
+        resolved: &extraction::ResolvedMentions,
+    ) {
+        let Some(graph) = &self.graph else {
+            return;
+        };
+        if claims.is_empty() {
+            return;
+        }
+
+        let outcome = async {
+            let t = graph.next_time().await?;
+            let flakes = extraction::claim_flakes(claims, resolved, t);
+            if flakes.is_empty() {
+                return Ok(());
+            }
+            graph.assert_flakes(&flakes).await
+        }
+        .await;
+
+        if let Err(error) = outcome {
+            eprintln!(
+                "extraction projection failed for {} claim(s): {error}. The claims \
+                 are recorded; `graph:extraction` is stale until they are replayed.",
+                claims.len()
+            );
+        }
     }
 
     /// Claims waiting for a human, with the sentence each came from.
@@ -1041,11 +1183,60 @@ impl Catalog {
         confirmed: bool,
         decided_by: &str,
     ) -> Result<graph_owl_storage::QueuedClaimRecord, CatalogError> {
-        self.storage
+        let record = self
+            .storage
             .decide_extraction_claim(claim_id, confirmed, decided_by)
             .await
             .map_err(CatalogError::from)?
-            .ok_or(CatalogError::NotFound)
+            .ok_or(CatalogError::NotFound)?;
+
+        // **Confirmation is what makes a surfaced claim reason-able.** A human
+        // said yes, so it earns exactly the projection a confident extractor's
+        // claim gets — same graph, same shape. Rejection projects nothing and
+        // has nothing to retract: a pending claim was never in the graph, which
+        // is the containment this epic is built around.
+        if confirmed {
+            let context = self
+                .extraction_evidence(record.run_id, record.evidence_start, record.evidence_end)
+                .await;
+            let resolved = self
+                .resolve_claim_mentions(record.run_id, &record, &context)
+                .await
+                .unwrap_or_default();
+            self.project_extraction_claims(std::slice::from_ref(&record), &resolved)
+                .await;
+        }
+
+        Ok(record)
+    }
+
+    /// The entities one stored claim's endpoints refer to.
+    ///
+    /// Resolved **again** at confirmation rather than remembered from
+    /// submission, because the catalog moves: a claim surfaced last week may
+    /// name a table that has since been created, and a remembered "unresolved"
+    /// would make confirming it a no-op no reviewer could explain.
+    async fn resolve_claim_mentions(
+        &self,
+        run_id: Uuid,
+        record: &graph_owl_storage::QueuedClaimRecord,
+        context: &str,
+    ) -> Result<extraction::ResolvedMentions, CatalogError> {
+        let mut resolved = extraction::ResolvedMentions::new();
+        if let Some(entity) = self
+            .resolve_extraction_mention(run_id, &record.subject, context)
+            .await?
+        {
+            resolved.insert(record.subject.clone(), entity);
+        }
+        if extraction::object_shape(&record.predicate) == Some(extraction::ObjectShape::Reference)
+            && let Some(entity) = self
+                .resolve_extraction_mention(run_id, &record.object, context)
+                .await?
+        {
+            resolved.insert(record.object.clone(), entity);
+        }
+        Ok(resolved)
     }
 
     /// Delete a run and everything it produced.
@@ -4405,50 +4596,9 @@ impl Catalog {
         mention: graph_owl_core::resolution::TextMention,
     ) -> Result<Option<graph_owl_core::resolution::MentionResolution>, CatalogError> {
         let _ = principal;
-        let candidates = self
-            .storage
-            .search_assets(
-                &mention.text,
-                mention.expected_type,
-                &graph_owl_core::page::PageRequest {
-                    limit: 50,
-                    after: None,
-                },
-            )
+        let best = self
+            .best_mention_candidate(&mention.text, &mention.context, mention.expected_type)
             .await?;
-
-        let mut best: Option<(Asset, f64)> = None;
-        for candidate in candidates.data {
-            let ancestor_names: Vec<String> = self
-                .storage
-                .ancestors_of(candidate.id)
-                .await?
-                .into_iter()
-                .filter(|a| a.id != candidate.id)
-                .map(|a| a.name)
-                .collect();
-            let score = graph_owl_resolution::mention::score_mention(
-                &mention.text,
-                &mention.context,
-                &candidate.name,
-                &ancestor_names,
-            );
-            // `>` rather than `>=`: on an exact tie, the earlier-found
-            // candidate wins. Untested at the exact tie boundary on
-            // purpose — `search_assets`'s ordering is not part of this
-            // module's contract, so a test pinning "candidate A beats
-            // candidate B on a tie" would be asserting an ordering this
-            // code does not promise, not a real requirement. Which
-            // candidate wins a genuine tie is not specified by the plan;
-            // that any winner is chosen deterministically, and that a
-            // clear winner (this loop's normal case) is picked, are.
-            if best
-                .as_ref()
-                .is_none_or(|(_, best_score)| score > *best_score)
-            {
-                best = Some((candidate, score));
-            }
-        }
 
         let Some((candidate, score)) = best else {
             return Ok(None);
@@ -4468,6 +4618,73 @@ impl Catalog {
         Ok(Some(
             self.storage.record_mention_resolution(resolution).await?,
         ))
+    }
+
+    /// The best-scoring candidate for a mention, and its score.
+    ///
+    /// **The one candidate-scoring path in the system**, shared by Epic 17's
+    /// `POST /memories/{id}/mentions` and by Epic 21's extraction. That sharing
+    /// is the point rather than tidiness: extraction previously matched
+    /// subjects by exact fully-qualified name, which is a second identity path
+    /// — and a second identity path is how an API that is perfectly idempotent
+    /// still ends up with two logical copies of one table, because the two
+    /// paths disagree about what "the orders table" refers to.
+    ///
+    /// Returns `None` only when there are no candidates at all. Whether a score
+    /// is good enough is [`graph_owl_resolution::mention::clears_threshold`]'s
+    /// question, deliberately left to the caller so that neither caller can
+    /// quietly hold a different bar.
+    async fn best_mention_candidate(
+        &self,
+        text: &str,
+        context: &str,
+        expected_type: Option<AssetKind>,
+    ) -> Result<Option<(Asset, f64)>, CatalogError> {
+        let candidates = self
+            .storage
+            .search_assets(
+                text,
+                expected_type,
+                &graph_owl_core::page::PageRequest {
+                    limit: MENTION_CANDIDATES,
+                    after: None,
+                },
+            )
+            .await?;
+
+        let mut best: Option<(Asset, f64)> = None;
+        for candidate in candidates.data {
+            let ancestor_names: Vec<String> = self
+                .storage
+                .ancestors_of(candidate.id)
+                .await?
+                .into_iter()
+                .filter(|a| a.id != candidate.id)
+                .map(|a| a.name)
+                .collect();
+            let score = graph_owl_resolution::mention::score_mention(
+                text,
+                context,
+                &candidate.name,
+                &ancestor_names,
+            );
+            // `>` rather than `>=`: on an exact tie, the earlier-found
+            // candidate wins. Untested at the exact tie boundary on
+            // purpose — `search_assets`'s ordering is not part of this
+            // module's contract, so a test pinning "candidate A beats
+            // candidate B on a tie" would be asserting an ordering this
+            // code does not promise, not a real requirement. Which
+            // candidate wins a genuine tie is not specified by the plan;
+            // that any winner is chosen deterministically, and that a
+            // clear winner (this loop's normal case) is picked, are.
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_score)| score > *best_score)
+            {
+                best = Some((candidate, score));
+            }
+        }
+        Ok(best)
     }
 
     // ---- envelope (Epic 3) ----
@@ -5525,7 +5742,7 @@ impl Catalog {
             ))
         })?;
 
-        let base = Self::asserted_base(graph.as_ref()).await?;
+        let base = Self::reasoning_base(graph.as_ref(), budget).await?;
         let concluded = reasoning::derive_within(&base, budget);
 
         // Withdraw the previous run's overlay before writing this one.
@@ -5650,7 +5867,7 @@ impl Catalog {
             ))
         })?;
 
-        let base = Self::asserted_base(graph.as_ref()).await?;
+        let base = Self::reasoning_base(graph.as_ref(), budget).await?;
         let concluded = reasoning::derive_within(&base, budget);
         let target = Flake {
             s: subject.clone(),
@@ -6054,6 +6271,39 @@ impl Catalog {
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
     }
+
+    /// The facts a reasoning run may read: the default graph, plus every named
+    /// graph the budget opted into.
+    ///
+    /// **Loading them is what makes the opt-in real.**
+    /// [`reasoning::derive_within`] already filters its input on
+    /// `include_graphs`, but filtering a base that never contained the named
+    /// graph is a no-op — before this, `graph:extraction` was invisible to
+    /// reasoning whether or not a deployment asked for it. That looked exactly
+    /// like the containment rule working, and was actually the facts never
+    /// arriving: the safe behaviour, reached by an accident that also made the
+    /// opt-in impossible.
+    ///
+    /// `graph:reasoning` is not special-cased here. A budget that included it
+    /// would feed a run its own previous conclusions, which is a choice with a
+    /// meaning ­— and one no default makes.
+    async fn reasoning_base(
+        graph: &dyn graph_owl_engine::TripleStore,
+        budget: &reasoning::Budget,
+    ) -> Result<Vec<Flake>, CatalogError> {
+        let mut base = Self::asserted_base(graph).await?;
+        for included in &budget.include_graphs {
+            let facts = graph
+                .query_pattern(&graph_owl_core::flake::TriplePattern {
+                    cx: Some(Some(included.clone())),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            base.extend(facts);
+        }
+        Ok(base)
+    }
 }
 
 /// The graph shapes are stated in.
@@ -6121,6 +6371,41 @@ pub struct IngestItem {
     pub description: Option<String>,
     pub properties: Option<serde_json::Value>,
 }
+
+/// Records one mention and the sentence it appeared in.
+///
+/// Accumulates rather than overwrites: a document naming the same thing in
+/// several sentences gets all of them as context, because the phrase that
+/// disambiguates it ("the orders table **in staging**") sits in one sentence and
+/// not the others. Deduplicated, so a claim repeated verbatim does not weight
+/// its own sentence twice.
+fn note_mention<'a>(
+    mentions: &mut std::collections::BTreeMap<&'a str, String>,
+    text: &'a str,
+    evidence: &str,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let entry = mentions.entry(text).or_default();
+    if entry.contains(evidence) {
+        return;
+    }
+    if !entry.is_empty() {
+        entry.push(' ');
+    }
+    entry.push_str(evidence);
+}
+
+/// How many candidates a mention is scored against.
+///
+/// One page of name-search hits, so the cost of resolving a mention is bounded
+/// by a constant rather than by the size of the catalog — a document naming a
+/// common word must not turn into a scan. A mention whose referent is not among
+/// the search engine's first hits was never going to clear
+/// [`graph_owl_resolution::mention::MENTION_THRESHOLD`] on name similarity
+/// anyway, so a larger page buys candidates that cannot win.
+const MENTION_CANDIDATES: usize = 50;
 
 /// How many rows a batch job applies in one round trip.
 ///

@@ -125,9 +125,9 @@ Each stage is separately testable; only parse and extract touch external service
 - [x] PDF ingests when an adapter is configured; absent one, a clear "no parser configured" error.
 - [x] Extraction is schema-bounded — off-ontology output is discarded with a reason, never stored untyped.
 - [x] Every claim carries provenance to document, block, and character range.
-- [~] Mentions resolve via Epic 17; unresolved mentions are recorded as unresolved, not dropped. **Half done, and the half that is missing is named.** A claim naming an entity the catalog does not have is discarded *with a reason and kept* — so nothing is dropped silently. What does not happen yet is Epic 17 *resolution*: "the orders table" is matched by exact FQN, not resolved through the mention index, so a document that names an entity by an alias produces nothing. Wiring `resolve_asset` in is a small change to `Catalog::submit_extraction` and no change to any port.
+- [x] Mentions resolve via Epic 17; unresolved mentions are recorded as unresolved, not dropped. **Both endpoints, through one scorer.** `Catalog::best_mention_candidate` is now the single candidate-scoring path in the system, shared with `POST /memories/{id}/mentions` — extraction has no identity logic of its own, which is what stops the two disagreeing about what "the orders table" refers to. An exact fully-qualified name short-circuits it (a worker that emits one is stating an identity, not guessing); everything else is scored and held to Epic 17's threshold, and a scored resolution is written to `mention_resolutions` against the run that caused it. A claim's *object* goes through the same path when the predicate is reference-shaped, because half an edge is not an edge.
 - [x] Confidence bands are applied; the 0.5–0.8 band queues for confirmation.
-- [~] Everything lands in `graph:extraction`; a failed run is deletable wholesale. **Deletable wholesale is done and tested** — `ON DELETE CASCADE` from `extraction_runs` makes it a schema guarantee rather than something a method must remember, and an HTTP test asserts the queue is empty afterwards. **The named-graph projection is not.** `EXTRACTION_GRAPH` exists and every claim is scoped to a run, but an asserted claim is not yet written as a flake with `cx = Sid::dsc("graph:extraction")`; it lives in `extraction_claims` with state `asserted`. Decision 2's real guarantee — that Epic 6's reasoning cannot see unconfirmed machine output — currently holds *because the facts are not in the graph at all*, which is stricter than intended but for the wrong reason. Projecting them needs predicate registration and is its own slice.
+- [x] Everything lands in `graph:extraction`; a failed run is deletable wholesale. **Deletable wholesale** is `ON DELETE CASCADE` from `extraction_runs` — a schema guarantee rather than something a method must remember. **The named-graph projection now happens**: an asserted claim is written as a flake with `cx = Sid::dsc("graph:extraction")`, and confirming a surfaced claim writes exactly the same flake. Rejecting writes nothing and has nothing to retract, because a pending claim was never in the graph.
 - [x] Re-ingesting the same document is idempotent.
 
 ## Slices
@@ -170,8 +170,72 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: The confirmed-claim survival test: confirm a claim, re-ingest the document, assert the confirmation is not reset. Human curation must not be destroyed by re-processing — the same rule as Epic 15's hand-edit preservation. Mutator watch: wholesale replacement must fail it.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+### Slice G: Resolution, projection, and the boundary that proves both
+
+**Value**: the epic's two open criteria closed, and decision 2 demonstrated
+rather than assumed.
+
+**What it did**:
+
+- **One identity path.** `Catalog::best_mention_candidate` is now the only
+  candidate-scoring code in the system; extraction calls it, and so does Epic
+  17's mention endpoint. An exact FQN short-circuits it — a worker emitting one
+  is stating an identity, not guessing — and everything else clears Epic 17's
+  threshold or resolves to nothing.
+- **Both endpoints of a claim.** A reference-shaped predicate (`feeds`,
+  `derivedFrom`, `dependsOn`, `owner`, `term`) has its *object* resolved by the
+  same path. An unresolvable object is discarded with a reason, by the same rule
+  `constrain` already applied to the subject: half an edge is not an edge, and a
+  lineage fact reachable from neither end is worse than no fact.
+- **Projection into `graph:extraction`.** An asserted claim becomes a flake with
+  `cx = Sid::dsc("graph:extraction")`; confirming a surfaced claim writes exactly
+  the same flake; rejecting writes nothing. Literal-shaped predicates project a
+  string, reference-shaped ones a `Ref` — a string in a ref position stores
+  cleanly and is unreachable by reverse traversal, which is how a lineage edge
+  disappears with no error anywhere.
+- **`Catalog::reasoning_base`.** `derive_within` already filtered its input on
+  `include_graphs`, but filtering a base that never contained the named graph is
+  a no-op: `graph:extraction` was invisible to reasoning whether or not a
+  deployment asked for it. That looked exactly like the containment rule working
+  and was really the facts never arriving — safe by accident, and in a way that
+  also made the opt-in impossible. Loading the included graphs is what makes
+  both directions real.
+
+**The magic numbers, and where they come from**: `MENTION_CANDIDATES = 50` is
+one page of name-search hits, so resolving a mention costs a constant rather
+than a scan — and a candidate outside the search engine's first page was never
+going to clear the threshold on name similarity anyway. Nothing else new is a
+number; the bands and the threshold are Epic 17's and Epic 21's existing ones.
+
+**RED**: the two-directional boundary test, which is the point of the slice —
+a surfaced claim reaches no conclusion *even for a deployment that opted in*
+(it is absent, not filtered), and an asserted one reaches a conclusion *only*
+for a deployment that opted in. Plus the confirmation transition and its
+negative: rejecting puts nothing in the graph. Mutator watch: a projection that
+ran on every decision rather than on a confirmation must fail the rejection
+test; a `cx` of `None` must fail the containment test.
+
+**A standing invariant, tested**: every predicate in `CATALOG_PREDICATES` must
+exist in the engine's `predicates` table. Nothing in the type system connects
+the two lists, and a predicate in the first and not the second passes every
+policy check and then fails at `assert_flakes` — where the only symptom is a
+logged line and a fact that is not there. `term` and `dependsOn` were exactly
+that, and `V7__extraction_predicates.sql` fixes it.
+
+**Known-loose, deliberately**: `owner` and `term` are reference-shaped, and
+their objects are users and glossary terms — neither of which the *asset*
+resolver can see. So an extracted `owner` claim resolves to nothing and is
+discarded with a reason. That is honest rather than silent, and it is the same
+outcome as before this slice (the claim reached no graph either way), but it
+means owner and term extraction needs a resolver per namespace before it does
+anything. Destination: a slice of its own, once a worker actually emits them —
+today both extractors emit only `description`.
+
 ## Explicitly deferred (with destination)
 
+- **Owner and glossary-term resolution** → both are reference-shaped predicates
+  whose objects live outside the asset tree; each needs its own resolver. See
+  Slice G's "known-loose".
 - **Conversation platform connectors** (chat, email) → a source-specific adapter each; the pipeline is shared. Add per platform on demand.
 - **Coreference resolution within a document** → Epic 17 resolves mentions to entities; mention-to-mention chaining is a further step.
 - **Multilingual extraction** → single-language assumed.

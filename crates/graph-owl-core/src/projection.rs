@@ -31,10 +31,21 @@ pub fn parent_predicate(kind: AssetKind) -> Option<Sid> {
     })
 }
 
+/// The node an entity of a given id occupies in the graph.
+///
+/// Spelled once. Extraction projects claims about entities it resolved by
+/// **id** rather than by value ([`asset_sid`] needs the whole asset), and two
+/// spellings of the same identity is the drift that makes a fact about a table
+/// invisible to every query about that table — with nothing failing anywhere.
+#[must_use]
+pub fn entity_sid(id: uuid::Uuid) -> Sid {
+    Sid::new(namespace::DSC, id.to_string())
+}
+
 /// The node an asset occupies in the graph.
 #[must_use]
 pub fn asset_sid(asset: &Asset) -> Sid {
-    Sid::new(namespace::DSC, asset.id.to_string())
+    entity_sid(asset.id)
 }
 
 /// Every field of an asset, as flakes sharing one transaction time.

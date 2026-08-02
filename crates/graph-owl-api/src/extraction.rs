@@ -15,15 +15,27 @@
 //! of those checks are available to a compromised or merely mis-tuned worker,
 //! because none of them are in the worker.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use graph_owl_connectors::extraction::constrain;
 use graph_owl_core::extraction::{Claim, Disposition, ExtractionResult, ParsedDocument};
-use graph_owl_core::extraction_run::content_fingerprint;
+use graph_owl_core::extraction_run::{EXTRACTION_GRAPH, content_fingerprint};
+use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+use graph_owl_core::projection::entity_sid;
 use graph_owl_storage::{
     DiscardedClaimRecord, ExtractionRunRecord, QueuedClaimRecord, StorageError,
 };
 use uuid::Uuid;
+
+/// Which mention text resolved to which catalog entity.
+///
+/// **The one identity map extraction uses**, built by Epic 17's resolver and
+/// passed in whole. A worker's `subject` is a string it read in a document;
+/// what the catalog stores a fact against is an entity id, and the step
+/// between them is resolution — not string equality against a fully-qualified
+/// name, which is what silently produces a second logical copy of a table the
+/// catalog already has.
+pub type ResolvedMentions = HashMap<String, Uuid>;
 
 /// The predicates an extracted claim may use.
 ///
@@ -40,6 +52,103 @@ pub const CATALOG_PREDICATES: &[&str] = &[
     "derivedFrom",
     "dependsOn",
 ];
+
+/// What a catalog predicate's object *is*.
+///
+/// Extraction produces prose on both sides of a claim, and the graph does not:
+/// `dsc:feeds` is a reference, indexed in OPST so that "what feeds this table"
+/// is answerable by reverse traversal. Writing the string `"the orders table"`
+/// into that position type-checks, stores, and makes the edge unreachable from
+/// the end that needed it — a lineage graph that quietly loses edges, which is
+/// the one thing a lineage graph must never do.
+///
+/// So the shape decides how a claim projects, and a reference-shaped claim
+/// whose object does not resolve to an entity is discarded with a reason
+/// rather than written as text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectShape {
+    /// The object is the value: `description`, `tag`.
+    Literal,
+    /// The object names another entity: `feeds`, `derivedFrom`, `dependsOn`,
+    /// `owner`, `term`.
+    Reference,
+}
+
+/// The shape of `predicate`'s object, or `None` if it is not a catalog
+/// predicate at all.
+#[must_use]
+pub fn object_shape(predicate: &str) -> Option<ObjectShape> {
+    match predicate {
+        "description" | "tag" => Some(ObjectShape::Literal),
+        "owner" | "term" | "feeds" | "derivedFrom" | "dependsOn" => Some(ObjectShape::Reference),
+        _ => None,
+    }
+}
+
+/// The named graph every extracted fact is written to, as a subject id.
+#[must_use]
+pub fn extraction_graph() -> Sid {
+    Sid::dsc(EXTRACTION_GRAPH)
+}
+
+/// The flake one claim contributes to `graph:extraction`.
+///
+/// **Never the default graph** (decision 2). Epic 6's reasoning reads the
+/// default graph and whatever named graphs a run was told to include, so a
+/// claim landing here is invisible to inference until a deployment opts in —
+/// which is the whole containment property, and it only holds if every write
+/// carries the `cx`.
+///
+/// `None` when the predicate is outside the vocabulary, or when it is
+/// reference-shaped and `object_entity` is absent. Both are refusals to write
+/// something the graph cannot represent honestly, not errors.
+#[must_use]
+pub fn claim_flake(
+    subject: Uuid,
+    predicate: &str,
+    object: &str,
+    object_entity: Option<Uuid>,
+    t: i64,
+) -> Option<Flake> {
+    let value = match object_shape(predicate)? {
+        ObjectShape::Literal => FlakeValue::String(object.to_string()),
+        ObjectShape::Reference => FlakeValue::Ref(entity_sid(object_entity?)),
+    };
+    Some(Flake {
+        s: entity_sid(subject),
+        p: Sid::dsc(predicate),
+        o: value,
+        cx: Some(extraction_graph()),
+        t,
+        op: true,
+    })
+}
+
+/// Every flake a batch of claims contributes, skipping the ones that cannot
+/// be represented.
+///
+/// Driven by the **persisted** claim records rather than the in-memory result,
+/// so the confirmation path and the submission path share one projection: a
+/// human saying yes writes exactly the flake a confident extractor would have.
+#[must_use]
+pub fn claim_flakes(
+    claims: &[QueuedClaimRecord],
+    resolved: &ResolvedMentions,
+    t: i64,
+) -> Vec<Flake> {
+    claims
+        .iter()
+        .filter_map(|claim| {
+            claim_flake(
+                *resolved.get(&claim.subject)?,
+                &claim.predicate,
+                &claim.object,
+                resolved.get(&claim.object).copied(),
+                t,
+            )
+        })
+        .collect()
+}
 
 /// What a submitted run did.
 ///
@@ -117,46 +226,59 @@ pub const QUEUE_PAGE: i64 = 100;
 /// 2. **Vocabulary and subject**, because a claim about an unknown entity or
 ///    with an unknown predicate cannot be stored no matter how confident the
 ///    worker is — confidence is not the failing.
-/// 3. **Human rejections**, because a reviewer who said no should not be asked
+/// 3. **Reference objects**, by the same rule applied to the other endpoint:
+///    both ends of a reference must be entities the catalog knows.
+/// 4. **Human rejections**, because a reviewer who said no should not be asked
 ///    the same question by the next run of the same extractor.
-/// 4. **Confidence bands last**, on what survived.
+/// 5. **Confidence bands last**, on what survived.
+///
+/// Returns the outcome and the records written in the **asserted** state —
+/// what the caller projects into `graph:extraction`. Returning them rather
+/// than making the caller read them back is what keeps the projection driven
+/// by the rows that were actually stored.
 ///
 /// # Errors
 ///
 /// [`StorageError`] if the run cannot be read or written.
 pub async fn submit(
     storage: &dyn graph_owl_storage::Storage,
+    run_id: Uuid,
     document: &ParsedDocument,
     result: ExtractionResult,
     extractor: &str,
     version: &str,
-    // **`+ Sync` is load-bearing, not decoration.** A bare `&dyn Fn` makes
-    // this future non-`Send`, and axum only accepts `Send` handlers — so the
-    // omission surfaces as "`submit_extraction` does not implement `Handler`"
-    // at the route, three layers away from the cause.
-    known_subject: &(dyn Fn(&str) -> bool + Sync),
-) -> Result<SubmissionOutcome, StorageError> {
+    resolved: &ResolvedMentions,
+) -> Result<(SubmissionOutcome, Vec<QueuedClaimRecord>), StorageError> {
     let fingerprint = content_fingerprint(document.text.as_bytes());
 
     if let Some(previous) = storage
         .find_extraction_run(&document.source_id, &fingerprint, extractor, version)
         .await?
     {
-        return Ok(SubmissionOutcome::AlreadyExtracted {
-            run_id: previous.id,
-        });
+        return Ok((
+            SubmissionOutcome::AlreadyExtracted {
+                run_id: previous.id,
+            },
+            Vec::new(),
+        ));
     }
 
-    let constrained = constrain(result, CATALOG_PREDICATES, known_subject);
+    // **`+ Sync` on the closure is load-bearing, not decoration.** A bare
+    // `&dyn Fn` makes this future non-`Send`, and axum only accepts `Send`
+    // handlers — so the omission surfaces as "`submit_extraction` does not
+    // implement `Handler`" at the route, three layers away from the cause.
+    let known_subject = |subject: &str| resolved.contains_key(subject);
+    let constrained = constrain(result, CATALOG_PREDICATES, &known_subject);
+    let (constrained, unresolved_objects) = split_unresolved_objects(constrained, resolved);
 
     let rejected: HashSet<(String, String, String)> =
         storage.rejected_assertions().await?.into_iter().collect();
     let (survived, previously_rejected) = split_rejected(constrained, &rejected);
 
     let (assert, surface, mut discarded) = survived.partition();
+    discarded.extend(unresolved_objects);
     discarded.extend(previously_rejected);
 
-    let run_id = Uuid::new_v4();
     let run = ExtractionRunRecord {
         id: run_id,
         source_id: document.source_id.clone(),
@@ -170,9 +292,13 @@ pub async fn submit(
         discarded: i32::try_from(discarded.len()).unwrap_or(i32::MAX),
     };
 
-    let queued: Vec<QueuedClaimRecord> = assert
+    let asserted: Vec<QueuedClaimRecord> = assert
         .iter()
         .map(|claim| record(run_id, claim, STATE_ASSERTED))
+        .collect();
+    let queued: Vec<QueuedClaimRecord> = asserted
+        .iter()
+        .cloned()
         .chain(
             surface
                 .iter()
@@ -197,12 +323,52 @@ pub async fn submit(
         .save_extraction_run(&run, &queued, &discards)
         .await?;
 
-    Ok(SubmissionOutcome::Recorded {
-        run_id,
-        asserted: assert.len(),
-        surfaced: surface.len(),
-        discarded: discarded.len(),
-    })
+    Ok((
+        SubmissionOutcome::Recorded {
+            run_id,
+            asserted: assert.len(),
+            surfaced: surface.len(),
+            discarded: discarded.len(),
+        },
+        asserted,
+    ))
+}
+
+/// Moves reference-shaped claims whose object named nothing the catalog knows.
+///
+/// **The subject rule, applied to the other endpoint.** `constrain` already
+/// refuses a claim about an unknown entity; a `feeds` claim whose *object* is
+/// unknown has the same defect from the other side — there is no edge to draw,
+/// only half of one. Discarding it with a reason is what makes the gap
+/// diagnosable from the run's own output.
+fn split_unresolved_objects(
+    result: ExtractionResult,
+    resolved: &ResolvedMentions,
+) -> (
+    ExtractionResult,
+    Vec<graph_owl_core::extraction::DiscardedClaim>,
+) {
+    let mut kept = Vec::new();
+    let mut dropped = Vec::new();
+    for claim in result.claims {
+        let references = object_shape(&claim.predicate) == Some(ObjectShape::Reference);
+        if references && !resolved.contains_key(&claim.object) {
+            let reason = format!(
+                "`{}` names another entity, and `{}` did not resolve to one",
+                claim.predicate, claim.object
+            );
+            dropped.push(graph_owl_core::extraction::DiscardedClaim { claim, reason });
+        } else {
+            kept.push(claim);
+        }
+    }
+    (
+        ExtractionResult {
+            claims: kept,
+            discarded: result.discarded,
+        },
+        dropped,
+    )
 }
 
 /// Moves claims a human already rejected out of the result, with a reason.
@@ -474,5 +640,211 @@ mod tests {
     fn asserted_and_pending_are_distinct_states() {
         assert_ne!(STATE_ASSERTED, STATE_PENDING);
         assert_ne!(STATE_ASSERTED, "confirmed");
+    }
+
+    // ── the projection into `graph:extraction` ──────────────────────────────
+
+    fn resolved(pairs: &[(&str, Uuid)]) -> ResolvedMentions {
+        pairs
+            .iter()
+            .map(|(text, id)| ((*text).to_string(), *id))
+            .collect()
+    }
+
+    fn asserted_record(subject: &str, predicate: &str, object: &str) -> QueuedClaimRecord {
+        QueuedClaimRecord {
+            id: Uuid::new_v4(),
+            run_id: Uuid::nil(),
+            subject: subject.to_string(),
+            predicate: predicate.to_string(),
+            object: object.to_string(),
+            confidence: 0.9,
+            evidence_start: 0,
+            evidence_end: 4,
+            state: STATE_ASSERTED.to_string(),
+            decided_by: None,
+        }
+    }
+
+    /// **The containment property, asserted on the flake itself.** Decision 2
+    /// says extracted facts land in `graph:extraction` and never the default
+    /// graph, and that is only true if every write carries the `cx` — one
+    /// forgotten `None` puts machine output where Epic 6 reasons over it
+    /// unconditionally, with nothing failing.
+    #[test]
+    fn an_extracted_fact_is_stamped_into_the_extraction_graph() {
+        let subject = Uuid::new_v4();
+
+        let flake = claim_flake(subject, "description", "append-only", None, 7)
+            .expect("a literal claim projects");
+
+        assert_eq!(flake.cx, Some(extraction_graph()));
+        assert_ne!(flake.cx, None, "the default graph is the failure mode");
+        assert_eq!(flake.s, entity_sid(subject));
+        assert_eq!(flake.p, Sid::dsc("description"));
+        assert_eq!(flake.o, FlakeValue::String("append-only".to_string()));
+        assert_eq!(flake.t, 7);
+        assert!(flake.op);
+    }
+
+    /// A reference-shaped predicate projects a `Ref`, not the text it was
+    /// extracted from. A string in that position stores fine and is unreachable
+    /// by reverse traversal, which is how a lineage edge disappears without an
+    /// error.
+    #[test]
+    fn a_reference_claim_projects_the_resolved_entity_not_its_words() {
+        let subject = Uuid::new_v4();
+        let object = Uuid::new_v4();
+
+        let flake = claim_flake(subject, "feeds", "the payments table", Some(object), 1)
+            .expect("a resolved reference claim projects");
+
+        assert_eq!(flake.o, FlakeValue::Ref(entity_sid(object)));
+    }
+
+    /// **The negative that a mutation would otherwise survive.** Without the
+    /// object requirement, `feeds "the payments table"` projects as a string
+    /// and the graph gains an edge to a sentence.
+    #[test]
+    fn a_reference_claim_with_no_resolved_object_projects_nothing() {
+        assert!(
+            claim_flake(Uuid::new_v4(), "feeds", "the payments table", None, 1).is_none(),
+            "half an edge is not an edge"
+        );
+    }
+
+    /// And a predicate outside the vocabulary projects nothing even if
+    /// everything else about the claim resolved — the vocabulary check is not
+    /// something the projection may re-decide.
+    #[test]
+    fn a_claim_outside_the_vocabulary_projects_nothing() {
+        assert!(claim_flake(Uuid::new_v4(), "isFriendsWith", "bob", None, 1).is_none());
+    }
+
+    /// The vocabulary and the shape table are one thing said twice, and the
+    /// pair drifts the first time a predicate is added to one of them: a
+    /// vocabulary entry with no shape is a claim that passes `constrain` and
+    /// then silently never projects.
+    #[test]
+    fn every_catalog_predicate_has_an_object_shape() {
+        for predicate in CATALOG_PREDICATES {
+            assert!(
+                object_shape(predicate).is_some(),
+                "`{predicate}` is in the vocabulary with no object shape, so it \
+                 would be accepted and then never reach the graph"
+            );
+        }
+        assert!(
+            object_shape("isFriendsWith").is_none(),
+            "and nothing outside the vocabulary has one"
+        );
+    }
+
+    /// Lineage predicates are references and prose predicates are literals.
+    /// Getting this backwards is not a compile error anywhere.
+    #[test]
+    fn the_lineage_predicates_are_references_and_description_is_not() {
+        assert_eq!(object_shape("description"), Some(ObjectShape::Literal));
+        assert_eq!(object_shape("tag"), Some(ObjectShape::Literal));
+        assert_eq!(object_shape("feeds"), Some(ObjectShape::Reference));
+        assert_eq!(object_shape("derivedFrom"), Some(ObjectShape::Reference));
+        assert_eq!(object_shape("dependsOn"), Some(ObjectShape::Reference));
+    }
+
+    /// A batch skips what it cannot represent and keeps what it can, rather
+    /// than failing the whole run — one unresolvable object must not cost the
+    /// other facts in the same document.
+    #[test]
+    fn a_batch_projects_what_resolves_and_skips_what_does_not() {
+        let orders = Uuid::new_v4();
+        let map = resolved(&[("svc.db.orders", orders)]);
+        let claims = vec![
+            asserted_record("svc.db.orders", "description", "append-only"),
+            asserted_record("svc.db.orders", "feeds", "nobody has catalogued this"),
+        ];
+
+        let flakes = claim_flakes(&claims, &map, 3);
+
+        assert_eq!(flakes.len(), 1, "{flakes:#?}");
+        assert_eq!(flakes[0].p, Sid::dsc("description"));
+    }
+
+    /// A claim whose *subject* never resolved cannot project either — and this
+    /// is the case that would otherwise panic on an unwrap rather than skip.
+    #[test]
+    fn a_batch_skips_a_claim_whose_subject_did_not_resolve() {
+        let claims = vec![asserted_record(
+            "svc.db.nobody-knows",
+            "description",
+            "append-only",
+        )];
+
+        assert!(claim_flakes(&claims, &resolved(&[]), 3).is_empty());
+    }
+
+    // ── both ends of a reference must be known ──────────────────────────────
+
+    /// **The other half of `constrain`'s subject rule.** A `feeds` claim whose
+    /// object resolved to nothing is half an edge, and storing it would leave a
+    /// lineage fact that no traversal from either end can reach.
+    #[test]
+    fn a_reference_claim_with_an_unresolvable_object_is_discarded_with_a_reason() {
+        let mut lineage = claim("svc.db.orders", "feeds", 0.9);
+        lineage.object = "the payments table".to_string();
+        let result = ExtractionResult {
+            claims: vec![lineage],
+            discarded: Vec::new(),
+        };
+
+        let (kept, dropped) =
+            split_unresolved_objects(result, &resolved(&[("svc.db.orders", Uuid::new_v4())]));
+
+        assert!(kept.claims.is_empty(), "{:?}", kept.claims);
+        assert_eq!(dropped.len(), 1);
+        assert!(
+            dropped[0].reason.contains("did not resolve"),
+            "{}",
+            dropped[0].reason
+        );
+    }
+
+    /// **The negative.** A literal-shaped predicate must not be held to the
+    /// same rule — requiring `description "append-only"` to name an entity
+    /// would discard every description anyone ever extracted.
+    #[test]
+    fn a_literal_claim_is_never_asked_to_resolve_its_object() {
+        let result = ExtractionResult {
+            claims: vec![claim("svc.db.orders", "description", 0.9)],
+            discarded: Vec::new(),
+        };
+
+        let (kept, dropped) =
+            split_unresolved_objects(result, &resolved(&[("svc.db.orders", Uuid::new_v4())]));
+
+        assert_eq!(kept.claims.len(), 1);
+        assert!(dropped.is_empty());
+    }
+
+    /// And a reference claim whose object *did* resolve survives, or the rule
+    /// above would be indistinguishable from "references never work".
+    #[test]
+    fn a_reference_claim_with_a_resolved_object_survives() {
+        let mut lineage = claim("svc.db.orders", "feeds", 0.9);
+        lineage.object = "svc.db.payments".to_string();
+        let result = ExtractionResult {
+            claims: vec![lineage],
+            discarded: Vec::new(),
+        };
+
+        let (kept, dropped) = split_unresolved_objects(
+            result,
+            &resolved(&[
+                ("svc.db.orders", Uuid::new_v4()),
+                ("svc.db.payments", Uuid::new_v4()),
+            ]),
+        );
+
+        assert_eq!(kept.claims.len(), 1);
+        assert!(dropped.is_empty());
     }
 }

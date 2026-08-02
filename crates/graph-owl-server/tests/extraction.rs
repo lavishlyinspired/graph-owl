@@ -225,6 +225,120 @@ async fn a_claim_about_an_unknown_entity_is_discarded() {
     assert_eq!(body["asserted"], 0);
 }
 
+// ── a mention is resolved, not string-matched ──────────────────────────────
+
+/// A `service` → `database` → `schema` → `table` chain, returning the table's
+/// fully-qualified name and the service's name. A root-kind asset cannot be
+/// resolved by mention at all — it has no ancestors, so context can contribute
+/// nothing and the score tops out at exactly the threshold, which does not
+/// clear it. Which is correct, and means this test needs depth.
+async fn nested_table(app: &axum::Router) -> String {
+    let mut parent: Option<String> = None;
+    let mut fqn = String::new();
+    for (kind, name) in [
+        ("service", "warehouse"),
+        ("database", "sales"),
+        ("schema", "public"),
+        ("table", "orders"),
+    ] {
+        let mut body = json!({ "kind": kind, "name": name });
+        if let Some(parent_id) = &parent {
+            body["parentId"] = json!(parent_id);
+        }
+        let (status, created) = send(app, "POST", "/assets", Some(body)).await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        parent = Some(created["id"].as_str().expect("an id").to_string());
+        fqn = created["fullyQualifiedName"]
+            .as_str()
+            .expect("an fqn")
+            .to_string();
+    }
+    fqn
+}
+
+/// The same submission, with the evidence span the caller chooses — the span is
+/// what the mention is scored against, so a test about resolution has to control
+/// it rather than inherit a fixed one.
+fn submission_spanning(subject: &str, confidence: f64, text: &str) -> Value {
+    let mut payload = submission(subject, confidence, text);
+    payload["result"]["claims"][0]["provenance"]["evidence"] =
+        json!({ "start": 0, "end": text.len() });
+    payload
+}
+
+/// **The identity path extraction actually needs.** A worker reads "the orders
+/// table" in prose; the catalog stores facts against an entity id. Matching the
+/// subject to a fully-qualified name by string equality answers that question
+/// only when the document happens to spell the FQN — and answers it *wrongly*
+/// the rest of the time by concluding the entity is unknown, which is how the
+/// same real table ends up described twice.
+#[tokio::test]
+async fn a_mention_that_is_not_a_fully_qualified_name_still_resolves() {
+    let (app, _db, url) = test_app().await;
+    let fqn = nested_table(&app).await;
+    assert!(fqn.contains('.'), "the table should be nested: {fqn}");
+
+    let text = "The orders table in warehouse is append-only.";
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/extraction/runs",
+        Some(submission_spanning("orders", 0.9, text)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["asserted"], 1,
+        "`orders` is not the table's FQN, and it is unambiguously the table: {body}"
+    );
+
+    // And the resolution is **recorded**, so "why is this fact attached to this
+    // table" has an answer that is not "the extractor said so".
+    let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+    let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mention_resolutions")
+        .fetch_one(&pool)
+        .await
+        .expect("the resolutions should be readable");
+    assert_eq!(
+        recorded, 1,
+        "a scored resolution is provenance, not a guess"
+    );
+}
+
+/// **The negative, which is what makes the widening above safe.** Resolution is
+/// a threshold, not a nearest-neighbour: a mention that names nothing in the
+/// catalog must still be discarded, or extraction would attach every sentence
+/// to whichever entity happened to score least badly.
+#[tokio::test]
+async fn a_mention_that_names_nothing_is_still_discarded() {
+    let (app, _db, url) = test_app().await;
+    nested_table(&app).await;
+
+    let text = "The zzqxw table in warehouse is append-only.";
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/extraction/runs",
+        Some(submission_spanning("zzqxw", 0.95, text)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["asserted"], 0,
+        "0.95 confidence in a name nobody has is still a claim about nothing: {body}"
+    );
+    assert_eq!(body["discarded"], 1, "{body}");
+
+    let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+    let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mention_resolutions")
+        .fetch_one(&pool)
+        .await
+        .expect("the resolutions should be readable");
+    assert_eq!(recorded, 0, "nothing resolved, so nothing is recorded");
+}
+
 // ── idempotent re-ingestion ────────────────────────────────────────────────
 
 /// Re-submitting an unchanged document does nothing and **says** it did
@@ -511,4 +625,335 @@ async fn every_missing_identity_field_is_reported_in_one_response() {
     assert!(reported.contains("extractor"), "{reported}");
     assert!(reported.contains("extractorVersion"), "{reported}");
     assert!(reported.contains("sourceId"), "{reported}");
+}
+
+// ── the reasoning boundary, in both directions ──────────────────────────────
+//
+// **This is the property decision 2 is actually about**, and until this test
+// existed the epic could not tell whether it held. An asserted claim used to
+// stop at `extraction_claims`: reasoning could not see it, which looked exactly
+// like containment working and was really the facts never arriving. The rule
+// only means something if the *other* direction is also demonstrable — that a
+// deployment which opts in gets the confirmed facts and still does not get the
+// unconfirmed ones.
+
+use graph_owl_api::{Catalog, UpsertAsset};
+use graph_owl_core::extraction::{Claim, ExtractionResult, ParsedDocument, Provenance, TextSpan};
+use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+use graph_owl_core::{AssetKind, Principal, PrincipalKind};
+use graph_owl_engine::TripleStore;
+
+fn principal() -> Principal {
+    Principal {
+        id: "reviewer".to_string(),
+        name: "Reviewer".to_string(),
+        kind: PrincipalKind::User,
+        roles: Vec::new(),
+        is_admin: true,
+    }
+}
+
+async fn service(catalog: &Catalog, name: &str) -> String {
+    catalog
+        .upsert_asset(
+            &principal(),
+            UpsertAsset {
+                kind: AssetKind::Service,
+                name: name.to_string(),
+                parent_id: None,
+                description: None,
+                properties: None,
+                extension: None,
+            },
+        )
+        .await
+        .expect("a service should be creatable")
+        .fully_qualified_name
+}
+
+/// A document stating a dependency chain, with each claim's evidence pointing
+/// at the sentence it came from.
+fn chain(
+    text: &str,
+    links: &[(&str, &str)],
+    confidence: f64,
+) -> (ParsedDocument, ExtractionResult) {
+    let document = ParsedDocument {
+        source_id: "runbook.md".to_string(),
+        media_type: "markdown".to_string(),
+        text: text.to_string(),
+        sections: Vec::new(),
+    };
+    let claims = links
+        .iter()
+        .map(|(from, to)| Claim {
+            subject: (*from).to_string(),
+            predicate: "dependsOn".to_string(),
+            object: (*to).to_string(),
+            confidence,
+            provenance: Provenance {
+                source_id: "runbook.md".to_string(),
+                extractor: "runbook-rules".to_string(),
+                extractor_version: "1".to_string(),
+                extracted_at: chrono::Utc::now(),
+                evidence: TextSpan::new(0, text.len()),
+            },
+        })
+        .collect();
+    (
+        document,
+        ExtractionResult {
+            claims,
+            discarded: Vec::new(),
+        },
+    )
+}
+
+/// `dsc:dependsOn` is transitive — stated in the **default** graph, where an
+/// axiom belongs. The chain it closes over is the thing under test.
+async fn state_transitivity(url: &str) {
+    let graph = graph_owl_engine_postgres::PostgresTripleStore::connect(url)
+        .await
+        .expect("the graph engine should connect");
+    let t = graph.next_time().await.expect("a transaction time");
+    graph
+        .assert_flakes(&[Flake {
+            s: Sid::dsc("dependsOn"),
+            p: Sid::new(namespace::RDF, "type"),
+            o: FlakeValue::Ref(Sid::new(namespace::OWL, "TransitiveProperty")),
+            cx: None,
+            t,
+            op: true,
+        }])
+        .await
+        .expect("the axiom should be assertable");
+}
+
+fn opted_in() -> graph_owl_reasoning::Budget {
+    graph_owl_reasoning::Budget {
+        include_graphs: vec![Sid::dsc(graph_owl_core::extraction_run::EXTRACTION_GRAPH)],
+        ..graph_owl_reasoning::Budget::default()
+    }
+}
+
+/// **Direction one: an unconfirmed claim cannot affect reasoning.** Not because
+/// the reasoner declines to use it, but because it is not in the graph at all —
+/// and the opt-in budget is passed here deliberately, so the test proves the
+/// claim is absent rather than merely filtered.
+#[tokio::test]
+async fn a_surfaced_claim_reaches_no_conclusion_even_for_a_deployment_that_opted_in() {
+    let (catalog, _db, url) = common::test_catalog().await;
+    state_transitivity(&url).await;
+
+    let alpha = service(&catalog, "alpha").await;
+    let beta = service(&catalog, "beta").await;
+    let gamma = service(&catalog, "gamma").await;
+
+    let text = "alpha depends on beta, and beta depends on gamma.";
+    let (document, result) = chain(
+        text,
+        &[(&alpha, &beta), (&beta, &gamma)],
+        // The surface band: evidence, not proof, so a human is asked.
+        0.6,
+    );
+    let outcome = catalog
+        .submit_extraction(&document, result, "runbook-rules", "1")
+        .await
+        .expect("the submission should be accepted");
+    assert!(
+        matches!(
+            outcome,
+            graph_owl_api::extraction::SubmissionOutcome::Recorded {
+                surfaced: 2,
+                asserted: 0,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+
+    let report = catalog
+        .run_reasoning(&opted_in())
+        .await
+        .expect("reasoning should run");
+
+    assert_eq!(
+        report.derived, 0,
+        "an unconfirmed machine claim must reach no conclusion — a guess laundered \
+         into a derived fact carries provenance that looks like catalog truth"
+    );
+}
+
+/// **Direction two: an asserted claim does affect reasoning, once a deployment
+/// asks for it.** The same chain at a confidence the bands assert on, and the
+/// same two runs — the only difference between the assertions below is the
+/// budget, which is what makes this a test of the opt-in rather than of the
+/// reasoner.
+#[tokio::test]
+async fn an_asserted_claim_is_reasoned_over_only_by_a_deployment_that_opted_in() {
+    let (catalog, _db, url) = common::test_catalog().await;
+    state_transitivity(&url).await;
+
+    let alpha = service(&catalog, "alpha").await;
+    let beta = service(&catalog, "beta").await;
+    let gamma = service(&catalog, "gamma").await;
+
+    let text = "alpha depends on beta, and beta depends on gamma.";
+    let (document, result) = chain(text, &[(&alpha, &beta), (&beta, &gamma)], 0.9);
+    catalog
+        .submit_extraction(&document, result, "runbook-rules", "1")
+        .await
+        .expect("the submission should be accepted");
+
+    // The default deployment does not reason over extraction.
+    let closed = catalog
+        .run_reasoning(&graph_owl_reasoning::Budget::default())
+        .await
+        .expect("reasoning should run");
+    assert_eq!(
+        closed.derived, 0,
+        "extraction must not feed inference unless a deployment says it may"
+    );
+
+    // The same facts, the same rules, one different budget.
+    let open = catalog
+        .run_reasoning(&opted_in())
+        .await
+        .expect("reasoning should run");
+    assert!(
+        open.derived > 0,
+        "an opted-in deployment must actually see the confirmed facts — before \
+         this, `graph:extraction` was never loaded, so the rule above held for \
+         the wrong reason and this direction was impossible"
+    );
+
+    // And the conclusion is the one the axiom implies, not merely *a* conclusion.
+    let alpha_id = catalog
+        .get_asset_by_fqn(&alpha)
+        .await
+        .expect("read")
+        .expect("alpha exists")
+        .id;
+    let gamma_id = catalog
+        .get_asset_by_fqn(&gamma)
+        .await
+        .expect("read")
+        .expect("gamma exists")
+        .id;
+    let derived = catalog
+        .derived_about(&graph_owl_core::projection::entity_sid(alpha_id))
+        .await
+        .expect("the overlay should be readable");
+    assert!(
+        derived.iter().any(|f| f.p == Sid::dsc("dependsOn")
+            && f.o == FlakeValue::Ref(graph_owl_core::projection::entity_sid(gamma_id))),
+        "alpha depends on gamma transitively: {derived:#?}"
+    );
+}
+
+/// **The confirmation path closes the loop.** A claim the bands surfaced is
+/// invisible; the same claim after a human says yes is not. This is the
+/// transition decision 2 describes and nothing previously performed.
+#[tokio::test]
+async fn confirming_a_surfaced_claim_makes_it_reason_able() {
+    let (catalog, _db, url) = common::test_catalog().await;
+    state_transitivity(&url).await;
+
+    let alpha = service(&catalog, "alpha").await;
+    let beta = service(&catalog, "beta").await;
+    let gamma = service(&catalog, "gamma").await;
+
+    let text = "alpha depends on beta, and beta depends on gamma.";
+    let (document, result) = chain(text, &[(&alpha, &beta), (&beta, &gamma)], 0.6);
+    catalog
+        .submit_extraction(&document, result, "runbook-rules", "1")
+        .await
+        .expect("the submission should be accepted");
+
+    let queued = catalog.extraction_queue().await.expect("the queue reads");
+    assert_eq!(queued.len(), 2, "{queued:#?}");
+
+    for claim in &queued {
+        catalog
+            .decide_extraction_claim(claim.id, true, "reviewer")
+            .await
+            .expect("a reviewer should be able to confirm");
+    }
+
+    let report = catalog
+        .run_reasoning(&opted_in())
+        .await
+        .expect("reasoning should run");
+
+    assert!(
+        report.derived > 0,
+        "a human confirmed both links, so the chain must close: {report:?}"
+    );
+}
+
+/// **Rejecting is not confirming.** The negative a mutation would otherwise
+/// survive: a projection that ran on every decision rather than on a
+/// confirmation would put rejected machine output into the graph, which is
+/// precisely the claim a reviewer said was wrong.
+#[tokio::test]
+async fn rejecting_a_surfaced_claim_puts_nothing_in_the_graph() {
+    let (catalog, _db, url) = common::test_catalog().await;
+    state_transitivity(&url).await;
+
+    let alpha = service(&catalog, "alpha").await;
+    let beta = service(&catalog, "beta").await;
+    let gamma = service(&catalog, "gamma").await;
+
+    let text = "alpha depends on beta, and beta depends on gamma.";
+    let (document, result) = chain(text, &[(&alpha, &beta), (&beta, &gamma)], 0.6);
+    catalog
+        .submit_extraction(&document, result, "runbook-rules", "1")
+        .await
+        .expect("the submission should be accepted");
+
+    for claim in catalog.extraction_queue().await.expect("the queue reads") {
+        catalog
+            .decide_extraction_claim(claim.id, false, "reviewer")
+            .await
+            .expect("a reviewer should be able to reject");
+    }
+
+    let report = catalog
+        .run_reasoning(&opted_in())
+        .await
+        .expect("reasoning should run");
+
+    assert_eq!(
+        report.derived, 0,
+        "a rejected claim must not be in the graph for anything to reason over"
+    );
+}
+
+// ── the vocabulary and the registry are one thing ───────────────────────────
+
+/// **A claim can now be accepted by the policy and refused by the engine**, and
+/// nothing in the type system connects the two lists. `CATALOG_PREDICATES` is
+/// what a worker's claims are checked against; the `predicates` table is what
+/// `assert_flakes` checks against. A predicate in the first and not the second
+/// passes review, projects, and fails at the write — where the only symptom is
+/// a logged line and a fact that is not there.
+#[tokio::test]
+async fn every_predicate_a_worker_may_use_is_registered_in_the_engine() {
+    let (_catalog, _db, url) = common::test_catalog().await;
+    let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+
+    let registered: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM predicates WHERE namespace = 1")
+            .fetch_all(&pool)
+            .await
+            .expect("the registry should be readable");
+
+    for predicate in graph_owl_api::extraction::CATALOG_PREDICATES {
+        assert!(
+            registered.iter().any(|name| name == predicate),
+            "`dsc:{predicate}` is in the extraction vocabulary but not in the \
+             predicate registry, so an asserted claim using it would be refused \
+             by `assert_flakes` after passing every check above it"
+        );
+    }
 }
