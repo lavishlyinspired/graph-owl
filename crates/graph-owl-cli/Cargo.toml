@@ -26,6 +26,18 @@ thiserror.workspace = true
 # MIT OR Apache-2.0, so it clears `00i`'s permissive-only allowlist.
 serde_norway = "0.9"
 walkdir = "2"
+# The command surface. `derive` keeps each flag next to the field that holds
+# it, so a flag cannot exist without somewhere for its value to go.
+# `env` so `--server`/`--token` can come from the environment: a token
+# passed as an argument lands in shell history and in `ps`.
+clap = { version = "4", features = ["derive", "env"] }
+# The real `Catalog` implementation. **Blocking**, and that is the deliberate
+# choice: this binary does one bounded sequence of requests and exits, so an
+# async runtime would buy nothing but a dependency and a `#[tokio::main]`.
+# `rustls-tls` with no default features matches the workspace's own reqwest —
+# a CLI that dragged in OpenSSL would be harder to ship than the server it
+# talks to.
+reqwest = { workspace = true, features = ["blocking"] }
 
 [dev-dependencies]
 serde_norway = "0.9"

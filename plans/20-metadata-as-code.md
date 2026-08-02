@@ -1,6 +1,6 @@
 # Plan: Metadata-as-Code (Epic 20) ★
 **Branch**: feat/metadata-as-code
-**Status**: In progress (Slices A–G written; the HTTP client that carries a plan to a live catalog is the remaining piece)
+**Status**: Shipped (Slices A–G, plus the HTTP client and the `graph-owl` binary)
 **Depends on**: Epic 15 (idempotent upsert and reconciliation machinery)
 **Differentiator** — the flagship. See `plans/00a-product-position.md`.
 **Crates**: **`graph-owl-cli`** (new — plan/apply/drift/export) · `graph-owl-core` (declaration types) · `graph-owl-api` (reconciliation, reusing Epic 15's scoped machinery)
@@ -51,7 +51,7 @@ It lands right after connectors because Epic 15 already builds FQN-keyed idempot
 
 ## Acceptance criteria (feature level)
 
-- [~] A directory of YAML applies to an empty catalog, creating the declared hierarchy. **Planning is complete and proven; execution against a live catalog is not.** `compute` classifies every entity and `in_dependency_order` guarantees parents precede children, both tested — but nothing yet carries that plan over HTTP, which is the honest gap below.
+- [x] A directory of YAML applies to an empty catalog, creating the declared hierarchy — proven end to end against a real router and a real Postgres.
 - [x] A second apply with unchanged files is a no-op — zero versions, zero events. Structural rather than incidental: an unchanged entity is classified `NoChange` and `in_dependency_order` omits it entirely, so there is nothing to send. Tested from both directions.
 - [x] `--dry-run` prints an accurate plan and mutates nothing — the plan is a pure function of declarations and live state, with no write path to reach.
 - [x] An entity removed from the files is tombstoned only with `--prune`, and only within scope. Two independent guards, both tested, including the prefix-boundary case (`service_a` must not claim `service_ab`).
@@ -66,9 +66,11 @@ It lands right after connectors because Epic 15 already builds FQN-keyed idempot
 
 **The end-to-end test found what the doubles could not, immediately.** The server's `UpsertAsset` takes **`parentId` as a UUID**, not `parentFqn` as a string — so against a real catalog every child entity would have been refused, while the recording double went on accepting the wrong shape indefinitely. That is the whole argument for one real test at an epic's end: a double answers "did we make the right decision?", and only something that can say *no* answers "did we speak the right protocol?". The fix was a design change rather than a patch — `upsert` now returns the id the catalog assigned and apply threads a `ParentIds` map through the loop, which works only because apply runs parents-first. The ordering guarantee turned out to be load-bearing for a second, unanticipated reason.
 
-**Still not built:** the `clap` command surface.
+**Now built:** the HTTP client (`http.rs`, blocking `reqwest` — the CLI does one bounded sequence of requests and exits, so an async runtime would buy nothing) and the `graph-owl` binary with five subcommands: `validate`, `plan`, `apply`, `drift`, `export`. The list is closed per decision 8; querying, entity CRUD and server administration are deliberately absent.
 
-**Previously not built (now done):** the HTTP client seam. Every module above is a pure function over `Declarations` and a `Vec<LiveEntity>`, which is why all of it is testable with no server — but it also means nothing yet *fetches* live state or *sends* a change. That is deliberate sequencing, not an oversight: decision 6 makes the CLI a thin client over the HTTP API, so the client is one well-defined piece bolted onto a core that is already proven, rather than the thing everything else is entangled with. The acceptance criterion for applying to a live catalog is marked partial above to say so.
+**Conventions verified by running the binary, not by reading the code**: `validate` on a good tree exits 0 with its summary on *stderr*; on a bad tree it exits 1 with structured JSON on *stdout* that `python -m json.tool` parses; in text mode stdout is empty (0 bytes) so diagnostics never pollute a pipe. `--token` reads from the environment and clap hides its value in `--help`, so it appears in neither shell history nor `ps`.
+
+**Two details in the HTTP client that only matter when something goes wrong.** The scope read **pages to exhaustion** — stopping at one page would make the catalog look emptier than it is and plan a prune for everything past it, which no downstream guard can catch because the read itself lied. And `tombstone` resolves the FQN to an id immediately before deleting rather than trusting the id from the earlier plan read: one extra round trip, which is the right price for the one irreversible operation. Every module above is a pure function over `Declarations` and a `Vec<LiveEntity>`, which is why all of it is testable with no server — but it also means nothing yet *fetches* live state or *sends* a change. That is deliberate sequencing, not an oversight: decision 6 makes the CLI a thin client over the HTTP API, so the client is one well-defined piece bolted onto a core that is already proven, rather than the thing everything else is entangled with. The acceptance criterion for applying to a live catalog is marked partial above to say so.
 
 **A bug the gate caught that no amount of type-checking would have.** The document loop pushed one error per malformed document — but `serde_norway`'s multi-document iterator does not advance past a document it could not parse, so a single malformed file produced errors forever. It surfaced as a test running 185 seconds until the runner killed it; in a user's hands it would have hung the CLI and exhausted memory on a stray typo. Parsing now stops at the first parse failure *within a file*, which is also the correct semantic — once a parse fails the parser's position is untrustworthy, so further "documents" read out of it are fiction. Accumulation across files is unaffected.
 

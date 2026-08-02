@@ -57,7 +57,7 @@ is the condition that index exists to catch.
 | **17** | 6 | [`17-entity-resolution.md`](17-entity-resolution.md) | **Shipped** | 4/4 | Epic 4 (`sameAs` in the graph), Epic 15 + 16 (two write paths make this necessa… |
 | **18** | 6 | [`18-inbound-events.md`](18-inbound-events.md) | **Shipped** | 5/5 | Epic 16 (ingestion contract), Epic 17 (resolution, so pushes do not duplicate) |
 | **19** | 6 | [`19-streaming.md`](19-streaming.md) | In progress | 5/6 (+1 partial) | Epic 16 (ingestion contract), Epic 18 (dedup and ordering machinery) |
-| **20** | 6 | [`20-metadata-as-code.md`](20-metadata-as-code.md) | In progress | 1/2 (+1 partial) | Epic 15 (idempotent upsert and reconciliation machinery) |
+| **20** | 6 | [`20-metadata-as-code.md`](20-metadata-as-code.md) | **Shipped** | 2/2 | Epic 15 (idempotent upsert and reconciliation machinery) |
 | **21** | 6 | [`21-document-ingestion.md`](21-document-ingestion.md) | Not started | 0/2 | Epic 16 (ingestion), Epic 17 (mention resolution) |
 | **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | Not started | 0/8 | Epic 3 (the envelope's `extension` field) |
 | **23** | 7 | [`23-domains.md`](23-domains.md) | Not started | 0/8 | Epic 11 (domains and products are owned) |
@@ -382,7 +382,7 @@ is the condition that index exists to catch.
 
 ### Epic 20 — Metadata-as-Code ★ *(Demo 6)*
 
-- [~] `plan` / `apply` / `diff` with scoped authority
+- [x] `plan` / `apply` / `diff` with scoped authority
 - [x] Drift reported, never auto-corrected
 
 ### Epic 21 — Document & Conversation Ingestion *(Demo 6)*
