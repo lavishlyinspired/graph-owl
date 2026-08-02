@@ -66,6 +66,11 @@ pub struct Plan {
 /// compile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveEntity {
+    /// The catalog's own id. Carried because the write API addresses a
+    /// parent **by id, not by FQN** — a mismatch found only by reading the
+    /// server's actual DTO, and one a test double would happily have
+    /// accepted forever.
+    pub id: String,
     pub fully_qualified_name: String,
     pub kind: String,
     pub description: Option<String>,

@@ -29,3 +29,19 @@ walkdir = "2"
 
 [dev-dependencies]
 serde_norway = "0.9"
+# The end-to-end test stands up a real server against a real Postgres. This
+# is the ONE thing the recording double cannot do: it happily accepts any
+# payload shape forever, so a wrong URL or a wrong field name (`parentFqn`
+# where the server wants `parentId` — which is exactly what this found)
+# stays invisible until something real refuses it.
+graph-owl-server = { path = "../graph-owl-server" }
+graph-owl-api = { path = "../graph-owl-api" }
+graph-owl-storage-postgres = { path = "../graph-owl-storage-postgres" }
+graph-owl-engine-postgres = { path = "../graph-owl-engine-postgres" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }
+testcontainers = { version = "0.24", features = ["reusable-containers"] }
+testcontainers-modules = { version = "0.12", features = ["postgres"] }

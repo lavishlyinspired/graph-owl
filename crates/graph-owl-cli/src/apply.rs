@@ -97,3 +97,45 @@ pub fn in_dependency_order(plan: &Plan) -> Vec<&PlannedEntity> {
 pub const fn may_proceed(yes_flag: bool, stdin_is_tty: bool) -> bool {
     yes_flag || stdin_is_tty
 }
+
+/// Resolves parent FQNs to catalog ids as it goes.
+///
+/// **Why this exists at all**: the write API addresses a parent by id, and a
+/// just-created parent's id is only knowable from the response that created
+/// it. That makes apply inherently stateful — and tractable only because it
+/// runs parents-first, so every child's parent has already been seen.
+///
+/// Seeded from live state so an existing parent needs no write to be
+/// addressable.
+pub struct ParentIds {
+    by_fqn: std::collections::HashMap<String, String>,
+}
+
+impl ParentIds {
+    #[must_use]
+    pub fn from_live(live: &[crate::plan::LiveEntity]) -> Self {
+        Self {
+            by_fqn: live
+                .iter()
+                .map(|entity| (entity.fully_qualified_name.clone(), entity.id.clone()))
+                .collect(),
+        }
+    }
+
+    /// Records what a write returned, so children sent later can address it.
+    pub fn learn(&mut self, fully_qualified_name: &str, id: String) {
+        self.by_fqn.insert(fully_qualified_name.to_string(), id);
+    }
+
+    /// The id for a parent FQN, if known.
+    ///
+    /// `None` for a genuinely unknown parent is deliberately *not* an error
+    /// here: validation already refused a dangling parent locally, so
+    /// reaching this with `None` means the parent is live-but-out-of-scope,
+    /// and the catalog is the right place to refuse that — it knows whether
+    /// the caller may see it.
+    #[must_use]
+    pub fn get(&self, parent_fqn: &str) -> Option<&str> {
+        self.by_fqn.get(parent_fqn).map(String::as_str)
+    }
+}

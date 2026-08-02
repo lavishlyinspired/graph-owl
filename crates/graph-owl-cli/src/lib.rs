@@ -11,6 +11,7 @@ pub mod declaration;
 pub mod drift;
 pub mod exit;
 pub mod export;
+pub mod format;
 pub mod plan;
 pub mod prune;
 pub mod validate;

@@ -58,14 +58,17 @@ pub trait Catalog {
     /// [`ClientError`] if the catalog cannot be reached or refuses the read.
     fn live_within(&self, scope_prefixes: &[String]) -> Result<Vec<LiveEntity>, ClientError>;
 
-    /// Creates or updates one entity. Idempotent by FQN, reusing the
-    /// catalog's own upsert rather than a create-then-update dance that
-    /// would race.
+    /// Creates or updates one entity, returning **its id** — which the
+    /// caller needs, because a child's parent is addressed by id and the
+    /// only way to know a just-created parent's id is to be told.
+    ///
+    /// Idempotent by FQN, reusing the catalog's own upsert rather than a
+    /// create-then-update dance that would race.
     ///
     /// # Errors
     ///
     /// [`ClientError`] if the catalog cannot be reached or refuses the write.
-    fn upsert(&self, entity: &UpsertRequest) -> Result<(), ClientError>;
+    fn upsert(&self, entity: &UpsertRequest) -> Result<String, ClientError>;
 
     /// Soft-deletes one entity — a tombstone, never a hard delete, so a
     /// mistaken prune is recoverable.
@@ -87,6 +90,14 @@ pub trait Catalog {
 pub struct UpsertRequest {
     pub kind: String,
     pub name: String,
-    pub parent_fqn: Option<String>,
+    /// The parent's **catalog id**, not its FQN.
+    ///
+    /// This is the shape the server actually accepts (`UpsertAsset.parentId`
+    /// is a `Uuid`), and getting it wrong is invisible to a test double:
+    /// the double would accept an FQN indefinitely while every real request
+    /// for a child was refused. Resolving FQN → id is the caller's job, and
+    /// tractable precisely because apply runs parents-first — by the time a
+    /// child is sent, its parent's id is known.
+    pub parent_id: Option<String>,
     pub description: Option<String>,
 }

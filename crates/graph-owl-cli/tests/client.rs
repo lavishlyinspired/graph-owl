@@ -9,9 +9,10 @@
 //! declaration happened to match. Recording the request is the only way to
 //! see the difference.
 
+use graph_owl_cli::apply::ParentIds;
 use graph_owl_cli::client::{Catalog, ClientError, UpsertRequest};
 use graph_owl_cli::declaration::{API_VERSION, Declaration, Metadata};
-use graph_owl_cli::plan::{Change, LiveEntity, compute};
+use graph_owl_cli::plan::{LiveEntity, compute};
 use graph_owl_cli::validate::Declarations;
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -40,9 +41,11 @@ impl Catalog for Recorder {
             .collect())
     }
 
-    fn upsert(&self, entity: &UpsertRequest) -> Result<(), ClientError> {
+    fn upsert(&self, entity: &UpsertRequest) -> Result<String, ClientError> {
         self.upserts.borrow_mut().push(entity.clone());
-        Ok(())
+        // A real catalog returns the id it assigned; the double mints a
+        // deterministic one so a child's parent_id is checkable.
+        Ok(format!("id-{}", entity.name))
     }
 
     fn tombstone(&self, fully_qualified_name: &str) -> Result<(), ClientError> {
@@ -77,6 +80,7 @@ fn declared(fqn: &str, kind: &str, description: Option<&str>) -> (String, (PathB
 
 fn live(fqn: &str, kind: &str, description: Option<&str>) -> LiveEntity {
     LiveEntity {
+        id: format!("id-{fqn}"),
         fully_qualified_name: fqn.to_string(),
         kind: kind.to_string(),
         description: description.map(ToString::to_string),
@@ -89,17 +93,28 @@ fn apply_plan(
     catalog: &dyn Catalog,
     plan: &graph_owl_cli::plan::Plan,
     declarations: &Declarations,
+    live: &[LiveEntity],
 ) {
+    // Seeded from live state so an already-existing parent is addressable
+    // without writing it; each write then teaches the id it returned.
+    let mut parents = ParentIds::from_live(live);
     for entity in graph_owl_cli::apply::in_dependency_order(plan) {
         let (_, declaration) = &declarations.by_fqn[&entity.fully_qualified_name];
-        catalog
+        let parent_id = declaration
+            .metadata
+            .parent
+            .as_deref()
+            .and_then(|fqn| parents.get(fqn))
+            .map(ToString::to_string);
+        let id = catalog
             .upsert(&UpsertRequest {
                 kind: declaration.kind.clone(),
                 name: declaration.metadata.name.clone(),
-                parent_fqn: declaration.metadata.parent.clone(),
+                parent_id,
                 description: declaration.metadata.description.clone(),
             })
             .expect("recorder never fails");
+        parents.learn(&entity.fully_qualified_name, id);
     }
 }
 
@@ -123,7 +138,7 @@ fn an_undeclared_description_is_never_sent() {
     let decls = declarations(vec![declared("svc", "service", None)]);
 
     let plan = compute(&decls, &recorder.live);
-    apply_plan(&recorder, &plan, &decls);
+    apply_plan(&recorder, &plan, &decls, &recorder.live);
 
     assert!(
         recorder.upserts.borrow().is_empty(),
@@ -168,18 +183,17 @@ fn creates_are_sent_parents_before_children() {
     ]);
 
     let plan = compute(&decls, &[]);
-    apply_plan(&recorder, &plan, &decls);
+    apply_plan(&recorder, &plan, &decls, &recorder.live);
 
-    let sent: Vec<String> = recorder
-        .upserts
-        .borrow()
-        .iter()
-        .map(|r| match &r.parent_fqn {
-            Some(parent) => format!("{parent}.{}", r.name),
-            None => r.name.clone(),
-        })
-        .collect();
-    assert_eq!(sent, vec!["svc", "svc.db", "svc.db.public"]);
+    let sent = recorder.upserts.borrow();
+    let names: Vec<&str> = sent.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, vec!["svc", "db", "public"]);
+    // **And each child addressed its parent by the id the parent's own
+    // write returned** — the property that makes parents-first necessary
+    // rather than merely tidy.
+    assert_eq!(sent[0].parent_id, None, "a root has no parent");
+    assert_eq!(sent[1].parent_id.as_deref(), Some("id-svc"));
+    assert_eq!(sent[2].parent_id.as_deref(), Some("id-db"));
 }
 
 /// A declared description that genuinely differs **is** sent — the converse
@@ -193,7 +207,7 @@ fn a_changed_description_is_sent() {
     let decls = declarations(vec![declared("svc", "service", Some("new"))]);
 
     let plan = compute(&decls, &recorder.live);
-    apply_plan(&recorder, &plan, &decls);
+    apply_plan(&recorder, &plan, &decls, &recorder.live);
 
     let sent = recorder.upserts.borrow();
     assert_eq!(sent.len(), 1, "{sent:?}");
@@ -218,7 +232,7 @@ fn a_second_apply_over_unchanged_declarations_sends_nothing() {
     ]);
 
     let plan = compute(&decls, &recorder.live);
-    apply_plan(&recorder, &plan, &decls);
+    apply_plan(&recorder, &plan, &decls, &recorder.live);
 
     assert!(recorder.upserts.borrow().is_empty());
     assert!(!plan.has_changes());
@@ -239,7 +253,7 @@ fn an_apply_never_tombstones_on_its_own() {
     let decls = declarations(vec![declared("svc", "service", None)]);
 
     let plan = compute(&decls, &recorder.live);
-    apply_plan(&recorder, &plan, &decls);
+    apply_plan(&recorder, &plan, &decls, &recorder.live);
 
     assert_eq!(
         plan.counts().prune,

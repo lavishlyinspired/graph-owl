@@ -35,6 +35,7 @@ fn declared(fqn: &str, kind: &str, description: Option<&str>) -> (String, (PathB
 
 fn live(fqn: &str, kind: &str, description: Option<&str>) -> LiveEntity {
     LiveEntity {
+        id: format!("id-{fqn}"),
         fully_qualified_name: fqn.to_string(),
         kind: kind.to_string(),
         description: description.map(ToString::to_string),
