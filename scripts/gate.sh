@@ -31,14 +31,20 @@ cd "$(dirname "$0")/.."
 # --- 0. Environment, before believing any timing -------------------------
 # Every "slow build" investigation in this project's history ended in an
 # environmental cause, and each cost an hour of looking at the wrong thing.
-containers=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')
+# `|| true` on every one of these: with `set -o pipefail`, a `pgrep` or
+# `docker` that legitimately matches nothing exits 1, the assignment inherits
+# it, and `set -e` kills the script — **silently, before running any of the
+# gate**. That happened: a run reported nothing and was read as green when it
+# had in fact done nothing at all. A gate that can pass without executing is
+# worse than no gate.
+containers=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ' || true)
 if [[ ${containers:-0} -gt 4 ]]; then
     echo "WARNING: $containers docker containers running." >&2
     echo "  Leaked test containers make everything slower (see CLAUDE.md)." >&2
     echo "  docker ps --format '{{.Names}}\t{{.Image}}'" >&2
 fi
 for proc in cargo claude rustc; do
-    n=$(pgrep -x "$proc" 2>/dev/null | wc -l | tr -d ' ')
+    n=$(pgrep -x "$proc" 2>/dev/null | wc -l | tr -d ' ' || true)
     # `cargo` counts this script's own invocation once it starts.
     if [[ ${n:-0} -gt 1 ]]; then
         echo "WARNING: $n '$proc' processes — something else is competing." >&2
@@ -60,14 +66,14 @@ else
     # it is exactly the state right after committing an epic, which is when
     # a gate before pushing is most wanted, and scoping it to "nothing" would
     # silently promote every such run to a full workspace pass.
-    CHANGED=$(git status --porcelain | awk '{print $NF}')
+    CHANGED=$(git status --porcelain | awk '{print $NF}' || true)
     if [[ -z $CHANGED ]] && git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
-        CHANGED=$(git diff --name-only '@{upstream}'...HEAD)
+        CHANGED=$(git diff --name-only '@{upstream}'...HEAD || true)
     fi
     while IFS= read -r crate; do
         [[ -n $crate ]] && SCOPE+=(-p "$crate")
     done < <(printf '%s\n' "$CHANGED" \
-        | grep -oE 'crates/[^/]+' | sort -u | cut -d/ -f2)
+        | grep -oE 'crates/[^/]+' | sort -u | cut -d/ -f2 || true)
 fi
 
 if [[ $FULL -eq 1 || ${#SCOPE[@]} -eq 0 ]]; then
@@ -106,7 +112,7 @@ else
 fi
 
 echo
-echo "Gate passed."
+echo "Gate passed — and it actually ran: $(date -u +%H:%M:%SZ)."
 echo
 echo "This was a SCOPED run unless you passed --full. The whole-workspace"
 echo "suite and the doc-tests are CI's job (.github/workflows/ci.yml) — that"
