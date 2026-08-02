@@ -1,0 +1,9 @@
+apiVersion: graph-owl.dev/v1
+kind: warehouse
+metadata:
+  name: not_a_kind
+---
+apiVersion: graph-owl.dev/v1
+kind: service
+metadata:
+  description: this document has no name field at all

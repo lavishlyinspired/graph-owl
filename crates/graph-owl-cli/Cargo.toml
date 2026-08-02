@@ -8,8 +8,24 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# `graph-owl-core` only — deliberately **not** `graph-owl-api`, which the
+# placeholder manifest carried. Decision 6: the CLI is a thin client over the
+# HTTP API with no direct database access, and depending on the facade would
+# pull the storage adapter into a binary that must be able to run against a
+# remote instance. `graph-owl-core` is pure domain types with no I/O, which is
+# what validating a declaration's `kind` actually needs.
 graph-owl-core = { path = "../graph-owl-core" }
-graph-owl-api = { path = "../graph-owl-api" }
-tokio.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+# YAML with source locations — `Error::location()` is what turns "missing
+# field" into "missing field, this file, this line", which Slice A's criteria
+# require. **`serde_norway`, not `serde_yaml`**: the latter was deprecated and
+# archived by its author in March 2024, and `00l-build-vs-adopt.md` is explicit
+# that a parser for a standard we did not invent is adopted, never written.
+# MIT OR Apache-2.0, so it clears `00i`'s permissive-only allowlist.
+serde_norway = "0.9"
+walkdir = "2"
+
+[dev-dependencies]
+serde_norway = "0.9"

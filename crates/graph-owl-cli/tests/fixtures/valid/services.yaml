@@ -1,0 +1,11 @@
+apiVersion: graph-owl.dev/v1
+kind: service
+metadata:
+  name: snowflake_prod
+  description: The production warehouse
+---
+apiVersion: graph-owl.dev/v1
+kind: database
+metadata:
+  name: analytics
+  parent: snowflake_prod

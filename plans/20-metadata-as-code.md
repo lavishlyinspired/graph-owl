@@ -1,6 +1,6 @@
 # Plan: Metadata-as-Code (Epic 20) ★
 **Branch**: feat/metadata-as-code
-**Status**: Not started
+**Status**: In progress (Slices A–G written; the HTTP client that carries a plan to a live catalog is the remaining piece)
 **Depends on**: Epic 15 (idempotent upsert and reconciliation machinery)
 **Differentiator** — the flagship. See `plans/00a-product-position.md`.
 **Crates**: **`graph-owl-cli`** (new — plan/apply/drift/export) · `graph-owl-core` (declaration types) · `graph-owl-api` (reconciliation, reusing Epic 15's scoped machinery)
@@ -51,14 +51,27 @@ It lands right after connectors because Epic 15 already builds FQN-keyed idempot
 
 ## Acceptance criteria (feature level)
 
-- [ ] A directory of YAML applies to an empty catalog, creating the declared hierarchy.
-- [ ] A second apply with unchanged files is a no-op — zero versions, zero events.
-- [ ] `--dry-run` prints an accurate plan and mutates nothing.
-- [ ] An entity removed from the files is tombstoned only with `--prune`, and only within scope.
-- [ ] `drift` reports divergence between declared and live state without changing anything.
-- [ ] `export` produces declarations that re-apply as a no-op.
-- [ ] A CI mode fails a pull request whose plan would delete assets.
+- [~] A directory of YAML applies to an empty catalog, creating the declared hierarchy. **Planning is complete and proven; execution against a live catalog is not.** `compute` classifies every entity and `in_dependency_order` guarantees parents precede children, both tested — but nothing yet carries that plan over HTTP, which is the honest gap below.
+- [x] A second apply with unchanged files is a no-op — zero versions, zero events. Structural rather than incidental: an unchanged entity is classified `NoChange` and `in_dependency_order` omits it entirely, so there is nothing to send. Tested from both directions.
+- [x] `--dry-run` prints an accurate plan and mutates nothing — the plan is a pure function of declarations and live state, with no write path to reach.
+- [x] An entity removed from the files is tombstoned only with `--prune`, and only within scope. Two independent guards, both tested, including the prefix-boundary case (`service_a` must not claim `service_ab`).
+- [x] `drift` reports divergence between declared and live state without changing anything — and distinguishes "someone edited live" from "the file changed and was never applied", which a plain diff cannot.
+- [x] `export` produces declarations that re-apply as a no-op — the round-trip test asserts exactly that.
+- [x] A CI mode fails a pull request whose plan would delete assets, with exit codes that separate "pending changes" from "error" so a real diff is not a broken build.
 - [ ] A malformed or schema-invalid file fails before anything is mutated.
+
+## What is built, and what is not
+
+**Built and tested (32 tests):** the declaration format and its local validator (all errors reported, never the first); plan computation with per-field before/after and byte-identical determinism; apply *ordering* and the consent rule; scope and threshold guards for pruning; drift classification; export round-trip; exit codes and credential redaction.
+
+**Not built:** the HTTP client. Every module above is a pure function over `Declarations` and a `Vec<LiveEntity>`, which is why all of it is testable with no server — but it also means nothing yet *fetches* live state or *sends* a change. That is deliberate sequencing, not an oversight: decision 6 makes the CLI a thin client over the HTTP API, so the client is one well-defined piece bolted onto a core that is already proven, rather than the thing everything else is entangled with. The acceptance criterion for applying to a live catalog is marked partial above to say so.
+
+**A bug the gate caught that no amount of type-checking would have.** The document loop pushed one error per malformed document — but `serde_norway`'s multi-document iterator does not advance past a document it could not parse, so a single malformed file produced errors forever. It surfaced as a test running 185 seconds until the runner killed it; in a user's hands it would have hung the CLI and exhausted memory on a stray typo. Parsing now stops at the first parse failure *within a file*, which is also the correct semantic — once a parse fails the parser's position is untrustworthy, so further "documents" read out of it are fiction. Accumulation across files is unaffected.
+
+**Two corrections to the plan's own premises**, found while implementing:
+
+- The placeholder `graph-owl-cli` manifest depended on `graph-owl-api`, which contradicts decision 6 — depending on the facade pulls the storage adapter into a binary that is supposed to run against a *remote* instance. Removed; `graph-owl-core` alone supplies the domain vocabulary (`AssetKind`) that validation needs.
+- `serde_yaml` was deprecated and archived by its author in March 2024, so the obvious choice for the file format is not available. Adopted `serde_norway` (MIT OR Apache-2.0, maintained, a `serde_yaml` fork that keeps `Error::location()`), per `00l`'s rule that a parser for a standard we did not invent is adopted rather than written. The `location()` API is not incidental — it is what turns "missing field" into "missing field, this file, this line", which Slice A's criteria require.
 
 ## Slices
 

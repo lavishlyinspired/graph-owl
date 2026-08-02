@@ -1,0 +1,15 @@
+apiVersion: graph-owl.dev/v1
+kind: service
+metadata:
+  name: duplicated
+---
+apiVersion: graph-owl.dev/v1
+kind: service
+metadata:
+  name: duplicated
+---
+apiVersion: graph-owl.dev/v1
+kind: table
+metadata:
+  name: orphan
+  parent: nobody.declared.this

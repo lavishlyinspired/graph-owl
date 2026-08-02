@@ -77,19 +77,58 @@ times, so it is at the top rather than buried in the gotchas below.
 **fmt and clippy change the code** — running them after the suite means
 running the suite twice. It also checks the environment first (see below).
 
-**Do not run `cargo test` or `cargo clippy` after every slice.** Write the
-whole epic, then gate once. Three slices verified separately cost ~21
-minutes; the same three verified together cost ~7. The one carve-out, decided
-in advance rather than per-slice: a genuinely novel *external-system*
-integration (a first-ever broker client, a new container image) may take one
-early smoke run, because `cargo check` cannot catch wire-level bugs — Epic 19
-lost time to an IPv6/Docker fallback and a Kafka rebalance-state error that
-no amount of type-checking would have found. One run, not one per slice.
+**Should several epics share one gate, to save more time? No — and the
+question was asked and answered with measurements on 2 Aug 2026.** Batching
+five epics saves ~4 gate runs (~12 minutes scoped). It costs far more than
+that: Epic 19's gate alone surfaced four bugs, so five epics means fifteen to
+twenty failures arriving together across five unfamiliar areas, interleaved
+in one log — and debugging is already the dominant cost, not gating (one
+test's diagnosis took four cycles and ~40 minutes *in isolation*). It also
+makes a commit unrevertable granularly, and lets epic N+1 be built on a
+design flaw in epic N that only the gate would have shown.
 
-**Editing files is free; only the compiler collides.** Keep writing while a
-suite runs — never sit idle waiting on a background cargo run when there is
-code left to write. What must not overlap is two *compiles*: they take the
-same build lock, and the second one relinks what the first is running.
+**The lever is gate *scope*, not gate frequency.** Measured: full workspace
+1118s, single crate 185s — a 6x saving, bigger than batching offers and with
+none of its downside. `scripts/gate.sh` is therefore scoped to the crates
+with uncommitted changes by default (`--full` overrides), and CI
+(`.github/workflows/ci.yml`) already owns the exhaustive workspace run plus
+doc-tests. Running that locally per epic duplicates CI while blocking the
+person waiting.
+
+**Do not run `cargo test`, `cargo clippy` or `cargo nextest` after a slice —
+not even a fast one.** Write the whole epic, then gate once. Three slices
+verified separately cost ~21 minutes; the same three together cost ~7.
+
+**There is no exception, and an earlier version of this file had one that
+turned out to be the loophole.** It said a novel external-system integration
+could take one early smoke run; that was then used to justify per-slice runs
+on Epic 19 *and* on an Epic 20 slice that touched no infrastructure at all.
+If a wire-level integration genuinely needs an early run, a human asks for
+it. **The tell that this rule is about to break: a slice is finished and
+something wants to "just confirm it works". That is what the epic-end gate
+is for — write the next slice instead.**
+
+**Editing files is free; only the compiler collides. So keep writing while
+anything runs.** Never sit in a wait-loop polling a background run when there
+is code left to write — on Epic 19 that produced five stacked waiter shells
+blocked behind a single hung test, which from the outside looked like six
+concurrent gates. Start the run, then go write the next slice; read the
+result when it arrives. What must not overlap is two *compiles*: they take
+the same build lock, and the second relinks what the first is running.
+
+**The gate's real value here is finding hangs, not type errors.** Two
+consecutive epics have shipped an infinite loop that `cargo check` passed
+cleanly and no happy path reached: Epic 19's consume loop spun at 100% CPU
+against an unreachable broker (a burned core per dead subscription in
+production), and Epic 20's YAML document loop pushed errors forever because
+the parser's iterator does not advance past a document it cannot parse (a
+hung CLI and exhausted memory on one stray typo). Both surfaced only as a
+test that ran until something killed it.
+
+So: **a test that "hangs" is a finding, not an infrastructure annoyance.**
+Read it as a probable unbounded loop in the new code before blaming the
+environment — and when writing a loop that reacts to a failure (a failed
+receive, a failed parse), state explicitly what makes it terminate.
 
 **Watch the right process name.** `cargo nextest run` execs as
 **`cargo-nextest`**, not `cargo` — an `until ! pgrep -x cargo` waiter fires

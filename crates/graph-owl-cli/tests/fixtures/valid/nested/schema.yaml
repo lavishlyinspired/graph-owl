@@ -1,0 +1,5 @@
+apiVersion: graph-owl.dev/v1
+kind: schema
+metadata:
+  name: public
+  parent: snowflake_prod.analytics
