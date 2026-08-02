@@ -4853,6 +4853,56 @@
         "summary": "Withdraw a waiver, returning the finding to the queue"
       }
     },
+    "/webhooks/dead-letters": {
+      "delete": {
+        "operationId": "delete_webhooks_dead-letters",
+        "responses": {
+          "200": {
+            "description": "Purge dead-lettered events older than a caller-named cutoff"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Purge dead-lettered events older than a caller-named cutoff"
+      },
+      "get": {
+        "operationId": "get_webhooks_dead-letters",
+        "responses": {
+          "200": {
+            "description": "The dead-letter queue, filterable by endpoint and reason"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "The dead-letter queue, filterable by endpoint and reason"
+      }
+    },
     "/webhooks/endpoints": {
       "get": {
         "operationId": "get_webhooks_endpoints",
@@ -4901,6 +4951,53 @@
           }
         ],
         "summary": "Register a webhook endpoint; the secret is write-only"
+      }
+    },
+    "/webhooks/events/{id}": {
+      "get": {
+        "operationId": "get_webhooks_events__id_",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The status of one inbound event"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "The status of one inbound event"
       }
     },
     "/webhooks/mappings": {
@@ -5017,6 +5114,32 @@
         },
         "security": [],
         "summary": "Receive a webhook delivery; the raw body is verified before parsing"
+      }
+    },
+    "/webhooks/replay": {
+      "post": {
+        "operationId": "post_webhooks_replay",
+        "responses": {
+          "200": {
+            "description": "Replay a window of an endpoint's events, in sender-timestamp order"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Replay a window of an endpoint's events, in sender-timestamp order"
       }
     }
   },

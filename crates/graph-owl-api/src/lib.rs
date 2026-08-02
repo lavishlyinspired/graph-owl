@@ -1488,6 +1488,7 @@ impl Catalog {
             dedup_key: graph_owl_core::webhook::dedup_key(None, raw_body),
             raw: raw_body.to_vec(),
             state: graph_owl_core::webhook::EventState::Received,
+            reason: None,
         };
         Ok(self.storage.create_inbound_event(event).await?)
     }
@@ -1555,15 +1556,38 @@ impl Catalog {
             .await?
             .ok_or(CatalogError::NotFound)?;
 
-        let draft = match graph_owl_connectors::webhook_mapping::apply_mapping(&mapping, payload) {
+        Ok(
+            match self.resolve_and_validate_draft(&mapping, payload).await? {
+                MappingResolution::Ready { draft, .. } => MappingOutcome::Draft(draft),
+                MappingResolution::MissingField { field } => MappingOutcome::MissingField { field },
+                MappingResolution::InvalidKind { kind } => MappingOutcome::InvalidKind { kind },
+                MappingResolution::ShapeViolation { reason } => {
+                    MappingOutcome::ShapeViolation { reason }
+                }
+            },
+        )
+    }
+
+    /// Applies a mapping and checks the result against shapes — the one
+    /// place that answers "does this payload fit this mapping", shared by
+    /// [`Catalog::dry_run_mapping`] (which stops here) and
+    /// [`Catalog::process_inbound_event`] (which goes on to apply what this
+    /// resolves). `kind` and `parent_id` are returned alongside the draft
+    /// so a caller that proceeds to write does not have to re-derive them.
+    async fn resolve_and_validate_draft(
+        &self,
+        mapping: &graph_owl_storage::Mapping,
+        payload: &serde_json::Value,
+    ) -> Result<MappingResolution, CatalogError> {
+        let draft = match graph_owl_connectors::webhook_mapping::apply_mapping(mapping, payload) {
             Ok(draft) => draft,
             Err(graph_owl_connectors::webhook_mapping::MappingError { field, .. }) => {
-                return Ok(MappingOutcome::MissingField { field });
+                return Ok(MappingResolution::MissingField { field });
             }
         };
 
         let Ok(kind) = AssetKind::parse(&draft.kind) else {
-            return Ok(MappingOutcome::InvalidKind { kind: draft.kind });
+            return Ok(MappingResolution::InvalidKind { kind: draft.kind });
         };
 
         let parent_id = match &draft.parent_fqn {
@@ -1583,7 +1607,7 @@ impl Catalog {
             id: Uuid::nil(),
             kind,
             name: draft.name.clone(),
-            fully_qualified_name,
+            fully_qualified_name: fully_qualified_name.clone(),
             parent_id,
             description: draft.description.clone(),
             properties: draft.properties.clone(),
@@ -1601,10 +1625,289 @@ impl Catalog {
             updated_at: now,
         };
         if let Some(reason) = self.validate_draft(&candidate).await? {
-            return Ok(MappingOutcome::ShapeViolation { reason });
+            return Ok(MappingResolution::ShapeViolation { reason });
         }
 
-        Ok(MappingOutcome::Draft(draft))
+        Ok(MappingResolution::Ready {
+            draft,
+            kind,
+            parent_id,
+            fully_qualified_name,
+        })
+    }
+
+    /// Maps and applies one inbound event — Epic 18 Slice D's processing
+    /// pipeline. Looks up the event's endpoint and its mapping, parses the
+    /// raw payload, resolves and shape-checks the draft (the same check
+    /// [`Catalog::dry_run_mapping`] runs), and upserts it — moving the
+    /// event through `Mapped` to `Applied`, or to `Failed` with a reason at
+    /// whichever step rejected it.
+    ///
+    /// **Idempotent by state.** Only `Received` and `Failed` events are
+    /// (re)processed; every other state is left alone — this is what makes
+    /// replaying a window (which may include already-`Applied` events)
+    /// safe: dedup holds because there is nothing left for it to do.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if no such event exists. `Storage` if a write fails. A
+    /// mapping, JSON, or shape problem is **not** an error here — it is
+    /// recorded as `Failed` and this returns `Ok(())`, because a rejected
+    /// draft is this pipeline's normal, expected output for a bad payload.
+    #[tracing::instrument(name = "catalog.process_inbound_event", skip_all)]
+    pub async fn process_inbound_event(&self, id: Uuid) -> Result<(), CatalogError> {
+        let event = self
+            .storage
+            .get_inbound_event(id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        if !matches!(
+            event.state,
+            graph_owl_core::webhook::EventState::Received
+                | graph_owl_core::webhook::EventState::Failed
+        ) {
+            return Ok(());
+        }
+
+        let Some(endpoint) = self.storage.get_webhook_endpoint(event.endpoint).await? else {
+            return self
+                .fail_inbound_event(
+                    id,
+                    "the endpoint this event was received on no longer exists".to_string(),
+                )
+                .await;
+        };
+
+        let payload: serde_json::Value = match serde_json::from_slice(&event.raw) {
+            Ok(value) => value,
+            Err(error) => {
+                return self
+                    .fail_inbound_event(id, format!("payload is not valid JSON: {error}"))
+                    .await;
+            }
+        };
+
+        let Some(mapping) = self.storage.get_mapping(&endpoint.mapping).await? else {
+            return self
+                .fail_inbound_event(
+                    id,
+                    format!("no mapping named `{}` is registered", endpoint.mapping),
+                )
+                .await;
+        };
+
+        let (draft, kind, parent_id, fully_qualified_name) =
+            match self.resolve_and_validate_draft(&mapping, &payload).await? {
+                MappingResolution::Ready {
+                    draft,
+                    kind,
+                    parent_id,
+                    fully_qualified_name,
+                } => (draft, kind, parent_id, fully_qualified_name),
+                MappingResolution::MissingField { field } => {
+                    return self
+                        .fail_inbound_event(
+                            id,
+                            format!(
+                                "mapping `{}` field `{field}`: nothing at the path",
+                                mapping.name
+                            ),
+                        )
+                        .await;
+                }
+                MappingResolution::InvalidKind { kind } => {
+                    return self
+                        .fail_inbound_event(id, format!("`{kind}` is not a known asset kind"))
+                        .await;
+                }
+                MappingResolution::ShapeViolation { reason } => {
+                    return self.fail_inbound_event(id, reason).await;
+                }
+            };
+
+        self.storage
+            .update_inbound_event_state(id, graph_owl_core::webhook::EventState::Mapped, None)
+            .await?;
+
+        // Out-of-order protection: a candidate whose `sender_timestamp` is
+        // older than what is already applied for this entity is recognized
+        // and deliberately not applied — a late-arriving stale update must
+        // never revert a newer one. Nothing to compare against (no prior
+        // applied timestamp) always proceeds; no `sender_timestamp` on the
+        // candidate falls back to arrival order, same as
+        // `Freshness::Ambiguous` documents, and is logged rather than
+        // silently assumed safe.
+        if let Some(current) = self
+            .storage
+            .last_applied_timestamp(&fully_qualified_name)
+            .await?
+        {
+            match graph_owl_core::webhook::compare_timestamps(event.sender_timestamp, current) {
+                graph_owl_core::webhook::Freshness::Older => {
+                    self.storage
+                        .update_inbound_event_state(
+                            id,
+                            graph_owl_core::webhook::EventState::Superseded,
+                            Some(&format!(
+                                "sender_timestamp is older than the currently applied state for `{fully_qualified_name}`"
+                            )),
+                        )
+                        .await?;
+                    return Ok(());
+                }
+                graph_owl_core::webhook::Freshness::Ambiguous => {
+                    tracing::warn!(
+                        event = %id,
+                        entity = %fully_qualified_name,
+                        "applying an event with no sender_timestamp against entity state that has one; falling back to arrival order"
+                    );
+                }
+                graph_owl_core::webhook::Freshness::Newer => {}
+            }
+        }
+
+        let principal = self
+            .resolve_principal(&endpoint.source, &endpoint.source)
+            .await?;
+        let sender_timestamp = event.sender_timestamp;
+        let request = UpsertAsset {
+            kind,
+            name: draft.name,
+            parent_id,
+            description: draft.description,
+            properties: draft.properties,
+        };
+        // `Validation`/`Conflict` are the write refusing *this draft* —
+        // exactly what "mapping or validation failure moves the event to
+        // DLQ" means, so they dead-letter rather than propagate. Anything
+        // else (a storage failure) is not about this event and must not be
+        // swallowed as though it were.
+        match self.upsert_asset(&principal, request).await {
+            Ok(_) => {
+                if let Some(sender_timestamp) = sender_timestamp {
+                    self.storage
+                        .record_applied_timestamp(&fully_qualified_name, sender_timestamp)
+                        .await?;
+                }
+                self.storage
+                    .update_inbound_event_state(
+                        id,
+                        graph_owl_core::webhook::EventState::Applied,
+                        None,
+                    )
+                    .await?;
+                Ok(())
+            }
+            Err(CatalogError::Validation(errors)) => {
+                let detail = errors
+                    .iter()
+                    .map(|e| format!("{}: {}", e.field, e.detail))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                self.fail_inbound_event(id, detail).await
+            }
+            Err(CatalogError::Conflict { detail, .. }) => self.fail_inbound_event(id, detail).await,
+            Err(other) => Err(other),
+        }
+    }
+
+    async fn fail_inbound_event(&self, id: Uuid, reason: String) -> Result<(), CatalogError> {
+        self.storage
+            .update_inbound_event_state(
+                id,
+                graph_owl_core::webhook::EventState::Failed,
+                Some(&reason),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn inbound_event(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::webhook::InboundEvent>, CatalogError> {
+        Ok(self.storage.get_inbound_event(id).await?)
+    }
+
+    /// The dead-letter queue, filtered — Epic 18 Slice D.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn dead_letter_queue(
+        &self,
+        filter: &graph_owl_storage::DeadLetterFilter,
+    ) -> Result<Vec<graph_owl_core::webhook::InboundEvent>, CatalogError> {
+        Ok(self.storage.list_dead_letters(filter).await?)
+    }
+
+    /// Replays every event for `endpoint` received between `since` and
+    /// `until`, in `sender_timestamp` order (falling back to arrival order
+    /// for events without one) — Epic 18 Slice D.
+    ///
+    /// An already-`Applied` or `Duplicate` event in the window is skipped,
+    /// not reprocessed: [`Catalog::process_inbound_event`]'s own
+    /// state-gating is what makes "replay of an already-applied event is a
+    /// no-op" true, so replay does not need a second idempotency check of
+    /// its own — it would only be restating the same rule in a second
+    /// place, which is exactly how the two drift.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if a read or write fails.
+    #[tracing::instrument(name = "catalog.replay_window", skip_all)]
+    pub async fn replay_window(
+        &self,
+        endpoint: Uuid,
+        since: chrono::DateTime<chrono::Utc>,
+        until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ReplaySummary, CatalogError> {
+        let events = self
+            .storage
+            .list_inbound_events_in_window(endpoint, since, until)
+            .await?;
+
+        let mut summary = ReplaySummary::default();
+        for event in events {
+            if matches!(
+                event.state,
+                graph_owl_core::webhook::EventState::Applied
+                    | graph_owl_core::webhook::EventState::Duplicate
+                    | graph_owl_core::webhook::EventState::Superseded
+            ) {
+                summary.skipped += 1;
+                continue;
+            }
+            summary.attempted += 1;
+            self.process_inbound_event(event.id).await?;
+            match self
+                .storage
+                .get_inbound_event(event.id)
+                .await?
+                .map(|e| e.state)
+            {
+                Some(graph_owl_core::webhook::EventState::Applied) => summary.applied += 1,
+                _ => summary.still_failed += 1,
+            }
+        }
+        Ok(summary)
+    }
+
+    /// Deletes dead-lettered events older than `older_than` — Slice D's
+    /// bounded-retention criterion. The bound is the caller's to configure;
+    /// this is the mechanism, not a schedule this crate decides on its own.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    pub async fn purge_dead_letters(
+        &self,
+        older_than: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, CatalogError> {
+        Ok(self.storage.purge_dead_letters(older_than).await?)
     }
 
     /// Create or update a team.
@@ -5481,6 +5784,44 @@ pub enum MappingOutcome {
     ShapeViolation { reason: String },
 }
 
+/// The internal twin of [`MappingOutcome`] — `resolve_and_validate_draft`'s
+/// own return type, carrying `kind`/`parent_id` alongside a successful
+/// draft so [`Catalog::process_inbound_event`] does not have to re-derive
+/// them. Not `pub`: `MappingOutcome` is the shape a caller outside this
+/// function ever sees.
+enum MappingResolution {
+    Ready {
+        draft: graph_owl_connectors::batch::RowDraft,
+        kind: AssetKind,
+        parent_id: Option<Uuid>,
+        fully_qualified_name: String,
+    },
+    MissingField {
+        field: &'static str,
+    },
+    InvalidKind {
+        kind: String,
+    },
+    ShapeViolation {
+        reason: String,
+    },
+}
+
+/// What a replay over a window did — Epic 18 Slice D.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySummary {
+    /// Events actually (re)processed — excludes `skipped`.
+    pub attempted: usize,
+    /// Reached `Applied` this time.
+    pub applied: usize,
+    /// Reprocessed but still not `Applied` (mapping/shape still rejects it,
+    /// or the endpoint or mapping is gone).
+    pub still_failed: usize,
+    /// Already `Applied` or `Duplicate` — left untouched, not reprocessed.
+    pub skipped: usize,
+}
+
 /// What happened to one pushed item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestOutcome {
@@ -5739,6 +6080,8 @@ mod tests {
         webhook_endpoints: Mutex<Vec<(graph_owl_storage::WebhookEndpoint, Option<Vec<u8>>)>>,
         inbound_events: Mutex<Vec<graph_owl_core::webhook::InboundEvent>>,
         mapping_versions: Mutex<Vec<graph_owl_storage::Mapping>>,
+        entity_last_applied:
+            Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
     }
 
     impl InMemoryStorage {
@@ -6491,6 +6834,111 @@ mod tests {
                 .iter()
                 .find(|e| e.id == id)
                 .cloned())
+        }
+
+        async fn update_inbound_event_state(
+            &self,
+            id: Uuid,
+            state: graph_owl_core::webhook::EventState,
+            reason: Option<&str>,
+        ) -> Result<graph_owl_core::webhook::InboundEvent, StorageError> {
+            let mut held = self.inbound_events.lock().unwrap();
+            let event = held
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| StorageError::Unexpected(format!("no inbound event {id}")))?;
+            event.state = state;
+            event.reason = reason.map(str::to_string);
+            Ok(event.clone())
+        }
+
+        async fn list_dead_letters(
+            &self,
+            filter: &graph_owl_storage::DeadLetterFilter,
+        ) -> Result<Vec<graph_owl_core::webhook::InboundEvent>, StorageError> {
+            let mut matching: Vec<_> = self
+                .inbound_events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e.state == graph_owl_core::webhook::EventState::Failed)
+                .filter(|e| {
+                    filter
+                        .endpoint
+                        .is_none_or(|endpoint| e.endpoint == endpoint)
+                })
+                .filter(|e| {
+                    filter.reason_contains.as_ref().is_none_or(|needle| {
+                        e.reason
+                            .as_ref()
+                            .is_some_and(|reason| reason.contains(needle.as_str()))
+                    })
+                })
+                .cloned()
+                .collect();
+            matching.sort_by_key(|e| std::cmp::Reverse(e.received_at));
+            Ok(matching
+                .into_iter()
+                .skip(filter.offset)
+                .take(filter.limit)
+                .collect())
+        }
+
+        async fn list_inbound_events_in_window(
+            &self,
+            endpoint: Uuid,
+            since: chrono::DateTime<chrono::Utc>,
+            until: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<graph_owl_core::webhook::InboundEvent>, StorageError> {
+            let mut matching: Vec<_> = self
+                .inbound_events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| {
+                    e.endpoint == endpoint && e.received_at >= since && e.received_at <= until
+                })
+                .cloned()
+                .collect();
+            matching.sort_by_key(|e| e.sender_timestamp.unwrap_or(e.received_at));
+            Ok(matching)
+        }
+
+        async fn purge_dead_letters(
+            &self,
+            older_than: chrono::DateTime<chrono::Utc>,
+        ) -> Result<u64, StorageError> {
+            let mut held = self.inbound_events.lock().unwrap();
+            let before = held.len();
+            held.retain(|e| {
+                !(e.state == graph_owl_core::webhook::EventState::Failed
+                    && e.received_at < older_than)
+            });
+            Ok((before - held.len()) as u64)
+        }
+
+        async fn last_applied_timestamp(
+            &self,
+            fully_qualified_name: &str,
+        ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError> {
+            Ok(self
+                .entity_last_applied
+                .lock()
+                .unwrap()
+                .get(fully_qualified_name)
+                .copied())
+        }
+
+        async fn record_applied_timestamp(
+            &self,
+            fully_qualified_name: &str,
+            sender_timestamp: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), StorageError> {
+            self.entity_last_applied
+                .lock()
+                .unwrap()
+                .insert(fully_qualified_name.to_string(), sender_timestamp);
+            Ok(())
         }
 
         async fn upsert_mapping(
@@ -12807,6 +13255,733 @@ mod mappings_turn_payloads_into_drafts {
         );
         assert_eq!(history[0].version, 2, "newest first");
         assert_eq!(history[1].version, 1);
+    }
+}
+
+#[cfg(test)]
+mod inbound_events_are_mapped_and_applied {
+    //! Epic 18 Slice D at the **facade**.
+    //!
+    //! The mapping engine and shape-check reuse are proven in isolation
+    //! (Slice C's own tests); this proves the *pipeline* —
+    //! `Catalog::process_inbound_event` actually reaches the catalog, a
+    //! rejection at any step lands the event in the dead-letter queue
+    //! naming why, and replaying a window is idempotent against events
+    //! that already succeeded.
+
+    use super::*;
+    use graph_owl_storage::{
+        DeadLetterFilter, Expression, Mapping, SignatureScheme, WebhookEndpoint,
+    };
+    use std::collections::BTreeMap;
+    use tests::InMemoryStorage;
+
+    fn path(pointer: &str) -> Expression {
+        Expression::Path {
+            pointer: pointer.to_string(),
+        }
+    }
+
+    fn endpoint() -> WebhookEndpoint {
+        let now = chrono::Utc::now();
+        WebhookEndpoint {
+            id: Uuid::new_v4(),
+            path: "dbt".to_string(),
+            source: "dbt-bot".to_string(),
+            signature_scheme: SignatureScheme::HmacSha256 {
+                header: "X-Signature".to_string(),
+                prefix: "sha256=".to_string(),
+            },
+            mapping: "dbt-run-completed".to_string(),
+            event_filter: vec!["run.completed".to_string()],
+            enabled: true,
+            has_secret: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn mapping() -> Mapping {
+        Mapping {
+            name: "dbt-run-completed".to_string(),
+            version: 0,
+            kind: path("/kind"),
+            entity_name: path("/tableName"),
+            parent_fqn: None,
+            description: Some(path("/description")),
+            properties: BTreeMap::new(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn hmac_sign(secret: &[u8], body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
+        mac.update(body);
+        let bytes = mac.finalize().into_bytes();
+        format!(
+            "sha256={}",
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        )
+    }
+
+    async fn seeded() -> (Catalog, WebhookEndpoint) {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        catalog
+            .upsert_mapping(mapping())
+            .await
+            .expect("register mapping");
+        let registered = catalog
+            .register_webhook_endpoint(endpoint(), Some(b"secret"))
+            .await
+            .expect("register endpoint");
+        (catalog, registered)
+    }
+
+    async fn seeded_with_storage() -> (Catalog, Arc<InMemoryStorage>, WebhookEndpoint) {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage.clone());
+        catalog
+            .upsert_mapping(mapping())
+            .await
+            .expect("register mapping");
+        let registered = catalog
+            .register_webhook_endpoint(endpoint(), Some(b"secret"))
+            .await
+            .expect("register endpoint");
+        (catalog, storage, registered)
+    }
+
+    async fn deliver(catalog: &Catalog, endpoint: &WebhookEndpoint, body: &[u8]) -> Uuid {
+        let signature = hmac_sign(b"secret", body);
+        catalog
+            .receive_webhook(endpoint, Some(&signature), body)
+            .await
+            .expect("delivery should verify")
+            .id
+    }
+
+    /// Constructs an event directly with a `sender_timestamp` set, bypassing
+    /// `receive_webhook` — extracting one from a real payload is still
+    /// Slice C's declarative-mapping problem, unsolved, so this is the only
+    /// way to exercise the out-of-order comparison until that lands.
+    async fn deliver_with_timestamp(
+        storage: &Arc<InMemoryStorage>,
+        endpoint_id: Uuid,
+        body: &[u8],
+        sender_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Uuid {
+        let event = graph_owl_core::webhook::InboundEvent {
+            id: Uuid::new_v4(),
+            endpoint: endpoint_id,
+            sender_event_id: None,
+            sender_timestamp,
+            received_at: chrono::Utc::now(),
+            dedup_key: graph_owl_core::webhook::dedup_key(None, body),
+            raw: body.to_vec(),
+            state: graph_owl_core::webhook::EventState::Received,
+            reason: None,
+        };
+        storage
+            .create_inbound_event(event)
+            .await
+            .expect("create")
+            .id
+    }
+
+    #[tokio::test]
+    async fn a_valid_delivery_is_mapped_and_applied() {
+        let (catalog, endpoint) = seeded().await;
+        // `service` — a root-kind asset needs no parent, the cheap fixture
+        // for a happy path that isn't testing containment.
+        let body = br#"{"kind":"service","tableName":"orders","description":"one row per order"}"#;
+        let event_id = deliver(&catalog, &endpoint, body).await;
+
+        catalog
+            .process_inbound_event(event_id)
+            .await
+            .expect("process");
+
+        let processed = catalog
+            .inbound_event(event_id)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            processed.state,
+            graph_owl_core::webhook::EventState::Applied
+        );
+        assert_eq!(processed.reason, None);
+
+        let asset = catalog
+            .get_asset_by_fqn("orders")
+            .await
+            .expect("read")
+            .expect("the mapped entity was actually applied");
+        assert_eq!(asset.kind, AssetKind::Service);
+        assert_eq!(asset.description.as_deref(), Some("one row per order"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_required_field_dead_letters_naming_the_mapping_and_field() {
+        let (catalog, endpoint) = seeded().await;
+        let body = br#"{"kind":"table"}"#; // no tableName
+        let event_id = deliver(&catalog, &endpoint, body).await;
+
+        catalog
+            .process_inbound_event(event_id)
+            .await
+            .expect("process");
+
+        let processed = catalog
+            .inbound_event(event_id)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(processed.state, graph_owl_core::webhook::EventState::Failed);
+        let reason = processed.reason.expect("a failed event names why");
+        assert!(reason.contains("dbt-run-completed"), "{reason}");
+        assert!(reason.contains("name"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_payload_is_dead_lettered_not_a_panic() {
+        let (catalog, endpoint) = seeded().await;
+        let event_id = deliver(&catalog, &endpoint, b"this is not json").await;
+
+        catalog
+            .process_inbound_event(event_id)
+            .await
+            .expect("process");
+
+        let processed = catalog
+            .inbound_event(event_id)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(processed.state, graph_owl_core::webhook::EventState::Failed);
+        assert!(
+            processed
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.contains("JSON")),
+            "{:?}",
+            processed.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_mapping_is_dead_lettered_naming_it() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        // Note: no `upsert_mapping` call — the endpoint names a mapping
+        // that was never registered.
+        let registered = catalog
+            .register_webhook_endpoint(endpoint(), Some(b"secret"))
+            .await
+            .expect("register endpoint");
+        let event_id = deliver(&catalog, &registered, br#"{"kind":"table"}"#).await;
+
+        catalog
+            .process_inbound_event(event_id)
+            .await
+            .expect("process");
+
+        let processed = catalog
+            .inbound_event(event_id)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(processed.state, graph_owl_core::webhook::EventState::Failed);
+        assert!(
+            processed
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.contains("dbt-run-completed")),
+            "{:?}",
+            processed.reason
+        );
+    }
+
+    /// **The mapping and the shape check can both pass and the write can
+    /// still be invalid** — a `table` with no parent is well-formed by
+    /// both of those measures and refused by `upsert_asset`'s own
+    /// containment rule. This must dead-letter exactly like a mapping or
+    /// shape failure, not propagate as an unhandled error: from a webhook's
+    /// perspective this is the same kind of outcome, a payload this
+    /// mapping cannot turn into a writable entity.
+    #[tokio::test]
+    async fn a_structural_failure_from_the_upsert_itself_is_dead_lettered_too() {
+        let (catalog, endpoint) = seeded().await;
+        let body = br#"{"kind":"table","tableName":"orders"}"#;
+        let event_id = deliver(&catalog, &endpoint, body).await;
+
+        catalog
+            .process_inbound_event(event_id)
+            .await
+            .expect("process must not propagate the upsert's validation error");
+
+        let processed = catalog
+            .inbound_event(event_id)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(processed.state, graph_owl_core::webhook::EventState::Failed);
+        assert!(
+            processed
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.contains("parent")),
+            "{:?}",
+            processed.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn reprocessing_an_already_applied_event_is_a_no_op() {
+        let (catalog, endpoint) = seeded().await;
+        let body = br#"{"kind":"service","tableName":"orders"}"#;
+        let event_id = deliver(&catalog, &endpoint, body).await;
+        catalog
+            .process_inbound_event(event_id)
+            .await
+            .expect("first process");
+        let first_pass = catalog
+            .inbound_event(event_id)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            first_pass.state,
+            graph_owl_core::webhook::EventState::Applied
+        );
+
+        let after_first_apply = catalog
+            .get_asset_by_fqn("orders")
+            .await
+            .expect("read")
+            .expect("exists")
+            .version;
+
+        // Reprocessing must not error and must not attempt anything —
+        // state-gated inside `process_inbound_event` itself.
+        catalog
+            .process_inbound_event(event_id)
+            .await
+            .expect("reprocess is a no-op, not an error");
+
+        let asset = catalog
+            .get_asset_by_fqn("orders")
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            asset.version, after_first_apply,
+            "reprocessing must not write a second version"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_lettered_event_is_listed_and_filterable() {
+        let (catalog, endpoint) = seeded().await;
+        let event_id = deliver(&catalog, &endpoint, br#"{"kind":"table"}"#).await;
+        catalog
+            .process_inbound_event(event_id)
+            .await
+            .expect("process");
+
+        let dlq = catalog
+            .dead_letter_queue(&DeadLetterFilter {
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .expect("dlq");
+        assert!(dlq.iter().any(|e| e.id == event_id), "{dlq:?}");
+
+        let by_endpoint = catalog
+            .dead_letter_queue(&DeadLetterFilter {
+                endpoint: Some(endpoint.id),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .expect("dlq");
+        assert!(by_endpoint.iter().any(|e| e.id == event_id));
+
+        let by_other_endpoint = catalog
+            .dead_letter_queue(&DeadLetterFilter {
+                endpoint: Some(Uuid::new_v4()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .expect("dlq");
+        assert!(
+            !by_other_endpoint.iter().any(|e| e.id == event_id),
+            "a different endpoint's filter must not return this event"
+        );
+    }
+
+    #[tokio::test]
+    async fn replaying_after_a_mapping_fix_re_processes_and_applies() {
+        let (catalog, endpoint) = seeded().await;
+        // Delivered while the mapping requires `tableName` and the payload
+        // does not have it — dead-lettered. `service`, not `table`: once
+        // fixed below this must reach the actual upsert and succeed, and a
+        // `table` would fail there too, on requiring a parent — a second,
+        // unrelated failure this test is not about.
+        let body = br#"{"kind":"service"}"#;
+        let event_id = deliver(&catalog, &endpoint, body).await;
+        catalog
+            .process_inbound_event(event_id)
+            .await
+            .expect("first attempt fails");
+        assert_eq!(
+            catalog
+                .inbound_event(event_id)
+                .await
+                .expect("read")
+                .expect("exists")
+                .state,
+            graph_owl_core::webhook::EventState::Failed
+        );
+
+        // Fix the mapping: `name` now comes from a literal, so the same
+        // payload resolves.
+        let mut fixed = mapping();
+        fixed.entity_name = Expression::Literal {
+            value: "orders".to_string(),
+        };
+        catalog.upsert_mapping(fixed).await.expect("fixed mapping");
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(1);
+        let until = chrono::Utc::now() + chrono::Duration::hours(1);
+        let summary = catalog
+            .replay_window(endpoint.id, since, until)
+            .await
+            .expect("replay");
+
+        assert_eq!(summary.attempted, 1);
+        assert_eq!(summary.applied, 1, "{summary:?}");
+        assert_eq!(
+            catalog
+                .inbound_event(event_id)
+                .await
+                .expect("read")
+                .expect("exists")
+                .state,
+            graph_owl_core::webhook::EventState::Applied
+        );
+    }
+
+    #[tokio::test]
+    async fn replaying_without_fixing_the_problem_counts_as_still_failed() {
+        let (catalog, endpoint) = seeded().await;
+        let body = br#"{"kind":"table"}"#; // no tableName, and no mapping fix follows
+        let event_id = deliver(&catalog, &endpoint, body).await;
+        catalog
+            .process_inbound_event(event_id)
+            .await
+            .expect("first attempt fails");
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(1);
+        let until = chrono::Utc::now() + chrono::Duration::hours(1);
+        let summary = catalog
+            .replay_window(endpoint.id, since, until)
+            .await
+            .expect("replay");
+
+        assert_eq!(
+            summary,
+            ReplaySummary {
+                attempted: 1,
+                applied: 0,
+                still_failed: 1,
+                skipped: 0,
+            },
+            "an unresolved failure must be counted as attempted-but-still-failed, not silently dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn replaying_a_window_skips_already_applied_events() {
+        let (catalog, endpoint) = seeded().await;
+        let body = br#"{"kind":"service","tableName":"orders"}"#;
+        let event_id = deliver(&catalog, &endpoint, body).await;
+        catalog
+            .process_inbound_event(event_id)
+            .await
+            .expect("process");
+        let after_first_apply = catalog
+            .get_asset_by_fqn("orders")
+            .await
+            .expect("read")
+            .expect("exists")
+            .version;
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(1);
+        let until = chrono::Utc::now() + chrono::Duration::hours(1);
+        let summary = catalog
+            .replay_window(endpoint.id, since, until)
+            .await
+            .expect("replay");
+
+        assert_eq!(
+            summary,
+            ReplaySummary {
+                attempted: 0,
+                applied: 0,
+                still_failed: 0,
+                skipped: 1,
+            },
+            "an already-Applied event must be skipped, not reprocessed"
+        );
+        let asset = catalog
+            .get_asset_by_fqn("orders")
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            asset.version, after_first_apply,
+            "replay must not double-apply an already-applied event"
+        );
+    }
+
+    #[tokio::test]
+    async fn purging_removes_old_dead_letters() {
+        let (catalog, endpoint) = seeded().await;
+        let event_id = deliver(&catalog, &endpoint, br#"{"kind":"table"}"#).await;
+        catalog
+            .process_inbound_event(event_id)
+            .await
+            .expect("process");
+        assert_eq!(
+            catalog
+                .inbound_event(event_id)
+                .await
+                .expect("read")
+                .expect("exists")
+                .state,
+            graph_owl_core::webhook::EventState::Failed
+        );
+
+        // Nothing older than a year — the just-created row survives.
+        let purged = catalog
+            .purge_dead_letters(chrono::Utc::now() - chrono::Duration::days(365))
+            .await
+            .expect("purge");
+        assert_eq!(purged, 0);
+        assert!(
+            catalog
+                .inbound_event(event_id)
+                .await
+                .expect("read")
+                .is_some()
+        );
+
+        // Everything up to now — the row is gone.
+        let purged = catalog
+            .purge_dead_letters(chrono::Utc::now() + chrono::Duration::seconds(1))
+            .await
+            .expect("purge");
+        assert_eq!(purged, 1);
+        assert!(
+            catalog
+                .inbound_event(event_id)
+                .await
+                .expect("read")
+                .is_none()
+        );
+    }
+
+    // ---- out-of-order protection ----
+
+    fn t(seconds_ago: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now() - chrono::Duration::seconds(seconds_ago)
+    }
+
+    #[tokio::test]
+    async fn a_newer_event_is_applied_and_updates_the_high_water_mark() {
+        let (catalog, storage, endpoint) = seeded_with_storage().await;
+        let first = deliver_with_timestamp(
+            &storage,
+            endpoint.id,
+            br#"{"kind":"service","tableName":"orders","description":"v1"}"#,
+            Some(t(20)),
+        )
+        .await;
+        catalog
+            .process_inbound_event(first)
+            .await
+            .expect("first apply");
+
+        let second = deliver_with_timestamp(
+            &storage,
+            endpoint.id,
+            br#"{"kind":"service","tableName":"orders","description":"v2"}"#,
+            Some(t(10)),
+        )
+        .await;
+        catalog
+            .process_inbound_event(second)
+            .await
+            .expect("second apply");
+
+        assert_eq!(
+            catalog
+                .inbound_event(second)
+                .await
+                .expect("read")
+                .expect("exists")
+                .state,
+            graph_owl_core::webhook::EventState::Applied
+        );
+        let asset = catalog
+            .get_asset_by_fqn("orders")
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(asset.description.as_deref(), Some("v2"));
+    }
+
+    #[tokio::test]
+    async fn an_older_event_is_superseded_and_does_not_overwrite_newer_state() {
+        let (catalog, storage, endpoint) = seeded_with_storage().await;
+        let newer = deliver_with_timestamp(
+            &storage,
+            endpoint.id,
+            br#"{"kind":"service","tableName":"orders","description":"v2"}"#,
+            Some(t(10)),
+        )
+        .await;
+        catalog
+            .process_inbound_event(newer)
+            .await
+            .expect("newer applies first");
+
+        // Arrives *after* the newer one but describes an *earlier* state.
+        let older = deliver_with_timestamp(
+            &storage,
+            endpoint.id,
+            br#"{"kind":"service","tableName":"orders","description":"v1"}"#,
+            Some(t(20)),
+        )
+        .await;
+        catalog
+            .process_inbound_event(older)
+            .await
+            .expect("process must not error");
+
+        let processed = catalog
+            .inbound_event(older)
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            processed.state,
+            graph_owl_core::webhook::EventState::Superseded
+        );
+        assert!(
+            processed.reason.is_some(),
+            "a superseded event still names why, like a failed one does"
+        );
+
+        let asset = catalog
+            .get_asset_by_fqn("orders")
+            .await
+            .expect("read")
+            .expect("exists");
+        assert_eq!(
+            asset.description.as_deref(),
+            Some("v2"),
+            "the older delivery must not have overwritten the newer state"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_event_with_no_sender_timestamp_still_applies_falling_back_to_arrival_order() {
+        let (catalog, storage, endpoint) = seeded_with_storage().await;
+        let first = deliver_with_timestamp(
+            &storage,
+            endpoint.id,
+            br#"{"kind":"service","tableName":"orders","description":"v1"}"#,
+            Some(t(10)),
+        )
+        .await;
+        catalog
+            .process_inbound_event(first)
+            .await
+            .expect("first apply");
+
+        // No sender_timestamp at all — Slice C's own extraction gap, not
+        // this mechanism's — must not block processing.
+        let second = deliver_with_timestamp(
+            &storage,
+            endpoint.id,
+            br#"{"kind":"service","tableName":"orders","description":"v2"}"#,
+            None,
+        )
+        .await;
+        catalog
+            .process_inbound_event(second)
+            .await
+            .expect("second apply");
+
+        assert_eq!(
+            catalog
+                .inbound_event(second)
+                .await
+                .expect("read")
+                .expect("exists")
+                .state,
+            graph_owl_core::webhook::EventState::Applied
+        );
+    }
+
+    #[tokio::test]
+    async fn a_superseded_event_is_skipped_on_replay_like_an_applied_one() {
+        let (catalog, storage, endpoint) = seeded_with_storage().await;
+        let newer = deliver_with_timestamp(
+            &storage,
+            endpoint.id,
+            br#"{"kind":"service","tableName":"orders","description":"v2"}"#,
+            Some(t(10)),
+        )
+        .await;
+        catalog
+            .process_inbound_event(newer)
+            .await
+            .expect("newer applies");
+        let older = deliver_with_timestamp(
+            &storage,
+            endpoint.id,
+            br#"{"kind":"service","tableName":"orders","description":"v1"}"#,
+            Some(t(20)),
+        )
+        .await;
+        catalog
+            .process_inbound_event(older)
+            .await
+            .expect("older is superseded");
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(1);
+        let until = chrono::Utc::now() + chrono::Duration::hours(1);
+        let summary = catalog
+            .replay_window(endpoint.id, since, until)
+            .await
+            .expect("replay");
+
+        assert_eq!(
+            summary,
+            ReplaySummary {
+                attempted: 0,
+                applied: 0,
+                still_failed: 0,
+                skipped: 2,
+            },
+            "both the applied and the superseded event must be skipped: {summary:?}"
+        );
     }
 }
 

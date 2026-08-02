@@ -565,6 +565,21 @@ pub struct AssetFilter<'a> {
     pub unowned: bool,
 }
 
+/// What slice of the dead-letter queue a caller wants — Epic 18 Slice D.
+/// Always scoped to `Failed` events; a steward triages by which endpoint is
+/// misbehaving and what it's failing with, not by state, which this filter
+/// does not need to name.
+#[derive(Debug, Clone, Default)]
+pub struct DeadLetterFilter {
+    pub endpoint: Option<Uuid>,
+    /// Substring match against `reason` — a steward searching for "every
+    /// event this shape rejected" does not know the exact message, only
+    /// the shape's name.
+    pub reason_contains: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
 /// What slice of the queue a caller wants.
 #[derive(Debug, Clone, Default)]
 pub struct ValidationFilter {
@@ -1164,6 +1179,88 @@ pub trait Storage: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<graph_owl_core::webhook::InboundEvent>, StorageError>;
+
+    /// Moves an inbound event to a new state — Epic 18 Slice D's processing
+    /// pipeline. `reason` is written alongside every transition (`Some` only
+    /// for `Failed`, `None` otherwise), never left stale from an earlier
+    /// attempt: a replay that succeeds clears whatever reason a prior
+    /// failure left behind.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the write fails, or the id names no event.
+    async fn update_inbound_event_state(
+        &self,
+        id: Uuid,
+        state: graph_owl_core::webhook::EventState,
+        reason: Option<&str>,
+    ) -> Result<graph_owl_core::webhook::InboundEvent, StorageError>;
+
+    /// The dead-letter queue, filtered — Epic 18 Slice D.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn list_dead_letters(
+        &self,
+        filter: &DeadLetterFilter,
+    ) -> Result<Vec<graph_owl_core::webhook::InboundEvent>, StorageError>;
+
+    /// Every event for `endpoint` received between `since` and `until`
+    /// (inclusive), ordered for replay: by `sender_timestamp` where an event
+    /// has one, falling back to arrival order (`received_at`) for the ones
+    /// that do not — the same fallback [`graph_owl_core::webhook::Freshness::Ambiguous`]
+    /// names.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn list_inbound_events_in_window(
+        &self,
+        endpoint: Uuid,
+        since: chrono::DateTime<chrono::Utc>,
+        until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<graph_owl_core::webhook::InboundEvent>, StorageError>;
+
+    /// Deletes dead-lettered events older than `older_than` — Slice D's
+    /// "DLQ retention is bounded and configurable" criterion. The bound is
+    /// the caller's to configure (a runbook, an admin call, a schedule);
+    /// this is the mechanism, not a policy this crate decides on its own.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the write fails.
+    async fn purge_dead_letters(
+        &self,
+        older_than: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, StorageError>;
+
+    /// The `sender_timestamp` most recently and successfully applied for
+    /// this entity, if anything has been — the high-water mark
+    /// `graph_owl_core::webhook::compare_timestamps` checks a candidate
+    /// against before `process_inbound_event` overwrites it.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn last_applied_timestamp(
+        &self,
+        fully_qualified_name: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError>;
+
+    /// Records that `sender_timestamp` is the newest applied so far for this
+    /// entity. Always an upsert to the newer value — callers only reach
+    /// this after confirming the candidate is not older than what is
+    /// already there.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the write fails.
+    async fn record_applied_timestamp(
+        &self,
+        fully_qualified_name: &str,
+        sender_timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError>;
 
     /// Records a new version of a mapping — Epic 18 Slice C. `version` and
     /// `created_at` on the argument are ignored; the real values (the

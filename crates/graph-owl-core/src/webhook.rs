@@ -11,9 +11,12 @@ use uuid::Uuid;
 
 /// Where an inbound event sits in its own lifecycle.
 ///
-/// Five states, not a bool, because "received but not yet mapped" and
-/// "mapped but its apply failed" are different failure surfaces a dead-letter
-/// view (Slice D) has to distinguish.
+/// Not a bool, because "received but not yet mapped" and "mapped but its
+/// apply failed" are different failure surfaces a dead-letter view (Slice D)
+/// has to distinguish — and "correctly recognized as stale" (`Superseded`)
+/// is a third thing again, distinct from `Failed`: nothing about it needs
+/// fixing, and a mapping fix that would rescue a `Failed` event does nothing
+/// for one that is merely late.
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EventState {
@@ -27,6 +30,13 @@ pub enum EventState {
     Failed,
     /// Recognized as a redelivery of an already-applied event; no effect.
     Duplicate,
+    /// This event's `sender_timestamp` is older than what is already
+    /// applied for the entity it describes — recognized and deliberately
+    /// not applied, so a newer update is never reverted by a late-arriving
+    /// older one. Not `Failed`: there is nothing to fix, and not
+    /// `Duplicate`: this is not a redelivery of the same event, just one
+    /// superseded by a different, newer one.
+    Superseded,
 }
 
 /// One inbound webhook delivery, from signature verification onward.
@@ -52,6 +62,13 @@ pub struct InboundEvent {
     /// key a redelivery was judged against, not a value that could drift if
     /// the computation ever changes.
     pub dedup_key: String,
+    /// Why this event is `Failed` — the mapping and field, or the shape and
+    /// constraint, that rejected it. `None` for every other state: a reason
+    /// is only ever written alongside the transition to `Failed`, never
+    /// cleared or reused, so it always names the *current* rejection rather
+    /// than some earlier attempt's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// The dedup key a delivery is judged against: the sender's own event id

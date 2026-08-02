@@ -208,6 +208,13 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             get(list_mapping_versions),
         )
         .route("/webhooks/mappings/{name}/dry-run", post(dry_run_mapping))
+        // Epic 18 Slice D: dead-letter and replay, admin-gated.
+        .route("/webhooks/events/{id}", get(inbound_event_status))
+        .route(
+            "/webhooks/dead-letters",
+            get(dead_letter_queue).delete(purge_dead_letters),
+        )
+        .route("/webhooks/replay", post(replay_window))
         // Unauthenticated by necessity rather than by design: this is what a
         // client reads *before* it holds a token, so requiring one would be
         // circular.
@@ -2391,6 +2398,21 @@ async fn receive_webhook(
         .get(header_name.as_str())
         .and_then(|value| value.to_str().ok());
     let event = catalog.receive_webhook(&endpoint, signature, &body).await?;
+    // Detached, same reasoning as `ingest_batch`: the response has already
+    // gone back with the event's id, and mapping/applying (Slice D) can
+    // take longer than a caller should have to wait for a `201`. Only for
+    // an actually-new delivery — a `Duplicate` has already had its one
+    // effect (none), and reprocessing it would just repeat the state check
+    // in `process_inbound_event` for nothing.
+    if event.state == graph_owl_core::webhook::EventState::Received {
+        let worker = catalog.clone();
+        let event_id = event.id;
+        tokio::spawn(async move {
+            if let Err(error) = worker.process_inbound_event(event_id).await {
+                tracing::error!(event = %event_id, "inbound event could not be processed: {error:?}");
+            }
+        });
+    }
     Ok((
         StatusCode::CREATED,
         Json(json!({ "id": event.id, "state": event.state })),
@@ -2517,6 +2539,114 @@ async fn dry_run_mapping(
             "reason": reason,
         }),
     }))
+}
+
+/// The status of one inbound event — Epic 18 Slice D.
+async fn inbound_event_status(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let event = catalog.inbound_event(id).await?.ok_or(AppError::NotFound)?;
+    Ok(Json(json!({
+        "id": event.id,
+        "endpoint": event.endpoint,
+        "state": event.state,
+        "reason": event.reason,
+        "receivedAt": event.received_at,
+    })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeadLetterQuery {
+    endpoint: Option<Uuid>,
+    reason_contains: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+/// The dead-letter queue, filtered — Epic 18 Slice D.
+async fn dead_letter_queue(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Query(query): Query<DeadLetterQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    // 50, matching the page size the rest of the API uses.
+    let limit = query.limit.unwrap_or(50).min(200);
+    let filter = graph_owl_storage::DeadLetterFilter {
+        endpoint: query.endpoint,
+        reason_contains: query.reason_contains,
+        limit,
+        offset: query.offset.unwrap_or(0),
+    };
+    let events = catalog.dead_letter_queue(&filter).await?;
+    Ok(Json(json!({
+        "data": events.iter().map(|event| json!({
+            "id": event.id,
+            "endpoint": event.endpoint,
+            "reason": event.reason,
+            "receivedAt": event.received_at,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplayRequest {
+    endpoint: Uuid,
+    since: chrono::DateTime<chrono::Utc>,
+    until: chrono::DateTime<chrono::Utc>,
+}
+
+impl ValidateBody for ReplayRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Replays a window of an endpoint's events — Epic 18 Slice D.
+async fn replay_window(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<ReplayRequest>,
+) -> Result<Json<graph_owl_api::ReplaySummary>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(
+        catalog
+            .replay_window(payload.endpoint, payload.since, payload.until)
+            .await?,
+    ))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PurgeQuery {
+    older_than_days: u32,
+}
+
+/// Deletes dead-lettered events older than the given number of days — Epic
+/// 18 Slice D's bounded-retention criterion. The bound is named by whoever
+/// calls this (a runbook, a schedule), not decided by the server.
+async fn purge_dead_letters(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Query(query): Query<PurgeQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(query.older_than_days));
+    let purged = catalog.purge_dead_letters(cutoff).await?;
+    Ok(Json(json!({ "purged": purged })))
 }
 
 #[derive(Debug, serde::Deserialize)]

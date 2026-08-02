@@ -1157,6 +1157,129 @@ impl Storage for PostgresStorage {
         row.map(inbound_event_from_row).transpose()
     }
 
+    #[tracing::instrument(name = "storage.update_inbound_event_state", skip_all)]
+    async fn update_inbound_event_state(
+        &self,
+        id: Uuid,
+        state: graph_owl_core::webhook::EventState,
+        reason: Option<&str>,
+    ) -> Result<graph_owl_core::webhook::InboundEvent, StorageError> {
+        let row = sqlx::query(
+            "UPDATE inbound_events SET state = $1, reason = $2 WHERE id = $3 RETURNING *",
+        )
+        .bind(event_state_str(state))
+        .bind(reason)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        .ok_or_else(|| StorageError::Unexpected(format!("no inbound event {id}")))?;
+        inbound_event_from_row(row)
+    }
+
+    #[tracing::instrument(name = "storage.list_dead_letters", skip_all)]
+    async fn list_dead_letters(
+        &self,
+        filter: &graph_owl_storage::DeadLetterFilter,
+    ) -> Result<Vec<graph_owl_core::webhook::InboundEvent>, StorageError> {
+        let limit = i64::try_from(filter.limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(filter.offset).unwrap_or(0);
+        let rows = sqlx::query(
+            "SELECT * FROM inbound_events
+             WHERE state = 'failed'
+               AND ($1::uuid IS NULL OR endpoint_id = $1)
+               AND ($2::text IS NULL OR reason ILIKE '%' || $2 || '%')
+             ORDER BY received_at DESC
+             LIMIT $3 OFFSET $4",
+        )
+        .bind(filter.endpoint)
+        .bind(&filter.reason_contains)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        rows.into_iter().map(inbound_event_from_row).collect()
+    }
+
+    #[tracing::instrument(name = "storage.list_inbound_events_in_window", skip_all)]
+    async fn list_inbound_events_in_window(
+        &self,
+        endpoint: Uuid,
+        since: chrono::DateTime<chrono::Utc>,
+        until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<graph_owl_core::webhook::InboundEvent>, StorageError> {
+        // `COALESCE(sender_timestamp, received_at)` is the replay order —
+        // an event without a sender timestamp falls back to arrival order,
+        // same reasoning as `Freshness::Ambiguous`. The window itself is
+        // bounded by `received_at`, which is always populated; a
+        // `sender_timestamp` might fall outside `[since, until]` even
+        // though the delivery itself landed inside it, and it is the
+        // delivery a replay window is scoped to.
+        let rows = sqlx::query(
+            "SELECT * FROM inbound_events
+             WHERE endpoint_id = $1 AND received_at >= $2 AND received_at <= $3
+             ORDER BY COALESCE(sender_timestamp, received_at) ASC",
+        )
+        .bind(endpoint)
+        .bind(since)
+        .bind(until)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        rows.into_iter().map(inbound_event_from_row).collect()
+    }
+
+    #[tracing::instrument(name = "storage.purge_dead_letters", skip_all)]
+    async fn purge_dead_letters(
+        &self,
+        older_than: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, StorageError> {
+        let result =
+            sqlx::query("DELETE FROM inbound_events WHERE state = 'failed' AND received_at < $1")
+                .bind(older_than)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
+    #[tracing::instrument(name = "storage.last_applied_timestamp", skip_all)]
+    async fn last_applied_timestamp(
+        &self,
+        fully_qualified_name: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError> {
+        let row = sqlx::query(
+            "SELECT sender_timestamp FROM entity_last_applied WHERE fully_qualified_name = $1",
+        )
+        .bind(fully_qualified_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(|row| row.get("sender_timestamp")))
+    }
+
+    #[tracing::instrument(name = "storage.record_applied_timestamp", skip_all)]
+    async fn record_applied_timestamp(
+        &self,
+        fully_qualified_name: &str,
+        sender_timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO entity_last_applied (fully_qualified_name, sender_timestamp)
+                 VALUES ($1, $2)
+             ON CONFLICT (fully_qualified_name) DO UPDATE SET
+                 sender_timestamp = EXCLUDED.sender_timestamp,
+                 updated_at = now()",
+        )
+        .bind(fully_qualified_name)
+        .bind(sender_timestamp)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
     // The next version is computed inside the `INSERT` itself, not read then
     // written: a subquery in the `SELECT` list is one round trip and one
     // statement, so there is no window between reading the current max and
@@ -4605,6 +4728,7 @@ const fn event_state_str(state: graph_owl_core::webhook::EventState) -> &'static
         EventState::Applied => "applied",
         EventState::Failed => "failed",
         EventState::Duplicate => "duplicate",
+        EventState::Superseded => "superseded",
     }
 }
 
@@ -4616,6 +4740,7 @@ fn event_state_from_str(value: &str) -> Result<graph_owl_core::webhook::EventSta
         "applied" => Ok(EventState::Applied),
         "failed" => Ok(EventState::Failed),
         "duplicate" => Ok(EventState::Duplicate),
+        "superseded" => Ok(EventState::Superseded),
         other => Err(StorageError::Unexpected(format!(
             "unknown event state '{other}' in inbound_events"
         ))),
@@ -4634,6 +4759,7 @@ fn inbound_event_from_row(
         raw: row.get("raw"),
         state: event_state_from_str(row.get::<&str, _>("state"))?,
         dedup_key: row.get("dedup_key"),
+        reason: row.get("reason"),
     })
 }
 
