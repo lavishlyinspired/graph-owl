@@ -55,8 +55,8 @@ is the condition that index exists to catch.
 | **15** | 1 | [`15-connectors.md`](15-connectors.md) | In progress | 13/17 | Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable) |
 | **16** | 6 | [`16-ingestion-apis.md`](16-ingestion-apis.md) | In progress | 5/6 (+1 partial) | Epic 1 (contract), Epic 15 (upsert semantics) |
 | **17** | 6 | [`17-entity-resolution.md`](17-entity-resolution.md) | **Shipped** | 4/4 | Epic 4 (`sameAs` in the graph), Epic 15 + 16 (two write paths make this necessa… |
-| **18** | 6 | [`18-inbound-events.md`](18-inbound-events.md) | Not started | 0/2 | Epic 16 (ingestion contract), Epic 17 (resolution, so pushes do not duplicate) |
-| **19** | 6 | [`19-streaming.md`](19-streaming.md) | Not started | 0/2 | Epic 16 (ingestion contract), Epic 18 (dedup and ordering machinery) |
+| **18** | 6 | [`18-inbound-events.md`](18-inbound-events.md) | **Shipped** | 5/5 | Epic 16 (ingestion contract), Epic 17 (resolution, so pushes do not duplicate) |
+| **19** | 6 | [`19-streaming.md`](19-streaming.md) | Not started | 0/1 | Epic 16 (ingestion contract), Epic 18 (dedup and ordering machinery) |
 | **20** | 6 | [`20-metadata-as-code.md`](20-metadata-as-code.md) | Not started | 0/2 | Epic 15 (idempotent upsert and reconciliation machinery) |
 | **21** | 6 | [`21-document-ingestion.md`](21-document-ingestion.md) | Not started | 0/2 | Epic 16 (ingestion), Epic 17 (mention resolution) |
 | **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | Not started | 0/8 | Epic 3 (the envelope's `extension` field) |
@@ -365,12 +365,14 @@ is the condition that index exists to catch.
 
 ### Epic 18 — Inbound Events & Webhooks *(Demo 6)*
 
-- [ ] Webhook registry, signature verification, replay
-- [ ] Broker consumption with consumer-group rebalancing
+- [x] Endpoint registration and signature verification
+- [x] Dedup and ordering
+- [x] Declarative mapping
+- [x] Dead-letter and replay, with real out-of-order protection
+- [x] Abuse resistance
 
 ### Epic 19 — Streaming Ingestion *(Demo 6)*
 
-- [ ] Webhook registry, signature verification, replay
 - [ ] Broker consumption with consumer-group rebalancing
 
 ### Epic 20 — Metadata-as-Code ★ *(Demo 6)*
