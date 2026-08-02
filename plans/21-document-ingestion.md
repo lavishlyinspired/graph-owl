@@ -1,7 +1,7 @@
 # Plan: Document & Conversation Ingestion (Epic 21)
 
 **Branch**: feat/document-ingestion
-**Status**: Not started
+**Status**: In progress — the Rust domain, ports and the markdown/text adapter are built; every external worker (PDF, OCR, LLM, multimodal) remains out of scope by decision 0
 **Depends on**: Epic 16 (ingestion), Epic 17 (mention resolution)
 **Feeds**: Epic 31 (organizational memory)
 **Crates**: `graph-owl-connectors` (DocumentParser + ClaimExtractor ports, optional feature-gated adapters) · `graph-owl-resolution` (mention resolution) · `graph-owl-core` (Claim, Provenance) — no new crates
@@ -23,6 +23,24 @@ This epic is the input path for organizational memory (Epic 31). A confidently-w
 3. **Confidence bands from `00c-domain-model.md` apply**: ≥0.8 assert, 0.5–0.8 surface for confirmation, <0.5 discard.
 4. **Parsers and extractors are ports with optional adapters.** No Python runtime is required for core operation — that would break the operational-simplicity budget (`00a-product-position.md`).
 5. **The source document is retained and linked.** A claim without its source is unverifiable. `capturedAs` links source → extracted memory.
+
+## What is built, and the constraint that shaped it
+
+**Scope, decided deliberately:** the Rust domain (`Claim`, `Provenance`, `TextSpan`, `ParsedDocument`, `ExtractionResult`, `Disposition`), the two ports (`DocumentParser`, `ClaimExtractor`), the markdown/text adapter, the confidence bands, the confirmation queue, `graph:extraction`, and idempotent re-ingestion. **Every external worker — PDF, OCR, LLM, multimodal — is out of scope**, per decision 0.
+
+**The binding requirement on that split: adding a worker later must not change the Rust domain model.** That ruled out three things which would otherwise be the natural Rust choice, and each exclusion is load-bearing rather than stylistic:
+
+- **No enum naming the kind of extractor.** `ExtractorKind { Rules, Llm, Ocr }` would need a new variant for every worker anyone writes, and each variant is a breaking change to a type that has already been persisted. `Provenance` carries the extractor's *identity as data* (`extractor` + `extractor_version`), so adding a worker is a deployment, not a migration.
+- **No Rust-specific document representation.** `ParsedDocument` is text plus spans — a shape a Python worker produces as readily as a Rust one. An AST would be rich enough for markdown and wrong for OCR, and only Rust could speak it.
+- **No claim only in-process code could build.** Subject and predicate are strings, so a worker that has never heard of `AssetKind` can emit a claim and be told it was wrong.
+
+Everything is `Serialize + Deserialize` with round-trip tests, because the boundary these types cross is a *process* boundary and a type that cannot survive JSON cannot cross it.
+
+**The policy stays in graph-owl, not in the worker.** `Disposition::for_confidence` decides what a proposed confidence buys; `constrain` decides whether a predicate is in the vocabulary. Both run on every claim from every source — *including* the in-process extractor, which gets no exemption for being local. A worker proposes; graph-owl disposes. That is what stops a mis-tuned or compromised extractor from writing straight into the graph by asserting its own certainty, and it is only true because the check is on this side of the boundary.
+
+**The rule-based extractor claims 0.6 on purpose.** A name matched in prose is evidence, not proof, so it lands in the *surface* band and waits for a human — an extractor claiming 0.9 for substring matching would be asserting into the graph on the strength of a string match. A test asserts it can never reach `Assert`.
+
+**A bug the gate caught that no design review would have: FQNs contain periods.** The sentence splitter ended a sentence at every `.`, which tore `svc.db.orders` into `The svc.`, `db.` and `orders table is append-only.` — so no sentence ever contained the subject and the extractor silently found *nothing at all*. A period now ends a sentence only when whitespace or the end of the text follows it. Worth recording because the failure was total and silent: the extractor returned an empty result rather than a wrong one, which reads identically to "this document mentions nothing".
 
 ## Implementation reference
 

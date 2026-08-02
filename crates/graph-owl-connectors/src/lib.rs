@@ -7,6 +7,8 @@
 //! the trait, run scoping, and the ordering guarantee.
 
 pub mod batch;
+pub mod document;
+pub mod extraction;
 pub mod ingest;
 pub mod job;
 pub mod rows;

@@ -25,6 +25,9 @@ tokio.workspace = true
 # from the wrong position — a correctness problem, not just a debugging
 # nicety, so it is logged for real rather than swallowed.
 tracing.workspace = true
+# Epic 21: extraction provenance timestamps. Was dev-only until claims
+# needed to record when they were extracted.
+chrono.workspace = true
 # Epic 19 Slice F: `TryStreamExt` for the Pulsar consumer stream.
 futures = "0.3"
 # Epic 19: Kafka/Redpanda consumer. MIT; wraps `rdkafka-sys` (MIT), which
