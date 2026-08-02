@@ -970,8 +970,8 @@ impl Storage for PostgresStorage {
         let (scheme, header, prefix) = scheme_columns(&endpoint.signature_scheme);
         let row = sqlx::query(
             "INSERT INTO webhook_endpoints
-                 (id, path, source, scheme, scheme_header, scheme_prefix, mapping, event_filter, enabled, secret)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 (id, path, source, scheme, scheme_header, scheme_prefix, mapping, event_filter, enabled, secret, rate_limit_per_minute)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              ON CONFLICT (id) DO UPDATE SET
                  path          = EXCLUDED.path,
                  source        = EXCLUDED.source,
@@ -984,10 +984,11 @@ impl Storage for PostgresStorage {
                  -- `None` means leave an existing key alone — same reasoning
                  -- as `upsert_connector_config`.
                  secret        = COALESCE($10, webhook_endpoints.secret),
+                 rate_limit_per_minute = EXCLUDED.rate_limit_per_minute,
                  updated_at    = now()
              RETURNING id, path, source, scheme, scheme_header, scheme_prefix,
                        mapping, event_filter, enabled, (secret IS NOT NULL) AS has_secret,
-                       created_at, updated_at",
+                       rate_limit_per_minute, created_at, updated_at",
         )
         .bind(endpoint.id)
         .bind(&endpoint.path)
@@ -999,6 +1000,7 @@ impl Storage for PostgresStorage {
         .bind(&endpoint.event_filter)
         .bind(endpoint.enabled)
         .bind(secret)
+        .bind(endpoint.rate_limit_per_minute.map(|n| i32::try_from(n).unwrap_or(i32::MAX)))
         .fetch_one(&self.pool)
         .await
         .map_err(|e| match &e {
@@ -1022,7 +1024,7 @@ impl Storage for PostgresStorage {
         let row = sqlx::query(
             "SELECT id, path, source, scheme, scheme_header, scheme_prefix,
                     mapping, event_filter, enabled, (secret IS NOT NULL) AS has_secret,
-                    created_at, updated_at
+                    rate_limit_per_minute, created_at, updated_at
              FROM webhook_endpoints WHERE id = $1",
         )
         .bind(id)
@@ -1040,7 +1042,7 @@ impl Storage for PostgresStorage {
         let row = sqlx::query(
             "SELECT id, path, source, scheme, scheme_header, scheme_prefix,
                     mapping, event_filter, enabled, (secret IS NOT NULL) AS has_secret,
-                    created_at, updated_at
+                    rate_limit_per_minute, created_at, updated_at
              FROM webhook_endpoints WHERE path = $1",
         )
         .bind(path)
@@ -1057,7 +1059,7 @@ impl Storage for PostgresStorage {
         let rows = sqlx::query(
             "SELECT id, path, source, scheme, scheme_header, scheme_prefix,
                     mapping, event_filter, enabled, (secret IS NOT NULL) AS has_secret,
-                    created_at, updated_at
+                    rate_limit_per_minute, created_at, updated_at
              FROM webhook_endpoints ORDER BY path",
         )
         .fetch_all(&self.pool)
@@ -4715,6 +4717,9 @@ fn webhook_endpoint_from_row(row: PgRow) -> graph_owl_storage::WebhookEndpoint {
         event_filter: row.get("event_filter"),
         enabled: row.get("enabled"),
         has_secret: row.get("has_secret"),
+        rate_limit_per_minute: row
+            .get::<Option<i32>, _>("rate_limit_per_minute")
+            .map(|n| u32::try_from(n).unwrap_or(0)),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }

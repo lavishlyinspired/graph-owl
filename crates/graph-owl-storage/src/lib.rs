@@ -440,6 +440,14 @@ pub struct WebhookEndpoint {
     pub event_filter: Vec<String>,
     pub enabled: bool,
     pub has_secret: bool,
+    /// Deliveries this endpoint accepts per minute; `None` means unlimited —
+    /// Epic 18 Slice E. Per-endpoint, not a global default: `01-api-conventions.md`
+    /// treats rate limiting as an ingress concern except for per-principal
+    /// quotas, and a registered endpoint's own configured budget *is* that
+    /// quota, set by whoever knows this specific sender's expected volume
+    /// rather than a single number this crate would otherwise have to guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_minute: Option<u32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }

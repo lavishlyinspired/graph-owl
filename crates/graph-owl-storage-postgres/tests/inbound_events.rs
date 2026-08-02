@@ -32,6 +32,7 @@ fn endpoint() -> WebhookEndpoint {
         event_filter: vec!["run.completed".to_string()],
         enabled: true,
         has_secret: false,
+        rate_limit_per_minute: None,
         created_at: now,
         updated_at: now,
     }

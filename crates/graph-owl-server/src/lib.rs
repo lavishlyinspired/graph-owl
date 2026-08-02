@@ -3,6 +3,7 @@ pub mod budget;
 pub mod jwks;
 pub mod observability;
 pub mod openapi;
+pub mod rate_limit;
 
 use axum::{
     Json, Router,
@@ -265,6 +266,11 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
     } else {
         router
     };
+
+    // One limiter for the whole process, same lifetime reasoning as the JWKS
+    // client: per-endpoint state (`rate_limit::Window`) has to survive across
+    // requests, so it is built once here rather than per-request.
+    let router = router.layer(axum::Extension(Arc::new(rate_limit::RateLimiter::new())));
 
     router
         // **Inside** the observability layer, so a shed request is still
@@ -952,6 +958,13 @@ enum AppError {
         class: &'static str,
         retry_after_seconds: u64,
     },
+    /// A webhook endpoint's own configured rate limit was exceeded — Epic
+    /// 18 Slice E. Distinct from `Overloaded`: this is not the server
+    /// protecting its own resources, it is one specific sender's own
+    /// budget, and a different endpoint's traffic is entirely unaffected.
+    RateLimited {
+        retry_after_seconds: u64,
+    },
 }
 
 impl AppError {
@@ -1014,6 +1027,7 @@ impl AppError {
             AppError::TokenInvalid(_) => "token-invalid",
             AppError::IllegalRelationship { .. } => "illegal-relationship",
             AppError::Overloaded { .. } => "overloaded",
+            AppError::RateLimited { .. } => "rate-limited",
         }
     }
 
@@ -1076,6 +1090,7 @@ impl AppError {
             AppError::TokenInvalid(_) => "Token invalid",
             AppError::IllegalRelationship { .. } => "Illegal relationship",
             AppError::Overloaded { .. } => "Server overloaded",
+            AppError::RateLimited { .. } => "Rate limit exceeded",
         }
     }
 
@@ -1093,6 +1108,7 @@ impl AppError {
             }
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::Overloaded { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            AppError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
         }
     }
 
@@ -1202,6 +1218,11 @@ impl AppError {
                 "the {class} path is at its concurrency limit and this request was refused \
                  rather than queued. Retry after {retry_after_seconds}s — nothing about the \
                  request itself is wrong"
+            ),
+            AppError::RateLimited {
+                retry_after_seconds,
+            } => format!(
+                "this endpoint's own rate limit was exceeded. Retry after {retry_after_seconds}s"
             ),
         }
     }
@@ -1314,14 +1335,22 @@ impl IntoResponse for AppError {
             axum::http::HeaderValue::from_static("application/problem+json"),
         );
 
-        // `Retry-After` is the half of a `503` that makes it actionable. A
-        // rejection without one leaves every client to invent its own backoff,
-        // and the ones that invent "immediately" are what turn a shed load into
-        // a retry storm — the exact failure admission control exists to stop.
-        if let AppError::Overloaded {
-            retry_after_seconds,
-            ..
-        } = &self
+        // `Retry-After` is the half of a `503`/`429` that makes it
+        // actionable. A rejection without one leaves every client to invent
+        // its own backoff, and the ones that invent "immediately" are what
+        // turn a shed load into a retry storm — the exact failure both
+        // admission control and rate limiting exist to stop.
+        let retry_after_seconds = match &self {
+            AppError::Overloaded {
+                retry_after_seconds,
+                ..
+            }
+            | AppError::RateLimited {
+                retry_after_seconds,
+            } => Some(*retry_after_seconds),
+            _ => None,
+        };
+        if let Some(retry_after_seconds) = retry_after_seconds
             && let Ok(value) = axum::http::HeaderValue::from_str(&retry_after_seconds.to_string())
         {
             response
@@ -2289,6 +2318,10 @@ struct WebhookEndpointRequest {
     /// optional so a future edit form can omit it to keep the existing key.
     #[serde(default)]
     secret: Option<String>,
+    /// Deliveries this endpoint accepts per minute; absent means unlimited
+    /// — Epic 18 Slice E.
+    #[serde(default)]
+    rate_limit_per_minute: Option<u32>,
 }
 
 fn default_webhook_enabled() -> bool {
@@ -2342,6 +2375,7 @@ async fn register_webhook_endpoint(
         // Ignored on the way in — `upsert_webhook_endpoint` returns the real
         // value from `secret IS NOT NULL`, not this placeholder.
         has_secret: false,
+        rate_limit_per_minute: payload.rate_limit_per_minute,
         created_at: now,
         updated_at: now,
     };
@@ -2364,6 +2398,28 @@ async fn list_webhook_endpoints(
     Ok(Json(catalog.list_webhook_endpoints().await?))
 }
 
+/// `graph_owl_<subsystem>_<noun>_<unit>`, per the observability contract's
+/// naming convention. `endpoint` is the registered *path*, not the endpoint's
+/// UUID — an operator's dashboard groups by the name they configured, the
+/// same reasoning `admission`'s `route` label uses the template rather than
+/// a generated id.
+const WEBHOOK_EVENTS: &str = "graph_owl_webhook_events_total";
+
+/// Epic 18 Slice E's "metrics per endpoint for received, applied, duplicate,
+/// dead-lettered" criterion, recorded here rather than in `graph-owl-api`:
+/// every other Prometheus counter in this codebase lives in the HTTP layer
+/// (`admission`, `observability`), and the facade's own instrumentation is
+/// `tracing::instrument` spans, not metrics — this keeps that boundary
+/// rather than drawing a new one for one subsystem.
+fn record_webhook_event(endpoint_path: &str, state: graph_owl_core::webhook::EventState) {
+    metrics::counter!(
+        WEBHOOK_EVENTS,
+        "endpoint" => endpoint_path.to_string(),
+        "state" => state.as_str()
+    )
+    .increment(1);
+}
+
 /// Receive a webhook delivery — Epic 18 Slice A.
 ///
 /// **Raw bytes, read before any JSON parsing.** Plan decision 2: an
@@ -2382,6 +2438,7 @@ async fn list_webhook_endpoints(
 /// because it falls out of `enabled` for free).
 async fn receive_webhook(
     State(catalog): State<Catalog>,
+    axum::Extension(rate_limiter): axum::Extension<Arc<rate_limit::RateLimiter>>,
     Path(path): Path<String>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
@@ -2390,6 +2447,21 @@ async fn receive_webhook(
         .webhook_endpoint_by_path(&path)
         .await?
         .ok_or(AppError::NotFound)?;
+
+    // Checked before signature verification, deliberately: the criterion is
+    // "one misbehaving sender must not cost every other sender its
+    // traffic", and a flood of unsigned noise is exactly the case that
+    // would otherwise burn CPU on HMAC/Ed25519 verification per request
+    // before ever being refused.
+    if let Err(rate_limit::RateLimited {
+        retry_after_seconds,
+    }) = rate_limiter.try_admit(endpoint.id, endpoint.rate_limit_per_minute)
+    {
+        return Err(AppError::RateLimited {
+            retry_after_seconds,
+        });
+    }
+
     let header_name = match &endpoint.signature_scheme {
         graph_owl_storage::SignatureScheme::HmacSha256 { header, .. }
         | graph_owl_storage::SignatureScheme::Ed25519 { header } => header,
@@ -2398,24 +2470,45 @@ async fn receive_webhook(
         .get(header_name.as_str())
         .and_then(|value| value.to_str().ok());
     let event = catalog.receive_webhook(&endpoint, signature, &body).await?;
+    record_webhook_event(&endpoint.path, event.state);
     // Detached, same reasoning as `ingest_batch`: the response has already
     // gone back with the event's id, and mapping/applying (Slice D) can
     // take longer than a caller should have to wait for a `201`. Only for
     // an actually-new delivery — a `Duplicate` has already had its one
-    // effect (none), and reprocessing it would just repeat the state check
-    // in `process_inbound_event` for nothing.
+    // effect (none, and reprocessing it would just repeat the state check
+    // in `process_inbound_event` for nothing), and a `Failed` delivery
+    // (malformed JSON, checked synchronously) has nothing to map.
     if event.state == graph_owl_core::webhook::EventState::Received {
         let worker = catalog.clone();
         let event_id = event.id;
+        let endpoint_path = endpoint.path.clone();
         tokio::spawn(async move {
             if let Err(error) = worker.process_inbound_event(event_id).await {
                 tracing::error!(event = %event_id, "inbound event could not be processed: {error:?}");
+                return;
+            }
+            // Read back rather than threaded through the return value: the
+            // metric is a side effect of whatever state the pipeline landed
+            // on (`Mapped`/`Applied`/`Failed`/`Superseded`), not a value
+            // `process_inbound_event` needs to hand back for any other
+            // reason, and this runs after the response has already gone
+            // back so the extra read costs no caller anything.
+            if let Ok(Some(processed)) = worker.inbound_event(event_id).await {
+                record_webhook_event(&endpoint_path, processed.state);
             }
         });
     }
+    // `Failed` here can only be the synchronous malformed-JSON check —
+    // every other rejection (mapping, shape, containment) happens later,
+    // asynchronously, after this response has already gone back as `201`.
+    let status = if event.state == graph_owl_core::webhook::EventState::Failed {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::CREATED
+    };
     Ok((
-        StatusCode::CREATED,
-        Json(json!({ "id": event.id, "state": event.state })),
+        status,
+        Json(json!({ "id": event.id, "state": event.state, "reason": event.reason })),
     ))
 }
 

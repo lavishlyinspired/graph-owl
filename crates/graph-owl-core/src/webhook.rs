@@ -39,6 +39,23 @@ pub enum EventState {
     Superseded,
 }
 
+impl EventState {
+    /// The label this state takes on the wire and in metrics — matching the
+    /// `camelCase` serde rename so an operator's dashboard and a client's
+    /// JSON body agree on the same word.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            EventState::Received => "received",
+            EventState::Mapped => "mapped",
+            EventState::Applied => "applied",
+            EventState::Failed => "failed",
+            EventState::Duplicate => "duplicate",
+            EventState::Superseded => "superseded",
+        }
+    }
+}
+
 /// One inbound webhook delivery, from signature verification onward.
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,6 +141,39 @@ pub fn compare_timestamps(candidate: Option<DateTime<Utc>>, current: DateTime<Ut
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Epic 18 Slice E: the per-endpoint metric needs a `'static` label for
+    /// each state, matching the wire's own `camelCase` rename so an
+    /// operator's dashboard and a client's JSON body use the same word.
+    #[test]
+    fn every_state_has_a_distinct_label_matching_its_wire_rename() {
+        let states = [
+            EventState::Received,
+            EventState::Mapped,
+            EventState::Applied,
+            EventState::Failed,
+            EventState::Duplicate,
+            EventState::Superseded,
+        ];
+        let labels: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
+        let mut deduped = labels.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            states.len(),
+            "every state must have its own distinct label: {labels:?}"
+        );
+
+        for state in states {
+            let wire = serde_json::to_value(state).expect("state should serialize");
+            assert_eq!(
+                wire.as_str(),
+                Some(state.as_str()),
+                "the metric label must match the wire rename for {state:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_same_sender_event_id_produces_the_same_key() {

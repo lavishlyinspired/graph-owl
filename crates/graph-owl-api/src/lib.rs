@@ -1475,6 +1475,15 @@ impl Catalog {
             return Err(CatalogError::Unauthenticated);
         }
 
+        // Malformed JSON is checked synchronously, here, rather than left
+        // for the async mapping step — Epic 18 Slice E's own criterion:
+        // "malformed JSON after a valid signature → 400 and DLQ, not a
+        // panic" names a synchronous response, and mapping/shape checks are
+        // the only reasons this pipeline is otherwise asynchronous at all.
+        // A signature can verify over any bytes; only now, once verified,
+        // does it become worth looking at what they contain.
+        let is_valid_json = serde_json::from_slice::<serde_json::Value>(raw_body).is_ok();
+
         // `sender_event_id` stays `None` until Slice C's declarative mapping
         // can extract one from the payload — every delivery through this
         // pipeline is content-hash deduped today, which `dedup_key` already
@@ -1487,8 +1496,16 @@ impl Catalog {
             received_at: chrono::Utc::now(),
             dedup_key: graph_owl_core::webhook::dedup_key(None, raw_body),
             raw: raw_body.to_vec(),
-            state: graph_owl_core::webhook::EventState::Received,
-            reason: None,
+            state: if is_valid_json {
+                graph_owl_core::webhook::EventState::Received
+            } else {
+                graph_owl_core::webhook::EventState::Failed
+            },
+            reason: if is_valid_json {
+                None
+            } else {
+                Some("payload is not valid JSON".to_string())
+            },
         };
         Ok(self.storage.create_inbound_event(event).await?)
     }
@@ -12650,6 +12667,7 @@ mod webhooks_are_verified_before_they_are_believed {
             event_filter: vec!["run.completed".to_string()],
             enabled: true,
             has_secret: false,
+            rate_limit_per_minute: None,
             created_at: now,
             updated_at: now,
         }
@@ -12694,6 +12712,38 @@ mod webhooks_are_verified_before_they_are_believed {
         assert_eq!(event.endpoint, registered.id);
         assert_eq!(event.raw, body);
         assert_eq!(event.state, graph_owl_core::webhook::EventState::Received);
+    }
+
+    /// Epic 18 Slice E: the malformed-JSON check happens **inside
+    /// `receive_webhook` itself**, not only when `process_inbound_event`
+    /// later gets around to mapping it. A signature can verify over any
+    /// bytes; a body this broken is worth failing before the async
+    /// pipeline ever sees it, so the HTTP layer can answer `400`
+    /// synchronously instead of `201` for something that was never going
+    /// anywhere.
+    #[tokio::test]
+    async fn a_verified_but_unparseable_body_is_recorded_failed_synchronously() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let secret = b"shared-secret";
+        let registered = catalog
+            .register_webhook_endpoint(endpoint(hmac_scheme()), Some(secret))
+            .await
+            .expect("register");
+
+        let body = b"this is not json";
+        let signature = hmac_sign(secret, body);
+
+        let event = catalog
+            .receive_webhook(&registered, Some(&signature), body)
+            .await
+            .expect("a verified delivery is recorded even when unparseable");
+
+        assert_eq!(event.state, graph_owl_core::webhook::EventState::Failed);
+        assert!(
+            event.reason.as_deref().is_some_and(|r| r.contains("JSON")),
+            "{:?}",
+            event.reason
+        );
     }
 
     #[tokio::test]
@@ -12893,6 +12943,7 @@ mod redelivered_webhooks_are_deduped_not_reapplied {
             event_filter: vec!["run.completed".to_string()],
             enabled: true,
             has_secret: false,
+            rate_limit_per_minute: None,
             created_at: now,
             updated_at: now,
         }
@@ -13296,6 +13347,7 @@ mod inbound_events_are_mapped_and_applied {
             event_filter: vec!["run.completed".to_string()],
             enabled: true,
             has_secret: false,
+            rate_limit_per_minute: None,
             created_at: now,
             updated_at: now,
         }

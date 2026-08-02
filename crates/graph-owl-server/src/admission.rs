@@ -95,9 +95,16 @@ pub fn class_of(route: &str) -> Option<Class> {
         // deliberately absent — a client that cannot ask how its job is doing
         // has to guess, and a `503` on a poll would make an overloaded server
         // look like a lost job.
-        "/connectors/postgres/runs" | "/graph/reconcile" | "/ingest/batch" => {
-            Some(Class::Ingestion)
-        }
+        // A webhook delivery, joining them for the same reason: it holds a
+        // connection for `create_inbound_event`'s synchronous write, and an
+        // external sender retrying into a `503` is the same back-pressure
+        // signal `/ingest/batch` already relies on — Epic 18 Slice E's own
+        // criterion, "a burst does not exhaust the pool", is this mechanism
+        // rather than a new one.
+        "/connectors/postgres/runs"
+        | "/graph/reconcile"
+        | "/ingest/batch"
+        | "/webhooks/receive/{path}" => Some(Class::Ingestion),
         _ => None,
     }
 }
@@ -533,6 +540,14 @@ mod tests {
                 Some(Class::Ingestion)
             );
             assert_eq!(class_of("/graph/reconcile"), Some(Class::Ingestion));
+        }
+
+        /// Epic 18 Slice E: a webhook delivery holds a connection the same
+        /// way `/ingest/batch` does, so a burst of deliveries sheds through
+        /// the same mechanism rather than exhausting the pool.
+        #[test]
+        fn a_webhook_delivery_is_ingestion_class() {
+            assert_eq!(class_of("/webhooks/receive/{path}"), Some(Class::Ingestion));
         }
 
         /// **The negative that matters most.** A server shedding load is

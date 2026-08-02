@@ -28,6 +28,7 @@ fn endpoint(path: &str) -> WebhookEndpoint {
         event_filter: vec!["run.completed".to_string()],
         enabled: true,
         has_secret: false,
+        rate_limit_per_minute: None,
         created_at: now,
         updated_at: now,
     }
@@ -55,6 +56,55 @@ async fn a_registered_endpoint_round_trips_without_its_secret() {
             header: "X-Signature".to_string(),
             prefix: "sha256=".to_string(),
         }
+    );
+}
+
+/// Epic 18 Slice E: `rate_limit_per_minute` is ordinary configuration, not a
+/// secret, so — unlike the endpoint's signing key — it must round-trip
+/// exactly through every read path, and `None` (unlimited) must stay `None`
+/// rather than becoming a stored zero.
+#[tokio::test]
+async fn rate_limit_per_minute_round_trips_through_every_read_path() {
+    let (storage, _db) = test_storage().await;
+    let mut limited = endpoint("dbt");
+    limited.rate_limit_per_minute = Some(120);
+
+    let written = storage
+        .upsert_webhook_endpoint(limited, Some(b"shared-secret"))
+        .await
+        .expect("register");
+    assert_eq!(written.rate_limit_per_minute, Some(120));
+
+    let fetched_by_id = storage
+        .get_webhook_endpoint(written.id)
+        .await
+        .expect("get")
+        .expect("must exist");
+    assert_eq!(fetched_by_id.rate_limit_per_minute, Some(120));
+
+    let fetched_by_path = storage
+        .get_webhook_endpoint_by_path("dbt")
+        .await
+        .expect("get by path")
+        .expect("must exist");
+    assert_eq!(fetched_by_path.rate_limit_per_minute, Some(120));
+
+    let listed = storage
+        .list_webhook_endpoints()
+        .await
+        .expect("list")
+        .into_iter()
+        .find(|e| e.id == written.id)
+        .expect("must be listed");
+    assert_eq!(listed.rate_limit_per_minute, Some(120));
+
+    let unlimited = storage
+        .upsert_webhook_endpoint(endpoint("unbounded"), Some(b"another-secret"))
+        .await
+        .expect("register");
+    assert_eq!(
+        unlimited.rate_limit_per_minute, None,
+        "an endpoint that never set a limit must read back as unlimited, not zero"
     );
 }
 
