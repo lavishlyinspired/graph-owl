@@ -119,6 +119,17 @@
               "string",
               "null"
             ]
+          },
+          "extension": {
+            "additionalProperties": {},
+            "description": "Organization-defined fields — Epic 22 Slice B.\n\n**Merged per key, not replaced wholesale.** A patch naming\n`costCenter` must not silently clear `retentionDays`, and a client that\nhad to send the whole bag to change one field would be racing every\nother client that did the same. A key present with an explicit `null`\nclears *that* key; a key absent is untouched — Epic 3's PATCH semantics\napplied one level down, where the fields actually are.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
           }
         },
         "type": "object"

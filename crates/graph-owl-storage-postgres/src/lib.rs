@@ -3507,6 +3507,14 @@ impl Storage for PostgresStorage {
         if let Some(description) = &update.description {
             after.description = description.clone();
         }
+        // Merged per key against what is stored, so a patch naming one custom
+        // property cannot clear another. The merge is the domain's
+        // ([`AssetUpdate::merged_extension`]) rather than SQL's, because it is
+        // the same rule the facade validates against — computing it twice in
+        // two languages is how the validated bag and the written bag diverge.
+        if let Some(merged) = update.merged_extension(before.extension.as_ref()) {
+            after.extension = Some(merged);
+        }
 
         let diff = ChangeDescription::between(
             &serde_json::to_value(&before).unwrap_or_default(),
@@ -3525,7 +3533,7 @@ impl Storage for PostgresStorage {
         let next = before.version.bump(kind);
         let updated_row = sqlx::query(&format!(
             "UPDATE assets SET description = $2, version_major = $3, version_minor = $4,
-                 updated_by = $5, change_description = $6, updated_at = now()
+                 updated_by = $5, change_description = $6, extension = $7, updated_at = now()
              WHERE id = $1
              RETURNING {ASSET_COLUMNS}"
         ))
@@ -3535,6 +3543,7 @@ impl Storage for PostgresStorage {
         .bind(i32::try_from(next.minor).unwrap_or(i32::MAX))
         .bind(updated_by)
         .bind(serde_json::to_value(&diff).ok())
+        .bind(serde_json::to_value(after.extension.clone().unwrap_or_default()).unwrap_or_default())
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
@@ -3771,6 +3780,7 @@ impl Storage for PostgresStorage {
         // measurement says otherwise: a maintained effective-owner projection buys
         // speed and owes an invalidation problem, and containment is at most five
         // levels deep (service → database → schema → table → column).
+        let extension = extension_clauses(filter.extension, 9);
         let sql = format!(
             "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
              WHERE NOT deleted
@@ -3781,10 +3791,11 @@ impl Storage for PostgresStorage {
                      SELECT 1 FROM json_array_elements({OWNERS_EXPR}) AS effective
                       WHERE effective->>'id' = $7))
                AND ($8::bool IS NOT TRUE OR json_array_length({OWNERS_EXPR}) = 0)
+               {extension}
              ORDER BY fully_qualified_name, id
              LIMIT $4"
         );
-        let query = sqlx::query(&sql)
+        let mut query = sqlx::query(&sql)
             .bind(filter.kind.map(AssetKind::as_str))
             .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
             .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
@@ -3793,6 +3804,9 @@ impl Storage for PostgresStorage {
             .bind(&deny)
             .bind(filter.owner)
             .bind(filter.unowned);
+        for condition in filter.extension {
+            query = query.bind(&condition.name).bind(&condition.value);
+        }
         self.asset_page(query, page).await
     }
 
@@ -3800,7 +3814,7 @@ impl Storage for PostgresStorage {
     async fn search_assets_visible(
         &self,
         query: &str,
-        kind: Option<AssetKind>,
+        filter: &graph_owl_storage::AssetFilter<'_>,
         page: &PageRequest,
         predicate: &AccessPredicate,
     ) -> Result<Page<Asset>, StorageError> {
@@ -3815,6 +3829,7 @@ impl Storage for PostgresStorage {
         let overfetch = i64::try_from(page.limit)
             .unwrap_or(i64::MAX)
             .saturating_add(1);
+        let extension = extension_clauses(filter.extension, 8);
         let sql = format!(
             "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners, {RANK_KEY} AS sort_key
              FROM assets, to_tsquery('english', $1) AS q (ts)
@@ -3823,17 +3838,21 @@ impl Storage for PostgresStorage {
                AND ($2::text IS NULL OR kind = $2)
                AND ($3::text IS NULL OR ({RANK_KEY}, id) > ($3, $4))
                {VISIBILITY_SEARCH}
+               {extension}
              ORDER BY {RANK_KEY}, id
              LIMIT $5"
         );
-        let q = sqlx::query(&sql)
+        let mut q = sqlx::query(&sql)
             .bind(terms)
-            .bind(kind.map(AssetKind::as_str))
+            .bind(filter.kind.map(AssetKind::as_str))
             .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
             .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
             .bind(overfetch)
             .bind(&allow)
             .bind(&deny);
+        for condition in filter.extension {
+            q = q.bind(&condition.name).bind(&condition.value);
+        }
         self.ranked_asset_page(q, page).await
     }
 
@@ -5057,6 +5076,204 @@ impl Storage for PostgresStorage {
         Ok(done.rows_affected() > 0)
     }
 
+    async fn custom_property_values(
+        &self,
+        entity_type: &str,
+        name: &str,
+    ) -> Result<Vec<(Uuid, serde_json::Value)>, StorageError> {
+        // The same `?` plus not-null test `count_custom_property_values` uses,
+        // so the count and the list can never disagree about what "holds a
+        // value" means — a `409` reporting three and a migration touching two
+        // is a bug nobody would look for in two different `WHERE` clauses.
+        let rows = sqlx::query(
+            "SELECT id, extension -> $2 AS value FROM assets
+             WHERE kind::text = $1 AND extension ? $2 AND extension -> $2 <> 'null'::jsonb
+             ORDER BY id",
+        )
+        .bind(entity_type)
+        .bind(name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|row| (row.get("id"), row.get::<serde_json::Value, _>("value")))
+            .collect())
+    }
+
+    async fn update_custom_property(
+        &self,
+        id: Uuid,
+        property: &CustomProperty,
+        previous_name: &str,
+    ) -> Result<bool, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let done = sqlx::query(
+            "UPDATE custom_properties
+                SET name = $2, property_type = $3, description = $4, constraints = $5
+              WHERE id = $1",
+        )
+        .bind(id)
+        .bind(&property.name)
+        .bind(property.property_type.as_str())
+        .bind(&property.description)
+        .bind(serde_json::to_value(&property.constraints).unwrap_or_default())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            if e.as_database_error()
+                .is_some_and(|d| d.is_unique_violation())
+            {
+                StorageError::Conflict {
+                    detail: format!(
+                        "`{}` is already defined on `{}`",
+                        property.name, property.entity_type
+                    ),
+                    existing_id: None,
+                    kind: ConflictKind::CustomPropertyExists,
+                }
+            } else {
+                StorageError::Unexpected(e.to_string())
+            }
+        })?;
+
+        if done.rows_affected() == 0 {
+            tx.rollback()
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            return Ok(false);
+        }
+
+        // The key migration, in the same transaction as the definition change.
+        // `- old || jsonb_build_object(new, value)` in one expression, so no
+        // row is ever observed holding neither key.
+        if previous_name != property.name {
+            sqlx::query(
+                "UPDATE assets
+                    SET extension = (extension - $2)
+                                    || jsonb_build_object($3::text, extension -> $2)
+                  WHERE kind::text = $1 AND extension ? $2",
+            )
+            .bind(&property.entity_type)
+            .bind(previous_name)
+            .bind(&property.name)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(true)
+    }
+
+    async fn force_delete_custom_property(
+        &self,
+        id: Uuid,
+        entity_type: &str,
+        name: &str,
+        updated_by: &str,
+    ) -> Result<i64, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        sqlx::query("DELETE FROM custom_properties WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // **Row by row, deliberately, and this is the expensive choice.** One
+        // `UPDATE ... SET extension = extension - $name` would strip every
+        // value in a single statement and record none of it: no version bump,
+        // no history row, no diff. An entity whose `costCenter` vanished has
+        // changed, and a catalog that cannot say when is exactly the catalog
+        // this epic exists to replace. Force-deleting a definition is a rare,
+        // admin-only, deliberately-typed operation; paying per row for an
+        // auditable one is the right side of that trade.
+        let affected = sqlx::query(&format!(
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
+              WHERE kind::text = $1 AND extension ? $2
+              ORDER BY id
+                FOR UPDATE"
+        ))
+        .bind(entity_type)
+        .bind(name)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut changed = 0_i64;
+        for row in affected {
+            let before = asset_from_row(row);
+            let mut after = before.clone();
+            let mut bag = before.extension.clone().unwrap_or_default();
+            bag.remove(name);
+            after.extension = Some(bag.clone());
+
+            let diff = graph_owl_core::envelope::ChangeDescription::between(
+                &serde_json::to_value(&before).unwrap_or_default(),
+                &serde_json::to_value(&after).unwrap_or_default(),
+            );
+            let kind = graph_owl_core::envelope::classify(&diff);
+            if matches!(kind, graph_owl_core::envelope::ChangeKind::None) {
+                continue;
+            }
+            let next = before.version.bump(kind);
+
+            let updated_row = sqlx::query(&format!(
+                "UPDATE assets SET extension = $2, version_major = $3, version_minor = $4,
+                     updated_by = $5, change_description = $6, updated_at = now()
+                 WHERE id = $1
+                 RETURNING {ASSET_COLUMNS}"
+            ))
+            .bind(before.id)
+            .bind(serde_json::to_value(&bag).unwrap_or_default())
+            .bind(i32::try_from(next.major).unwrap_or(i32::MAX))
+            .bind(i32::try_from(next.minor).unwrap_or(i32::MAX))
+            .bind(updated_by)
+            .bind(serde_json::to_value(&diff).ok())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            let updated = asset_from_row(updated_row);
+
+            sqlx::query(
+                "INSERT INTO asset_versions
+                     (asset_id, version_major, version_minor, snapshot, change_description, updated_by, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(before.id)
+            .bind(i32::try_from(next.major).unwrap_or(i32::MAX))
+            .bind(i32::try_from(next.minor).unwrap_or(i32::MAX))
+            .bind(serde_json::to_value(&updated).unwrap_or_default())
+            .bind(serde_json::to_value(&diff).ok())
+            .bind(updated_by)
+            .bind(updated.updated_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+            changed += 1;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(changed)
+    }
+
     async fn delete_extraction_run(&self, run_id: Uuid) -> Result<bool, StorageError> {
         // The claims and discards go with it by `ON DELETE CASCADE`, which is
         // what makes "a bad run is deletable wholesale" a schema guarantee
@@ -5543,6 +5760,48 @@ const OWNERS_EXPR: &str = "(WITH RECURSIVE ancestry (node, next_up, hops) AS (
 
 const ASSET_COLUMNS: &str = "id, kind, name, fully_qualified_name, parent_id, description, properties, extension, version_major, version_minor, updated_by, change_description, deleted, deleted_at, created_at, updated_at";
 
+/// `AND` clauses for a set of custom-property filters — Epic 22 Slice D.
+///
+/// Two placeholders per condition (the property name, then the value), starting
+/// at `next`. **The name is bound, never interpolated**: it arrives from a query
+/// string, and a name spliced into SQL is an injection whatever the facade
+/// checked first.
+///
+/// Equality is written as **containment** (`@>`), not as `extension -> name =
+/// value`. The two are equivalent here and only one is indexable: `jsonb_path_ops`
+/// — the operator class the `assets_extension` index uses — supports `@>` and
+/// nothing else. Written the other way this is a sequential scan of the whole
+/// table on the most common filter there is.
+///
+/// The bounds are not index-backed, and cannot be by a general index: a btree on
+/// `(extension -> 'retentionDays')` supports one property, so a generic range
+/// index would mean an index per definition — which is precisely the per-property
+/// migration this epic's decision 4 refuses. They run as a filter over whatever
+/// the indexable predicates (`kind`, visibility, any equality filter) already
+/// narrowed to. When one property becomes hot enough to matter, an expression
+/// index on that one property is the escape hatch, and it needs no code change.
+fn extension_clauses(filters: &[graph_owl_storage::ExtensionFilter], next: usize) -> String {
+    use graph_owl_storage::ExtensionOp;
+    let mut sql = String::new();
+    for (offset, condition) in filters.iter().enumerate() {
+        let name = next + offset * 2;
+        let value = name + 1;
+        let clause = match condition.op {
+            ExtensionOp::Eq => {
+                format!(" AND extension @> jsonb_build_object(${name}::text, ${value}::jsonb)")
+            }
+            // jsonb compares numbers numerically and strings lexicographically,
+            // and a property has one declared type — so one expression serves
+            // both the numeric and the date/timestamp criteria, ISO-8601 dates
+            // ordering correctly as strings.
+            ExtensionOp::Gte => format!(" AND (extension -> ${name}::text) >= ${value}::jsonb"),
+            ExtensionOp::Lte => format!(" AND (extension -> ${name}::text) <= ${value}::jsonb"),
+        };
+        sql.push_str(&clause);
+    }
+    sql
+}
+
 /// [`ASSET_COLUMNS`] with every name qualified by a table alias.
 ///
 /// **Derived rather than written out a second time.** A recursive CTE's two
@@ -5663,5 +5922,85 @@ impl PostgresStorage {
         Page::from_overfetch(Vec::new(), page.limit, |a: &Asset| {
             Cursor::new(a.fully_qualified_name.clone(), a.id)
         })
+    }
+}
+
+#[cfg(test)]
+mod extension_clause_tests {
+    use super::extension_clauses;
+    use graph_owl_storage::{ExtensionFilter, ExtensionOp};
+
+    fn filter(name: &str, op: ExtensionOp) -> ExtensionFilter {
+        ExtensionFilter {
+            name: name.to_string(),
+            op,
+            value: serde_json::json!("x"),
+        }
+    }
+
+    /// **The whole reason equality is written this way.** `jsonb_path_ops`
+    /// supports `@>` and nothing else, so `extension -> name = value` is a
+    /// sequential scan of the table on the most common filter there is — and
+    /// both spellings return the same rows, so only this assertion can tell
+    /// them apart.
+    #[test]
+    fn equality_is_containment_so_the_gin_index_can_serve_it() {
+        let sql = extension_clauses(&[filter("costCenter", ExtensionOp::Eq)], 9);
+
+        assert!(sql.contains("@>"), "{sql}");
+        assert!(
+            !sql.contains("extension -> $9"),
+            "a direct comparison is unindexable here: {sql}"
+        );
+    }
+
+    /// Placeholders advance by two per condition — one for the name, one for
+    /// the value. Off by one and every filter past the first binds the previous
+    /// filter's value, which returns wrong rows rather than failing.
+    #[test]
+    fn each_condition_consumes_two_placeholders_from_the_offset_given() {
+        let sql = extension_clauses(
+            &[
+                filter("costCenter", ExtensionOp::Eq),
+                filter("retentionDays", ExtensionOp::Gte),
+            ],
+            9,
+        );
+
+        assert!(sql.contains("$9"), "{sql}");
+        assert!(sql.contains("$10"), "{sql}");
+        assert!(sql.contains("$11"), "{sql}");
+        assert!(sql.contains("$12"), "{sql}");
+        assert!(!sql.contains("$13"), "{sql}");
+    }
+
+    /// The two bounds are different comparisons, and swapping them is a silent
+    /// wrong answer rather than an error.
+    #[test]
+    fn the_bounds_compare_in_the_directions_they_are_named_for() {
+        assert!(
+            extension_clauses(&[filter("d", ExtensionOp::Gte)], 1).contains(">="),
+            "gte must be >="
+        );
+        assert!(
+            extension_clauses(&[filter("d", ExtensionOp::Lte)], 1).contains("<="),
+            "lte must be <="
+        );
+    }
+
+    /// **The property name is never interpolated.** It arrives from a query
+    /// string, and a name spliced into SQL is an injection whatever the facade
+    /// checked first.
+    #[test]
+    fn the_property_name_is_bound_not_written_into_the_sql() {
+        let sql = extension_clauses(&[filter("'; DROP TABLE assets; --", ExtensionOp::Eq)], 9);
+
+        assert!(!sql.contains("DROP TABLE"), "{sql}");
+    }
+
+    /// No filters, no clauses — an empty string, not a dangling `AND`.
+    #[test]
+    fn no_filters_produce_no_sql() {
+        assert!(extension_clauses(&[], 9).is_empty());
     }
 }

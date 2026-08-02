@@ -1,6 +1,6 @@
 # Plan: Custom Properties (Epic 22)
 **Branch**: feat/custom-properties
-**Status**: Slice A shipped; Slice B partial (create path only); Slices C and D not started
+**Status**: Slices A–D shipped
 **Depends on**: Epic 3 (the envelope's `extension` field)
 **Crates**: `graph-owl-core` (CustomProperty, typed validation — pure) · `graph-owl-storage-postgres` (JSONB + GIN index) · `graph-owl-api` · `graph-owl-server`
 
@@ -50,11 +50,11 @@ evidence they are not the same field.
 
 - [x] A custom property can be defined on an entity type with a type and optional constraints.
 - [x] Values are validated on write against the definition.
-- [~] Values round-trip through create, read, patch, and version history. **Create and read are done.** PATCH is not: `AssetUpdate` carries no `extension`, so a value can be set at creation and not yet changed in isolation. Version history is not: the change is not classified, so setting a value does not appear in `changeDescription`.
-- [ ] Custom properties are filterable on list endpoints and searchable. Slice D — the GIN index exists, nothing queries through it yet. **Until this lands the feature is write-only**, which the plan itself calls worse than none.
-- [ ] Changing a definition's type is rejected while values exist. Slice C — there is no update endpoint at all yet, so the unsafe change is impossible rather than guarded. Safe by absence, which is not the same as safe.
-- [~] Deleting a definition with values → `409` unless forced. **The `409` is done and reports the count**; `?force=true` is not implemented, so a definition with values currently cannot be removed at all.
-- [ ] A value change bumps the version and appears in the change description.
+- [x] Values round-trip through create, read, patch, and version history. PATCH merges **per key**: a patch naming `costCenter` leaves `retentionDays` alone, and an explicit `null` clears the one key it names. The merged bag — not the patch — is what gets validated, so a patch cannot reach storage carrying a value a create would have refused.
+- [x] Custom properties are filterable on list endpoints and searchable. `?extension.costCenter=CC-1234` on `GET /assets` and `GET /assets/search`, with `.gte`/`.lte` for ranges. Equality is written as JSONB containment so the GIN index can serve it, verified by an `EXPLAIN` test.
+- [x] Changing a definition's type is rejected while values exist, reporting the count.
+- [x] Deleting a definition with values → `409` naming `?force=true`; `?force=true` removes the definition and its values transactionally, bumping every affected entity's version.
+- [x] A value change bumps the version and appears in the change description.
 
 ## Slices
 
@@ -75,58 +75,48 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: entity, type enum, validation, endpoints.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice B: Values are set and validated — **partial**: validated on create, not yet on PATCH, and no version classification
+### Slice B: Values are set and validated — **shipped**
 
 **Value**: The property does something.
 **Path**: `extension: Map<String, Value>` on the envelope; validated against definitions on write.
-**Acceptance criteria**:
-- Setting a defined property with a correct value succeeds and round-trips.
-- Wrong type (string into integer) → `400` naming the property and both types.
-- Undefined property name → `400`.
-- Enum value outside the list → `400` listing valid values.
-- Constraint violation (min/max, pattern, length) → `400` naming the constraint.
-- Entity-reference type validates the target exists and is of the right type.
-- Setting to null clears it; omitting leaves it unchanged (consistent with Epic 3's PATCH semantics).
-- A value change bumps the version Minor and appears in `changeDescription`.
-**RED**: Table-driven validation over every supported type with valid and invalid values. Omit-vs-null test. Mutator watch: validation that checks presence but not type must fail the wrong-type cases; an unconditional pass must fail all of them.
-**GREEN**: validation engine, storage in `extension`, change tracking.
-**REFACTOR**: validation is a pure function of (definition, value). Assess placing it in `core` rather than the facade — it is domain knowledge and exhaustively testable without I/O.
-**Done when**: criteria met, mutation report reviewed, commit approved.
+**What it settled**: PATCH merges **per key**. A whole-bag replace would make a client that wants to change one field send all of them, which is a race every other client is also running — and the loser's value disappears with nothing failing. An explicit `null` clears the one key it names; an absent `extension` leaves the column alone, which is why a description edit does not wipe the organization's fields.
+**And the ordering that matters**: the **merged** bag is validated, not the patch. Validating only what the client sent would let a patch add a key beside existing ones without ever revalidating them, so the check would pass for a bag no create would have accepted.
 
-### Slice C: Definitions evolve safely
+### Slice C: Definitions evolve safely — **shipped**
 
 **Value**: The metadata model can change without silently corrupting data.
-**Path**: guarded updates on definitions.
-**Acceptance criteria**:
-- Changing the description or display name is always allowed.
-- Changing the type while values exist → `409` reporting the count.
-- Widening a constraint (raising a max) is allowed; narrowing it while violating values exist → `409` reporting how many.
-- Adding an enum value is allowed; removing one in use → `409`.
-- Renaming a definition migrates existing values transactionally.
-- Deleting a definition with values → `409`; `?force=true` removes definition and values transactionally, bumping affected versions.
-**RED**: Narrowing-constraint test asserting the `409` reports the violating count. Force-delete test asserting every value is removed *and* every affected entity's version advanced. Mutator watch: allowing a narrowing that orphans values must fail; non-transactional force must fail.
-**GREEN**: change classification, usage counting, transactional migration.
-**Done when**: criteria met, mutation report reviewed, commit approved.
+**Path**: `PATCH /custom-properties/{id}`; `DELETE ...?force=true`.
 
-### Slice D: Custom properties are queryable
+**One rule, not a classification table.** The criteria list four cases — type change, constraint narrowing, enum-value removal, and the widenings that are always fine — and the obvious implementation is four predicates over the *shape* of the change. That table has to be right for every combination of bound, type and enum member, and the first combination it gets wrong silently orphans data.
+
+So the check is: apply the change, then re-run the **write-path validator** over every value that already exists. A widening admits everything it did before and passes; a narrowing that strands values fails and reports how many. It cannot disagree with what a write would do, because it is the same function — and no case can be forgotten, because there are no cases. The cost is reading one property's values; a description edit skips it entirely, since nothing about what a value must satisfy moved.
+
+**`entityType` is immutable by DTO shape**, the pattern Epic 3 used for `TableUpdate`'s id. Moving a definition between types would orphan every value under the old one, and there is nothing a client can send that would do it.
+
+**`?force=true` is row by row on purpose, and it is the expensive choice.** One `UPDATE ... SET extension = extension - $name` would strip every value in a single statement and record none of it — no version bump, no history row, no diff. An entity whose `costCenter` vanished has changed, and a catalog that cannot say when is the catalog this epic exists to replace. Force-deleting a definition is rare, admin-only and deliberately typed; paying per row for an auditable operation is the right side of that trade.
+
+**Mutants watched**: a check that classified the change rather than validating the values must fail `removing_an_unused_enum_value_is_allowed`; a non-transactional force must fail the version assertions in `force_deleting_removes_the_values_and_bumps_every_affected_version`.
+
+### Slice D: Custom properties are queryable — **shipped**
 
 **Value**: Without this the feature is write-only, and write-only metadata is worse than none.
-**Path**: `?extension.costCenter=CC-1234` on list endpoints; indexed in search.
-**Acceptance criteria**:
-- Equality filtering on string, integer, boolean, and enum properties.
-- Range filtering (`gte`/`lte`) on numeric and date properties.
-- Filtering on an undefined property → `400`, not silently empty.
-- Filters compose with other filters and with pagination; `paging.total` respects them.
-- Custom properties are indexed and returned in search results.
-- Search facets are available for enum-typed properties.
-- Filtering performance is acceptable — a supporting index exists, verified by query plan.
-**RED**: Range-filter tests over numeric and date types. A test asserting an undefined property filter is `400`, not an empty page — the silent-empty failure mode is a data-leak-shaped bug (Epic 1's unknown-parameter rule). Mutator watch: silent-empty must fail it.
-**GREEN**: JSONB indexing and filtering, search mapping, facets.
-**REFACTOR**: assess whether filtering should be generic over `extension` or generated per definition. Generic with a GIN index — per-definition columns would mean a migration per property, defeating the purpose.
-**Done when**: criteria met, query plan reviewed, mutation report reviewed, commit approved.
+**Path**: `?extension.costCenter=CC-1234` on `GET /assets` and `GET /assets/search`; `.gte`/`.lte` for ranges.
+
+**The syntax**: `extension.<name>` for equality, `extension.<name>.gte` / `.lte` for bounds. A dotted suffix rather than `[gte]` because brackets need percent-encoding in strict clients, and the whole filter stays one flat `name[.op]=value` grammar that reads the same as the `extension.` prefix in front of it. A range is two filters on one property, which falls out of the conventions doc's "repeated params are AND" rather than needing a grammar of its own. An unrecognised suffix is a `400`: `?extension.retentionDays.gt=30` is somebody meaning `gte`, and reading it as a property called `retentionDays.gt` answers with an empty page and no hint.
+
+**Why they cannot go through `AppQuery`.** Custom property names are defined at runtime, so no struct can name them, and the only serde shape that accepts them is a flattened map — which absorbs *every* unrecognised parameter and silently repeals `deny_unknown_fields` for the endpoint. `?ownr=alice` would go back to being a filter that matches everything. So `extension.*` pairs are split off the raw query first and the remainder goes through the same strict extractor as before; a typo'd property name is caught one layer down, against the definitions.
+
+**Coercion belongs in the facade.** A query string carries only text, and `retentionDays=30` means the number thirty because the *definition* says so — not because it happens to parse as one. Guessing would make a string property whose values are digits unfilterable.
+
+**The index, and the honest half.** Equality is written as JSONB **containment** (`@>`), not `extension -> name = value`. The two are equivalent and only one is indexable: `jsonb_path_ops`, the operator class `assets_extension` uses, supports `@>` and nothing else — written the other way, the most common filter there is becomes a sequential scan of the whole table. `equality_filtering_uses_the_extension_index` asserts the plan with `enable_seqscan = off`, which is what makes the assertion about the *operator* rather than about the row count.
+
+**Ranges are deliberately not index-backed.** A btree on `(extension -> 'retentionDays')` supports one property, so a generic range index means an index per definition — precisely the per-property migration decision 4 refuses. They filter what the indexable predicates (`kind`, visibility, any equality filter) already narrowed. When one property becomes hot enough to matter, an expression index on that one property is the escape hatch and it needs no code change.
+
+**Facets are enum-only.** A facet is a short closed list somebody clicks; a facet over free text is one bucket per value, which is a report.
 
 ## Explicitly deferred (with destination)
 
+- **Range filters served by an index** → an expression index per hot property, added when a measurement names one. See Slice D.
 - **Computed / derived properties** → needs an expression language; revisit if requested.
 - **Cross-entity property references beyond entity-reference type** → the reference type covers the realistic need.
 - **Per-property access control** → Epic 13 operates on entities; property-level granularity only if asked.

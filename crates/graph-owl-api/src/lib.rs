@@ -785,6 +785,7 @@ impl Catalog {
     /// `Validation` if the definition cannot exist — a reserved name, an enum
     /// with no values, bounds that cross. `Conflict` if the name is already
     /// defined **on that type**.
+    // (see `CustomPropertyUpdate` below for the guarded change path)
     pub async fn define_custom_property(
         &self,
         property: graph_owl_core::custom_property::CustomProperty,
@@ -823,16 +824,121 @@ impl Catalog {
             .map_err(CatalogError::from)
     }
 
-    /// Delete a definition, refusing while values exist.
+    /// Change a definition, refusing any change that would orphan a value.
+    ///
+    /// **One rule, not a classification table.** The plan lists four cases —
+    /// type change, constraint narrowing, enum-value removal, and the widenings
+    /// that are always fine — and it is tempting to encode them as four
+    /// predicates over the *shape* of the change. That table has to be right for
+    /// every combination of bound, type and enum member, and the first
+    /// combination it gets wrong silently orphans data.
+    ///
+    /// So the check is: apply the change, then re-run the **write-path
+    /// validator** over every value that already exists. A widening admits
+    /// everything it did before and passes; a narrowing that strands values
+    /// fails and reports how many. It cannot disagree with what a write would
+    /// do, because it is the same function — and no case can be forgotten,
+    /// because there are no cases.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if no such definition. `Validation` if the changed definition
+    /// could not exist at all. `Conflict` if existing values would no longer be
+    /// valid, reporting how many, or if the new name is taken on that type.
+    pub async fn update_custom_property(
+        &self,
+        id: Uuid,
+        change: CustomPropertyUpdate,
+    ) -> Result<graph_owl_core::custom_property::CustomProperty, CatalogError> {
+        let before = self
+            .storage
+            .get_custom_property(id)
+            .await
+            .map_err(CatalogError::from)?
+            .ok_or(CatalogError::NotFound)?;
+
+        let mut after = before.clone();
+        if let Some(name) = change.name {
+            after.name = name;
+        }
+        if let Some(property_type) = change.property_type {
+            after.property_type = property_type;
+        }
+        if let Some(description) = change.description {
+            after.description = description;
+        }
+        if let Some(constraints) = change.constraints {
+            after.constraints = constraints;
+        }
+
+        after.validate().map_err(|error| {
+            CatalogError::Validation(vec![FieldError::new(
+                "name",
+                FieldErrorCode::Value,
+                error.to_string(),
+            )])
+        })?;
+
+        // Nothing to check if nothing about what a value must satisfy moved.
+        // A description edit is always allowed, and reading every value to
+        // confirm that would make renaming the help text an O(estate) operation.
+        //
+        // **Both decisions live in `core`**, where they are pure and
+        // exhaustively testable without a database — this method is the shell
+        // that fetches the values and turns a count into a `409`.
+        if graph_owl_core::custom_property::constrains_differently(&before, &after) {
+            let held = self
+                .storage
+                .custom_property_values(&before.entity_type, &before.name)
+                .await
+                .map_err(CatalogError::from)?;
+            let values: Vec<serde_json::Value> = held.into_iter().map(|(_, value)| value).collect();
+            let stranded = graph_owl_core::custom_property::stranded_by(&after, &values);
+            if stranded > 0 {
+                return Err(CatalogError::Conflict {
+                    detail: format!(
+                        "{stranded} of {} existing `{}` values would no longer be valid \
+                         under the changed definition; widen it, or clear those values first",
+                        values.len(),
+                        before.name
+                    ),
+                    existing_id: Some(id),
+                    kind: ConflictKind::CustomPropertyExists,
+                });
+            }
+        }
+
+        if !self
+            .storage
+            .update_custom_property(id, &after, &before.name)
+            .await
+            .map_err(CatalogError::from)?
+        {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(after)
+    }
+
+    /// Delete a definition, refusing while values exist unless `force`.
     ///
     /// **Decision 5: removing a definition does not silently delete data.** The
     /// `409` reports the count, because "values exist" tells an operator
     /// nothing about whether this is a five-minute cleanup or a quarter's work.
+    /// `force` is the same operation with the operator's consent, and it is
+    /// transactional and version-bumping rather than a bulk strip: an entity
+    /// whose field vanished has changed, and a history that cannot say when
+    /// leaves a consumer no way to explain it.
     ///
     /// # Errors
     ///
-    /// `NotFound` if no such definition; `Conflict` if values still exist.
-    pub async fn delete_custom_property(&self, id: Uuid) -> Result<(), CatalogError> {
+    /// `NotFound` if no such definition; `Conflict` if values still exist and
+    /// `force` was not given.
+    pub async fn delete_custom_property(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        force: bool,
+    ) -> Result<(), CatalogError> {
         let property = self
             .storage
             .get_custom_property(id)
@@ -845,16 +951,30 @@ impl Catalog {
             .count_custom_property_values(&property.entity_type, &property.name)
             .await
             .map_err(CatalogError::from)?;
-        if held > 0 {
+        if held > 0 && !force {
             return Err(CatalogError::Conflict {
                 detail: format!(
                     "`{}` still holds values on {held} {} entities; \
-                     deleting the definition would orphan them",
+                     deleting the definition would orphan them. Re-send with \
+                     `?force=true` to remove the definition and its values together",
                     property.name, property.entity_type
                 ),
                 existing_id: Some(id),
                 kind: ConflictKind::CustomPropertyExists,
             });
+        }
+
+        if force {
+            self.storage
+                .force_delete_custom_property(
+                    id,
+                    &property.entity_type,
+                    &property.name,
+                    &principal.id,
+                )
+                .await
+                .map_err(CatalogError::from)?;
+            return Ok(());
         }
 
         self.storage
@@ -3650,7 +3770,7 @@ impl Catalog {
         &self,
         principal: &Principal,
         query: &str,
-        kind: Option<AssetKind>,
+        filter: &graph_owl_storage::AssetFilter<'_>,
         page: &PageRequest,
     ) -> Result<Page<Asset>, CatalogError> {
         let predicate = self
@@ -3658,8 +3778,86 @@ impl Catalog {
             .await?;
         Ok(self
             .storage
-            .search_assets_visible(query, kind, page, &predicate)
+            .search_assets_visible(query, filter, page, &predicate)
             .await?)
+    }
+
+    /// Turn `extension.<name>[.gte|.lte]=<text>` pairs into typed filters.
+    ///
+    /// **An undefined name is a `400`, never an empty page.** A typo'd filter
+    /// that silently matched nothing is the failure mode `00d-api-conventions.md`
+    /// singles out: the client reads "no results" as an answer about the data
+    /// rather than about the request, and acts on it. That is a data-leak-shaped
+    /// bug in reverse — a false negative nobody investigates.
+    ///
+    /// The value is coerced against the **declared type**, which is the reason
+    /// this lives in the facade and not in storage: a query string carries only
+    /// text, and `retentionDays=30` means the number thirty only because the
+    /// definition says so. Coercing by guessing — "does it parse as a number?" —
+    /// would make a string property whose values happen to be digits
+    /// unfilterable.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` naming every filter that does not resolve, not just the
+    /// first. `Storage` if the definitions cannot be read.
+    pub async fn extension_filters(
+        &self,
+        kind: Option<AssetKind>,
+        requested: &[(String, graph_owl_storage::ExtensionOp, String)],
+    ) -> Result<Vec<graph_owl_storage::ExtensionFilter>, CatalogError> {
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Every definition, or only the filtered kind's. Unscoped is right when
+        // no `kind` was given: `?extension.costCenter=X` with no kind is a
+        // question about every entity type that defines it, and scoping it to
+        // one arbitrarily would answer a different question silently.
+        let definitions = self
+            .storage
+            .list_custom_properties(kind.map(AssetKind::as_str))
+            .await
+            .map_err(CatalogError::from)?;
+
+        let mut filters = Vec::with_capacity(requested.len());
+        let mut errors = Vec::new();
+        for (name, op, raw) in requested {
+            let Some((_, definition)) = definitions
+                .iter()
+                .find(|(_, property)| property.name == *name)
+            else {
+                errors.push(FieldError::new(
+                    &format!("extension.{name}"),
+                    FieldErrorCode::Value,
+                    format!(
+                        "`{name}` is not a custom property{}; filtering on it would \
+                         silently match nothing",
+                        kind.map_or_else(String::new, |k| format!(" of `{k}`"))
+                    ),
+                ));
+                continue;
+            };
+
+            match coerce_filter_value(definition.property_type, raw) {
+                Some(value) => filters.push(graph_owl_storage::ExtensionFilter {
+                    name: name.clone(),
+                    op: *op,
+                    value,
+                }),
+                None => errors.push(FieldError::new(
+                    &format!("extension.{name}"),
+                    FieldErrorCode::Type,
+                    format!("`{raw}` is not a {}", definition.property_type.as_str()),
+                )),
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(filters)
+        } else {
+            Err(CatalogError::Validation(errors))
+        }
     }
 
     /// # Errors
@@ -4703,6 +4901,19 @@ impl Catalog {
         expected_version: Option<EntityVersion>,
     ) -> Result<Asset, CatalogError> {
         let before = self.storage.get_asset(id).await.unwrap_or(None);
+
+        // **The merged bag, not the patch.** Validating only what the client
+        // sent would let `{"retentionDays": null}` clear a value that a
+        // narrowed definition now requires, and would revalidate nothing when a
+        // patch adds a key beside existing ones. The merge is computed here
+        // from the same function storage applies, so the bag that was checked
+        // is the bag that gets written.
+        if let Some(before) = &before
+            && let Some(merged) = update.merged_extension(before.extension.as_ref())
+        {
+            self.check_extension(before.kind, Some(&merged)).await?;
+        }
+
         let updated = match self
             .storage
             .update_asset(id, update, &principal.id, expected_version)
@@ -6397,6 +6608,56 @@ fn note_mention<'a>(
     entry.push_str(evidence);
 }
 
+/// A query-string value, as the property's declared type.
+///
+/// `None` when the text cannot be that type — which is a `400`, because a
+/// filter the catalog cannot evaluate must not quietly become one that matches
+/// nothing. `Boolean` accepts only `true`/`false`: a lenient reading where "any
+/// other word is false" turns a typo into a confident wrong answer.
+///
+/// Date and timestamp stay **strings**, deliberately. They are stored as ISO-8601
+/// strings, and ISO-8601 sorts lexicographically in exactly the order it sorts
+/// chronologically — so the same comparison serves both, and parsing here would
+/// buy a reformatting risk for nothing.
+fn coerce_filter_value(
+    property_type: graph_owl_core::custom_property::PropertyType,
+    raw: &str,
+) -> Option<serde_json::Value> {
+    use graph_owl_core::custom_property::PropertyType;
+    match property_type {
+        PropertyType::Integer => raw.parse::<i64>().ok().map(serde_json::Value::from),
+        PropertyType::Number => raw.parse::<f64>().ok().map(serde_json::Value::from),
+        PropertyType::Boolean => match raw {
+            "true" => Some(serde_json::Value::Bool(true)),
+            "false" => Some(serde_json::Value::Bool(false)),
+            _ => None,
+        },
+        PropertyType::String
+        | PropertyType::Date
+        | PropertyType::Timestamp
+        | PropertyType::Enum
+        | PropertyType::EntityReference => Some(serde_json::Value::String(raw.to_string())),
+    }
+}
+
+/// A change to a definition — Epic 22 Slice C.
+///
+/// **`entityType` is absent by construction**, the same immutability-by-DTO-shape
+/// this codebase uses for `TableUpdate`'s id: moving a definition between entity
+/// types is not an edit, it is a delete and a define, and every value under the
+/// old type would be orphaned by an operation that reads like a rename. There is
+/// nothing here a client can send that would do it.
+///
+/// `description` is doubly optional so that clearing it is expressible: the
+/// outer `None` means "not mentioned", the inner one means "clear it".
+#[derive(Debug, Clone, Default)]
+pub struct CustomPropertyUpdate {
+    pub name: Option<String>,
+    pub property_type: Option<graph_owl_core::custom_property::PropertyType>,
+    pub description: Option<Option<String>>,
+    pub constraints: Option<graph_owl_core::custom_property::Constraints>,
+}
+
 /// How many candidates a mention is scored against.
 ///
 /// One page of name-search hits, so the cost of resolving a mention is bounded
@@ -6814,6 +7075,45 @@ mod tests {
 
     use graph_owl_storage::{ReviewQueueFilter, SplitOutcome, Storage};
     use std::sync::{Arc, Mutex};
+
+    /// The double's own evaluation of a custom-property filter.
+    ///
+    /// **Written out rather than skipped**, because a double that ignored the
+    /// filter would report every asset for every query and make the facade's
+    /// composition tests pass against a filter that does nothing. It compares
+    /// JSON values the way `jsonb` does — numbers numerically, strings
+    /// lexicographically — which is what makes ISO-8601 dates order correctly on
+    /// both sides.
+    fn admits_extension(asset: &Asset, filters: &[graph_owl_storage::ExtensionFilter]) -> bool {
+        use graph_owl_storage::ExtensionOp;
+        filters.iter().all(|condition| {
+            let Some(held) = asset
+                .extension
+                .as_ref()
+                .and_then(|bag| bag.get(&condition.name))
+            else {
+                return false;
+            };
+            match condition.op {
+                ExtensionOp::Eq => *held == condition.value,
+                ExtensionOp::Gte | ExtensionOp::Lte => {
+                    let ordering = match (held.as_f64(), condition.value.as_f64()) {
+                        (Some(a), Some(b)) => a.partial_cmp(&b),
+                        _ => match (held.as_str(), condition.value.as_str()) {
+                            (Some(a), Some(b)) => Some(a.cmp(b)),
+                            _ => None,
+                        },
+                    };
+                    match (ordering, condition.op) {
+                        (Some(std::cmp::Ordering::Less), ExtensionOp::Lte)
+                        | (Some(std::cmp::Ordering::Greater), ExtensionOp::Gte)
+                        | (Some(std::cmp::Ordering::Equal), _) => true,
+                        _ => false,
+                    }
+                }
+            }
+        })
+    }
 
     #[derive(Default)]
     pub(super) struct InMemoryStorage {
@@ -8730,6 +9030,7 @@ mod tests {
                     None => true,
                     Some(wanted) => effective(a).iter().any(|id| id == wanted),
                 })
+                .filter(|a| admits_extension(a, filter.extension))
                 .collect();
             Ok(Page::from_overfetch(visible, page.limit, |a: &Asset| {
                 Cursor::new(a.fully_qualified_name.clone(), a.id)
@@ -8739,15 +9040,16 @@ mod tests {
         async fn search_assets_visible(
             &self,
             query: &str,
-            kind: Option<AssetKind>,
+            filter: &graph_owl_storage::AssetFilter<'_>,
             page: &PageRequest,
             predicate: &AccessPredicate,
         ) -> Result<Page<Asset>, StorageError> {
-            let all = self.search_assets(query, kind, page).await?;
+            let all = self.search_assets(query, filter.kind, page).await?;
             let visible: Vec<Asset> = all
                 .data
                 .into_iter()
                 .filter(|a| predicate.admits(&a.fully_qualified_name))
+                .filter(|a| admits_extension(a, filter.extension))
                 .collect();
             Ok(Page::from_overfetch(visible, page.limit, |a: &Asset| {
                 Cursor::new(a.fully_qualified_name.clone(), a.id)
@@ -9484,6 +9786,110 @@ mod tests {
             let before = held.len();
             held.retain(|(held_id, _)| *held_id != id);
             Ok(held.len() < before)
+        }
+
+        async fn custom_property_values(
+            &self,
+            entity_type: &str,
+            name: &str,
+        ) -> Result<Vec<(Uuid, serde_json::Value)>, StorageError> {
+            // The same "holds a value" test `count_custom_property_values`
+            // uses. A double where the count and the list disagreed would
+            // report a `409` for three values and migrate two, and the SQL
+            // impl's own agreement would then be untested from here.
+            let assets = self.assets.lock().expect("lock");
+            Ok(assets
+                .iter()
+                .filter(|asset| asset.kind.as_str() == entity_type)
+                .filter_map(|asset| {
+                    let value = asset.extension.as_ref()?.get(name)?;
+                    (!value.is_null()).then(|| (asset.id, value.clone()))
+                })
+                .collect())
+        }
+
+        async fn update_custom_property(
+            &self,
+            id: Uuid,
+            property: &graph_owl_core::custom_property::CustomProperty,
+            previous_name: &str,
+        ) -> Result<bool, StorageError> {
+            self.guard_write("update_custom_property");
+            let mut held = self.custom_properties.lock().unwrap();
+            if held.iter().any(|(other, existing)| {
+                *other != id
+                    && existing.name == property.name
+                    && existing.entity_type == property.entity_type
+            }) {
+                return Err(StorageError::Conflict {
+                    detail: format!(
+                        "`{}` is already defined on `{}`",
+                        property.name, property.entity_type
+                    ),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::CustomPropertyExists,
+                });
+            }
+            let Some(slot) = held.iter_mut().find(|(held_id, _)| *held_id == id) else {
+                return Ok(false);
+            };
+            slot.1 = property.clone();
+            drop(held);
+
+            // The key migration, which is the half a double is most tempted to
+            // skip — and skipping it would let a rename pass every test here
+            // while orphaning every value in Postgres.
+            if previous_name != property.name {
+                let mut assets = self.assets.lock().expect("lock");
+                for asset in assets
+                    .iter_mut()
+                    .filter(|asset| asset.kind.as_str() == property.entity_type)
+                {
+                    if let Some(bag) = asset.extension.as_mut()
+                        && let Some(value) = bag.remove(previous_name)
+                    {
+                        bag.insert(property.name.clone(), value);
+                    }
+                }
+            }
+            Ok(true)
+        }
+
+        async fn force_delete_custom_property(
+            &self,
+            id: Uuid,
+            entity_type: &str,
+            name: &str,
+            updated_by: &str,
+        ) -> Result<i64, StorageError> {
+            self.guard_write("force_delete_custom_property");
+            {
+                let mut held = self.custom_properties.lock().unwrap();
+                held.retain(|(held_id, _)| *held_id != id);
+            }
+            let mut assets = self.assets.lock().expect("lock");
+            let mut changed = 0_i64;
+            for asset in assets
+                .iter_mut()
+                .filter(|asset| asset.kind.as_str() == entity_type)
+            {
+                let removed = asset
+                    .extension
+                    .as_mut()
+                    .is_some_and(|bag| bag.remove(name).is_some());
+                if removed {
+                    // The version bump is the point of the operation being
+                    // transactional rather than a bulk strip, so a double that
+                    // dropped it would make the auditability untestable here.
+                    asset.version = asset
+                        .version
+                        .bump(graph_owl_core::envelope::ChangeKind::Minor);
+                    asset.updated_by = updated_by.to_string();
+                    asset.updated_at = Utc::now();
+                    changed += 1;
+                }
+            }
+            Ok(changed)
         }
 
         async fn find_extraction_run_by_id(
@@ -16275,6 +16681,7 @@ mod projection_isolation_tests {
                     created.id,
                     &AssetUpdate {
                         description: Some(Some(text.to_string())),
+                        extension: None,
                     },
                     None,
                 )
@@ -16314,6 +16721,7 @@ mod projection_isolation_tests {
                 created.id,
                 &AssetUpdate {
                     description: Some(Some("the first description".to_string())),
+                    extension: None,
                 },
                 None,
             )
@@ -16328,6 +16736,7 @@ mod projection_isolation_tests {
                 created.id,
                 &AssetUpdate {
                     description: Some(Some("the corrected description".to_string())),
+                    extension: None,
                 },
                 None,
             )
@@ -16371,6 +16780,7 @@ mod projection_isolation_tests {
                 created.id,
                 &AssetUpdate {
                     description: Some(Some("written then withdrawn".to_string())),
+                    extension: None,
                 },
                 None,
             )
@@ -16383,6 +16793,7 @@ mod projection_isolation_tests {
                 created.id,
                 &AssetUpdate {
                     description: Some(None),
+                    extension: None,
                 },
                 None,
             )
@@ -16478,6 +16889,7 @@ mod projection_isolation_tests {
                 created.id,
                 &AssetUpdate {
                     description: Some(Some("core banking".to_string())),
+                    extension: None,
                 },
                 None,
             )
@@ -16545,6 +16957,7 @@ mod projection_isolation_tests {
                 created.id,
                 &AssetUpdate {
                     description: Some(Some("core banking".to_string())),
+                    extension: None,
                 },
                 None,
             )
@@ -17510,6 +17923,7 @@ mod projection_isolation_tests {
         fn describe(text: &str) -> AssetUpdate {
             AssetUpdate {
                 description: Some(Some(text.to_string())),
+                extension: None,
             }
         }
 
@@ -18017,5 +18431,79 @@ mod batch_jobs_report_what_landed {
         let job = catalog.ingest_job(id).await.expect("read").expect("job");
         assert_eq!(job.state, "failed");
         assert!(job.finished_at.is_some());
+    }
+}
+
+#[cfg(test)]
+mod filter_coercion_tests {
+    use super::coerce_filter_value;
+    use graph_owl_core::custom_property::PropertyType;
+
+    /// **The reason coercion needs the definition.** `retentionDays=30` means
+    /// the number thirty because the definition says so, not because the text
+    /// happens to parse as one — and a stored `30` never equals a filtered
+    /// `"30"` in JSONB, so guessing wrong returns an empty page rather than an
+    /// error.
+    #[test]
+    fn a_number_is_coerced_by_the_declared_type_not_by_what_the_text_looks_like() {
+        assert_eq!(
+            coerce_filter_value(PropertyType::Integer, "30"),
+            Some(serde_json::json!(30))
+        );
+        assert_eq!(
+            coerce_filter_value(PropertyType::String, "30"),
+            Some(serde_json::json!("30")),
+            "digits in a string property stay a string, or it becomes unfilterable"
+        );
+    }
+
+    #[test]
+    fn a_value_that_cannot_be_the_declared_type_is_refused() {
+        assert_eq!(coerce_filter_value(PropertyType::Integer, "forever"), None);
+        assert_eq!(coerce_filter_value(PropertyType::Number, "many"), None);
+    }
+
+    /// **Booleans accept exactly two words.** A lenient reading where anything
+    /// else is `false` turns a typo into a confident wrong answer, which is the
+    /// same silent-empty failure the undefined-name check exists to stop.
+    #[test]
+    fn booleans_accept_only_true_and_false() {
+        assert_eq!(
+            coerce_filter_value(PropertyType::Boolean, "true"),
+            Some(serde_json::json!(true))
+        );
+        assert_eq!(
+            coerce_filter_value(PropertyType::Boolean, "false"),
+            Some(serde_json::json!(false))
+        );
+        assert_eq!(coerce_filter_value(PropertyType::Boolean, "yes"), None);
+        assert_eq!(coerce_filter_value(PropertyType::Boolean, "TRUE"), None);
+    }
+
+    /// Dates stay strings on purpose: ISO-8601 sorts lexicographically in the
+    /// order it sorts chronologically, so one comparison serves numbers and
+    /// dates both, and parsing here would buy a reformatting risk for nothing.
+    #[test]
+    fn dates_and_timestamps_stay_strings() {
+        assert_eq!(
+            coerce_filter_value(PropertyType::Date, "2026-01-01"),
+            Some(serde_json::json!("2026-01-01"))
+        );
+        assert_eq!(
+            coerce_filter_value(PropertyType::Timestamp, "2026-01-01T00:00:00Z"),
+            Some(serde_json::json!("2026-01-01T00:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn an_enum_and_an_entity_reference_filter_by_their_text() {
+        assert_eq!(
+            coerce_filter_value(PropertyType::Enum, "gold"),
+            Some(serde_json::json!("gold"))
+        );
+        assert_eq!(
+            coerce_filter_value(PropertyType::EntityReference, "svc.db.orders"),
+            Some(serde_json::json!("svc.db.orders"))
+        );
     }
 }

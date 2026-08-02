@@ -583,6 +583,38 @@ pub struct AssetFilter<'a> {
     /// principal actually called `none`, and "no owner" is a different *kind* of
     /// question from "this owner" rather than a special value of it.
     pub unowned: bool,
+    /// Organization-defined fields to match — Epic 22 Slice D.
+    ///
+    /// Repeated filters are **AND**, matching the conventions doc's rule for
+    /// repeated parameters. Two bounds on one property is how a range is
+    /// expressed, and it falls out of that rule rather than needing its own.
+    pub extension: &'a [ExtensionFilter],
+}
+
+/// One condition on a custom property's value — Epic 22 Slice D.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtensionFilter {
+    pub name: String,
+    pub op: ExtensionOp,
+    /// The value as JSON, already coerced to the property's declared type by
+    /// the facade. **Coerced there, not here**: a query string carries only
+    /// text, and deciding that `30` means the number thirty rather than the
+    /// string "30" needs the definition — which storage does not have and the
+    /// facade already read to reject undefined names.
+    pub value: serde_json::Value,
+}
+
+/// How a value is compared.
+///
+/// Three, not a general expression language. Equality answers "which tables are
+/// in this cost centre" and the two bounds answer "which ones outlive ninety
+/// days"; anything past that is search's job, not a list endpoint's
+/// (`00d-api-conventions.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionOp {
+    Eq,
+    Gte,
+    Lte,
 }
 
 /// What slice of the dead-letter queue a caller wants — Epic 18 Slice D.
@@ -1567,10 +1599,15 @@ pub trait Storage: Send + Sync {
         predicate: &AccessPredicate,
     ) -> Result<Page<Asset>, StorageError>;
 
+    /// Takes the whole [`AssetFilter`] rather than a bare `kind`, so a custom
+    /// property filter narrows a search exactly as it narrows a list. Two
+    /// endpoints that filtered differently would be two endpoints a client has
+    /// to learn separately, and the one that got it wrong would be the one that
+    /// silently returned more.
     async fn search_assets_visible(
         &self,
         query: &str,
-        kind: Option<AssetKind>,
+        filter: &AssetFilter<'_>,
         page: &PageRequest,
         predicate: &AccessPredicate,
     ) -> Result<Page<Asset>, StorageError>;
@@ -2291,6 +2328,64 @@ pub trait Storage: Send + Sync {
     /// # Errors
     /// [`StorageError::Unexpected`] if the delete fails.
     async fn delete_custom_property(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Every value currently held for one property, with the entity holding it.
+    ///
+    /// **What a guarded definition change is checked against.** Deciding
+    /// whether a narrowed constraint orphans data by reasoning about the
+    /// *shape* of the change — is this a widening or a narrowing? — needs a
+    /// classification table that has to be right for every combination of
+    /// bound, type and enum. Reading the values and re-running the write-path
+    /// validator over them needs no table at all, and it cannot disagree with
+    /// what a write would do, because it is the same function.
+    ///
+    /// Unpaged: an admin operation over one property's values, and a paged
+    /// answer would let a value slip between pages while the check runs —
+    /// producing an "allowed" verdict for a change that orphans it.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn custom_property_values(
+        &self,
+        entity_type: &str,
+        name: &str,
+    ) -> Result<Vec<(Uuid, serde_json::Value)>, StorageError>;
+
+    /// Replace a definition in place. `false` if it did not exist.
+    ///
+    /// A change of `name` **migrates every existing value to the new key in
+    /// the same transaction**. Doing it in two statements would leave a window
+    /// in which the definition names a key no entity holds, and every read in
+    /// that window reports the organization's field as unset.
+    ///
+    /// # Errors
+    /// [`StorageError::Conflict`] if the new name is already defined on that
+    /// entity type. [`StorageError::Unexpected`] if the write fails.
+    async fn update_custom_property(
+        &self,
+        id: Uuid,
+        property: &CustomProperty,
+        previous_name: &str,
+    ) -> Result<bool, StorageError>;
+
+    /// Delete a definition **and every value of it**, transactionally, bumping
+    /// the version of each entity that held one. Returns how many entities
+    /// changed.
+    ///
+    /// The version bump is what makes this honest rather than merely tidy: an
+    /// entity whose `costCenter` vanished has changed, and a history that does
+    /// not say so leaves a consumer unable to explain when the field stopped
+    /// being there.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if any part of the transaction fails.
+    async fn force_delete_custom_property(
+        &self,
+        id: Uuid,
+        entity_type: &str,
+        name: &str,
+        updated_by: &str,
+    ) -> Result<i64, StorageError>;
 }
 
 /// A stored extraction run.

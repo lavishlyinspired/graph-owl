@@ -13,7 +13,7 @@ use axum::{
     },
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
 };
 use std::sync::Arc;
 
@@ -85,7 +85,10 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             "/custom-properties",
             get(list_custom_properties).post(define_custom_property),
         )
-        .route("/custom-properties/{id}", delete(delete_custom_property))
+        .route(
+            "/custom-properties/{id}",
+            patch(update_custom_property).delete(delete_custom_property),
+        )
         // Epic 21. `/extraction/runs` is the surface an out-of-process worker
         // submits to; the queue and the decision are what a human does with
         // what it proposed.
@@ -919,6 +922,73 @@ where
 /// deserializer stops at its first error — which forces a client into one round
 /// trip per mistake. Validation runs over the untyped document, accumulating
 /// failures, and only a clean document is deserialized into `T`.
+/// A query string with the `extension.*` filters split off — Epic 22 Slice D.
+///
+/// **They cannot go through `AppQuery`**, and the reason is the rule that makes
+/// `AppQuery` worth having. Custom-property names are defined at runtime, so
+/// they cannot appear in a struct; the only serde shape that accepts them is a
+/// flattened map, and a flattened map absorbs *every* unrecognised parameter —
+/// which silently repeals `deny_unknown_fields` for the whole endpoint and turns
+/// `?ownr=alice` back into a filter that matches everything.
+///
+/// So they are removed from the raw query first, and what remains is
+/// deserialized by the same strict extractor as before. A typo'd `extension.*`
+/// name is still caught, one layer down, by the facade checking it against the
+/// definitions.
+/// The `extension.*` filters as they arrive: a property name, a comparison and
+/// the raw text. Untyped until the facade resolves each against its definition
+/// — deciding that `30` is the number thirty needs the definition, which this
+/// layer does not have.
+type RequestedFilters = Vec<(String, graph_owl_storage::ExtensionOp, String)>;
+
+struct AppQueryWithExtensions<T>(T, RequestedFilters);
+
+impl<S, T> FromRequestParts<S> for AppQueryWithExtensions<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let raw = parts.uri.query().unwrap_or_default().to_string();
+        let (extensions, rest) = split_extension_filters(&raw)?;
+
+        // Rebuilt onto the URI so the inner extractor sees a query string with
+        // no `extension.*` in it at all. Reconstructing the whole `Parts` would
+        // be the alternative, and it is more code doing the same thing.
+        let mut builder = axum::http::Uri::builder();
+        if let Some(scheme) = parts.uri.scheme() {
+            builder = builder.scheme(scheme.clone());
+        }
+        if let Some(authority) = parts.uri.authority() {
+            builder = builder.authority(authority.clone());
+        }
+        let path = parts.uri.path();
+        let path_and_query = if rest.is_empty() {
+            path.to_string()
+        } else {
+            format!("{path}?{rest}")
+        };
+        if let Ok(uri) = builder.path_and_query(path_and_query).build() {
+            parts.uri = uri;
+        }
+
+        let AppQuery(value) = AppQuery::<T>::from_request_parts(parts, state).await?;
+        Ok(AppQueryWithExtensions(value, extensions))
+    }
+}
+
+/// Wraps [`Json`] to return `400 Bad Request` rather than axum's default `422`,
+/// and to report **every** field violation in one response.
+///
+/// The body is parsed to a [`serde_json::Value`] first, because `serde`'s derived
+/// deserializer stops at its first error — which forces a client into one round
+/// trip per mistake. Validation runs over the untyped document, accumulating
+/// failures, and only a clean document is deserialized into `T`.
 struct AppJson<T>(T);
 
 impl<S, T> FromRequest<S> for AppJson<T>
@@ -1426,6 +1496,86 @@ impl IntoResponse for AppError {
     }
 }
 
+/// Splits `extension.<name>` and `extension.<name>.<op>` pairs out of a raw
+/// query string, returning them and everything else.
+///
+/// An unrecognised operator suffix is a `400` rather than being read as part of
+/// the property name: `?extension.retentionDays.gt=30` is somebody meaning
+/// `gte`, and treating it as a filter on a property called `retentionDays.gt`
+/// answers with an empty page and no hint.
+fn split_extension_filters(raw: &str) -> Result<(RequestedFilters, String), AppError> {
+    use graph_owl_storage::ExtensionOp;
+    const PREFIX: &str = "extension.";
+
+    let mut filters = Vec::new();
+    let mut rest: Vec<String> = Vec::new();
+    let mut errors = Vec::new();
+
+    for pair in raw.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = percent_decode(key);
+        let Some(spec) = key.strip_prefix(PREFIX) else {
+            rest.push(pair.to_string());
+            continue;
+        };
+        let value = percent_decode(value.replace('+', " ").as_str());
+
+        let (name, op) = match spec.rsplit_once('.') {
+            Some((name, "gte")) => (name, ExtensionOp::Gte),
+            Some((name, "lte")) => (name, ExtensionOp::Lte),
+            Some((_, unknown)) => {
+                errors.push(FieldError::new(
+                    format!("{PREFIX}{spec}"),
+                    FieldErrorCode::Value,
+                    format!(
+                        "`{unknown}` is not a comparison; use `gte` or `lte`, or omit \
+                         it for equality"
+                    ),
+                ));
+                continue;
+            }
+            None => (spec, ExtensionOp::Eq),
+        };
+        if name.is_empty() {
+            errors.push(FieldError::new(
+                format!("{PREFIX}{spec}"),
+                FieldErrorCode::Required,
+                "a custom property filter needs a property name",
+            ));
+            continue;
+        }
+        filters.push((name.to_string(), op, value));
+    }
+
+    if errors.is_empty() {
+        Ok((filters, rest.join("&")))
+    } else {
+        Err(AppError::Validation(errors))
+    }
+}
+
+/// Enough percent-decoding for a query parameter. `serde_urlencoded` does this
+/// for the typed half; the `extension.*` half is peeled off before it runs, so
+/// it has to do it here or a cost centre with a space in it would never match.
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&raw[i + 1..i + 3], 16)
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 // ---- asset hierarchy (Epic 2) ----
 
 #[derive(serde::Deserialize)]
@@ -1463,6 +1613,8 @@ struct AssetSearchQuery {
     after: Option<String>,
 }
 
+/// An asset kind from a query parameter, naming what *is* supported when it is
+/// not one.
 fn parse_kind(raw: Option<&str>) -> Result<Option<AssetKind>, AppError> {
     raw.map(|value| {
         AssetKind::parse(value).map_err(|_| {
@@ -1507,7 +1659,7 @@ async fn upsert_asset(
 async fn list_assets(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
-    AppQuery(query): AppQuery<AssetListQuery>,
+    AppQueryWithExtensions(query, requested): AppQueryWithExtensions<AssetListQuery>,
 ) -> Result<Json<Page<Asset>>, AppError> {
     let kind = parse_kind(query.kind.as_deref())?;
     let page = PageRequest::new(query.limit, query.after.as_deref())?;
@@ -1522,10 +1674,14 @@ async fn list_assets(
              a named principal and by nobody",
         )]));
     }
+    // Resolved against the definitions before the query runs, so an undefined
+    // name is a `400` rather than an empty page that reads like an answer.
+    let extension = catalog.extension_filters(kind, &requested).await?;
     let filter = graph_owl_storage::AssetFilter {
         kind,
         owner: query.owner.as_deref(),
         unowned: query.unowned.unwrap_or(false),
+        extension: &extension,
     };
     Ok(Json(
         catalog.list_assets_for(&principal, &filter, &page).await?,
@@ -1535,12 +1691,19 @@ async fn list_assets(
 async fn search_assets(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
-    AppQuery(query): AppQuery<AssetSearchQuery>,
+    AppQueryWithExtensions(query, requested): AppQueryWithExtensions<AssetSearchQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let kind = parse_kind(query.kind.as_deref())?;
     let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    let extension = catalog.extension_filters(kind, &requested).await?;
+    let filter = graph_owl_storage::AssetFilter {
+        kind,
+        owner: None,
+        unowned: false,
+        extension: &extension,
+    };
     let page_result = catalog
-        .search_assets_for(&principal, &query.q, kind, &page)
+        .search_assets_for(&principal, &query.q, &filter, &page)
         .await?;
 
     // Facets are computed over the *visible* set, like the counts. A facet
@@ -1557,13 +1720,61 @@ async fn search_assets(
         }
     }
 
+    // Facets for enum-typed custom properties — Epic 22 Slice D. Only enums:
+    // a facet is a short, closed list somebody can click, and a facet over a
+    // free-text property is one bucket per value, which is a report rather than
+    // a filter. Computed over the same visible page as the others, for the same
+    // reason.
+    let enums: Vec<String> = catalog
+        .list_custom_properties(kind.map(AssetKind::as_str))
+        .await?
+        .into_iter()
+        .filter(|(_, property)| {
+            property.property_type == graph_owl_core::custom_property::PropertyType::Enum
+        })
+        .map(|(_, property)| property.name)
+        .collect();
+    let mut by_property: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, usize>,
+    > = std::collections::BTreeMap::new();
+    for asset in &page_result.data {
+        let Some(bag) = &asset.extension else {
+            continue;
+        };
+        for name in &enums {
+            if let Some(value) = bag.get(name).and_then(serde_json::Value::as_str) {
+                *by_property
+                    .entry(name.clone())
+                    .or_default()
+                    .entry(value.to_string())
+                    .or_default() += 1;
+            }
+        }
+    }
+
+    let mut facets = json!({
+        "kind": by_kind.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
+        "schema": by_schema.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
+    });
+    if let Some(object) = facets.as_object_mut() {
+        for (name, counts) in by_property {
+            object.insert(
+                format!("extension.{name}"),
+                json!(
+                    counts
+                        .iter()
+                        .map(|(value, count)| json!({ "value": value, "count": count }))
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+    }
+
     Ok(Json(json!({
         "data": page_result.data,
         "paging": page_result.paging,
-        "facets": {
-            "kind": by_kind.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
-            "schema": by_schema.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
-        }
+        "facets": facets,
     })))
 }
 
@@ -5320,13 +5531,118 @@ async fn list_custom_properties(
     ))
 }
 
+/// A change to a definition — Epic 22 Slice C.
+///
+/// **No `entityType`.** Moving a definition between entity types is a delete and
+/// a define, not an edit, and every value under the old type would be orphaned
+/// by an operation that reads like a rename. `deny_unknown_fields` means sending
+/// one is a `400` rather than a silently dropped field.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(clippy::option_option)]
+struct UpdateCustomProperty {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    property_type: Option<String>,
+    #[serde(default, deserialize_with = "optional_double_option")]
+    description: Option<Option<String>>,
+    #[serde(default)]
+    constraints: Option<graph_owl_core::custom_property::Constraints>,
+}
+
+/// Absent stays `None`; present — including an explicit `null` — becomes
+/// `Some`. The same double-option trick `AssetUpdate` uses, spelled locally
+/// because it is a wire concern rather than a domain one.
+///
+/// `option_option` is exactly the shape being asked for here: the two levels
+/// mean different things ("not mentioned" and "clear it"), which is the
+/// distinction the lint assumes is accidental.
+#[allow(clippy::option_option)]
+fn optional_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
+
+impl ValidateBody for UpdateCustomProperty {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        if let Some(name) = value.get("name")
+            && name.as_str().is_none_or(|found| found.trim().is_empty())
+        {
+            errors.push(FieldError::new(
+                "name",
+                FieldErrorCode::Required,
+                "`name` cannot be blank; omit it to leave the name alone",
+            ));
+        }
+        errors
+    }
+}
+
+async fn update_custom_property(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<UpdateCustomProperty>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let _ = principal;
+    let property_type = match payload.property_type.as_deref() {
+        None => None,
+        Some(name) => Some(
+            graph_owl_core::custom_property::PropertyType::parse(name).map_err(|unknown| {
+                AppError::Validation(vec![FieldError::new(
+                    "propertyType",
+                    FieldErrorCode::Value,
+                    format!("`{unknown}` is not a supported type"),
+                )])
+            })?,
+        ),
+    };
+
+    let property = catalog
+        .update_custom_property(
+            id,
+            graph_owl_api::CustomPropertyUpdate {
+                name: payload.name,
+                property_type,
+                description: payload.description,
+                constraints: payload.constraints,
+            },
+        )
+        .await?;
+
+    let mut body = serde_json::to_value(&property).unwrap_or(serde_json::Value::Null);
+    if let Some(object) = body.as_object_mut() {
+        object.insert("id".to_string(), serde_json::json!(id));
+    }
+    Ok(Json(body))
+}
+
+/// `?force=true` on a delete.
+///
+/// A query parameter rather than a body, because a `DELETE` with a body is
+/// something proxies and clients disagree about — and this is a flag on the
+/// operation, not data.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForceQuery {
+    #[serde(default)]
+    force: Option<bool>,
+}
+
 async fn delete_custom_property(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
     Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<ForceQuery>,
 ) -> Result<StatusCode, AppError> {
-    let _ = principal;
-    catalog.delete_custom_property(id).await?;
+    catalog
+        .delete_custom_property(&principal, id, query.force.unwrap_or(false))
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -6027,5 +6343,121 @@ mod auth_configuration {
             assert!(!is_ambiguous_auth_config(false, true));
             assert!(!is_ambiguous_auth_config(false, false));
         }
+    }
+}
+
+#[cfg(test)]
+mod extension_filter_parsing_tests {
+    use super::{percent_decode, split_extension_filters};
+    use graph_owl_storage::ExtensionOp;
+
+    #[test]
+    fn a_bare_name_is_equality_and_a_suffix_is_a_bound() {
+        let (filters, rest) = split_extension_filters(
+            "extension.costCenter=CC-1&extension.retentionDays.gte=30&kind=table",
+        )
+        .ok()
+        .expect("a valid query");
+
+        assert_eq!(
+            filters,
+            vec![
+                (
+                    "costCenter".to_string(),
+                    ExtensionOp::Eq,
+                    "CC-1".to_string()
+                ),
+                (
+                    "retentionDays".to_string(),
+                    ExtensionOp::Gte,
+                    "30".to_string()
+                ),
+            ]
+        );
+        assert_eq!(rest, "kind=table", "everything else passes through");
+    }
+
+    /// **The property that makes `deny_unknown_fields` survive this feature.**
+    /// A flattened serde map would have absorbed `ownr` too; splitting only the
+    /// `extension.` prefix leaves the typo for the strict extractor to refuse.
+    #[test]
+    fn a_parameter_that_is_not_an_extension_filter_is_left_for_the_strict_extractor() {
+        let (filters, rest) = split_extension_filters("ownr=alice").ok().expect("parses");
+
+        assert!(filters.is_empty());
+        assert_eq!(rest, "ownr=alice");
+    }
+
+    /// An unrecognised comparison is somebody meaning `gte`. Reading it as part
+    /// of the property name answers with an empty page and no hint.
+    #[test]
+    fn an_unknown_comparison_suffix_is_refused_rather_than_read_as_a_name() {
+        assert!(split_extension_filters("extension.retentionDays.gt=30").is_err());
+    }
+
+    /// And the negative: `lte` and `gte` are the two that must be *accepted*,
+    /// or the rule above would be indistinguishable from bounds not working.
+    #[test]
+    fn both_bounds_are_accepted() {
+        for (suffix, expected) in [("gte", ExtensionOp::Gte), ("lte", ExtensionOp::Lte)] {
+            let (filters, _) = split_extension_filters(&format!("extension.d.{suffix}=1"))
+                .ok()
+                .expect("a valid bound");
+            assert_eq!(filters[0].1, expected);
+        }
+    }
+
+    #[test]
+    fn a_filter_with_no_property_name_is_refused() {
+        assert!(split_extension_filters("extension.=CC-1").is_err());
+    }
+
+    /// The `extension.*` pairs are peeled off before `serde_urlencoded` runs,
+    /// so they carry their own decoding — without it every multi-word value
+    /// silently matches nothing.
+    #[test]
+    fn values_are_percent_and_plus_decoded() {
+        let (filters, _) = split_extension_filters("extension.owningTeam=Data%20Platform")
+            .ok()
+            .expect("parses");
+        assert_eq!(filters[0].2, "Data Platform");
+
+        let (filters, _) = split_extension_filters("extension.owningTeam=Data+Platform")
+            .ok()
+            .expect("parses");
+        assert_eq!(filters[0].2, "Data Platform");
+    }
+
+    #[test]
+    fn percent_decoding_leaves_ordinary_text_alone_and_survives_a_truncated_escape() {
+        assert_eq!(percent_decode("CC-1"), "CC-1");
+        assert_eq!(
+            percent_decode("100%"),
+            "100%",
+            "a trailing % is not an escape"
+        );
+        // **The byte where the bounds check actually decides.** A `%` followed
+        // by exactly one character is the only input that tells `i + 2 < len`
+        // apart from `i + 2 <= len` — and the loose version indexes past the
+        // end of the string, which is a panic on a query parameter anyone can
+        // send. A trailing `%` alone does not distinguish them.
+        assert_eq!(
+            percent_decode("%2"),
+            "%2",
+            "one character is not an escape, and reading two would run off the end"
+        );
+        assert_eq!(percent_decode("%zz"), "%zz", "not hex, so not an escape");
+        assert_eq!(
+            percent_decode("%41"),
+            "A",
+            "and a real escape still decodes"
+        );
+    }
+
+    #[test]
+    fn an_empty_query_yields_nothing() {
+        let (filters, rest) = split_extension_filters("").ok().expect("parses");
+        assert!(filters.is_empty());
+        assert!(rest.is_empty());
     }
 }

@@ -133,6 +133,40 @@ pub struct AssetVersion {
 pub struct AssetUpdate {
     #[serde(default, deserialize_with = "double_option")]
     pub description: Option<Option<String>>,
+    /// Organization-defined fields — Epic 22 Slice B.
+    ///
+    /// **Merged per key, not replaced wholesale.** A patch naming
+    /// `costCenter` must not silently clear `retentionDays`, and a client that
+    /// had to send the whole bag to change one field would be racing every
+    /// other client that did the same. A key present with an explicit `null`
+    /// clears *that* key; a key absent is untouched — Epic 3's PATCH semantics
+    /// applied one level down, where the fields actually are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl AssetUpdate {
+    /// The bag an asset holds after this patch is applied to `before`.
+    ///
+    /// `None` when the patch does not mention `extension` at all, which is
+    /// distinct from a patch that clears every key: the first leaves the column
+    /// alone, the second writes an empty bag.
+    #[must_use]
+    pub fn merged_extension(
+        &self,
+        before: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let patch = self.extension.as_ref()?;
+        let mut merged = before.cloned().unwrap_or_default();
+        for (key, value) in patch {
+            if value.is_null() {
+                merged.remove(key);
+            } else {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+        Some(merged)
+    }
 }
 
 fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -345,5 +379,85 @@ mod principal_tests {
         ] {
             assert_eq!(serde_json::to_string(&kind).expect("serializes"), wire);
         }
+    }
+
+    // ---- Epic 22 Slice B: the PATCH merge ----
+
+    /// **The criterion the whole merge exists for.** A patch naming one custom
+    /// property must not clear the others — a client forced to send the whole
+    /// bag to change one field is racing every other client doing the same,
+    /// and the loser's value disappears with nothing failing.
+    #[test]
+    fn a_patch_naming_one_property_leaves_the_others_alone() {
+        let before: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({
+                "costCenter": "CC-1", "retentionDays": 30
+            }))
+            .expect("a bag");
+        let update = AssetUpdate {
+            description: None,
+            extension: serde_json::from_value(serde_json::json!({ "costCenter": "CC-2" })).ok(),
+        };
+
+        let merged = update.merged_extension(Some(&before)).expect("a merge");
+
+        assert_eq!(merged["costCenter"], serde_json::json!("CC-2"));
+        assert_eq!(
+            merged["retentionDays"],
+            serde_json::json!(30),
+            "an unmentioned property must survive the patch"
+        );
+    }
+
+    /// An explicit null clears **that** key and nothing else — Epic 3's
+    /// absent-versus-null distinction, one level down.
+    #[test]
+    fn an_explicit_null_clears_only_the_key_it_names() {
+        let before: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({
+                "costCenter": "CC-1", "retentionDays": 30
+            }))
+            .expect("a bag");
+        let update = AssetUpdate {
+            description: None,
+            extension: serde_json::from_value(serde_json::json!({ "costCenter": null })).ok(),
+        };
+
+        let merged = update.merged_extension(Some(&before)).expect("a merge");
+
+        assert!(!merged.contains_key("costCenter"));
+        assert_eq!(merged["retentionDays"], serde_json::json!(30));
+    }
+
+    /// **Absent is not the same as empty.** A patch that says nothing about
+    /// `extension` must leave the column alone; one that clears every key
+    /// writes an empty bag. Collapsing the two would make every description
+    /// edit wipe the organization's fields.
+    #[test]
+    fn a_patch_that_does_not_mention_extension_changes_nothing() {
+        let before: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({ "costCenter": "CC-1" })).expect("a bag");
+        let update = AssetUpdate {
+            description: Some(Some("new".to_string())),
+            extension: None,
+        };
+
+        assert!(
+            update.merged_extension(Some(&before)).is_none(),
+            "an absent `extension` is a decision not to touch it"
+        );
+    }
+
+    /// A first value on an asset that had no bag at all still lands.
+    #[test]
+    fn a_patch_onto_an_absent_bag_creates_it() {
+        let update = AssetUpdate {
+            description: None,
+            extension: serde_json::from_value(serde_json::json!({ "costCenter": "CC-1" })).ok(),
+        };
+
+        let merged = update.merged_extension(None).expect("a merge");
+
+        assert_eq!(merged["costCenter"], serde_json::json!("CC-1"));
     }
 }

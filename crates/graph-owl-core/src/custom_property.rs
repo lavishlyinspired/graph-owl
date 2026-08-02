@@ -498,6 +498,164 @@ pub fn validate_extension(
     }
 }
 
+/// Whether a definition change can strand a value that already exists — Epic
+/// 22 Slice C.
+///
+/// **A change to the description or the display name cannot**, so saying so is
+/// what keeps editing help text from becoming an O(estate) read. Everything
+/// that moves what a value must *satisfy* can, and is checked against the data
+/// rather than reasoned about.
+#[must_use]
+pub fn constrains_differently(before: &CustomProperty, after: &CustomProperty) -> bool {
+    before.property_type != after.property_type || before.constraints != after.constraints
+}
+
+/// How many of `values` the changed definition would no longer accept.
+///
+/// **One rule, not a classification table.** The four cases the plan lists —
+/// type change, constraint narrowing, enum-member removal, and the widenings
+/// that are always fine — are tempting to encode as predicates over the *shape*
+/// of the change. That table has to be right for every combination of bound,
+/// type and enum member, and the first combination it gets wrong silently
+/// orphans data.
+///
+/// So the change is applied and [`validate_value`] — the **write path's own
+/// validator** — is re-run over what exists. A widening admits everything it
+/// did before and strands nothing; a narrowing that orphans values reports how
+/// many. It cannot disagree with what a write would do, because it is the same
+/// function, and no case can be forgotten because there are no cases.
+#[must_use]
+pub fn stranded_by(after: &CustomProperty, values: &[Value]) -> usize {
+    values
+        .iter()
+        .filter(|value| validate_value(after, value).is_err())
+        .count()
+}
+
+#[cfg(test)]
+mod change_safety_tests {
+    use super::*;
+
+    fn integer(minimum: f64, maximum: f64) -> CustomProperty {
+        CustomProperty {
+            name: "retentionDays".to_string(),
+            entity_type: "table".to_string(),
+            property_type: PropertyType::Integer,
+            description: None,
+            constraints: Constraints {
+                minimum: Some(minimum),
+                maximum: Some(maximum),
+                ..Constraints::default()
+            },
+        }
+    }
+
+    fn choices(values: &[&str]) -> CustomProperty {
+        CustomProperty {
+            name: "tier".to_string(),
+            entity_type: "table".to_string(),
+            property_type: PropertyType::Enum,
+            description: None,
+            constraints: Constraints {
+                values: values.iter().map(|v| (*v).to_string()).collect(),
+                ..Constraints::default()
+            },
+        }
+    }
+
+    /// Editing help text is not a schema change, and proving anything about the
+    /// values for it would make renaming a description cost a scan.
+    #[test]
+    fn a_description_edit_does_not_constrain_differently() {
+        let before = integer(1.0, 90.0);
+        let mut after = before.clone();
+        after.description = Some("how long we keep it".to_string());
+
+        assert!(!constrains_differently(&before, &after));
+    }
+
+    /// Both halves of the condition, separately — an `&&` in place of the `||`
+    /// would let a type change through unchecked whenever the constraints
+    /// happened to match.
+    #[test]
+    fn a_type_change_and_a_constraint_change_each_constrain_differently() {
+        let before = integer(1.0, 90.0);
+
+        let mut retyped = before.clone();
+        retyped.property_type = PropertyType::String;
+        assert!(
+            constrains_differently(&before, &retyped),
+            "a type change alone must be checked"
+        );
+
+        assert!(
+            constrains_differently(&before, &integer(1.0, 30.0)),
+            "a constraint change alone must be checked"
+        );
+    }
+
+    /// **Widening strands nothing**, which is the half that proves the check is
+    /// looking at the data rather than at the diff.
+    #[test]
+    fn widening_a_bound_strands_nothing() {
+        let values = vec![json_int(30), json_int(80)];
+
+        assert_eq!(stranded_by(&integer(1.0, 365.0), &values), 0);
+    }
+
+    /// And narrowing strands exactly the values past the new bound — not all of
+    /// them, and not none.
+    #[test]
+    fn narrowing_a_bound_strands_only_the_values_past_it() {
+        let values = vec![json_int(30), json_int(200), json_int(400)];
+
+        assert_eq!(stranded_by(&integer(1.0, 90.0), &values), 2);
+    }
+
+    /// Removing an enum member in use strands its holders; removing an unused
+    /// one strands nobody. The pair is the case a shape-based rule cannot tell
+    /// apart at all.
+    #[test]
+    fn removing_an_enum_value_strands_only_its_holders() {
+        let values = vec![
+            Value::String("gold".to_string()),
+            Value::String("gold".to_string()),
+            Value::String("silver".to_string()),
+        ];
+
+        assert_eq!(
+            stranded_by(&choices(&["silver"]), &values),
+            2,
+            "both gold holders are stranded"
+        );
+        assert_eq!(
+            stranded_by(&choices(&["gold", "silver"]), &values),
+            0,
+            "removing an unused member strands nobody"
+        );
+    }
+
+    /// Retyping strands every value that is not of the new type — the case the
+    /// `409` reports a count for.
+    #[test]
+    fn retyping_strands_the_values_that_are_not_of_the_new_type() {
+        let mut retyped = integer(1.0, 365.0);
+        retyped.property_type = PropertyType::Boolean;
+        retyped.constraints = Constraints::default();
+
+        assert_eq!(stranded_by(&retyped, &[json_int(30), json_int(80)]), 2);
+    }
+
+    #[test]
+    fn no_values_strand_nothing() {
+        assert_eq!(stranded_by(&integer(1.0, 1.0), &[]), 0);
+    }
+
+    fn json_int(value: i64) -> Value {
+        Value::Number(value.into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
