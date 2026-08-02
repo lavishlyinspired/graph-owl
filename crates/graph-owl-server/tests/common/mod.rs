@@ -209,6 +209,17 @@ async fn build_app(secret: Option<&str>) -> (axum::Router, TestDb, String) {
     (graph_owl_server::app(catalog), container, connection_string)
 }
 
+/// The raw `Catalog`, for a test that needs to drive something below the
+/// HTTP surface directly — Epic 19 Slice B's kill-and-restart test needs
+/// precise control over how many messages get applied before it simulates a
+/// crash, which the router's fire-and-forget background spawn does not
+/// offer from outside the crate.
+#[allow(dead_code)]
+pub async fn test_catalog() -> (Catalog, TestDb, String) {
+    let (container, connection_string, catalog) = build_catalog(None).await;
+    (catalog, container, connection_string)
+}
+
 async fn build_catalog(secret: Option<&str>) -> (TestDb, String, Catalog) {
     match secret {
         Some(secret) => unsafe { std::env::set_var("GRAPH_OWL_JWT_SECRET", secret) },
@@ -238,4 +249,44 @@ pub async fn json_body(response: axum::response::Response) -> Value {
         .await
         .expect("failed to read body");
     serde_json::from_slice(&bytes).expect("response body should be valid JSON")
+}
+
+/// Epic 19 Slice A's end-to-end test needs a real broker alongside Postgres.
+/// One container per test binary, the same reasoning as the Postgres one
+/// above — started via the crate-local `testcontainers-kafka` /
+/// `testcontainers-modules-kafka` pin (see `Cargo.toml`), independent of the
+/// workspace-wide `testcontainers`/`testcontainers-modules` used for
+/// Postgres.
+static SHARED_KAFKA: tokio::sync::OnceCell<
+    testcontainers_kafka::ContainerAsync<testcontainers_modules_kafka::kafka::apache::Kafka>,
+> = tokio::sync::OnceCell::const_new();
+
+#[allow(dead_code)]
+pub async fn kafka_bootstrap_servers() -> String {
+    use testcontainers_kafka::runners::AsyncRunner;
+    use testcontainers_kafka::{ImageExt, ReuseDirective};
+    let container = SHARED_KAFKA
+        .get_or_init(|| async {
+            testcontainers_modules_kafka::kafka::apache::Kafka::default()
+                // Named + reused, same reasoning as `SHARED_CONTAINER` above:
+                // a `OnceCell` never drops, so an anonymous container is
+                // never reaped and one accumulates per binary per run.
+                .with_container_name("graph-owl-kafka-tests")
+                .with_reuse(ReuseDirective::Always)
+                .start()
+                .await
+                .expect("kafka container should start")
+        })
+        .await;
+    let host = container.get_host().await.expect("container host");
+    let port = container
+        .get_host_port_ipv4(9092)
+        .await
+        .expect("container port");
+    format!("{host}:{port}")
+}
+
+#[allow(dead_code)]
+pub fn unique_topic() -> String {
+    format!("test-{}", uuid::Uuid::new_v4())
 }

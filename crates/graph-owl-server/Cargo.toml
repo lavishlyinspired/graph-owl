@@ -46,6 +46,23 @@ testcontainers-modules.workspace = true
 testcontainers.workspace = true
 hmac.workspace = true
 sha2.workspace = true
+# Epic 19 Slice A's end-to-end test needs a Kafka container alongside the
+# Postgres one `testcontainers[-modules].workspace` already provides above —
+# but that pin (0.23/0.11) has no `kafka` feature, and the version that does
+# needs `testcontainers ^0.24`. Renamed via `package =`, the same way
+# `graph-owl-connectors` avoids bumping the shared workspace pin (see
+# `19-streaming.md` decision 6) — Cargo happily compiles two versions of one
+# crate under different local names.
+testcontainers-kafka = { package = "testcontainers", version = "0.24", features = [
+    "reusable-containers",
+] }
+testcontainers-modules-kafka = { package = "testcontainers-modules", version = "0.12", features = [
+    "kafka",
+] }
+# Test-only: producing a message directly, to prove consumption end to end.
+# `graph-owl-connectors` depends on `rdkafka` itself but does not re-export
+# it, so using its producer API here needs its own declaration.
+rdkafka = "0.39"
 
 [lints]
 workspace = true

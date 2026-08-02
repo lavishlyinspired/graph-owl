@@ -4,6 +4,7 @@ pub mod jwks;
 pub mod observability;
 pub mod openapi;
 pub mod rate_limit;
+pub mod streaming;
 
 use axum::{
     Json, Router,
@@ -216,6 +217,21 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             get(dead_letter_queue).delete(purge_dead_letters),
         )
         .route("/webhooks/replay", post(replay_window))
+        // Epic 19 Slice A: durable broker subscriptions, admin-gated the same
+        // way webhook endpoints and connector configs are — all three hold a
+        // credential and decide what an external system may write.
+        .route(
+            "/streaming/subscriptions",
+            get(list_stream_subscriptions).post(register_stream_subscription),
+        )
+        // Epic 19 Slice E: replay a historical window, admin-gated.
+        .route("/streaming/replay", post(replay_stream_window))
+        // Epic 19 Slice D: poison-message quarantine, admin-gated.
+        .route("/streaming/dead-letters", get(list_stream_dead_letters))
+        .route(
+            "/streaming/dead-letters/{id}/replay",
+            post(replay_stream_dead_letter),
+        )
         // Unauthenticated by necessity rather than by design: this is what a
         // client reads *before* it holds a token, so requiring one would be
         // circular.
@@ -1018,6 +1034,10 @@ impl AppError {
                 kind: ConflictKind::WebhookPathExists,
                 ..
             } => "webhook-path-exists",
+            AppError::Conflict {
+                kind: ConflictKind::StreamSubscriptionExists,
+                ..
+            } => "stream-subscription-exists",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
             AppError::PreconditionFailed { .. } => "version-conflict",
@@ -1081,6 +1101,10 @@ impl AppError {
                 kind: ConflictKind::WebhookPathExists,
                 ..
             } => "This path is already registered to another endpoint",
+            AppError::Conflict {
+                kind: ConflictKind::StreamSubscriptionExists,
+                ..
+            } => "This topic and consumer group are already registered to another subscription",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
             AppError::PreconditionFailed { .. } => "Version precondition failed",
@@ -1183,6 +1207,13 @@ impl AppError {
             // already a complete sentence.
             AppError::Conflict {
                 kind: ConflictKind::WebhookPathExists,
+                detail,
+                ..
+            } => detail.clone(),
+            // Same reasoning as `WebhookPathExists`: the storage layer's
+            // message already names the topic and consumer group.
+            AppError::Conflict {
+                kind: ConflictKind::StreamSubscriptionExists,
                 detail,
                 ..
             } => detail.clone(),
@@ -2396,6 +2427,200 @@ async fn list_webhook_endpoints(
         return Err(AppError::NotFound);
     }
     Ok(Json(catalog.list_webhook_endpoints().await?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamSubscriptionRequest {
+    broker: graph_owl_storage::BrokerConfig,
+    topic: String,
+    consumer_group: String,
+    mapping: String,
+    #[serde(default = "default_start_position")]
+    start_position: graph_owl_storage::StartPosition,
+    #[serde(default = "default_max_in_flight")]
+    max_in_flight: usize,
+    #[serde(default = "default_poison_threshold")]
+    poison_threshold: u32,
+    #[serde(default = "default_stream_subscription_enabled")]
+    enabled: bool,
+    /// Write-only and never echoed back — same reasoning as
+    /// [`WebhookEndpointRequest::secret`]. `Option` because not every broker
+    /// needs one: the Kafka/Pulsar testcontainers this epic's own tests run
+    /// against are unauthenticated.
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+fn default_start_position() -> graph_owl_storage::StartPosition {
+    graph_owl_storage::StartPosition::Latest
+}
+
+/// Not a stated fact the way `admission::DEFAULT_PERMITS` derives from the
+/// Postgres pool size — there is no equivalent number to derive this from.
+/// `100` is a starting point an operator overrides once real throughput is
+/// known, the same reasoning `rate_limit_per_minute` avoided inventing a
+/// global default entirely; this one needs *some* value or the type would
+/// have to be `Option<usize>` for a field the plan's own reference always
+/// shows as required.
+fn default_max_in_flight() -> usize {
+    100
+}
+
+fn default_poison_threshold() -> u32 {
+    3
+}
+
+fn default_stream_subscription_enabled() -> bool {
+    true
+}
+
+impl ValidateBody for StreamSubscriptionRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("topic"),
+            &mut errors,
+        );
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("consumerGroup"),
+            &mut errors,
+        );
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("mapping"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// Register a streaming subscription — Epic 19 Slice A.
+///
+/// Admin-only, same reasoning as [`register_webhook_endpoint`]: a
+/// subscription holds broker credentials and decides what an external
+/// system may write into the catalog on an ongoing basis.
+async fn register_stream_subscription(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<StreamSubscriptionRequest>,
+) -> Result<(StatusCode, Json<graph_owl_storage::StreamSubscription>), AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let now = chrono::Utc::now();
+    let subscription = graph_owl_storage::StreamSubscription {
+        id: Uuid::new_v4(),
+        broker: payload.broker,
+        topic: payload.topic,
+        consumer_group: payload.consumer_group,
+        mapping: payload.mapping,
+        start_position: payload.start_position,
+        max_in_flight: payload.max_in_flight,
+        poison_threshold: payload.poison_threshold,
+        // Ignored on the way in — `upsert_stream_subscription` returns the
+        // real value from `secret IS NOT NULL`, not this placeholder.
+        has_secret: false,
+        enabled: payload.enabled,
+        created_at: now,
+        updated_at: now,
+    };
+    let saved = catalog
+        .register_stream_subscription(subscription, payload.secret.as_deref().map(str::as_bytes))
+        .await?;
+    // Starts immediately rather than waiting for the next server restart —
+    // `spawn_enabled_subscriptions` (called once at startup) is what makes a
+    // *restart* resume existing subscriptions; this is what makes a *fresh*
+    // registration usable without one.
+    if saved.enabled {
+        streaming::spawn_consumer(catalog, saved.clone());
+    }
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+/// Every registered subscription, without secrets.
+async fn list_stream_subscriptions(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<Vec<graph_owl_storage::StreamSubscription>>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.list_stream_subscriptions().await?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamReplayRequest {
+    subscription: Uuid,
+    since: chrono::DateTime<chrono::Utc>,
+}
+
+impl ValidateBody for StreamReplayRequest {
+    /// Nothing to check structurally: both fields are required and typed,
+    /// so serde's own rejection is the validation — same reasoning as
+    /// `ReplayRequest` (Epic 18 Slice D).
+    fn validate_body(_value: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Replay a subscription's messages from a timestamp — Epic 19 Slice E.
+///
+/// Synchronous, unlike the webhook replay's fire-and-forget: a replay reads
+/// a bounded historical window and the summary *is* the answer an operator
+/// asked for, so returning `202` with nothing to poll would be worse than
+/// waiting. It is admission-controlled as ingestion for the same reason
+/// `/ingest/batch` is.
+async fn replay_stream_window(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<StreamReplayRequest>,
+) -> Result<Json<streaming::StreamReplaySummary>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(
+        streaming::replay_window(&catalog, payload.subscription, payload.since).await?,
+    ))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamDeadLetterQuery {
+    subscription: Option<Uuid>,
+}
+
+/// Poisoned streamed messages, newest first — Epic 19 Slice D. Admin-gated
+/// like every other streaming surface: the raw payload is external data an
+/// operator triages, not something every catalog reader needs to see.
+async fn list_stream_dead_letters(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppQuery(query): AppQuery<StreamDeadLetterQuery>,
+) -> Result<Json<Vec<graph_owl_storage::StreamDeadLetter>>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.stream_dead_letters(query.subscription).await?))
+}
+
+/// Replays one dead letter after a mapping fix — Epic 19 Slice D. `200`
+/// with no body on success (the letter is gone); the failure a
+/// still-broken mapping produces comes back as the same validation error a
+/// live message would have hit.
+async fn replay_stream_dead_letter(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    catalog.replay_stream_dead_letter(id).await?;
+    Ok(StatusCode::OK)
 }
 
 /// `graph_owl_<subsystem>_<noun>_<unit>`, per the observability contract's
@@ -5134,8 +5359,13 @@ async fn health() -> Json<serde_json::Value> {
 async fn ready(State(catalog): State<Catalog>) -> Response {
     let database = catalog.ping().await;
     let secured = signing_secret().is_some() || oidc_config().is_some();
+    // Epic 19 Slice C: "a failed consumer makes readiness fail." Required,
+    // not advisory — a subscription an operator registered and is relying
+    // on for freshness must not silently stop consuming while `/ready`
+    // keeps reporting green.
+    let (streaming_ok, failed_subscriptions) = streaming::all_healthy();
 
-    let (status, state) = if database.is_ok() {
+    let (status, state) = if database.is_ok() && streaming_ok {
         (StatusCode::OK, if secured { "ready" } else { "degraded" })
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "unready")
@@ -5151,6 +5381,11 @@ async fn ready(State(catalog): State<Catalog>) -> Response {
                 // server that is accidentally open must say so rather than look
                 // identical to a secured one.
                 "authentication": { "required": false, "ok": secured },
+                "streaming": {
+                    "required": true,
+                    "ok": streaming_ok,
+                    "failedSubscriptions": failed_subscriptions,
+                },
             }
         })),
     )

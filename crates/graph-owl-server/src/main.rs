@@ -85,6 +85,16 @@ async fn main() {
         .with_graph(graph.clone())
         .with_traversal(graph);
 
+    // Resumes every enabled subscription from its last committed offset —
+    // Epic 19 decision 1 ("a durable subscription, not a push endpoint")
+    // means a restart must not go silently quiet until someone re-registers
+    // it. A failure here is logged, not fatal: a broker being unreachable at
+    // boot must not stop the catalog itself from serving the rest of its
+    // traffic.
+    if let Err(error) = graph_owl_server::streaming::spawn_enabled_subscriptions(&catalog).await {
+        tracing::error!("failed to resume streaming subscriptions at startup: {error:?}");
+    }
+
     let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let listener = tokio::net::TcpListener::bind(&bind)
         .await

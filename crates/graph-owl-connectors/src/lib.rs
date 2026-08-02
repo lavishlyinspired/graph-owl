@@ -10,6 +10,8 @@ pub mod batch;
 pub mod ingest;
 pub mod job;
 pub mod rows;
+pub mod streaming;
+pub mod streaming_pulsar;
 pub mod webhook_mapping;
 pub mod webhook_signature;
 

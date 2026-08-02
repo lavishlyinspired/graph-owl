@@ -21,7 +21,45 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+# Epic 19: a seek failure on rebalance means the consumer silently starts
+# from the wrong position — a correctness problem, not just a debugging
+# nicety, so it is logged for real rather than swallowed.
+tracing.workspace = true
+# Epic 19 Slice F: `TryStreamExt` for the Pulsar consumer stream.
+futures = "0.3"
+# Epic 19: Kafka/Redpanda consumer. MIT; wraps `rdkafka-sys` (MIT), which
+# vendors and statically builds librdkafka (BSD-2-Clause) — see
+# `19-streaming.md` decision 6 for why this is the only Rust client with
+# real consumer-group rebalancing, and why the two pure-Rust alternatives
+# (rskafka, kafka) were checked and disqualified on capability, not licence.
+rdkafka = "0.39"
+# Epic 19: Pulsar consumer — a distinct wire protocol from Kafka, needs its
+# own client. MIT OR Apache-2.0, pure Rust (`streamnative/pulsar-rs`).
+# `default-features = false`: the crate's own defaults pull in both
+# `tokio-runtime` and `async-std-runtime` (this project uses only tokio) and
+# `native-tls` (this project uses `rustls` everywhere else) — trimmed to
+# what is actually needed rather than carrying a second async runtime and a
+# second TLS stack. `protobuf-src` vendors and builds `protoc` from source at
+# compile time (`prost-build` needs one) rather than requiring a
+# system-installed binary every dev machine and CI image would otherwise
+# have to remember — the same vendor-rather-than-assume choice `rdkafka-sys`
+# already makes for librdkafka, both needing the same C/C++ toolchain class.
+pulsar = { version = "6", default-features = false, features = ["tokio-rustls-runtime-ring", "compression", "protobuf-src"] }
 
 [dev-dependencies]
 rand.workspace = true
 chrono.workspace = true
+uuid.workspace = true
+# Test-only: measuring process CPU time directly to prove an idle consumer
+# does not busy-poll (Epic 19 Slice A). Already in the dependency tree
+# transitively via `rdkafka`; declared explicitly because using a crate's
+# API requires declaring it, not just having it resolve.
+libc = "0.2"
+# Deliberately not the workspace-wide `testcontainers`/`testcontainers-modules`
+# pin (0.23/0.11) — see `19-streaming.md` decision 6. Neither has a `pulsar`
+# feature; the version that does needs `testcontainers ^0.24`, and bumping
+# the shared workspace pin risks the already-tuned Postgres container-reuse
+# behaviour (CLAUDE.md documents how fragile that has been to get right) for
+# no benefit to Postgres. Pinned independently here instead.
+testcontainers = { version = "0.24", features = ["reusable-containers"] }
+testcontainers-modules = { version = "0.12", features = ["kafka", "pulsar"] }

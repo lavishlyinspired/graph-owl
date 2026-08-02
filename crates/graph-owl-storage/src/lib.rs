@@ -78,6 +78,11 @@ pub enum ConflictKind {
     /// is the actionable detail: "conflict" alone does not tell a caller
     /// which URL segment to pick instead.
     WebhookPathExists,
+    /// A `(topic, consumer_group)` pair is already registered as a different
+    /// subscription — Epic 19 Slice A. Its own variant for the same reason
+    /// as `WebhookPathExists`: the pair is the actionable detail a caller
+    /// needs back, not a generic "conflict".
+    StreamSubscriptionExists,
 }
 
 #[derive(Debug, Error)]
@@ -728,6 +733,90 @@ pub enum GlossaryDeletion {
     },
 }
 
+/// A message broker's connection details — Epic 19.
+///
+/// Two variants, deliberately, matching the two client crates actually
+/// adopted (`19-streaming.md` decision 6): Kafka and Pulsar do not share a
+/// wire protocol, so there is no third "generic" variant that would almost
+/// fit either. Redpanda needs no variant of its own — it speaks the Kafka
+/// protocol, so `KafkaProtocol` already covers it.
+///
+/// `rename_all_fields`, not just `rename_all`: the latter renames a tagged
+/// enum's *variant names*, not the fields inside them — a documented gotcha
+/// from Epic 18's `Authorship`, which shipped `agent_id` on the wire because
+/// only `rename_all` was set. `bootstrap_servers` is this type's first
+/// multi-word variant field, so it is the first place that bug would have
+/// resurfaced silently.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum BrokerConfig {
+    KafkaProtocol { bootstrap_servers: String },
+    Pulsar { service_url: String },
+}
+
+/// Where a new subscription starts reading from — Epic 19.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum StartPosition {
+    Earliest,
+    Latest,
+    Timestamp { at: chrono::DateTime<chrono::Utc> },
+    Offset { value: i64 },
+}
+
+/// A durable subscription to a broker topic, **without its credentials** —
+/// Epic 19. Same reasoning as [`WebhookEndpoint`]: no field for SASL/token
+/// material, so a `Debug` derive or a response body can never leak it. When a
+/// broker needs one, it is readable through exactly one method
+/// ([`Storage::stream_subscription_secret`]).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamSubscription {
+    pub id: Uuid,
+    pub broker: BrokerConfig,
+    pub topic: String,
+    pub consumer_group: String,
+    /// The declarative mapping (Epic 18 Slice C) messages on this topic are
+    /// run through — reused wholesale rather than reinvented: the payload
+    /// shapes and duplication problem are identical to a webhook's, and only
+    /// the transport differs.
+    pub mapping: String,
+    pub start_position: StartPosition,
+    pub max_in_flight: usize,
+    pub poison_threshold: u32,
+    pub has_secret: bool,
+    /// Same reasoning as [`WebhookEndpoint::enabled`]: pausing consumption
+    /// without losing the registration (and its committed offsets) needs a
+    /// flag, not a delete-and-recreate.
+    pub enabled: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A streamed message that failed `poison_threshold` apply attempts —
+/// Epic 19 Slice D. Kept with its raw payload so a replay after a mapping
+/// fix re-applies exactly what the broker delivered, not a reconstruction.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamDeadLetter {
+    pub id: Uuid,
+    pub subscription_id: Uuid,
+    pub topic: String,
+    pub partition: i32,
+    pub offset: i64,
+    pub payload: Vec<u8>,
+    pub reason: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[async_trait]
 pub trait Storage: Send + Sync {
     /// Connection-pool occupancy, if this backend has a pool.
@@ -1169,6 +1258,83 @@ pub trait Storage: Send + Sync {
     ///
     /// [`StorageError`] if the read fails.
     async fn webhook_secret(&self, id: Uuid) -> Result<Option<Vec<u8>>, StorageError>;
+
+    /// Registers or updates a streaming subscription — Epic 19.
+    ///
+    /// `secret` is `None` to **leave an existing credential alone** — same
+    /// reasoning as [`Self::upsert_webhook_endpoint`].
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Conflict`] if `(topic, consumer_group)` is already
+    /// registered to a different subscription;
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn upsert_stream_subscription(
+        &self,
+        subscription: StreamSubscription,
+        secret: Option<&[u8]>,
+    ) -> Result<StreamSubscription, StorageError>;
+
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn get_stream_subscription(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<StreamSubscription>, StorageError>;
+
+    /// Every registered subscription, without secrets.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn list_stream_subscriptions(&self) -> Result<Vec<StreamSubscription>, StorageError>;
+
+    /// The stored credential, for the consume path only.
+    ///
+    /// **The one call site that sees a secret** — same reasoning as
+    /// [`Self::webhook_secret`].
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn stream_subscription_secret(&self, id: Uuid) -> Result<Option<Vec<u8>>, StorageError>;
+
+    /// Persists a poisoned streamed message — Epic 19 Slice D.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the write fails.
+    async fn create_stream_dead_letter(
+        &self,
+        letter: StreamDeadLetter,
+    ) -> Result<StreamDeadLetter, StorageError>;
+
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn get_stream_dead_letter(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<StreamDeadLetter>, StorageError>;
+
+    /// Dead letters, newest first, optionally scoped to one subscription.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn list_stream_dead_letters(
+        &self,
+        subscription: Option<Uuid>,
+    ) -> Result<Vec<StreamDeadLetter>, StorageError>;
+
+    /// Removes a dead letter — the successful end of a replay. Returns
+    /// whether a row existed to remove.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the delete fails.
+    async fn delete_stream_dead_letter(&self, id: Uuid) -> Result<bool, StorageError>;
 
     /// Persists a received (already signature-verified) inbound event.
     ///

@@ -91,6 +91,17 @@ suite runs — never sit idle waiting on a background cargo run when there is
 code left to write. What must not overlap is two *compiles*: they take the
 same build lock, and the second one relinks what the first is running.
 
+**Watch the right process name.** `cargo nextest run` execs as
+**`cargo-nextest`**, not `cargo` — an `until ! pgrep -x cargo` waiter fires
+the moment the build phase ends and reports a suite "finished" while it is
+still running. This is the same class of mistake as the `pgrep -f` trap
+below (which matches the waiter's own command line), in a new disguise.
+Check `pgrep -x cargo-nextest` for a nextest run, `pgrep -x cargo` for
+everything else — or better, do not chain waiters at all: **five stacked
+`until ! pgrep` shells once sat blocked for over an hour behind a single
+hung test**, and from the outside that looked like six concurrent gates.
+One run, one wait, read the output.
+
 ### Why it is fast now, and what to re-check when it is not
 
 Four things were fixed on 2 August 2026 after a session where the loop

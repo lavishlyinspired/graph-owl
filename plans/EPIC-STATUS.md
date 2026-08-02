@@ -56,7 +56,7 @@ is the condition that index exists to catch.
 | **16** | 6 | [`16-ingestion-apis.md`](16-ingestion-apis.md) | In progress | 5/6 (+1 partial) | Epic 1 (contract), Epic 15 (upsert semantics) |
 | **17** | 6 | [`17-entity-resolution.md`](17-entity-resolution.md) | **Shipped** | 4/4 | Epic 4 (`sameAs` in the graph), Epic 15 + 16 (two write paths make this necessa… |
 | **18** | 6 | [`18-inbound-events.md`](18-inbound-events.md) | **Shipped** | 5/5 | Epic 16 (ingestion contract), Epic 17 (resolution, so pushes do not duplicate) |
-| **19** | 6 | [`19-streaming.md`](19-streaming.md) | Not started | 0/1 | Epic 16 (ingestion contract), Epic 18 (dedup and ordering machinery) |
+| **19** | 6 | [`19-streaming.md`](19-streaming.md) | In progress | 5/6 (+1 partial) | Epic 16 (ingestion contract), Epic 18 (dedup and ordering machinery) |
 | **20** | 6 | [`20-metadata-as-code.md`](20-metadata-as-code.md) | Not started | 0/2 | Epic 15 (idempotent upsert and reconciliation machinery) |
 | **21** | 6 | [`21-document-ingestion.md`](21-document-ingestion.md) | Not started | 0/2 | Epic 16 (ingestion), Epic 17 (mention resolution) |
 | **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | Not started | 0/8 | Epic 3 (the envelope's `extension` field) |
@@ -373,7 +373,12 @@ is the condition that index exists to catch.
 
 ### Epic 19 — Streaming Ingestion *(Demo 6)*
 
-- [ ] Broker consumption with consumer-group rebalancing
+- [x] Consume and apply
+- [x] Offsets commit only after apply
+- [x] Lag and health
+- [x] Poison messages and backpressure
+- [x] Rebalancing and replay
+- [~] Pulsar parity
 
 ### Epic 20 — Metadata-as-Code ★ *(Demo 6)*
 

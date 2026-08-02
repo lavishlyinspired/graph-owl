@@ -1424,6 +1424,41 @@ impl Catalog {
         Ok(self.storage.list_webhook_endpoints().await?)
     }
 
+    /// # Errors
+    ///
+    /// `Storage::Conflict` if `(topic, consumer_group)` is already
+    /// registered to a different subscription; `Storage` if the write
+    /// fails.
+    pub async fn register_stream_subscription(
+        &self,
+        subscription: graph_owl_storage::StreamSubscription,
+        secret: Option<&[u8]>,
+    ) -> Result<graph_owl_storage::StreamSubscription, CatalogError> {
+        Ok(self
+            .storage
+            .upsert_stream_subscription(subscription, secret)
+            .await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn stream_subscription(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::StreamSubscription>, CatalogError> {
+        Ok(self.storage.get_stream_subscription(id).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn list_stream_subscriptions(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::StreamSubscription>, CatalogError> {
+        Ok(self.storage.list_stream_subscriptions().await?)
+    }
+
     /// Verifies an inbound delivery's signature and, if it verifies, records
     /// it. The HTTP layer is responsible for reading `raw_body` before any
     /// JSON parsing and for extracting exactly the header `endpoint`'s own
@@ -1847,6 +1882,149 @@ impl Catalog {
         id: Uuid,
     ) -> Result<Option<graph_owl_core::webhook::InboundEvent>, CatalogError> {
         Ok(self.storage.get_inbound_event(id).await?)
+    }
+
+    /// Records a poisoned streamed message — Epic 19 Slice D.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    pub async fn record_stream_dead_letter(
+        &self,
+        letter: graph_owl_storage::StreamDeadLetter,
+    ) -> Result<graph_owl_storage::StreamDeadLetter, CatalogError> {
+        Ok(self.storage.create_stream_dead_letter(letter).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn stream_dead_letters(
+        &self,
+        subscription: Option<Uuid>,
+    ) -> Result<Vec<graph_owl_storage::StreamDeadLetter>, CatalogError> {
+        Ok(self.storage.list_stream_dead_letters(subscription).await?)
+    }
+
+    /// Replays one dead letter through the same mapping-and-apply path a
+    /// live message takes — Epic 19 Slice D's "the DLQ is replayable after
+    /// a mapping fix". On success the letter is removed; on failure it
+    /// stays, with the error propagated so the caller sees exactly what a
+    /// fixed-then-still-broken mapping produced.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if no such letter, or its subscription no longer exists.
+    /// `Validation` if the payload still does not apply. `Storage` on
+    /// read/write failure.
+    #[tracing::instrument(name = "catalog.replay_stream_dead_letter", skip_all)]
+    pub async fn replay_stream_dead_letter(&self, id: Uuid) -> Result<(), CatalogError> {
+        let letter = self
+            .storage
+            .get_stream_dead_letter(id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        let subscription = self
+            .storage
+            .get_stream_subscription(letter.subscription_id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&letter.payload).map_err(|error| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "payload",
+                    FieldErrorCode::Type,
+                    format!("the dead-lettered payload is not valid JSON: {error}"),
+                )])
+            })?;
+        self.apply_streamed_message(&subscription.mapping, &payload)
+            .await?;
+        self.storage.delete_stream_dead_letter(id).await?;
+        Ok(())
+    }
+
+    /// Maps and applies one streamed message — Epic 19 Slice A. Reuses
+    /// Epic 18's mapping and resolution machinery wholesale
+    /// (`resolve_and_validate_draft`), the same helper
+    /// [`Catalog::process_inbound_event`] calls — the payload shapes and
+    /// duplication problem are identical to a webhook's, only the transport
+    /// differs.
+    ///
+    /// **Unlike `process_inbound_event`, there is no persisted event row to
+    /// move through states here** — a streamed message has no `InboundEvent`
+    /// equivalent yet; Slice D designs streaming's own poison-message
+    /// handling separately, since Kafka's redelivery semantics (a consumer
+    /// simply re-reads an uncommitted offset) are not a webhook's. A
+    /// rejection is therefore a `CatalogError::Validation` here, for the
+    /// caller (the consume loop) to decide what to do with, rather than a
+    /// silent `Failed` state written somewhere.
+    ///
+    /// **`Catalog::resolve_asset` runs automatically after every successful
+    /// upsert** — `19-streaming.md` decision 7: streaming has no caller
+    /// waiting on a response the way a webhook's sender or a batch push's
+    /// client does, so nothing else is in a position to ask for it, and
+    /// leaving it manual would let streamed data duplicate silently.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if no mapping is registered under `mapping_name`.
+    /// `Validation` if the payload does not resolve to a valid draft (a
+    /// missing field, an unknown kind, or a shape violation) or the write
+    /// itself is refused. `Storage` if a read or write fails.
+    #[tracing::instrument(name = "catalog.apply_streamed_message", skip_all)]
+    pub async fn apply_streamed_message(
+        &self,
+        mapping_name: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), CatalogError> {
+        let mapping = self
+            .storage
+            .get_mapping(mapping_name)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+
+        let (draft, kind, parent_id) =
+            match self.resolve_and_validate_draft(&mapping, payload).await? {
+                MappingResolution::Ready {
+                    draft,
+                    kind,
+                    parent_id,
+                    ..
+                } => (draft, kind, parent_id),
+                MappingResolution::MissingField { field } => {
+                    return Err(CatalogError::Validation(vec![FieldError::new(
+                        field,
+                        FieldErrorCode::Required,
+                        format!("mapping `{mapping_name}` field `{field}`: nothing at the path"),
+                    )]));
+                }
+                MappingResolution::InvalidKind { kind } => {
+                    return Err(CatalogError::Validation(vec![FieldError::new(
+                        "kind",
+                        FieldErrorCode::Type,
+                        format!("`{kind}` is not a known asset kind"),
+                    )]));
+                }
+                MappingResolution::ShapeViolation { reason } => {
+                    return Err(CatalogError::Validation(vec![FieldError::new(
+                        "shape",
+                        FieldErrorCode::Type,
+                        reason,
+                    )]));
+                }
+            };
+
+        let principal = Principal::system();
+        let request = UpsertAsset {
+            kind,
+            name: draft.name,
+            parent_id,
+            description: draft.description,
+            properties: draft.properties,
+        };
+        let asset = self.upsert_asset(&principal, request).await?;
+        self.resolve_asset(&principal, asset.id).await?;
+        Ok(())
     }
 
     /// The dead-letter queue, filtered — Epic 18 Slice D.
@@ -6096,6 +6274,10 @@ mod tests {
         #[allow(clippy::type_complexity)]
         webhook_endpoints: Mutex<Vec<(graph_owl_storage::WebhookEndpoint, Option<Vec<u8>>)>>,
         inbound_events: Mutex<Vec<graph_owl_core::webhook::InboundEvent>>,
+        /// `(subscription, secret)` — same reasoning as `webhook_endpoints`.
+        #[allow(clippy::type_complexity)]
+        stream_subscriptions: Mutex<Vec<(graph_owl_storage::StreamSubscription, Option<Vec<u8>>)>>,
+        stream_dead_letters: Mutex<Vec<graph_owl_storage::StreamDeadLetter>>,
         mapping_versions: Mutex<Vec<graph_owl_storage::Mapping>>,
         entity_last_applied:
             Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
@@ -6819,6 +7001,123 @@ mod tests {
                 .iter()
                 .find(|(e, _)| e.id == id)
                 .and_then(|(_, s)| s.clone()))
+        }
+
+        async fn upsert_stream_subscription(
+            &self,
+            subscription: graph_owl_storage::StreamSubscription,
+            secret: Option<&[u8]>,
+        ) -> Result<graph_owl_storage::StreamSubscription, StorageError> {
+            let mut held = self.stream_subscriptions.lock().unwrap();
+            if held.iter().any(|(s, _)| {
+                s.topic == subscription.topic
+                    && s.consumer_group == subscription.consumer_group
+                    && s.id != subscription.id
+            }) {
+                return Err(StorageError::Conflict {
+                    detail: format!(
+                        "topic '{}' with consumer group '{}' is already registered",
+                        subscription.topic, subscription.consumer_group
+                    ),
+                    existing_id: None,
+                    kind: ConflictKind::StreamSubscriptionExists,
+                });
+            }
+            let existing_secret = held
+                .iter()
+                .find(|(s, _)| s.id == subscription.id)
+                .and_then(|(_, s)| s.clone());
+            held.retain(|(s, _)| s.id != subscription.id);
+            let kept = secret.map(<[u8]>::to_vec).or(existing_secret);
+            let mut stored = subscription;
+            stored.has_secret = kept.is_some();
+            held.push((stored.clone(), kept));
+            Ok(stored)
+        }
+
+        async fn get_stream_subscription(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_storage::StreamSubscription>, StorageError> {
+            Ok(self
+                .stream_subscriptions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(s, _)| s.id == id)
+                .map(|(s, _)| s.clone()))
+        }
+
+        async fn list_stream_subscriptions(
+            &self,
+        ) -> Result<Vec<graph_owl_storage::StreamSubscription>, StorageError> {
+            Ok(self
+                .stream_subscriptions
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(s, _)| s.clone())
+                .collect())
+        }
+
+        async fn stream_subscription_secret(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            Ok(self
+                .stream_subscriptions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(s, _)| s.id == id)
+                .and_then(|(_, s)| s.clone()))
+        }
+
+        async fn create_stream_dead_letter(
+            &self,
+            letter: graph_owl_storage::StreamDeadLetter,
+        ) -> Result<graph_owl_storage::StreamDeadLetter, StorageError> {
+            self.stream_dead_letters
+                .lock()
+                .unwrap()
+                .push(letter.clone());
+            Ok(letter)
+        }
+
+        async fn get_stream_dead_letter(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_storage::StreamDeadLetter>, StorageError> {
+            Ok(self
+                .stream_dead_letters
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|l| l.id == id)
+                .cloned())
+        }
+
+        async fn list_stream_dead_letters(
+            &self,
+            subscription: Option<Uuid>,
+        ) -> Result<Vec<graph_owl_storage::StreamDeadLetter>, StorageError> {
+            let mut letters: Vec<_> = self
+                .stream_dead_letters
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| subscription.is_none_or(|s| l.subscription_id == s))
+                .cloned()
+                .collect();
+            letters.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(letters)
+        }
+
+        async fn delete_stream_dead_letter(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut held = self.stream_dead_letters.lock().unwrap();
+            let before = held.len();
+            held.retain(|l| l.id != id);
+            Ok(held.len() < before)
         }
 
         async fn create_inbound_event(
@@ -14034,6 +14333,163 @@ mod inbound_events_are_mapped_and_applied {
             },
             "both the applied and the superseded event must be skipped: {summary:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod streamed_messages_are_mapped_applied_and_resolved {
+    //! Epic 19 Slice A at the **facade**.
+    //!
+    //! The mapping evaluator is proven in isolation
+    //! (`graph-owl-connectors::webhook_mapping`), and its orchestration
+    //! (mapping lookup, shape validation) is already proven by Epic 18's own
+    //! facade tests, since `Catalog::apply_streamed_message` reuses the same
+    //! private `resolve_and_validate_draft` helper. What is unique to this
+    //! slice, and therefore what this module proves, is the one behavioral
+    //! difference from a webhook: **resolution runs automatically**, with no
+    //! caller ever asking for it — decision 7.
+
+    use super::*;
+    use projection_isolation_tests::RecordingGraph;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use tests::InMemoryStorage;
+
+    /// `resolve_asset` needs a graph engine to look up candidates against —
+    /// same fixture `resolution_decides_before_it_merges` uses.
+    fn seeded() -> (Catalog, Arc<InMemoryStorage>) {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage.clone()).with_graph(RecordingGraph::working());
+        (catalog, storage)
+    }
+
+    fn path(pointer: &str) -> graph_owl_storage::Expression {
+        graph_owl_storage::Expression::Path {
+            pointer: pointer.to_string(),
+        }
+    }
+
+    fn mapping(name: &str) -> graph_owl_storage::Mapping {
+        graph_owl_storage::Mapping {
+            name: name.to_string(),
+            version: 0, // ignored on write
+            kind: path("/kind"),
+            entity_name: path("/name"),
+            parent_fqn: None,
+            description: None,
+            properties: BTreeMap::new(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// **The criterion this slice exists to prove.** A streamed message
+    /// mapping to a near-duplicate of an already-cataloged entity (same
+    /// name, different case — `is_deterministic_match`'s own normalization)
+    /// must produce a merge record, with nothing in this test ever calling
+    /// `resolve_asset` directly. A merge retracts the losing entity's
+    /// graph-level flakes rather than deleting its `assets` row (Epic 17's
+    /// own reversibility design — `POST /merges/{id}/split` needs the row to
+    /// restore), so a merge record is the correct, direct signal that
+    /// resolution ran — not the row's absence, which a merge was never
+    /// going to produce.
+    #[tokio::test]
+    async fn a_streamed_near_duplicate_is_merged_not_duplicated() {
+        let (catalog, storage) = seeded();
+        catalog
+            .upsert_mapping(mapping("dbt-run-completed"))
+            .await
+            .expect("register mapping");
+        let original = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Service,
+                    name: "Orders".to_string(),
+                    parent_id: None,
+                    description: None,
+                    properties: None,
+                },
+            )
+            .await
+            .expect("seed the existing entity");
+
+        catalog
+            .apply_streamed_message(
+                "dbt-run-completed",
+                &json!({"kind": "service", "name": "orders"}),
+            )
+            .await
+            .expect("apply");
+
+        let records = storage.merge_records.lock().unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "resolution must have merged the near-duplicate into the original"
+        );
+        assert_eq!(
+            records[0].canonical, original.id,
+            "the original entity must be the merge's canonical id"
+        );
+    }
+
+    /// A message mapping to a genuinely new entity is applied as one —
+    /// resolution running automatically does not mean *everything* merges.
+    #[tokio::test]
+    async fn a_streamed_message_with_no_existing_match_is_applied_as_new() {
+        let (catalog, _storage) = seeded();
+        catalog
+            .upsert_mapping(mapping("dbt-run-completed"))
+            .await
+            .expect("register mapping");
+
+        catalog
+            .apply_streamed_message(
+                "dbt-run-completed",
+                &json!({"kind": "service", "name": "Payments"}),
+            )
+            .await
+            .expect("apply");
+
+        let created = catalog
+            .get_asset_by_fqn("Payments")
+            .await
+            .expect("read")
+            .expect("the new entity must exist");
+        assert_eq!(created.name, "Payments");
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_mapping_is_not_found() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let result = catalog
+            .apply_streamed_message("no-such-mapping", &json!({"kind": "service", "name": "x"}))
+            .await;
+
+        assert!(matches!(result, Err(CatalogError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn a_missing_required_field_is_a_validation_error_naming_it() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        catalog
+            .upsert_mapping(mapping("dbt-run-completed"))
+            .await
+            .expect("register mapping");
+
+        // No `name` in the payload — the mapping's `entity_name` path
+        // resolves to nothing.
+        let result = catalog
+            .apply_streamed_message("dbt-run-completed", &json!({"kind": "service"}))
+            .await;
+
+        match result {
+            Err(CatalogError::Validation(errors)) => {
+                assert!(errors.iter().any(|e| e.field == "name"), "{errors:?}");
+            }
+            other => panic!("expected a validation error naming the field, got {other:?}"),
+        }
     }
 }
 

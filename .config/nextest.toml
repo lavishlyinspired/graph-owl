@@ -28,3 +28,31 @@ containers = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'binary(streaming) or binary(streaming_offsets) or binary(streaming_health) or binary(streaming_poison) or binary(streaming_rebalance)'
 test-group = 'containers'
+
+# `a_large_batch_commits_as_one_transaction` asserts that 8000 flakes span
+# fewer than 5 transactions, measured via `pg_stat_database.xact_commit` —
+# a **database-wide** counter that also counts the commits sqlx makes when
+# establishing a pool connection. How many connections the pool opens
+# depends on load, so under parallelism the count drifts past the threshold
+# and the test reports "chunking broke atomicity" when chunking is fine.
+# Verified both ways: it passes in 0.36s alone and failed at 6 commits in a
+# parallel run.
+#
+# Serialised here rather than "fixed" by loosening the threshold, because
+# the threshold is the assertion — raising it until it stops failing would
+# throw away the only thing the test checks. The real fix is to count the
+# transactions `assert_flakes` itself opens rather than infer them from a
+# server-wide statistic, which belongs with whoever next touches that code.
+[[profile.default.overrides]]
+filter = 'binary(flake_roundtrip)'
+test-group = 'containers'
+
+# The kill-and-restart test deliberately waits out a Kafka consumer-group
+# rebalance: dropping a consumer does not release its partitions until
+# `session.timeout.ms` (45s by default) expires, so its replacement can sit
+# unassigned for the better part of a minute before it is fed anything.
+# That is the scenario under test, not slowness to be tuned away — it needs
+# more headroom than the default 4x60s.
+[[profile.default.overrides]]
+filter = 'test(killing_the_consumer_before_a_commit_reprocesses_without_duplicating)'
+slow-timeout = { period = "60s", terminate-after = 6 }

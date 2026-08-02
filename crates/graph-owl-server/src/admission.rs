@@ -101,10 +101,17 @@ pub fn class_of(route: &str) -> Option<Class> {
         // signal `/ingest/batch` already relies on — Epic 18 Slice E's own
         // criterion, "a burst does not exhaust the pool", is this mechanism
         // rather than a new one.
+        // `/streaming/replay` joins them (Epic 19 Slice E): it holds a
+        // connection for the whole historical window it re-applies, which
+        // is exactly `/ingest/batch`'s shape. The *subscription* routes are
+        // deliberately absent, for the same reason the webhook polling
+        // routes are — an operator must be able to register or inspect a
+        // subscription while the server is shedding.
         "/connectors/postgres/runs"
         | "/graph/reconcile"
         | "/ingest/batch"
-        | "/webhooks/receive/{path}" => Some(Class::Ingestion),
+        | "/webhooks/receive/{path}"
+        | "/streaming/replay" => Some(Class::Ingestion),
         _ => None,
     }
 }
@@ -548,6 +555,17 @@ mod tests {
         #[test]
         fn a_webhook_delivery_is_ingestion_class() {
             assert_eq!(class_of("/webhooks/receive/{path}"), Some(Class::Ingestion));
+        }
+
+        /// Epic 19 Slice E: a replay re-applies a whole historical window in
+        /// one request — `/ingest/batch`'s shape, so `/ingest/batch`'s class.
+        /// Registering or inspecting a subscription is deliberately not: an
+        /// operator must be able to see streaming while the server sheds.
+        #[test]
+        fn a_stream_replay_is_ingestion_but_subscription_management_is_not() {
+            assert_eq!(class_of("/streaming/replay"), Some(Class::Ingestion));
+            assert_eq!(class_of("/streaming/subscriptions"), None);
+            assert_eq!(class_of("/streaming/dead-letters"), None);
         }
 
         /// **The negative that matters most.** A server shedding load is

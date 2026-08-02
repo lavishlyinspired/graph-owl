@@ -1080,6 +1080,189 @@ impl Storage for PostgresStorage {
             .map_err(|e| StorageError::Unexpected(e.to_string()))
     }
 
+    #[tracing::instrument(name = "storage.upsert_stream_subscription", skip_all)]
+    async fn upsert_stream_subscription(
+        &self,
+        subscription: graph_owl_storage::StreamSubscription,
+        secret: Option<&[u8]>,
+    ) -> Result<graph_owl_storage::StreamSubscription, StorageError> {
+        let (broker_kind, broker_address) = broker_columns(&subscription.broker);
+        let (start_position, start_timestamp, start_offset) =
+            start_position_columns(subscription.start_position);
+        let row = sqlx::query(
+            "INSERT INTO stream_subscriptions
+                 (id, broker_kind, broker_address, topic, consumer_group, mapping,
+                  start_position, start_timestamp, start_offset, max_in_flight,
+                  poison_threshold, enabled, secret)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             ON CONFLICT (id) DO UPDATE SET
+                 broker_kind      = EXCLUDED.broker_kind,
+                 broker_address   = EXCLUDED.broker_address,
+                 topic            = EXCLUDED.topic,
+                 consumer_group   = EXCLUDED.consumer_group,
+                 mapping          = EXCLUDED.mapping,
+                 start_position   = EXCLUDED.start_position,
+                 start_timestamp  = EXCLUDED.start_timestamp,
+                 start_offset     = EXCLUDED.start_offset,
+                 max_in_flight    = EXCLUDED.max_in_flight,
+                 poison_threshold = EXCLUDED.poison_threshold,
+                 enabled          = EXCLUDED.enabled,
+                 -- `None` means leave an existing credential alone — same
+                 -- reasoning as `upsert_webhook_endpoint`.
+                 secret           = COALESCE($13, stream_subscriptions.secret),
+                 updated_at       = now()
+             RETURNING id, broker_kind, broker_address, topic, consumer_group, mapping,
+                       start_position, start_timestamp, start_offset, max_in_flight,
+                       poison_threshold, enabled, (secret IS NOT NULL) AS has_secret,
+                       created_at, updated_at",
+        )
+        .bind(subscription.id)
+        .bind(broker_kind)
+        .bind(broker_address)
+        .bind(&subscription.topic)
+        .bind(&subscription.consumer_group)
+        .bind(&subscription.mapping)
+        .bind(start_position)
+        .bind(start_timestamp)
+        .bind(start_offset)
+        .bind(i32::try_from(subscription.max_in_flight).unwrap_or(i32::MAX))
+        .bind(i32::try_from(subscription.poison_threshold).unwrap_or(i32::MAX))
+        .bind(subscription.enabled)
+        .bind(secret)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some(UNIQUE_VIOLATION) => {
+                StorageError::Conflict {
+                    detail: format!(
+                        "topic '{}' with consumer group '{}' is already registered",
+                        subscription.topic, subscription.consumer_group
+                    ),
+                    existing_id: None,
+                    kind: ConflictKind::StreamSubscriptionExists,
+                }
+            }
+            _ => StorageError::Unexpected(e.to_string()),
+        })?;
+        Ok(stream_subscription_from_row(row))
+    }
+
+    #[tracing::instrument(name = "storage.get_stream_subscription", skip_all)]
+    async fn get_stream_subscription(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::StreamSubscription>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, broker_kind, broker_address, topic, consumer_group, mapping,
+                    start_position, start_timestamp, start_offset, max_in_flight,
+                    poison_threshold, enabled, (secret IS NOT NULL) AS has_secret,
+                    created_at, updated_at
+             FROM stream_subscriptions WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(stream_subscription_from_row))
+    }
+
+    #[tracing::instrument(name = "storage.list_stream_subscriptions", skip_all)]
+    async fn list_stream_subscriptions(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::StreamSubscription>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, broker_kind, broker_address, topic, consumer_group, mapping,
+                    start_position, start_timestamp, start_offset, max_in_flight,
+                    poison_threshold, enabled, (secret IS NOT NULL) AS has_secret,
+                    created_at, updated_at
+             FROM stream_subscriptions ORDER BY topic, consumer_group",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(stream_subscription_from_row).collect())
+    }
+
+    #[tracing::instrument(name = "storage.stream_subscription_secret", skip_all)]
+    async fn stream_subscription_secret(&self, id: Uuid) -> Result<Option<Vec<u8>>, StorageError> {
+        // The only place credential material is read — same reasoning as
+        // `webhook_secret`.
+        sqlx::query_scalar("SELECT secret FROM stream_subscriptions WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map(Option::flatten)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    #[tracing::instrument(name = "storage.create_stream_dead_letter", skip_all)]
+    async fn create_stream_dead_letter(
+        &self,
+        letter: graph_owl_storage::StreamDeadLetter,
+    ) -> Result<graph_owl_storage::StreamDeadLetter, StorageError> {
+        let row = sqlx::query(
+            "INSERT INTO stream_dead_letters
+                 (id, subscription_id, topic, partition, kafka_offset, payload, reason)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING id, subscription_id, topic, partition, kafka_offset, payload, reason, created_at",
+        )
+        .bind(letter.id)
+        .bind(letter.subscription_id)
+        .bind(&letter.topic)
+        .bind(letter.partition)
+        .bind(letter.offset)
+        .bind(&letter.payload)
+        .bind(&letter.reason)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(stream_dead_letter_from_row(&row))
+    }
+
+    #[tracing::instrument(name = "storage.get_stream_dead_letter", skip_all)]
+    async fn get_stream_dead_letter(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::StreamDeadLetter>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, subscription_id, topic, partition, kafka_offset, payload, reason, created_at
+             FROM stream_dead_letters WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.as_ref().map(stream_dead_letter_from_row))
+    }
+
+    #[tracing::instrument(name = "storage.list_stream_dead_letters", skip_all)]
+    async fn list_stream_dead_letters(
+        &self,
+        subscription: Option<Uuid>,
+    ) -> Result<Vec<graph_owl_storage::StreamDeadLetter>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, subscription_id, topic, partition, kafka_offset, payload, reason, created_at
+             FROM stream_dead_letters
+             WHERE ($1::uuid IS NULL OR subscription_id = $1)
+             ORDER BY created_at DESC",
+        )
+        .bind(subscription)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.iter().map(stream_dead_letter_from_row).collect())
+    }
+
+    #[tracing::instrument(name = "storage.delete_stream_dead_letter", skip_all)]
+    async fn delete_stream_dead_letter(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM stream_dead_letters WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
+    }
+
     // The event row is inserted before the dedup marker — `first_event_id`
     // is a real foreign key, so the row it points to must already exist.
     // Both statements run in one transaction so "concurrent duplicate
@@ -4722,6 +4905,99 @@ fn webhook_endpoint_from_row(row: PgRow) -> graph_owl_storage::WebhookEndpoint {
             .map(|n| u32::try_from(n).unwrap_or(0)),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    }
+}
+
+fn broker_columns(broker: &graph_owl_storage::BrokerConfig) -> (&'static str, &str) {
+    use graph_owl_storage::BrokerConfig;
+    match broker {
+        BrokerConfig::KafkaProtocol { bootstrap_servers } => {
+            ("kafka_protocol", bootstrap_servers.as_str())
+        }
+        BrokerConfig::Pulsar { service_url } => ("pulsar", service_url.as_str()),
+    }
+}
+
+fn broker_config_from_columns(kind: &str, address: String) -> graph_owl_storage::BrokerConfig {
+    use graph_owl_storage::BrokerConfig;
+    if kind == "pulsar" {
+        BrokerConfig::Pulsar {
+            service_url: address,
+        }
+    } else {
+        BrokerConfig::KafkaProtocol {
+            bootstrap_servers: address,
+        }
+    }
+}
+
+fn start_position_columns(
+    position: graph_owl_storage::StartPosition,
+) -> (
+    &'static str,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<i64>,
+) {
+    use graph_owl_storage::StartPosition;
+    match position {
+        StartPosition::Earliest => ("earliest", None, None),
+        StartPosition::Latest => ("latest", None, None),
+        StartPosition::Timestamp { at } => ("timestamp", Some(at), None),
+        StartPosition::Offset { value } => ("offset", None, Some(value)),
+    }
+}
+
+fn start_position_from_row(row: &PgRow) -> graph_owl_storage::StartPosition {
+    use graph_owl_storage::StartPosition;
+    let kind: &str = row.get("start_position");
+    match kind {
+        "latest" => StartPosition::Latest,
+        "timestamp" => StartPosition::Timestamp {
+            at: row.get("start_timestamp"),
+        },
+        "offset" => StartPosition::Offset {
+            value: row.get("start_offset"),
+        },
+        _ => StartPosition::Earliest,
+    }
+}
+
+fn stream_subscription_from_row(row: PgRow) -> graph_owl_storage::StreamSubscription {
+    let broker_kind: String = row.get("broker_kind");
+    let broker_address: String = row.get("broker_address");
+    let start_position = start_position_from_row(&row);
+    graph_owl_storage::StreamSubscription {
+        id: row.get("id"),
+        broker: broker_config_from_columns(&broker_kind, broker_address),
+        topic: row.get("topic"),
+        consumer_group: row.get("consumer_group"),
+        mapping: row.get("mapping"),
+        start_position,
+        max_in_flight: row
+            .get::<i32, _>("max_in_flight")
+            .try_into()
+            .unwrap_or(usize::MAX),
+        poison_threshold: row
+            .get::<i32, _>("poison_threshold")
+            .try_into()
+            .unwrap_or(u32::MAX),
+        has_secret: row.get("has_secret"),
+        enabled: row.get("enabled"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn stream_dead_letter_from_row(row: &PgRow) -> graph_owl_storage::StreamDeadLetter {
+    graph_owl_storage::StreamDeadLetter {
+        id: row.get("id"),
+        subscription_id: row.get("subscription_id"),
+        topic: row.get("topic"),
+        partition: row.get("partition"),
+        offset: row.get("kafka_offset"),
+        payload: row.get("payload"),
+        reason: row.get("reason"),
+        created_at: row.get("created_at"),
     }
 }
 
