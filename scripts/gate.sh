@@ -55,9 +55,18 @@ if [[ ${1:-} == "--full" ]]; then
 elif [[ $# -gt 0 ]]; then
     SCOPE=("$@")
 else
+    # Uncommitted changes first; if the tree is clean, fall back to whatever
+    # is committed-but-unpushed. **The clean-tree case is the common one** —
+    # it is exactly the state right after committing an epic, which is when
+    # a gate before pushing is most wanted, and scoping it to "nothing" would
+    # silently promote every such run to a full workspace pass.
+    CHANGED=$(git status --porcelain | awk '{print $NF}')
+    if [[ -z $CHANGED ]] && git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
+        CHANGED=$(git diff --name-only '@{upstream}'...HEAD)
+    fi
     while IFS= read -r crate; do
         [[ -n $crate ]] && SCOPE+=(-p "$crate")
-    done < <(git status --porcelain | awk '{print $NF}' \
+    done < <(printf '%s\n' "$CHANGED" \
         | grep -oE 'crates/[^/]+' | sort -u | cut -d/ -f2)
 fi
 
