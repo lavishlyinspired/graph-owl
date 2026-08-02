@@ -65,3 +65,35 @@ graph-owl-api = { path = "crates/graph-owl-api" }
 graph-owl-ui = { path = "crates/graph-owl-ui" }
 graph-owl-connectors = { path = "crates/graph-owl-connectors" }
 graph-owl-search = { path = "crates/graph-owl-search" }
+
+# ---------------------------------------------------------------------------
+# Build-time profile tuning. Added after a session where the compile/test loop
+# dominated wall clock; each setting below is a measured or mechanically
+# obvious win, not a guess.
+# ---------------------------------------------------------------------------
+
+[profile.dev]
+# Full DWARF is the single biggest linker input on macOS, and ~75 test
+# binaries relink after any port change. `line-tables-only` keeps what is
+# actually read — file and line in a panic backtrace — and drops the type
+# and variable descriptions only an interactive debugger uses. A debugger
+# session that needs them can build with `--profile dev-debug`.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+# Dependencies are compiled once and then cached; their debug info is never
+# stepped through and costs link time on every test binary that pulls them
+# in. This is the setting that shrinks the ~63 MB `graph-owl-server` test
+# rlib the mutation notes call out.
+debug = false
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = false
+
+# For the rare case a real debugger is needed: `cargo build --profile dev-debug`.
+[profile.dev-debug]
+inherits = "dev"
+debug = true

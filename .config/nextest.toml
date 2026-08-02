@@ -1,0 +1,30 @@
+# Test-runner configuration — Epic 19 era.
+#
+# `cargo nextest` runs each test in its own process with a work-stealing
+# scheduler, which is materially faster than `cargo test` on this workspace
+# for two reasons specific to it: it never builds or runs doc-tests (84
+# minutes on a full `cargo test --workspace`, zero behavioural coverage), and
+# it does not serialise the whole run behind the slowest binary.
+
+[profile.default]
+# The container-backed integration tests dominate wall time and are I/O-bound
+# on Docker, not CPU-bound — more concurrency here buys throughput rather
+# than contention, which is the opposite of `cargo test`'s per-binary
+# `--test-threads` knob this replaces.
+test-threads = "num-cpus"
+# A hung container wait should fail one test, not the run.
+slow-timeout = { period = "60s", terminate-after = 4 }
+fail-fast = false
+
+# **The tests that must not run concurrently with each other.** Each creates
+# a database on the shared Postgres server or asserts against a shared
+# broker; running them in one group serialises exactly those, leaving every
+# pure-logic test in the workspace free to run in parallel — which is what
+# `cargo test -- --test-threads=1` could never express, since it serialises
+# everything or nothing.
+[test-groups]
+containers = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(streaming) or binary(streaming_offsets) or binary(streaming_health) or binary(streaming_poison) or binary(streaming_rebalance)'
+test-group = 'containers'

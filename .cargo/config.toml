@@ -1,0 +1,46 @@
+# Build configuration. Every entry here was measured or ruled out on this
+# machine (Apple Silicon, 18 cores, 48 GB, SSD) on 2 August 2026 — none is
+# copied from a generic "speed up Rust" list, because several of the usual
+# recommendations are actively wrong here.
+
+# --- What was RULED OUT, and why -------------------------------------------
+#
+# **A third-party linker (mold / zld / lld).** The single most-recommended
+# Rust build fix, and it buys nothing on this machine. `ld -v` reports
+# `ld-1266.8` — Apple's *new* linker (shipped with Xcode 15, often called
+# `ld_prime`), which is already several times faster than the old `ld64`
+# every one of those recommendations was written against. `zld` is archived
+# by its own author for exactly this reason: the platform linker made it
+# obsolete. `mold` does not support Mach-O at all. Do not add one.
+#
+# **`codegen-units` / `lto` / `incremental` in the dev profile.** Already at
+# their fastest defaults (256 / off / on). Setting them explicitly changes
+# nothing and only invites someone to "tune" them later.
+#
+# **`RUSTC_WRAPPER = "sccache"`, workspace-wide.** sccache cannot cache
+# incremental builds, so turning it on globally trades the fast local
+# edit-rebuild loop — which is the loop that actually runs all day — for
+# faster cold builds. It is genuinely useful for the *separate* check
+# directory (`CARGO_TARGET_DIR=/tmp/check`), which is cold far more often;
+# enable it there per-invocation rather than here:
+#
+#     RUSTC_WRAPPER=sccache CARGO_TARGET_DIR=/tmp/check cargo check -p <crate>
+
+[build]
+# Emit one `.rmeta` as soon as a crate's signatures are known, so dependent
+# crates start type-checking before it finishes generating code. This is the
+# setting that makes `cargo check` across a 28-crate workspace pipeline
+# properly rather than walking the dependency graph one level at a time.
+pipelining = true
+
+[target.aarch64-apple-darwin]
+rustflags = [
+    # Dead-strip at link time. On a workspace that links ~75 test binaries
+    # after any port change, the linker's input size is the cost, and most of
+    # what each binary pulls in is never called from it.
+    "-C",
+    "link-arg=-Wl,-dead_strip",
+]
+
+[net]
+git-fetch-with-cli = true

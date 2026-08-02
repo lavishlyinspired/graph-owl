@@ -59,6 +59,71 @@ One incident already occurred and was reverted during planning (a cache-tier tab
 
 **Crate naming is not a concern.** `core`, `api`, `server`, `query`, `cli`, `storage` are universal Rust convention, not anyone's expression; `graph-owl-bolt` names the protocol it speaks, which is descriptive use of an openly specified protocol. Do not rename crates for licensing reasons — see `plans/00i-licensing.md`.
 
+## The build/test loop — read this before running anything
+
+**The default loop is `cargo check` against a separate target dir. Everything
+else is a checkpoint, not a step.** This has been drifted back into three
+times, so it is at the top rather than buried in the gotchas below.
+
+| When | Command | Cost |
+|---|---|---|
+| **While writing** (the 95% case) | `CARGO_TARGET_DIR=/tmp/check cargo check -p <crate> --all-targets` | seconds, **no workspace lock** |
+| One crate's own logic | `cargo test -p <crate> --lib` | seconds |
+| One test by name | `cargo nextest run -p <crate> <substring>` | seconds |
+| **Once per EPIC** | `scripts/gate.sh` | minutes |
+| Before pushing only | `cargo test --workspace --doc` | ~84 min |
+
+`scripts/gate.sh` runs fmt → clippy → build → nextest in that order, because
+**fmt and clippy change the code** — running them after the suite means
+running the suite twice. It also checks the environment first (see below).
+
+**Do not run `cargo test` or `cargo clippy` after every slice.** Write the
+whole epic, then gate once. Three slices verified separately cost ~21
+minutes; the same three verified together cost ~7. The one carve-out, decided
+in advance rather than per-slice: a genuinely novel *external-system*
+integration (a first-ever broker client, a new container image) may take one
+early smoke run, because `cargo check` cannot catch wire-level bugs — Epic 19
+lost time to an IPv6/Docker fallback and a Kafka rebalance-state error that
+no amount of type-checking would have found. One run, not one per slice.
+
+**Editing files is free; only the compiler collides.** Keep writing while a
+suite runs — never sit idle waiting on a background cargo run when there is
+code left to write. What must not overlap is two *compiles*: they take the
+same build lock, and the second one relinks what the first is running.
+
+### Why it is fast now, and what to re-check when it is not
+
+Four things were fixed on 2 August 2026 after a session where the loop
+dominated wall clock. If it gets slow again, check them in this order:
+
+1. **Leaked containers — always check this first.** `docker ps -q | wc -l`.
+   Anything above ~4 means test containers accumulated. This has now happened
+   twice: 146 Postgres (documented below) and 11 Kafka. Both had the same
+   cause — a `static OnceCell` never drops, so testcontainers never reaps an
+   anonymous container. Both are fixed the same way, by a **named** container
+   with `ReuseDirective::Always`, which cannot accumulate because there is
+   only ever the one:
+   `docker rm -f graph-owl-tests graph-owl-kafka-tests` for a genuinely fresh
+   pair.
+2. **Debug info.** `Cargo.toml` sets `debug = "line-tables-only"` for our
+   crates and `debug = false` for dependencies. Full DWARF is the largest
+   linker input on macOS and ~75 test binaries relink after any port change;
+   panics still carry file and line. Use `--profile dev-debug` when a real
+   debugger is needed.
+3. **`cargo nextest`, not `cargo test`.** It never builds doc-tests (84
+   minutes, zero behavioural coverage) and schedules across binaries instead
+   of serialising behind the slowest. `.config/nextest.toml` puts only the
+   container-backed binaries in a `max-threads = 1` group — so those stay
+   safe while every pure-logic test runs wide, which
+   `cargo test -- --test-threads=1` could never express.
+4. **The macOS Gatekeeper exemption**, documented at length below. It is a
+   machine setting, does not survive a reset, and is worth more than
+   everything else here combined (213,000ms → 58ms per newly linked binary).
+
+Not yet adopted, in rough order of expected value if this is still not
+enough: `sccache` (shared compilation cache), a faster linker (`lld`/`mold`
+via Homebrew), and moving the full gate to CI so it never blocks local work.
+
 ## Gotchas learned building the Table entity slice
 
 - **axum 0.7 + edition 2024 doesn't mix.** Implementing a custom `FromRequest<S>` extractor against axum 0.7 from an edition-2024 crate fails with `E0195` (lifetime params on `from_request` don't match the trait). axum-core 0.7.x was authored under edition-2021 RPITIT capture rules; edition 2024 changed them. Fix is to upgrade to axum 0.8 (native async-fn-in-trait, edition-2024 compatible) — not to downgrade the workspace edition. Also note: axum 0.8 changed path param syntax from `:id` to `{id}`.
