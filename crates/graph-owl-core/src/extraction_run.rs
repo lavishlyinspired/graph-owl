@@ -237,6 +237,31 @@ mod tests {
         );
     }
 
+    /// **The cross-language contract, pinned to a literal.**
+    ///
+    /// A Python worker computes this fingerprint independently, and the two
+    /// must agree or idempotence silently never fires — every re-submission
+    /// would look like a new document and an OCR pass would re-run over an
+    /// unchanged corpus forever, reporting success. Asserting the two
+    /// implementations agree is impossible from either side, so both assert
+    /// the same literal instead. The Python half is
+    /// `sdk/python/tests/test_extraction.py::test_the_fingerprint_is_sha256_of_the_utf8_text`.
+    ///
+    /// The non-ASCII case is here because it is where a plausible alternative
+    /// (hashing the `str` object, or encoding as latin-1) gives a different
+    /// answer while the ASCII case still passes.
+    #[test]
+    fn the_fingerprint_matches_the_value_python_computes() {
+        assert_eq!(
+            content_fingerprint(b"The orders service is append-only."),
+            "9f5b39545a78414cb63fcd6d94e6828ca34c56271d3840176696f961e4e9a7b0"
+        );
+        assert_eq!(
+            content_fingerprint("café serves crêpes".as_bytes()),
+            "fce1e1d30931d5cb25710237f7221b4329f1a3ef9a749ccc922cac9eb16ed4d3"
+        );
+    }
+
     /// A one-byte edit changes it — a fingerprint that missed small edits
     /// would skip re-extraction on exactly the corrections people make.
     #[test]

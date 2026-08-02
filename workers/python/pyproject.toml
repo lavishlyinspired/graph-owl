@@ -1,0 +1,32 @@
+[project]
+name = "graph-owl-worker"
+version = "0.1.0"
+description = "Parse documents graph-owl cannot, and propose what they say."
+requires-python = ">=3.10"
+
+# **A separate package from `graph-owl-sdk`, and the split is the point.**
+# The SDK promises zero runtime dependencies because it runs in somebody else's
+# environment — a scheduler image, a lambda, a notebook — and every dependency
+# it adds is one they must resolve against whatever they already pinned. This
+# worker is the opposite: it exists *because* of Python's document ecosystem,
+# and it runs as its own process on its own release schedule. Merging them would
+# put `pypdf` in every adapter author's dependency tree to serve a feature they
+# are not using.
+dependencies = ["graph-owl-sdk"]
+
+[project.optional-dependencies]
+# Each format is opt-in, so `pip install graph-owl-worker` gives a worker that
+# handles text and markdown with nothing extra installed — decision 4's
+# "no Python runtime is required for core operation", applied one level down.
+pdf = ["pypdf>=4"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+graph-owl-worker = "graph_owl_worker.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["graph_owl_worker*"]

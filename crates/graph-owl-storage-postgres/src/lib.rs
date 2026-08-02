@@ -9,9 +9,10 @@ use graph_owl_core::{
     page::{Cursor, Page, PageRequest},
 };
 use graph_owl_storage::{
-    ConflictKind, FollowOutcome, Holdings, IdempotencyClaim, MemoryWrite, OwnersWrite,
-    PrincipalDeletion, ReviewQueueFilter, SplitOutcome, Storage, StorageError, StoredUser,
-    SupersedeOutcome, UpdateOutcome,
+    ConflictKind, DiscardedClaimRecord, ExtractionRunRecord, FollowOutcome, Holdings,
+    IdempotencyClaim, MemoryWrite, OwnersWrite, PrincipalDeletion, QueuedClaimRecord,
+    ReviewQueueFilter, SplitOutcome, Storage, StorageError, StoredUser, SupersedeOutcome,
+    UpdateOutcome,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -4726,6 +4727,243 @@ impl Storage for PostgresStorage {
             .await
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(row.map(metric_from_row))
+    }
+
+    // ---- Epic 21: extraction runs and the confirmation queue ----
+
+    async fn find_extraction_run(
+        &self,
+        source_id: &str,
+        fingerprint: &str,
+        extractor: &str,
+        version: &str,
+    ) -> Result<Option<ExtractionRunRecord>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, source_id, source_fingerprint, extractor, extractor_version,
+                    source_text, media_type, asserted, surfaced, discarded
+             FROM extraction_runs
+             WHERE source_id = $1 AND source_fingerprint = $2
+               AND extractor = $3 AND extractor_version = $4
+             ORDER BY started_at DESC
+             LIMIT 1",
+        )
+        .bind(source_id)
+        .bind(fingerprint)
+        .bind(extractor)
+        .bind(version)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(row.map(|row| ExtractionRunRecord {
+            id: row.get("id"),
+            source_id: row.get("source_id"),
+            source_fingerprint: row.get("source_fingerprint"),
+            extractor: row.get("extractor"),
+            extractor_version: row.get("extractor_version"),
+            source_text: row.get("source_text"),
+            media_type: row.get("media_type"),
+            asserted: row.get("asserted"),
+            surfaced: row.get("surfaced"),
+            discarded: row.get("discarded"),
+        }))
+    }
+
+    async fn find_extraction_run_by_id(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Option<ExtractionRunRecord>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, source_id, source_fingerprint, extractor, extractor_version,
+                    source_text, media_type, asserted, surfaced, discarded
+             FROM extraction_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(row.map(|row| ExtractionRunRecord {
+            id: row.get("id"),
+            source_id: row.get("source_id"),
+            source_fingerprint: row.get("source_fingerprint"),
+            extractor: row.get("extractor"),
+            extractor_version: row.get("extractor_version"),
+            source_text: row.get("source_text"),
+            media_type: row.get("media_type"),
+            asserted: row.get("asserted"),
+            surfaced: row.get("surfaced"),
+            discarded: row.get("discarded"),
+        }))
+    }
+
+    async fn save_extraction_run(
+        &self,
+        run: &ExtractionRunRecord,
+        queued: &[QueuedClaimRecord],
+        discarded: &[DiscardedClaimRecord],
+    ) -> Result<(), StorageError> {
+        // One transaction. Claims written without their run row would be
+        // unattributable assertions that nothing can delete wholesale — the
+        // exact property decision 0 buys by scoping extraction to a named
+        // graph, lost to a partial write.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO extraction_runs
+                (id, source_id, source_fingerprint, extractor, extractor_version,
+                 source_text, media_type, asserted, surfaced, discarded)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(run.id)
+        .bind(&run.source_id)
+        .bind(&run.source_fingerprint)
+        .bind(&run.extractor)
+        .bind(&run.extractor_version)
+        .bind(&run.source_text)
+        .bind(&run.media_type)
+        .bind(run.asserted)
+        .bind(run.surfaced)
+        .bind(run.discarded)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        for claim in queued {
+            sqlx::query(
+                "INSERT INTO extraction_claims
+                    (id, run_id, subject, predicate, object, confidence,
+                     evidence_start, evidence_end, state)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(claim.id)
+            .bind(run.id)
+            .bind(&claim.subject)
+            .bind(&claim.predicate)
+            .bind(&claim.object)
+            .bind(claim.confidence)
+            .bind(claim.evidence_start)
+            .bind(claim.evidence_end)
+            .bind(&claim.state)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        for discard in discarded {
+            sqlx::query(
+                "INSERT INTO extraction_discards
+                    (id, run_id, subject, predicate, object, confidence, reason)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(discard.id)
+            .bind(run.id)
+            .bind(&discard.subject)
+            .bind(&discard.predicate)
+            .bind(&discard.object)
+            .bind(discard.confidence)
+            .bind(&discard.reason)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    async fn pending_extraction_claims(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<QueuedClaimRecord>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, run_id, subject, predicate, object, confidence,
+                    evidence_start, evidence_end, state, decided_by
+             FROM extraction_claims
+             WHERE state = 'pending'
+             ORDER BY queued_at ASC
+             LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows.iter().map(queued_claim_from_row).collect())
+    }
+
+    async fn decide_extraction_claim(
+        &self,
+        claim_id: Uuid,
+        confirmed: bool,
+        decided_by: &str,
+    ) -> Result<Option<QueuedClaimRecord>, StorageError> {
+        // `RETURNING` rather than update-then-read: the read would be a second
+        // statement against a row another reviewer may have decided in
+        // between, and the answer this returns is what the caller is told
+        // happened.
+        let row = sqlx::query(
+            "UPDATE extraction_claims
+             SET state = $2, decided_at = now(), decided_by = $3
+             WHERE id = $1
+             RETURNING id, run_id, subject, predicate, object, confidence,
+                       evidence_start, evidence_end, state, decided_by",
+        )
+        .bind(claim_id)
+        .bind(if confirmed { "confirmed" } else { "rejected" })
+        .bind(decided_by)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(row.as_ref().map(queued_claim_from_row))
+    }
+
+    async fn rejected_assertions(&self) -> Result<Vec<(String, String, String)>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT subject, predicate, object
+             FROM extraction_claims WHERE state = 'rejected'",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|row| (row.get("subject"), row.get("predicate"), row.get("object")))
+            .collect())
+    }
+
+    async fn delete_extraction_run(&self, run_id: Uuid) -> Result<bool, StorageError> {
+        // The claims and discards go with it by `ON DELETE CASCADE`, which is
+        // what makes "a bad run is deletable wholesale" a schema guarantee
+        // rather than a thing this method has to remember.
+        let done = sqlx::query("DELETE FROM extraction_runs WHERE id = $1")
+            .bind(run_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(done.rows_affected() > 0)
+    }
+}
+
+fn queued_claim_from_row(row: &PgRow) -> QueuedClaimRecord {
+    QueuedClaimRecord {
+        id: row.get("id"),
+        run_id: row.get("run_id"),
+        subject: row.get("subject"),
+        predicate: row.get("predicate"),
+        object: row.get("object"),
+        confidence: row.get("confidence"),
+        evidence_start: row.get("evidence_start"),
+        evidence_end: row.get("evidence_end"),
+        state: row.get("state"),
+        decided_by: row.get("decided_by"),
     }
 }
 

@@ -2142,4 +2142,133 @@ pub trait Storage: Send + Sync {
         metric_id: Uuid,
         sources: &[String],
     ) -> Result<Option<MetricRecord>, StorageError>;
+
+    // ---- Epic 21: extraction runs and the confirmation queue ----
+
+    /// Whether this exact document has already been through this exact
+    /// extractor.
+    ///
+    /// **All three parts of the identity, because any one alone is wrong**: a
+    /// better extractor should re-read old documents, an edited document
+    /// should be re-read by the same extractor, and neither changing means
+    /// there is nothing new to learn.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn find_extraction_run(
+        &self,
+        source_id: &str,
+        fingerprint: &str,
+        extractor: &str,
+        version: &str,
+    ) -> Result<Option<ExtractionRunRecord>, StorageError>;
+
+    /// One run by id, for resolving a queued claim's evidence against the
+    /// source text as the parser produced it.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn find_extraction_run_by_id(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Option<ExtractionRunRecord>, StorageError>;
+
+    /// Persist a whole run — the run row, its queued claims, and its
+    /// discards — in one transaction.
+    ///
+    /// **One transaction, because a partial run is worse than no run.** Claims
+    /// written without their run row would be unattributable assertions that
+    /// nothing can delete wholesale, which is the exact property decision 0
+    /// buys by putting extraction in a named graph.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn save_extraction_run(
+        &self,
+        run: &ExtractionRunRecord,
+        queued: &[QueuedClaimRecord],
+        discarded: &[DiscardedClaimRecord],
+    ) -> Result<(), StorageError>;
+
+    /// Claims awaiting a human, oldest first.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn pending_extraction_claims(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<QueuedClaimRecord>, StorageError>;
+
+    /// Record a reviewer's decision. `None` if the claim does not exist.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn decide_extraction_claim(
+        &self,
+        claim_id: Uuid,
+        confirmed: bool,
+        decided_by: &str,
+    ) -> Result<Option<QueuedClaimRecord>, StorageError>;
+
+    /// Assertions a human has already rejected, so a later run does not
+    /// re-queue them.
+    ///
+    /// **Keyed on the assertion, not on the run**, because the re-ingestion
+    /// that would re-propose a rejected claim is by definition a *different*
+    /// run — matching on run id would make this never fire.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn rejected_assertions(&self) -> Result<Vec<(String, String, String)>, StorageError>;
+
+    /// Delete a run and everything it produced. `false` if it did not exist.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the delete fails.
+    async fn delete_extraction_run(&self, run_id: Uuid) -> Result<bool, StorageError>;
+}
+
+/// A stored extraction run.
+///
+/// Carries `source_text` because every evidence span is an offset into *that
+/// string*. Resolving spans against a re-read of the original document would
+/// drift silently the moment anyone edits it, and a reviewer shown the current
+/// text of an edited sentence is being shown something the extractor never saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractionRunRecord {
+    pub id: Uuid,
+    pub source_id: String,
+    pub source_fingerprint: String,
+    pub extractor: String,
+    pub extractor_version: String,
+    pub source_text: String,
+    pub media_type: String,
+    pub asserted: i32,
+    pub surfaced: i32,
+    pub discarded: i32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedClaimRecord {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub confidence: f64,
+    pub evidence_start: i32,
+    pub evidence_end: i32,
+    pub state: String,
+    pub decided_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscardedClaimRecord {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub confidence: f64,
+    pub reason: String,
 }

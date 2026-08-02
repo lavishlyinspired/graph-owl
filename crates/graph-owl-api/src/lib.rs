@@ -28,6 +28,7 @@ use graph_owl_traversal::{Bounds, Direction, EdgeFilter, Subgraph, TraversalEngi
 use serde::Deserialize;
 use uuid::Uuid;
 
+pub mod extraction;
 pub mod validation;
 use validation::{
     FieldError, FieldErrorCode, FieldPath, ValidateBody, optional_string, require_non_empty_string,
@@ -770,6 +771,156 @@ impl Catalog {
     /// present there and absent here is drift by definition, however it got
     /// that way.
     ///
+    // ---- Epic 21: the surface an out-of-process worker submits to ----
+
+    /// Accept a worker's extraction output and apply the policy to it.
+    ///
+    /// The subject check is resolved here rather than passed in, because
+    /// "is this a known entity" is a question only the catalog can answer and
+    /// a worker that could answer it would be one that had to be given the
+    /// catalog's contents.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the run cannot be read or written.
+    pub async fn submit_extraction(
+        &self,
+        document: &graph_owl_core::extraction::ParsedDocument,
+        result: graph_owl_core::extraction::ExtractionResult,
+        extractor: &str,
+        version: &str,
+    ) -> Result<extraction::SubmissionOutcome, CatalogError> {
+        // Resolved for the **distinct** subjects this document names, before
+        // the policy runs. Two things this is not: not a query per claim (a
+        // document naming one table forty times would pay forty round trips to
+        // answer the same question), and not a page of every asset in the
+        // catalog (bounded by the catalog's size rather than the document's,
+        // and silently wrong past the first page).
+        let mut wanted: Vec<&str> = result
+            .claims
+            .iter()
+            .map(|claim| claim.subject.as_str())
+            .collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+
+        let mut subjects = std::collections::HashSet::new();
+        for fqn in wanted {
+            if self
+                .storage
+                .get_asset_by_fqn(fqn)
+                .await
+                .map_err(CatalogError::from)?
+                .is_some()
+            {
+                subjects.insert(fqn.to_string());
+            }
+        }
+
+        extraction::submit(
+            self.storage.as_ref(),
+            document,
+            result,
+            extractor,
+            version,
+            &|fqn: &str| subjects.contains(fqn),
+        )
+        .await
+        .map_err(CatalogError::from)
+    }
+
+    /// Claims waiting for a human, with the sentence each came from.
+    ///
+    /// **The evidence text is resolved here, from the run's stored source.** A
+    /// reviewer asked to confirm "the orders table is append-only" without
+    /// seeing the sentence it came from is being asked to trust the extractor,
+    /// which is the thing under review.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the queue cannot be read.
+    pub async fn extraction_queue(&self) -> Result<Vec<extraction::PendingClaim>, CatalogError> {
+        let claims = self
+            .storage
+            .pending_extraction_claims(extraction::QUEUE_PAGE)
+            .await
+            .map_err(CatalogError::from)?;
+
+        let mut pending = Vec::with_capacity(claims.len());
+        for claim in claims {
+            // Spans are byte offsets into the run's own `source_text`, and an
+            // out-of-range one is untrusted input rather than a bug here — a
+            // worker that miscounts must not be able to panic the reviewer's
+            // page.
+            let evidence = self
+                .extraction_evidence(claim.run_id, claim.evidence_start, claim.evidence_end)
+                .await;
+            pending.push(extraction::PendingClaim {
+                id: claim.id,
+                run_id: claim.run_id,
+                subject: claim.subject,
+                predicate: claim.predicate,
+                object: claim.object,
+                confidence: claim.confidence,
+                evidence,
+            });
+        }
+        Ok(pending)
+    }
+
+    async fn extraction_evidence(&self, run_id: Uuid, start: i32, end: i32) -> String {
+        const UNRESOLVED: &str = "(the evidence span does not resolve against the source)";
+        let Ok(Some(run)) = self.storage.find_extraction_run_by_id(run_id).await else {
+            return UNRESOLVED.to_string();
+        };
+        let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
+            return UNRESOLVED.to_string();
+        };
+        run.source_text
+            .get(start..end)
+            .map_or_else(|| UNRESOLVED.to_string(), |text| text.trim().to_string())
+    }
+
+    /// Record a reviewer's decision on a queued claim.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the claim does not exist; `Storage` if the write fails.
+    pub async fn decide_extraction_claim(
+        &self,
+        claim_id: Uuid,
+        confirmed: bool,
+        decided_by: &str,
+    ) -> Result<graph_owl_storage::QueuedClaimRecord, CatalogError> {
+        self.storage
+            .decide_extraction_claim(claim_id, confirmed, decided_by)
+            .await
+            .map_err(CatalogError::from)?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// Delete a run and everything it produced.
+    ///
+    /// **This is what decision 0 buys.** Extraction is scoped so that a bad
+    /// run — a mis-prompted model, a broken OCR pass — is one delete rather
+    /// than a hunt through the graph for facts nothing can attribute.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the run does not exist; `Storage` if the delete fails.
+    pub async fn delete_extraction_run(&self, run_id: Uuid) -> Result<(), CatalogError> {
+        if self
+            .storage
+            .delete_extraction_run(run_id)
+            .await
+            .map_err(CatalogError::from)?
+        {
+            Ok(())
+        } else {
+            Err(CatalogError::NotFound)
+        }
+    }
+
     /// # Errors
     ///
     /// `Storage` if either side cannot be read.
@@ -6281,6 +6432,9 @@ mod tests {
         mapping_versions: Mutex<Vec<graph_owl_storage::Mapping>>,
         entity_last_applied:
             Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
+        extraction_runs: Mutex<Vec<graph_owl_storage::ExtractionRunRecord>>,
+        extraction_claims: Mutex<Vec<graph_owl_storage::QueuedClaimRecord>>,
+        extraction_discards: Mutex<Vec<graph_owl_storage::DiscardedClaimRecord>>,
     }
 
     impl InMemoryStorage {
@@ -8768,6 +8922,118 @@ mod tests {
             metric.source_assets = sources.to_vec();
             metric.updated_at = Utc::now();
             Ok(Some(metric.clone()))
+        }
+
+        // ---- Epic 21, and again as strict as the port ----
+        //
+        // In particular the cascade is real here: deleting a run drops its
+        // claims and discards, because "a bad run is deletable wholesale" is
+        // the property the whole named-graph decision buys, and a double that
+        // left orphans behind would let a broken cascade pass every test that
+        // does not use Postgres.
+
+        async fn find_extraction_run(
+            &self,
+            source_id: &str,
+            fingerprint: &str,
+            extractor: &str,
+            version: &str,
+        ) -> Result<Option<graph_owl_storage::ExtractionRunRecord>, StorageError> {
+            let runs = self.extraction_runs.lock().unwrap();
+            Ok(runs
+                .iter()
+                .find(|run| {
+                    run.source_id == source_id
+                        && run.source_fingerprint == fingerprint
+                        && run.extractor == extractor
+                        && run.extractor_version == version
+                })
+                .cloned())
+        }
+
+        async fn find_extraction_run_by_id(
+            &self,
+            run_id: Uuid,
+        ) -> Result<Option<graph_owl_storage::ExtractionRunRecord>, StorageError> {
+            let runs = self.extraction_runs.lock().unwrap();
+            Ok(runs.iter().find(|run| run.id == run_id).cloned())
+        }
+
+        async fn save_extraction_run(
+            &self,
+            run: &graph_owl_storage::ExtractionRunRecord,
+            queued: &[graph_owl_storage::QueuedClaimRecord],
+            discarded: &[graph_owl_storage::DiscardedClaimRecord],
+        ) -> Result<(), StorageError> {
+            self.guard_write("save_extraction_run");
+            self.extraction_runs.lock().unwrap().push(run.clone());
+            self.extraction_claims
+                .lock()
+                .unwrap()
+                .extend(queued.iter().cloned());
+            self.extraction_discards
+                .lock()
+                .unwrap()
+                .extend(discarded.iter().cloned());
+            Ok(())
+        }
+
+        async fn pending_extraction_claims(
+            &self,
+            limit: i64,
+        ) -> Result<Vec<graph_owl_storage::QueuedClaimRecord>, StorageError> {
+            let claims = self.extraction_claims.lock().unwrap();
+            Ok(claims
+                .iter()
+                .filter(|claim| claim.state == "pending")
+                .take(usize::try_from(limit).unwrap_or(usize::MAX))
+                .cloned()
+                .collect())
+        }
+
+        async fn decide_extraction_claim(
+            &self,
+            claim_id: Uuid,
+            confirmed: bool,
+            decided_by: &str,
+        ) -> Result<Option<graph_owl_storage::QueuedClaimRecord>, StorageError> {
+            let mut claims = self.extraction_claims.lock().unwrap();
+            let Some(claim) = claims.iter_mut().find(|claim| claim.id == claim_id) else {
+                return Ok(None);
+            };
+            claim.state = if confirmed { "confirmed" } else { "rejected" }.to_string();
+            claim.decided_by = Some(decided_by.to_string());
+            Ok(Some(claim.clone()))
+        }
+
+        async fn rejected_assertions(&self) -> Result<Vec<(String, String, String)>, StorageError> {
+            let claims = self.extraction_claims.lock().unwrap();
+            Ok(claims
+                .iter()
+                .filter(|claim| claim.state == "rejected")
+                .map(|claim| {
+                    (
+                        claim.subject.clone(),
+                        claim.predicate.clone(),
+                        claim.object.clone(),
+                    )
+                })
+                .collect())
+        }
+
+        async fn delete_extraction_run(&self, run_id: Uuid) -> Result<bool, StorageError> {
+            let mut runs = self.extraction_runs.lock().unwrap();
+            let before = runs.len();
+            runs.retain(|run| run.id != run_id);
+            self.extraction_claims
+                .lock()
+                .unwrap()
+                .retain(|claim| claim.run_id != run_id);
+            self.extraction_discards
+                .lock()
+                .unwrap()
+                .retain(|discard| discard.run_id != run_id);
+            Ok(runs.len() < before)
         }
     }
 

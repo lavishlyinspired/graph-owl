@@ -252,6 +252,30 @@ class GraphOwlClient:
         idempotency_key: str | None = None,
         content_type: str | None = None,
     ) -> dict[str, Any]:
+        """Every ingestion endpoint answers with an object, so this narrows to
+        one. Endpoints that answer with an array use :meth:`request`."""
+        answer = self.request(method, path, body, raw, idempotency_key, content_type)
+        return answer if isinstance(answer, dict) else {}
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        body: Any | None = None,
+        raw: bytes | None = None,
+        idempotency_key: str | None = None,
+        content_type: str | None = None,
+    ) -> Any:
+        """The transport, with retries, returning the response body **as it is**.
+
+        Public because it is the seam every other endpoint family builds on —
+        the extraction worker (Epic 21) sends through this rather than
+        reimplementing backoff, idempotency keys and error handling in a second
+        place. ``_send`` narrows the answer to a dict for the ingestion paths,
+        which is wrong for anything that returns an array: an array coerced to
+        ``{}`` is an empty review queue, and an empty queue looks exactly like
+        "nothing is waiting for you".
+        """
         headers: dict[str, str] = {}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
@@ -270,7 +294,7 @@ class GraphOwlClient:
             status, text = self._attempt(method, path, payload, headers)
             parsed = json.loads(text) if text else None
             if 200 <= status < 300 or status == 207:
-                return parsed if isinstance(parsed, dict) else {}
+                return parsed
             last = GraphOwlError(status, parsed)
             if not is_retryable(status):
                 raise last

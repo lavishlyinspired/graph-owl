@@ -42,6 +42,41 @@ Everything is `Serialize + Deserialize` with round-trip tests, because the bound
 
 **A bug the gate caught that no design review would have: FQNs contain periods.** The sentence splitter ended a sentence at every `.`, which tore `svc.db.orders` into `The svc.`, `db.` and `orders table is append-only.` — so no sentence ever contained the subject and the extractor silently found *nothing at all*. A period now ends a sentence only when whitespace or the end of the text follows it. Worth recording because the failure was total and silent: the extractor returned an empty result rather than a wrong one, which reads identically to "this document mentions nothing".
 
+## The out-of-process half, and what it proved about the ports
+
+The Rust half was written first, deliberately shaped so that adding a worker
+later would need no change to it. Writing the worker is the only way to find out
+whether that was true. **It was, with one exception, and the exception was in
+the transport rather than the domain**: `GraphOwlClient._send` narrowed every
+response to a dict, which turns the review queue's JSON array into `{}` — and an
+empty queue looks exactly like "nothing is waiting for you". The fix was a
+public `request()` returning the body as it is; no domain type changed.
+
+Three things the split forced into the open:
+
+- **Byte offsets are a cross-language contract, not a detail.** Python indexes
+  strings by character and Rust by byte. A worker computing spans character-wise
+  would point at the wrong words in any document containing an accent — silently,
+  and only in the documents most likely to be interesting. Both sides now assert
+  it, and the Python `TextSpan.resolve` returns `None` on a span that splits a
+  multi-byte character rather than raising.
+- **The fingerprint has to be pinned to a literal, because neither side can
+  assert the other agrees.** If Python hashed the wire JSON or used a different
+  encoding, every re-submission would look like a new document, idempotence
+  would never fire, and an OCR pass would re-run over an unchanged corpus
+  forever *while reporting success*. Both suites now assert the same two hex
+  strings, one of them non-ASCII, because that is the case where a plausible
+  alternative still passes the ASCII one.
+- **The sentence-splitter bug reappeared in the second language.** FQNs contain
+  periods; splitting on every period tears `svc.db.orders` into three fragments
+  and the extractor finds nothing at all. The Python implementation has the same
+  rule and a test whose name says why.
+
+**The policy did not move, and that is the result worth keeping.** The worker
+proposes a confidence, a predicate and a subject; graph-owl decides what each
+one buys, for every claim from every source, including its own in-process
+extractor. A worker cannot opt out because the checks are not in it.
+
 ## Implementation reference
 
 ```rust
@@ -86,14 +121,14 @@ Each stage is separately testable; only parse and extract touch external service
 
 ## Acceptance criteria
 
-- [ ] Markdown and plain text ingest with no optional adapter installed.
-- [ ] PDF ingests when an adapter is configured; absent one, a clear "no parser configured" error.
-- [ ] Extraction is schema-bounded — off-ontology output is discarded with a reason, never stored untyped.
-- [ ] Every claim carries provenance to document, block, and character range.
-- [ ] Mentions resolve via Epic 17; unresolved mentions are recorded as unresolved, not dropped.
-- [ ] Confidence bands are applied; the 0.5–0.8 band queues for confirmation.
-- [ ] Everything lands in `graph:extraction`; a failed run is deletable wholesale.
-- [ ] Re-ingesting the same document is idempotent.
+- [x] Markdown and plain text ingest with no optional adapter installed.
+- [x] PDF ingests when an adapter is configured; absent one, a clear "no parser configured" error.
+- [x] Extraction is schema-bounded — off-ontology output is discarded with a reason, never stored untyped.
+- [x] Every claim carries provenance to document, block, and character range.
+- [~] Mentions resolve via Epic 17; unresolved mentions are recorded as unresolved, not dropped. **Half done, and the half that is missing is named.** A claim naming an entity the catalog does not have is discarded *with a reason and kept* — so nothing is dropped silently. What does not happen yet is Epic 17 *resolution*: "the orders table" is matched by exact FQN, not resolved through the mention index, so a document that names an entity by an alias produces nothing. Wiring `resolve_asset` in is a small change to `Catalog::submit_extraction` and no change to any port.
+- [x] Confidence bands are applied; the 0.5–0.8 band queues for confirmation.
+- [~] Everything lands in `graph:extraction`; a failed run is deletable wholesale. **Deletable wholesale is done and tested** — `ON DELETE CASCADE` from `extraction_runs` makes it a schema guarantee rather than something a method must remember, and an HTTP test asserts the queue is empty afterwards. **The named-graph projection is not.** `EXTRACTION_GRAPH` exists and every claim is scoped to a run, but an asserted claim is not yet written as a flake with `cx = Sid::dsc("graph:extraction")`; it lives in `extraction_claims` with state `asserted`. Decision 2's real guarantee — that Epic 6's reasoning cannot see unconfirmed machine output — currently holds *because the facts are not in the graph at all*, which is stricter than intended but for the wrong reason. Projecting them needs predicate registration and is its own slice.
+- [x] Re-ingesting the same document is idempotent.
 
 ## Slices
 

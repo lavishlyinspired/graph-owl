@@ -2303,6 +2303,152 @@
         "summary": "Interactive documentation for this contract"
       }
     },
+    "/extraction/claims/{id}/decision": {
+      "post": {
+        "operationId": "post_extraction_claims__id__decision",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Confirm or reject a queued claim"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Confirm or reject a queued claim"
+      }
+    },
+    "/extraction/queue": {
+      "get": {
+        "operationId": "get_extraction_queue",
+        "responses": {
+          "200": {
+            "description": "Claims awaiting confirmation, each with the sentence it came from"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Claims awaiting confirmation, each with the sentence it came from"
+      }
+    },
+    "/extraction/runs": {
+      "post": {
+        "operationId": "post_extraction_runs",
+        "responses": {
+          "201": {
+            "description": "Submit a parsed document and the claims drawn from it"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Submit a parsed document and the claims drawn from it"
+      }
+    },
+    "/extraction/runs/{id}": {
+      "delete": {
+        "operationId": "delete_extraction_runs__id_",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Delete an extraction run and everything it produced"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete an extraction run and everything it produced"
+      }
+    },
     "/glossaries": {
       "get": {
         "operationId": "get_glossaries",

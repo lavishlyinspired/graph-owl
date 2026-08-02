@@ -79,6 +79,16 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/lineage", post(assert_lineage))
         .route("/lineage/{id}", delete(remove_lineage))
         .route("/lineage/asset/{id}", get(lineage_graph))
+        // Epic 21. `/extraction/runs` is the surface an out-of-process worker
+        // submits to; the queue and the decision are what a human does with
+        // what it proposed.
+        .route("/extraction/runs", post(submit_extraction))
+        .route("/extraction/runs/{id}", delete(delete_extraction_run))
+        .route("/extraction/queue", get(extraction_queue))
+        .route(
+            "/extraction/claims/{id}/decision",
+            post(decide_extraction_claim),
+        )
         .route("/reasoning/runs", post(run_reasoning))
         .route("/reasoning/explain", get(explain_fact))
         .route("/reasoning/derived", get(derived_about))
@@ -5150,6 +5160,162 @@ async fn assert_lineage(
         [(axum::http::header::LOCATION, location)],
         Json(edge),
     ))
+}
+
+// ---- Epic 21: the surface an out-of-process worker submits to ----
+
+/// What a worker sends: the document it parsed and the claims it drew from it.
+///
+/// **The document travels with the claims, rather than being fetched here.**
+/// The worker is the only party that read the source — graph-owl never saw the
+/// PDF — so the parsed text is what every evidence span is an offset into. A
+/// server that re-read the original would resolve spans against a file the
+/// extractor never saw, which is silent drift on every later edit.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubmitExtraction {
+    document: graph_owl_core::extraction::ParsedDocument,
+    result: graph_owl_core::extraction::ExtractionResult,
+    /// The worker's name for itself (`pdf-worker`, `gpt-5-extractor`).
+    /// A string, not an enum — adding a worker must be a deployment, not a
+    /// migration of a type that has already been persisted.
+    extractor: String,
+    extractor_version: String,
+}
+
+impl ValidateBody for SubmitExtraction {
+    /// **All three identify the run, and idempotence is judged on all three.**
+    /// A blank extractor name would make every worker look like the same one,
+    /// so a second worker over the same document would be mistaken for a
+    /// re-run of the first and silently do nothing — a failure that reads as
+    /// "the document had already been processed" rather than as a bad request.
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        for field in ["extractor", "extractorVersion"] {
+            if value
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|found| found.trim().is_empty())
+            {
+                errors.push(FieldError::new(
+                    field,
+                    FieldErrorCode::Required,
+                    format!("`{field}` identifies the run and must not be blank"),
+                ));
+            }
+        }
+        if value
+            .get("document")
+            .and_then(|document| document.get("sourceId"))
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|found| found.trim().is_empty())
+        {
+            errors.push(FieldError::new(
+                "document.sourceId",
+                FieldErrorCode::Required,
+                "`document.sourceId` is how a re-ingestion recognises the same \
+                 document and must not be blank"
+                    .to_string(),
+            ));
+        }
+        errors
+    }
+}
+
+async fn submit_extraction(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<SubmitExtraction>,
+) -> Result<
+    (
+        StatusCode,
+        Json<graph_owl_api::extraction::SubmissionOutcome>,
+    ),
+    AppError,
+> {
+    let _ = principal;
+
+    let outcome = catalog
+        .submit_extraction(
+            &payload.document,
+            payload.result,
+            &payload.extractor,
+            &payload.extractor_version,
+        )
+        .await?;
+
+    // 200 for a document already extracted, 201 for one that produced a new
+    // run. A worker retrying after a timeout gets a different status for
+    // "nothing happened because it already had" than for "this created
+    // something", which is the distinction its own logs need.
+    let status = match outcome {
+        graph_owl_api::extraction::SubmissionOutcome::Recorded { .. } => StatusCode::CREATED,
+        graph_owl_api::extraction::SubmissionOutcome::AlreadyExtracted { .. } => StatusCode::OK,
+    };
+    Ok((status, Json(outcome)))
+}
+
+async fn extraction_queue(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<Vec<graph_owl_api::extraction::PendingClaim>>, AppError> {
+    let _ = principal;
+    Ok(Json(catalog.extraction_queue().await?))
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ClaimDecision {
+    confirmed: bool,
+}
+
+impl ValidateBody for ClaimDecision {
+    /// `confirmed` has no default. A missing field defaulting either way would
+    /// turn a malformed request into a silent decision on somebody's behalf,
+    /// and both directions are wrong: defaulting to true asserts what nobody
+    /// approved, defaulting to false rejects what nobody refused.
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        if value
+            .get("confirmed")
+            .and_then(serde_json::Value::as_bool)
+            .is_none()
+        {
+            return vec![FieldError::new(
+                "confirmed",
+                FieldErrorCode::Required,
+                "`confirmed` must be true or false — there is no default for a \
+                 review decision"
+                    .to_string(),
+            )];
+        }
+        Vec::new()
+    }
+}
+
+async fn decide_extraction_claim(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<ClaimDecision>,
+) -> Result<StatusCode, AppError> {
+    // **The reviewer is the authenticated caller, never a body field.** A
+    // `decidedBy` a client could set would make the audit trail say whatever
+    // the client wanted it to say, which is worse than having no audit trail
+    // because it looks like one.
+    catalog
+        .decide_extraction_claim(id, payload.confirmed, &principal.id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_extraction_run(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    let _ = principal;
+    catalog.delete_extraction_run(id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn remove_lineage(
