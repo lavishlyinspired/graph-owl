@@ -227,6 +227,22 @@ mod tests {
         }
     }
 
+    /// **`Display` renders the handle**, not an empty string. Nothing else
+    /// asserted its output, so a `fmt` that wrote nothing passed the whole file
+    /// — and this is the form that reaches a log line or an error message,
+    /// where an empty id is indistinguishable from a missing one.
+    #[test]
+    fn display_renders_the_handle() {
+        let rendered = ElementId::encode(&sid(1, "asset/7f3a")).to_string();
+
+        assert_eq!(rendered, "1:asset/7f3a");
+        assert_eq!(
+            rendered,
+            ElementId::encode(&sid(1, "asset/7f3a")).as_str(),
+            "`Display` and `as_str` must not diverge"
+        );
+    }
+
     /// The wire form is a plain string, because every consumer — Bolt, JSON,
     /// `GraphML` — has strings and none of them share a richer type.
     #[test]

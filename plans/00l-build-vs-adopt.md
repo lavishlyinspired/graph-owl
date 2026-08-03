@@ -42,6 +42,14 @@ rejected by default** (`00i`).
 | `reasonable` | BSD-3-Clause | OWL 2 RL via Datalog, *subset* of rules, Python bindings | **Evaluate** — see below |
 | `whelk-rs` | BSD-3-Clause | **OWL EL reasoner** | **Evaluate seriously** — Epic 98 |
 | `oxigraph` | Apache-2.0 / MIT | Complete store + SPARQL engine | **Test oracle only** — owns storage |
+| **openCypher grammar** | **Apache-2.0** | Official Cypher grammar: XML source, generated EBNF + ANTLR4, railroad diagrams | **Adopt the grammar** — see the Cypher section below |
+| **openCypher TCK** | Apache-2.0 | Cucumber features defining Cypher behaviour | **Adopt as a conformance oracle** |
+| `decypher` | EUPL-1.2 **OR** MIT **OR** Apache-2.0 | openCypher parser, `rowan`-based, error-resilient, returns `Unsupported` for unhandled productions | **Spike before committing** — active (2026-05-19) but `0.2.0-alpha.6`, and its own README says the AST is unstable until 0.2.0 |
+| `open-cypher` | MIT | `pest` grammar derived from the openCypher EBNF | **Reject — abandoned.** Last published 2022-07-23 at v0.1.1. The *approach* is right; the crate is four years stale |
+| `ocg` | Apache-2.0 | "100% openCypher-compliant graph database" | **Reject** — it is a database, so it owns storage and crosses the line above; and its repository is on `github.ibm.com`, which nobody outside IBM can audit |
+| `antlr4rust` | BSD-3-Clause on crates.io, `NOASSERTION` on GitHub | ANTLR4 runtime for Rust | **Reject** — repository unpushed since 2023-02-14, and the two licence claims disagree |
+| `antlr-rust-runtime` | BSD-3-Clause | Newer ANTLR4 Rust runtime | **Reject for now** — fresh (2026-08-01) but 2,439 downloads; too thin to put a query front end on |
+| `pest` | MIT / Apache-2.0 | PEG parser generator | **Adopt** — 293M downloads; the generation target for the Cypher subset |
 | `horned-owl` | **LGPL-3.0** | OWL parsing and manipulation — RDF/XML, OWL/XML, Functional, Manchester | **Adopt out of process.** See below — the earlier "rejected" was wrong about both the licence and the options |
 
 ### Python
@@ -229,3 +237,70 @@ After the above, what remains is genuinely this project's:
 
 That is a much smaller list than "a SPARQL engine, a reasoner and an RDF layer",
 and stating it is the point of this document.
+
+
+## Cypher: adopt the grammar, generate the parser
+
+**Verified against crates.io, the openCypher repository and GitHub on 4 August
+2026.** This section exists because "reuse openCypher" means two different
+things and only one of them was ever in doubt.
+
+1. **Reuse the openCypher *specification and grammar*.** Never in doubt, and
+   `00i` rule 2 requires it: specifications are the source. The grammar is
+   **Apache-2.0**, published as XML source with generated EBNF and ANTLR4.
+2. **Reuse someone's openCypher *parser implementation*.** This is the question,
+   and the answer in 2026 is **no** — not because building is better in
+   principle, but because nothing in the Rust ecosystem is both maintained and
+   stable enough to put a query front end on.
+
+### The finding that changes the estimate
+
+`07c-engine-lpg.md` records that a reference implementation carries a
+**~10,000-line openCypher front end**. That number has been misread — including
+by this project — as an estimate for Epic 7b Slice A. It is not. It is the cost
+of a **complete** front end for the whole language: lexer, parser, validator and
+diagnostics.
+
+**Epic 7b's declared subset is eleven clause forms** — `MATCH`,
+`OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `UNWIND`, `ORDER BY`, `SKIP`,
+`LIMIT`, `DISTINCT`, and variable-length patterns — with `CALL`, procedures,
+`FOREACH`, path predicates and shortest-path explicitly out. That is a different
+order of magnitude, and the plan should not be sized against the larger number.
+
+### The decision
+
+**Vendor the Apache-2.0 openCypher EBNF and generate a `pest` grammar
+restricted to the declared subset.** Not a hand-written lexer and parser, and
+not a third-party parser crate.
+
+Three reasons, in order of weight:
+
+1. **"A documented subset" stops being a promise and becomes a file.** The
+   grammar *is* the declaration. Productions outside it do not parse, so the
+   `Unsupported` answer the plan requires falls out of the parse error rather
+   than needing a separate validator kept in step with the parser — which is
+   two things that can disagree.
+2. **No fragile dependency in a security-relevant path.** Authorization is
+   compiled into the plan (Epic 7 Slice E), so the query front end is on the
+   security path. `decypher` is `0.2.0-alpha.6` with an explicitly unstable AST;
+   `open-cypher` has not been touched since 2022. `pest` is MIT/Apache-2.0 with
+   293M downloads.
+3. **The route is already proven.** `open-cypher` is exactly this — a pestfile
+   derived from the openCypher EBNF. We take the approach and leave the
+   abandoned crate.
+
+**Adopt the TCK regardless of route.** It is Apache-2.0 Cucumber features that
+say empirically what our subset supports, rather than us asserting it — the same
+role `00k` gives specification conformance elsewhere.
+
+### What would change this
+
+`decypher` is the better answer the moment its AST stabilises: `rowan` gives
+error-resilient parsing and column-accurate diagnostics for free, and it already
+returns `Unsupported` rather than panicking, which is the exact shape Slice A
+needs. **A one-hour spike against its API belongs before Slice A, not instead of
+it** — and this section should be revisited when it reaches 0.2.0 proper.
+
+What is *not* a reason to revisit: an ANTLR route. It would add a Java
+build-time dependency to a Rust workspace and CI, on runtimes that are either
+stale or barely adopted.

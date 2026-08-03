@@ -680,6 +680,72 @@ mod tests {
         assert_eq!(properties.len(), 1);
     }
 
+    /// **Counting, at more than one count.**
+    ///
+    /// Every other assertion in this file happens to expect exactly one
+    /// property, so a `len` that always returned `1` satisfied all of them —
+    /// mutation testing found it. Zero, one and three, because no constant can
+    /// satisfy all three.
+    #[test]
+    fn a_property_map_counts_what_it_holds() {
+        let mut properties = PropertyMap::new();
+        assert_eq!(properties.len(), 0);
+        assert!(properties.is_empty());
+
+        properties
+            .insert_user("a", PropertyValue::Integer(1))
+            .expect("accepted");
+        assert_eq!(properties.len(), 1);
+        assert!(
+            !properties.is_empty(),
+            "a map holding something is not empty"
+        );
+
+        properties
+            .insert_user("b", PropertyValue::Integer(2))
+            .expect("accepted");
+        properties
+            .insert_user("c", PropertyValue::Integer(3))
+            .expect("accepted");
+        assert_eq!(properties.len(), 3);
+    }
+
+    /// **A repeated key grows one entry rather than adding entries.** The list
+    /// behaviour and the count have to agree, or a consumer paging by `len`
+    /// walks off the end.
+    #[test]
+    fn a_repeated_key_does_not_grow_the_count() {
+        let mut properties = PropertyMap::new();
+        for value in 0..4 {
+            properties
+                .insert_user("tag", PropertyValue::Integer(value))
+                .expect("accepted");
+        }
+
+        assert_eq!(properties.len(), 1, "one key: {properties:?}");
+        let Some(PropertyValue::List(values)) = properties.get("tag") else {
+            panic!("expected a list, got {:?}", properties.get("tag"));
+        };
+        assert_eq!(values.len(), 4, "four values under it");
+    }
+
+    /// **`keys` yields the keys**, not an empty iterator that happens to satisfy
+    /// a comparison against its own sorted copy — which is all the determinism
+    /// test alone required.
+    #[test]
+    fn keys_yields_every_key_in_sorted_order() {
+        let mut properties = PropertyMap::new();
+        for key in ["zebra", "alpha", "mike"] {
+            properties
+                .insert_user(key, PropertyValue::Integer(1))
+                .expect("accepted");
+        }
+
+        let keys: Vec<&str> = properties.keys().map(String::as_str).collect();
+
+        assert_eq!(keys, vec!["alpha", "mike", "zebra"]);
+    }
+
     /// A named graph survives the trip.
     #[test]
     fn a_named_graph_survives_as_a_reserved_property() {

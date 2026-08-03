@@ -1,7 +1,7 @@
 # Plan: Cypher Query Support (Epic 7b)
 
 **Branch**: feat/engine-cypher
-**Status**: Not started — **scheduled** (was optional; see the status change below)
+**Status**: Not started. **Slice A re-scoped 4 August 2026** from "build a parser" to "adopt the Apache-2.0 grammar, generate the parser" — see Slice A and `00l-build-vs-adopt.md`
 **Depends on**: Epic 7 (SPARQL plan is the lowering target), Epic 7a (traversal), **Epic 7c (LPG projection — 7c ships before 7b; the letters are labels, not a sequence)**
 **Unblocks**: Epic 7d (Bolt), Epic 41 (query workbench)
 **Crates**: `graph-owl-query` (new `cypher` module — **not a separate crate**) · consumes `graph-owl-lpg` (7c) · consumed by `graph-owl-bolt` (7d)
@@ -77,11 +77,55 @@ Cypher's `MATCH` uses **relationship-isomorphism** semantics: within one `MATCH`
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first.
 
-### Slice A: Parse the subset (pure)
+### Slice A: Parse the subset — **adopt the grammar, generate the parser**
 
-**Acceptance criteria**: node and relationship patterns with labels, types, direction, and properties; `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT`, `DISTINCT`; variable-length `*1..3`, `*`, `*..5`; a write clause → a specific rejection naming it and pointing at the catalog API; `CALL`/`FOREACH` → "unsupported"; syntax errors report line and column.
+**Changed 4 August 2026 after checking the ecosystem. This slice was written as
+"build a Cypher parser" and should not be.** See `00l-build-vs-adopt.md`'s
+Cypher section for the full analysis; the short version:
+
+- The **openCypher grammar is Apache-2.0** and published as EBNF and ANTLR4.
+  `00i` rule 2 already requires the specification to be the source, so adopting
+  it is not a new decision — only generating from it is.
+- **The ~10k-line figure quoted in `07c` was misread**, including by this plan.
+  It is the size of a *complete* openCypher front end for the whole language.
+  This subset is eleven clause forms, which is a different order of magnitude —
+  do not size the slice against the larger number.
+- **No Rust openCypher parser crate is both maintained and stable enough** to
+  put on the security path (authorization is compiled into the plan).
+  `open-cypher` is abandoned since 2022; `decypher` is active and `rowan`-based
+  but `0.2.0-alpha.6` with an explicitly unstable AST; `ocg` is a whole database
+  on an unauditable internal repository. ANTLR's Rust runtimes are stale or
+  barely adopted, and would add a Java build step to CI.
+
+**Do first, before any parser work: a one-hour spike against `decypher`.** If
+its AST is usable, it is the better answer — `rowan` gives error-resilient
+parsing and column-accurate diagnostics for free, and it already returns
+`Unsupported` for unhandled productions, which is exactly what the criteria
+below ask for. If it is not, generate a `pest` grammar from the vendored EBNF.
+**The spike's outcome is the slice's first commit, either way.**
+
+**Acceptance criteria**: node and relationship patterns with labels, types, direction, and properties; `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT`, `DISTINCT`; variable-length `*1..3`, `*`, `*..5`; a write clause → a specific rejection naming it and pointing at the catalog API; `CALL`/`FOREACH` → "unsupported"; syntax errors report line and column; **the supported subset is expressed as a grammar file rather than as a validator**, so a production outside it cannot parse rather than being caught by a second pass that can drift.
 **RED**: A query corpus with expected ASTs, plus a malformed corpus with expected positions. Write-clause tests asserting the rejection *names the API to use instead* — a bare "unsupported" leaves the user stuck. Mutator watch: accepting `CREATE` must fail; generic errors must fail the naming assertions.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+### Slice A2: The TCK as a conformance oracle
+
+**Adopted regardless of which parsing route Slice A takes.** The openCypher
+**Technology Compatibility Kit** is Apache-2.0 Cucumber features defining Cypher
+behaviour. Running it tells us **empirically** what the subset supports instead
+of us asserting it — the same role `00k-standards-conformance.md` gives
+specification conformance everywhere else.
+
+**Acceptance criteria**: the TCK runs against this engine; every scenario is
+recorded as pass, fail, or **out-of-subset**, and the third is a first-class
+outcome rather than a failure; the out-of-subset list is generated from the run
+rather than hand-maintained, so it cannot drift from what the parser does; a
+scenario moving from out-of-subset to fail is a regression the suite catches.
+**RED**: A scenario known to be outside the subset must be reported
+out-of-subset and **not** as a pass — a harness that counted skips as successes
+would report conformance we do not have, which is the exact claim `00a` refuses
+to make.
+**Done when**: criteria met, the generated subset report is committed, commit approved.
 
 ### Slice B: Lower to the SPARQL AST (pure)
 
