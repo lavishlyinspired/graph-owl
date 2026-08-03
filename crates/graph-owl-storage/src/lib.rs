@@ -12,6 +12,7 @@ use graph_owl_core::{
     memory::Memory,
     ownership::{EntityReference, OwnerRef},
     page::{Page, PageRequest},
+    quality::TestStatus,
     usage::{Consumer, UsageOperation, UsageRollup},
 };
 use serde::{Deserialize, Serialize};
@@ -488,6 +489,86 @@ pub struct BreachReport {
     pub consumers: Vec<String>,
     pub column: String,
     pub detail: String,
+}
+
+/// A test case as stored, with its cadence already resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredTestCase {
+    pub id: Uuid,
+    pub name: String,
+    pub target_fqn: String,
+    pub test_type: String,
+    pub description: Option<String>,
+    pub definition_id: Option<Uuid>,
+    pub suite_id: Option<Uuid>,
+    /// **Resolved here, not at read time.** A case may override its
+    /// definition's cadence; folding that once means every consumer of a case
+    /// sees the cadence that actually applies rather than re-deriving it and
+    /// occasionally getting it wrong.
+    pub expected_cadence: Option<String>,
+}
+
+/// A reusable check template.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredTestDefinition {
+    pub id: Uuid,
+    pub name: String,
+    pub test_type: String,
+    pub description: Option<String>,
+    pub expected_cadence: Option<String>,
+}
+
+/// One observation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestResultWrite {
+    pub case_id: Uuid,
+    pub status: TestStatus,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+    pub message: Option<String>,
+    pub metrics: Option<serde_json::Value>,
+}
+
+/// A stored observation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredTestResult {
+    pub id: Uuid,
+    pub case_id: Uuid,
+    pub status: TestStatus,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+    pub message: Option<String>,
+    pub metrics: Option<serde_json::Value>,
+}
+
+/// What a batch of results did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResultIngest {
+    pub accepted: i64,
+    /// Already seen, by `(case, observed_at)`. **Not an error**: a retried push
+    /// is normal, and the same check at the same instant is one observation
+    /// however many times it arrives.
+    pub duplicates: i64,
+    /// Refused: an observation dated in the future is a clock problem.
+    pub rejected: i64,
+    /// The named case does not exist.
+    pub unknown_case: i64,
+}
+
+/// A column-level mapping inside a lineage edge — Epic 29 Slice D.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnMapping {
+    pub from_column_fqn: String,
+    pub to_column_fqn: String,
+    pub expression: Option<String>,
+}
+
+/// What a source-scoped lineage reconciliation did — Epic 29 Slice E.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LineageReconciliation {
+    pub added: i64,
+    /// Edges this source had asserted before and no longer does. **Only this
+    /// source's**: a manually curated edge is never in this count, which is the
+    /// whole property the slice exists for.
+    pub removed: i64,
 }
 
 /// What claiming an idempotency key found.
@@ -2631,6 +2712,172 @@ pub trait Storage: Send + Sync {
         property: &CustomProperty,
         previous_name: &str,
     ) -> Result<bool, StorageError>;
+
+    // ---- Epic 30: quality signals ----
+
+    /// Register a reusable check template.
+    ///
+    /// # Errors
+    /// [`StorageError::Conflict`] if the name is taken.
+    async fn create_test_definition(
+        &self,
+        id: Uuid,
+        name: &str,
+        test_type: &str,
+        description: Option<&str>,
+        expected_cadence: Option<&str>,
+    ) -> Result<StoredTestDefinition, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_test_definitions(&self) -> Result<Vec<StoredTestDefinition>, StorageError>;
+
+    /// Change a definition's cadence, and with it every case that has not
+    /// overridden it.
+    ///
+    /// **This is the whole point of decision 3a.** Without the split, changing
+    /// "freshness within 24 hours" to 12 means editing eight hundred rows; with
+    /// it, the cases that inherited the cadence follow automatically and the
+    /// ones that deliberately differ do not. Returns how many cases now resolve
+    /// differently.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn set_definition_cadence(
+        &self,
+        id: Uuid,
+        expected_cadence: Option<&str>,
+    ) -> Result<Option<i64>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Conflict`] if the name is taken on that target.
+    async fn create_test_suite(
+        &self,
+        id: Uuid,
+        name: &str,
+        owner: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<Option<Uuid>, StorageError>;
+
+    /// Register a case against an asset or a column. `None` when the target
+    /// does not resolve, or when a named definition or suite does not exist.
+    ///
+    /// # Errors
+    /// [`StorageError::Conflict`] if the name is taken on that target.
+    async fn create_test_case(
+        &self,
+        id: Uuid,
+        name: &str,
+        target_fqn: &str,
+        test_type: &str,
+        description: Option<&str>,
+        definition_id: Option<Uuid>,
+        suite_id: Option<Uuid>,
+        expected_cadence: Option<&str>,
+    ) -> Result<Option<StoredTestCase>, StorageError>;
+
+    /// Cases on a target, or in a suite, or all of them.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_test_cases(
+        &self,
+        target_fqn: Option<&str>,
+        suite_id: Option<Uuid>,
+    ) -> Result<Vec<StoredTestCase>, StorageError>;
+
+    /// Delete a case and its results. `false` if it did not exist.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the delete fails.
+    async fn delete_test_case(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Record a batch of observations.
+    ///
+    /// **Never bumps the entity version and emits no change event** (decision
+    /// 2): a nightly suite across ten thousand tables would otherwise inflate
+    /// every history with observations rather than changes, and the version
+    /// tracks *descriptive* change.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn record_test_results(
+        &self,
+        batch: &[TestResultWrite],
+    ) -> Result<ResultIngest, StorageError>;
+
+    /// A case's results, newest first.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn test_results(
+        &self,
+        case_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<StoredTestResult>, StorageError>;
+
+    /// The latest result per case for a target, which is what health is
+    /// computed from.
+    ///
+    /// **Returns a row per case even when it has never run**, because a
+    /// registered case with no results is a *stale* case rather than an absent
+    /// one — somebody declared the check and it has produced nothing, which is
+    /// worth saying.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn latest_results_for(
+        &self,
+        target_fqn: &str,
+    ) -> Result<Vec<graph_owl_core::quality::LatestResult>, StorageError>;
+
+    /// Delete results older than `before`, keeping the most recent per case.
+    ///
+    /// **The latest survives regardless of age.** Pruning it would blank the
+    /// health signal pruning exists to support, and would do it worst for
+    /// exactly the infrequently-tested assets whose signal is scarcest.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the delete fails.
+    async fn prune_test_results(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<i64, StorageError>;
+
+    // ---- Epic 29 Slices D and E: column lineage and reconciliation ----
+
+    /// Attach column-level mappings to an edge, replacing what was there.
+    ///
+    /// `None` when the edge does not exist, or when a named column does not.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn set_column_mappings(
+        &self,
+        edge_id: Uuid,
+        mappings: &[ColumnMapping],
+    ) -> Result<Option<i64>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn column_mappings(&self, edge_id: Uuid) -> Result<Vec<ColumnMapping>, StorageError>;
+
+    /// Replace the edge set one source asserted **within an enumerated scope**.
+    ///
+    /// **Scoped by source and by prefix, and both halves matter.** Source-blind
+    /// replacement silently deletes lineage a human curated — the failure this
+    /// exists to prevent. Scope-blind replacement deletes edges in schemas the
+    /// run never looked at, which is the same bug wearing a different hat.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if any part of the transaction fails.
+    async fn reconcile_lineage(
+        &self,
+        source: &str,
+        scope_prefix: &str,
+        asserted: &[(Uuid, Uuid, String)],
+        created_by: &str,
+    ) -> Result<LineageReconciliation, StorageError>;
 
     // ---- Epic 27: data contracts ----
 

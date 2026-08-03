@@ -90,6 +90,31 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             "/custom-properties/{id}",
             patch(update_custom_property).delete(delete_custom_property),
         )
+        // Epic 30. graph-owl ingests and displays results; it does not run
+        // tests, so there is no scheduler and no executor here.
+        .route(
+            "/test-definitions",
+            get(list_test_definitions).post(create_test_definition),
+        )
+        .route(
+            "/test-definitions/{id}/cadence",
+            post(set_definition_cadence),
+        )
+        .route("/test-suites", post(create_test_suite))
+        .route("/test-cases", get(list_test_cases).post(create_test_case))
+        .route("/test-cases/{id}", delete(delete_test_case))
+        .route(
+            "/test-cases/{id}/results",
+            get(list_test_results).post(record_test_results),
+        )
+        .route("/test-results/prune", post(prune_test_results))
+        .route("/health/{fqn}", get(asset_health))
+        // Epic 29 Slices D and E.
+        .route(
+            "/lineage/{id}/columns",
+            get(get_column_mappings).put(set_column_mappings),
+        )
+        .route("/lineage/reconcile", post(reconcile_lineage))
         // Epic 27. A contract is an entity with parties, not an annotation —
         // so it gets entity routes, and the evaluation is a sub-resource of the
         // *asset* whose change triggered it.
@@ -5804,6 +5829,517 @@ async fn delete_custom_property(
         .delete_custom_property(&principal, id, query.force.unwrap_or(false))
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- Epic 30: quality signals ----
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateTestDefinitionBody {
+    name: String,
+    test_type: String,
+    #[serde(default)]
+    description: Option<String>,
+    /// ISO 8601, days and smaller. A year is not a fixed length of time and a
+    /// cadence has to be answerable by subtracting two instants.
+    #[serde(default)]
+    expected_cadence: Option<String>,
+}
+
+impl ValidateBody for CreateTestDefinitionBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        for field in ["name", "testType"] {
+            require_non_empty_string(
+                value,
+                &graph_owl_api::validation::FieldPath::root().key(field),
+                &mut errors,
+            );
+        }
+        errors
+    }
+}
+
+fn definition_body(d: &graph_owl_storage::StoredTestDefinition) -> serde_json::Value {
+    json!({
+        "id": d.id,
+        "name": d.name,
+        "testType": d.test_type,
+        "description": d.description,
+        "expectedCadence": d.expected_cadence,
+    })
+}
+
+async fn create_test_definition(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppJson(payload): AppJson<CreateTestDefinitionBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let created = catalog
+        .create_test_definition(
+            payload.name,
+            payload.test_type,
+            payload.description,
+            payload.expected_cadence,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(definition_body(&created))))
+}
+
+async fn list_test_definitions(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    Ok(Json(
+        catalog
+            .list_test_definitions()
+            .await?
+            .iter()
+            .map(definition_body)
+            .collect(),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CadenceBody {
+    #[serde(default)]
+    expected_cadence: Option<String>,
+}
+
+impl ValidateBody for CadenceBody {
+    fn validate_body(_value: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// **The whole point of the definition/case split** (decision 3a): one edit,
+/// and every case that inherited the cadence follows.
+async fn set_definition_cadence(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<CadenceBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let affected = catalog
+        .set_definition_cadence(id, payload.expected_cadence)
+        .await?;
+    Ok(Json(json!({ "affectedCases": affected })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateTestSuiteBody {
+    name: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+impl ValidateBody for CreateTestSuiteBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("name"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+async fn create_test_suite(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppJson(payload): AppJson<CreateTestSuiteBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let id = catalog
+        .create_test_suite(payload.name, payload.owner, payload.description)
+        .await?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateTestCaseBody {
+    name: String,
+    target_fqn: String,
+    test_type: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    definition_id: Option<Uuid>,
+    #[serde(default)]
+    suite_id: Option<Uuid>,
+    #[serde(default)]
+    expected_cadence: Option<String>,
+}
+
+impl ValidateBody for CreateTestCaseBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        for field in ["name", "targetFqn", "testType"] {
+            require_non_empty_string(
+                value,
+                &graph_owl_api::validation::FieldPath::root().key(field),
+                &mut errors,
+            );
+        }
+        errors
+    }
+}
+
+fn case_body(c: &graph_owl_storage::StoredTestCase) -> serde_json::Value {
+    json!({
+        "id": c.id,
+        "name": c.name,
+        "targetFqn": c.target_fqn,
+        "testType": c.test_type,
+        "description": c.description,
+        "definitionId": c.definition_id,
+        "suiteId": c.suite_id,
+        // Already resolved: the case's own cadence, or the definition's.
+        "expectedCadence": c.expected_cadence,
+    })
+}
+
+async fn create_test_case(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppJson(payload): AppJson<CreateTestCaseBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let created = catalog
+        .create_test_case(graph_owl_api::CreateTestCase {
+            name: payload.name,
+            target_fqn: payload.target_fqn,
+            test_type: payload.test_type,
+            description: payload.description,
+            definition_id: payload.definition_id,
+            suite_id: payload.suite_id,
+            expected_cadence: payload.expected_cadence,
+        })
+        .await?;
+    Ok((StatusCode::CREATED, Json(case_body(&created))))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TestCaseQuery {
+    #[serde(default)]
+    target_fqn: Option<String>,
+    #[serde(default)]
+    suite_id: Option<Uuid>,
+}
+
+async fn list_test_cases(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppQuery(query): AppQuery<TestCaseQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    Ok(Json(
+        catalog
+            .list_test_cases(query.target_fqn.as_deref(), query.suite_id)
+            .await?
+            .iter()
+            .map(case_body)
+            .collect(),
+    ))
+}
+
+async fn delete_test_case(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    catalog.delete_test_case(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResultBatchBody {
+    results: Vec<TestResultBody>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TestResultBody {
+    status: String,
+    observed_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    metrics: Option<serde_json::Value>,
+}
+
+impl ValidateBody for ResultBatchBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        if !value
+            .get("results")
+            .is_some_and(serde_json::Value::is_array)
+        {
+            errors.push(FieldError::new(
+                "results",
+                FieldErrorCode::Required,
+                "`results` must be an array",
+            ));
+        }
+        errors
+    }
+}
+
+/// **Never bumps the entity version and emits no change event** (decision 2). A
+/// nightly suite across ten thousand tables would otherwise fill every history
+/// with observations rather than changes.
+async fn record_test_results(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<ResultBatchBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use graph_owl_core::quality::TestStatus;
+
+    let mut batch = Vec::with_capacity(payload.results.len());
+    for result in payload.results {
+        let status = TestStatus::parse(&result.status).map_err(|unknown| {
+            AppError::Validation(vec![FieldError::new(
+                "results.status",
+                FieldErrorCode::Value,
+                format!(
+                    "`{unknown}` is not a test status; expected one of: {}",
+                    TestStatus::all()
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )])
+        })?;
+        batch.push(graph_owl_storage::TestResultWrite {
+            case_id: id,
+            status,
+            observed_at: result.observed_at,
+            message: result.message,
+            metrics: result.metrics,
+        });
+    }
+
+    let ingest = catalog.record_test_results(batch).await?;
+    Ok(Json(json!({
+        "accepted": ingest.accepted,
+        "duplicates": ingest.duplicates,
+        "rejected": ingest.rejected,
+        "unknownCase": ingest.unknown_case,
+    })))
+}
+
+async fn list_test_results(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    Ok(Json(
+        catalog
+            .test_results(id)
+            .await?
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": r.id,
+                    "caseId": r.case_id,
+                    "status": r.status,
+                    "observedAt": r.observed_at,
+                    "message": r.message,
+                    "metrics": r.metrics,
+                })
+            })
+            .collect(),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HealthQuery {
+    /// Off by default, because the walk costs a query per upstream asset —
+    /// and because upstream health is a different question from this asset's.
+    #[serde(default)]
+    include_upstream: Option<bool>,
+}
+
+async fn asset_health(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(fqn): Path<String>,
+    AppQuery(query): AppQuery<HealthQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let own = catalog.health_of(&fqn).await?;
+    let mut body = json!({ "health": own });
+
+    if query.include_upstream.unwrap_or(false) {
+        // **Reported separately, never merged into the asset's own.**
+        // Conflating them makes the signal unactionable: a steward cannot tell
+        // whether to fix this table or go upstream.
+        let upstream = catalog.upstream_health(&fqn).await?;
+        if let Some(object) = body.as_object_mut() {
+            object.insert(
+                "upstream".to_string(),
+                serde_json::to_value(upstream).unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+    Ok(Json(body))
+}
+
+async fn prune_test_results(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Admin-only, for the same reason usage pruning is: a scan-and-delete over
+    // one of the largest tables in the system.
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let pruned = catalog.prune_test_results().await?;
+    Ok(Json(json!({ "pruned": pruned })))
+}
+
+// ---- Epic 29 Slices D and E: column lineage and reconciliation ----
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ColumnMappingsBody {
+    mappings: Vec<ColumnMappingBody>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ColumnMappingBody {
+    from_column_fqn: String,
+    to_column_fqn: String,
+    #[serde(default)]
+    expression: Option<String>,
+}
+
+impl ValidateBody for ColumnMappingsBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        if !value
+            .get("mappings")
+            .is_some_and(serde_json::Value::is_array)
+        {
+            errors.push(FieldError::new(
+                "mappings",
+                FieldErrorCode::Required,
+                "`mappings` must be an array",
+            ));
+        }
+        errors
+    }
+}
+
+/// `PUT`, because the mappings are replaced wholesale: a partial update cannot
+/// express "this column now comes from one source instead of two", and that is
+/// the edit a refactor produces.
+async fn set_column_mappings(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<ColumnMappingsBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mappings = payload
+        .mappings
+        .into_iter()
+        .map(|m| graph_owl_storage::ColumnMapping {
+            from_column_fqn: m.from_column_fqn,
+            to_column_fqn: m.to_column_fqn,
+            expression: m.expression,
+        })
+        .collect();
+    let count = catalog.set_column_mappings(id, mappings).await?;
+    Ok(Json(json!({ "mappings": count })))
+}
+
+async fn get_column_mappings(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    Ok(Json(
+        catalog
+            .column_mappings(id)
+            .await?
+            .iter()
+            .map(|m| {
+                json!({
+                    "fromColumnFqn": m.from_column_fqn,
+                    "toColumnFqn": m.to_column_fqn,
+                    "expression": m.expression,
+                })
+            })
+            .collect(),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReconcileLineageBody {
+    source: String,
+    /// The FQN prefix this run enumerated. **Required**, because a
+    /// reconciliation with no scope would replace every edge this source ever
+    /// asserted anywhere — including in schemas the run never looked at.
+    scope_prefix: String,
+    #[serde(default)]
+    edges: Vec<ReconcileEdgeBody>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReconcileEdgeBody {
+    from_asset_id: Uuid,
+    to_asset_id: Uuid,
+    relationship: String,
+}
+
+impl ValidateBody for ReconcileLineageBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        for field in ["source", "scopePrefix"] {
+            require_non_empty_string(
+                value,
+                &graph_owl_api::validation::FieldPath::root().key(field),
+                &mut errors,
+            );
+        }
+        errors
+    }
+}
+
+async fn reconcile_lineage(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<ReconcileLineageBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let asserted: Vec<(Uuid, Uuid, String)> = payload
+        .edges
+        .into_iter()
+        .map(|e| (e.from_asset_id, e.to_asset_id, e.relationship))
+        .collect();
+    let report = catalog
+        .reconcile_lineage(
+            &principal,
+            &payload.source,
+            &payload.scope_prefix,
+            &asserted,
+        )
+        .await?;
+    Ok(Json(json!({
+        "added": report.added,
+        // Only this source's, within this scope — a curated edge is never in
+        // this count.
+        "removed": report.removed,
+    })))
 }
 
 // ---- Epic 27: data contracts ----

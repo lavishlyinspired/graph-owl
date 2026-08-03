@@ -15,12 +15,14 @@ use graph_owl_core::{
     page::{Cursor, Page, PageRequest},
 };
 use graph_owl_storage::{
-    BreachReport, ConflictKind, DataProductUpdate, DiscardedClaimRecord, DomainDeletion,
-    DomainHoldings, DomainUpdate, ExtractionRunRecord, FollowOutcome, Holdings, IdempotencyClaim,
-    IssueOutcome, LabelDecision, LabelOutcome, LifecycleOutcome, MembershipRefusal, MemoryWrite,
-    OwnersWrite, PrincipalDeletion, QueuedClaimRecord, ReviewQueueFilter, SplitOutcome, Storage,
-    StorageError, StoredCertification, StoredCertificationType, StoredContract, StoredUser,
-    SupersedeOutcome, TagUsage, UpdateOutcome, UsageIngest, UsageWrite,
+    BreachReport, ColumnMapping, ConflictKind, DataProductUpdate, DiscardedClaimRecord,
+    DomainDeletion, DomainHoldings, DomainUpdate, ExtractionRunRecord, FollowOutcome, Holdings,
+    IdempotencyClaim, IssueOutcome, LabelDecision, LabelOutcome, LifecycleOutcome,
+    LineageReconciliation, MembershipRefusal, MemoryWrite, OwnersWrite, PrincipalDeletion,
+    QueuedClaimRecord, ResultIngest, ReviewQueueFilter, SplitOutcome, Storage, StorageError,
+    StoredCertification, StoredCertificationType, StoredContract, StoredTestCase,
+    StoredTestDefinition, StoredTestResult, StoredUser, SupersedeOutcome, TagUsage,
+    TestResultWrite, UpdateOutcome, UsageIngest, UsageWrite,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -479,6 +481,20 @@ impl PostgresStorage {
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(())
+    }
+
+    /// One case with its cadence resolved.
+    async fn get_test_case(&self, id: Uuid) -> Result<Option<StoredTestCase>, StorageError> {
+        let row = sqlx::query(&format!(
+            "SELECT {TEST_CASE_COLUMNS} FROM test_cases c
+               LEFT JOIN test_definitions d ON d.id = c.definition_id
+              WHERE c.id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.as_ref().map(test_case_from_row))
     }
 
     /// A contract row plus its consumers, guaranteed columns and SLAs.
@@ -5289,6 +5305,538 @@ impl Storage for PostgresStorage {
         Ok(done.rows_affected() > 0)
     }
 
+    // ---- Epic 30: quality signals ----
+
+    async fn create_test_definition(
+        &self,
+        id: Uuid,
+        name: &str,
+        test_type: &str,
+        description: Option<&str>,
+        expected_cadence: Option<&str>,
+    ) -> Result<StoredTestDefinition, StorageError> {
+        sqlx::query(
+            "INSERT INTO test_definitions (id, name, test_type, description, expected_cadence)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(test_type)
+        .bind(description)
+        .bind(expected_cadence)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            conflict_or_unexpected(
+                &e,
+                format!("a test definition named `{name}` already exists"),
+            )
+        })?;
+
+        Ok(StoredTestDefinition {
+            id,
+            name: name.to_string(),
+            test_type: test_type.to_string(),
+            description: description.map(str::to_string),
+            expected_cadence: expected_cadence.map(str::to_string),
+        })
+    }
+
+    async fn list_test_definitions(&self) -> Result<Vec<StoredTestDefinition>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, name, test_type, description, expected_cadence
+               FROM test_definitions ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows
+            .iter()
+            .map(|row| StoredTestDefinition {
+                id: row.get("id"),
+                name: row.get("name"),
+                test_type: row.get("test_type"),
+                description: row.get("description"),
+                expected_cadence: row.get("expected_cadence"),
+            })
+            .collect())
+    }
+
+    async fn set_definition_cadence(
+        &self,
+        id: Uuid,
+        expected_cadence: Option<&str>,
+    ) -> Result<Option<i64>, StorageError> {
+        let done = sqlx::query(
+            "UPDATE test_definitions SET expected_cadence = $2, updated_at = now() WHERE id = $1",
+        )
+        .bind(id)
+        .bind(expected_cadence)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if done.rows_affected() == 0 {
+            return Ok(None);
+        }
+        // The cases that *inherit* — one row edited, N cases now resolving
+        // differently, which is the whole point of the definition/case split.
+        // Cases with their own cadence are deliberately not counted: they said
+        // something different on purpose.
+        let inherited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM test_cases
+              WHERE definition_id = $1 AND expected_cadence IS NULL",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(Some(inherited))
+    }
+
+    async fn create_test_suite(
+        &self,
+        id: Uuid,
+        name: &str,
+        owner: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<Option<Uuid>, StorageError> {
+        if let Some(owner) = owner {
+            let found: Option<String> = sqlx::query_scalar("SELECT id FROM teams WHERE id = $1")
+                .bind(owner)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            if found.is_none() {
+                return Ok(None);
+            }
+        }
+        sqlx::query(
+            "INSERT INTO test_suites (id, name, owner, description) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(owner)
+        .bind(description)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            conflict_or_unexpected(&e, format!("a test suite named `{name}` already exists"))
+        })?;
+        Ok(Some(id))
+    }
+
+    async fn create_test_case(
+        &self,
+        id: Uuid,
+        name: &str,
+        target_fqn: &str,
+        test_type: &str,
+        description: Option<&str>,
+        definition_id: Option<Uuid>,
+        suite_id: Option<Uuid>,
+        expected_cadence: Option<&str>,
+    ) -> Result<Option<StoredTestCase>, StorageError> {
+        // The target must be a live asset — a case on a name nothing resolves
+        // to produces results nobody can navigate to.
+        let live: Option<bool> =
+            sqlx::query_scalar("SELECT deleted FROM assets WHERE fully_qualified_name = $1")
+                .bind(target_fqn)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if live != Some(false) {
+            return Ok(None);
+        }
+        if let Some(definition) = definition_id {
+            let found: Option<Uuid> =
+                sqlx::query_scalar("SELECT id FROM test_definitions WHERE id = $1")
+                    .bind(definition)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            if found.is_none() {
+                return Ok(None);
+            }
+        }
+        if let Some(suite) = suite_id {
+            let found: Option<Uuid> =
+                sqlx::query_scalar("SELECT id FROM test_suites WHERE id = $1")
+                    .bind(suite)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            if found.is_none() {
+                return Ok(None);
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO test_cases
+                 (id, name, target_fqn, test_type, description, definition_id, suite_id, expected_cadence)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(target_fqn)
+        .bind(test_type)
+        .bind(description)
+        .bind(definition_id)
+        .bind(suite_id)
+        .bind(expected_cadence)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            conflict_or_unexpected(&e, format!("`{name}` is already a test case on `{target_fqn}`"))
+        })?;
+
+        self.get_test_case(id).await
+    }
+
+    async fn list_test_cases(
+        &self,
+        target_fqn: Option<&str>,
+        suite_id: Option<Uuid>,
+    ) -> Result<Vec<StoredTestCase>, StorageError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {TEST_CASE_COLUMNS} FROM test_cases c
+               LEFT JOIN test_definitions d ON d.id = c.definition_id
+              WHERE ($1::text IS NULL OR c.target_fqn = $1)
+                AND ($2::uuid IS NULL OR c.suite_id = $2)
+              ORDER BY c.target_fqn, c.name"
+        ))
+        .bind(target_fqn)
+        .bind(suite_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.iter().map(test_case_from_row).collect())
+    }
+
+    async fn delete_test_case(&self, id: Uuid) -> Result<bool, StorageError> {
+        // Results go with it by `ON DELETE CASCADE` — an observation about a
+        // check nobody declared is unattributable.
+        let done = sqlx::query("DELETE FROM test_cases WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn record_test_results(
+        &self,
+        batch: &[TestResultWrite],
+    ) -> Result<ResultIngest, StorageError> {
+        let mut ingest = ResultIngest::default();
+        let now = chrono::Utc::now();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        for result in batch {
+            if result.observed_at > now {
+                ingest.rejected += 1;
+                continue;
+            }
+            let known: Option<Uuid> = sqlx::query_scalar("SELECT id FROM test_cases WHERE id = $1")
+                .bind(result.case_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            if known.is_none() {
+                ingest.unknown_case += 1;
+                continue;
+            }
+
+            // `ON CONFLICT DO NOTHING` against `(case, observed_at)`: a retried
+            // push is normal and must not double-count.
+            let inserted = sqlx::query(
+                "INSERT INTO test_results (id, case_id, status, observed_at, message, metrics)
+                 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+            )
+            .bind(Uuid::new_v4())
+            .bind(result.case_id)
+            .bind(result.status.as_str())
+            .bind(result.observed_at)
+            .bind(&result.message)
+            .bind(&result.metrics)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+            if inserted.rows_affected() == 0 {
+                ingest.duplicates += 1;
+            } else {
+                ingest.accepted += 1;
+            }
+        }
+
+        // **No version bump and no change event** (decision 2). Deliberately
+        // absent rather than forgotten: a nightly suite across ten thousand
+        // tables would otherwise fill every history with observations, and the
+        // version tracks descriptive change.
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(ingest)
+    }
+
+    async fn test_results(
+        &self,
+        case_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<StoredTestResult>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, case_id, status, observed_at, message, metrics
+               FROM test_results WHERE case_id = $1
+              ORDER BY observed_at DESC LIMIT $2",
+        )
+        .bind(case_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.iter().map(result_from_row).collect())
+    }
+
+    async fn latest_results_for(
+        &self,
+        target_fqn: &str,
+    ) -> Result<Vec<graph_owl_core::quality::LatestResult>, StorageError> {
+        // `LEFT JOIN LATERAL` so a case with no results still produces a row —
+        // a registered check that has never run is a *stale* case, not an
+        // absent one, and an inner join would silently make it invisible.
+        let rows = sqlx::query(
+            "SELECT c.name,
+                    coalesce(c.expected_cadence, d.expected_cadence) AS expected_cadence,
+                    r.status, r.observed_at
+               FROM test_cases c
+               LEFT JOIN test_definitions d ON d.id = c.definition_id
+               LEFT JOIN LATERAL (
+                   SELECT status, observed_at FROM test_results
+                    WHERE case_id = c.id ORDER BY observed_at DESC LIMIT 1
+               ) r ON TRUE
+              WHERE c.target_fqn = $1
+              ORDER BY c.name",
+        )
+        .bind(target_fqn)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|row| graph_owl_core::quality::LatestResult {
+                case_name: row.get("name"),
+                status: row
+                    .get::<Option<String>, _>("status")
+                    .and_then(|raw| graph_owl_core::quality::TestStatus::parse(&raw).ok()),
+                observed_at: row.get("observed_at"),
+                // An unparseable cadence is treated as none rather than
+                // panicking: it was validated on the way in, so reaching here
+                // means a migration widened the column, and a read that dies is
+                // worse than one that is conservative.
+                cadence: row
+                    .get::<Option<String>, _>("expected_cadence")
+                    .and_then(|raw| graph_owl_core::quality::parse_cadence(&raw).ok()),
+            })
+            .collect())
+    }
+
+    async fn prune_test_results(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<i64, StorageError> {
+        // **The latest per case survives regardless of age**, or pruning would
+        // blank the health signal it exists to support — and would do it worst
+        // for exactly the infrequently-tested assets whose signal is scarcest.
+        let pruned = sqlx::query(
+            "DELETE FROM test_results r
+              WHERE r.observed_at < $1
+                AND r.id <> (SELECT keep.id FROM test_results keep
+                              WHERE keep.case_id = r.case_id
+                              ORDER BY keep.observed_at DESC, keep.id
+                              LIMIT 1)",
+        )
+        .bind(before)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        .rows_affected();
+        Ok(i64::try_from(pruned).unwrap_or(i64::MAX))
+    }
+
+    // ---- Epic 29 Slices D and E ----
+
+    async fn set_column_mappings(
+        &self,
+        edge_id: Uuid,
+        mappings: &[ColumnMapping],
+    ) -> Result<Option<i64>, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM lineage_edges WHERE id = $1")
+            .bind(edge_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if exists.is_none() {
+            return Ok(None);
+        }
+
+        // Every named column has to resolve. A mapping to a column that does
+        // not exist is a lineage claim nothing can render, and it would sit
+        // there looking like coverage.
+        for mapping in mappings {
+            for fqn in [&mapping.from_column_fqn, &mapping.to_column_fqn] {
+                let found: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT id FROM assets
+                      WHERE fully_qualified_name = $1 AND kind = 'column' AND NOT deleted",
+                )
+                .bind(fqn)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+                if found.is_none() {
+                    return Ok(None);
+                }
+            }
+        }
+
+        sqlx::query("DELETE FROM lineage_column_mappings WHERE edge_id = $1")
+            .bind(edge_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        for mapping in mappings {
+            sqlx::query(
+                "INSERT INTO lineage_column_mappings
+                     (edge_id, from_column_fqn, to_column_fqn, expression)
+                 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+            )
+            .bind(edge_id)
+            .bind(&mapping.from_column_fqn)
+            .bind(&mapping.to_column_fqn)
+            .bind(&mapping.expression)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(Some(i64::try_from(mappings.len()).unwrap_or(i64::MAX)))
+    }
+
+    async fn column_mappings(&self, edge_id: Uuid) -> Result<Vec<ColumnMapping>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT from_column_fqn, to_column_fqn, expression
+               FROM lineage_column_mappings WHERE edge_id = $1
+              ORDER BY to_column_fqn, from_column_fqn",
+        )
+        .bind(edge_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows
+            .iter()
+            .map(|row| ColumnMapping {
+                from_column_fqn: row.get("from_column_fqn"),
+                to_column_fqn: row.get("to_column_fqn"),
+                expression: row.get("expression"),
+            })
+            .collect())
+    }
+
+    async fn reconcile_lineage(
+        &self,
+        source: &str,
+        scope_prefix: &str,
+        asserted: &[(Uuid, Uuid, String)],
+        created_by: &str,
+    ) -> Result<LineageReconciliation, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut report = LineageReconciliation::default();
+
+        for (from, to, relationship) in asserted {
+            let inserted = sqlx::query(
+                "INSERT INTO lineage_edges
+                     (id, from_asset_id, to_asset_id, relationship, source, created_by)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (from_asset_id, to_asset_id, relationship, source) DO NOTHING",
+            )
+            .bind(Uuid::new_v4())
+            .bind(from)
+            .bind(to)
+            .bind(relationship)
+            .bind(source)
+            .bind(created_by)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            if inserted.rows_affected() > 0 {
+                report.added += 1;
+            }
+        }
+
+        // **Scoped by source AND by prefix.** Source-blind replacement silently
+        // deletes lineage a human curated, which is the failure this exists to
+        // prevent. Scope-blind replacement deletes edges in schemas this run
+        // never looked at — the same bug wearing a different hat.
+        let keep: Vec<Uuid> = Vec::new();
+        let removed = sqlx::query(
+            "DELETE FROM lineage_edges e
+              USING assets a
+              WHERE e.from_asset_id = a.id
+                AND e.source = $1
+                AND (a.fully_qualified_name = $2 OR a.fully_qualified_name LIKE $2 || '.%')
+                AND NOT EXISTS (
+                    SELECT 1 FROM unnest($3::uuid[], $4::uuid[], $5::text[])
+                              AS asserted(from_id, to_id, rel)
+                     WHERE asserted.from_id = e.from_asset_id
+                       AND asserted.to_id = e.to_asset_id
+                       AND asserted.rel = e.relationship)",
+        )
+        .bind(source)
+        .bind(scope_prefix)
+        .bind(
+            asserted
+                .iter()
+                .map(|(from, _, _)| *from)
+                .collect::<Vec<_>>(),
+        )
+        .bind(asserted.iter().map(|(_, to, _)| *to).collect::<Vec<_>>())
+        .bind(
+            asserted
+                .iter()
+                .map(|(_, _, rel)| rel.clone())
+                .collect::<Vec<_>>(),
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        .rows_affected();
+        let _ = keep;
+        report.removed = i64::try_from(removed).unwrap_or(i64::MAX);
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(report)
+    }
+
     // ---- Epic 27: data contracts ----
 
     async fn create_contract(
@@ -7991,6 +8539,35 @@ fn conflict_or_unexpected(error: &sqlx::Error, detail: String) -> StorageError {
 const CONTRACT_COLUMNS: &str = "id, name, asset_fqn, producer, compatibility, status, \
      allow_additional, version_major, version_minor, updated_by, change_description, \
      created_at, updated_at";
+
+const TEST_CASE_COLUMNS: &str = "c.id, c.name, c.target_fqn, c.test_type, c.description, \
+     c.definition_id, c.suite_id, coalesce(c.expected_cadence, d.expected_cadence) \
+     AS expected_cadence";
+
+fn test_case_from_row(row: &PgRow) -> StoredTestCase {
+    StoredTestCase {
+        id: row.get("id"),
+        name: row.get("name"),
+        target_fqn: row.get("target_fqn"),
+        test_type: row.get("test_type"),
+        description: row.get("description"),
+        definition_id: row.get("definition_id"),
+        suite_id: row.get("suite_id"),
+        expected_cadence: row.get("expected_cadence"),
+    }
+}
+
+fn result_from_row(row: &PgRow) -> StoredTestResult {
+    StoredTestResult {
+        id: row.get("id"),
+        case_id: row.get("case_id"),
+        status: graph_owl_core::quality::TestStatus::parse(row.get::<String, _>("status").as_str())
+            .unwrap_or(graph_owl_core::quality::TestStatus::Aborted),
+        observed_at: row.get("observed_at"),
+        message: row.get("message"),
+        metrics: row.get("metrics"),
+    }
+}
 
 fn breach_from_row(row: &PgRow) -> ContractBreach {
     ContractBreach {

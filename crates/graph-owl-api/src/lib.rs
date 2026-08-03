@@ -1065,6 +1065,295 @@ impl Catalog {
             })
     }
 
+    // ---- Epic 30: quality signals ----
+
+    /// # Errors
+    ///
+    /// `Validation` if the cadence is not a usable ISO 8601 duration;
+    /// `Conflict` if the name is taken.
+    pub async fn create_test_definition(
+        &self,
+        name: String,
+        test_type: String,
+        description: Option<String>,
+        expected_cadence: Option<String>,
+    ) -> Result<graph_owl_storage::StoredTestDefinition, CatalogError> {
+        Self::check_cadence(expected_cadence.as_deref())?;
+        Ok(self
+            .storage
+            .create_test_definition(
+                Uuid::new_v4(),
+                &name,
+                &test_type,
+                description.as_deref(),
+                expected_cadence.as_deref(),
+            )
+            .await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn list_test_definitions(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::StoredTestDefinition>, CatalogError> {
+        Ok(self.storage.list_test_definitions().await?)
+    }
+
+    /// Change a definition's cadence, and with it every case that inherits it.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the definition does not exist; `Validation` if the cadence
+    /// is unusable.
+    pub async fn set_definition_cadence(
+        &self,
+        id: Uuid,
+        expected_cadence: Option<String>,
+    ) -> Result<i64, CatalogError> {
+        Self::check_cadence(expected_cadence.as_deref())?;
+        self.storage
+            .set_definition_cadence(id, expected_cadence.as_deref())
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the named owner is not a team; `Conflict` if the name is
+    /// taken.
+    pub async fn create_test_suite(
+        &self,
+        name: String,
+        owner: Option<String>,
+        description: Option<String>,
+    ) -> Result<Uuid, CatalogError> {
+        self.storage
+            .create_test_suite(
+                Uuid::new_v4(),
+                &name,
+                owner.as_deref(),
+                description.as_deref(),
+            )
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    ///
+    /// `Validation` if the cadence is unusable; `NotFound` if the target,
+    /// definition or suite does not resolve; `Conflict` if the name is taken on
+    /// that target.
+    pub async fn create_test_case(
+        &self,
+        request: CreateTestCase,
+    ) -> Result<graph_owl_storage::StoredTestCase, CatalogError> {
+        Self::check_cadence(request.expected_cadence.as_deref())?;
+        self.storage
+            .create_test_case(
+                Uuid::new_v4(),
+                &request.name,
+                &request.target_fqn,
+                &request.test_type,
+                request.description.as_deref(),
+                request.definition_id,
+                request.suite_id,
+                request.expected_cadence.as_deref(),
+            )
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn list_test_cases(
+        &self,
+        target_fqn: Option<&str>,
+        suite_id: Option<Uuid>,
+    ) -> Result<Vec<graph_owl_storage::StoredTestCase>, CatalogError> {
+        Ok(self.storage.list_test_cases(target_fqn, suite_id).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the case does not exist.
+    pub async fn delete_test_case(&self, id: Uuid) -> Result<(), CatalogError> {
+        if self.storage.delete_test_case(id).await? {
+            Ok(())
+        } else {
+            Err(CatalogError::NotFound)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    pub async fn record_test_results(
+        &self,
+        batch: Vec<graph_owl_storage::TestResultWrite>,
+    ) -> Result<graph_owl_storage::ResultIngest, CatalogError> {
+        Ok(self.storage.record_test_results(&batch).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn test_results(
+        &self,
+        case_id: Uuid,
+    ) -> Result<Vec<graph_owl_storage::StoredTestResult>, CatalogError> {
+        Ok(self.storage.test_results(case_id, RESULT_PAGE).await?)
+    }
+
+    /// An asset's health, derived on read.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn health_of(
+        &self,
+        target_fqn: &str,
+    ) -> Result<graph_owl_core::quality::HealthSummary, CatalogError> {
+        let latest = self.storage.latest_results_for(target_fqn).await?;
+        Ok(graph_owl_core::quality::health_of(&latest, Utc::now()))
+    }
+
+    /// The worst health among an asset's upstream lineage, reported
+    /// **separately** from its own.
+    ///
+    /// **Never merged into the asset's own health** — conflating them makes the
+    /// signal unactionable: a steward cannot tell whether to fix this table or
+    /// go upstream. Returns the worst state found and which asset it was, with
+    /// how many hops away.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if a read fails.
+    pub async fn upstream_health(
+        &self,
+        target_fqn: &str,
+    ) -> Result<Option<UpstreamHealth>, CatalogError> {
+        let Some(asset) = self.storage.get_asset_by_fqn(target_fqn).await? else {
+            return Err(CatalogError::NotFound);
+        };
+
+        // Bounded and cycle-safe. A lineage loop is a configuration mistake
+        // somebody will make, and an unbounded walk turns it into a hung
+        // request rather than an answer.
+        let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        seen.insert(asset.id);
+        let mut frontier = vec![asset.id];
+        let mut worst: Option<UpstreamHealth> = None;
+
+        for hops in 1..=UPSTREAM_HOPS {
+            // **One query per level, not per node.** `lineage_edges_touching`
+            // exists for exactly this shape — a walk that asked per node would
+            // turn a five-deep graph into hundreds of round trips.
+            let edges = self.storage.lineage_edges_touching(&frontier).await?;
+            let mut next = Vec::new();
+            for edge in edges {
+                // Upstream only: an edge is `from → to`, so the frontier being
+                // the `to` end is what makes this a walk against the flow.
+                if !frontier.contains(&edge.to_asset_id) || !seen.insert(edge.from_asset_id) {
+                    continue;
+                }
+                next.push(edge.from_asset_id);
+                let Some(upstream) = self.storage.get_asset(edge.from_asset_id).await? else {
+                    continue;
+                };
+                let summary = self.health_of(&upstream.fully_qualified_name).await?;
+                let candidate = UpstreamHealth {
+                    state: summary.state,
+                    asset_fqn: upstream.fully_qualified_name,
+                    hops,
+                };
+                // Strictly worse replaces, so the **nearest** instance of the
+                // worst state is reported — a steward wants the closest thing
+                // they can act on, not the furthest.
+                let replaces = worst.as_ref().is_none_or(|current| {
+                    current.state != candidate.state
+                        && graph_owl_core::quality::worst(&[current.state, candidate.state])
+                            == candidate.state
+                });
+                if replaces {
+                    worst = Some(candidate);
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        Ok(worst)
+    }
+
+    /// Delete results older than the retention window.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the delete fails.
+    pub async fn prune_test_results(&self) -> Result<i64, CatalogError> {
+        let before = Utc::now() - chrono::Duration::days(RESULT_RETENTION_DAYS);
+        Ok(self.storage.prune_test_results(before).await?)
+    }
+
+    fn check_cadence(raw: Option<&str>) -> Result<(), CatalogError> {
+        let Some(raw) = raw else { return Ok(()) };
+        graph_owl_core::quality::parse_cadence(raw).map_err(|detail| {
+            CatalogError::Validation(vec![FieldError::new(
+                "expectedCadence",
+                FieldErrorCode::Value,
+                detail,
+            )])
+        })?;
+        Ok(())
+    }
+
+    // ---- Epic 29 Slices D and E ----
+
+    /// # Errors
+    ///
+    /// `NotFound` if the edge does not exist or a named column does not.
+    pub async fn set_column_mappings(
+        &self,
+        edge_id: Uuid,
+        mappings: Vec<graph_owl_storage::ColumnMapping>,
+    ) -> Result<i64, CatalogError> {
+        self.storage
+            .set_column_mappings(edge_id, &mappings)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn column_mappings(
+        &self,
+        edge_id: Uuid,
+    ) -> Result<Vec<graph_owl_storage::ColumnMapping>, CatalogError> {
+        Ok(self.storage.column_mappings(edge_id).await?)
+    }
+
+    /// Replace what one source asserted within a scope.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the transaction fails.
+    pub async fn reconcile_lineage(
+        &self,
+        principal: &Principal,
+        source: &str,
+        scope_prefix: &str,
+        asserted: &[(Uuid, Uuid, String)],
+    ) -> Result<graph_owl_storage::LineageReconciliation, CatalogError> {
+        Ok(self
+            .storage
+            .reconcile_lineage(source, scope_prefix, asserted, &principal.id)
+            .await?)
+    }
+
     // ---- Epic 27: data contracts ----
 
     /// # Errors
@@ -7884,6 +8173,51 @@ fn note_mention<'a>(
     entry.push_str(evidence);
 }
 
+/// What a client sends to register a test case.
+#[derive(Debug, Clone, Default)]
+pub struct CreateTestCase {
+    pub name: String,
+    pub target_fqn: String,
+    pub test_type: String,
+    pub description: Option<String>,
+    pub definition_id: Option<Uuid>,
+    pub suite_id: Option<Uuid>,
+    pub expected_cadence: Option<String>,
+}
+
+/// The worst health found upstream, and where.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpstreamHealth {
+    pub state: graph_owl_core::quality::Health,
+    pub asset_fqn: String,
+    /// How far away, so a steward knows whether this is their neighbour's
+    /// problem or three teams removed.
+    pub hops: usize,
+}
+
+/// How many results one page returns.
+///
+/// A hundred, matching every other queue in this codebase: somebody reading a
+/// check's history wants the recent shape of it, and a request returning a
+/// year of nightly runs is a slow query answering a question nobody asked.
+const RESULT_PAGE: i64 = 100;
+
+/// How long test results are kept.
+///
+/// Ninety days, the plan's documented default — long enough to see a quarter's
+/// pattern, and the latest result per case survives regardless of age so
+/// pruning can never blank the health signal.
+const RESULT_RETENTION_DAYS: i64 = 90;
+
+/// How far upstream a health rollup walks.
+///
+/// Three hops: far enough to cross a staging layer and a mart, short enough
+/// that the walk stays a bounded number of reads. An unhealthy source five
+/// layers away is somebody else's incident, and reporting it here would make
+/// every asset in a large estate look sick.
+const UPSTREAM_HOPS: usize = 3;
+
 /// What a client sends to define a contract.
 #[derive(Debug, Clone)]
 pub struct CreateContract {
@@ -8532,6 +8866,11 @@ mod tests {
         contracts: Mutex<Vec<graph_owl_core::contract::Contract>>,
         contract_breaches: Mutex<Vec<graph_owl_core::contract::ContractBreach>>,
         observations: Mutex<Vec<graph_owl_storage::UsageWrite>>,
+        test_definitions: Mutex<Vec<graph_owl_storage::StoredTestDefinition>>,
+        test_suites: Mutex<Vec<(Uuid, String, Option<String>)>>,
+        test_cases: Mutex<Vec<graph_owl_storage::StoredTestCase>>,
+        test_results: Mutex<Vec<graph_owl_storage::StoredTestResult>>,
+        column_mappings: Mutex<Vec<(Uuid, graph_owl_storage::ColumnMapping)>>,
         data_products: Mutex<Vec<graph_owl_core::domain::DataProduct>>,
         product_members: Mutex<Vec<(Uuid, Uuid)>>,
         asset_domains: Mutex<Vec<(Uuid, Uuid)>>,
@@ -11160,6 +11499,423 @@ mod tests {
             let before = held.len();
             held.retain(|(held_id, _)| *held_id != id);
             Ok(held.len() < before)
+        }
+
+        // ---- Epics 29 (D, E) and 30, and as strict as the port ----
+
+        async fn create_test_definition(
+            &self,
+            id: Uuid,
+            name: &str,
+            test_type: &str,
+            description: Option<&str>,
+            expected_cadence: Option<&str>,
+        ) -> Result<graph_owl_storage::StoredTestDefinition, StorageError> {
+            self.guard_write("create_test_definition");
+            let mut held = self.test_definitions.lock().unwrap();
+            if held.iter().any(|d| d.name == name) {
+                return Err(StorageError::Conflict {
+                    detail: format!("a test definition named `{name}` already exists"),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::Fqn,
+                });
+            }
+            let created = graph_owl_storage::StoredTestDefinition {
+                id,
+                name: name.to_string(),
+                test_type: test_type.to_string(),
+                description: description.map(str::to_string),
+                expected_cadence: expected_cadence.map(str::to_string),
+            };
+            held.push(created.clone());
+            Ok(created)
+        }
+
+        async fn list_test_definitions(
+            &self,
+        ) -> Result<Vec<graph_owl_storage::StoredTestDefinition>, StorageError> {
+            Ok(self.test_definitions.lock().unwrap().clone())
+        }
+
+        async fn set_definition_cadence(
+            &self,
+            id: Uuid,
+            expected_cadence: Option<&str>,
+        ) -> Result<Option<i64>, StorageError> {
+            self.guard_write("set_definition_cadence");
+            {
+                let mut held = self.test_definitions.lock().unwrap();
+                let Some(definition) = held.iter_mut().find(|d| d.id == id) else {
+                    return Ok(None);
+                };
+                definition.expected_cadence = expected_cadence.map(str::to_string);
+            }
+            // Only the cases that *inherit*. One with its own cadence said
+            // something different on purpose, and counting it would report a
+            // change that did not happen.
+            let cases = self.test_cases.lock().unwrap();
+            Ok(Some(
+                i64::try_from(cases.iter().filter(|c| c.definition_id == Some(id)).count())
+                    .unwrap_or(i64::MAX),
+            ))
+        }
+
+        async fn create_test_suite(
+            &self,
+            id: Uuid,
+            name: &str,
+            owner: Option<&str>,
+            description: Option<&str>,
+        ) -> Result<Option<Uuid>, StorageError> {
+            self.guard_write("create_test_suite");
+            let _ = description;
+            if let Some(owner) = owner {
+                let teams = self.teams.lock().unwrap();
+                if !teams.iter().any(|t| t.id == owner) {
+                    return Ok(None);
+                }
+            }
+            let mut held = self.test_suites.lock().unwrap();
+            if held.iter().any(|(_, existing, _)| existing == name) {
+                return Err(StorageError::Conflict {
+                    detail: format!("a test suite named `{name}` already exists"),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::Fqn,
+                });
+            }
+            held.push((id, name.to_string(), owner.map(str::to_string)));
+            Ok(Some(id))
+        }
+
+        async fn create_test_case(
+            &self,
+            id: Uuid,
+            name: &str,
+            target_fqn: &str,
+            test_type: &str,
+            description: Option<&str>,
+            definition_id: Option<Uuid>,
+            suite_id: Option<Uuid>,
+            expected_cadence: Option<&str>,
+        ) -> Result<Option<graph_owl_storage::StoredTestCase>, StorageError> {
+            self.guard_write("create_test_case");
+            {
+                let assets = self.assets.lock().expect("lock");
+                if !assets
+                    .iter()
+                    .any(|a| a.fully_qualified_name == target_fqn && !a.deleted)
+                {
+                    return Ok(None);
+                }
+            }
+            let inherited = match definition_id {
+                None => None,
+                Some(definition) => {
+                    let held = self.test_definitions.lock().unwrap();
+                    match held.iter().find(|d| d.id == definition) {
+                        None => return Ok(None),
+                        Some(found) => found.expected_cadence.clone(),
+                    }
+                }
+            };
+            if let Some(suite) = suite_id {
+                let held = self.test_suites.lock().unwrap();
+                if !held.iter().any(|(existing, _, _)| *existing == suite) {
+                    return Ok(None);
+                }
+            }
+
+            let mut cases = self.test_cases.lock().unwrap();
+            if cases
+                .iter()
+                .any(|c| c.target_fqn == target_fqn && c.name == name)
+            {
+                return Err(StorageError::Conflict {
+                    detail: format!("`{name}` is already a test case on `{target_fqn}`"),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::Fqn,
+                });
+            }
+            let created = graph_owl_storage::StoredTestCase {
+                id,
+                name: name.to_string(),
+                target_fqn: target_fqn.to_string(),
+                test_type: test_type.to_string(),
+                description: description.map(str::to_string),
+                definition_id,
+                suite_id,
+                // Resolved here exactly as the SQL `coalesce` does: the case's
+                // own cadence wins, the definition's is the fallback.
+                expected_cadence: expected_cadence.map(str::to_string).or(inherited),
+            };
+            cases.push(created.clone());
+            Ok(Some(created))
+        }
+
+        async fn list_test_cases(
+            &self,
+            target_fqn: Option<&str>,
+            suite_id: Option<Uuid>,
+        ) -> Result<Vec<graph_owl_storage::StoredTestCase>, StorageError> {
+            let cases = self.test_cases.lock().unwrap();
+            Ok(cases
+                .iter()
+                .filter(|c| target_fqn.is_none_or(|fqn| c.target_fqn == fqn))
+                .filter(|c| suite_id.is_none_or(|suite| c.suite_id == Some(suite)))
+                .cloned()
+                .collect())
+        }
+
+        async fn delete_test_case(&self, id: Uuid) -> Result<bool, StorageError> {
+            self.guard_write("delete_test_case");
+            let mut cases = self.test_cases.lock().unwrap();
+            let before = cases.len();
+            cases.retain(|c| c.id != id);
+            self.test_results
+                .lock()
+                .unwrap()
+                .retain(|r| r.case_id != id);
+            Ok(cases.len() < before)
+        }
+
+        async fn record_test_results(
+            &self,
+            batch: &[graph_owl_storage::TestResultWrite],
+        ) -> Result<graph_owl_storage::ResultIngest, StorageError> {
+            self.guard_write("record_test_results");
+            let mut ingest = graph_owl_storage::ResultIngest::default();
+            let now = Utc::now();
+            let known: Vec<Uuid> = self
+                .test_cases
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c.id)
+                .collect();
+            let mut held = self.test_results.lock().unwrap();
+
+            for result in batch {
+                if result.observed_at > now {
+                    ingest.rejected += 1;
+                    continue;
+                }
+                if !known.contains(&result.case_id) {
+                    ingest.unknown_case += 1;
+                    continue;
+                }
+                // The same `(case, observed_at)` dedup the unique index
+                // enforces — a retried push must not double-count.
+                if held
+                    .iter()
+                    .any(|r| r.case_id == result.case_id && r.observed_at == result.observed_at)
+                {
+                    ingest.duplicates += 1;
+                    continue;
+                }
+                held.push(graph_owl_storage::StoredTestResult {
+                    id: Uuid::new_v4(),
+                    case_id: result.case_id,
+                    status: result.status,
+                    observed_at: result.observed_at,
+                    message: result.message.clone(),
+                    metrics: result.metrics.clone(),
+                });
+                ingest.accepted += 1;
+            }
+            // No version bump, deliberately — decision 2.
+            Ok(ingest)
+        }
+
+        async fn test_results(
+            &self,
+            case_id: Uuid,
+            limit: i64,
+        ) -> Result<Vec<graph_owl_storage::StoredTestResult>, StorageError> {
+            let held = self.test_results.lock().unwrap();
+            let mut found: Vec<graph_owl_storage::StoredTestResult> = held
+                .iter()
+                .filter(|r| r.case_id == case_id)
+                .cloned()
+                .collect();
+            found.sort_by(|a, b| b.observed_at.cmp(&a.observed_at));
+            found.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+            Ok(found)
+        }
+
+        async fn latest_results_for(
+            &self,
+            target_fqn: &str,
+        ) -> Result<Vec<graph_owl_core::quality::LatestResult>, StorageError> {
+            let cases = self.test_cases.lock().unwrap();
+            let results = self.test_results.lock().unwrap();
+            Ok(cases
+                .iter()
+                .filter(|c| c.target_fqn == target_fqn)
+                .map(|case| {
+                    // A case with no results still produces a row — it is a
+                    // *stale* case, not an absent one, and dropping it would
+                    // make a declared check that never ran invisible.
+                    let latest = results
+                        .iter()
+                        .filter(|r| r.case_id == case.id)
+                        .max_by_key(|r| r.observed_at);
+                    graph_owl_core::quality::LatestResult {
+                        case_name: case.name.clone(),
+                        status: latest.map(|r| r.status),
+                        observed_at: latest.map(|r| r.observed_at),
+                        cadence: case
+                            .expected_cadence
+                            .as_deref()
+                            .and_then(|raw| graph_owl_core::quality::parse_cadence(raw).ok()),
+                    }
+                })
+                .collect())
+        }
+
+        async fn prune_test_results(&self, before: DateTime<Utc>) -> Result<i64, StorageError> {
+            self.guard_write("prune_test_results");
+            let mut held = self.test_results.lock().unwrap();
+            // The latest per case survives regardless of age.
+            let mut keep: std::collections::BTreeMap<Uuid, DateTime<Utc>> =
+                std::collections::BTreeMap::new();
+            for result in held.iter() {
+                keep.entry(result.case_id)
+                    .and_modify(|newest| {
+                        if result.observed_at > *newest {
+                            *newest = result.observed_at;
+                        }
+                    })
+                    .or_insert(result.observed_at);
+            }
+            let count_before = held.len();
+            held.retain(|r| {
+                r.observed_at >= before || keep.get(&r.case_id) == Some(&r.observed_at)
+            });
+            Ok(i64::try_from(count_before - held.len()).unwrap_or(i64::MAX))
+        }
+
+        async fn set_column_mappings(
+            &self,
+            edge_id: Uuid,
+            mappings: &[graph_owl_storage::ColumnMapping],
+        ) -> Result<Option<i64>, StorageError> {
+            self.guard_write("set_column_mappings");
+            {
+                let edges = self.lineage.lock().unwrap();
+                if !edges.iter().any(|e| e.id == edge_id) {
+                    return Ok(None);
+                }
+            }
+            {
+                // Every named column has to resolve, as the real adapter
+                // requires — a double that skipped it would let the facade's
+                // tests pass against mappings nothing can render.
+                let assets = self.assets.lock().expect("lock");
+                for mapping in mappings {
+                    for fqn in [&mapping.from_column_fqn, &mapping.to_column_fqn] {
+                        if !assets.iter().any(|a| {
+                            a.fully_qualified_name == *fqn
+                                && a.kind == AssetKind::Column
+                                && !a.deleted
+                        }) {
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+            let mut held = self.column_mappings.lock().unwrap();
+            held.retain(|(edge, _)| *edge != edge_id);
+            for mapping in mappings {
+                held.push((edge_id, mapping.clone()));
+            }
+            Ok(Some(i64::try_from(mappings.len()).unwrap_or(i64::MAX)))
+        }
+
+        async fn column_mappings(
+            &self,
+            edge_id: Uuid,
+        ) -> Result<Vec<graph_owl_storage::ColumnMapping>, StorageError> {
+            Ok(self
+                .column_mappings
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(edge, _)| *edge == edge_id)
+                .map(|(_, mapping)| mapping.clone())
+                .collect())
+        }
+
+        async fn reconcile_lineage(
+            &self,
+            source: &str,
+            scope_prefix: &str,
+            asserted: &[(Uuid, Uuid, String)],
+            created_by: &str,
+        ) -> Result<graph_owl_storage::LineageReconciliation, StorageError> {
+            self.guard_write("reconcile_lineage");
+            let mut report = graph_owl_storage::LineageReconciliation::default();
+
+            let in_scope: Vec<Uuid> = {
+                let assets = self.assets.lock().expect("lock");
+                assets
+                    .iter()
+                    .filter(|a| {
+                        a.fully_qualified_name == scope_prefix
+                            || a.fully_qualified_name
+                                .starts_with(&format!("{scope_prefix}."))
+                    })
+                    .map(|a| a.id)
+                    .collect()
+            };
+
+            let mut edges = self.lineage.lock().unwrap();
+            for (from, to, relationship) in asserted {
+                let already = edges.iter().any(|e| {
+                    e.from_asset_id == *from
+                        && e.to_asset_id == *to
+                        && e.relationship.as_str() == relationship
+                        && e.details.source.as_str() == source
+                });
+                if already {
+                    continue;
+                }
+                edges.push(graph_owl_core::lineage::LineageEdge {
+                    id: Uuid::new_v4(),
+                    from_asset_id: *from,
+                    to_asset_id: *to,
+                    relationship: graph_owl_core::relationship_type::RelationshipType::parse(
+                        relationship,
+                    )
+                    .unwrap_or(graph_owl_core::relationship_type::RelationshipType::Feeds),
+                    details: graph_owl_core::lineage::LineageDetails {
+                        source: graph_owl_core::lineage::LineageSource::parse(source)
+                            .unwrap_or(graph_owl_core::lineage::LineageSource::Connector),
+                        query: None,
+                        description: None,
+                    },
+                    created_at: Utc::now(),
+                    created_by: created_by.to_string(),
+                });
+                report.added += 1;
+            }
+
+            // **Scoped by source and by prefix.** A manually curated edge is
+            // never touched — that is the property the slice exists for, and a
+            // double that dropped either half would let a source-blind
+            // implementation pass every facade test.
+            let before = edges.len();
+            edges.retain(|e| {
+                let this_source = e.details.source.as_str() == source;
+                let in_this_scope = in_scope.contains(&e.from_asset_id);
+                let still_asserted = asserted.iter().any(|(from, to, relationship)| {
+                    e.from_asset_id == *from
+                        && e.to_asset_id == *to
+                        && e.relationship.as_str() == relationship
+                });
+                !(this_source && in_this_scope && !still_asserted)
+            });
+            report.removed = i64::try_from(before - edges.len()).unwrap_or(i64::MAX);
+            Ok(report)
         }
 
         // ---- Epics 27 and 28, and as strict as the port ----

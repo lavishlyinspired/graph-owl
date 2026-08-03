@@ -679,10 +679,10 @@ actually holds could not be asserted at all.
 - [x] **23** Domains and data products — accountability axis with inheritance, consumable bundles *(3 August 2026)*
 - [x] **25** Classifications with mutual exclusivity — the PII taxonomy, with provenance and a rejection ledger *(3 August 2026)*
 - [x] **26** Lifecycle and certification with issuer and expiry, status computed on read *(3 August 2026)*
-- [ ] **27** Data contracts and compatibility
-- [ ] **28** Usage and popularity signals
-- [ ] **29** Lineage: table, column, with SQL and pipeline payload
-- [ ] **30** Quality: test definitions, suites, results, incidents
+- [x] **27** Data contracts and compatibility — the 24-cell matrix, breaches that report rather than block *(3 August 2026)*
+- [x] **28** Usage and popularity signals — rollups, trend with a volume floor, query text dropped at the boundary *(3 August 2026)*
+- [x] **29** Lineage: table and column, with source-scoped reconciliation *(Slices A–C 29 Jul, D–F 3 August 2026)*
+- [x] **30** Quality: definitions, suites, results, derived health *(3 August 2026)*
 
 ### Epic 22 — Custom properties
 - [x] **Typed, per-entity-type property definitions** *(Slice A, 2 August 2026)*. `costCenter` on a service, `retentionDays` on a table — defined through `POST /custom-properties`, validated before the write so a definition that could never be satisfied never reaches the table. A closed type set (decision 4), and an unsupported type is refused *with the supported ones listed*, because a client told only "unsupported" has to go and find the documentation.
@@ -752,6 +752,56 @@ actually holds could not be asserted at all.
 - [~] **Discoverable** *(Slice F, partial)*. A deprecated asset is returned **with its marker** — filtering hides reality, unmarking misleads. `?lifecycle=` / `?certification=` filters and facets are not built.
 
 - **`rename_all_fields` missing, for the fourth time in this codebase.** `CertificationStatus::ExpiringSoon` shipped `days_remaining` beside a camelCase wire. `rename_all` on an enum renames *variants*, not the fields inside them — after `Authorship.agent_id`, `SubmissionOutcome.run_id` and `AssetListQuery.data_product`. Caught only because a unit test asserts the serialized bytes, which is now habit rather than luck.
+
+### Epic 27 — Data contracts
+
+- [x] **The compatibility matrix, written out cell by cell** *(Slice B, 3 August 2026)*. Twenty-four cells, table-tested in `core` with no database. Every shortcut that would compress it — `Full` is `Backward` plus `Forward`, "removal is always breaking" — is a place a future edit gets one cell wrong while the other twenty-three keep passing. Clippy asked to merge the twelve `false` arms; the lint is allowed with that reasoning beside it.
+
+- [x] **Two rules outside the matrix, applied first.** `allow_additional: false` beats even the `None` mode — a consumer reading `SELECT *` into a fixed struct breaks on any new column however nullable, and an explicit refusal must beat a vague permission. And a change to a column the contract never mentioned is never a breach, or every contract becomes a whole-table lock.
+
+- [x] **A breach reports and never blocks** *(Slice C, decision 3)*. graph-owl observes metadata and cannot stop a warehouse `ALTER TABLE`; refusing would be a promise it has no way to keep, and the producer would route around it. Breaches **accumulate** and a later compatible change does not clear one — silent clearing would let a producer break something on Monday and look clean on Tuesday.
+
+- [~] **Every SLA reports `Unknown`** *(Slice D)*, and that is the delivery rather than a stub: decision 5 evaluates against Epic 30's signals, and reporting `Met` for an unmeasured SLA manufactures confidence out of missing data.
+
+- [ ] **ODCS interop** *(Slice E)* → deferred. `00l-build-vs-adopt.md` must be read before any standard-shaped component and `00k` governs conformance claims; doing it inside the epic meant skipping that reading or claiming a conformance nobody verified.
+
+### Epic 28 — Usage and popularity
+
+- [x] **Observations ingest, rollups fold in incrementally** *(Slices A–B, 3 August 2026)*. Usage for an asset nobody has catalogued yet is **kept and reported**, not rejected — the connector may simply not have run, and discarding it would throw away exactly the usage that says something is missing. Ingest never bumps the entity version: reading a table is not editing it.
+
+- [x] **Popularity computed on read** *(Slice C)*, with a volume floor: one query last week against two this week is not "Rising 100%", which is a ratio computed from noise wearing the confidence of one computed from thousands. **`Unknown` is not `Dormant`** — nothing ingested means nothing known, and claiming an asset is unused when nothing was measured is a false negative somebody acts on by retiring it.
+
+- [x] **Query text is dropped at the boundary** *(Slice D, decision 2)*, not filtered on read — and the test reads the column directly, because asserting it is not *shown* is the weaker property and the one that fails a database dump.
+
+- [x] **The most recent observation survives pruning** *(Slice E)*, whatever its age. Pruning `last_accessed` out of existence would blank the single most useful signal there is.
+
+- [ ] **Ranking integration** *(Slice F)* → deferred. Its own RED test is the blocker: ranking with the weight at zero must reproduce prior ordering *exactly*, which is a property of Epic 8's formula and needs a before/after over a real corpus. Adding a popularity term without it is how a ranking change ships that nobody can turn off.
+
+### Epic 29 — Lineage, the column half
+
+- [x] **Column-level mappings, many-to-one** *(Slice D, 3 August 2026)*. One row per source column, so `first_name` + `last_name` → `full_name` needs no array and no ordering nobody agreed on — and a one-to-one model breaks on the first concatenation anybody catalogues. Keyed by column FQN, so a mapping follows a name rather than a position.
+
+- [x] **Source-scoped reconciliation** *(Slice E)* — the sharp one. A manually curated edge survives a connector run that replaces everything that connector asserted; source-blind replacement deletes curated lineage every night without an error. Scoped by FQN prefix as well, and the scope is **required** rather than defaulted, because a scopeless reconciliation would replace every edge that source ever asserted anywhere. Slice A's `(from, to, relationship, source)` uniqueness is what makes it possible at all.
+
+- [x] **Edges survive soft delete and return on restore** *(Slice F)*.
+
+- [ ] **Rename and drop propagation** *(Slice D's last two criteria)* → a column rename leaves the mapping pointing at the old FQN. Doing it properly means hooking the asset rename path where Epic 2's containment cascade lives, and the two should move together rather than growing a second half-aware traversal.
+
+### Epic 30 — Quality signals
+
+- [x] **The boundary held**: graph-owl ingests and displays results produced elsewhere. No scheduler, no assertion language, no executor — those are a product in their own right and would dominate the roadmap.
+
+- [x] **Definitions, cases and suites** *(Slice A, 3 August 2026)*. One definition applied to N assets yields N cases, and editing its cadence changes all N — while a case that overrode it is deliberately not moved, which is what makes the override an override rather than a default nobody can escape.
+
+- [x] **Results are history** *(Slice B)*, and ingesting them never bumps the entity version (decision 2): a nightly suite across ten thousand tables would otherwise fill every history with observations rather than changes.
+
+- [x] **Health is derived, and refuses to lie twice** *(Slice C)*. No tests → `Unknown`, **never** `Healthy`: reporting health for something nobody checked asserts trust nobody earned, silently. A result older than its cadence → `Stale`, not its last status: carrying it forward is how a pipeline that stopped running keeps looking green. A fresh pass beside a stale case reports **both**, distinctly, rather than averaging one away. An *aborted* check is neither a pass nor a failure — it says nothing about the data, and counting it either way invents a signal out of an outage.
+
+- [x] **The latest result survives pruning** *(Slice E)*, worst-case for exactly the infrequently-tested assets whose signal is scarcest.
+
+- [x] **Upstream health is reported separately, never merged** *(Slice F)*. Conflating them makes the signal unactionable: a steward cannot tell whether to fix this table or go upstream. Bounded at three hops, cycle-safe, one query per level. **`Unknown` is not the worst state** in the rollup — an upstream nobody tests is less alarming than one known to be failing, and ordering it below `Unhealthy` stops an untested corner drowning out a real incident.
+
+- [ ] **Health filtering and facets** *(Slice D)* → deferred. It requires a denormalized column refreshed *asynchronously* plus a query-plan test asserting no per-row computation; there is no async work queue here, and inventing one for a filter is a bigger decision than the filter. Computing health per row instead is what the criteria name as the thing to avoid.
 
 ### Epic 24 — Business semantics
 

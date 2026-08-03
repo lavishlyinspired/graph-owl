@@ -1,8 +1,6 @@
 # Plan: Lineage (Epic 29)
 **Branch**: feat/lineage
-**Status**: **In progress** — Slices A, B and C shipped 29 Jul 2026, pulled
-forward from Demo 7 because Demo 3's lineage DAG had nothing to draw without
-them. D (column-level), E (connector reconciliation) and F (survives deletion)
+**Status**: **Slices A–F shipped.** A, B and C on 29 Jul 2026; D, E and F on 3 Aug 2026
 not started
 **Depends on**: Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage), **Epic 7a** (bounded, cycle-safe traversal — lineage does not implement its own walk)
 **Unblocks**: impact analysis workflows
@@ -79,7 +77,22 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: visited set, node budget, truncation flag.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice D: Lineage reaches column level
+### Slice D: Lineage reaches column level — **shipped**
+
+**One row per source column, so many-to-one needs no array.** `first_name` and
+`last_name` → `full_name` is the ordinary case, not an edge case, and a
+one-to-one model breaks on the first concatenation anybody catalogues. Rows also
+avoid an ordering nobody agreed on.
+
+Mappings are keyed by **column FQN**, so they follow a name rather than a
+position — the reorder criterion falls out of the key rather than needing a rule.
+`PUT` replaces wholesale, because a refactor that makes a column come from one
+source instead of two cannot be expressed by adding.
+
+**Not done**: rename and drop propagation. A column rename today leaves the
+mapping pointing at the old FQN. That is a real gap rather than a rounding —
+see "Explicitly deferred".
+
 
 **Value**: "Which source column produced this number" — the question that ends a data-quality argument.
 **Path**: `column_lineage: Vec<ColumnMapping>` inside `LineageDetails`, mapping `Vec<from_column_fqn> → to_column_fqn`.
@@ -94,7 +107,18 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: mapping type, validation, rename/drop propagation.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice E: Connector-asserted lineage reconciles
+### Slice E: Connector-asserted lineage reconciles — **shipped**
+
+**Scoped by source *and* by prefix, and both halves matter.** Source-blind
+replacement silently deletes lineage a human curated — every night, without an
+error, which is why it is the slice's own critical test. Scope-blind replacement
+deletes edges in schemas the run never looked at, which is the same bug wearing
+a different hat; the scope is therefore required rather than defaulted.
+
+The `(from, to, relationship, source)` uniqueness Slice A already put on
+`lineage_edges` is what makes this possible at all: a human's edge and a
+connector's are two rows, so replacing one set cannot touch the other.
+
 
 **Value**: Automation and human curation coexist instead of overwriting each other every night.
 **Path**: a connector run replaces the edge set it previously asserted for the scope it enumerated, keyed by `source`.
@@ -109,7 +133,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **REFACTOR**: this is the second consumer of "reconcile an enumerated scope" (after Epic 15 Slice E). Extract the shared pure reconciliation function if not already done.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice F: Lineage survives entity deletion
+### Slice F: Lineage survives entity deletion — **shipped**
 
 **Value**: Restoring a mistakenly deleted table restores its lineage too.
 **Path**: edges retained on soft delete; purged on hard delete.
@@ -123,6 +147,17 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
 ## Explicitly deferred (with destination)
+
+- **Column rename and drop propagation** (Slice D's last two criteria) → a
+  rename today leaves a mapping pointing at the old column FQN. Doing it
+  properly means hooking the asset rename path, which is where Epic 2's
+  containment cascade already lives, and the two should move together rather
+  than growing a second half-aware traversal. Named here so it is a known gap
+  rather than a surprise.
+- **A crashed run replacing nothing** (Slice E) → the completion gating is Epic
+  15 Slice E's, and reconciliation here is called *by* a completed run rather
+  than deciding completion itself. The guard exists one layer up; this endpoint
+  deliberately does not re-implement it.
 
 - **SQL parsing to derive lineage automatically** → a substantial sub-project. Asserted lineage covers most of the value; revisit when manual + connector lineage demonstrably falls short.
 - **Lineage from query logs** → same reason; also needs query-log ingestion, itself off the roadmap.

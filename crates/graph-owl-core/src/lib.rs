@@ -17,6 +17,7 @@ pub mod metric;
 pub mod ownership;
 pub mod page;
 pub mod projection;
+pub mod quality;
 pub mod recall;
 pub mod relationship_type;
 pub mod resolution;

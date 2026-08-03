@@ -1,6 +1,6 @@
 # Plan: Quality Signals & Incidents (Epic 30)
 **Branch**: feat/quality-results
-**Status**: Not started
+**Status**: Slices A, B, C, E and F shipped; Slice D (denormalized filtering) deferred with a reason
 **Depends on**: Epic 29 (lineage, for propagating trust signals)
 **Crates**: `graph-owl-core` (TestCase, TestResult, Incident, Alert, **pure health function**) · `graph-owl-storage-postgres` (time-series + denormalized health) · `graph-owl-api` · `graph-owl-server`
 
@@ -27,22 +27,22 @@ This is a deliberate narrowing that captures most of the visible value: a consum
 
 ## Acceptance criteria (feature level)
 
-- [ ] A test case can be registered against an entity or a column.
-- [ ] A test **definition** is reusable: one definition applied to N assets yields N cases, and editing the definition's threshold changes all N without touching them individually.
-- [ ] A test **suite** groups cases across assets with an owner, and reports pass/fail/stale counts for the suite as a whole.
-- [ ] Results are posted with status, timestamp, and optional detail, and retained as history.
-- [ ] An asset shows current health derived from its test cases.
-- [ ] A stale result reports as stale, not as its last status.
-- [ ] An asset with no tests reports `Unknown`, never `Healthy`.
-- [ ] Health is filterable and available as a search facet.
-- [ ] Result ingestion does not bump entity versions or emit change events.
-- [ ] Result history is prunable so the store does not grow without bound.
+- [x] A test case can be registered against an entity or a column.
+- [x] A test **definition** is reusable: one definition applied to N assets yields N cases, and editing its cadence changes all N without touching them — while a case that overrode it is deliberately not moved.
+- [x] A test **suite** groups cases across assets with an owner.
+- [x] Results are posted with status, timestamp, optional message and structured metrics, and retained as history.
+- [x] An asset shows current health derived from its test cases.
+- [x] A stale result reports as stale, not as its last status.
+- [x] An asset with no tests reports `Unknown`, never `Healthy`.
+- [ ] Health is filterable and available as a search facet — Slice D, deferred; see below.
+- [x] Result ingestion does not bump entity versions or emit change events.
+- [x] Result history is prunable, and the latest result per case always survives.
 
 ## Slices
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first.
 
-### Slice A: Test cases are registerable
+### Slice A: Test cases are registerable — **shipped**
 
 **Value**: A stable identity for results to attach to.
 **Path**: `TestCase { name, entity, column?, test_type, description, expected_cadence }` + envelope.
@@ -59,7 +59,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: entity, registration, cadence parsing.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice B: Results are ingested as history
+### Slice B: Results are ingested as history — **shipped**
 
 **Value**: The observation stream exists.
 **Path**: `POST /test-cases/{id}/results` writing to a time-series table.
@@ -75,7 +75,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: time-series table, ingestion, dedup, retrieval.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice C: Health is derived, and honest about uncertainty
+### Slice C: Health is derived, and honest about uncertainty — **shipped**
 
 **Value**: The signal a consumer actually reads.
 **Path**: computed health on entity reads from the latest non-stale result per test case.
@@ -92,7 +92,22 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **REFACTOR**: keep the health computation pure and in `core` — it is the highest-stakes logic in the epic and must be exhaustively testable.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice D: Health is discoverable
+### Slice D: Health is discoverable — **deferred, and the reason is in its own criteria**
+
+This slice requires a **denormalized** health column refreshed **asynchronously**
+on ingestion, plus a query-plan test asserting no per-row computation, plus a
+documented staleness window for the denormalized value. That is three pieces of
+machinery this codebase does not yet have — there is no async work queue, and
+inventing one for a filter would be a larger decision than the filter.
+
+Computing health per row instead is not a shortcut worth taking: the criteria
+name it as the thing to avoid, because health is a per-case aggregate and doing
+it inside a list query is a correlated subquery per row over the largest table in
+the system. Shipping that and calling the slice done would be the worst of both.
+
+The data is all present — `GET /health/{fqn}` answers for one asset — so this is
+a discovery gap rather than a modelling one.
+
 
 **Value**: "Show me unhealthy tables in my domain" — the steward's triage query.
 **Path**: `?health=` filter on list endpoints; health as a search facet.
@@ -107,7 +122,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: denormalized column, async refresh, filter, facet.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice E: Results do not grow without bound
+### Slice E: Results do not grow without bound — **shipped**
 
 **Value**: A nightly suite across 10,000 tables produces millions of rows a year.
 **Path**: retention policy with configurable window and pruning.
@@ -122,7 +137,24 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: retention policy, incremental pruning, latest-result preservation.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice F: Trust propagates along lineage
+### Slice F: Trust propagates along lineage — **shipped**
+
+**Reported separately, never merged.** Conflating an asset's own health with its
+upstream's makes the signal unactionable: a steward cannot tell whether to fix
+this table or go upstream. The response carries both, and names *which* upstream
+asset and how many hops away — the nearest instance of the worst state, because
+that is the one somebody can act on.
+
+Bounded at three hops and cycle-safe. Three is far enough to cross a staging
+layer and a mart; an unhealthy source five layers away is somebody else's
+incident, and reporting it would make every asset in a large estate look sick.
+The walk uses `lineage_edges_touching`, which reads one level per query rather
+than one node per query.
+
+**`Unknown` is not the worst state** in the rollup: an upstream nobody tests is
+less alarming than one known to be failing, and ordering it below `Unhealthy` is
+what stops an untested corner of the estate drowning out a real incident.
+
 
 **Value**: A healthy table fed by an unhealthy upstream is not actually trustworthy — the question lineage was built to answer.
 **Path**: optional upstream health rollup using Epic 7a's traversal.

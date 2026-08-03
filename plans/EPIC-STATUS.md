@@ -59,15 +59,15 @@ is the condition that index exists to catch.
 | **19** | 6 | [`19-streaming.md`](19-streaming.md) | In progress | 5/6 (+1 partial) | Epic 16 (ingestion contract), Epic 18 (dedup and ordering machinery) |
 | **20** | 6 | [`20-metadata-as-code.md`](20-metadata-as-code.md) | **Shipped** | 2/2 | Epic 15 (idempotent upsert and reconciliation machinery) |
 | **21** | 6 | [`21-document-ingestion.md`](21-document-ingestion.md) | **Shipped** | 3/3 | Epic 16 (ingestion), Epic 17 (mention resolution) |
-| **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | In progress | 8/12 | Epic 3 (the envelope's `extension` field) |
-| **23** | 7 | [`23-domains.md`](23-domains.md) | In progress | 10/14 | Epic 11 (domains and products are owned) |
+| **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | **Shipped** | 12/12 | Epic 3 (the envelope's `extension` field) |
+| **23** | 7 | [`23-domains.md`](23-domains.md) | **Shipped** | 14/14 | Epic 11 (domains and products are owned) |
 | **24** | 7 | [`24-business-semantics.md`](24-business-semantics.md) | In progress | 8/9 (+1 partial) | Epic 2 (FQN derivation and the hierarchy terms attach to), Epic 11 (term review… |
-| **25** | 7 | [`25-classification.md`](25-classification.md) | In progress | 11/16 | Epic 3 (envelope carries `tags`), Epic 11 (term reviewers are users) |
+| **25** | 7 | [`25-classification.md`](25-classification.md) | In progress | 15/16 | Epic 3 (envelope carries `tags`), Epic 11 (term reviewers are users) |
 | **26** | 7 | [`26-lifecycle-certification.md`](26-lifecycle-certification.md) | In progress | 6/7 (+1 partial) | Epic 11 (issuers are principals), Epic 24 (metrics are certifiable) |
-| **27** | 7 | [`27-contracts.md`](27-contracts.md) | Not started | — | Epic 2 (schemas to guarantee), Epic 3 (version diffs detect breakage) |
-| **28** | 7 | [`28-usage.md`](28-usage.md) | Not started | — | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
-| **29** | 7 | [`29-lineage.md`](29-lineage.md) | In progress | 5/8 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
-| **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | In progress | 4/8 | Epic 29 (lineage, for propagating trust signals) |
+| **27** | 7 | [`27-contracts.md`](27-contracts.md) | In progress | 3/5 (+1 partial) | Epic 2 (schemas to guarantee), Epic 3 (version diffs detect breakage) |
+| **28** | 7 | [`28-usage.md`](28-usage.md) | In progress | 4/5 | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
+| **29** | 7 | [`29-lineage.md`](29-lineage.md) | In progress | 8/12 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
+| **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | In progress | 14/15 | Epic 29 (lineage, for propagating trust signals) |
 | **31** | 5 | [`31-memory.md`](31-memory.md) | In progress | 2/5 (+1 partial) | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
 | **32** | 5 | [`32-agent-capabilities.md`](32-agent-capabilities.md) | Not started | 0/2 | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
 | **33** | 9 | [`33-ontology-packs.md`](33-ontology-packs.md) | Not started | 0/8 | Epic 24 (glossary and taxonomy model), Epic 9 (standards import) |
@@ -397,10 +397,10 @@ is the condition that index exists to catch.
 - [x] 23
 - [x] 25
 - [x] 26
-- [ ] 27
-- [ ] 28
-- [ ] 29
-- [ ] 30
+- [x] 27
+- [x] 28
+- [x] 29
+- [x] 30
 - [x] Typed, per-entity-type property definitions
 - [x] Values validated on write
 - [x] Definitions evolve safely
@@ -412,10 +412,10 @@ is the condition that index exists to catch.
 - [x] 23
 - [x] 25
 - [x] 26
-- [ ] 27
-- [ ] 28
-- [ ] 29
-- [ ] 30
+- [x] 27
+- [x] 28
+- [x] 29
+- [x] 30
 - [x] Domains nest, and the paths move with them
 - [x] One asset, one domain, resolved by walking up
 - [x] The cascade is free, and the plan's criteria for it did not survive
@@ -441,10 +441,10 @@ is the condition that index exists to catch.
 - [x] 23
 - [x] 25
 - [x] 26
-- [ ] 27
-- [ ] 28
-- [ ] 29
-- [ ] 30
+- [x] 27
+- [x] 28
+- [x] 29
+- [x] 30
 - [x] Three of nine slices were already built.
 - [x] Provenance from day one
 - [x] Exclusivity is scoped to one classification
@@ -464,6 +464,22 @@ is the condition that index exists to catch.
 - [x] Renewal re-checks
 - [~] Discoverable
 
+### Epic 27 — Data Contracts *(Demo 7)*
+
+- [x] The compatibility matrix, written out cell by cell
+- [x] Two rules outside the matrix, applied first.
+- [x] A breach reports and never blocks
+- [~] Every SLA reports `Unknown`
+- [ ] ODCS interop
+
+### Epic 28 — Usage & Popularity *(Demo 7)*
+
+- [x] Observations ingest, rollups fold in incrementally
+- [x] Popularity computed on read
+- [x] Query text is dropped at the boundary
+- [x] The most recent observation survives pruning
+- [ ] Ranking integration
+
 ### Epic 29 — Lineage *(Demo 7)*
 
 - [x] A
@@ -474,6 +490,10 @@ is the condition that index exists to catch.
 - [ ] D
 - [ ] E
 - [ ] F
+- [x] Column-level mappings, many-to-one
+- [x] Source-scoped reconciliation
+- [x] Edges survive soft delete and return on restore
+- [ ] Rename and drop propagation
 
 ### Epic 30 — Quality Signals & Incidents *(Demo 7)*
 
@@ -481,10 +501,17 @@ is the condition that index exists to catch.
 - [x] 23
 - [x] 25
 - [x] 26
-- [ ] 27
-- [ ] 28
-- [ ] 29
-- [ ] 30
+- [x] 27
+- [x] 28
+- [x] 29
+- [x] 30
+- [x] The boundary held
+- [x] Definitions, cases and suites
+- [x] Results are history
+- [x] Health is derived, and refuses to lie twice
+- [x] The latest result survives pruning
+- [x] Upstream health is reported separately, never merged
+- [ ] Health filtering and facets
 
 ### Epic 31 — Organizational Memory ★ *(Demo 5)*
 
