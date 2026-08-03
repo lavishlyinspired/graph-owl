@@ -1,7 +1,7 @@
 # Plan: Cypher Query Support (Epic 7b)
 
 **Branch**: feat/engine-cypher
-**Status**: Not started. **Slice A re-scoped 4 August 2026** from "build a parser" to "adopt the Apache-2.0 grammar, generate the parser" — see Slice A and `00l-build-vs-adopt.md`
+**Status**: Not started. **Slice A re-scoped 4 August 2026**: adopt an existing Rust Cypher parser if one survives a controlled spike; generate from the Apache-2.0 grammar only if none does. See Slice A and `00l-build-vs-adopt.md`
 **Depends on**: Epic 7 (SPARQL plan is the lowering target), Epic 7a (traversal), **Epic 7c (LPG projection — 7c ships before 7b; the letters are labels, not a sequence)**
 **Unblocks**: Epic 7d (Bolt), Epic 41 (query workbench)
 **Crates**: `graph-owl-query` (new `cypher` module — **not a separate crate**) · consumes `graph-owl-lpg` (7c) · consumed by `graph-owl-bolt` (7d)
@@ -77,36 +77,52 @@ Cypher's `MATCH` uses **relationship-isomorphism** semantics: within one `MATCH`
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first.
 
-### Slice A: Parse the subset — **adopt the grammar, generate the parser**
+### Slice A: Parse the subset — **adopt a parser, or generate one only if none survives**
 
-**Changed 4 August 2026 after checking the ecosystem. This slice was written as
-"build a Cypher parser" and should not be.** See `00l-build-vs-adopt.md`'s
-Cypher section for the full analysis; the short version:
+**Re-scoped twice. Read this before writing any parser code.**
 
-- The **openCypher grammar is Apache-2.0** and published as EBNF and ANTLR4.
-  `00i` rule 2 already requires the specification to be the source, so adopting
-  it is not a new decision — only generating from it is.
-- **The ~10k-line figure quoted in `07c` was misread**, including by this plan.
-  It is the size of a *complete* openCypher front end for the whole language.
-  This subset is eleven clause forms, which is a different order of magnitude —
-  do not size the slice against the larger number.
-- **No Rust openCypher parser crate is both maintained and stable enough** to
-  put on the security path (authorization is compiled into the plan).
-  `open-cypher` is abandoned since 2022; `decypher` is active and `rowan`-based
-  but `0.2.0-alpha.6` with an explicitly unstable AST; `ocg` is a whole database
-  on an unauditable internal repository. ANTLR's Rust runtimes are stale or
-  barely adopted, and would add a Java build step to CI.
+The slice was originally written as "build a Cypher parser". On 4 August 2026 it
+became "vendor the EBNF and generate a `pest` parser". A second pass over the
+ecosystem the same day found three Rust Cypher crates the first had missed — the
+first search returned the *hyphenated* `open-cypher` (abandoned 2022) and was
+never repeated for the unhyphenated `opencypher`. So:
 
-**Do first, before any parser work: a one-hour spike against `decypher`.** If
-its AST is usable, it is the better answer — `rowan` gives error-resilient
-parsing and column-accurate diagnostics for free, and it already returns
-`Unsupported` for unhandled productions, which is exactly what the criteria
-below ask for. If it is not, generate a `pest` grammar from the vendored EBNF.
-**The spike's outcome is the slice's first commit, either way.**
+> **Adopt an existing parser if one passes a controlled spike. Generate from the
+> official grammar only if every candidate fails. Hand-writing one is the last
+> resort.**
 
-**Acceptance criteria**: node and relationship patterns with labels, types, direction, and properties; `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT`, `DISTINCT`; variable-length `*1..3`, `*`, `*..5`; a write clause → a specific rejection naming it and pointing at the catalog API; `CALL`/`FOREACH` → "unsupported"; syntax errors report line and column; **the supported subset is expressed as a grammar file rather than as a validator**, so a production outside it cannot parse rather than being caught by a second pass that can drift.
-**RED**: A query corpus with expected ASTs, plus a malformed corpus with expected positions. Write-clause tests asserting the rejection *names the API to use instead* — a bare "unsupported" leaves the user stuck. Mutator watch: accepting `CREATE` must fail; generic errors must fail the naming assertions.
-**Done when**: criteria met, mutation report reviewed, commit approved.
+Full analysis and the licence table are in `00l-build-vs-adopt.md`. What binds
+this slice:
+
+- **The ~10k-line figure quoted from `07c` is not this slice's size.** It is a
+  *complete* front end for the whole language. This subset is eleven clause
+  forms.
+- **Spike order**: `cypher-parser` (MIT, Shopify, active, parse/execute
+  separable) → `tree-sitter-cypher` (MIT, mature runtime) → `decypher`
+  (permissive, typed, alpha) → **`opencypher` is blocked** while its repository
+  404s → `pest` from the vendored EBNF as the fallback.
+- **Auditability is a gate, not a score.** `opencypher` is the best API fit on
+  paper — a typed, span-annotated AST — and cannot be adopted while its source
+  cannot be read, its licence claim cannot be checked against the code, and
+  there is nowhere to file a bug. This is the same objection `00l` raised
+  against `ocg`; applying it inconsistently would make it worthless.
+- **A CST is not an AST, and error-tolerance is not a virtue here.**
+  `tree-sitter` recovers from malformed input and returns a partial tree. That
+  is ideal for Epic 41's workbench and a hazard for this slice, because this
+  parser is a **gate** deciding whether a query is in the supported subset — a
+  parser that recovers rather than refusing makes that decision by omission. If
+  tree-sitter wins for the editor and something typed wins for the engine, two
+  parsers is the right answer and the TCK is what keeps them agreeing.
+
+**The spike is this slice's first commit**, whichever way it falls, and it runs
+**one corpus against every candidate** — otherwise it is four impressions rather
+than a comparison. Judged in this order: auditability and licence (a gate);
+subset coverage; refusal behaviour on out-of-subset constructs; diagnostics with
+line and column; AST usability for lowering; maintenance and dependency weight.
+
+**Acceptance criteria**: node and relationship patterns with labels, types, direction, and properties; `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT`, `DISTINCT`; variable-length `*1..3`, `*`, `*..5`; a write clause → a specific rejection naming it and pointing at the catalog API; `CALL`/`FOREACH` → "unsupported"; syntax errors report line and column; **an out-of-subset construct is refused explicitly rather than partially parsed** — whichever parser is adopted, a silent partial parse on the engine path is disqualifying.
+**RED**: A query corpus with expected ASTs, plus a malformed corpus with expected positions. Write-clause tests asserting the rejection *names the API to use instead* — a bare "unsupported" leaves the user stuck. **A partial-parse test**: a query that is half in-subset must be refused whole, not lowered as far as it got. Mutator watch: accepting `CREATE` must fail; generic errors must fail the naming assertions; treating a partial parse as success must fail the refusal test.
+**Done when**: criteria met, the spike's result is recorded in `00l`, mutation report reviewed, commit approved.
 
 ### Slice A2: The TCK as a conformance oracle
 
