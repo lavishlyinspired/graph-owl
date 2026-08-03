@@ -363,13 +363,27 @@ mod tests {
 
     // ---- wire shapes ----
 
+    /// **The round trip was asymmetric, and mutation testing found it.**
+    /// `LabelType` was checked in both directions; `LabelState` only through
+    /// `parse`, so nothing asserted what `as_str` actually produces — and
+    /// mutating it to `""` survived. That string is not cosmetic: it is written
+    /// straight into a column with `CHECK (state IN ('suggested','confirmed'))`,
+    /// so a wrong one turns every label write into a constraint violation.
     #[test]
     fn label_types_and_states_round_trip_through_their_wire_names() {
         for kind in LabelType::all() {
             assert_eq!(LabelType::parse(kind.as_str()), Ok(*kind));
         }
         assert!(LabelType::parse("guessed").is_err());
-        assert_eq!(LabelState::parse("suggested"), Ok(LabelState::Suggested));
+
+        for state in [LabelState::Suggested, LabelState::Confirmed] {
+            assert_eq!(LabelState::parse(state.as_str()), Ok(state));
+        }
+        // Pinned to the literals, because these are the two values the
+        // database's own `CHECK` accepts — a round trip alone would pass with
+        // both halves renamed in step.
+        assert_eq!(LabelState::Suggested.as_str(), "suggested");
+        assert_eq!(LabelState::Confirmed.as_str(), "confirmed");
         assert!(LabelState::parse("maybe").is_err());
     }
 
