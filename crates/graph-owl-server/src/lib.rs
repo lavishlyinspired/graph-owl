@@ -89,6 +89,42 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             "/custom-properties/{id}",
             patch(update_custom_property).delete(delete_custom_property),
         )
+        // Epic 25. Classifications are the operational vocabulary; labels are
+        // its application, and they carry where they came from.
+        .route(
+            "/classifications",
+            get(list_classifications).post(create_classification),
+        )
+        .route("/classifications/{id}", delete(delete_classification))
+        .route("/classifications/{id}/tags", post(create_tag))
+        .route("/tags", get(list_tags))
+        .route("/tags/{fqn}", delete(delete_tag))
+        .route("/tags/{fqn}/usage", get(tag_usage))
+        // Labels hang off the *target*, not the tag: they are facts about the
+        // entity, they version with it, and a client reading an asset wants
+        // them beside everything else about it.
+        .route("/labels/{targetFqn}", get(labels_on).post(apply_tag_label))
+        .route("/labels/{targetFqn}/{tagFqn}", delete(remove_tag_label))
+        .route("/labels/{targetFqn}/{tagFqn}/confirm", post(confirm_label))
+        .route("/labels/{targetFqn}/{tagFqn}/reject", post(reject_label))
+        .route(
+            "/labels/{targetFqn}/{tagFqn}/propagate",
+            post(propagate_label),
+        )
+        .route("/label-suggestions", get(label_suggestions))
+        // Epic 26. Lifecycle and certification are orthogonal — an asset can be
+        // Deprecated-certified, which is "still trustworthy, and going away".
+        .route("/assets/{id}/lifecycle", post(set_lifecycle))
+        .route("/assets/{fqn}/successor", get(terminal_successor))
+        .route(
+            "/certification-types",
+            get(list_certification_types).post(create_certification_type),
+        )
+        .route(
+            "/certifications/{targetFqn}",
+            get(certifications_on).post(issue_certification),
+        )
+        .route("/recertification-queue", get(recertification_queue))
         // Epic 23. Domains are the accountability axis; data products are the
         // consumable one. Both are entities with envelopes, so both get
         // ordinary entity routes rather than a bespoke shape.
@@ -1126,6 +1162,14 @@ impl AppError {
                 ..
             } => "domain-already-assigned",
             AppError::Conflict {
+                kind: ConflictKind::TagInUse,
+                ..
+            } => "tag-in-use",
+            AppError::Conflict {
+                kind: ConflictKind::TagExclusive,
+                ..
+            } => "tag-mutually-exclusive",
+            AppError::Conflict {
                 kind: ConflictKind::DomainInUse,
                 ..
             } => "domain-in-use",
@@ -1204,6 +1248,14 @@ impl AppError {
                 kind: ConflictKind::DomainAssigned,
                 ..
             } => "This asset already belongs to a domain",
+            AppError::Conflict {
+                kind: ConflictKind::TagInUse,
+                ..
+            } => "This tag is still in use",
+            AppError::Conflict {
+                kind: ConflictKind::TagExclusive,
+                ..
+            } => "That classification permits only one tag",
             AppError::Conflict {
                 kind: ConflictKind::DomainInUse,
                 ..
@@ -1307,6 +1359,14 @@ impl AppError {
             // operator can act on.
             AppError::Conflict {
                 kind: ConflictKind::DomainAssigned | ConflictKind::DomainInUse,
+                detail,
+                ..
+            } => detail.clone(),
+            // Same rule: the counts by kind and the name of the conflicting tag
+            // are the only parts an operator can act on, and a canned sentence
+            // per kind would silently replace them.
+            AppError::Conflict {
+                kind: ConflictKind::TagInUse | ConflictKind::TagExclusive,
                 detail,
                 ..
             } => detail.clone(),
@@ -5729,6 +5789,608 @@ async fn delete_custom_property(
         .delete_custom_property(&principal, id, query.force.unwrap_or(false))
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- Epic 25: tags and classifications ----
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateClassificationBody {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    /// Defaulting to `false` because most vocabularies are additive —
+    /// `PII.Sensitive` beside `PII.Restricted` is normal — and a default that
+    /// refused the common case would be discovered only after somebody hit it.
+    #[serde(default)]
+    mutually_exclusive: bool,
+}
+
+impl ValidateBody for CreateClassificationBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("name"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+async fn create_classification(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<CreateClassificationBody>,
+) -> Result<
+    (
+        StatusCode,
+        Json<graph_owl_core::classification::Classification>,
+    ),
+    AppError,
+> {
+    let created = catalog
+        .create_classification(
+            &principal,
+            payload.name,
+            payload.description,
+            payload.mutually_exclusive,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+async fn list_classifications(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+) -> Result<Json<Vec<graph_owl_core::classification::Classification>>, AppError> {
+    Ok(Json(catalog.list_classifications().await?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecursiveQuery {
+    #[serde(default)]
+    recursive: Option<bool>,
+}
+
+async fn delete_classification(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<RecursiveQuery>,
+) -> Result<StatusCode, AppError> {
+    catalog
+        .delete_classification(id, query.recursive.unwrap_or(false))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateTagBody {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+impl ValidateBody for CreateTagBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("name"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+async fn create_tag(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<CreateTagBody>,
+) -> Result<(StatusCode, Json<graph_owl_core::classification::Tag>), AppError> {
+    let created = catalog
+        .create_tag(&principal, id, payload.name, payload.description)
+        .await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TagListQuery {
+    #[serde(default)]
+    classification_id: Option<Uuid>,
+}
+
+async fn list_tags(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppQuery(query): AppQuery<TagListQuery>,
+) -> Result<Json<Vec<graph_owl_core::classification::Tag>>, AppError> {
+    Ok(Json(catalog.list_tags(query.classification_id).await?))
+}
+
+async fn tag_usage(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(fqn): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let usage = catalog.tag_usage(&fqn).await?;
+    Ok(Json(json!({
+        "total": usage.total(),
+        "byKind": usage
+            .by_kind
+            .iter()
+            .map(|(kind, count)| json!({ "kind": kind, "count": count }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForceFlagQuery {
+    #[serde(default)]
+    force: Option<bool>,
+}
+
+async fn delete_tag(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(fqn): Path<String>,
+    AppQuery(query): AppQuery<ForceFlagQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let removed = catalog
+        .delete_tag(&principal, &fqn, query.force.unwrap_or(false))
+        .await?;
+    Ok(Json(json!({ "removedLabels": removed })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApplyLabelBody {
+    tag_fqn: String,
+    /// Defaults to a human applying it directly, which is what a bare `POST`
+    /// from a console is. A scanner states `automated` and gets `suggested`
+    /// with it.
+    #[serde(default)]
+    label_type: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+impl ValidateBody for ApplyLabelBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("tagFqn"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+async fn apply_tag_label(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(target_fqn): Path<String>,
+    AppJson(payload): AppJson<ApplyLabelBody>,
+) -> Result<StatusCode, AppError> {
+    use graph_owl_core::classification::{LabelState, LabelType};
+
+    let label_type = match payload.label_type.as_deref() {
+        None => LabelType::Manual,
+        Some(raw) => LabelType::parse(raw).map_err(|unknown| {
+            AppError::Validation(vec![FieldError::new(
+                "labelType",
+                FieldErrorCode::Value,
+                format!(
+                    "`{unknown}` is not a label type; expected one of: {}",
+                    LabelType::all()
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )])
+        })?,
+    };
+    // **A manual application defaults to confirmed; an automated one to
+    // suggested.** A scanner's proposal counting as curation is the failure
+    // decision 2 exists to prevent, and making the caller state it would mean
+    // one that forgot got the dangerous answer.
+    let state = match payload.state.as_deref() {
+        Some(raw) => LabelState::parse(raw).map_err(|unknown| {
+            AppError::Validation(vec![FieldError::new(
+                "state",
+                FieldErrorCode::Value,
+                format!("`{unknown}` is not a label state; expected suggested or confirmed"),
+            )])
+        })?,
+        None if matches!(label_type, LabelType::Automated | LabelType::Derived) => {
+            LabelState::Suggested
+        }
+        None => LabelState::Confirmed,
+    };
+
+    catalog
+        .apply_tag(&principal, &payload.tag_fqn, &target_fqn, label_type, state)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn labels_on(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(target_fqn): Path<String>,
+) -> Result<Json<Vec<graph_owl_core::classification::TagLabel>>, AppError> {
+    Ok(Json(catalog.labels_on(&target_fqn).await?))
+}
+
+async fn remove_tag_label(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path((target_fqn, tag_fqn)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    catalog.remove_tag(&tag_fqn, &target_fqn).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn confirm_label(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path((target_fqn, tag_fqn)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    catalog
+        .decide_label(&principal, &tag_fqn, &target_fqn, true)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn reject_label(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path((target_fqn, tag_fqn)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    catalog
+        .decide_label(&principal, &tag_fqn, &target_fqn, false)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn propagate_label(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path((target_fqn, tag_fqn)): Path<(String, String)>,
+    AppQuery(query): AppQuery<RecursiveQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let affected = catalog
+        .propagate_tag(
+            &principal,
+            &tag_fqn,
+            &target_fqn,
+            query.recursive.unwrap_or(false),
+        )
+        .await?;
+    Ok(Json(json!({ "affected": affected })))
+}
+
+async fn label_suggestions(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+) -> Result<Json<Vec<graph_owl_core::classification::TagLabel>>, AppError> {
+    Ok(Json(catalog.suggested_labels().await?))
+}
+
+// ---- Epic 26: lifecycle and certification ----
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetLifecycleBody {
+    lifecycle: String,
+    #[serde(default)]
+    deprecation: Option<DeprecationBody>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeprecationBody {
+    reason: String,
+    #[serde(default)]
+    successor_fqn: Option<String>,
+    #[serde(default)]
+    sunset_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ValidateBody for SetLifecycleBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("lifecycle"),
+            &mut errors,
+        );
+        // A deprecation whose reason is blank is a deprecation nobody can act
+        // on, and refusing it here means the facade's own check never has to
+        // guess whether an empty string counts.
+        // **The path is walked from the value it is given.** Passing the
+        // nested `deprecation` object *and* a root-anchored path looks for
+        // `deprecation.deprecation.reason`, which is never there — so every
+        // deprecation carrying a perfectly good reason was refused as missing
+        // one. The whole document, with the whole path.
+        if value.get("deprecation").is_some() {
+            require_non_empty_string(
+                value,
+                &graph_owl_api::validation::FieldPath::root()
+                    .key("deprecation")
+                    .key("reason"),
+                &mut errors,
+            );
+        }
+        errors
+    }
+}
+
+async fn set_lifecycle(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<SetLifecycleBody>,
+) -> Result<Json<Asset>, AppError> {
+    use graph_owl_core::lifecycle::{Deprecation, LifecycleState};
+
+    let to = LifecycleState::parse(&payload.lifecycle).map_err(|unknown| {
+        AppError::Validation(vec![FieldError::new(
+            "lifecycle",
+            FieldErrorCode::Value,
+            format!(
+                "`{unknown}` is not a lifecycle state; expected one of: {}",
+                LifecycleState::all()
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )])
+    })?;
+
+    let deprecation = payload.deprecation.map(|body| Deprecation {
+        reason: body.reason,
+        successor_fqn: body.successor_fqn,
+        deprecated_at: chrono::Utc::now(),
+        sunset_at: body.sunset_at,
+    });
+
+    Ok(Json(
+        catalog
+            .set_lifecycle(&principal, id, to, deprecation)
+            .await?,
+    ))
+}
+
+async fn terminal_successor(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(fqn): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // `null` rather than a 404 when the chain ends nowhere: "this is deprecated
+    // and there is no replacement" is a real answer, and the most useful one an
+    // agent can get short of a successor.
+    let found = catalog.terminal_successor(&fqn).await?;
+    Ok(Json(
+        serde_json::to_value(found).unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateCertificationTypeBody {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    default_validity_days: i32,
+    #[serde(default)]
+    required_evidence: Vec<String>,
+    #[serde(default)]
+    authorized_issuers: Vec<String>,
+}
+
+impl ValidateBody for CreateCertificationTypeBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("name"),
+            &mut errors,
+        );
+        if value.get("defaultValidityDays").is_none() {
+            errors.push(FieldError::new(
+                "defaultValidityDays",
+                FieldErrorCode::Required,
+                "a certification must expire, so its default validity is required",
+            ));
+        }
+        errors
+    }
+}
+
+fn certification_type_body(
+    stored: &graph_owl_storage::StoredCertificationType,
+) -> serde_json::Value {
+    json!({
+        "id": stored.id,
+        "name": stored.name,
+        "description": stored.description,
+        "defaultValidityDays": stored.default_validity_days,
+        "requiredEvidence": stored.required_evidence,
+        "authorizedIssuers": stored.authorized_issuers,
+    })
+}
+
+async fn create_certification_type(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<CreateCertificationTypeBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let created = catalog
+        .create_certification_type(
+            &principal,
+            graph_owl_api::CreateCertificationType {
+                name: payload.name,
+                description: payload.description,
+                default_validity_days: payload.default_validity_days,
+                required_evidence: payload.required_evidence,
+                authorized_issuers: payload.authorized_issuers,
+            },
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(certification_type_body(&created))))
+}
+
+async fn list_certification_types(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    Ok(Json(
+        catalog
+            .list_certification_types()
+            .await?
+            .iter()
+            .map(certification_type_body)
+            .collect(),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IssueCertificationBody {
+    type_id: Uuid,
+    #[serde(default)]
+    criteria: Option<String>,
+    /// Omitted means "use the type's default validity" — the common case, and
+    /// the one that keeps every certification of a type ageing at the same rate.
+    #[serde(default)]
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    evidence: Vec<EvidenceBody>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EvidenceBody {
+    kind: String,
+    reference: String,
+}
+
+impl ValidateBody for IssueCertificationBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        if value.get("typeId").is_none() {
+            errors.push(FieldError::new(
+                "typeId",
+                FieldErrorCode::Required,
+                "`typeId` is required",
+            ));
+        }
+        errors
+    }
+}
+
+fn certification_body(
+    stored: &graph_owl_storage::StoredCertification,
+    status: graph_owl_core::lifecycle::CertificationStatus,
+) -> serde_json::Value {
+    json!({
+        "id": stored.id,
+        "targetFqn": stored.target_fqn,
+        "typeId": stored.type_id,
+        "typeName": stored.type_name,
+        "issuer": stored.issuer,
+        "criteria": stored.criteria,
+        "issuedAt": stored.issued_at,
+        "expiresAt": stored.expires_at,
+        "evidence": stored
+            .evidence
+            .iter()
+            .map(|(kind, reference)| json!({ "kind": kind, "reference": reference }))
+            .collect::<Vec<_>>(),
+        // **Computed here, on every read.** A stored status goes stale without
+        // the entity changing, so an asset would read as certified for as long
+        // as nobody wrote to it.
+        "status": status,
+    })
+}
+
+async fn issue_certification(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(target_fqn): Path<String>,
+    AppJson(payload): AppJson<IssueCertificationBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let evidence = payload
+        .evidence
+        .into_iter()
+        .map(|e| (e.kind, e.reference))
+        .collect();
+    let issued = catalog
+        .issue_certification(
+            &principal,
+            &target_fqn,
+            payload.type_id,
+            payload.criteria,
+            payload.expires_at,
+            evidence,
+        )
+        .await?;
+    let status = graph_owl_core::lifecycle::certification_status(
+        Some(issued.expires_at),
+        chrono::Utc::now(),
+        graph_owl_core::lifecycle::DEFAULT_EXPIRY_WINDOW_DAYS,
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(certification_body(&issued, status)),
+    ))
+}
+
+async fn certifications_on(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(target_fqn): Path<String>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    Ok(Json(
+        catalog
+            .certifications_on(&target_fqn)
+            .await?
+            .iter()
+            .map(|(stored, status)| certification_body(stored, *status))
+            .collect(),
+    ))
+}
+
+async fn recertification_queue(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let now = chrono::Utc::now();
+    Ok(Json(
+        catalog
+            .recertification_queue()
+            .await?
+            .iter()
+            .map(|stored| {
+                let status = graph_owl_core::lifecycle::certification_status(
+                    Some(stored.expires_at),
+                    now,
+                    graph_owl_core::lifecycle::DEFAULT_EXPIRY_WINDOW_DAYS,
+                );
+                certification_body(stored, status)
+            })
+            .collect(),
+    ))
 }
 
 // ---- Epic 23: domains and data products ----

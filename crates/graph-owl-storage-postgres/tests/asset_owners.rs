@@ -43,6 +43,8 @@ async fn asset(storage: &PostgresStorage, name: &str) -> Uuid {
             deleted_at: None,
             created_at: now,
             updated_at: now,
+            lifecycle: Default::default(),
+            deprecation: None,
         })
         .await
         .expect("asset")
@@ -399,6 +401,8 @@ async fn estate(storage: &PostgresStorage, prefix: &str) -> (Uuid, Uuid, Uuid) {
                 deleted_at: None,
                 created_at: now,
                 updated_at: now,
+                lifecycle: Default::default(),
+                deprecation: None,
             })
             .await
             .expect("asset");

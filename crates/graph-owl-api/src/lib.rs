@@ -1040,6 +1040,583 @@ impl Catalog {
             })
     }
 
+    // ---- Epic 25: tags and classifications ----
+
+    /// # Errors
+    ///
+    /// `Validation` if the name cannot exist; `Conflict` if it is taken.
+    pub async fn create_classification(
+        &self,
+        principal: &Principal,
+        name: String,
+        description: Option<String>,
+        mutually_exclusive: bool,
+    ) -> Result<graph_owl_core::classification::Classification, CatalogError> {
+        graph_owl_core::classification::validate_tag_name(&name).map_err(|detail| {
+            CatalogError::Validation(vec![FieldError::new("name", FieldErrorCode::Value, detail)])
+        })?;
+        Ok(self
+            .storage
+            .create_classification(
+                Uuid::new_v4(),
+                &name,
+                description.as_deref(),
+                mutually_exclusive,
+                &principal.id,
+            )
+            .await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn list_classifications(
+        &self,
+    ) -> Result<Vec<graph_owl_core::classification::Classification>, CatalogError> {
+        Ok(self.storage.list_classifications().await?)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if absent; `Conflict` if it still has tags and `recursive`
+    /// was not given.
+    pub async fn delete_classification(
+        &self,
+        id: Uuid,
+        recursive: bool,
+    ) -> Result<(), CatalogError> {
+        match self.storage.delete_classification(id, recursive).await? {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(CatalogError::NotFound),
+            Err(tags) => Err(CatalogError::Conflict {
+                detail: format!(
+                    "this classification still has {tags} tag(s); re-send with \
+                     `?recursive=true` to remove them with it"
+                ),
+                existing_id: Some(id),
+                kind: ConflictKind::TagInUse,
+            }),
+        }
+    }
+
+    /// # Errors
+    ///
+    /// `Validation` if the name cannot exist; `NotFound` if the classification
+    /// does not; `Conflict` if the name is taken **on that classification**.
+    pub async fn create_tag(
+        &self,
+        principal: &Principal,
+        classification_id: Uuid,
+        name: String,
+        description: Option<String>,
+    ) -> Result<graph_owl_core::classification::Tag, CatalogError> {
+        graph_owl_core::classification::validate_tag_name(&name).map_err(|detail| {
+            CatalogError::Validation(vec![FieldError::new("name", FieldErrorCode::Value, detail)])
+        })?;
+        self.storage
+            .create_tag(
+                Uuid::new_v4(),
+                classification_id,
+                &name,
+                description.as_deref(),
+                &principal.id,
+            )
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn list_tags(
+        &self,
+        classification_id: Option<Uuid>,
+    ) -> Result<Vec<graph_owl_core::classification::Tag>, CatalogError> {
+        Ok(self.storage.list_tags(classification_id).await?)
+    }
+
+    /// Apply a tag to an entity or a column.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` naming the tag or target when either does not resolve.
+    /// `Conflict` naming the tag already present from the same exclusive
+    /// classification.
+    pub async fn apply_tag(
+        &self,
+        principal: &Principal,
+        tag_fqn: &str,
+        target_fqn: &str,
+        label_type: graph_owl_core::classification::LabelType,
+        state: graph_owl_core::classification::LabelState,
+    ) -> Result<(), CatalogError> {
+        use graph_owl_storage::LabelOutcome;
+        match self
+            .storage
+            .apply_tag(tag_fqn, target_fqn, label_type, state, &principal.id)
+            .await?
+        {
+            // Idempotent: the state the caller asked for is already true, and a
+            // `409` here would make every retry fail.
+            LabelOutcome::Applied | LabelOutcome::AlreadyApplied => Ok(()),
+            LabelOutcome::NoSuchTag => Err(CatalogError::Validation(vec![FieldError::new(
+                "tagFqn",
+                FieldErrorCode::Value,
+                format!("`{tag_fqn}` is not a defined tag"),
+            )])),
+            LabelOutcome::NoSuchTarget => Err(CatalogError::Validation(vec![FieldError::new(
+                "targetFqn",
+                FieldErrorCode::Value,
+                format!("`{target_fqn}` is not a live entity"),
+            )])),
+            LabelOutcome::Conflicts { existing_tag_fqn } => Err(CatalogError::Conflict {
+                detail: format!(
+                    "`{existing_tag_fqn}` is already applied and its classification is \
+                     mutually exclusive; remove it first"
+                ),
+                existing_id: None,
+                kind: ConflictKind::TagExclusive,
+            }),
+            // Dropped rather than refused: a scanner re-proposing something a
+            // human rejected is normal, and a `409` would make every run of it
+            // look like a failure.
+            LabelOutcome::PreviouslyRejected => Ok(()),
+        }
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the label was not there.
+    pub async fn remove_tag(&self, tag_fqn: &str, target_fqn: &str) -> Result<(), CatalogError> {
+        if self.storage.remove_tag(tag_fqn, target_fqn).await? {
+            Ok(())
+        } else {
+            Err(CatalogError::NotFound)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn labels_on(
+        &self,
+        target_fqn: &str,
+    ) -> Result<Vec<graph_owl_core::classification::TagLabel>, CatalogError> {
+        Ok(self.storage.labels_on(target_fqn).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the label does not exist; `Conflict` if it was already
+    /// confirmed.
+    pub async fn decide_label(
+        &self,
+        principal: &Principal,
+        tag_fqn: &str,
+        target_fqn: &str,
+        confirmed: bool,
+    ) -> Result<(), CatalogError> {
+        use graph_owl_storage::LabelDecision;
+        match self
+            .storage
+            .decide_label(tag_fqn, target_fqn, confirmed, &principal.id)
+            .await?
+        {
+            LabelDecision::Decided => Ok(()),
+            LabelDecision::NoSuchLabel => Err(CatalogError::NotFound),
+            LabelDecision::AlreadyConfirmed => Err(CatalogError::Conflict {
+                detail: format!("`{tag_fqn}` on `{target_fqn}` is already confirmed"),
+                existing_id: None,
+                kind: ConflictKind::TagInUse,
+            }),
+        }
+    }
+
+    /// The steward triage queue.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn suggested_labels(
+        &self,
+    ) -> Result<Vec<graph_owl_core::classification::TagLabel>, CatalogError> {
+        Ok(self.storage.suggested_labels(SUGGESTION_PAGE).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn tag_usage(
+        &self,
+        tag_fqn: &str,
+    ) -> Result<graph_owl_storage::TagUsage, CatalogError> {
+        Ok(self.storage.tag_usage(tag_fqn).await?)
+    }
+
+    /// Delete a tag, refusing while it is applied unless forced.
+    ///
+    /// **Decision 5.** A governance label vanishing from a thousand columns by
+    /// accident is a compliance hazard, so the refusal carries counts by kind —
+    /// which tells a steward whether this is a propagation to undo or a
+    /// curation to redo.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the tag does not exist; `Conflict` with counts if it is in
+    /// use and `force` was not given.
+    pub async fn delete_tag(
+        &self,
+        principal: &Principal,
+        tag_fqn: &str,
+        force: bool,
+    ) -> Result<i64, CatalogError> {
+        let usage = self.storage.tag_usage(tag_fqn).await?;
+        if !usage.is_empty() && !force {
+            let breakdown = usage
+                .by_kind
+                .iter()
+                .map(|(kind, count)| format!("{count} {kind}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(CatalogError::Conflict {
+                detail: format!(
+                    "`{tag_fqn}` is applied to {breakdown}; re-send with `?force=true` \
+                     to remove the tag and every label of it"
+                ),
+                existing_id: None,
+                kind: ConflictKind::TagInUse,
+            });
+        }
+        self.storage
+            .delete_tag(tag_fqn, force, &principal.id)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// Push a tag down to a target's children.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the tag or the target does not resolve.
+    pub async fn propagate_tag(
+        &self,
+        principal: &Principal,
+        tag_fqn: &str,
+        target_fqn: &str,
+        recursive: bool,
+    ) -> Result<i64, CatalogError> {
+        if self.storage.get_tag_by_fqn(tag_fqn).await?.is_none() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "tagFqn",
+                FieldErrorCode::Value,
+                format!("`{tag_fqn}` is not a defined tag"),
+            )]));
+        }
+        if self.storage.get_asset_by_fqn(target_fqn).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self
+            .storage
+            .propagate_tag(tag_fqn, target_fqn, recursive, &principal.id)
+            .await?)
+    }
+
+    // ---- Epic 26: lifecycle and certification ----
+
+    /// Move an asset's lifecycle state.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the asset does not exist. `Validation` if the move is not
+    /// in the state machine, or if a deprecation is missing its reason or names
+    /// an unusable successor.
+    pub async fn set_lifecycle(
+        &self,
+        principal: &Principal,
+        asset_id: Uuid,
+        to: graph_owl_core::lifecycle::LifecycleState,
+        deprecation: Option<graph_owl_core::lifecycle::Deprecation>,
+    ) -> Result<Asset, CatalogError> {
+        use graph_owl_core::lifecycle::LifecycleState;
+        use graph_owl_storage::LifecycleOutcome;
+
+        if to == LifecycleState::Deprecated {
+            let Some(deprecation) = &deprecation else {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "deprecation",
+                    FieldErrorCode::Required,
+                    "deprecating requires a reason: a deprecation nobody can explain \
+                     is one nobody can act on",
+                )]));
+            };
+            self.check_successor(asset_id, deprecation).await?;
+            if let Some(sunset) = deprecation.sunset_at
+                && sunset < Utc::now()
+            {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "deprecation.sunsetAt",
+                    FieldErrorCode::Value,
+                    "a sunset in the past would mean the asset is already retired; \
+                     move it to retired instead",
+                )]));
+            }
+        }
+
+        match self
+            .storage
+            .set_lifecycle(asset_id, to, deprecation.as_ref(), &principal.id)
+            .await?
+        {
+            LifecycleOutcome::Moved(asset) => Ok(*asset),
+            LifecycleOutcome::NotFound => Err(CatalogError::NotFound),
+            LifecycleOutcome::Illegal { from, to } => {
+                Err(CatalogError::Validation(vec![FieldError::new(
+                    "lifecycle",
+                    FieldErrorCode::Value,
+                    format!("`{}` cannot move to `{}`", from.as_str(), to.as_str()),
+                )]))
+            }
+        }
+    }
+
+    /// A successor must exist and must itself be usable.
+    ///
+    /// **Pointing users at another dead asset is worse than pointing
+    /// nowhere**: it looks like an answer. A cycle is caught by the same rule —
+    /// an asset cannot succeed itself, directly or through a chain, because
+    /// every link in that chain is deprecated and therefore refused.
+    async fn check_successor(
+        &self,
+        asset_id: Uuid,
+        deprecation: &graph_owl_core::lifecycle::Deprecation,
+    ) -> Result<(), CatalogError> {
+        use graph_owl_core::lifecycle::LifecycleState;
+        let Some(successor_fqn) = &deprecation.successor_fqn else {
+            return Ok(());
+        };
+        let Some(successor) = self.storage.get_asset_by_fqn(successor_fqn).await? else {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "deprecation.successorFqn",
+                FieldErrorCode::Value,
+                format!("`{successor_fqn}` does not exist"),
+            )]));
+        };
+        if successor.id == asset_id {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "deprecation.successorFqn",
+                FieldErrorCode::Value,
+                "an asset cannot succeed itself",
+            )]));
+        }
+        if matches!(
+            successor.lifecycle,
+            LifecycleState::Deprecated | LifecycleState::Retired
+        ) {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "deprecation.successorFqn",
+                FieldErrorCode::Value,
+                format!(
+                    "`{successor_fqn}` is itself {}; pointing users at another dead \
+                     asset is worse than pointing nowhere",
+                    successor.lifecycle.as_str()
+                ),
+            )]));
+        }
+        Ok(())
+    }
+
+    /// The live asset at the end of a deprecation chain.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the walk fails.
+    pub async fn terminal_successor(&self, fqn: &str) -> Result<Option<Asset>, CatalogError> {
+        Ok(self.storage.terminal_successor(fqn).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Validation` if the validity is not positive; `Conflict` if the name is
+    /// taken.
+    pub async fn create_certification_type(
+        &self,
+        principal: &Principal,
+        request: CreateCertificationType,
+    ) -> Result<graph_owl_storage::StoredCertificationType, CatalogError> {
+        if request.default_validity_days <= 0 {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "defaultValidityDays",
+                FieldErrorCode::Value,
+                "a certification must expire, so its default validity has to be \
+                 positive — an unexpiring trust stamp becomes a lie within a year",
+            )]));
+        }
+
+        // **Every named issuer has to be a real principal**, because decision 4
+        // is that accountability requires a name — and a name nothing resolves
+        // to is not one. Checked here so an unknown issuer is a `400` naming
+        // them rather than a foreign-key violation surfacing as a `500`, which
+        // tells the caller nothing and reads as our bug rather than their typo.
+        let mut unknown = Vec::new();
+        for issuer in &request.authorized_issuers {
+            if self.storage.find_user(issuer).await?.is_none() {
+                unknown.push(issuer.clone());
+            }
+        }
+        if !unknown.is_empty() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "authorizedIssuers",
+                FieldErrorCode::Value,
+                format!(
+                    "these are not known principals: {}. An issuer nothing \
+                     resolves to cannot be accountable for anything",
+                    unknown.join(", ")
+                ),
+            )]));
+        }
+
+        Ok(self
+            .storage
+            .create_certification_type(
+                Uuid::new_v4(),
+                &request.name,
+                request.description.as_deref(),
+                request.default_validity_days,
+                &request.required_evidence,
+                &request.authorized_issuers,
+                &principal.id,
+            )
+            .await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn list_certification_types(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::StoredCertificationType>, CatalogError> {
+        Ok(self.storage.list_certification_types().await?)
+    }
+
+    /// Issue or renew a certification.
+    ///
+    /// **The same path serves both**, which is what makes Slice E's re-check
+    /// real: a renewal goes through the identical evidence enforcement, so one
+    /// whose evidence has since disappeared fails. Renewing on stale grounds is
+    /// how certification decays into theatre.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the type does not exist. `Forbidden` if the principal is
+    /// not an authorized issuer. `Validation` if the expiry is in the past, the
+    /// target does not resolve, or required evidence is missing — named.
+    pub async fn issue_certification(
+        &self,
+        principal: &Principal,
+        target_fqn: &str,
+        type_id: Uuid,
+        criteria: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+        evidence: Vec<(String, String)>,
+    ) -> Result<graph_owl_storage::StoredCertification, CatalogError> {
+        use graph_owl_storage::IssueOutcome;
+
+        if let Some(expiry) = expires_at
+            && expiry <= Utc::now()
+        {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "expiresAt",
+                FieldErrorCode::Value,
+                "a certification that has already expired vouches for nothing",
+            )]));
+        }
+
+        match self
+            .storage
+            .issue_certification(
+                Uuid::new_v4(),
+                target_fqn,
+                type_id,
+                &principal.id,
+                criteria.as_deref(),
+                expires_at,
+                &evidence,
+            )
+            .await?
+        {
+            IssueOutcome::Issued(certification) => Ok(*certification),
+            IssueOutcome::NoSuchType => Err(CatalogError::NotFound),
+            IssueOutcome::NoSuchTarget => Err(CatalogError::Validation(vec![FieldError::new(
+                "targetFqn",
+                FieldErrorCode::Value,
+                format!("`{target_fqn}` is not a live entity"),
+            )])),
+            IssueOutcome::NotAuthorized => Err(CatalogError::Forbidden),
+            // **Named, not counted.** "Evidence is missing" tells an issuer
+            // nothing; the list tells them what to go and get.
+            IssueOutcome::MissingEvidence(missing) => {
+                Err(CatalogError::Validation(vec![FieldError::new(
+                    "evidence",
+                    FieldErrorCode::Required,
+                    format!(
+                        "this certification type requires evidence that was not \
+                         supplied: {}",
+                        missing.join(", ")
+                    ),
+                )]))
+            }
+        }
+    }
+
+    /// Live certifications on a target, each with its computed status.
+    ///
+    /// **Status is computed here, on every read.** A stored one goes stale
+    /// without the entity changing, so an asset would read as certified for as
+    /// long as nobody wrote to it.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn certifications_on(
+        &self,
+        target_fqn: &str,
+    ) -> Result<
+        Vec<(
+            graph_owl_storage::StoredCertification,
+            graph_owl_core::lifecycle::CertificationStatus,
+        )>,
+        CatalogError,
+    > {
+        let now = Utc::now();
+        Ok(self
+            .storage
+            .certifications_on(target_fqn)
+            .await?
+            .into_iter()
+            .map(|certification| {
+                let status = graph_owl_core::lifecycle::certification_status(
+                    Some(certification.expires_at),
+                    now,
+                    graph_owl_core::lifecycle::DEFAULT_EXPIRY_WINDOW_DAYS,
+                );
+                (certification, status)
+            })
+            .collect())
+    }
+
+    /// The recertification queue: what expires inside the warning window.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn recertification_queue(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::StoredCertification>, CatalogError> {
+        let horizon = Utc::now()
+            + chrono::Duration::days(graph_owl_core::lifecycle::DEFAULT_EXPIRY_WINDOW_DAYS);
+        Ok(self.storage.certifications_expiring_before(horizon).await?)
+    }
+
     // ---- Epic 23: domains and data products ----
 
     /// Define a domain, optionally under a parent.
@@ -2213,6 +2790,8 @@ impl Catalog {
                 deleted_at: None,
                 created_at: now,
                 updated_at: now,
+                lifecycle: Default::default(),
+                deprecation: None,
             })
             .await?;
 
@@ -2697,6 +3276,8 @@ impl Catalog {
             deleted_at: None,
             created_at: now,
             updated_at: now,
+            lifecycle: Default::default(),
+            deprecation: None,
         };
         if let Some(reason) = self.validate_draft(&candidate).await? {
             return Ok(MappingResolution::ShapeViolation { reason });
@@ -6024,6 +6605,8 @@ impl Catalog {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 extension: None,
+                lifecycle: Default::default(),
+                deprecation: None,
             };
             if let Some(reason) = self.validate_draft(&candidate).await? {
                 outcomes.push(IngestOutcome {
@@ -7011,6 +7594,24 @@ fn note_mention<'a>(
     entry.push_str(evidence);
 }
 
+/// What a client sends to define a certification type.
+#[derive(Debug, Clone, Default)]
+pub struct CreateCertificationType {
+    pub name: String,
+    pub description: Option<String>,
+    pub default_validity_days: i32,
+    pub required_evidence: Vec<String>,
+    pub authorized_issuers: Vec<String>,
+}
+
+/// How many suggested labels one page of the triage queue returns.
+///
+/// A steward works through a queue a screenful at a time; a request returning
+/// every suggestion from a bulk scan would be a slow query answering a question
+/// nobody asked. The same reasoning, and the same number, as Epic 21's
+/// extraction queue.
+const SUGGESTION_PAGE: i64 = 100;
+
 /// What a client sends to define a domain.
 #[derive(Debug, Clone, Default)]
 pub struct CreateDomain {
@@ -7470,6 +8071,8 @@ mod tests {
             created_at: now,
             updated_at: now,
             extension: None,
+            lifecycle: Default::default(),
+            deprecation: None,
         };
 
         let lower = storage
@@ -7609,6 +8212,12 @@ mod tests {
             Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
         custom_properties: Mutex<Vec<(Uuid, graph_owl_core::custom_property::CustomProperty)>>,
         domains: Mutex<Vec<graph_owl_core::domain::Domain>>,
+        classifications: Mutex<Vec<graph_owl_core::classification::Classification>>,
+        tags: Mutex<Vec<graph_owl_core::classification::Tag>>,
+        labels: Mutex<Vec<graph_owl_core::classification::TagLabel>>,
+        label_rejections: Mutex<Vec<(String, String)>>,
+        certification_types: Mutex<Vec<graph_owl_storage::StoredCertificationType>>,
+        certifications: Mutex<Vec<graph_owl_storage::StoredCertification>>,
         data_products: Mutex<Vec<graph_owl_core::domain::DataProduct>>,
         product_members: Mutex<Vec<(Uuid, Uuid)>>,
         asset_domains: Mutex<Vec<(Uuid, Uuid)>>,
@@ -7621,6 +8230,26 @@ mod tests {
         pub(super) fn forbid_writes(&self) {
             self.writes_forbidden
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Advance an asset's version because a label about it changed.
+        ///
+        /// A tag is not a column on the asset, so the ordinary update path
+        /// never sees it — but a governance label appearing or vanishing is
+        /// exactly what a consumer watches for, and one that left no version
+        /// would be invisible to every one of them.
+        fn bump_by_fqn(&self, target_fqn: &str, updated_by: &str) {
+            let mut assets = self.assets.lock().expect("lock");
+            if let Some(asset) = assets
+                .iter_mut()
+                .find(|a| a.fully_qualified_name == target_fqn)
+            {
+                asset.version = asset
+                    .version
+                    .bump(graph_owl_core::envelope::ChangeKind::Minor);
+                asset.updated_by = updated_by.to_string();
+                asset.updated_at = Utc::now();
+            }
         }
 
         fn guard_write(&self, what: &str) {
@@ -10217,6 +10846,653 @@ mod tests {
             let before = held.len();
             held.retain(|(held_id, _)| *held_id != id);
             Ok(held.len() < before)
+        }
+
+        // ---- Epics 25 and 26, and as strict as the port ----
+        //
+        // In particular **exclusivity, idempotence and the rejection ledger are
+        // all real here**. A double that skipped any of them would make the
+        // facade's tests pass against a rule that does not exist in Postgres,
+        // which is the failure mode this project has hit before.
+
+        async fn create_classification(
+            &self,
+            id: Uuid,
+            name: &str,
+            description: Option<&str>,
+            mutually_exclusive: bool,
+            updated_by: &str,
+        ) -> Result<graph_owl_core::classification::Classification, StorageError> {
+            self.guard_write("create_classification");
+            let mut held = self.classifications.lock().unwrap();
+            if held.iter().any(|c| c.name == name) {
+                return Err(StorageError::Conflict {
+                    detail: format!("a classification named `{name}` already exists"),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::Fqn,
+                });
+            }
+            let now = Utc::now();
+            let created = graph_owl_core::classification::Classification {
+                id,
+                name: name.to_string(),
+                description: description.map(str::to_string),
+                mutually_exclusive,
+                version: EntityVersion::initial(),
+                updated_by: updated_by.to_string(),
+                change_description: None,
+                created_at: now,
+                updated_at: now,
+            };
+            held.push(created.clone());
+            Ok(created)
+        }
+
+        async fn get_classification(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_core::classification::Classification>, StorageError> {
+            Ok(self
+                .classifications
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.id == id)
+                .cloned())
+        }
+
+        async fn list_classifications(
+            &self,
+        ) -> Result<Vec<graph_owl_core::classification::Classification>, StorageError> {
+            Ok(self.classifications.lock().unwrap().clone())
+        }
+
+        async fn delete_classification(
+            &self,
+            id: Uuid,
+            recursive: bool,
+        ) -> Result<Result<bool, i64>, StorageError> {
+            self.guard_write("delete_classification");
+            let tag_fqns: Vec<String> = {
+                let tags = self.tags.lock().unwrap();
+                tags.iter()
+                    .filter(|t| t.classification_id == id)
+                    .map(|t| t.fully_qualified_name.clone())
+                    .collect()
+            };
+            if !tag_fqns.is_empty() && !recursive {
+                return Ok(Err(i64::try_from(tag_fqns.len()).unwrap_or(i64::MAX)));
+            }
+            if recursive {
+                self.labels
+                    .lock()
+                    .unwrap()
+                    .retain(|l| !tag_fqns.contains(&l.tag_fqn));
+                self.tags
+                    .lock()
+                    .unwrap()
+                    .retain(|t| t.classification_id != id);
+            }
+            let mut held = self.classifications.lock().unwrap();
+            let before = held.len();
+            held.retain(|c| c.id != id);
+            Ok(Ok(held.len() < before))
+        }
+
+        async fn create_tag(
+            &self,
+            id: Uuid,
+            classification_id: Uuid,
+            name: &str,
+            description: Option<&str>,
+            updated_by: &str,
+        ) -> Result<Option<graph_owl_core::classification::Tag>, StorageError> {
+            self.guard_write("create_tag");
+            let classification = {
+                let held = self.classifications.lock().unwrap();
+                held.iter()
+                    .find(|c| c.id == classification_id)
+                    .map(|c| c.name.clone())
+            };
+            let Some(classification) = classification else {
+                return Ok(None);
+            };
+            let fqn = graph_owl_core::classification::tag_fqn(&classification, name);
+
+            let mut tags = self.tags.lock().unwrap();
+            // **Scoped to the classification**, exactly as the real unique
+            // index is. A globally-scoped double would refuse `Tier.Gold`
+            // beside `SupportPlan.Gold`, which the database accepts — so the
+            // rule would look enforced here and be untested where it lives.
+            if tags
+                .iter()
+                .any(|t| t.classification_id == classification_id && t.name == name)
+            {
+                return Err(StorageError::Conflict {
+                    detail: format!("`{fqn}` already exists"),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::Fqn,
+                });
+            }
+            let now = Utc::now();
+            let created = graph_owl_core::classification::Tag {
+                id,
+                name: name.to_string(),
+                classification_id,
+                fully_qualified_name: fqn,
+                description: description.map(str::to_string),
+                version: EntityVersion::initial(),
+                updated_by: updated_by.to_string(),
+                created_at: now,
+                updated_at: now,
+            };
+            tags.push(created.clone());
+            Ok(Some(created))
+        }
+
+        async fn get_tag_by_fqn(
+            &self,
+            fqn: &str,
+        ) -> Result<Option<graph_owl_core::classification::Tag>, StorageError> {
+            Ok(self
+                .tags
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|t| t.fully_qualified_name == fqn)
+                .cloned())
+        }
+
+        async fn list_tags(
+            &self,
+            classification_id: Option<Uuid>,
+        ) -> Result<Vec<graph_owl_core::classification::Tag>, StorageError> {
+            let tags = self.tags.lock().unwrap();
+            Ok(tags
+                .iter()
+                .filter(|t| classification_id.is_none_or(|id| t.classification_id == id))
+                .cloned()
+                .collect())
+        }
+
+        async fn apply_tag(
+            &self,
+            tag_fqn: &str,
+            target_fqn: &str,
+            label_type: graph_owl_core::classification::LabelType,
+            state: graph_owl_core::classification::LabelState,
+            applied_by: &str,
+        ) -> Result<graph_owl_storage::LabelOutcome, StorageError> {
+            use graph_owl_core::classification::LabelType;
+            use graph_owl_storage::LabelOutcome;
+            self.guard_write("apply_tag");
+
+            let tag = {
+                let tags = self.tags.lock().unwrap();
+                tags.iter()
+                    .find(|t| t.fully_qualified_name == tag_fqn)
+                    .cloned()
+            };
+            let Some(tag) = tag else {
+                return Ok(LabelOutcome::NoSuchTag);
+            };
+            let live = {
+                let assets = self.assets.lock().expect("lock");
+                assets
+                    .iter()
+                    .any(|a| a.fully_qualified_name == target_fqn && !a.deleted)
+            };
+            if !live {
+                return Ok(LabelOutcome::NoSuchTarget);
+            }
+            if matches!(label_type, LabelType::Automated | LabelType::Derived)
+                && self
+                    .label_rejections
+                    .lock()
+                    .unwrap()
+                    .contains(&(tag_fqn.to_string(), target_fqn.to_string()))
+            {
+                return Ok(LabelOutcome::PreviouslyRejected);
+            }
+
+            let existing: Vec<graph_owl_core::classification::TagLabel> = self
+                .labels
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l.target_fqn == target_fqn)
+                .cloned()
+                .collect();
+            if existing.iter().any(|l| l.tag_fqn == tag_fqn) {
+                return Ok(LabelOutcome::AlreadyApplied);
+            }
+
+            let exclusive = {
+                let held = self.classifications.lock().unwrap();
+                held.iter()
+                    .find(|c| c.id == tag.classification_id)
+                    .is_some_and(|c| c.mutually_exclusive)
+            };
+            if let Some(blocker) =
+                graph_owl_core::classification::conflicting_label(&existing, tag_fqn, exclusive)
+            {
+                return Ok(LabelOutcome::Conflicts {
+                    existing_tag_fqn: blocker.tag_fqn.clone(),
+                });
+            }
+
+            self.labels
+                .lock()
+                .unwrap()
+                .push(graph_owl_core::classification::TagLabel {
+                    tag_fqn: tag_fqn.to_string(),
+                    target_fqn: target_fqn.to_string(),
+                    label_type,
+                    state,
+                    applied_by: applied_by.to_string(),
+                    applied_at: Utc::now(),
+                    confirmed_by: None,
+                });
+            self.bump_by_fqn(target_fqn, applied_by);
+            Ok(LabelOutcome::Applied)
+        }
+
+        async fn remove_tag(&self, tag_fqn: &str, target_fqn: &str) -> Result<bool, StorageError> {
+            let mut labels = self.labels.lock().unwrap();
+            let before = labels.len();
+            labels.retain(|l| !(l.tag_fqn == tag_fqn && l.target_fqn == target_fqn));
+            Ok(labels.len() < before)
+        }
+
+        async fn labels_on(
+            &self,
+            target_fqn: &str,
+        ) -> Result<Vec<graph_owl_core::classification::TagLabel>, StorageError> {
+            Ok(self
+                .labels
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l.target_fqn == target_fqn)
+                .cloned()
+                .collect())
+        }
+
+        async fn decide_label(
+            &self,
+            tag_fqn: &str,
+            target_fqn: &str,
+            confirmed: bool,
+            decided_by: &str,
+        ) -> Result<graph_owl_storage::LabelDecision, StorageError> {
+            use graph_owl_core::classification::LabelState;
+            use graph_owl_storage::LabelDecision;
+            self.guard_write("decide_label");
+
+            let mut labels = self.labels.lock().unwrap();
+            let Some(index) = labels
+                .iter()
+                .position(|l| l.tag_fqn == tag_fqn && l.target_fqn == target_fqn)
+            else {
+                return Ok(LabelDecision::NoSuchLabel);
+            };
+            if confirmed && labels[index].state == LabelState::Confirmed {
+                return Ok(LabelDecision::AlreadyConfirmed);
+            }
+            if confirmed {
+                labels[index].state = LabelState::Confirmed;
+                labels[index].confirmed_by = Some(decided_by.to_string());
+            } else {
+                labels.remove(index);
+                // **Recorded, not merely removed** — the half a double is most
+                // tempted to skip, and the one that makes a rejection stick.
+                let mut rejections = self.label_rejections.lock().unwrap();
+                let key = (tag_fqn.to_string(), target_fqn.to_string());
+                if !rejections.contains(&key) {
+                    rejections.push(key);
+                }
+            }
+            drop(labels);
+            self.bump_by_fqn(target_fqn, decided_by);
+            Ok(LabelDecision::Decided)
+        }
+
+        async fn suggested_labels(
+            &self,
+            limit: i64,
+        ) -> Result<Vec<graph_owl_core::classification::TagLabel>, StorageError> {
+            use graph_owl_core::classification::LabelState;
+            let labels = self.labels.lock().unwrap();
+            Ok(labels
+                .iter()
+                .filter(|l| l.state == LabelState::Suggested)
+                .take(usize::try_from(limit).unwrap_or(usize::MAX))
+                .cloned()
+                .collect())
+        }
+
+        async fn tag_usage(
+            &self,
+            tag_fqn: &str,
+        ) -> Result<graph_owl_storage::TagUsage, StorageError> {
+            let targets: Vec<String> = self
+                .labels
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l.tag_fqn == tag_fqn)
+                .map(|l| l.target_fqn.clone())
+                .collect();
+            let assets = self.assets.lock().expect("lock");
+            let mut by_kind: std::collections::BTreeMap<String, i64> =
+                std::collections::BTreeMap::new();
+            for asset in assets
+                .iter()
+                // Live only: a tombstoned column does not keep a governance
+                // label alive.
+                .filter(|a| !a.deleted && targets.contains(&a.fully_qualified_name))
+            {
+                *by_kind.entry(asset.kind.as_str().to_string()).or_default() += 1;
+            }
+            Ok(graph_owl_storage::TagUsage {
+                by_kind: by_kind.into_iter().collect(),
+            })
+        }
+
+        async fn delete_tag(
+            &self,
+            tag_fqn: &str,
+            force: bool,
+            updated_by: &str,
+        ) -> Result<Option<i64>, StorageError> {
+            self.guard_write("delete_tag");
+            if !self
+                .tags
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|t| t.fully_qualified_name == tag_fqn)
+            {
+                return Ok(None);
+            }
+            let mut removed = 0_i64;
+            if force {
+                let targets: Vec<String> = self
+                    .labels
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|l| l.tag_fqn == tag_fqn)
+                    .map(|l| l.target_fqn.clone())
+                    .collect();
+                for target in &targets {
+                    self.bump_by_fqn(target, updated_by);
+                }
+                removed = i64::try_from(targets.len()).unwrap_or(i64::MAX);
+                self.labels.lock().unwrap().retain(|l| l.tag_fqn != tag_fqn);
+            }
+            self.tags
+                .lock()
+                .unwrap()
+                .retain(|t| t.fully_qualified_name != tag_fqn);
+            Ok(Some(removed))
+        }
+
+        async fn propagate_tag(
+            &self,
+            tag_fqn: &str,
+            target_fqn: &str,
+            recursive: bool,
+            applied_by: &str,
+        ) -> Result<i64, StorageError> {
+            use graph_owl_core::classification::{LabelState, LabelType};
+            let children: Vec<String> = {
+                let assets = self.assets.lock().expect("lock");
+                let parent_id = assets
+                    .iter()
+                    .find(|a| a.fully_qualified_name == target_fqn)
+                    .map(|a| a.id);
+                assets
+                    .iter()
+                    .filter(|a| {
+                        !a.deleted
+                            && if recursive {
+                                a.fully_qualified_name
+                                    .starts_with(&format!("{target_fqn}."))
+                            } else {
+                                parent_id.is_some_and(|id| a.parent_id == Some(id))
+                            }
+                    })
+                    .map(|a| a.fully_qualified_name.clone())
+                    .collect()
+            };
+
+            let mut affected = 0_i64;
+            for child in children {
+                let held = self
+                    .labels_on(&child)
+                    .await?
+                    .into_iter()
+                    .find(|l| l.tag_fqn == tag_fqn);
+                if !graph_owl_core::classification::propagation_may_overwrite(held.as_ref()) {
+                    continue;
+                }
+                if held.is_some() {
+                    self.remove_tag(tag_fqn, &child).await?;
+                }
+                if matches!(
+                    self.apply_tag(
+                        tag_fqn,
+                        &child,
+                        LabelType::Propagated,
+                        LabelState::Confirmed,
+                        applied_by,
+                    )
+                    .await?,
+                    graph_owl_storage::LabelOutcome::Applied
+                ) {
+                    affected += 1;
+                }
+            }
+            Ok(affected)
+        }
+
+        async fn set_lifecycle(
+            &self,
+            asset_id: Uuid,
+            to: graph_owl_core::lifecycle::LifecycleState,
+            deprecation: Option<&graph_owl_core::lifecycle::Deprecation>,
+            updated_by: &str,
+        ) -> Result<graph_owl_storage::LifecycleOutcome, StorageError> {
+            use graph_owl_storage::LifecycleOutcome;
+            self.guard_write("set_lifecycle");
+            let mut assets = self.assets.lock().expect("lock");
+            let Some(asset) = assets.iter_mut().find(|a| a.id == asset_id) else {
+                return Ok(LifecycleOutcome::NotFound);
+            };
+            let from = asset.lifecycle;
+            if !graph_owl_core::lifecycle::can_transition(from, to) {
+                return Ok(LifecycleOutcome::Illegal { from, to });
+            }
+            asset.lifecycle = to;
+            asset.deprecation = deprecation.cloned();
+            asset.version = asset
+                .version
+                .bump(graph_owl_core::envelope::ChangeKind::Minor);
+            asset.updated_by = updated_by.to_string();
+            asset.updated_at = Utc::now();
+            Ok(LifecycleOutcome::Moved(Box::new(asset.clone())))
+        }
+
+        async fn terminal_successor(&self, fqn: &str) -> Result<Option<Asset>, StorageError> {
+            use graph_owl_core::lifecycle::LifecycleState;
+            const MAX_HOPS: usize = 10;
+            let assets = self.assets.lock().expect("lock");
+            let mut seen = std::collections::HashSet::new();
+            let mut current = fqn.to_string();
+            for _ in 0..MAX_HOPS {
+                if !seen.insert(current.clone()) {
+                    return Ok(None);
+                }
+                let Some(asset) = assets.iter().find(|a| a.fully_qualified_name == current) else {
+                    return Ok(None);
+                };
+                match asset.lifecycle {
+                    LifecycleState::Deprecated | LifecycleState::Retired => {
+                        let Some(next) = asset
+                            .deprecation
+                            .as_ref()
+                            .and_then(|d| d.successor_fqn.clone())
+                        else {
+                            return Ok(None);
+                        };
+                        current = next;
+                    }
+                    _ => return Ok(Some(asset.clone())),
+                }
+            }
+            Ok(None)
+        }
+
+        async fn create_certification_type(
+            &self,
+            id: Uuid,
+            name: &str,
+            description: Option<&str>,
+            default_validity_days: i32,
+            required_evidence: &[String],
+            authorized_issuers: &[String],
+            _updated_by: &str,
+        ) -> Result<graph_owl_storage::StoredCertificationType, StorageError> {
+            self.guard_write("create_certification_type");
+            let mut types = self.certification_types.lock().unwrap();
+            if types.iter().any(|t| t.name == name) {
+                return Err(StorageError::Conflict {
+                    detail: format!("a certification type named `{name}` already exists"),
+                    existing_id: None,
+                    kind: graph_owl_storage::ConflictKind::Fqn,
+                });
+            }
+            let created = graph_owl_storage::StoredCertificationType {
+                id,
+                name: name.to_string(),
+                description: description.map(str::to_string),
+                default_validity_days,
+                required_evidence: required_evidence.to_vec(),
+                authorized_issuers: authorized_issuers.to_vec(),
+            };
+            types.push(created.clone());
+            Ok(created)
+        }
+
+        async fn list_certification_types(
+            &self,
+        ) -> Result<Vec<graph_owl_storage::StoredCertificationType>, StorageError> {
+            Ok(self.certification_types.lock().unwrap().clone())
+        }
+
+        async fn get_certification_type(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_storage::StoredCertificationType>, StorageError> {
+            Ok(self
+                .certification_types
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|t| t.id == id)
+                .cloned())
+        }
+
+        async fn issue_certification(
+            &self,
+            id: Uuid,
+            target_fqn: &str,
+            type_id: Uuid,
+            issuer: &str,
+            criteria: Option<&str>,
+            expires_at: Option<DateTime<Utc>>,
+            evidence: &[(String, String)],
+        ) -> Result<graph_owl_storage::IssueOutcome, StorageError> {
+            use graph_owl_storage::IssueOutcome;
+            self.guard_write("issue_certification");
+
+            let Some(certification_type) = self.get_certification_type(type_id).await? else {
+                return Ok(IssueOutcome::NoSuchType);
+            };
+            if !graph_owl_core::lifecycle::may_issue(&certification_type.authorized_issuers, issuer)
+            {
+                return Ok(IssueOutcome::NotAuthorized);
+            }
+            // **Enforced here too**, so a renewal that lost its evidence fails
+            // in the double exactly as it does in Postgres.
+            let supplied: Vec<String> = evidence.iter().map(|(kind, _)| kind.clone()).collect();
+            let missing = graph_owl_core::lifecycle::missing_evidence(
+                &certification_type.required_evidence,
+                &supplied,
+            );
+            if !missing.is_empty() {
+                return Ok(IssueOutcome::MissingEvidence(missing));
+            }
+            let live = {
+                let assets = self.assets.lock().expect("lock");
+                assets
+                    .iter()
+                    .any(|a| a.fully_qualified_name == target_fqn && !a.deleted)
+            };
+            if !live {
+                return Ok(IssueOutcome::NoSuchTarget);
+            }
+
+            let expires_at = expires_at.unwrap_or_else(|| {
+                Utc::now()
+                    + chrono::Duration::days(i64::from(certification_type.default_validity_days))
+            });
+            let mut held = self.certifications.lock().unwrap();
+            // Supersedes rather than accumulating: one live answer per (target,
+            // type).
+            held.retain(|c| !(c.target_fqn == target_fqn && c.type_id == type_id));
+            let issued = graph_owl_storage::StoredCertification {
+                id,
+                target_fqn: target_fqn.to_string(),
+                type_id,
+                type_name: certification_type.name,
+                issuer: issuer.to_string(),
+                criteria: criteria.map(str::to_string),
+                issued_at: Utc::now(),
+                expires_at,
+                evidence: evidence.to_vec(),
+            };
+            held.push(issued.clone());
+            Ok(IssueOutcome::Issued(Box::new(issued)))
+        }
+
+        async fn certifications_on(
+            &self,
+            target_fqn: &str,
+        ) -> Result<Vec<graph_owl_storage::StoredCertification>, StorageError> {
+            Ok(self
+                .certifications
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.target_fqn == target_fqn)
+                .cloned()
+                .collect())
+        }
+
+        async fn certifications_expiring_before(
+            &self,
+            instant: DateTime<Utc>,
+        ) -> Result<Vec<graph_owl_storage::StoredCertification>, StorageError> {
+            Ok(self
+                .certifications
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.expires_at < instant)
+                .cloned()
+                .collect())
         }
 
         // ---- Epic 23, and as strict as the port ----

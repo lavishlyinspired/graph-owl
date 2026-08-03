@@ -57,6 +57,8 @@ async fn subject(storage: &PostgresStorage, name: &str) -> Uuid {
         deleted_at: None,
         created_at: now,
         updated_at: now,
+        lifecycle: Default::default(),
+        deprecation: None,
     };
     storage.upsert_asset(asset).await.expect("asset").id
 }

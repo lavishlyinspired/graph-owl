@@ -3,9 +3,11 @@ use graph_owl_authz::{AccessPredicate, Policy};
 use graph_owl_core::envelope::EntityVersion;
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
+    classification::{Classification, LabelState, LabelType, Tag, TagLabel},
     contradiction::Review,
     custom_property::CustomProperty,
     domain::{DataProduct, Domain, DomainAssignment},
+    lifecycle::{Deprecation, LifecycleState},
     memory::Memory,
     ownership::{EntityReference, OwnerRef},
     page::{Page, PageRequest},
@@ -48,6 +50,18 @@ pub enum ConflictKind {
     /// which makes it a property of the design rather than a slip: **a conflict
     /// carrying its own detail needs its own kind.**
     IdempotencyConflict,
+    /// A tag is still applied, or a classification still has tags — Epic 25.
+    ///
+    /// Its own kind because the response carries **counts by entity kind**, and
+    /// a borrowed kind's canned sentence would replace them. That has now
+    /// happened twice in this codebase, which makes it a property of the design
+    /// rather than a slip.
+    TagInUse,
+    /// Another tag from the same mutually-exclusive classification is present —
+    /// Epic 25 decision 4. Separate from `TagInUse` because the fix is
+    /// different: one says remove the other tag, the other says the tag itself
+    /// cannot go yet.
+    TagExclusive,
     /// An asset is already assigned to a different domain — Epic 23 Slice B.
     ///
     /// Its own kind because the response has to name the *current* domain, and
@@ -317,6 +331,109 @@ pub enum MembershipRefusal {
     NoSuchProduct,
     NoSuchAsset,
     AssetDeleted,
+}
+
+/// What a tag still holds, by entity kind — Epic 25 Slice H.
+///
+/// **By kind, not a total.** "This tag is used 4,312 times" tells a steward
+/// nothing about the shape of the cleanup; "1 service, 3 schemas, 4,308
+/// columns" tells them it is a propagation to undo, not a curation to redo.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TagUsage {
+    pub by_kind: Vec<(String, i64)>,
+}
+
+impl TagUsage {
+    #[must_use]
+    pub fn total(&self) -> i64 {
+        self.by_kind.iter().map(|(_, count)| count).sum()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+}
+
+/// What applying a tag did — Epic 25 Slice B.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LabelOutcome {
+    Applied,
+    /// It was already there. **Not an error**: applying a tag twice is the
+    /// state the caller asked for, and a `409` would make every retry fail.
+    AlreadyApplied,
+    NoSuchTag,
+    NoSuchTarget,
+    /// Another tag from the same exclusive classification is present, named so
+    /// the caller can act.
+    Conflicts {
+        existing_tag_fqn: String,
+    },
+    /// A human already rejected this exact suggestion, so an automated
+    /// re-proposal is dropped rather than asked again.
+    PreviouslyRejected,
+}
+
+/// What deciding a suggested label did — Epic 25 Slice D.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabelDecision {
+    Decided,
+    NoSuchLabel,
+    /// Confirming something already confirmed. A distinct outcome because it
+    /// means the caller's picture of the queue is stale, which is worth telling
+    /// them rather than silently succeeding.
+    AlreadyConfirmed,
+}
+
+/// A change to a lifecycle state — Epic 26 Slice A.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LifecycleOutcome {
+    Moved(Box<Asset>),
+    NotFound,
+    /// The move is not in the state machine, reported with both ends so the
+    /// message can name them.
+    Illegal {
+        from: LifecycleState,
+        to: LifecycleState,
+    },
+}
+
+/// What issuing a certification did — Epic 26 Slice C.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IssueOutcome {
+    Issued(Box<StoredCertification>),
+    NoSuchType,
+    NoSuchTarget,
+    /// The principal is not on the type's allowlist.
+    NotAuthorized,
+    /// Required evidence was absent, **named** — a count would tell an issuer
+    /// nothing they can act on.
+    MissingEvidence(Vec<String>),
+}
+
+/// A stored certification, with its type's name resolved for display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredCertification {
+    pub id: Uuid,
+    pub target_fqn: String,
+    pub type_id: Uuid,
+    pub type_name: String,
+    pub issuer: String,
+    pub criteria: Option<String>,
+    pub issued_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub evidence: Vec<(String, String)>,
+}
+
+/// A certification type as stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredCertificationType {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub default_validity_days: i32,
+    pub required_evidence: Vec<String>,
+    pub authorized_issuers: Vec<String>,
 }
 
 /// What claiming an idempotency key found.
@@ -2460,6 +2577,243 @@ pub trait Storage: Send + Sync {
         property: &CustomProperty,
         previous_name: &str,
     ) -> Result<bool, StorageError>;
+
+    // ---- Epic 25: tags and classifications ----
+
+    /// # Errors
+    /// [`StorageError::Conflict`] if the name is taken.
+    async fn create_classification(
+        &self,
+        id: Uuid,
+        name: &str,
+        description: Option<&str>,
+        mutually_exclusive: bool,
+        updated_by: &str,
+    ) -> Result<Classification, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_classification(&self, id: Uuid) -> Result<Option<Classification>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_classifications(&self) -> Result<Vec<Classification>, StorageError>;
+
+    /// Delete a classification. `Err(count)` when it still has tags and
+    /// `recursive` was not given — the number, because "it has tags" tells an
+    /// operator nothing about the size of the cleanup.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the delete fails.
+    async fn delete_classification(
+        &self,
+        id: Uuid,
+        recursive: bool,
+    ) -> Result<Result<bool, i64>, StorageError>;
+
+    /// Create a tag under a classification. `None` when the classification does
+    /// not exist.
+    ///
+    /// # Errors
+    /// [`StorageError::Conflict`] if the name is taken **on that
+    /// classification** — the same name under a different one is a different
+    /// tag and inserts fine.
+    async fn create_tag(
+        &self,
+        id: Uuid,
+        classification_id: Uuid,
+        name: &str,
+        description: Option<&str>,
+        updated_by: &str,
+    ) -> Result<Option<Tag>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_tag_by_fqn(&self, fqn: &str) -> Result<Option<Tag>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_tags(&self, classification_id: Option<Uuid>) -> Result<Vec<Tag>, StorageError>;
+
+    /// Apply a tag to something, with provenance.
+    ///
+    /// Enforces exclusivity, idempotence and the rejection ledger — all three
+    /// here rather than in the facade, because they are one decision about one
+    /// row and splitting them would open a read-then-write race on every one.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn apply_tag(
+        &self,
+        tag_fqn: &str,
+        target_fqn: &str,
+        label_type: LabelType,
+        state: LabelState,
+        applied_by: &str,
+    ) -> Result<LabelOutcome, StorageError>;
+
+    /// Remove a label. `false` if it was not there.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the delete fails.
+    async fn remove_tag(&self, tag_fqn: &str, target_fqn: &str) -> Result<bool, StorageError>;
+
+    /// Every label on a target, newest first.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn labels_on(&self, target_fqn: &str) -> Result<Vec<TagLabel>, StorageError>;
+
+    /// Confirm or reject a suggested label.
+    ///
+    /// **A rejection is recorded, not merely removed.** A rejection that
+    /// vanished would be re-proposed by the next run of the same scanner, and a
+    /// steward would answer the same question forever.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn decide_label(
+        &self,
+        tag_fqn: &str,
+        target_fqn: &str,
+        confirmed: bool,
+        decided_by: &str,
+    ) -> Result<LabelDecision, StorageError>;
+
+    /// Targets carrying a suggested label — the steward triage queue.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn suggested_labels(&self, limit: i64) -> Result<Vec<TagLabel>, StorageError>;
+
+    /// How many live entities carry a tag, by kind.
+    ///
+    /// **Soft-deleted entities do not count.** A tombstoned column does not
+    /// keep a governance label alive, and counting it would refuse a delete
+    /// over data nobody can see.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn tag_usage(&self, tag_fqn: &str) -> Result<TagUsage, StorageError>;
+
+    /// Delete a tag and, when forced, every label of it — transactionally,
+    /// bumping each affected entity's version. Returns how many labels went.
+    ///
+    /// `None` when the tag does not exist.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if any part of the transaction fails.
+    async fn delete_tag(
+        &self,
+        tag_fqn: &str,
+        force: bool,
+        updated_by: &str,
+    ) -> Result<Option<i64>, StorageError>;
+
+    /// Apply a tag to a target's children, respecting precedence.
+    ///
+    /// Returns how many children gained or kept a label because of this call.
+    /// **A manual label on a child is never downgraded** — a steward's
+    /// deliberate choice survives, and relabelling it `Propagated` would also
+    /// be a lie about where it came from.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn propagate_tag(
+        &self,
+        tag_fqn: &str,
+        target_fqn: &str,
+        recursive: bool,
+        applied_by: &str,
+    ) -> Result<i64, StorageError>;
+
+    // ---- Epic 26: lifecycle and certification ----
+
+    /// Move an asset's lifecycle state, refusing a move the machine forbids.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn set_lifecycle(
+        &self,
+        asset_id: Uuid,
+        to: LifecycleState,
+        deprecation: Option<&Deprecation>,
+        updated_by: &str,
+    ) -> Result<LifecycleOutcome, StorageError>;
+
+    /// Follow a deprecation chain to the first asset that is not itself
+    /// deprecated or retired.
+    ///
+    /// **Bounded and cycle-safe**: a successor loop is a configuration mistake
+    /// somebody will make, and an unbounded walk turns it into a hung request.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn terminal_successor(&self, fqn: &str) -> Result<Option<Asset>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Conflict`] if the name is taken.
+    async fn create_certification_type(
+        &self,
+        id: Uuid,
+        name: &str,
+        description: Option<&str>,
+        default_validity_days: i32,
+        required_evidence: &[String],
+        authorized_issuers: &[String],
+        updated_by: &str,
+    ) -> Result<StoredCertificationType, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_certification_types(&self) -> Result<Vec<StoredCertificationType>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_certification_type(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<StoredCertificationType>, StorageError>;
+
+    /// Issue a certification, enforcing the issuer allowlist and the required
+    /// evidence.
+    ///
+    /// A second issuance of the same type on the same target **supersedes**
+    /// rather than accumulating, so "when does my Gold expire" has one answer —
+    /// and the superseded row stays, because who vouched for what and when is
+    /// the point of having certification at all.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn issue_certification(
+        &self,
+        id: Uuid,
+        target_fqn: &str,
+        type_id: Uuid,
+        issuer: &str,
+        criteria: Option<&str>,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+        evidence: &[(String, String)],
+    ) -> Result<IssueOutcome, StorageError>;
+
+    /// Live certifications on a target — superseded ones excluded.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn certifications_on(
+        &self,
+        target_fqn: &str,
+    ) -> Result<Vec<StoredCertification>, StorageError>;
+
+    /// Live certifications expiring before an instant — the recertification
+    /// queue.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn certifications_expiring_before(
+        &self,
+        instant: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<StoredCertification>, StorageError>;
 
     // ---- Epic 23: domains and data products ----
 

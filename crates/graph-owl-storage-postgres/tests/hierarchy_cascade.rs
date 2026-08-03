@@ -48,6 +48,8 @@ fn asset(kind: AssetKind, name: &str, fqn: &str, parent_id: Option<Uuid>) -> Ass
         deleted_at: None,
         created_at: now,
         updated_at: now,
+        lifecycle: Default::default(),
+        deprecation: None,
     }
 }
 

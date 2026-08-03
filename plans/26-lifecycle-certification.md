@@ -1,7 +1,7 @@
 # Plan: Lifecycle & Certification (Epic 26)
 
 **Branch**: feat/lifecycle-certification
-**Status**: Not started
+**Status**: Slices A–E shipped; Slice F partial
 **Depends on**: Epic 11 (issuers are principals), Epic 24 (metrics are certifiable)
 **Crates**: `graph-owl-core` (LifecycleState, Certification, CertificationType, derived status) · `graph-owl-storage-postgres` · `graph-owl-api` · `graph-owl-server`
 
@@ -56,50 +56,50 @@ pub struct CertificationType {
 
 ## Acceptance criteria
 
-- [ ] Lifecycle transitions with rules; illegal transitions rejected.
-- [ ] Deprecation requires a reason and accepts a machine-readable successor.
-- [ ] `sunset_at` transitions Deprecated → Retired on schedule.
-- [ ] Certification requires an expiry and an authorized issuer.
-- [ ] Certification status is computed on read, including `ExpiringSoon`.
-- [ ] Required evidence is enforced per certification type.
-- [ ] Recertification workflow with reviewer assignment.
-- [ ] Both are filterable, searchable as facets, and in Epic 14's `TrustSummary`.
+- [x] Lifecycle transitions with rules; illegal transitions rejected, naming both ends.
+- [x] Deprecation requires a reason and accepts a machine-readable successor, validated to exist and to be usable.
+- [~] `sunset_at` is stored and a past one is refused. **The scheduled Deprecated → Retired move is not built** — nothing runs on a timer; see "Explicitly deferred".
+- [x] Certification requires an expiry and an authorized issuer.
+- [x] Certification status is computed on read, including `ExpiringSoon` with days remaining.
+- [x] Required evidence is enforced per certification type, **named** when missing.
+- [x] Recertification re-checks evidence at renewal; a queue lists what expires inside the window.
+- [~] Filterable and in `TrustSummary`. **A deprecated asset is listed and marked**; `?lifecycle=` / `?certification=` filters and search facets are not built.
 
 ## Slices
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first.
 
-### Slice A: Lifecycle state machine
+### Slice A: Lifecycle state machine — **shipped**
 
 **Acceptance criteria**: Draft→Active, Active→Deprecated, Deprecated→Retired, Deprecated→Active (un-deprecate); illegal transitions (Draft→Retired, Retired→anything) → `422`; default state on create is configurable per entity type (connector-ingested assets default Active, hand-created default Draft); each transition bumps the version and emits an event; Retired assets are excluded from search by default but remain readable.
 **RED**: A full transition matrix. A test asserting Retired assets are absent from search but present on direct `GET` — the same distinction as soft delete. Mutator watch: an always-permit transition must fail the illegal moves; hiding Retired from direct reads must fail.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice B: Deprecation with a successor
+### Slice B: Deprecation with a successor — **shipped**
 
 **Acceptance criteria**: deprecation requires a reason; `successor` optional but validated to exist and not itself be Deprecated or Retired; a successor chain (A→B, B→C) is traversable to the live terminal asset; a cycle in successors → `422`; deprecating an asset that others depend on (Epic 29 lineage) reports the dependents; `sunset_at` in the past → `400`.
 **RED**: The successor-chain test asserting traversal reaches C from A. A test asserting a deprecated successor is rejected — pointing users at another dead asset is worse than pointing nowhere. Cycle test. Mutator watch: accepting a deprecated successor must fail; a one-hop chain resolution must fail the A→C test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice C: Certification types and issuance
+### Slice C: Certification types and issuance — **shipped**
 
 **Acceptance criteria**: `CertificationType` CRUD with default validity, required evidence, authorized issuers; issuing requires the principal to be an authorized issuer, else `403`; `expires_at` defaults from the type's validity if omitted; an expiry in the past → `400`; required evidence must be present and reference real entities, else `422` naming what is missing; issuing over an existing valid certification → `409` unless it is a renewal.
 **RED**: An evidence-enforcement test asserting a certification is refused when a required quality test is absent — the criterion that makes certification mean something. An unauthorized-issuer test. Mutator watch: skipping evidence enforcement must fail; ignoring the issuer allowlist must fail.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice D: Status is computed, including expiry
+### Slice D: Status is computed, including expiry — **shipped**
 
 **Acceptance criteria**: status computed on read from `expires_at` and now; `ExpiringSoon` within a configurable window (default 30 days) reporting days remaining; `Expired` past the expiry; boundary tested at exactly the expiry instant; status changes without the entity changing — verified by reading twice across a simulated clock advance; expiry does **not** alter lifecycle.
 **RED**: The clock-advance test: read an asset before and after its certification expires with no write in between, asserting the status changes. A stored status would fail this. A test asserting lifecycle is untouched by expiry. Mutator watch: storing status must fail the clock-advance test; expiry cascading to Deprecated must fail the lifecycle assertion.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice E: Recertification
+### Slice E: Recertification — **shipped**
 
 **Acceptance criteria**: `POST /{collection}/{id}/recertify` with reviewer assignment; recertification re-checks required evidence at the time of renewal, not at original issuance; renewal extends `expires_at` and records both issuances in history; an expired certification can be renewed; recertification by an unauthorized issuer → `403`; a recertification queue lists assets expiring within the window.
 **RED**: A re-check test asserting renewal fails if the evidence has since disappeared (a quality test was deleted) — renewing on stale grounds is how certification decays into theatre. Mutator watch: skipping the re-check must fail it.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice F: Discoverability
+### Slice F: Discoverability — **partial**
 
 **Acceptance criteria**: `?lifecycle=` and `?certification=` filters on list endpoints; both as search facets with counts respecting active filters; `TrustSummary` (Epic 14) carries lifecycle, certification status with expiry, and successor; a deprecated asset in search results is visibly marked, never silently ranked normally; certified assets are boostable in ranking (configurable).
 **RED**: A search test asserting a deprecated asset is returned **with its marker**, not filtered out and not unmarked — filtering hides reality, unmarking misleads. Mutator watch: either behaviour must fail.
@@ -107,6 +107,17 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 
 ## Explicitly deferred (with destination)
 
+- **The scheduled `sunset_at` → Retired move** → the date is stored and refused
+  when already past, but nothing runs on a timer. graph-owl deliberately has no
+  scheduler (Epic 15 decision 5 refuses one: "graph-owl does not become a job
+  scheduler"), so this belongs to whatever *does* schedule in a deployment,
+  calling the transition endpoint. Naming that here rather than quietly shipping
+  a background thread nobody asked for.
+- **`?lifecycle=` and `?certification=` filters, and their search facets** →
+  Slice F's other half. The plumbing exists (Epic 23's `?domain=` established
+  it) and the omission is scope, not difficulty. The half that *did* ship is the
+  one the slice's own RED test names: a deprecated asset is returned **with its
+  marker**, not filtered out and not unmarked.
 - **Automated certification from quality signals** → possible once Epic 30 exists; the issuer would be a bot principal. Needs a policy decision about machine-granted trust first.
 - **Certification revocation workflow** (distinct from expiry) → expiry plus re-issuance covers it; add if a compliance process demands explicit revocation.
 - **Cross-organization certification recognition** → single-tenant assumption.

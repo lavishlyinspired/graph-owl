@@ -259,6 +259,8 @@ pub fn asset_from_flakes(id: uuid::Uuid, flakes: &[Flake]) -> Option<Asset> {
         deleted_at: instant("deletedAt"),
         created_at: instant("createdAt").unwrap_or_else(chrono::Utc::now),
         updated_at: instant("updatedAt").unwrap_or_else(chrono::Utc::now),
+        lifecycle: Default::default(),
+        deprecation: None,
     })
 }
 
@@ -363,6 +365,8 @@ mod projection_tests {
             deleted_at: None,
             created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             updated_at: Utc.timestamp_opt(1_700_000_500, 0).unwrap(),
+            lifecycle: Default::default(),
+            deprecation: None,
         }
     }
 

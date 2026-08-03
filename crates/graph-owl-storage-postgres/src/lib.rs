@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 use graph_owl_authz::{AccessPredicate, Policy};
+use graph_owl_core::classification::{Classification, LabelState, LabelType, Tag, TagLabel};
 use graph_owl_core::contradiction::{Review, Verdict};
 use graph_owl_core::custom_property::CustomProperty;
 use graph_owl_core::domain::{DataProduct, Domain, DomainAssignment, domain_fqn};
+use graph_owl_core::lifecycle::{Deprecation, LifecycleState};
 use graph_owl_core::memory::{Authorship, LinkRelation, Memory, MemoryKind, MemoryLink};
 use graph_owl_core::ownership::{EntityReference, OwnerKind, OwnerRef};
 use graph_owl_core::{
@@ -12,9 +14,10 @@ use graph_owl_core::{
 };
 use graph_owl_storage::{
     ConflictKind, DataProductUpdate, DiscardedClaimRecord, DomainDeletion, DomainHoldings,
-    DomainUpdate, ExtractionRunRecord, FollowOutcome, Holdings, IdempotencyClaim,
-    MembershipRefusal, MemoryWrite, OwnersWrite, PrincipalDeletion, QueuedClaimRecord,
-    ReviewQueueFilter, SplitOutcome, Storage, StorageError, StoredUser, SupersedeOutcome,
+    DomainUpdate, ExtractionRunRecord, FollowOutcome, Holdings, IdempotencyClaim, IssueOutcome,
+    LabelDecision, LabelOutcome, LifecycleOutcome, MembershipRefusal, MemoryWrite, OwnersWrite,
+    PrincipalDeletion, QueuedClaimRecord, ReviewQueueFilter, SplitOutcome, Storage, StorageError,
+    StoredCertification, StoredCertificationType, StoredUser, SupersedeOutcome, TagUsage,
     UpdateOutcome,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
@@ -406,6 +409,76 @@ pub struct PostgresStorage {
 }
 
 impl PostgresStorage {
+    /// The principals allowed to issue a certification type.
+    async fn read_issuers(&self, type_id: Uuid) -> Result<Vec<String>, StorageError> {
+        sqlx::query_scalar(
+            "SELECT principal_id FROM certification_type_issuers WHERE type_id = $1 ORDER BY principal_id",
+        )
+        .bind(type_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    /// Attach each certification's evidence.
+    ///
+    /// A second query per row rather than a join: evidence is a small list and
+    /// a join would multiply the certification rows by it, which every caller
+    /// would then have to un-multiply.
+    async fn hydrate_certifications(
+        &self,
+        rows: &[PgRow],
+    ) -> Result<Vec<StoredCertification>, StorageError> {
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: Uuid = row.get("id");
+            let evidence: Vec<(String, String)> = sqlx::query_as(
+                "SELECT kind, reference FROM certification_evidence
+                  WHERE certification_id = $1 ORDER BY kind, reference",
+            )
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            out.push(StoredCertification {
+                id,
+                target_fqn: row.get("target_fqn"),
+                type_id: row.get("type_id"),
+                type_name: row.get("type_name"),
+                issuer: row.get("issuer"),
+                criteria: row.get("criteria"),
+                issued_at: row.get("issued_at"),
+                expires_at: row.get("expires_at"),
+                evidence,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Advance an asset's version because something *about* it changed.
+    ///
+    /// A tag is not a column on `assets`, so the ordinary update path never
+    /// sees it — but a governance label appearing or vanishing is exactly the
+    /// kind of change a consumer watches for, and one that left no version
+    /// would be invisible to every one of them.
+    async fn bump_asset_version(
+        tx: &mut Transaction<'_, Postgres>,
+        target_fqn: &str,
+        updated_by: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE assets
+                SET version_minor = version_minor + 1, updated_by = $2, updated_at = now()
+              WHERE fully_qualified_name = $1",
+        )
+        .bind(target_fqn)
+        .bind(updated_by)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
     /// The named experts on a domain, ordered as they were given.
     ///
     /// Order is preserved because it is meaningful — the first expert is
@@ -5141,6 +5214,889 @@ impl Storage for PostgresStorage {
         Ok(done.rows_affected() > 0)
     }
 
+    // ---- Epic 25: tags and classifications ----
+
+    async fn create_classification(
+        &self,
+        id: Uuid,
+        name: &str,
+        description: Option<&str>,
+        mutually_exclusive: bool,
+        updated_by: &str,
+    ) -> Result<Classification, StorageError> {
+        let row = sqlx::query(&format!(
+            "INSERT INTO classifications (id, name, description, mutually_exclusive, updated_by)
+             VALUES ($1, $2, $3, $4, $5) RETURNING {CLASSIFICATION_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(name)
+        .bind(description)
+        .bind(mutually_exclusive)
+        .bind(updated_by)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| {
+            conflict_or_unexpected(
+                &e,
+                format!("a classification named `{name}` already exists"),
+            )
+        })?;
+        Ok(classification_from_row(&row))
+    }
+
+    async fn get_classification(&self, id: Uuid) -> Result<Option<Classification>, StorageError> {
+        let row = sqlx::query(&format!(
+            "SELECT {CLASSIFICATION_COLUMNS} FROM classifications WHERE id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.as_ref().map(classification_from_row))
+    }
+
+    async fn list_classifications(&self) -> Result<Vec<Classification>, StorageError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {CLASSIFICATION_COLUMNS} FROM classifications ORDER BY name"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.iter().map(classification_from_row).collect())
+    }
+
+    async fn delete_classification(
+        &self,
+        id: Uuid,
+        recursive: bool,
+    ) -> Result<Result<bool, i64>, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let tags: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE classification_id = $1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if tags > 0 && !recursive {
+            return Ok(Err(tags));
+        }
+        if recursive {
+            // The labels go with the tags. `tag_labels` is `ON DELETE RESTRICT`
+            // against `tags` deliberately — a governance label must not vanish
+            // as a side effect — so a recursive delete clears them explicitly,
+            // which is the caller having said so.
+            sqlx::query(
+                "DELETE FROM tag_labels WHERE tag_id IN (SELECT id FROM tags WHERE classification_id = $1)",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            sqlx::query("DELETE FROM tags WHERE classification_id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+        let done = sqlx::query("DELETE FROM classifications WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(Ok(done.rows_affected() > 0))
+    }
+
+    async fn create_tag(
+        &self,
+        id: Uuid,
+        classification_id: Uuid,
+        name: &str,
+        description: Option<&str>,
+        updated_by: &str,
+    ) -> Result<Option<Tag>, StorageError> {
+        let classification: Option<String> =
+            sqlx::query_scalar("SELECT name FROM classifications WHERE id = $1")
+                .bind(classification_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let Some(classification) = classification else {
+            return Ok(None);
+        };
+        let fqn = graph_owl_core::classification::tag_fqn(&classification, name);
+
+        let row = sqlx::query(&format!(
+            "INSERT INTO tags (id, name, classification_id, fully_qualified_name, description, updated_by)
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING {TAG_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(name)
+        .bind(classification_id)
+        .bind(&fqn)
+        .bind(description)
+        .bind(updated_by)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| conflict_or_unexpected(&e, format!("`{fqn}` already exists")))?;
+        Ok(Some(tag_from_row(&row)))
+    }
+
+    async fn get_tag_by_fqn(&self, fqn: &str) -> Result<Option<Tag>, StorageError> {
+        let row = sqlx::query(&format!(
+            "SELECT {TAG_COLUMNS} FROM tags WHERE fully_qualified_name = $1"
+        ))
+        .bind(fqn)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.as_ref().map(tag_from_row))
+    }
+
+    async fn list_tags(&self, classification_id: Option<Uuid>) -> Result<Vec<Tag>, StorageError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {TAG_COLUMNS} FROM tags
+              WHERE $1::uuid IS NULL OR classification_id = $1
+              ORDER BY fully_qualified_name"
+        ))
+        .bind(classification_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.iter().map(tag_from_row).collect())
+    }
+
+    async fn apply_tag(
+        &self,
+        tag_fqn: &str,
+        target_fqn: &str,
+        label_type: LabelType,
+        state: LabelState,
+        applied_by: &str,
+    ) -> Result<LabelOutcome, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let tag: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
+            "SELECT t.id, t.classification_id, c.mutually_exclusive
+               FROM tags t JOIN classifications c ON c.id = t.classification_id
+              WHERE t.fully_qualified_name = $1",
+        )
+        .bind(tag_fqn)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let Some((tag_id, classification_id, exclusive)) = tag else {
+            return Ok(LabelOutcome::NoSuchTag);
+        };
+
+        // The target must be a live asset. A label on a name nothing resolves
+        // to is a governance claim about nothing, and it would sit there
+        // looking like coverage.
+        let target: Option<bool> =
+            sqlx::query_scalar("SELECT deleted FROM assets WHERE fully_qualified_name = $1")
+                .bind(target_fqn)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if target != Some(false) {
+            return Ok(LabelOutcome::NoSuchTarget);
+        }
+
+        // **A human already said no.** Only automated re-proposals are dropped:
+        // a person deliberately applying a tag that was once rejected is
+        // changing their mind, which is allowed and is not the loop this ledger
+        // exists to break.
+        if matches!(label_type, LabelType::Automated | LabelType::Derived) {
+            let rejected: Option<Uuid> = sqlx::query_scalar(
+                "SELECT tag_id FROM tag_rejections WHERE tag_id = $1 AND target_fqn = $2",
+            )
+            .bind(tag_id)
+            .bind(target_fqn)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            if rejected.is_some() {
+                return Ok(LabelOutcome::PreviouslyRejected);
+            }
+        }
+
+        let already: Option<Uuid> = sqlx::query_scalar(
+            "SELECT tag_id FROM tag_labels WHERE tag_id = $1 AND target_fqn = $2",
+        )
+        .bind(tag_id)
+        .bind(target_fqn)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if already.is_some() {
+            return Ok(LabelOutcome::AlreadyApplied);
+        }
+
+        if exclusive {
+            let conflict: Option<String> = sqlx::query_scalar(
+                "SELECT t.fully_qualified_name
+                   FROM tag_labels l JOIN tags t ON t.id = l.tag_id
+                  WHERE l.target_fqn = $1 AND t.classification_id = $2
+                  LIMIT 1",
+            )
+            .bind(target_fqn)
+            .bind(classification_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            if let Some(existing_tag_fqn) = conflict {
+                return Ok(LabelOutcome::Conflicts { existing_tag_fqn });
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO tag_labels (tag_id, target_fqn, label_type, state, applied_by)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(tag_id)
+        .bind(target_fqn)
+        .bind(label_type.as_str())
+        .bind(state.as_str())
+        .bind(applied_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Self::bump_asset_version(&mut tx, target_fqn, applied_by).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(LabelOutcome::Applied)
+    }
+
+    async fn remove_tag(&self, tag_fqn: &str, target_fqn: &str) -> Result<bool, StorageError> {
+        let done = sqlx::query(
+            "DELETE FROM tag_labels
+              WHERE tag_id = (SELECT id FROM tags WHERE fully_qualified_name = $1)
+                AND target_fqn = $2",
+        )
+        .bind(tag_fqn)
+        .bind(target_fqn)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn labels_on(&self, target_fqn: &str) -> Result<Vec<TagLabel>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT t.fully_qualified_name AS tag_fqn, l.target_fqn, l.label_type, l.state,
+                    l.applied_by, l.applied_at, l.confirmed_by
+               FROM tag_labels l JOIN tags t ON t.id = l.tag_id
+              WHERE l.target_fqn = $1
+              ORDER BY l.applied_at DESC, t.fully_qualified_name",
+        )
+        .bind(target_fqn)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.iter().map(label_from_row).collect())
+    }
+
+    async fn decide_label(
+        &self,
+        tag_fqn: &str,
+        target_fqn: &str,
+        confirmed: bool,
+        decided_by: &str,
+    ) -> Result<LabelDecision, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let found: Option<(Uuid, String)> = sqlx::query_as(
+            "SELECT l.tag_id, l.state
+               FROM tag_labels l JOIN tags t ON t.id = l.tag_id
+              WHERE t.fully_qualified_name = $1 AND l.target_fqn = $2
+                FOR UPDATE OF l",
+        )
+        .bind(tag_fqn)
+        .bind(target_fqn)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let Some((tag_id, state)) = found else {
+            return Ok(LabelDecision::NoSuchLabel);
+        };
+        if confirmed && state == LabelState::Confirmed.as_str() {
+            return Ok(LabelDecision::AlreadyConfirmed);
+        }
+
+        if confirmed {
+            sqlx::query(
+                "UPDATE tag_labels SET state = 'confirmed', confirmed_by = $3, confirmed_at = now()
+                  WHERE tag_id = $1 AND target_fqn = $2",
+            )
+            .bind(tag_id)
+            .bind(target_fqn)
+            .bind(decided_by)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        } else {
+            sqlx::query("DELETE FROM tag_labels WHERE tag_id = $1 AND target_fqn = $2")
+                .bind(tag_id)
+                .bind(target_fqn)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            // **Recorded, not merely removed.** A rejection that vanished would
+            // be re-proposed by the next run of the same scanner, and a steward
+            // would answer the same question forever.
+            sqlx::query(
+                "INSERT INTO tag_rejections (tag_id, target_fqn, rejected_by)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (tag_id, target_fqn)
+                 DO UPDATE SET rejected_by = EXCLUDED.rejected_by, rejected_at = now()",
+            )
+            .bind(tag_id)
+            .bind(target_fqn)
+            .bind(decided_by)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        Self::bump_asset_version(&mut tx, target_fqn, decided_by).await?;
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(LabelDecision::Decided)
+    }
+
+    async fn suggested_labels(&self, limit: i64) -> Result<Vec<TagLabel>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT t.fully_qualified_name AS tag_fqn, l.target_fqn, l.label_type, l.state,
+                    l.applied_by, l.applied_at, l.confirmed_by
+               FROM tag_labels l JOIN tags t ON t.id = l.tag_id
+              WHERE l.state = 'suggested'
+              ORDER BY l.applied_at
+              LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.iter().map(label_from_row).collect())
+    }
+
+    async fn tag_usage(&self, tag_fqn: &str) -> Result<TagUsage, StorageError> {
+        // **Live entities only.** A tombstoned column does not keep a
+        // governance label alive, and counting it would refuse a delete over
+        // data nobody can see.
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT a.kind::text, COUNT(*)
+               FROM tag_labels l
+               JOIN tags t ON t.id = l.tag_id
+               JOIN assets a ON a.fully_qualified_name = l.target_fqn
+              WHERE t.fully_qualified_name = $1 AND NOT a.deleted
+              GROUP BY a.kind
+              ORDER BY a.kind::text",
+        )
+        .bind(tag_fqn)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(TagUsage { by_kind: rows })
+    }
+
+    async fn delete_tag(
+        &self,
+        tag_fqn: &str,
+        force: bool,
+        updated_by: &str,
+    ) -> Result<Option<i64>, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let tag_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM tags WHERE fully_qualified_name = $1")
+                .bind(tag_fqn)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let Some(tag_id) = tag_id else {
+            return Ok(None);
+        };
+
+        let mut removed = 0_i64;
+        if force {
+            // Each affected entity's version advances, so a label that
+            // disappeared from a thousand columns is visible in each of their
+            // histories rather than only in this one operation's response.
+            let targets: Vec<String> =
+                sqlx::query_scalar("SELECT target_fqn FROM tag_labels WHERE tag_id = $1")
+                    .bind(tag_id)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            for target in &targets {
+                Self::bump_asset_version(&mut tx, target, updated_by).await?;
+            }
+            removed = i64::try_from(targets.len()).unwrap_or(i64::MAX);
+            sqlx::query("DELETE FROM tag_labels WHERE tag_id = $1")
+                .bind(tag_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        sqlx::query("DELETE FROM tags WHERE id = $1")
+            .bind(tag_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(Some(removed))
+    }
+
+    async fn propagate_tag(
+        &self,
+        tag_fqn: &str,
+        target_fqn: &str,
+        recursive: bool,
+        applied_by: &str,
+    ) -> Result<i64, StorageError> {
+        let children: Vec<String> = if recursive {
+            sqlx::query_scalar(
+                "SELECT fully_qualified_name FROM assets
+                  WHERE NOT deleted
+                    AND fully_qualified_name LIKE $1 || '.%'",
+            )
+            .bind(target_fqn)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        } else {
+            sqlx::query_scalar(
+                "SELECT child.fully_qualified_name FROM assets child
+                   JOIN assets parent ON parent.id = child.parent_id
+                  WHERE NOT child.deleted AND parent.fully_qualified_name = $1",
+            )
+            .bind(target_fqn)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        };
+
+        let mut affected = 0_i64;
+        for child in children {
+            // Reuses `apply_tag`, so precedence, exclusivity and the rejection
+            // ledger are all decided in one place. An `Applied` outcome is a
+            // child that gained the label; everything else — already present,
+            // conflicting, rejected — is deliberately not counted, because the
+            // number reports what this call *did*.
+            let existing = self.labels_on(&child).await?;
+            let held = existing.iter().find(|l| l.tag_fqn == tag_fqn);
+            if !graph_owl_core::classification::propagation_may_overwrite(held) {
+                continue;
+            }
+            if held.is_some() {
+                self.remove_tag(tag_fqn, &child).await?;
+            }
+            if matches!(
+                self.apply_tag(
+                    tag_fqn,
+                    &child,
+                    LabelType::Propagated,
+                    LabelState::Confirmed,
+                    applied_by,
+                )
+                .await?,
+                LabelOutcome::Applied
+            ) {
+                affected += 1;
+            }
+        }
+        Ok(affected)
+    }
+
+    // ---- Epic 26: lifecycle and certification ----
+
+    async fn set_lifecycle(
+        &self,
+        asset_id: Uuid,
+        to: LifecycleState,
+        deprecation: Option<&Deprecation>,
+        updated_by: &str,
+    ) -> Result<LifecycleOutcome, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let current: Option<String> =
+            sqlx::query_scalar("SELECT lifecycle FROM assets WHERE id = $1 FOR UPDATE")
+                .bind(asset_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let Some(current) = current else {
+            return Ok(LifecycleOutcome::NotFound);
+        };
+        let from = LifecycleState::parse(&current).unwrap_or_default();
+        if !graph_owl_core::lifecycle::can_transition(from, to) {
+            return Ok(LifecycleOutcome::Illegal { from, to });
+        }
+
+        // The deprecation document and the state are written together, so they
+        // cannot disagree — a `Deprecated` asset with no reason, or an `Active`
+        // one still carrying a successor, are both states nothing should be
+        // able to store.
+        let row = sqlx::query(&format!(
+            "UPDATE assets
+                SET lifecycle = $2, deprecation = $3,
+                    version_minor = version_minor + 1, updated_by = $4, updated_at = now()
+              WHERE id = $1
+              RETURNING {ASSET_COLUMNS}"
+        ))
+        .bind(asset_id)
+        .bind(to.as_str())
+        .bind(deprecation.and_then(|d| serde_json::to_value(d).ok()))
+        .bind(updated_by)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut asset = asset_from_row(row);
+        asset.owners = self.asset_owners(asset.id).await?;
+        Ok(LifecycleOutcome::Moved(Box::new(asset)))
+    }
+
+    async fn terminal_successor(&self, fqn: &str) -> Result<Option<Asset>, StorageError> {
+        // **Bounded and cycle-safe.** A successor loop is a configuration
+        // mistake somebody will make, and an unbounded walk turns it into a
+        // hung request rather than an answer. Ten hops is far past any real
+        // chain — an estate that has deprecated the same thing ten times in
+        // sequence has a bigger problem than this walk.
+        const MAX_HOPS: usize = 10;
+        let mut seen = std::collections::HashSet::new();
+        let mut current = fqn.to_string();
+
+        for _ in 0..MAX_HOPS {
+            if !seen.insert(current.clone()) {
+                return Ok(None);
+            }
+            let row = sqlx::query(&format!(
+                "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
+                  WHERE fully_qualified_name = $1"
+            ))
+            .bind(&current)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            let Some(row) = row else { return Ok(None) };
+            let asset = asset_from_row(row);
+
+            match asset.lifecycle {
+                LifecycleState::Deprecated | LifecycleState::Retired => {
+                    let Some(next) = asset
+                        .deprecation
+                        .as_ref()
+                        .and_then(|d| d.successor_fqn.clone())
+                    else {
+                        // Dead end: deprecated with nowhere to go. `None`, not
+                        // this asset — pointing a caller at a dead asset is the
+                        // failure the successor field exists to prevent.
+                        return Ok(None);
+                    };
+                    current = next;
+                }
+                _ => return Ok(Some(asset)),
+            }
+        }
+        Ok(None)
+    }
+
+    async fn create_certification_type(
+        &self,
+        id: Uuid,
+        name: &str,
+        description: Option<&str>,
+        default_validity_days: i32,
+        required_evidence: &[String],
+        authorized_issuers: &[String],
+        updated_by: &str,
+    ) -> Result<StoredCertificationType, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO certification_types
+                 (id, name, description, default_validity_days, required_evidence, updated_by)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(description)
+        .bind(default_validity_days)
+        .bind(required_evidence)
+        .bind(updated_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            conflict_or_unexpected(
+                &e,
+                format!("a certification type named `{name}` already exists"),
+            )
+        })?;
+
+        for issuer in authorized_issuers {
+            sqlx::query(
+                "INSERT INTO certification_type_issuers (type_id, principal_id)
+                 VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(id)
+            .bind(issuer)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(StoredCertificationType {
+            id,
+            name: name.to_string(),
+            description: description.map(str::to_string),
+            default_validity_days,
+            required_evidence: required_evidence.to_vec(),
+            authorized_issuers: authorized_issuers.to_vec(),
+        })
+    }
+
+    async fn list_certification_types(&self) -> Result<Vec<StoredCertificationType>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, name, description, default_validity_days, required_evidence
+               FROM certification_types ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut types = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id: Uuid = row.get("id");
+            types.push(StoredCertificationType {
+                id,
+                name: row.get("name"),
+                description: row.get("description"),
+                default_validity_days: row.get("default_validity_days"),
+                required_evidence: row.get("required_evidence"),
+                authorized_issuers: self.read_issuers(id).await?,
+            });
+        }
+        Ok(types)
+    }
+
+    async fn get_certification_type(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<StoredCertificationType>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, name, description, default_validity_days, required_evidence
+               FROM certification_types WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let Some(row) = row else { return Ok(None) };
+        Ok(Some(StoredCertificationType {
+            id,
+            name: row.get("name"),
+            description: row.get("description"),
+            default_validity_days: row.get("default_validity_days"),
+            required_evidence: row.get("required_evidence"),
+            authorized_issuers: self.read_issuers(id).await?,
+        }))
+    }
+
+    async fn issue_certification(
+        &self,
+        id: Uuid,
+        target_fqn: &str,
+        type_id: Uuid,
+        issuer: &str,
+        criteria: Option<&str>,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+        evidence: &[(String, String)],
+    ) -> Result<IssueOutcome, StorageError> {
+        let Some(certification_type) = self.get_certification_type(type_id).await? else {
+            return Ok(IssueOutcome::NoSuchType);
+        };
+
+        if !graph_owl_core::lifecycle::may_issue(&certification_type.authorized_issuers, issuer) {
+            return Ok(IssueOutcome::NotAuthorized);
+        }
+
+        // **Re-checked at issuance, every time.** Slice E's renewal path goes
+        // through here too, so a renewal whose evidence has since disappeared
+        // fails — renewing on stale grounds is how certification decays into
+        // theatre.
+        let supplied: Vec<String> = evidence.iter().map(|(kind, _)| kind.clone()).collect();
+        let missing = graph_owl_core::lifecycle::missing_evidence(
+            &certification_type.required_evidence,
+            &supplied,
+        );
+        if !missing.is_empty() {
+            return Ok(IssueOutcome::MissingEvidence(missing));
+        }
+
+        let target: Option<bool> =
+            sqlx::query_scalar("SELECT deleted FROM assets WHERE fully_qualified_name = $1")
+                .bind(target_fqn)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if target != Some(false) {
+            return Ok(IssueOutcome::NoSuchTarget);
+        }
+
+        let expires_at = expires_at.unwrap_or_else(|| {
+            chrono::Utc::now()
+                + chrono::Duration::days(i64::from(certification_type.default_validity_days))
+        });
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // **Insert first, then supersede.** `superseded_by` is a
+        // self-referential foreign key, so naming the new row before it exists
+        // is refused by the database — and the two statements are in one
+        // transaction, so no reader ever sees the moment when both are live.
+        sqlx::query(
+            "INSERT INTO certifications (id, target_fqn, type_id, issuer, criteria, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(id)
+        .bind(target_fqn)
+        .bind(type_id)
+        .bind(issuer)
+        .bind(criteria)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // A second issuance of the same type supersedes rather than
+        // accumulating, so "when does my Gold expire" has one answer. The
+        // superseded row stays: who vouched for what and when is the point.
+        sqlx::query(
+            "UPDATE certifications SET superseded_by = $3
+              WHERE target_fqn = $1 AND type_id = $2 AND superseded_by IS NULL
+                AND id <> $3",
+        )
+        .bind(target_fqn)
+        .bind(type_id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        for (kind, reference) in evidence {
+            sqlx::query(
+                "INSERT INTO certification_evidence (certification_id, kind, reference)
+                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            )
+            .bind(id)
+            .bind(kind)
+            .bind(reference)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(IssueOutcome::Issued(Box::new(StoredCertification {
+            id,
+            target_fqn: target_fqn.to_string(),
+            type_id,
+            type_name: certification_type.name,
+            issuer: issuer.to_string(),
+            criteria: criteria.map(str::to_string),
+            issued_at: chrono::Utc::now(),
+            expires_at,
+            evidence: evidence.to_vec(),
+        })))
+    }
+
+    async fn certifications_on(
+        &self,
+        target_fqn: &str,
+    ) -> Result<Vec<StoredCertification>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT c.id, c.target_fqn, c.type_id, t.name AS type_name, c.issuer, c.criteria,
+                    c.issued_at, c.expires_at
+               FROM certifications c JOIN certification_types t ON t.id = c.type_id
+              WHERE c.target_fqn = $1 AND c.superseded_by IS NULL
+              ORDER BY c.expires_at",
+        )
+        .bind(target_fqn)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        self.hydrate_certifications(&rows).await
+    }
+
+    async fn certifications_expiring_before(
+        &self,
+        instant: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<StoredCertification>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT c.id, c.target_fqn, c.type_id, t.name AS type_name, c.issuer, c.criteria,
+                    c.issued_at, c.expires_at
+               FROM certifications c JOIN certification_types t ON t.id = c.type_id
+              WHERE c.superseded_by IS NULL AND c.expires_at < $1
+              ORDER BY c.expires_at",
+        )
+        .bind(instant)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        self.hydrate_certifications(&rows).await
+    }
+
     // ---- Epic 23: domains and data products ----
 
     async fn create_domain(
@@ -6376,8 +7332,97 @@ fn product_from_row(row: &PgRow) -> DataProduct {
     }
 }
 
+const CLASSIFICATION_COLUMNS: &str = "id, name, description, mutually_exclusive, \
+     version_major, version_minor, updated_by, change_description, created_at, updated_at";
+
+const TAG_COLUMNS: &str = "id, name, classification_id, fully_qualified_name, description, \
+     version_major, version_minor, updated_by, created_at, updated_at";
+
+fn classification_from_row(row: &PgRow) -> Classification {
+    Classification {
+        id: row.get("id"),
+        name: row.get("name"),
+        description: row.get("description"),
+        mutually_exclusive: row.get("mutually_exclusive"),
+        version: EntityVersion {
+            major: u32::try_from(row.get::<i32, _>("version_major")).unwrap_or(0),
+            minor: u32::try_from(row.get::<i32, _>("version_minor")).unwrap_or(1),
+        },
+        updated_by: row.get("updated_by"),
+        change_description: row
+            .get::<Option<serde_json::Value>, _>("change_description")
+            .and_then(|v| serde_json::from_value(v).ok()),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn tag_from_row(row: &PgRow) -> Tag {
+    Tag {
+        id: row.get("id"),
+        name: row.get("name"),
+        classification_id: row.get("classification_id"),
+        fully_qualified_name: row.get("fully_qualified_name"),
+        description: row.get("description"),
+        version: EntityVersion {
+            major: u32::try_from(row.get::<i32, _>("version_major")).unwrap_or(0),
+            minor: u32::try_from(row.get::<i32, _>("version_minor")).unwrap_or(1),
+        },
+        updated_by: row.get("updated_by"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn label_from_row(row: &PgRow) -> TagLabel {
+    TagLabel {
+        tag_fqn: row.get("tag_fqn"),
+        target_fqn: row.get("target_fqn"),
+        // A stored value the enum has never heard of falls back rather than
+        // panicking: the columns carry `CHECK`s, so this is only reachable by a
+        // migration that widened one, and a read that dies is worse than one
+        // that is conservative.
+        label_type: LabelType::parse(row.get::<String, _>("label_type").as_str())
+            .unwrap_or(LabelType::Manual),
+        state: LabelState::parse(row.get::<String, _>("state").as_str())
+            .unwrap_or(LabelState::Confirmed),
+        applied_by: row.get("applied_by"),
+        applied_at: row.get("applied_at"),
+        confirmed_by: row.get("confirmed_by"),
+    }
+}
+
+/// A unique violation becomes a named conflict; everything else stays
+/// unexpected. Written once because five call sites needed the same three
+/// lines, and five copies is five chances to map one of them wrong.
+fn conflict_or_unexpected(error: &sqlx::Error, detail: String) -> StorageError {
+    if error
+        .as_database_error()
+        .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
+    {
+        StorageError::Conflict {
+            detail,
+            existing_id: None,
+            kind: ConflictKind::Fqn,
+        }
+    } else {
+        StorageError::Unexpected(error.to_string())
+    }
+}
+
 fn asset_from_row(row: PgRow) -> Asset {
     Asset {
+        // A stored state the enum has never heard of falls back to `Active`
+        // rather than panicking: the column has a `CHECK`, so this can only be
+        // reached by a migration that widened it, and a read that dies is worse
+        // than one that is conservative.
+        lifecycle: graph_owl_core::lifecycle::LifecycleState::parse(
+            row.get::<String, _>("lifecycle").as_str(),
+        )
+        .unwrap_or_default(),
+        deprecation: row
+            .get::<Option<serde_json::Value>, _>("deprecation")
+            .and_then(|v| serde_json::from_value(v).ok()),
         version: EntityVersion {
             major: u32::try_from(row.get::<i32, _>("version_major")).unwrap_or(0),
             minor: u32::try_from(row.get::<i32, _>("version_minor")).unwrap_or(1),
@@ -6762,7 +7807,7 @@ const OWNERS_EXPR: &str = "(WITH RECURSIVE ancestry (node, next_up, hops) AS (
     LEFT JOIN users u ON u.id = o.user_id
     LEFT JOIN teams t ON t.id = o.team_id)";
 
-const ASSET_COLUMNS: &str = "id, kind, name, fully_qualified_name, parent_id, description, properties, extension, version_major, version_minor, updated_by, change_description, deleted, deleted_at, created_at, updated_at";
+const ASSET_COLUMNS: &str = "id, kind, name, fully_qualified_name, parent_id, description, properties, extension, lifecycle, deprecation, version_major, version_minor, updated_by, change_description, deleted, deleted_at, created_at, updated_at";
 
 /// `AND` clauses for a set of custom-property filters — Epic 22 Slice D.
 ///

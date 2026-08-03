@@ -75,6 +75,8 @@ async fn asset(storage: &PostgresStorage, name: &str) -> Uuid {
             deleted_at: None,
             created_at: now,
             updated_at: now,
+            lifecycle: Default::default(),
+            deprecation: None,
         })
         .await
         .expect("asset")

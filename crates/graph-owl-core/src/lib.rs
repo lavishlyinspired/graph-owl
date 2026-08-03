@@ -1,4 +1,5 @@
 pub mod blocking;
+pub mod classification;
 pub mod contradiction;
 pub mod custom_property;
 pub mod domain;
@@ -8,6 +9,7 @@ pub mod extraction_run;
 pub mod flake;
 pub mod fqn;
 pub mod glossary;
+pub mod lifecycle;
 pub mod lineage;
 pub mod memory;
 pub mod metric;
@@ -90,6 +92,20 @@ pub struct Asset {
     /// optional field on this envelope draws.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Where this asset is in its life — Epic 26.
+    ///
+    /// **Orthogonal to `deleted`.** A tombstone says the source no longer
+    /// reports it; a lifecycle state says what the organization intends. An
+    /// asset can be Active and tombstoned (a connector lost sight of it) or
+    /// Retired and present (deliberately turned off), and collapsing them would
+    /// make both unanswerable.
+    #[serde(default = "default_lifecycle")]
+    pub lifecycle: crate::lifecycle::LifecycleState,
+    /// Why it is going away and what to use instead. Present only while
+    /// `lifecycle` is `Deprecated` — the two are written together by the one
+    /// method that moves the state, so they cannot disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecation: Option<crate::lifecycle::Deprecation>,
     /// Users and teams accountable for this asset — Epic 11 Slice C.
     ///
     /// **Always serialized, empty when unowned**, never omitted. An unowned asset
@@ -168,6 +184,15 @@ impl AssetUpdate {
         }
         Some(merged)
     }
+}
+
+/// Assets that predate Epic 26 are `Active`, not `Draft`.
+///
+/// Retroactively marking a whole existing estate `draft` would make the state
+/// meaningless on the day it shipped — everything already here got here from a
+/// connector or a deliberate write.
+fn default_lifecycle() -> crate::lifecycle::LifecycleState {
+    crate::lifecycle::LifecycleState::Active
 }
 
 fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>

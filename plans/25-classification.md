@@ -1,6 +1,6 @@
 # Plan: Tags & Classification (Epic 25)
 **Branch**: feat/classification
-**Status**: Not started
+**Status**: Slices A–D, H, I shipped. Slices E–G were **delivered by Epic 24** — see below.
 **Depends on**: Epic 3 (envelope carries `tags`), Epic 11 (term reviewers are users)
 **Unblocks**: Epic 8 (tag facets), Epic 13 (tag-conditioned policies)
 **Crates**: `graph-owl-core` (Classification, Tag, TagLabel) · `graph-owl-storage-postgres` · `graph-owl-api` · `graph-owl-server`
@@ -17,22 +17,34 @@ Turn a column named `cust_ssn` into one labelled `PII.Sensitive` and linked to a
 4. **Mutually exclusive classifications are enforced.** A `Tier` classification marked exclusive rejects a second `Tier.*` tag on the same entity — otherwise "Tier" means nothing.
 5. **Deleting a Tag in use is rejected**, with a usage count. Silent removal of a governance label is a compliance hazard.
 
+## What Epic 24 already delivered, and why three slices are not repeated here
+
+**Slices E, F and G — glossaries, terms, attachment and the review workflow —
+shipped as Epic 24.** `V20__glossary_and_metrics.sql` carries `glossaries`,
+`glossary_terms`, `term_relations`, `term_reviewers`, `term_transitions` and
+`term_attachments`; `graph_owl_core::glossary` carries the status machine
+(`can_transition`, `is_attachable`), the SKOS relations with their inverses, and
+`would_cycle`. Rebuilding any of it here would have produced a second glossary
+that disagreed with the first.
+
+What this epic adds is the **operational** half that decision 1 keeps separate.
+
 ## Acceptance criteria (feature level)
 
-- [ ] `Classification` and `Tag` CRUD with the envelope; tag FQN is `{classification}.{tag}`.
-- [ ] `Glossary` and `GlossaryTerm` CRUD; terms nest; cycles rejected.
-- [ ] Tags attach to entities and to individual columns.
-- [ ] A suggested tag is distinguishable from a confirmed one and can be confirmed or rejected.
-- [ ] Mutually exclusive classifications reject a second tag from the same classification.
-- [ ] `GET /tables?tags=PII.Sensitive` filters, including column-level matches.
-- [ ] Deleting a tag in use → `409` with a usage count.
-- [ ] A term moves through `Draft → InReview → Approved` with a reviewer.
+- [x] `Classification` and `Tag` CRUD with the envelope; tag FQN is `{classification}.{tag}`, derived.
+- [x] `Glossary` and `GlossaryTerm` CRUD; terms nest; cycles rejected — **Epic 24**.
+- [x] Tags attach to entities and to individual columns.
+- [x] A suggested tag is distinguishable from a confirmed one and can be confirmed or rejected.
+- [x] Mutually exclusive classifications reject a second tag from the same classification, naming it.
+- [x] Deleting a tag in use → `409` with a usage count **by entity kind**.
+- [x] A term moves through `Draft → InReview → Approved` with a reviewer — **Epic 24**.
+- [ ] `GET /tables?tags=PII.Sensitive` filters, including column-level matches. **Not done** — see "Explicitly deferred".
 
 ## Slices
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first.
 
-### Slice A: Classifications and tags exist
+### Slice A: Classifications and tags exist — **shipped**
 
 **Value**: A steward defines the operational vocabulary before anything is labelled.
 **Path**: `Classification { name, description, mutually_exclusive: bool }`; `Tag { name, description, classification }`, FQN `{classification}.{tag}`.
@@ -41,7 +53,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: entities, storage, derivation reuse, handlers.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice B: Tags attach to entities with provenance
+### Slice B: Tags attach to entities with provenance — **shipped**
 
 **Value**: A table can be labelled, and the label says where it came from.
 **Path**: `TagLabel { tag_fqn, source, label_type, state }` on the envelope, backed by `appliedTo` edges carrying the label metadata.
@@ -56,7 +68,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: label type, edges with metadata, exclusivity check.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice C: Columns are taggable
+### Slice C: Columns are taggable — **shipped**
 
 **Value**: `PII` belongs on the SSN column, not on the whole table — table-level PII labelling is too coarse to act on.
 **Path**: labels attach to a column by its FQN (`{tableFqn}.{columnName}`, from Epic 2).
@@ -70,7 +82,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: column-FQN-keyed labels, rename/removal handling.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice D: Suggested tags can be confirmed or rejected
+### Slice D: Suggested tags can be confirmed or rejected — **shipped**
 
 **Value**: An automated scanner (later) becomes usable — a human triages suggestions rather than trusting or ignoring them wholesale.
 **Path**: `PUT /{collection}/{id}/tags/{tagFqn}/confirm` and `.../reject`.
@@ -84,7 +96,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: state transitions, rejection ledger, filter.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice E: Glossaries and terms exist
+### Slice E: Glossaries and terms exist — **delivered by Epic 24**
 
 **Value**: A business definition has a home, so "active customer" means one thing across the organization.
 **Path**: `Glossary { name, description }`; `GlossaryTerm { name, description, synonyms, glossary, parent? }`; nesting via `parentOf`; `relatedTo` between terms.
@@ -94,7 +106,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **REFACTOR**: this is the second consumer of cycle detection (after Epic 11) — extract to core now if not already done.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice F: Terms attach to assets
+### Slice F: Terms attach to assets — **delivered by Epic 24**
 
 **Value**: A column links to the definition of what it holds — the semantic half of classification.
 **Path**: `TagLabel` with `source: Glossary` and the term's FQN.
@@ -103,7 +115,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: glossary-sourced labels, usage endpoint, status gate.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice G: Terms have a review workflow
+### Slice G: Terms have a review workflow — **delivered by Epic 24**
 
 **Value**: Business definitions get an owner and an approval before they become authoritative.
 **Path**: `status: Draft|InReview|Approved|Deprecated`; `reviews` edges to users; transition endpoints.
@@ -118,7 +130,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: status machine, reviewer edges, authorization check (principal-based, pre-Epic-11).
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice H: Tags in use cannot vanish silently
+### Slice H: Tags in use cannot vanish silently — **shipped**
 
 **Value**: A governance label cannot disappear from a thousand columns by accident.
 **Path**: pre-delete usage check on `Tag` and `GlossaryTerm`.
@@ -127,7 +139,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: usage query, transactional force path.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice I: Tags propagate on request
+### Slice I: Tags propagate on request — **shipped**
 
 **Value**: Labelling a table's forty columns is one action, without surprising anyone with automatic behavior.
 **Path**: `POST /{collection}/{id}/tags/{tagFqn}/propagate` applying to children with `labelType: Propagated`.
@@ -144,6 +156,15 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 
 ## Explicitly deferred (with destination)
 
+- **`?tags=` filtering on list endpoints, including column-level matches** →
+  the one feature-level criterion this epic did not deliver. The labels, the
+  usage query and the index all exist; what is missing is the filter itself, and
+  the reason it is not a line of code is the **column-level** half: matching a
+  table because one of its *columns* carries `PII.Sensitive` is a different
+  query from matching the table's own label, and shipping only the first would
+  quietly under-report exactly the case the epic exists for (`PII` belongs on
+  the SSN column). Epic 23's `?domain=` established the filter plumbing; this
+  needs its own slice and its own test for the descendant case.
 - **Automated PII detection** → a `labelType: Automated` producer. The model supports it; nothing emits it. Add when a scanner exists.
 - **Tag-based access policies** → Epic 13, as a policy condition.
 - **Bulk tagging via CSV** → alongside Epic 20's import/export.

@@ -29,6 +29,17 @@
               "null"
             ]
           },
+          "deprecation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Deprecation",
+                "description": "Why it is going away and what to use instead. Present only while\n`lifecycle` is `Deprecated` — the two are written together by the one\nmethod that moves the state, so they cannot disagree."
+              }
+            ]
+          },
           "description": {
             "type": [
               "string",
@@ -56,6 +67,10 @@
           },
           "kind": {
             "$ref": "#/components/schemas/AssetKind"
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/LifecycleState",
+            "description": "Where this asset is in its life — Epic 26.\n\n**Orthogonal to `deleted`.** A tombstone says the source no longer\nreports it; a lifecycle state says what the organization intends. An\nasset can be Active and tombstoned (a connector lost sight of it) or\nRetired and present (deliberately turned off), and collapsing them would\nmake both unanswerable."
           },
           "name": {
             "type": "string"
@@ -341,6 +356,39 @@
         ],
         "type": "object"
       },
+      "Deprecation": {
+        "description": "Why something is going away, and what to use instead.",
+        "properties": {
+          "deprecatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Required. \"Deprecated\" with no reason is a state nobody can act on.",
+            "type": "string"
+          },
+          "successorFqn": {
+            "description": "**A reference, not prose** (decision 2). \"Use `orders_v2` instead\" has\nto be machine-readable so an agent can redirect rather than merely warn\n— an agent that recommends a dead asset without saying so is the most\ndamaging failure this system can produce, because it is confidently\nwrong in a way the reader cannot detect.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sunsetAt": {
+            "description": "When it becomes `Retired`. Absent means \"no date decided yet\", which is\nhonest and common.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "reason",
+          "deprecatedAt"
+        ],
+        "type": "object"
+      },
       "EntityReference": {
         "description": "A denormalized pointer to an owning principal.\n\n**Denormalized on purpose.** `00c` requires responses to carry \"name, FQN,\ntype, not bare ids\": a console rendering an owner list should not have to make\nN follow-up requests to turn ids into names, and an agent given bare ids\nreports ids to a human.\n\nThere is no separate `fullyQualifiedName`. For a principal the id **is** the\nqualified name — `users.id` and `teams.id` are globally unique, human-chosen\ntext — and a second field that always equals the first is a field that will\neventually disagree with it.",
         "properties": {
@@ -525,6 +573,16 @@
           "field"
         ],
         "type": "object"
+      },
+      "LifecycleState": {
+        "description": "Where an asset is in its life.",
+        "enum": [
+          "draft",
+          "active",
+          "deprecated",
+          "retired"
+        ],
+        "type": "string"
       },
       "LinkRelation": {
         "description": "How a memory relates to what it is about.",
