@@ -1,7 +1,7 @@
 # Plan: Labelled Property Graph Projection (Epic 7c) ★
 
 **Branch**: feat/engine-lpg
-**Status**: Slices A–C built (nodes, element ids, edges) in `graph-owl-lpg`; the reverse direction (`flakes_from_node`/`flakes_from_edge`) and Slice D+ are not
+**Status**: Slices A–E built in `graph-owl-lpg` — nodes, element ids, edges, the reverse direction with its loss report, and named-graph/time-travel survival. Slice F+ not started
 **Depends on**: Epic 4 (flakes), Epic 1 (relationship taxonomy)
 **Unblocks**: Epic 7b (Cypher), Epic 7d (Bolt), Epic 9a (LPG interchange), Epic 40 (graph explorer UI)
 **Crates**: **`graph-owl-lpg`** (new — pure model + bidirectional mapping)

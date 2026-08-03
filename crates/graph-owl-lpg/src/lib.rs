@@ -223,6 +223,21 @@ pub enum LossyMapping {
         subject: String,
         graphs: Vec<String>,
     },
+    /// A typed literal that LPG has no type for, projected as a string.
+    ///
+    /// **The one loss a round trip cannot undo**, and it is a loss of *type*
+    /// rather than of value: `FlakeValue::Uuid` and `FlakeValue::Json` both
+    /// become `PropertyValue::String`, and coming back there is nothing left to
+    /// say which they were. The value survives exactly; the tag does not.
+    ///
+    /// Reported on the **forward** pass, because that is where the information
+    /// goes — the reverse pass has nothing left to notice.
+    TypeNarrowed {
+        subject: String,
+        predicate: String,
+        /// `uuid` or `json`.
+        from: &'static str,
+    },
 }
 
 /// What a projection could not carry.
@@ -259,6 +274,17 @@ pub enum MappingError {
     ReservedPropertyName(String),
     #[error("`{0}` is not a reified relationship: it has no `{1}`")]
     NotARelationship(String, &'static str),
+    /// An element reference that does not decode.
+    ///
+    /// **An error rather than a dropped property.** A reference that silently
+    /// vanished would turn a broken import into a successful one, and the
+    /// missing edge would be discovered by whoever queried for it later.
+    #[error("`{0}` is not an element id this server issued, so it names nothing")]
+    UnresolvableHandle(String),
+    /// A list inside a list. The flake model has no nesting: a repeated
+    /// predicate is a flat set of facts, so there is no encoding for this.
+    #[error("a nested list has no flake encoding; a repeated predicate is flat")]
+    NestedList,
 }
 
 /// The predicates the mapping reads. Named once so the projection and its tests
@@ -321,11 +347,24 @@ pub fn node_from_flakes(
             continue;
         }
 
-        if matches!(&flake.o, FlakeValue::Ref(_)) {
-            report.lossy.push(LossyMapping::RefInProperty {
+        match &flake.o {
+            FlakeValue::Ref(_) => report.lossy.push(LossyMapping::RefInProperty {
                 subject: subject.id.clone(),
                 predicate: flake.p.id.clone(),
-            });
+            }),
+            // The value survives; the type tag does not. See `TypeNarrowed`.
+            FlakeValue::Uuid(_) | FlakeValue::Json(_) => {
+                report.lossy.push(LossyMapping::TypeNarrowed {
+                    subject: subject.id.clone(),
+                    predicate: flake.p.id.clone(),
+                    from: if matches!(&flake.o, FlakeValue::Uuid(_)) {
+                        "uuid"
+                    } else {
+                        "json"
+                    },
+                });
+            }
+            _ => {}
         }
         properties.insert_user(&flake.p.id, PropertyValue::from_flake(&flake.o))?;
     }
@@ -373,10 +412,19 @@ pub fn edge_from_reified(
     let mut start = None;
     let mut end = None;
     let mut properties = PropertyMap::new();
+    let mut graphs: Vec<String> = Vec::new();
+    let mut newest: Option<i64> = None;
 
     for flake in flakes.iter().filter(|flake| &flake.s == relationship) {
         if !flake.op {
             continue;
+        }
+        newest = Some(newest.map_or(flake.t, |t: i64| t.max(flake.t)));
+        if let Some(graph) = &flake.cx {
+            let name = graph.id.clone();
+            if !graphs.contains(&name) {
+                graphs.push(name);
+            }
         }
         match flake.p.id.as_str() {
             predicate::REL_TYPE => {
@@ -411,6 +459,25 @@ pub fn edge_from_reified(
         }
     }
 
+    // **An inferred edge must not come back looking asserted.** Epic 6 writes
+    // derived relationships into `graph:reasoning`, and an agent or a console
+    // that cannot tell them from asserted ones is being shown inference as
+    // fact. The node path had this from the start; the edge path did not, and a
+    // surviving mutant is what surfaced the asymmetry.
+    if graphs.len() > 1 {
+        graphs.sort();
+        report.lossy.push(LossyMapping::NamedGraphCollapse {
+            subject: relationship.id.clone(),
+            graphs: graphs.clone(),
+        });
+    }
+    if let Some(first) = graphs.first() {
+        properties.insert_reserved(GRAPH_KEY, PropertyValue::String(first.clone()));
+    }
+    if let Some(t) = newest {
+        properties.insert_reserved(TIME_KEY, PropertyValue::Integer(t));
+    }
+
     Ok(LpgEdge {
         element_id: ElementId::encode(relationship),
         edge_type: edge_type.ok_or_else(|| {
@@ -424,6 +491,192 @@ pub fn edge_from_reified(
         })?,
         properties,
     })
+}
+
+/// One property value back into a flake object.
+///
+/// **Not the exact inverse of [`PropertyValue::from_flake`], and it cannot be.**
+/// `Uuid` and `Json` both project to `String`, so coming back there is nothing
+/// left to distinguish them from a string that was always a string. The forward
+/// pass reports that as [`LossyMapping::TypeNarrowed`] precisely because this
+/// function has no way to.
+///
+/// # Errors
+///
+/// [`MappingError::UnresolvableHandle`] when an element reference is not a
+/// handle this server issued — **an error rather than a dropped property**,
+/// because a reference that silently vanished would turn a broken import into a
+/// successful one.
+fn flake_value_from(value: &PropertyValue) -> Result<FlakeValue, MappingError> {
+    Ok(match value {
+        PropertyValue::Boolean(flag) => FlakeValue::Boolean(*flag),
+        PropertyValue::Integer(number) => FlakeValue::Int(*number),
+        PropertyValue::Float(number) => FlakeValue::Float(*number),
+        PropertyValue::String(text) => FlakeValue::String(text.clone()),
+        PropertyValue::Bytes(bytes) => FlakeValue::Bytes(bytes.clone()),
+        PropertyValue::DateTime(instant) => FlakeValue::Instant(*instant),
+        PropertyValue::Duration(seconds) => FlakeValue::Duration(*seconds),
+        PropertyValue::ElementRef(handle) => FlakeValue::Ref(
+            handle
+                .decode()
+                .map_err(|_| MappingError::UnresolvableHandle(handle.to_string()))?,
+        ),
+        // A list is several flakes on one predicate, so it is expanded by the
+        // caller rather than converted here — reaching this arm means a list
+        // nested inside a list, which the flake model cannot express.
+        PropertyValue::List(_) => return Err(MappingError::NestedList),
+    })
+}
+
+/// The named graph a reserved `_graph` property asks for.
+fn context_of(properties: &PropertyMap) -> Option<Sid> {
+    match properties.get(GRAPH_KEY) {
+        Some(PropertyValue::String(name)) => Some(Sid::dsc(name.clone())),
+        _ => None,
+    }
+}
+
+/// Turn one property into its flakes, expanding a list into several.
+fn property_flakes(
+    subject: &Sid,
+    key: &str,
+    value: &PropertyValue,
+    cx: Option<Sid>,
+    t: i64,
+) -> Result<Vec<Flake>, MappingError> {
+    let make = |object: FlakeValue| Flake {
+        s: subject.clone(),
+        p: Sid::dsc(key.to_string()),
+        o: object,
+        cx: cx.clone(),
+        t,
+        op: true,
+    };
+    match value {
+        // **A list becomes several flakes on one predicate**, which is what it
+        // was projected from. Order is not preserved and the plan says so:
+        // flakes are a set, so any order here would be an artifact.
+        PropertyValue::List(values) => values
+            .iter()
+            .map(|entry| Ok(make(flake_value_from(entry)?)))
+            .collect(),
+        single => Ok(vec![make(flake_value_from(single)?)]),
+    }
+}
+
+/// A node back into flakes, at a transaction time the caller supplies.
+///
+/// **`t` is a parameter, never read from `_t`.** The projection exposes
+/// transaction time read-only; taking it back from the payload would let a
+/// caller forge history, which is the one thing an append-only log exists to
+/// prevent. A `_t` in the properties is ignored rather than rejected — it is
+/// what the forward pass put there, so round-tripping a node must not fail.
+///
+/// # Errors
+///
+/// [`MappingError::ReservedPropertyName`] for a `_`-prefixed key the projection
+/// does not own; [`MappingError::UnresolvableHandle`] for a bad element
+/// reference; [`MappingError::Untyped`] for a node with no labels.
+pub fn flakes_from_node(node: &LpgNode, t: i64) -> Result<Vec<Flake>, MappingError> {
+    if node.labels.is_empty() {
+        return Err(MappingError::Untyped(node.element_id.to_string()));
+    }
+    let subject = node
+        .element_id
+        .decode()
+        .map_err(|_| MappingError::UnresolvableHandle(node.element_id.to_string()))?;
+    let cx = context_of(&node.properties);
+
+    let mut flakes: Vec<Flake> = node
+        .labels
+        .iter()
+        .map(|label| Flake {
+            s: subject.clone(),
+            p: Sid::dsc(predicate::TYPE),
+            o: FlakeValue::Ref(Sid::dsc(label.clone())),
+            cx: cx.clone(),
+            t,
+            op: true,
+        })
+        .collect();
+
+    for key in node.properties.keys() {
+        // `_graph` and `_t` are the projection's own and are consumed above or
+        // deliberately dropped; any *other* `_` key came from somewhere it
+        // should not have.
+        if key == GRAPH_KEY || key == TIME_KEY {
+            continue;
+        }
+        if key.starts_with(RESERVED_PREFIX) {
+            return Err(MappingError::ReservedPropertyName(key.clone()));
+        }
+        let value = node
+            .properties
+            .get(key)
+            .expect("a key the map just yielded");
+        flakes.extend(property_flakes(&subject, key, value, cx.clone(), t)?);
+    }
+    Ok(flakes)
+}
+
+/// An edge back into the reified flakes that encode it.
+///
+/// Produces the four structural facts — `type`, `relType`, `fromEntity`,
+/// `toEntity` — plus one per edge property. That reification is what lets an
+/// edge carry properties at all, which is the whole reason this mapping is
+/// cheap.
+///
+/// # Errors
+///
+/// As [`flakes_from_node`], plus an unresolvable endpoint handle.
+pub fn flakes_from_edge(edge: &LpgEdge, t: i64) -> Result<Vec<Flake>, MappingError> {
+    let relationship = edge
+        .element_id
+        .decode()
+        .map_err(|_| MappingError::UnresolvableHandle(edge.element_id.to_string()))?;
+    let start = edge
+        .start
+        .decode()
+        .map_err(|_| MappingError::UnresolvableHandle(edge.start.to_string()))?;
+    let end = edge
+        .end
+        .decode()
+        .map_err(|_| MappingError::UnresolvableHandle(edge.end.to_string()))?;
+    let cx = context_of(&edge.properties);
+
+    let structural = |predicate: &str, object: FlakeValue| Flake {
+        s: relationship.clone(),
+        p: Sid::dsc(predicate.to_string()),
+        o: object,
+        cx: cx.clone(),
+        t,
+        op: true,
+    };
+
+    let mut flakes = vec![
+        structural(predicate::TYPE, FlakeValue::Ref(Sid::dsc("Relationship"))),
+        structural(
+            predicate::REL_TYPE,
+            FlakeValue::Ref(Sid::dsc(edge.edge_type.clone())),
+        ),
+        structural(predicate::FROM_ENTITY, FlakeValue::Ref(start)),
+        structural(predicate::TO_ENTITY, FlakeValue::Ref(end)),
+    ];
+
+    for key in edge.properties.keys() {
+        if key == GRAPH_KEY || key == TIME_KEY {
+            continue;
+        }
+        if key.starts_with(RESERVED_PREFIX) {
+            return Err(MappingError::ReservedPropertyName(key.clone()));
+        }
+        let value = edge
+            .properties
+            .get(key)
+            .expect("a key the map just yielded");
+        flakes.extend(property_flakes(&relationship, key, value, cx.clone(), t)?);
+    }
+    Ok(flakes)
 }
 
 #[cfg(test)]
@@ -901,7 +1154,16 @@ mod tests {
         .expect("projects");
 
         assert_eq!(edge.properties.get(predicate::TYPE), None, "{edge:?}");
-        assert_eq!(edge.properties.len(), 1, "{edge:?}");
+        // The *user* properties are exactly the edge's own. Reserved keys the
+        // projection owns (`_t`, and `_graph` when scoped) are counted
+        // separately — asserting a bare length here would break every time the
+        // projection gained a legitimate reserved key, which is what happened.
+        let user: Vec<&String> = edge
+            .properties
+            .keys()
+            .filter(|key| !key.starts_with(RESERVED_PREFIX))
+            .collect();
+        assert_eq!(user, vec!["confidence"], "{edge:?}");
     }
 
     /// **The edge is addressable as a node**, because provenance, review and
@@ -981,6 +1243,346 @@ mod tests {
             .expect("projects");
 
         assert_eq!(edge.properties.get("confidence"), None, "{edge:?}");
+    }
+
+    // ---- Slice D: the reverse direction ----
+
+    /// Flakes compared as a set: the model is a set, so any order is an
+    /// artifact of iteration rather than of the data.
+    fn as_set(flakes: &[Flake]) -> std::collections::BTreeSet<String> {
+        flakes.iter().map(|f| format!("{f:?}")).collect()
+    }
+
+    /// **The round-trip test, and it is the specification for decision 2.**
+    ///
+    /// Flakes → LPG → flakes, over a fixture covering every value type the
+    /// round trip preserves exactly.
+    #[test]
+    fn a_node_round_trips_through_the_projection() {
+        let original = vec![
+            typed("orders", "Table"),
+            typed("orders", "Dataset"),
+            fact("orders", "name", FlakeValue::String("orders".into())),
+            fact("orders", "rowCount", FlakeValue::Int(41_203)),
+            fact("orders", "conf", FlakeValue::Float(0.875)),
+            fact("orders", "active", FlakeValue::Boolean(true)),
+            fact("orders", "ttl", FlakeValue::Duration(3_600)),
+            fact("orders", "blob", FlakeValue::Bytes(vec![1, 2, 3])),
+            fact("orders", "owner", FlakeValue::Ref(sid("team/payments"))),
+        ];
+        let mut report = MappingReport::default();
+
+        let node = node_from_flakes(&sid("orders"), &original, &mut report).expect("projects");
+        let back = flakes_from_node(&node, 1).expect("reverses");
+
+        assert_eq!(
+            as_set(&back),
+            as_set(&original),
+            "the round trip must be exact for every type it claims to preserve"
+        );
+    }
+
+    /// **A `Uuid` and a `Json` survive by value and not by type**, and the
+    /// forward pass says so rather than the round trip silently narrowing them.
+    #[test]
+    fn a_uuid_narrows_to_a_string_and_the_loss_is_named() {
+        let id = uuid::Uuid::from_u128(7);
+        let original = vec![
+            typed("orders", "Table"),
+            fact("orders", "sourceId", FlakeValue::Uuid(id)),
+        ];
+        let mut report = MappingReport::default();
+
+        let node = node_from_flakes(&sid("orders"), &original, &mut report).expect("projects");
+        let back = flakes_from_node(&node, 1).expect("reverses");
+
+        assert!(
+            matches!(
+                report.lossy.first(),
+                Some(LossyMapping::TypeNarrowed { from: "uuid", .. })
+            ),
+            "the specific loss is named, not a generic one: {report:?}"
+        );
+        // The value is intact; only the tag changed.
+        assert!(
+            back.iter()
+                .any(|f| f.o == FlakeValue::String(id.to_string())),
+            "{back:?}"
+        );
+    }
+
+    #[test]
+    fn json_narrows_to_a_string_and_the_loss_is_named() {
+        let mut report = MappingReport::default();
+        let node = node_from_flakes(
+            &sid("orders"),
+            &[
+                typed("orders", "Table"),
+                fact("orders", "raw", FlakeValue::Json("{\"a\":1}".into())),
+            ],
+            &mut report,
+        )
+        .expect("projects");
+
+        assert!(
+            matches!(
+                report.lossy.first(),
+                Some(LossyMapping::TypeNarrowed { from: "json", .. })
+            ),
+            "{report:?}"
+        );
+        assert!(flakes_from_node(&node, 1).is_ok());
+    }
+
+    /// **A loss annotates the operation; it does not fail it.** A caller
+    /// deciding whether to proceed needs the result *and* the caveat — refusing
+    /// outright would make every reference-carrying node unprojectable.
+    #[test]
+    fn a_reported_loss_does_not_fail_the_projection() {
+        let mut report = MappingReport::default();
+
+        let node = node_from_flakes(
+            &sid("orders"),
+            &[
+                typed("orders", "Table"),
+                fact("orders", "owner", FlakeValue::Ref(sid("team/payments"))),
+            ],
+            &mut report,
+        );
+
+        assert!(node.is_ok(), "annotated, not refused: {node:?}");
+        assert!(!report.is_lossless(), "and the caveat is there: {report:?}");
+        assert!(flakes_from_node(&node.expect("projects"), 1).is_ok());
+    }
+
+    /// A repeated predicate survives the round trip as the same set of facts,
+    /// which is the only sense in which a list can round-trip.
+    #[test]
+    fn a_repeated_predicate_round_trips_as_a_set() {
+        let original = vec![
+            typed("orders", "Table"),
+            fact("orders", "tag", FlakeValue::String("pii".into())),
+            fact("orders", "tag", FlakeValue::String("gold".into())),
+        ];
+
+        let node = node_from_flakes(&sid("orders"), &original, &mut MappingReport::default())
+            .expect("projects");
+        let back = flakes_from_node(&node, 1).expect("reverses");
+
+        assert_eq!(as_set(&back), as_set(&original));
+    }
+
+    /// **The caller supplies `t`; `_t` in the payload is ignored.** Taking it
+    /// from the payload would let a caller forge history, which is the one thing
+    /// an append-only log exists to prevent.
+    #[test]
+    fn transaction_time_comes_from_the_caller_not_the_payload() {
+        let mut later = fact("orders", "rowCount", FlakeValue::Int(2));
+        later.t = 9;
+        let node = node_from_flakes(
+            &sid("orders"),
+            &[typed("orders", "Table"), later],
+            &mut MappingReport::default(),
+        )
+        .expect("projects");
+        assert_eq!(
+            node.properties.get(TIME_KEY),
+            Some(&PropertyValue::Integer(9))
+        );
+
+        let back = flakes_from_node(&node, 42).expect("reverses");
+
+        assert!(
+            back.iter().all(|f| f.t == 42),
+            "the caller's t wins: {back:?}"
+        );
+        assert!(
+            !back.iter().any(|f| f.p.id == TIME_KEY),
+            "`_t` is not written back as a fact: {back:?}"
+        );
+    }
+
+    /// The named graph survives the round trip onto every flake.
+    #[test]
+    fn a_named_graph_round_trips_onto_every_flake() {
+        let mut scoped = typed("orders", "Table");
+        scoped.cx = Some(dsc("reasoning"));
+        let node = node_from_flakes(&sid("orders"), &[scoped], &mut MappingReport::default())
+            .expect("projects");
+
+        let back = flakes_from_node(&node, 1).expect("reverses");
+
+        assert!(
+            back.iter().all(|f| f.cx == Some(dsc("reasoning"))),
+            "a derived fact must not come back looking asserted: {back:?}"
+        );
+        assert!(!back.iter().any(|f| f.p.id == GRAPH_KEY));
+    }
+
+    /// **A user-supplied reserved key is rejected on the write path**, naming it.
+    #[test]
+    fn a_reserved_key_on_the_write_path_is_rejected_by_name() {
+        let mut properties = PropertyMap::new();
+        properties.insert_reserved("_smuggled", PropertyValue::Integer(1));
+        let node = LpgNode {
+            element_id: ElementId::encode(&sid("orders")),
+            labels: vec!["Table".to_string()],
+            properties,
+        };
+
+        let outcome = flakes_from_node(&node, 1);
+
+        assert!(
+            matches!(outcome, Err(MappingError::ReservedPropertyName(ref k)) if k == "_smuggled"),
+            "{outcome:?}"
+        );
+    }
+
+    /// An unresolvable handle is an error, never a dropped property — a
+    /// reference that vanished would turn a broken import into a successful one.
+    #[test]
+    fn an_unresolvable_handle_is_an_error_rather_than_a_dropped_property() {
+        let mut properties = PropertyMap::new();
+        properties
+            .insert_user(
+                "owner",
+                PropertyValue::ElementRef(ElementId::from_wire("not-an-id")),
+            )
+            .expect("accepted");
+        let node = LpgNode {
+            element_id: ElementId::encode(&sid("orders")),
+            labels: vec!["Table".to_string()],
+            properties,
+        };
+
+        assert!(matches!(
+            flakes_from_node(&node, 1),
+            Err(MappingError::UnresolvableHandle(_))
+        ));
+    }
+
+    #[test]
+    fn a_node_with_no_labels_cannot_be_written_back() {
+        let node = LpgNode {
+            element_id: ElementId::encode(&sid("orders")),
+            labels: Vec::new(),
+            properties: PropertyMap::new(),
+        };
+
+        assert!(matches!(
+            flakes_from_node(&node, 1),
+            Err(MappingError::Untyped(_))
+        ));
+    }
+
+    /// **The edge round trip, which is where reification earns its place.**
+    #[test]
+    fn an_edge_round_trips_with_its_properties() {
+        let original = relationship();
+
+        let edge = edge_from_reified(&sid("rel/1"), &original, &mut MappingReport::default())
+            .expect("projects");
+        let back = flakes_from_edge(&edge, 1).expect("reverses");
+
+        assert_eq!(
+            as_set(&back),
+            as_set(&original),
+            "an edge with properties must survive intact: {back:?}"
+        );
+    }
+
+    /// **A derived edge round trips as derived**, and this is the case Slice E
+    /// exists for: an agent or a UI must be able to tell an edge Epic 6
+    /// *inferred* from one somebody *asserted*. Losing `_graph` on the way back
+    /// makes inference indistinguishable from fact.
+    ///
+    /// Mutation testing found this gap — the node side had a named-graph test
+    /// and the edge side did not, so `_graph` on an edge was never exercised at
+    /// all and would have been rejected as a reserved key.
+    #[test]
+    fn a_derived_edge_round_trips_still_marked_derived() {
+        let inferred: Vec<Flake> = relationship()
+            .into_iter()
+            .map(|mut flake| {
+                flake.cx = Some(dsc("reasoning"));
+                flake
+            })
+            .collect();
+
+        let edge = edge_from_reified(&sid("rel/1"), &inferred, &mut MappingReport::default())
+            .expect("projects");
+        assert_eq!(
+            edge.properties.get(GRAPH_KEY),
+            Some(&PropertyValue::String("reasoning".into())),
+            "the projection marks it derived: {edge:?}"
+        );
+
+        let back = flakes_from_edge(&edge, 1).expect("reverses");
+
+        assert!(
+            back.iter().all(|f| f.cx == Some(dsc("reasoning"))),
+            "and it comes back derived, not asserted: {back:?}"
+        );
+        assert_eq!(as_set(&back), as_set(&inferred));
+    }
+
+    /// One named graph is not a collapse — a report that fired on every scoped
+    /// edge would be noise, and a caller learns to ignore a flag that is always
+    /// set.
+    #[test]
+    fn an_edge_in_one_named_graph_reports_no_collapse() {
+        let inferred: Vec<Flake> = relationship()
+            .into_iter()
+            .map(|mut flake| {
+                flake.cx = Some(dsc("reasoning"));
+                flake
+            })
+            .collect();
+        let mut report = MappingReport::default();
+
+        edge_from_reified(&sid("rel/1"), &inferred, &mut report).expect("projects");
+
+        assert!(report.is_lossless(), "{report:?}");
+    }
+
+    /// **Two named graphs on one edge is a reported collapse**, because
+    /// `_graph` holds one value — the same rule the node side follows, stated
+    /// separately because it is a different code path and mutation testing
+    /// found the edge side untested.
+    #[test]
+    fn an_edge_spanning_two_named_graphs_reports_the_collapse() {
+        let mut mixed = relationship();
+        mixed[0].cx = Some(dsc("extraction"));
+        for flake in mixed.iter_mut().skip(1) {
+            flake.cx = Some(dsc("reasoning"));
+        }
+        let mut report = MappingReport::default();
+
+        edge_from_reified(&sid("rel/1"), &mixed, &mut report).expect("projects");
+
+        assert!(
+            matches!(
+                report.lossy.first(),
+                Some(LossyMapping::NamedGraphCollapse { .. })
+            ),
+            "the loss is named: {report:?}"
+        );
+    }
+
+    #[test]
+    fn an_edge_with_a_broken_endpoint_is_an_error() {
+        let mut edge = edge_from_reified(
+            &sid("rel/1"),
+            &relationship(),
+            &mut MappingReport::default(),
+        )
+        .expect("projects");
+        edge.start = ElementId::from_wire("garbage");
+
+        assert!(matches!(
+            flakes_from_edge(&edge, 1),
+            Err(MappingError::UnresolvableHandle(_))
+        ));
     }
 
     #[test]
