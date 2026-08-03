@@ -21,6 +21,14 @@ serde_json.workspace = true
 chrono.workspace = true
 # The recall tool works with memory ids to mark which results are disputed.
 uuid.workspace = true
+# Epic 14: MCP's own types and protocol versions.
+#
+# **The schema crate, not `rust-mcp-sdk`** — the spike in
+# `plans/00l-build-vs-adopt.md` measured the SDK at 205 transitive crates
+# (including `aws-lc-sys`, a large C crypto library) because it owns a
+# transport we do not want it to own. This is 15, all of which are already in
+# the tree, and it has three times the downloads.
+rust-mcp-schema = "0.10"
 
 [dev-dependencies]
 chrono.workspace = true

@@ -20,10 +20,18 @@ use serde_json::{Value, json};
 
 /// The protocol version this server speaks.
 ///
-/// Sent back from `initialize` so a client can refuse a server it cannot talk
-/// to. Pinned rather than echoed: echoing the client's version would claim
-/// conformance to whatever it asked for.
-pub const PROTOCOL_VERSION: &str = "2024-11-05";
+/// **Taken from `rust-mcp-schema` rather than written here**, and that is the
+/// whole reason the dependency exists. This was a hand-pinned `"2024-11-05"`
+/// and MCP had moved on three revisions without anything noticing — a string
+/// constant cannot tell you it has gone stale, and a client negotiating against
+/// a two-year-old version either refuses or silently degrades.
+///
+/// Still **pinned rather than echoed**: echoing whatever a client asked for
+/// would claim conformance to a protocol this server has never seen.
+#[must_use]
+pub fn protocol_version() -> String {
+    rust_mcp_schema::ProtocolVersion::latest().to_string()
+}
 
 /// JSON-RPC 2.0's reserved error codes.
 ///
@@ -145,7 +153,7 @@ async fn dispatch(
 ) -> Result<Value, (i64, String)> {
     match method {
         "initialize" => Ok(json!({
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": protocol_version(),
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "graph-owl", "version": env!("CARGO_PKG_VERSION") },
         })),
@@ -446,8 +454,29 @@ mod tests {
 
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 1);
-        assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(response["result"]["protocolVersion"], protocol_version());
         assert_eq!(response["result"]["serverInfo"]["name"], "graph-owl");
+    }
+
+    /// **The version is a real MCP version, and current.**
+    ///
+    /// It was a hand-written `"2024-11-05"` that had gone three revisions stale
+    /// without anything noticing. Asserting against `ProtocolVersion::latest()`
+    /// means the constant cannot rot again — and asserting it is *not* the old
+    /// one is what makes this test say something rather than tautologise.
+    #[test]
+    fn the_advertised_protocol_version_is_current() {
+        let advertised = protocol_version();
+
+        assert_eq!(
+            advertised,
+            rust_mcp_schema::ProtocolVersion::latest().to_string()
+        );
+        assert_ne!(
+            advertised, "2024-11-05",
+            "the version this server pinned by hand before the schema crate \
+             was adopted"
+        );
     }
 
     /// **The version is pinned, not echoed.** Echoing whatever a client asked
@@ -463,7 +492,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(response["result"]["protocolVersion"], protocol_version());
     }
 
     #[tokio::test]

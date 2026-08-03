@@ -445,10 +445,38 @@ piece of work, not a dependency swap. Ripping out working, tested code at the
 end of a long session to half-finish a migration would be worse than scheduling
 it honestly.
 
-**So: a spike, on the same terms as the Cypher one.** One corpus — the thirteen
-declared tools and the protocol edge cases already covered by
-`jsonrpc.rs`'s tests — against the SDK, judged on whether the protocol layer is
-usable without surrendering the transport. The existing tests port directly and
-are the corpus. If it fits, `jsonrpc.rs` shrinks to an adapter and stdio comes
-along; if it does not, this section records why and the hand-written transport
-stays with an argument behind it instead of an oversight.
+### The spike ran, and the answer is the schema crate — not the SDK
+
+**4 August 2026.** Measured, not read off a README:
+
+| | transitive crates | downloads | what it gives |
+|---|---|---|---|
+| `rust-mcp-sdk` | **205** — including `aws-lc-sys`, a large C crypto library | 215k | transports, server framework, **and it owns the transport** |
+| `rust-mcp-schema` | **15**, every one already in this tree | **684k** | the MCP types and *every protocol version* |
+
+**Adopt `rust-mcp-schema`. Do not adopt the SDK.** The SDK's weight is almost
+entirely the transports, and the transport is the one part graph-owl must keep:
+`POST /mcp` sits behind the `Auth` extractor, admission control, observability
+and RFC 9457 rendering. Paying 190 extra crates and a C crypto dependency to be
+handed back a transport we would then have to fight is the wrong trade.
+
+**The spike found a live bug, which is the argument for adopting anything here.**
+`jsonrpc.rs` advertised a hand-written `PROTOCOL_VERSION = "2024-11-05"`. MCP had
+moved on **three revisions** — `2025-03-26`, `2025-06-18`, `2025-11-25` — and a
+string constant cannot tell you it has gone stale. A client negotiating against a
+version that old either refuses outright or silently degrades. That is precisely
+the maintenance the schema crate exists to absorb, and precisely what
+hand-writing costs you six months later.
+
+Fixed: the version now comes from `ProtocolVersion::latest()`, with a test that
+asserts it is **not** the old constant — so the assertion says something rather
+than tautologising.
+
+**Still to do, and specified rather than pretended:** the response bodies are
+still hand-built `serde_json::json!`. Moving them to the crate's typed
+`InitializeResult`, `ListToolsResult` and `CallToolResult` is mechanical, buys
+compile-time conformance, and is the obvious next increment. Stdio remains
+unserved — it is how most MCP clients actually connect, and `POST /mcp` reaches
+none of them; the framing is newline-delimited JSON, so it does not need the SDK.
+
+*(The spike described here has now run; its result is the section above.)*

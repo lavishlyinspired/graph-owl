@@ -1,7 +1,7 @@
 # Plan: MCP + Outbound Events (Epic 14) ★
 
 **Branch**: feat/mcp-activation
-**Status**: Slices A–E and G built, with a JSON-RPC transport at `POST /mcp`; F is decisions-only (no sender)
+**Status**: Slices A–E and G built, with a JSON-RPC transport at `POST /mcp` and `rust-mcp-schema` adopted for protocol versions; F is decisions-only (no sender); **stdio is unserved** and the response bodies are not yet the crate's typed ones
 **Depends on**: Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard gate**), Epic 4 (graph to expose)
 **Crate**: `graph-owl-mcp`
 
