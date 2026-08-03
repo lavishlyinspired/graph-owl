@@ -11,6 +11,7 @@
 
 pub mod budget;
 pub mod catalog;
+pub mod jsonrpc;
 pub mod lineage;
 pub mod trust;
 pub mod write;

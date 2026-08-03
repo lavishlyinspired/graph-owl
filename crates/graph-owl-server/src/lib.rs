@@ -170,6 +170,8 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         // ordinary entity routes rather than a bespoke shape.
         // Epic 32. Grants are admin-only and human-only; the agent is named in
         // the path so an audit reads who changed whose capabilities.
+        // Epic 14 + 32: the agent-facing surface. One endpoint, thirteen tools.
+        .route("/mcp", post(mcp_endpoint))
         .route("/agents/grants", get(list_agent_grants))
         .route(
             "/agents/{agent_id}/grant",
@@ -8946,4 +8948,68 @@ async fn reject_proposal(
 ) -> Result<StatusCode, AppError> {
     catalog.reject_proposal(&principal, id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- The MCP transport — Epic 14's missing half, and Epic 32's ----
+
+/// `POST /mcp` — JSON-RPC 2.0 over HTTP.
+///
+/// **Deliberately a shell.** Every decision — framing, method routing, whether a
+/// failure is a tool result or a transport error, which tools are declared —
+/// lives in `graph_owl_mcp::jsonrpc`, where it is testable without a socket.
+/// This function reads bytes, names the caller, and forwards.
+///
+/// Two things it does decide, because they are HTTP's business rather than the
+/// protocol's:
+///
+/// - **A notification gets `204`, not `200` with an empty body.** JSON-RPC says
+///   answer nothing; an empty `200` body is not nothing, and a client parsing it
+///   as JSON fails on a request that succeeded.
+/// - **A JSON-RPC error is still HTTP `200`.** The transport delivered the
+///   message. Returning `400` would make a client's HTTP error handling fire on
+///   a protocol-level response it can perfectly well read, and the two layers
+///   would then disagree about whether anything went wrong.
+async fn mcp_endpoint(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    body: axum::body::Bytes,
+) -> Response {
+    let request = match graph_owl_mcp::jsonrpc::parse(&body) {
+        Ok(request) => request,
+        Err(problem) => return (StatusCode::OK, Json(problem)).into_response(),
+    };
+
+    // **The authenticated principal is handed to the adapters**, not re-derived
+    // from its id. Re-resolving discards what authentication established — in
+    // open mode it yields the stored `system` row, which is deliberately
+    // non-admin, so the whole MCP surface could read nothing.
+    let reads = graph_owl_mcp::catalog::CatalogContext::new(catalog.clone(), principal.clone());
+    let writes = graph_owl_mcp::catalog::CatalogWriter::new(catalog, principal.clone());
+    let server = graph_owl_mcp::jsonrpc::Server {
+        reads: &reads,
+        // Epic 32 is wired, so the write half is offered. A deployment that
+        // wants a read-only surface passes `None` here and the write tools are
+        // then not merely refused — they are never declared.
+        writes: Some(&writes),
+        budget: graph_owl_mcp::budget::TokenBudget::default(),
+    };
+
+    // The MCP session's principal is the HTTP request's. **Not a shared service
+    // account**: Epic 32 decision 1 requires a distinct bot principal per agent,
+    // because attribution is the entire basis of trust for agent writes.
+    //
+    // **Authentication is required by the transport**, so `initialize` and
+    // `tools/list` need a credential here even though `jsonrpc` itself permits
+    // them unauthenticated. That is deliberate rather than an oversight: over
+    // HTTP the credential is a header on every request, so there is no
+    // negotiation phase during which a client legitimately has none — and the
+    // protocol layer stays the more permissive of the two so a future stdio
+    // transport, where negotiation genuinely precedes credentials, needs no
+    // second implementation.
+    let who = Some(principal.id.as_str());
+
+    match graph_owl_mcp::jsonrpc::handle(&server, who, &request).await {
+        Some(response) => (StatusCode::OK, Json(response)).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
 }

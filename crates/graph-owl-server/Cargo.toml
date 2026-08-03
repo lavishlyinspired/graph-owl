@@ -15,6 +15,8 @@ graph-owl-reasoning = { path = "../graph-owl-reasoning" }
 graph-owl-connectors.workspace = true
 graph-owl-ui.workspace = true
 graph-owl-authz.workspace = true
+# Epic 14 + 32: the MCP surface, served over JSON-RPC at `POST /mcp`.
+graph-owl-mcp.workspace = true
 jsonwebtoken = "9"
 graph-owl-core.workspace = true
 graph-owl-storage.workspace = true

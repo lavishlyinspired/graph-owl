@@ -1,6 +1,184 @@
 {
   "components": {
     "schemas": {
+      "ActivityOutcome": {
+        "description": "What happened when an agent tried to write.\n\n**Refusals are recorded too**, which is the whole reason this is an enum\nrather than a boolean on a success row. An agent repeatedly attempting\nun-granted writes is a signal worth seeing — it is either misconfigured or\ndoing something nobody intended, and an audit log of only successes cannot\nshow either.",
+        "enum": [
+          "applied",
+          "proposed",
+          "refused"
+        ],
+        "type": "string"
+      },
+      "AgentActivity": {
+        "description": "One line in an agent's history.",
+        "properties": {
+          "agentId": {
+            "type": "string"
+          },
+          "at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "capability": {
+            "$ref": "#/components/schemas/AgentCapability"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ActivityOutcome"
+          },
+          "refusal": {
+            "description": "Present on a refusal, naming which rule refused.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "targetFqn": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "agentId",
+          "capability",
+          "targetFqn",
+          "outcome",
+          "at"
+        ],
+        "type": "object"
+      },
+      "AgentCapability": {
+        "description": "What an agent may be trusted to do.\n\n**A closed set, and closed on purpose.** Every variant here was argued for;\nthe absences were argued for harder. See [`AgentCapability::ALL`] for the\nmembership test that guards it.",
+        "enum": [
+          "proposeDescription",
+          "proposeTags",
+          "proposeOwner",
+          "applyDescription",
+          "applyTags",
+          "recordMemory",
+          "recordInvestigation",
+          "createGlossaryTerm",
+          "createQualityTest",
+          "linkLineage"
+        ],
+        "type": "string"
+      },
+      "AgentGrant": {
+        "description": "What one agent may do, for how long, and how fast.",
+        "properties": {
+          "agent": {
+            "$ref": "#/components/schemas/EntityReference",
+            "description": "**A distinct bot principal, never a shared service account.**\n\nAttribution is the entire basis of trust here (decision 1). Two agents\nbehind one identity means a bad conclusion cannot be traced to the thing\nthat drew it, and every other agent inherits its reputation."
+          },
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/AgentCapability"
+            },
+            "type": "array"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "expiresAt": {
+            "description": "**Grants can be time-boxed**, and a grant for a specific investigation\nshould be. An expired grant refuses everything.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grantedBy": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "rateLimit": {
+            "$ref": "#/components/schemas/RateLimit"
+          },
+          "scope": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScopeRef",
+                "description": "`None` is the whole estate."
+              }
+            ]
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "agent",
+          "capabilities",
+          "grantedBy",
+          "createdAt",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "AgentGrantRequest": {
+        "description": "A grant as a human writes one.\n\n**The agent is named in the path, not the body.** A body-supplied agent id\nwould let a caller who may write one grant write anybody's, and the path is\nwhat a reviewer reads when auditing who changed what.",
+        "properties": {
+          "capabilities": {
+            "description": "Capability names from the closed set. **An unrecognised name is a `400`,\nnever silently dropped**: a grant that quietly ignored half of what it\nwas given would be a grant nobody wrote, and the caller would believe it\nhad granted more than it did.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "expiresAt": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "maxWrites": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "scopeFqnPrefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "windowSeconds": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "AgentGrant_Array": {
+        "items": {
+          "$ref": "#/components/schemas/AgentGrant"
+        },
+        "type": "array"
+      },
       "Asset": {
         "description": "A node in the asset hierarchy: service → database → schema → table → column.\n\nOne struct for all five levels rather than five near-identical structs. What\ndiffers between a schema and a table is the *kind* and what may contain it,\nnot the fields — and five structs would mean five repositories, five\nhandlers and five UI pages for one concept (`01-api-conventions.md`\ndecision 10, `39-ui-foundation.md` decision 4).",
         "properties": {
@@ -815,11 +993,47 @@
         ],
         "type": "string"
       },
+      "Page_AgentActivity": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/AgentActivity"
+            },
+            "type": "array"
+          },
+          "paging": {
+            "$ref": "#/components/schemas/Paging"
+          }
+        },
+        "required": [
+          "data",
+          "paging"
+        ],
+        "type": "object"
+      },
       "Page_Asset": {
         "properties": {
           "data": {
             "items": {
               "$ref": "#/components/schemas/Asset"
+            },
+            "type": "array"
+          },
+          "paging": {
+            "$ref": "#/components/schemas/Paging"
+          }
+        },
+        "required": [
+          "data",
+          "paging"
+        ],
+        "type": "object"
+      },
+      "Page_Proposal": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/Proposal"
             },
             "type": "array"
           },
@@ -904,6 +1118,104 @@
           "type",
           "title",
           "status"
+        ],
+        "type": "object"
+      },
+      "Proposal": {
+        "description": "An agent's suggestion, awaiting a human.",
+        "properties": {
+          "baseVersion": {
+            "$ref": "#/components/schemas/EntityVersion",
+            "description": "The entity version this was proposed against. A proposal against a value\nthat has since moved is stale — see [`is_stale`]."
+          },
+          "capability": {
+            "$ref": "#/components/schemas/AgentCapability"
+          },
+          "change": {
+            "description": "The proposed value, shaped by the capability."
+          },
+          "confidence": {
+            "description": "What the agent believed. Carried onto the proposal so a reviewer can\ntriage by it.",
+            "format": "double",
+            "type": "number"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "decidedAt": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decidedBy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "proposedBy": {
+            "$ref": "#/components/schemas/EntityReference",
+            "description": "Who suggested it. **Always the agent**, never the human who later accepts\n— see [`accepted_attribution`]."
+          },
+          "rationale": {
+            "description": "**Why.** Required, because a suggestion an agent cannot justify is one a\nreviewer cannot evaluate, and a queue of unjustified suggestions is a\nqueue nobody works.",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProposalStatus"
+          },
+          "targetFqn": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "proposedBy",
+          "targetFqn",
+          "capability",
+          "change",
+          "rationale",
+          "confidence",
+          "status",
+          "baseVersion",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "ProposalStatus": {
+        "description": "Where a proposal is in its life.",
+        "enum": [
+          "open",
+          "accepted",
+          "rejected",
+          "superseded"
+        ],
+        "type": "string"
+      },
+      "RateLimit": {
+        "description": "How many writes an agent may make in a window.\n\n**Per agent, per capability, per window** — not a global cap. A single\nrunaway agent must not be able to spend everybody else's budget, and a\nrunaway *loop* is usually confined to one capability, so a per-capability\nlimit stops it while leaving the agent's other work alive.",
+        "properties": {
+          "maxWrites": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "windowSeconds": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "maxWrites",
+          "windowSeconds"
         ],
         "type": "object"
       },
@@ -1019,6 +1331,19 @@
           }
         ]
       },
+      "ScopeRef": {
+        "description": "What a grant is restricted to.\n\n`None` on [`AgentGrant::scope`] means the whole estate, which is a real and\nsometimes correct answer — but it is spelled as an explicit `None` rather\nthan an empty list, so nobody reads \"no scopes\" as \"no access\".",
+        "properties": {
+          "fqnPrefix": {
+            "description": "An FQN prefix. `warehouse.retail` admits `warehouse.retail.public.orders`\nand refuses `warehouse.finance.public.salaries`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fqnPrefix"
+        ],
+        "type": "object"
+      },
       "Table": {
         "properties": {
           "createdAt": {
@@ -1129,6 +1454,180 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/agents/grants": {
+      "get": {
+        "operationId": "get_agents_grants",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGrant_Array"
+                }
+              }
+            },
+            "description": "Every agent grant"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every agent grant"
+      }
+    },
+    "/agents/{agent_id}/activity": {
+      "get": {
+        "operationId": "get_agents__agent_id__activity",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_AgentActivity"
+                }
+              }
+            },
+            "description": "An agent's writes, including refused attempts"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "An agent's writes, including refused attempts"
+      }
+    },
+    "/agents/{agent_id}/grant": {
+      "delete": {
+        "operationId": "delete_agents__agent_id__grant",
+        "responses": {
+          "204": {
+            "description": "Revoke an agent's capabilities"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Revoke an agent's capabilities"
+      },
+      "get": {
+        "operationId": "get_agents__agent_id__grant",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGrant"
+                }
+              }
+            },
+            "description": "What one agent may do"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "What one agent may do"
+      },
+      "put": {
+        "operationId": "put_agents__agent_id__grant",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentGrantRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGrant"
+                }
+              }
+            },
+            "description": "Grant or replace an agent's capabilities"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request body is invalid; every violation is listed"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Grant or replace an agent's capabilities"
+      }
+    },
     "/assets": {
       "get": {
         "operationId": "get_assets",
@@ -3657,6 +4156,32 @@
         "summary": "Remove a lineage edge"
       }
     },
+    "/mcp": {
+      "post": {
+        "operationId": "post_mcp",
+        "responses": {
+          "200": {
+            "description": "MCP tools over JSON-RPC 2.0"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "MCP tools over JSON-RPC 2.0"
+      }
+    },
     "/memories": {
       "post": {
         "operationId": "post_memories",
@@ -3959,6 +4484,194 @@
           }
         ],
         "summary": "What a policy would do to the estate, without saving it"
+      }
+    },
+    "/proposals": {
+      "get": {
+        "operationId": "get_proposals",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Proposal"
+                }
+              }
+            },
+            "description": "Agent proposals awaiting a human"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Agent proposals awaiting a human"
+      }
+    },
+    "/proposals/{id}": {
+      "get": {
+        "operationId": "get_proposals__id_",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Proposal"
+                }
+              }
+            },
+            "description": "One proposal"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "One proposal"
+      }
+    },
+    "/proposals/{id}/accept": {
+      "post": {
+        "operationId": "post_proposals__id__accept",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Proposal"
+                }
+              }
+            },
+            "description": "Accept a proposal — applied with the agent as author"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Accept a proposal — applied with the agent as author"
+      }
+    },
+    "/proposals/{id}/reject": {
+      "post": {
+        "operationId": "post_proposals__id__reject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Reject a proposal — nothing is applied"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Reject a proposal — nothing is applied"
       }
     },
     "/ready": {

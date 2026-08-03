@@ -1250,6 +1250,14 @@ dependencies = [
 [[package]]
 name = "graph-owl-lpg"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+ "graph-owl-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "uuid",
+]
 
 [[package]]
 name = "graph-owl-lpg-io"
@@ -1374,6 +1382,7 @@ dependencies = [
  "graph-owl-core",
  "graph-owl-engine",
  "graph-owl-engine-postgres",
+ "graph-owl-mcp",
  "graph-owl-reasoning",
  "graph-owl-storage",
  "graph-owl-storage-postgres",

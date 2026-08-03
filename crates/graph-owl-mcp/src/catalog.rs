@@ -18,6 +18,20 @@ use crate::{
 /// Serves MCP tools from the catalog, filtered by the caller's policy.
 pub struct CatalogContext {
     catalog: Catalog,
+    /// **The principal authentication established**, not one re-derived from an
+    /// id.
+    ///
+    /// The port takes `principal: &str` because an implementor that owns its own
+    /// identity store needs to resolve one. This implementor does not: the
+    /// composition root already authenticated the caller, and re-resolving threw
+    /// that away — in open mode it produced a *weaker* principal than the one
+    /// that authenticated, because `Principal::system()` is a synthetic
+    /// in-process admin while the stored `system` row is deliberately
+    /// non-admin (it exists for attribution, not authorisation). The MCP surface
+    /// could then read nothing at all.
+    ///
+    /// Authentication decides who the caller is. Nothing downstream re-decides.
+    principal: graph_owl_core::Principal,
     /// Classification names whose tags mean "the values here are restricted".
     ///
     /// **Declared by the deployment, never inferred from a tag's name.** See
@@ -29,9 +43,10 @@ pub struct CatalogContext {
 
 impl CatalogContext {
     #[must_use]
-    pub fn new(catalog: Catalog) -> Self {
+    pub fn new(catalog: Catalog, principal: graph_owl_core::Principal) -> Self {
         Self {
             catalog,
+            principal,
             masking: std::collections::HashSet::new(),
         }
     }
@@ -41,6 +56,23 @@ impl CatalogContext {
     pub fn masking(mut self, classifications: impl IntoIterator<Item = String>) -> Self {
         self.masking = classifications.into_iter().collect();
         self
+    }
+
+    /// The authenticated caller, checked against the id the port passed.
+    ///
+    /// **A mismatch is a refusal, not a silent substitution.** The two can only
+    /// disagree if a caller reached this adapter claiming to be somebody other
+    /// than the session it authenticated as, and answering for either identity
+    /// would be wrong — one impersonates, the other silently ignores what was
+    /// asked.
+    fn authenticated(&self, claimed: &str) -> Result<graph_owl_core::Principal, SourceError> {
+        if claimed != self.principal.id {
+            return Err(SourceError::Unavailable(format!(
+                "this session authenticated as `{}` and the call named `{claimed}`",
+                self.principal.id
+            )));
+        }
+        Ok(self.principal.clone())
     }
 }
 
@@ -111,14 +143,7 @@ impl ContextSource for CatalogContext {
         principal: &str,
         fqn: &str,
     ) -> Result<Option<AssetContext>, SourceError> {
-        // The principal is resolved rather than trusted: an MCP session names a
-        // subject, and what that subject may *see* is the catalog's decision,
-        // not the protocol's.
-        let who = self
-            .catalog
-            .resolve_principal(principal, principal)
-            .await
-            .map_err(|e| unavailable(&e))?;
+        let who = self.authenticated(principal)?;
 
         let Some(asset) = self
             .catalog
@@ -179,11 +204,7 @@ impl ContextSource for CatalogContext {
         fqn: &str,
         query: &str,
     ) -> Result<Option<Vec<MemoryContext>>, SourceError> {
-        let who = self
-            .catalog
-            .resolve_principal(principal, principal)
-            .await
-            .map_err(|e| unavailable(&e))?;
+        let who = self.authenticated(principal)?;
 
         let Some(asset) = self
             .catalog
@@ -249,11 +270,7 @@ impl ContextSource for CatalogContext {
         kind: Option<&str>,
         limit: usize,
     ) -> Result<crate::SearchResults, SourceError> {
-        let who = self
-            .catalog
-            .resolve_principal(principal, principal)
-            .await
-            .map_err(|e| unavailable(&e))?;
+        let who = self.authenticated(principal)?;
 
         // An unrecognised kind is an **empty answer, not an error**. The agent
         // asked a well-formed question about a category this catalog does not
@@ -317,11 +334,7 @@ impl ContextSource for CatalogContext {
         fqn: &str,
         direction: crate::Direction,
     ) -> Result<Option<crate::lineage::LineageWalk>, SourceError> {
-        let who = self
-            .catalog
-            .resolve_principal(principal, principal)
-            .await
-            .map_err(|e| unavailable(&e))?;
+        let who = self.authenticated(principal)?;
         let Some(root) = self.visible_asset(&who, fqn).await? else {
             return Ok(None);
         };
@@ -351,11 +364,7 @@ impl ContextSource for CatalogContext {
         principal: &str,
         fqn: &str,
     ) -> Result<Option<crate::lineage::ImpactReport>, SourceError> {
-        let who = self
-            .catalog
-            .resolve_principal(principal, principal)
-            .await
-            .map_err(|e| unavailable(&e))?;
+        let who = self.authenticated(principal)?;
         let Some(root) = self.visible_asset(&who, fqn).await? else {
             return Ok(None);
         };
@@ -417,11 +426,7 @@ impl ContextSource for CatalogContext {
         principal: &str,
         fqn: &str,
     ) -> Result<Option<crate::lineage::GovernanceContext>, SourceError> {
-        let who = self
-            .catalog
-            .resolve_principal(principal, principal)
-            .await
-            .map_err(|e| unavailable(&e))?;
+        let who = self.authenticated(principal)?;
         let Some(asset) = self.visible_asset(&who, fqn).await? else {
             return Ok(None);
         };
@@ -489,11 +494,7 @@ impl ContextSource for CatalogContext {
         principal: &str,
         query: &str,
     ) -> Result<Result<crate::QueryAnswer, crate::QueryFault>, SourceError> {
-        let who = self
-            .catalog
-            .resolve_principal(principal, principal)
-            .await
-            .map_err(|e| unavailable(&e))?;
+        let who = self.authenticated(principal)?;
 
         match self
             .catalog
@@ -677,12 +678,15 @@ fn staleness_note(staleness: &graph_owl_core::memory::Staleness) -> Option<Strin
 /// stronger guarantee than a runtime check.
 pub struct CatalogWriter {
     catalog: Catalog,
+    /// The authenticated agent — see [`CatalogContext::principal`] for why this
+    /// is carried rather than re-derived.
+    principal: graph_owl_core::Principal,
 }
 
 impl CatalogWriter {
     #[must_use]
-    pub fn new(catalog: Catalog) -> Self {
-        Self { catalog }
+    pub fn new(catalog: Catalog, principal: graph_owl_core::Principal) -> Self {
+        Self { catalog, principal }
     }
 }
 
@@ -699,11 +703,13 @@ impl crate::write::WriteSink for CatalogWriter {
     ) -> Result<Result<crate::write::WriteReceipt, String>, SourceError> {
         use graph_owl_authz::agent::{ActivityOutcome, WriteDecision};
 
-        let who = self
-            .catalog
-            .resolve_principal(agent_id, agent_id)
-            .await
-            .map_err(|e| unavailable(&e))?;
+        if agent_id != self.principal.id {
+            return Err(SourceError::Unavailable(format!(
+                "this session authenticated as `{}` and the call named `{agent_id}`",
+                self.principal.id
+            )));
+        }
+        let who = self.principal.clone();
 
         // The facade's gate is the single place capability, scope, expiry and
         // the rate limit are decided, and it records the refusal itself.

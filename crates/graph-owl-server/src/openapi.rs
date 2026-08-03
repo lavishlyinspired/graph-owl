@@ -1181,11 +1181,116 @@ pub static ROUTES: &[Route] = &[
         200,
         false,
     ),
+    // ---- Epic 14 + 32: the agent surface ----
+    //
+    // `/mcp` carries JSON-RPC, so its request and response shapes are the
+    // protocol's rather than this contract's — declared with no schema on
+    // purpose. Documenting a `$ref` here would claim a stability the JSON-RPC
+    // envelope does not have, and a generated client should not try to type it.
+    route(
+        "post",
+        "/mcp",
+        "MCP tools over JSON-RPC 2.0",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/agents/grants",
+        "Every agent grant",
+        None,
+        Some("AgentGrant_Array"),
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/agents/{agent_id}/grant",
+        "What one agent may do",
+        None,
+        Some("AgentGrant"),
+        200,
+        true,
+    ),
+    route(
+        "put",
+        "/agents/{agent_id}/grant",
+        "Grant or replace an agent's capabilities",
+        Some("AgentGrantRequest"),
+        Some("AgentGrant"),
+        200,
+        true,
+    ),
+    route(
+        "delete",
+        "/agents/{agent_id}/grant",
+        "Revoke an agent's capabilities",
+        None,
+        None,
+        204,
+        true,
+    ),
+    route(
+        "get",
+        "/agents/{agent_id}/activity",
+        "An agent's writes, including refused attempts",
+        None,
+        Some("Page_AgentActivity"),
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/proposals",
+        "Agent proposals awaiting a human",
+        None,
+        Some("Page_Proposal"),
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/proposals/{id}",
+        "One proposal",
+        None,
+        Some("Proposal"),
+        200,
+        true,
+    ),
+    route(
+        "post",
+        "/proposals/{id}/accept",
+        "Accept a proposal — applied with the agent as author",
+        None,
+        Some("Proposal"),
+        200,
+        true,
+    ),
+    route(
+        "post",
+        "/proposals/{id}/reject",
+        "Reject a proposal — nothing is applied",
+        None,
+        None,
+        204,
+        true,
+    ),
 ];
 
 /// The schemas the contract references.
 #[derive(utoipa::OpenApi)]
 #[openapi(components(schemas(
+    graph_owl_authz::agent::AgentGrant,
+    graph_owl_authz::agent::AgentCapability,
+    graph_owl_authz::agent::RateLimit,
+    graph_owl_authz::agent::ScopeRef,
+    graph_owl_authz::agent::Proposal,
+    graph_owl_authz::agent::ProposalStatus,
+    graph_owl_authz::agent::AgentActivity,
+    graph_owl_authz::agent::ActivityOutcome,
+    crate::AgentGrantRequest,
     graph_owl_core::Asset,
     graph_owl_core::AssetKind,
     graph_owl_core::AssetUpdate,
@@ -1316,6 +1421,10 @@ pub fn document() -> Value {
         map.insert("Asset_Array".to_string(), array_of("Asset"));
         map.insert("Relationship_Array".to_string(), array_of("Relationship"));
         map.insert("AssetVersion_Array".to_string(), array_of("AssetVersion"));
+        // Epic 32.
+        map.insert("Page_Proposal".to_string(), page_of("Proposal"));
+        map.insert("Page_AgentActivity".to_string(), page_of("AgentActivity"));
+        map.insert("AgentGrant_Array".to_string(), array_of("AgentGrant"));
     }
 
     let mut paths = serde_json::Map::new();

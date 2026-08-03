@@ -8,3 +8,11 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+graph-owl-core = { path = "../graph-owl-core" }
+serde.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
