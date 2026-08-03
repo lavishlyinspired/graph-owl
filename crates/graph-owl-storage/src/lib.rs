@@ -74,6 +74,14 @@ pub enum ConflictKind {
     DomainAssigned,
     /// A domain still holds assets, products or child domains — Epic 23 Slice F.
     DomainInUse,
+    /// An agent proposal was already decided — Epic 32 Slice B.
+    ///
+    /// Its own kind, following this enum's standing rule: the response has to
+    /// name **which** decision already happened and by whom, and a borrowed
+    /// kind's canned sentence would replace that. Deciding twice is a conflict
+    /// rather than an update because two reviewers reaching opposite
+    /// conclusions must not have the second silently win.
+    ProposalDecided,
     /// This principal still owns assets or parents teams — Epic 11 Slice G.
     ///
     /// Its own variant because the response has to carry *counts by kind*, and
@@ -3455,6 +3463,118 @@ pub trait Storage: Send + Sync {
         name: &str,
         updated_by: &str,
     ) -> Result<i64, StorageError>;
+
+    // ---- Epic 32: agent capabilities ----
+
+    /// Write or replace an agent's grant. **Human-managed only** — no MCP tool
+    /// reaches this, and `graph-owl-core::agent::authorize_forbidden` refuses
+    /// grant management unconditionally, so the absence is enforced twice.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn upsert_agent_grant(
+        &self,
+        grant: &graph_owl_authz::agent::AgentGrant,
+    ) -> Result<(), StorageError>;
+
+    /// `None` when this agent has no grant, which refuses everything.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn agent_grant(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<graph_owl_authz::agent::AgentGrant>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_agent_grants(
+        &self,
+    ) -> Result<Vec<graph_owl_authz::agent::AgentGrant>, StorageError>;
+
+    /// `false` when there was no grant to revoke.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the delete fails.
+    async fn revoke_agent_grant(&self, agent_id: &str) -> Result<bool, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn create_proposal(
+        &self,
+        proposal: &graph_owl_authz::agent::Proposal,
+    ) -> Result<(), StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_proposal(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_authz::agent::Proposal>, StorageError>;
+
+    /// An agent's proposals, newest first — **so a steward can review an
+    /// agent's track record** rather than only its individual suggestions.
+    /// `None` for `agent_id` lists everyone's.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_proposals(
+        &self,
+        agent_id: Option<&str>,
+        status: Option<graph_owl_authz::agent::ProposalStatus>,
+        page: &PageRequest,
+    ) -> Result<Page<graph_owl_authz::agent::Proposal>, StorageError>;
+
+    /// Record a decision. `false` when the proposal does not exist or was
+    /// already decided — **deciding twice is a conflict, not an update**: two
+    /// reviewers reaching opposite conclusions must not have the second
+    /// silently win.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn decide_proposal(
+        &self,
+        id: Uuid,
+        status: graph_owl_authz::agent::ProposalStatus,
+        decided_by: &str,
+    ) -> Result<bool, StorageError>;
+
+    /// Append one line to the agent's history — **including refusals**.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn record_agent_activity(
+        &self,
+        activity: &graph_owl_authz::agent::AgentActivity,
+    ) -> Result<(), StorageError>;
+
+    /// One agent's history, newest first.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn agent_activity(
+        &self,
+        agent_id: &str,
+        page: &PageRequest,
+    ) -> Result<Page<graph_owl_authz::agent::AgentActivity>, StorageError>;
+
+    /// How many writes of one capability this agent made inside the window, and
+    /// how long ago the oldest of them was.
+    ///
+    /// **This is what makes the rate limit survive a restart.** An in-process
+    /// counter resets on deploy, which is precisely when a runaway agent would
+    /// get its budget back.
+    ///
+    /// Returns `(count, oldest_age_seconds)`.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn agent_writes_in_window(
+        &self,
+        agent_id: &str,
+        capability: graph_owl_authz::agent::AgentCapability,
+        window_seconds: u32,
+    ) -> Result<(u32, Option<u64>), StorageError>;
 }
 
 /// A stored extraction run.

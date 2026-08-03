@@ -11,6 +11,8 @@ workspace = true
 graph-owl-core = { path = "../graph-owl-core" }
 graph-owl-api = { path = "../graph-owl-api" }
 graph-owl-storage = { path = "../graph-owl-storage" }
+# Epic 32: agent capabilities and grants.
+graph-owl-authz = { path = "../graph-owl-authz" }
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

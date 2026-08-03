@@ -4,6 +4,8 @@
 //! which is what makes every rule here exhaustively testable — and a surviving
 //! mutant in this crate is a security bug, not a style issue.
 
+pub mod agent;
+
 use serde::{Deserialize, Serialize};
 
 /// What a principal is trying to do.

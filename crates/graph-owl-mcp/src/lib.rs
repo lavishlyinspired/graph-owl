@@ -13,6 +13,7 @@ pub mod budget;
 pub mod catalog;
 pub mod lineage;
 pub mod trust;
+pub mod write;
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -290,6 +291,15 @@ pub enum Outcome {
     Governance(Box<lineage::GovernanceContext>),
     /// Bindings from a graph query.
     Bindings(Box<QueryAnswer>),
+    /// A write landed or became a proposal — Epic 32.
+    Wrote(Box<write::WriteReceipt>),
+    /// **An agent write was refused, readably.**
+    ///
+    /// Distinct from [`Outcome::BadRequest`]: the request was well-formed and
+    /// the agent simply may not do it. The text names which rule refused and
+    /// what would change the answer, because asking a human for a capability is
+    /// a different next step from retrying.
+    Refused(String),
     /// **The engine does not implement what the query asked for.**
     ///
     /// Distinct from [`Outcome::BadRequest`], which says the caller got it

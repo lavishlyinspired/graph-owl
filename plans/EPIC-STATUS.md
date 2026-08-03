@@ -69,7 +69,7 @@ is the condition that index exists to catch.
 | **29** | 7 | [`29-lineage.md`](29-lineage.md) | In progress | 8/12 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
 | **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | In progress | 14/15 | Epic 29 (lineage, for propagating trust signals) |
 | **31** | 5 | [`31-memory.md`](31-memory.md) | In progress | 2/5 (+1 partial) | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
-| **32** | 5 | [`32-agent-capabilities.md`](32-agent-capabilities.md) | Not started | 0/2 | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
+| **32** | 5 | [`32-agent-capabilities.md`](32-agent-capabilities.md) | In progress | 1/2 (+1 partial) | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
 | **33** | 9 | [`33-ontology-packs.md`](33-ontology-packs.md) | Not started | 0/8 | Epic 24 (glossary and taxonomy model), Epic 9 (standards import) |
 | **34** | 9 | [`34-entity-expansion.md`](34-entity-expansion.md) | Not started | — | Epic 8 (each new type indexes for free — the property being demonstrated), Epic… |
 | **35** | 9 | [`35-collaboration.md`](35-collaboration.md) | Not started | — | Epic 11 (users), Epic 12 (real identity on posts) |
@@ -523,8 +523,8 @@ is the condition that index exists to catch.
 
 ### Epic 32 — Agent Capabilities ★ *(Demo 5)*
 
-- [ ] Write-back with agent authorship
-- [ ] Investigation and remediation proposals
+- [x] Write-back with agent authorship — grants, the closed capability set, propose-by-default
+- [~] Investigation and remediation proposals — `record_investigation` refuses a finding with 
 
 ### Epic 33 — Domain Ontology Packs *(Demo 9)*
 

@@ -8,4 +8,19 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Epic 32's agent capabilities live here rather than in `graph-owl-core`, and
+# the reason is measured: 21 crates depend on `core` and 5 depend on this one,
+# so a change to a capability rebuilt the entire workspace. Capabilities are
+# *authorization*, which is what this crate is, so the architecture and the
+# build cost point the same way — see `plans/32-agent-capabilities.md`, which
+# named this crate from the start.
+graph-owl-core = { path = "../graph-owl-core" }
 serde.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+utoipa.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

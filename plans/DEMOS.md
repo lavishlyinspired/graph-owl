@@ -543,8 +543,8 @@ actually holds could not be asserted at all.
   is unit-tested only.
 
 ### Epic 32 — Agent capabilities
-- [ ] Write-back with agent authorship
-- [ ] Investigation and remediation proposals
+- [x] Write-back with agent authorship — grants, the closed capability set, propose-by-default, the rate limit, and the audit that records refusals too *(Slices A–F)*
+- [~] Investigation and remediation proposals — `record_investigation` refuses a finding with no evidence, and every write tool is declared; **only description proposals apply automatically**, the rest are accepted by making the change directly
 
 ### Console half
 - [ ] **14** **Agent activity — sessions, reads, writes, webhooks** *(Epic 42)*. An agent writing to the catalog with no visible audit is the single scariest thing in this demo

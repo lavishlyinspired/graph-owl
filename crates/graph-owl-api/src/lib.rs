@@ -197,6 +197,15 @@ pub enum CatalogError {
     /// know who this is and they may not do this" — the `401` vs `403`
     /// distinction RFC 9110 draws.
     Unauthenticated,
+    /// An agent write was refused — Epic 32.
+    ///
+    /// **Distinct from `Forbidden`, and the distinction is what makes it
+    /// actionable.** `Forbidden` says "not you"; this says *which* rule refused
+    /// and what would change the answer — a missing capability the agent can ask
+    /// a human for, a scope it strayed outside, a rate limit that will free up.
+    /// The caller here is a program, and a bare 403 gives it nothing to do but
+    /// retry.
+    AgentRefused(graph_owl_authz::agent::Refusal),
     Storage(StorageError),
 }
 
@@ -8464,6 +8473,9 @@ fn batch_detail(error: &CatalogError) -> String {
         }
         CatalogError::Forbidden => "not permitted".to_string(),
         CatalogError::Unauthenticated => "signature verification failed".to_string(),
+        // The refusal's own message already names the rule and what would
+        // change the answer, which is exactly what a batch report needs.
+        CatalogError::AgentRefused(refusal) => refusal.to_string(),
         CatalogError::Storage(inner) => inner.to_string(),
     }
 }
@@ -8821,6 +8833,12 @@ mod tests {
         /// question reached storage at all.
         pub(super) policy_reads: std::sync::atomic::AtomicUsize,
         source_hashes: Mutex<std::collections::HashMap<Uuid, Vec<u8>>>,
+        /// Epic 32. Keyed by agent id, matching the table's one-grant-per-agent
+        /// unique constraint — a double that allowed two grants would let a test
+        /// pass against a shape production refuses.
+        agent_grants: Mutex<std::collections::HashMap<String, graph_owl_authz::agent::AgentGrant>>,
+        proposals: Mutex<Vec<graph_owl_authz::agent::Proposal>>,
+        agent_activity: Mutex<Vec<graph_owl_authz::agent::AgentActivity>>,
         runs: Mutex<Vec<graph_owl_storage::ConnectorRun>>,
         lineage: Mutex<Vec<graph_owl_core::lineage::LineageEdge>>,
         memories: Mutex<Vec<graph_owl_core::memory::Memory>>,
@@ -13643,6 +13661,178 @@ mod tests {
                 .unwrap()
                 .retain(|discard| discard.run_id != run_id);
             Ok(runs.len() < before)
+        }
+
+        // ---- Epic 32: agent capabilities ----
+        //
+        // The facade tests that exercise the gate use this double, so these are
+        // real in-memory implementations rather than `todo!()` — a gate whose
+        // storage panics is a gate no test can reach.
+
+        async fn upsert_agent_grant(
+            &self,
+            grant: &graph_owl_authz::agent::AgentGrant,
+        ) -> Result<(), StorageError> {
+            self.agent_grants
+                .lock()
+                .expect("lock")
+                .insert(grant.agent.id.clone(), grant.clone());
+            Ok(())
+        }
+
+        async fn agent_grant(
+            &self,
+            agent_id: &str,
+        ) -> Result<Option<graph_owl_authz::agent::AgentGrant>, StorageError> {
+            Ok(self
+                .agent_grants
+                .lock()
+                .expect("lock")
+                .get(agent_id)
+                .cloned())
+        }
+
+        async fn list_agent_grants(
+            &self,
+        ) -> Result<Vec<graph_owl_authz::agent::AgentGrant>, StorageError> {
+            Ok(self
+                .agent_grants
+                .lock()
+                .expect("lock")
+                .values()
+                .cloned()
+                .collect())
+        }
+
+        async fn revoke_agent_grant(&self, agent_id: &str) -> Result<bool, StorageError> {
+            Ok(self
+                .agent_grants
+                .lock()
+                .expect("lock")
+                .remove(agent_id)
+                .is_some())
+        }
+
+        async fn create_proposal(
+            &self,
+            proposal: &graph_owl_authz::agent::Proposal,
+        ) -> Result<(), StorageError> {
+            self.proposals.lock().expect("lock").push(proposal.clone());
+            Ok(())
+        }
+
+        async fn get_proposal(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_authz::agent::Proposal>, StorageError> {
+            Ok(self
+                .proposals
+                .lock()
+                .expect("lock")
+                .iter()
+                .find(|proposal| proposal.id == id)
+                .cloned())
+        }
+
+        async fn list_proposals(
+            &self,
+            agent_id: Option<&str>,
+            status: Option<graph_owl_authz::agent::ProposalStatus>,
+            page: &PageRequest,
+        ) -> Result<Page<graph_owl_authz::agent::Proposal>, StorageError> {
+            let mut found: Vec<graph_owl_authz::agent::Proposal> = self
+                .proposals
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|proposal| agent_id.is_none_or(|id| proposal.proposed_by.id == id))
+                .filter(|proposal| status.is_none_or(|want| proposal.status == want))
+                .cloned()
+                .collect();
+            found.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+            Ok(Page::from_overfetch(found, page.limit, |p| {
+                Cursor::new(p.created_at.to_string(), p.id)
+            }))
+        }
+
+        async fn decide_proposal(
+            &self,
+            id: Uuid,
+            status: graph_owl_authz::agent::ProposalStatus,
+            decided_by: &str,
+        ) -> Result<bool, StorageError> {
+            let mut proposals = self.proposals.lock().expect("lock");
+            let Some(proposal) = proposals.iter_mut().find(|proposal| proposal.id == id) else {
+                return Ok(false);
+            };
+            // The same guard the SQL has: deciding twice is a conflict, not an
+            // update, so a double-decide must be observably refused here too or
+            // the double keeps a bug from ever reaching a test.
+            if proposal.status != graph_owl_authz::agent::ProposalStatus::Open {
+                return Ok(false);
+            }
+            proposal.status = status;
+            proposal.decided_by = Some(decided_by.to_string());
+            proposal.decided_at = Some(Utc::now());
+            Ok(true)
+        }
+
+        async fn record_agent_activity(
+            &self,
+            activity: &graph_owl_authz::agent::AgentActivity,
+        ) -> Result<(), StorageError> {
+            self.agent_activity
+                .lock()
+                .expect("lock")
+                .push(activity.clone());
+            Ok(())
+        }
+
+        async fn agent_activity(
+            &self,
+            agent_id: &str,
+            page: &PageRequest,
+        ) -> Result<Page<graph_owl_authz::agent::AgentActivity>, StorageError> {
+            let mut found: Vec<graph_owl_authz::agent::AgentActivity> = self
+                .agent_activity
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|activity| activity.agent_id == agent_id)
+                .cloned()
+                .collect();
+            found.sort_by(|a, b| b.at.cmp(&a.at).then(b.id.cmp(&a.id)));
+            Ok(Page::from_overfetch(found, page.limit, |a| {
+                Cursor::new(a.at.to_string(), a.id)
+            }))
+        }
+
+        async fn agent_writes_in_window(
+            &self,
+            agent_id: &str,
+            capability: graph_owl_authz::agent::AgentCapability,
+            window_seconds: u32,
+        ) -> Result<(u32, Option<u64>), StorageError> {
+            let cutoff = Utc::now() - chrono::Duration::seconds(i64::from(window_seconds));
+            let activity = self.agent_activity.lock().expect("lock");
+            // Refusals do not consume budget — the same rule the SQL applies,
+            // stated here too so the double cannot disagree with production
+            // about the one thing this function decides.
+            let inside: Vec<&graph_owl_authz::agent::AgentActivity> = activity
+                .iter()
+                .filter(|a| {
+                    a.agent_id == agent_id
+                        && a.capability == capability
+                        && a.outcome != graph_owl_authz::agent::ActivityOutcome::Refused
+                        && a.at > cutoff
+                })
+                .collect();
+            let oldest = inside
+                .iter()
+                .map(|a| a.at)
+                .min()
+                .and_then(|at| u64::try_from((Utc::now() - at).num_seconds()).ok());
+            Ok((u32::try_from(inside.len()).unwrap_or(u32::MAX), oldest))
         }
     }
 
@@ -21552,6 +21742,717 @@ mod projection_isolation_tests {
         }
     }
 
+    /// Epic 32 — the write gate, end to end through the facade.
+    mod what_an_agent_may_write {
+        use super::*;
+        use graph_owl_authz::agent::{
+            ActivityOutcome, AgentCapability, AgentGrant, ProposalStatus, RateLimit, Refusal,
+            ScopeRef,
+        };
+
+        fn service(name: &str) -> UpsertAsset {
+            UpsertAsset {
+                kind: AssetKind::Service,
+                name: name.to_string(),
+                parent_id: None,
+                description: None,
+                properties: None,
+                extension: None,
+            }
+        }
+
+        /// The agent, **with a read role**.
+        ///
+        /// A bot with no policy cannot read anything, so the gate refuses every
+        /// write with `Unreadable` before it ever reaches the capability check —
+        /// which is the product working (read gates write), and would make every
+        /// test below pass for the wrong reason.
+        fn bot() -> Principal {
+            Principal {
+                id: "agent-alpha".to_string(),
+                name: "Alpha".to_string(),
+                kind: graph_owl_core::PrincipalKind::Service,
+                roles: vec!["agent".to_string()],
+                is_admin: false,
+            }
+        }
+
+        /// Lets anything with the `agent` role *see* the estate. Reading is
+        /// Epic 13's question and is deliberately separate from what an agent
+        /// may write — this fixture grants the first so the tests can be about
+        /// the second.
+        fn read_policy() -> graph_owl_authz::Policy {
+            graph_owl_authz::Policy {
+                name: "agent".to_string(),
+                rules: vec![graph_owl_authz::Rule {
+                    name: "agents-can-read".to_string(),
+                    effect: graph_owl_authz::Effect::Allow,
+                    operations: vec![graph_owl_authz::MetadataOperation::ViewBasic],
+                    resources: graph_owl_authz::ResourceMatcher::All,
+                }],
+            }
+        }
+
+        fn steward() -> Principal {
+            Principal {
+                id: "asha".to_string(),
+                name: "Asha".to_string(),
+                kind: graph_owl_core::PrincipalKind::User,
+                roles: Vec::new(),
+                is_admin: true,
+            }
+        }
+
+        fn grant_of(capabilities: Vec<AgentCapability>) -> AgentGrant {
+            AgentGrant {
+                id: Uuid::new_v4(),
+                agent: graph_owl_core::ownership::EntityReference {
+                    id: "agent-alpha".to_string(),
+                    kind: graph_owl_core::ownership::OwnerKind::User,
+                    display_name: "Alpha".to_string(),
+                    inherited: false,
+                },
+                capabilities,
+                scope: None,
+                rate_limit: RateLimit::default(),
+                expires_at: None,
+                granted_by: "asha".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        fn page() -> PageRequest {
+            PageRequest::new(None, None).expect("a default page")
+        }
+
+        async fn catalog_with(grant: Option<AgentGrant>) -> (Catalog, Arc<InMemoryStorage>) {
+            let storage = Arc::new(InMemoryStorage::default());
+            storage.policies.lock().expect("lock").push(read_policy());
+            let catalog = Catalog::new(storage.clone());
+            catalog
+                .upsert_asset(&Principal::system(), service("warehouse"))
+                .await
+                .expect("create");
+            if let Some(grant) = grant {
+                catalog
+                    .set_agent_grant(&steward(), &grant)
+                    .await
+                    .expect("grant");
+            }
+            (catalog, storage)
+        }
+
+        // ---- Slice A: the self-grant refusal ----
+
+        /// **The security-critical test.** A service principal is refused grant
+        /// management whatever it holds — because managing grants is not a
+        /// capability that could be held.
+        #[tokio::test]
+        async fn an_agent_may_not_grant_itself_anything() {
+            let (catalog, _) = catalog_with(Some(grant_of(AgentCapability::ALL.to_vec()))).await;
+
+            let widened = grant_of(AgentCapability::ALL.to_vec());
+            let outcome = catalog.set_agent_grant(&bot(), &widened).await;
+
+            assert!(
+                matches!(
+                    outcome,
+                    Err(CatalogError::AgentRefused(Refusal::OutsideAnyGrant))
+                ),
+                "an agent holding everything must still be refused: {outcome:?}"
+            );
+        }
+
+        /// And it may not revoke anybody else's either — the same rule, and a
+        /// separate path that could have missed it.
+        #[tokio::test]
+        async fn an_agent_may_not_revoke_a_grant() {
+            let (catalog, _) = catalog_with(Some(grant_of(AgentCapability::ALL.to_vec()))).await;
+
+            let outcome = catalog.revoke_agent_grant(&bot(), "someone-else").await;
+
+            assert!(
+                matches!(
+                    outcome,
+                    Err(CatalogError::AgentRefused(Refusal::OutsideAnyGrant))
+                ),
+                "{outcome:?}"
+            );
+        }
+
+        /// A human who is not an admin is refused too, but as `Forbidden` — a
+        /// different answer, because for them it *is* a permission that could be
+        /// granted.
+        #[tokio::test]
+        async fn a_non_admin_human_is_forbidden_rather_than_refused_outright() {
+            let (catalog, _) = catalog_with(None).await;
+            let mut analyst = steward();
+            analyst.is_admin = false;
+
+            let outcome = catalog.set_agent_grant(&analyst, &grant_of(vec![])).await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::Forbidden)),
+                "{outcome:?}"
+            );
+        }
+
+        // ---- Slice A: no grant, and refusals are recorded ----
+
+        /// **No grant refuses everything.** Absence is not permission, and a
+        /// misconfiguration must land here.
+        #[tokio::test]
+        async fn an_agent_with_no_grant_is_refused() {
+            let (catalog, _) = catalog_with(None).await;
+
+            let outcome = catalog
+                .gate_agent_write(&bot(), AgentCapability::ApplyDescription, "warehouse")
+                .await;
+
+            assert!(
+                matches!(
+                    outcome,
+                    Err(CatalogError::AgentRefused(Refusal::MissingCapability(_)))
+                ),
+                "{outcome:?}"
+            );
+        }
+
+        /// **Refused attempts are recorded.** An agent repeatedly attempting
+        /// un-granted writes is either misconfigured or doing something nobody
+        /// intended, and an audit of only successes shows neither.
+        #[tokio::test]
+        async fn a_refusal_is_written_to_the_agents_history() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeTags]))).await;
+
+            let _ = catalog
+                .gate_agent_write(&bot(), AgentCapability::ApplyDescription, "warehouse")
+                .await;
+
+            let history = catalog
+                .agent_activity("agent-alpha", &page())
+                .await
+                .expect("history");
+            assert_eq!(history.data.len(), 1, "{history:?}");
+            assert_eq!(history.data[0].outcome, ActivityOutcome::Refused);
+            assert!(
+                history.data[0]
+                    .refusal
+                    .as_ref()
+                    .is_some_and(|why| why.contains("applyDescription")),
+                "the record names what was missing: {:?}",
+                history.data[0].refusal
+            );
+        }
+
+        /// **Read gates write**, and it is checked before the capability — an
+        /// agent that cannot see an asset must not learn it exists from the
+        /// shape of a later refusal.
+        #[tokio::test]
+        async fn an_agent_cannot_write_to_something_that_does_not_exist() {
+            let (catalog, _) = catalog_with(Some(grant_of(AgentCapability::ALL.to_vec()))).await;
+
+            let outcome = catalog
+                .gate_agent_write(&bot(), AgentCapability::ApplyDescription, "no.such.asset")
+                .await;
+
+            assert!(
+                matches!(
+                    outcome,
+                    Err(CatalogError::AgentRefused(Refusal::Unreadable(_)))
+                ),
+                "{outcome:?}"
+            );
+        }
+
+        /// A granted, in-scope, readable write is permitted — otherwise every
+        /// test above would pass against a gate that refuses everything.
+        #[tokio::test]
+        async fn a_granted_write_is_permitted_and_says_whether_it_applies() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ApplyDescription]))).await;
+
+            let gated = catalog
+                .gate_agent_write(&bot(), AgentCapability::ApplyDescription, "warehouse")
+                .await
+                .expect("permitted");
+
+            assert_eq!(gated.decision, graph_owl_authz::agent::WriteDecision::Apply);
+        }
+
+        /// And a propose-only capability comes back as `Propose`, even though
+        /// the gate let it through — authorization and the propose/apply
+        /// decision are different questions.
+        #[tokio::test]
+        async fn a_propose_capability_is_permitted_but_still_proposes() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeDescription]))).await;
+
+            let gated = catalog
+                .gate_agent_write(&bot(), AgentCapability::ProposeDescription, "warehouse")
+                .await
+                .expect("permitted");
+
+            assert_eq!(
+                gated.decision,
+                graph_owl_authz::agent::WriteDecision::Propose
+            );
+        }
+
+        /// Scope refuses an out-of-scope target.
+        #[tokio::test]
+        async fn an_out_of_scope_write_is_refused() {
+            let mut scoped = grant_of(vec![AgentCapability::ApplyDescription]);
+            scoped.scope = Some(ScopeRef {
+                fqn_prefix: "elsewhere".to_string(),
+            });
+            let (catalog, _) = catalog_with(Some(scoped)).await;
+
+            let outcome = catalog
+                .gate_agent_write(&bot(), AgentCapability::ApplyDescription, "warehouse")
+                .await;
+
+            assert!(
+                matches!(
+                    outcome,
+                    Err(CatalogError::AgentRefused(Refusal::OutOfScope { .. }))
+                ),
+                "{outcome:?}"
+            );
+        }
+
+        // ---- Slice B: propose, and who gets the credit ----
+
+        /// **The attribution test.** Accepting an agent's proposal attributes
+        /// the change to the *agent*, with the human recorded as approver.
+        ///
+        /// Backwards, this erases the agent's track record and credits the
+        /// reviewer with work they only checked — making a rubber stamp and a
+        /// real review indistinguishable in the history.
+        #[tokio::test]
+        async fn accepting_a_proposal_attributes_the_change_to_the_agent() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeDescription]))).await;
+
+            let proposal = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::ProposeDescription,
+                    "warehouse",
+                    serde_json::json!({ "description": "the retail warehouse" }),
+                    "every child schema is a retail domain",
+                    0.9,
+                )
+                .await
+                .expect("proposed");
+
+            let accepted = catalog
+                .accept_proposal(&steward(), proposal.id)
+                .await
+                .expect("accepted");
+
+            assert_eq!(accepted.status, ProposalStatus::Accepted);
+            assert_eq!(
+                accepted.decided_by.as_deref(),
+                Some("asha"),
+                "the human is the approver"
+            );
+
+            let asset = catalog
+                .get_asset_by_fqn("warehouse")
+                .await
+                .expect("read")
+                .expect("present");
+            assert_eq!(
+                asset.updated_by, "agent-alpha",
+                "the agent authored it — this is the whole audit trail"
+            );
+            assert_eq!(asset.description.as_deref(), Some("the retail warehouse"));
+        }
+
+        /// **A proposal without a rationale is refused.** A suggestion an agent
+        /// cannot justify is one a reviewer cannot evaluate.
+        #[tokio::test]
+        async fn a_proposal_must_say_why() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeDescription]))).await;
+
+            let outcome = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::ProposeDescription,
+                    "warehouse",
+                    serde_json::json!({ "description": "x" }),
+                    "   ",
+                    0.9,
+                )
+                .await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::Validation(_))),
+                "{outcome:?}"
+            );
+        }
+
+        /// **A proposal against a moved value is a `409`.** The agent reasoned
+        /// about something that no longer exists; applying it would discard
+        /// whatever the human did in between.
+        #[tokio::test]
+        async fn a_stale_proposal_is_refused_rather_than_overwriting() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeDescription]))).await;
+            let proposal = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::ProposeDescription,
+                    "warehouse",
+                    serde_json::json!({ "description": "the agent's idea" }),
+                    "because",
+                    0.9,
+                )
+                .await
+                .expect("proposed");
+
+            // A human edits it in the meantime.
+            let asset = catalog
+                .get_asset_by_fqn("warehouse")
+                .await
+                .expect("read")
+                .expect("present");
+            catalog
+                .update_asset(
+                    &steward(),
+                    asset.id,
+                    &AssetUpdate {
+                        description: Some(Some("what the human wrote".to_string())),
+                        ..AssetUpdate::default()
+                    },
+                    None,
+                )
+                .await
+                .expect("human edit");
+
+            let outcome = catalog.accept_proposal(&steward(), proposal.id).await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::PreconditionFailed { .. })),
+                "{outcome:?}"
+            );
+            let after = catalog
+                .get_asset_by_fqn("warehouse")
+                .await
+                .expect("read")
+                .expect("present");
+            assert_eq!(
+                after.description.as_deref(),
+                Some("what the human wrote"),
+                "the human's edit survived"
+            );
+        }
+
+        /// **Deciding twice is a conflict, not an update.** Two reviewers
+        /// reaching opposite conclusions must not have the second silently win.
+        #[tokio::test]
+        async fn a_proposal_cannot_be_decided_twice() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeDescription]))).await;
+            let proposal = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::ProposeDescription,
+                    "warehouse",
+                    serde_json::json!({ "description": "once" }),
+                    "because",
+                    0.9,
+                )
+                .await
+                .expect("proposed");
+            catalog
+                .reject_proposal(&steward(), proposal.id)
+                .await
+                .expect("rejected");
+
+            let outcome = catalog.accept_proposal(&steward(), proposal.id).await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::Conflict { .. })),
+                "{outcome:?}"
+            );
+        }
+
+        /// A rejected proposal changes nothing.
+        #[tokio::test]
+        async fn rejecting_a_proposal_applies_nothing() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeDescription]))).await;
+            let proposal = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::ProposeDescription,
+                    "warehouse",
+                    serde_json::json!({ "description": "rejected idea" }),
+                    "because",
+                    0.9,
+                )
+                .await
+                .expect("proposed");
+
+            catalog
+                .reject_proposal(&steward(), proposal.id)
+                .await
+                .expect("rejected");
+
+            let asset = catalog
+                .get_asset_by_fqn("warehouse")
+                .await
+                .expect("read")
+                .expect("present");
+            assert_eq!(asset.description, None, "nothing landed");
+        }
+
+        /// **Proposals are listable per agent**, so a steward can review an
+        /// agent's track record rather than only its individual suggestions.
+        #[tokio::test]
+        async fn an_agents_proposals_are_listable() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeDescription]))).await;
+            for n in 0..3 {
+                catalog
+                    .propose_as_agent(
+                        &bot(),
+                        AgentCapability::ProposeDescription,
+                        "warehouse",
+                        serde_json::json!({ "description": format!("idea {n}") }),
+                        "because",
+                        0.9,
+                    )
+                    .await
+                    .expect("proposed");
+            }
+
+            let mine = catalog
+                .list_proposals(Some("agent-alpha"), None, &page())
+                .await
+                .expect("list");
+            let someone_else = catalog
+                .list_proposals(Some("agent-beta"), None, &page())
+                .await
+                .expect("list");
+
+            assert_eq!(mine.data.len(), 3);
+            assert!(someone_else.data.is_empty());
+        }
+
+        // ---- Slice E: the rate limit ----
+
+        /// **The loop test.** An agent making N+1 writes in a window is refused
+        /// on the N+1th.
+        #[tokio::test]
+        async fn an_agent_is_stopped_by_its_limit_not_by_exhausting_the_database() {
+            let mut tight = grant_of(vec![AgentCapability::ProposeDescription]);
+            tight.rate_limit = RateLimit {
+                max_writes: 2,
+                window_seconds: 3_600,
+            };
+            let (catalog, _) = catalog_with(Some(tight)).await;
+
+            for attempt in 0..2 {
+                catalog
+                    .gate_agent_write(&bot(), AgentCapability::ProposeDescription, "warehouse")
+                    .await
+                    .unwrap_or_else(|e| panic!("attempt {attempt} should pass: {e:?}"));
+                catalog
+                    .record_agent_write(
+                        "agent-alpha",
+                        AgentCapability::ProposeDescription,
+                        "warehouse",
+                        ActivityOutcome::Proposed,
+                    )
+                    .await
+                    .expect("recorded");
+            }
+
+            let outcome = catalog
+                .gate_agent_write(&bot(), AgentCapability::ProposeDescription, "warehouse")
+                .await;
+
+            assert!(
+                matches!(
+                    outcome,
+                    Err(CatalogError::AgentRefused(Refusal::RateLimited { .. }))
+                ),
+                "{outcome:?}"
+            );
+        }
+
+        /// **The limit is per capability**, so a loop in one does not spend the
+        /// agent's whole budget.
+        #[tokio::test]
+        async fn spending_one_capabilitys_budget_leaves_the_others_alone() {
+            let mut tight = grant_of(vec![
+                AgentCapability::ProposeDescription,
+                AgentCapability::ProposeTags,
+            ]);
+            tight.rate_limit = RateLimit {
+                max_writes: 1,
+                window_seconds: 3_600,
+            };
+            let (catalog, _) = catalog_with(Some(tight)).await;
+            catalog
+                .record_agent_write(
+                    "agent-alpha",
+                    AgentCapability::ProposeDescription,
+                    "warehouse",
+                    ActivityOutcome::Proposed,
+                )
+                .await
+                .expect("recorded");
+
+            let spent = catalog
+                .gate_agent_write(&bot(), AgentCapability::ProposeDescription, "warehouse")
+                .await;
+            let untouched = catalog
+                .gate_agent_write(&bot(), AgentCapability::ProposeTags, "warehouse")
+                .await;
+
+            assert!(spent.is_err(), "{spent:?}");
+            assert!(untouched.is_ok(), "{untouched:?}");
+        }
+
+        /// **A refusal does not consume budget.** Otherwise each refusal pushes
+        /// the agent's own recovery further away, turning a misconfiguration
+        /// into a permanent lockout.
+        #[tokio::test]
+        async fn being_refused_does_not_spend_the_budget() {
+            let mut tight = grant_of(vec![AgentCapability::ProposeDescription]);
+            tight.rate_limit = RateLimit {
+                max_writes: 2,
+                window_seconds: 3_600,
+            };
+            let (catalog, _) = catalog_with(Some(tight)).await;
+
+            // Five refusals against an unreadable target.
+            for _ in 0..5 {
+                let _ = catalog
+                    .gate_agent_write(&bot(), AgentCapability::ProposeDescription, "no.such.thing")
+                    .await;
+            }
+
+            let outcome = catalog
+                .gate_agent_write(&bot(), AgentCapability::ProposeDescription, "warehouse")
+                .await;
+
+            assert!(outcome.is_ok(), "the budget was never spent: {outcome:?}");
+        }
+
+        // ---- Slice F: the audit ----
+
+        /// **Applied, proposed and refused all appear**, so an agent's
+        /// reliability is measurable rather than merely assertable.
+        #[tokio::test]
+        async fn the_audit_shows_what_was_accepted_proposed_and_refused() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeDescription]))).await;
+
+            catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::ProposeDescription,
+                    "warehouse",
+                    serde_json::json!({ "description": "an idea" }),
+                    "because",
+                    0.9,
+                )
+                .await
+                .expect("proposed");
+            let _ = catalog
+                .gate_agent_write(&bot(), AgentCapability::ApplyTags, "warehouse")
+                .await;
+
+            let history = catalog
+                .agent_activity("agent-alpha", &page())
+                .await
+                .expect("history");
+
+            let outcomes: Vec<ActivityOutcome> =
+                history.data.iter().map(|entry| entry.outcome).collect();
+            assert!(outcomes.contains(&ActivityOutcome::Proposed), "{history:?}");
+            assert!(outcomes.contains(&ActivityOutcome::Refused), "{history:?}");
+        }
+
+        /// One agent's history is only its own.
+        #[tokio::test]
+        async fn an_agents_history_does_not_include_another_agents() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeDescription]))).await;
+            catalog
+                .record_agent_write(
+                    "agent-beta",
+                    AgentCapability::ProposeDescription,
+                    "warehouse",
+                    ActivityOutcome::Applied,
+                )
+                .await
+                .expect("recorded");
+
+            let alpha = catalog
+                .agent_activity("agent-alpha", &page())
+                .await
+                .expect("history");
+
+            assert!(alpha.data.is_empty(), "{alpha:?}");
+        }
+
+        /// A grant round-trips through storage with its scope and limits intact
+        /// — a grant that lost its scope on the way back would silently widen.
+        #[tokio::test]
+        async fn a_grant_round_trips_with_its_scope_and_limits() {
+            let mut scoped = grant_of(vec![AgentCapability::ApplyTags]);
+            scoped.scope = Some(ScopeRef {
+                fqn_prefix: "warehouse.retail".to_string(),
+            });
+            scoped.rate_limit = RateLimit {
+                max_writes: 7,
+                window_seconds: 900,
+            };
+            let (catalog, _) = catalog_with(Some(scoped)).await;
+
+            let read = catalog
+                .agent_grant("agent-alpha")
+                .await
+                .expect("read")
+                .expect("present");
+
+            assert_eq!(read.capabilities, vec![AgentCapability::ApplyTags]);
+            assert_eq!(
+                read.scope.as_ref().map(|s| s.fqn_prefix.as_str()),
+                Some("warehouse.retail")
+            );
+            assert_eq!(read.rate_limit.max_writes, 7);
+        }
+
+        /// Revoking removes it, and the agent is then refused everything.
+        #[tokio::test]
+        async fn a_revoked_grant_refuses_everything_again() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ApplyDescription]))).await;
+
+            assert!(
+                catalog
+                    .revoke_agent_grant(&steward(), "agent-alpha")
+                    .await
+                    .expect("revoke")
+            );
+
+            let outcome = catalog
+                .gate_agent_write(&bot(), AgentCapability::ApplyDescription, "warehouse")
+                .await;
+            assert!(outcome.is_err(), "{outcome:?}");
+        }
+    }
+
     mod committed_changes_are_announced {
         use super::*;
         use graph_owl_events::{ChangeEvent, EventKind, EventSink};
@@ -22173,5 +23074,477 @@ mod filter_coercion_tests {
             coerce_filter_value(PropertyType::EntityReference, "svc.db.orders"),
             Some(serde_json::json!("svc.db.orders"))
         );
+    }
+}
+
+// ---- Epic 32: agent capabilities ----
+
+/// What an agent's write attempt resolved to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GatedWrite {
+    /// Apply now, or turn this into a proposal.
+    pub decision: graph_owl_authz::agent::WriteDecision,
+    /// The grant that permitted it, so a caller can read the scope and limits
+    /// without a second load.
+    pub grant: graph_owl_authz::agent::AgentGrant,
+}
+
+impl Catalog {
+    /// **The single gate every agent write passes through.**
+    ///
+    /// One function rather than a check per tool, because a security decision
+    /// spread across six call sites is one that will be six different decisions
+    /// within a year. Everything an agent may do goes through here, in this
+    /// order:
+    ///
+    /// 1. **The agent must be able to read the target.** Read gates write — an
+    ///    agent that cannot see an asset must not be able to learn about it by
+    ///    writing to it and reading the error.
+    /// 2. **A grant must exist.** No grant refuses everything; absence is not
+    ///    permission.
+    /// 3. **The grant must permit this capability, here, now** — expiry, then
+    ///    capability, then scope.
+    /// 4. **The rate limit must have room.**
+    ///
+    /// Every outcome is recorded, **including every refusal**. An agent
+    /// repeatedly attempting un-granted writes is either misconfigured or doing
+    /// something nobody intended, and an audit of only successes shows neither.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::AgentRefused`] naming which rule refused and what would
+    /// change the answer. `Storage` if the audit write or a read fails.
+    #[tracing::instrument(name = "catalog.gate_agent_write", skip_all)]
+    pub async fn gate_agent_write(
+        &self,
+        agent: &Principal,
+        capability: graph_owl_authz::agent::AgentCapability,
+        target_fqn: &str,
+    ) -> Result<GatedWrite, CatalogError> {
+        use graph_owl_authz::agent::{Refusal, check_rate_limit};
+
+        let refuse = |refusal: Refusal| async move {
+            self.record_refusal(&agent.id, capability, target_fqn, &refusal)
+                .await?;
+            Err::<GatedWrite, CatalogError>(CatalogError::AgentRefused(refusal))
+        };
+
+        // 1. Read gates write. Checked first, because an agent that cannot see
+        //    the asset must not learn from the *shape* of a later refusal that
+        //    it exists — "you lack applyTags on warehouse.salaries" confirms
+        //    warehouse.salaries.
+        let visible = match self.get_asset_by_fqn(target_fqn).await? {
+            Some(asset) => self.get_asset_for(agent, asset.id).await.is_ok(),
+            None => false,
+        };
+        if !visible {
+            return refuse(Refusal::Unreadable(target_fqn.to_string())).await;
+        }
+
+        // 2. No grant refuses everything. An agent with no row is an agent
+        //    nobody has trusted with anything yet, which is the correct default
+        //    and the one a misconfiguration should land on.
+        let Some(grant) = self.storage.agent_grant(&agent.id).await? else {
+            return refuse(Refusal::MissingCapability(capability.as_str())).await;
+        };
+
+        // 3. Expiry, capability, scope.
+        if let Err(refusal) =
+            graph_owl_authz::agent::authorize(&grant, capability, target_fqn, Utc::now())
+        {
+            return refuse(refusal).await;
+        }
+
+        // 4. The budget. Read from the durable activity log rather than a
+        //    counter in this process, which is what makes the limit survive a
+        //    restart — a deploy is exactly when a runaway agent would otherwise
+        //    get its budget back.
+        let (made, oldest_age) = self
+            .storage
+            .agent_writes_in_window(&agent.id, capability, grant.rate_limit.window_seconds)
+            .await?;
+        if let Err(refusal) = check_rate_limit(grant.rate_limit, capability, made, oldest_age) {
+            return refuse(refusal).await;
+        }
+
+        Ok(GatedWrite {
+            decision: graph_owl_authz::agent::decide_write(capability),
+            grant,
+        })
+    }
+
+    /// Append a refusal to the agent's history.
+    ///
+    /// Separate from the success path deliberately: a refusal that failed to
+    /// record must still refuse, so this is called *before* the error is
+    /// returned rather than by a caller who might forget.
+    async fn record_refusal(
+        &self,
+        agent_id: &str,
+        capability: graph_owl_authz::agent::AgentCapability,
+        target_fqn: &str,
+        refusal: &graph_owl_authz::agent::Refusal,
+    ) -> Result<(), CatalogError> {
+        self.storage
+            .record_agent_activity(&graph_owl_authz::agent::AgentActivity {
+                id: Uuid::new_v4(),
+                agent_id: agent_id.to_string(),
+                capability,
+                target_fqn: target_fqn.to_string(),
+                outcome: graph_owl_authz::agent::ActivityOutcome::Refused,
+                refusal: Some(refusal.to_string()),
+                at: Utc::now(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Record a write that happened.
+    ///
+    /// # Errors
+    /// `Storage` if the write fails.
+    pub async fn record_agent_write(
+        &self,
+        agent_id: &str,
+        capability: graph_owl_authz::agent::AgentCapability,
+        target_fqn: &str,
+        outcome: graph_owl_authz::agent::ActivityOutcome,
+    ) -> Result<(), CatalogError> {
+        self.storage
+            .record_agent_activity(&graph_owl_authz::agent::AgentActivity {
+                id: Uuid::new_v4(),
+                agent_id: agent_id.to_string(),
+                capability,
+                target_fqn: target_fqn.to_string(),
+                outcome,
+                // A success carrying a refusal reason is a contradiction, and
+                // the table's own CHECK constraint agrees.
+                refusal: None,
+                at: Utc::now(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Turn an authorized write into a proposal for a human.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` when the rationale is blank — a suggestion an agent cannot
+    /// justify is one a reviewer cannot evaluate, and a queue of unjustified
+    /// suggestions is a queue nobody works. `NotFound` when the target is gone.
+    #[tracing::instrument(name = "catalog.propose_as_agent", skip_all)]
+    pub async fn propose_as_agent(
+        &self,
+        agent: &Principal,
+        capability: graph_owl_authz::agent::AgentCapability,
+        target_fqn: &str,
+        change: serde_json::Value,
+        rationale: &str,
+        confidence: f64,
+    ) -> Result<graph_owl_authz::agent::Proposal, CatalogError> {
+        if rationale.trim().is_empty() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "rationale",
+                FieldErrorCode::Required,
+                "a proposal has to say why; a reviewer cannot evaluate a \
+                 suggestion that does not explain itself"
+                    .to_string(),
+            )]));
+        }
+        if !(0.0..=1.0).contains(&confidence) {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "confidence",
+                FieldErrorCode::Type,
+                format!("confidence must be between 0 and 1, got {confidence}"),
+            )]));
+        }
+
+        let Some(asset) = self.get_asset_by_fqn(target_fqn).await? else {
+            return Err(CatalogError::NotFound);
+        };
+
+        let proposal = graph_owl_authz::agent::Proposal {
+            id: Uuid::new_v4(),
+            proposed_by: graph_owl_core::ownership::EntityReference {
+                id: agent.id.clone(),
+                kind: graph_owl_core::ownership::OwnerKind::User,
+                display_name: agent.name.clone(),
+                inherited: false,
+            },
+            target_fqn: target_fqn.to_string(),
+            capability,
+            change,
+            rationale: rationale.to_string(),
+            confidence,
+            status: graph_owl_authz::agent::ProposalStatus::Open,
+            // The version the agent reasoned against. A later decision compares
+            // against this — see `accept_proposal`.
+            base_version: asset.version,
+            decided_by: None,
+            decided_at: None,
+            created_at: Utc::now(),
+        };
+        self.storage.create_proposal(&proposal).await?;
+        self.record_agent_write(
+            &agent.id,
+            capability,
+            target_fqn,
+            graph_owl_authz::agent::ActivityOutcome::Proposed,
+        )
+        .await?;
+        Ok(proposal)
+    }
+
+    /// # Errors
+    /// `Storage` if the read fails.
+    pub async fn get_proposal(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_authz::agent::Proposal>, CatalogError> {
+        Ok(self.storage.get_proposal(id).await?)
+    }
+
+    /// # Errors
+    /// `Storage` if the read fails.
+    pub async fn list_proposals(
+        &self,
+        agent_id: Option<&str>,
+        status: Option<graph_owl_authz::agent::ProposalStatus>,
+        page: &PageRequest,
+    ) -> Result<Page<graph_owl_authz::agent::Proposal>, CatalogError> {
+        Ok(self.storage.list_proposals(agent_id, status, page).await?)
+    }
+
+    /// Accept a proposal and apply it.
+    ///
+    /// **The attribution is the point of this method.** The change lands
+    /// attributed to the **agent** that proposed it, with the human recorded
+    /// separately as approver. Backwards, this erases the agent's track record —
+    /// so nobody can tell whose suggestions turn out well — and credits the
+    /// reviewer with work they only checked, which makes a rubber stamp and a
+    /// real review indistinguishable in the history.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if there is no such proposal. `Conflict` if it was already
+    /// decided — two reviewers reaching opposite conclusions must not have the
+    /// second silently win. `PreconditionFailed` if the target moved since the
+    /// proposal was made: the agent reasoned about a value that no longer
+    /// exists, and applying it would discard whatever happened in between.
+    #[tracing::instrument(name = "catalog.accept_proposal", skip_all)]
+    pub async fn accept_proposal(
+        &self,
+        approver: &Principal,
+        id: Uuid,
+    ) -> Result<graph_owl_authz::agent::Proposal, CatalogError> {
+        let Some(proposal) = self.storage.get_proposal(id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        if proposal.status != graph_owl_authz::agent::ProposalStatus::Open {
+            return Err(CatalogError::Conflict {
+                detail: format!(
+                    "this proposal was already {:?} and cannot be decided twice",
+                    proposal.status
+                ),
+                existing_id: Some(proposal.id),
+                kind: ConflictKind::ProposalDecided,
+            });
+        }
+
+        let Some(asset) = self.get_asset_by_fqn(&proposal.target_fqn).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        if graph_owl_authz::agent::is_stale(&proposal, asset.version) {
+            return Err(CatalogError::PreconditionFailed {
+                current: asset.version,
+            });
+        }
+
+        // **Attributed to the agent**, not to the approver. `updated_by` is the
+        // author; the approver is recorded on the proposal row.
+        let author = Principal {
+            id: proposal.proposed_by.id.clone(),
+            name: proposal.proposed_by.display_name.clone(),
+            kind: graph_owl_core::PrincipalKind::Service,
+            roles: Vec::new(),
+            is_admin: false,
+        };
+        self.apply_proposed_change(&author, &proposal, asset.id)
+            .await?;
+
+        if !self
+            .storage
+            .decide_proposal(
+                id,
+                graph_owl_authz::agent::ProposalStatus::Accepted,
+                &approver.id,
+            )
+            .await?
+        {
+            // Somebody decided it between the read and here. The change has
+            // landed and is revertible through history; reporting the race is
+            // more honest than pretending it did not happen.
+            return Err(CatalogError::Conflict {
+                detail: "this proposal was decided concurrently".to_string(),
+                existing_id: Some(id),
+                kind: ConflictKind::ProposalDecided,
+            });
+        }
+        self.record_agent_write(
+            &proposal.proposed_by.id,
+            proposal.capability,
+            &proposal.target_fqn,
+            graph_owl_authz::agent::ActivityOutcome::Applied,
+        )
+        .await?;
+
+        self.storage
+            .get_proposal(id)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// Reject a proposal. Nothing is applied.
+    ///
+    /// # Errors
+    /// `NotFound` if there is no such proposal, `Conflict` if already decided.
+    pub async fn reject_proposal(
+        &self,
+        approver: &Principal,
+        id: Uuid,
+    ) -> Result<(), CatalogError> {
+        if !self
+            .storage
+            .decide_proposal(
+                id,
+                graph_owl_authz::agent::ProposalStatus::Rejected,
+                &approver.id,
+            )
+            .await?
+        {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Apply what a proposal proposed.
+    ///
+    /// Only the capabilities that *can* be applied are handled; everything else
+    /// is a proposal shape nobody built an applier for yet, and is reported as
+    /// such rather than silently accepted-and-discarded.
+    async fn apply_proposed_change(
+        &self,
+        author: &Principal,
+        proposal: &graph_owl_authz::agent::Proposal,
+        asset_id: Uuid,
+    ) -> Result<(), CatalogError> {
+        use graph_owl_authz::agent::AgentCapability;
+        match proposal.capability {
+            AgentCapability::ProposeDescription | AgentCapability::ApplyDescription => {
+                let description = proposal
+                    .change
+                    .get("description")
+                    .and_then(|value| value.as_str());
+                let update = AssetUpdate {
+                    description: Some(description.map(ToString::to_string)),
+                    ..AssetUpdate::default()
+                };
+                self.update_asset(author, asset_id, &update, None).await?;
+                Ok(())
+            }
+            other => Err(CatalogError::Validation(vec![FieldError::new(
+                "capability",
+                FieldErrorCode::Type,
+                format!(
+                    "`{}` proposals cannot be applied automatically yet; accept \
+                     it by making the change directly so the history says who \
+                     really made it",
+                    other.as_str()
+                ),
+            )])),
+        }
+    }
+
+    // ---- grants: human-managed only ----
+
+    /// Write or replace an agent's grant.
+    ///
+    /// **Human-managed only.** No MCP tool reaches this, and
+    /// `graph_owl_authz::agent::authorize_forbidden` refuses grant management
+    /// unconditionally — so the absence is enforced in two independent places.
+    ///
+    /// # Errors
+    ///
+    /// `Forbidden` when the caller is not an admin, or when a **non-human**
+    /// principal attempts it: an agent that can widen its own permissions has
+    /// none, only a delay.
+    #[tracing::instrument(name = "catalog.set_agent_grant", skip_all)]
+    pub async fn set_agent_grant(
+        &self,
+        granter: &Principal,
+        grant: &graph_owl_authz::agent::AgentGrant,
+    ) -> Result<(), CatalogError> {
+        // **The self-grant refusal**, and it is checked on the *kind* of the
+        // caller rather than on any capability. A service principal is refused
+        // here even holding every capability there is, because managing grants
+        // is not a capability that could be held.
+        if granter.kind == graph_owl_core::PrincipalKind::Service {
+            return Err(CatalogError::AgentRefused(
+                graph_owl_authz::agent::Refusal::OutsideAnyGrant,
+            ));
+        }
+        if !granter.is_admin {
+            return Err(CatalogError::Forbidden);
+        }
+        self.storage.upsert_agent_grant(grant).await?;
+        Ok(())
+    }
+
+    /// # Errors
+    /// `Storage` if the read fails.
+    pub async fn agent_grant(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<graph_owl_authz::agent::AgentGrant>, CatalogError> {
+        Ok(self.storage.agent_grant(agent_id).await?)
+    }
+
+    /// # Errors
+    /// `Storage` if the read fails.
+    pub async fn list_agent_grants(
+        &self,
+    ) -> Result<Vec<graph_owl_authz::agent::AgentGrant>, CatalogError> {
+        Ok(self.storage.list_agent_grants().await?)
+    }
+
+    /// # Errors
+    /// `Forbidden` when the caller is not a human admin.
+    pub async fn revoke_agent_grant(
+        &self,
+        granter: &Principal,
+        agent_id: &str,
+    ) -> Result<bool, CatalogError> {
+        if granter.kind == graph_owl_core::PrincipalKind::Service {
+            return Err(CatalogError::AgentRefused(
+                graph_owl_authz::agent::Refusal::OutsideAnyGrant,
+            ));
+        }
+        if !granter.is_admin {
+            return Err(CatalogError::Forbidden);
+        }
+        Ok(self.storage.revoke_agent_grant(agent_id).await?)
+    }
+
+    /// One agent's history, newest first — applied, proposed **and refused**.
+    ///
+    /// # Errors
+    /// `Storage` if the read fails.
+    pub async fn agent_activity(
+        &self,
+        agent_id: &str,
+        page: &PageRequest,
+    ) -> Result<Page<graph_owl_authz::agent::AgentActivity>, CatalogError> {
+        Ok(self.storage.agent_activity(agent_id, page).await?)
     }
 }

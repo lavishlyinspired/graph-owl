@@ -8270,6 +8270,289 @@ impl Storage for PostgresStorage {
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(done.rows_affected() > 0)
     }
+
+    // ---- Epic 32: agent capabilities ----
+
+    async fn upsert_agent_grant(
+        &self,
+        grant: &graph_owl_authz::agent::AgentGrant,
+    ) -> Result<(), StorageError> {
+        let capabilities: Vec<String> = grant
+            .capabilities
+            .iter()
+            .map(|capability| capability.as_str().to_string())
+            .collect();
+        // One grant per agent (the table's unique constraint), so this is an
+        // upsert rather than an insert: a second grant row would make "what may
+        // this agent do" a union nobody wrote, and a revocation would have to
+        // find every row to be a revocation at all.
+        sqlx::query(
+            "INSERT INTO agent_grants
+                 (id, agent_id, capabilities, scope_fqn_prefix, max_writes,
+                  window_seconds, expires_at, granted_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (agent_id) DO UPDATE SET
+                 capabilities     = EXCLUDED.capabilities,
+                 scope_fqn_prefix = EXCLUDED.scope_fqn_prefix,
+                 max_writes       = EXCLUDED.max_writes,
+                 window_seconds   = EXCLUDED.window_seconds,
+                 expires_at       = EXCLUDED.expires_at,
+                 granted_by       = EXCLUDED.granted_by,
+                 updated_at       = now()",
+        )
+        .bind(grant.id)
+        .bind(&grant.agent.id)
+        .bind(&capabilities)
+        .bind(grant.scope.as_ref().map(|scope| scope.fqn_prefix.clone()))
+        .bind(i32::try_from(grant.rate_limit.max_writes).unwrap_or(i32::MAX))
+        .bind(i32::try_from(grant.rate_limit.window_seconds).unwrap_or(i32::MAX))
+        .bind(grant.expires_at)
+        .bind(&grant.granted_by)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn agent_grant(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<graph_owl_authz::agent::AgentGrant>, StorageError> {
+        let row = sqlx::query(
+            "SELECT g.id, g.agent_id, g.capabilities, g.scope_fqn_prefix,
+                    g.max_writes, g.window_seconds, g.expires_at, g.granted_by,
+                    g.created_at, g.updated_at, u.display_name
+               FROM agent_grants g
+               JOIN users u ON u.id = g.agent_id
+              WHERE g.agent_id = $1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(row.as_ref().map(agent_grant_from_row))
+    }
+
+    async fn list_agent_grants(
+        &self,
+    ) -> Result<Vec<graph_owl_authz::agent::AgentGrant>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT g.id, g.agent_id, g.capabilities, g.scope_fqn_prefix,
+                    g.max_writes, g.window_seconds, g.expires_at, g.granted_by,
+                    g.created_at, g.updated_at, u.display_name
+               FROM agent_grants g
+               JOIN users u ON u.id = g.agent_id
+              ORDER BY g.agent_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows.iter().map(agent_grant_from_row).collect())
+    }
+
+    async fn revoke_agent_grant(&self, agent_id: &str) -> Result<bool, StorageError> {
+        let done = sqlx::query("DELETE FROM agent_grants WHERE agent_id = $1")
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn create_proposal(
+        &self,
+        proposal: &graph_owl_authz::agent::Proposal,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO agent_proposals
+                 (id, agent_id, target_fqn, capability, change, rationale,
+                  confidence, status, base_major, base_minor)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9)",
+        )
+        .bind(proposal.id)
+        .bind(&proposal.proposed_by.id)
+        .bind(&proposal.target_fqn)
+        .bind(proposal.capability.as_str())
+        .bind(&proposal.change)
+        .bind(&proposal.rationale)
+        .bind(proposal.confidence)
+        .bind(i32::try_from(proposal.base_version.major).unwrap_or(i32::MAX))
+        .bind(i32::try_from(proposal.base_version.minor).unwrap_or(i32::MAX))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_proposal(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_authz::agent::Proposal>, StorageError> {
+        let row = sqlx::query(
+            "SELECT p.id, p.agent_id, p.target_fqn, p.capability, p.change,
+                    p.rationale, p.confidence, p.status, p.base_major, p.base_minor,
+                    p.decided_by, p.decided_at, p.created_at, u.display_name
+               FROM agent_proposals p
+               JOIN users u ON u.id = p.agent_id
+              WHERE p.id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(row.as_ref().map(proposal_from_row))
+    }
+
+    async fn list_proposals(
+        &self,
+        agent_id: Option<&str>,
+        status: Option<graph_owl_authz::agent::ProposalStatus>,
+        page: &PageRequest,
+    ) -> Result<Page<graph_owl_authz::agent::Proposal>, StorageError> {
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let rows = sqlx::query(
+            "SELECT p.id, p.agent_id, p.target_fqn, p.capability, p.change,
+                    p.rationale, p.confidence, p.status, p.base_major, p.base_minor,
+                    p.decided_by, p.decided_at, p.created_at, u.display_name
+               FROM agent_proposals p
+               JOIN users u ON u.id = p.agent_id
+              WHERE ($1::text IS NULL OR p.agent_id = $1)
+                AND ($2::text IS NULL OR p.status = $2)
+                AND ($3::text IS NULL OR (p.created_at::text, p.id) < ($3, $4))
+              ORDER BY p.created_at DESC, p.id DESC
+              LIMIT $5",
+        )
+        .bind(agent_id)
+        .bind(status.map(proposal_status_str))
+        .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
+        .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
+        .bind(overfetch)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(Page::from_overfetch(
+            rows.iter().map(proposal_from_row).collect(),
+            page.limit,
+            |p: &graph_owl_authz::agent::Proposal| Cursor::new(p.created_at.to_string(), p.id),
+        ))
+    }
+
+    async fn decide_proposal(
+        &self,
+        id: Uuid,
+        status: graph_owl_authz::agent::ProposalStatus,
+        decided_by: &str,
+    ) -> Result<bool, StorageError> {
+        // `AND status = 'open'` is the whole guard: **deciding twice is a
+        // conflict, not an update.** Two reviewers reaching opposite
+        // conclusions must not have the second silently win, and without this
+        // predicate the last writer would.
+        let done = sqlx::query(
+            "UPDATE agent_proposals
+                SET status = $2, decided_by = $3, decided_at = now()
+              WHERE id = $1 AND status = 'open'",
+        )
+        .bind(id)
+        .bind(proposal_status_str(status))
+        .bind(decided_by)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn record_agent_activity(
+        &self,
+        activity: &graph_owl_authz::agent::AgentActivity,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO agent_activity
+                 (id, agent_id, capability, target_fqn, outcome, refusal, at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(activity.id)
+        .bind(&activity.agent_id)
+        .bind(activity.capability.as_str())
+        .bind(&activity.target_fqn)
+        .bind(activity_outcome_str(activity.outcome))
+        .bind(activity.refusal.as_deref())
+        .bind(activity.at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn agent_activity(
+        &self,
+        agent_id: &str,
+        page: &PageRequest,
+    ) -> Result<Page<graph_owl_authz::agent::AgentActivity>, StorageError> {
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let rows = sqlx::query(
+            "SELECT id, agent_id, capability, target_fqn, outcome, refusal, at
+               FROM agent_activity
+              WHERE agent_id = $1
+                AND ($2::text IS NULL OR (at::text, id) < ($2, $3))
+              ORDER BY at DESC, id DESC
+              LIMIT $4",
+        )
+        .bind(agent_id)
+        .bind(page.after.as_ref().map(|c| c.sort_key.clone()))
+        .bind(page.after.as_ref().map_or_else(Uuid::nil, |c| c.id))
+        .bind(overfetch)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(Page::from_overfetch(
+            rows.iter().map(activity_from_row).collect(),
+            page.limit,
+            |a: &graph_owl_authz::agent::AgentActivity| Cursor::new(a.at.to_string(), a.id),
+        ))
+    }
+
+    async fn agent_writes_in_window(
+        &self,
+        agent_id: &str,
+        capability: graph_owl_authz::agent::AgentCapability,
+        window_seconds: u32,
+    ) -> Result<(u32, Option<u64>), StorageError> {
+        // **Refusals do not consume budget.** An agent already being refused
+        // must not have each refusal push its own recovery further away — that
+        // turns a misconfiguration into a permanent lockout, and the refusal is
+        // already recorded for the audit.
+        let row = sqlx::query(
+            "SELECT count(*) AS made,
+                    EXTRACT(EPOCH FROM (now() - min(at)))::bigint AS oldest_age
+               FROM agent_activity
+              WHERE agent_id = $1
+                AND capability = $2
+                AND outcome <> 'refused'
+                AND at > now() - make_interval(secs => $3::double precision)",
+        )
+        .bind(agent_id)
+        .bind(capability.as_str())
+        .bind(f64::from(window_seconds))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let made: i64 = row.try_get("made").unwrap_or(0);
+        let oldest: Option<i64> = row.try_get("oldest_age").unwrap_or(None);
+        Ok((
+            u32::try_from(made).unwrap_or(u32::MAX),
+            oldest.and_then(|age| u64::try_from(age).ok()),
+        ))
+    }
 }
 
 fn custom_property_from_row(row: &PgRow) -> CustomProperty {
@@ -9237,5 +9520,143 @@ mod extension_clause_tests {
     #[test]
     fn no_filters_produce_no_sql() {
         assert!(extension_clauses(&[], 9).is_empty());
+    }
+}
+
+// ---- Epic 32 row hydration ----
+
+/// A capability name from the database back into the closed enum.
+///
+/// **`None` for anything unrecognised, and the caller drops it.** A capability
+/// row that no longer maps to a variant is one that was *removed* — which is the
+/// direction this set is expected to move — and the safe reading of a name this
+/// build does not know is "not granted". Mapping it to a default would grant
+/// something nobody asked for.
+fn capability_from_str(name: &str) -> Option<graph_owl_authz::agent::AgentCapability> {
+    graph_owl_authz::agent::AgentCapability::ALL
+        .into_iter()
+        .find(|capability| capability.as_str() == name)
+}
+
+fn proposal_status_str(status: graph_owl_authz::agent::ProposalStatus) -> &'static str {
+    use graph_owl_authz::agent::ProposalStatus;
+    match status {
+        ProposalStatus::Open => "open",
+        ProposalStatus::Accepted => "accepted",
+        ProposalStatus::Rejected => "rejected",
+        ProposalStatus::Superseded => "superseded",
+    }
+}
+
+/// **An unrecognised status reads as `Superseded`, never as `Open`.**
+///
+/// `Open` would put a row nobody can act on into the reviewer's queue forever;
+/// `Accepted` would claim a decision nobody made. `Superseded` is the one
+/// variant that asserts nothing about what a human decided — it says the row
+/// stopped being actionable, which is exactly what an unreadable status means.
+fn proposal_status_from_str(name: &str) -> graph_owl_authz::agent::ProposalStatus {
+    use graph_owl_authz::agent::ProposalStatus;
+    match name {
+        "open" => ProposalStatus::Open,
+        "accepted" => ProposalStatus::Accepted,
+        "rejected" => ProposalStatus::Rejected,
+        _ => ProposalStatus::Superseded,
+    }
+}
+
+fn activity_outcome_str(outcome: graph_owl_authz::agent::ActivityOutcome) -> &'static str {
+    use graph_owl_authz::agent::ActivityOutcome;
+    match outcome {
+        ActivityOutcome::Applied => "applied",
+        ActivityOutcome::Proposed => "proposed",
+        ActivityOutcome::Refused => "refused",
+    }
+}
+
+/// **An unrecognised outcome reads as `Refused`.**
+///
+/// The audit exists to show what an agent actually managed to do. Reading an
+/// unknown row as `Applied` would credit it with a write nobody can confirm;
+/// `Refused` under-claims, which is the safe direction for an audit log.
+fn activity_outcome_from_str(name: &str) -> graph_owl_authz::agent::ActivityOutcome {
+    use graph_owl_authz::agent::ActivityOutcome;
+    match name {
+        "applied" => ActivityOutcome::Applied,
+        "proposed" => ActivityOutcome::Proposed,
+        _ => ActivityOutcome::Refused,
+    }
+}
+
+fn agent_grant_from_row(row: &PgRow) -> graph_owl_authz::agent::AgentGrant {
+    let names: Vec<String> = row.try_get("capabilities").unwrap_or_default();
+    graph_owl_authz::agent::AgentGrant {
+        id: row.get("id"),
+        agent: graph_owl_core::ownership::EntityReference {
+            id: row.get("agent_id"),
+            // An agent is a principal with `is_bot`, which is a `users` row —
+            // so a bot is a `User` here, not a `Team`. The distinction that
+            // matters for attribution is *which* principal, not its kind.
+            kind: graph_owl_core::ownership::OwnerKind::User,
+            display_name: row.get("display_name"),
+            inherited: false,
+        },
+        capabilities: names
+            .iter()
+            .filter_map(|name| capability_from_str(name))
+            .collect(),
+        scope: row
+            .get::<Option<String>, _>("scope_fqn_prefix")
+            .map(|fqn_prefix| graph_owl_authz::agent::ScopeRef { fqn_prefix }),
+        rate_limit: graph_owl_authz::agent::RateLimit {
+            max_writes: u32::try_from(row.get::<i32, _>("max_writes")).unwrap_or(0),
+            window_seconds: u32::try_from(row.get::<i32, _>("window_seconds")).unwrap_or(0),
+        },
+        expires_at: row.get("expires_at"),
+        granted_by: row.get("granted_by"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn proposal_from_row(row: &PgRow) -> graph_owl_authz::agent::Proposal {
+    graph_owl_authz::agent::Proposal {
+        id: row.get("id"),
+        proposed_by: graph_owl_core::ownership::EntityReference {
+            id: row.get("agent_id"),
+            kind: graph_owl_core::ownership::OwnerKind::User,
+            display_name: row.get("display_name"),
+            inherited: false,
+        },
+        target_fqn: row.get("target_fqn"),
+        // A proposal whose capability this build no longer knows is not
+        // actionable, and `LinkLineage` is the most conservative stand-in: it
+        // always proposes and never applies, so nothing can be applied from a
+        // row that could not be read.
+        capability: capability_from_str(&row.get::<String, _>("capability"))
+            .unwrap_or(graph_owl_authz::agent::AgentCapability::LinkLineage),
+        change: row.get("change"),
+        rationale: row.get("rationale"),
+        confidence: row.get("confidence"),
+        status: proposal_status_from_str(&row.get::<String, _>("status")),
+        base_version: graph_owl_core::envelope::EntityVersion {
+            major: u32::try_from(row.get::<i32, _>("base_major")).unwrap_or(0),
+            minor: u32::try_from(row.get::<i32, _>("base_minor")).unwrap_or(0),
+        },
+        decided_by: row.get("decided_by"),
+        decided_at: row.get("decided_at"),
+        created_at: row.get("created_at"),
+    }
+}
+
+fn activity_from_row(row: &PgRow) -> graph_owl_authz::agent::AgentActivity {
+    graph_owl_authz::agent::AgentActivity {
+        id: row.get("id"),
+        agent_id: row.get("agent_id"),
+        capability: capability_from_str(&row.get::<String, _>("capability"))
+            .unwrap_or(graph_owl_authz::agent::AgentCapability::LinkLineage),
+        target_fqn: row.get("target_fqn"),
+        outcome: activity_outcome_from_str(&row.get::<String, _>("outcome")),
+        refusal: row.get("refusal"),
+        at: row.get("at"),
     }
 }

@@ -1,7 +1,7 @@
 # Plan: Agent Capabilities (Epic 32) ★
 
 **Branch**: feat/agent-capabilities
-**Status**: Not started
+**Status**: Slices A–F built (core, storage, facade, HTTP, MCP write tools); no MCP transport, and only description proposals auto-apply
 **Depends on**: Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into)
 **Crates**: `graph-owl-mcp` (write tools) · `graph-owl-authz` (AgentCapability, grants) · `graph-owl-core` (AgentGrant, RateLimit) · `graph-owl-api` (propose-by-default enforcement) — no new crates
 

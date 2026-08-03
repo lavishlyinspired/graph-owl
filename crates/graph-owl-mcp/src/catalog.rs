@@ -669,3 +669,187 @@ fn staleness_note(staleness: &graph_owl_core::memory::Staleness) -> Option<Strin
         ),
     }
 }
+
+/// Serves MCP write tools from the catalog — Epic 32.
+///
+/// **Separate from [`CatalogContext`] on purpose.** A deployment that wires only
+/// the read adapter gets a surface with no code path to write, which is a
+/// stronger guarantee than a runtime check.
+pub struct CatalogWriter {
+    catalog: Catalog,
+}
+
+impl CatalogWriter {
+    #[must_use]
+    pub fn new(catalog: Catalog) -> Self {
+        Self { catalog }
+    }
+}
+
+#[async_trait]
+impl crate::write::WriteSink for CatalogWriter {
+    async fn write(
+        &self,
+        agent_id: &str,
+        capability: graph_owl_authz::agent::AgentCapability,
+        target_fqn: &str,
+        change: serde_json::Value,
+        rationale: &str,
+        confidence: f64,
+    ) -> Result<Result<crate::write::WriteReceipt, String>, SourceError> {
+        use graph_owl_authz::agent::{ActivityOutcome, WriteDecision};
+
+        let who = self
+            .catalog
+            .resolve_principal(agent_id, agent_id)
+            .await
+            .map_err(|e| unavailable(&e))?;
+
+        // The facade's gate is the single place capability, scope, expiry and
+        // the rate limit are decided, and it records the refusal itself.
+        let gated = match self
+            .catalog
+            .gate_agent_write(&who, capability, target_fqn)
+            .await
+        {
+            Ok(gated) => gated,
+            Err(graph_owl_api::CatalogError::AgentRefused(refusal)) => {
+                return Ok(Err(refusal.to_string()));
+            }
+            Err(error) => return Err(unavailable(&error)),
+        };
+
+        // **Confidence overrides the grant.** A capability that could apply
+        // still proposes when the agent is not confident enough to assert —
+        // decision 6, applied after authorization rather than inside it, because
+        // they answer different questions.
+        let by_confidence = graph_owl_authz::agent::decide_memory_write(confidence);
+        let decision =
+            if gated.decision == WriteDecision::Apply && by_confidence == WriteDecision::Apply {
+                WriteDecision::Apply
+            } else {
+                WriteDecision::Propose
+            };
+
+        let reason = match (gated.decision, by_confidence) {
+            (WriteDecision::Apply, WriteDecision::Apply) => format!(
+                "`{}` is granted for direct application and confidence {confidence} \
+                 is at or above the assertion threshold",
+                capability.as_str()
+            ),
+            (WriteDecision::Apply, WriteDecision::Propose) => format!(
+                "confidence {confidence} is below the assertion threshold of {}, \
+                 so this became a proposal despite `{}` being granted",
+                graph_owl_authz::agent::ASSERTION_CONFIDENCE_THRESHOLD,
+                capability.as_str()
+            ),
+            _ => format!(
+                "`{}` proposes rather than applies; a human decides",
+                capability.as_str()
+            ),
+        };
+
+        if decision == WriteDecision::Propose {
+            let proposal = self
+                .catalog
+                .propose_as_agent(&who, capability, target_fqn, change, rationale, confidence)
+                .await
+                .map_err(|e| unavailable(&e))?;
+            return Ok(Ok(crate::write::WriteReceipt {
+                outcome: "proposed",
+                proposal_id: Some(proposal.id.to_string()),
+                target_fqn: target_fqn.to_string(),
+                reason,
+            }));
+        }
+
+        self.apply_directly(&who, capability, target_fqn, &change)
+            .await?;
+        self.catalog
+            .record_agent_write(agent_id, capability, target_fqn, ActivityOutcome::Applied)
+            .await
+            .map_err(|e| unavailable(&e))?;
+
+        Ok(Ok(crate::write::WriteReceipt {
+            outcome: "applied",
+            proposal_id: None,
+            target_fqn: target_fqn.to_string(),
+            reason,
+        }))
+    }
+}
+
+impl CatalogWriter {
+    /// The two capabilities that land without a human.
+    ///
+    /// Written as an exhaustive match on the *granted* capability rather than a
+    /// generic applier, so a capability gaining direct-apply status has to be
+    /// added here deliberately — there is no path by which a new variant
+    /// silently becomes applicable.
+    async fn apply_directly(
+        &self,
+        who: &graph_owl_core::Principal,
+        capability: graph_owl_authz::agent::AgentCapability,
+        target_fqn: &str,
+        change: &serde_json::Value,
+    ) -> Result<(), SourceError> {
+        use graph_owl_authz::agent::AgentCapability;
+
+        let Some(asset) = self
+            .catalog
+            .get_asset_by_fqn(target_fqn)
+            .await
+            .map_err(|e| unavailable(&e))?
+        else {
+            return Err(SourceError::Unavailable(format!(
+                "`{target_fqn}` vanished between the gate and the write"
+            )));
+        };
+
+        match capability {
+            AgentCapability::ApplyDescription => {
+                let description = change.get("description").and_then(|v| v.as_str());
+                self.catalog
+                    .update_asset(
+                        who,
+                        asset.id,
+                        &graph_owl_core::AssetUpdate {
+                            description: Some(description.map(ToString::to_string)),
+                            ..graph_owl_core::AssetUpdate::default()
+                        },
+                        None,
+                    )
+                    .await
+                    .map_err(|e| unavailable(&e))?;
+                Ok(())
+            }
+            AgentCapability::ApplyTags => {
+                let tags = change.get("tags").and_then(|v| v.as_array());
+                for tag in tags.into_iter().flatten() {
+                    let Some(tag_fqn) = tag.as_str() else {
+                        continue;
+                    };
+                    self.catalog
+                        .apply_tag(
+                            who,
+                            tag_fqn,
+                            target_fqn,
+                            graph_owl_core::classification::LabelType::Automated,
+                            graph_owl_core::classification::LabelState::Suggested,
+                        )
+                        .await
+                        .map_err(|e| unavailable(&e))?;
+                }
+                Ok(())
+            }
+            // Unreachable while `decide_write` and this match agree, and stated
+            // rather than defaulted so that a disagreement is a loud failure
+            // instead of a silent direct write.
+            other => Err(SourceError::Unavailable(format!(
+                "`{}` is not a direct-apply capability; this is a bug in the \
+                 write path, not a refusal",
+                other.as_str()
+            ))),
+        }
+    }
+}

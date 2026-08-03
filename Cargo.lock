@@ -1108,7 +1108,13 @@ dependencies = [
 name = "graph-owl-authz"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "graph-owl-core",
  "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "utoipa",
+ "uuid",
 ]
 
 [[package]]
@@ -1256,6 +1262,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "graph-owl-api",
+ "graph-owl-authz",
  "graph-owl-core",
  "graph-owl-storage",
  "serde",

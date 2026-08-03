@@ -168,6 +168,20 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         // Epic 23. Domains are the accountability axis; data products are the
         // consumable one. Both are entities with envelopes, so both get
         // ordinary entity routes rather than a bespoke shape.
+        // Epic 32. Grants are admin-only and human-only; the agent is named in
+        // the path so an audit reads who changed whose capabilities.
+        .route("/agents/grants", get(list_agent_grants))
+        .route(
+            "/agents/{agent_id}/grant",
+            get(get_agent_grant)
+                .put(set_agent_grant)
+                .delete(revoke_agent_grant),
+        )
+        .route("/agents/{agent_id}/activity", get(get_agent_activity))
+        .route("/proposals", get(list_proposals))
+        .route("/proposals/{id}", get(get_proposal))
+        .route("/proposals/{id}/accept", post(accept_proposal))
+        .route("/proposals/{id}/reject", post(reject_proposal))
         .route("/domains", get(list_domains).post(create_domain))
         .route(
             "/domains/{id}",
@@ -1180,6 +1194,21 @@ enum AppError {
     RateLimited {
         retry_after_seconds: u64,
     },
+    /// An agent write was refused — Epic 32.
+    ///
+    /// **Its own variant rather than `Forbidden`**, because the caller is a
+    /// program: it needs to know *which* rule refused and what would change the
+    /// answer. `Forbidden` renders a fixed sentence, which would replace exactly
+    /// the part an agent could act on — the capability to request, the scope it
+    /// strayed outside, the seconds until its budget frees up.
+    ///
+    /// `retry_after_seconds` is `Some` only for the rate limit, which is also
+    /// the only refusal here that becomes a `429` rather than a `403`: it is the
+    /// one that will stop being true on its own.
+    AgentRefused {
+        detail: String,
+        retry_after_seconds: Option<u64>,
+    },
 }
 
 impl AppError {
@@ -1213,6 +1242,18 @@ impl AppError {
                 kind: ConflictKind::DomainInUse,
                 ..
             } => "domain-in-use",
+            AppError::Conflict {
+                kind: ConflictKind::ProposalDecided,
+                ..
+            } => "proposal-already-decided",
+            AppError::AgentRefused {
+                retry_after_seconds: None,
+                ..
+            } => "agent-refused",
+            AppError::AgentRefused {
+                retry_after_seconds: Some(_),
+                ..
+            } => "agent-rate-limited",
             AppError::Conflict {
                 kind: ConflictKind::WaiverExists,
                 ..
@@ -1288,6 +1329,18 @@ impl AppError {
                 kind: ConflictKind::DomainAssigned,
                 ..
             } => "This asset already belongs to a domain",
+            AppError::Conflict {
+                kind: ConflictKind::ProposalDecided,
+                ..
+            } => "This proposal was already decided",
+            AppError::AgentRefused {
+                retry_after_seconds: None,
+                ..
+            } => "This agent may not do that",
+            AppError::AgentRefused {
+                retry_after_seconds: Some(_),
+                ..
+            } => "This agent has used its budget",
             AppError::Conflict {
                 kind: ConflictKind::TagInUse,
                 ..
@@ -1372,6 +1425,13 @@ impl AppError {
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::Overloaded { .. } => StatusCode::SERVICE_UNAVAILABLE,
             AppError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+            // The rate limit is the one refusal that stops being true on its
+            // own, so it is the one that says "try again" rather than "not you".
+            AppError::AgentRefused {
+                retry_after_seconds: Some(_),
+                ..
+            } => StatusCode::TOO_MANY_REQUESTS,
+            AppError::AgentRefused { .. } => StatusCode::FORBIDDEN,
         }
     }
 
@@ -1410,6 +1470,14 @@ impl AppError {
                 detail,
                 ..
             } => detail.clone(),
+            // Same rule again: the refusal already names the rule and what would
+            // change the answer, and that is the whole value of it to a program.
+            AppError::Conflict {
+                kind: ConflictKind::ProposalDecided,
+                detail,
+                ..
+            }
+            | AppError::AgentRefused { detail, .. } => detail.clone(),
             AppError::Conflict {
                 kind: ConflictKind::WaiverExists,
                 ..
@@ -1594,6 +1662,16 @@ impl From<CatalogError> for AppError {
             },
             CatalogError::Forbidden => AppError::Forbidden,
             CatalogError::Unauthenticated => AppError::Unauthenticated,
+            CatalogError::AgentRefused(refusal) => AppError::AgentRefused {
+                detail: refusal.to_string(),
+                retry_after_seconds: match refusal {
+                    graph_owl_authz::agent::Refusal::RateLimited {
+                        retry_after_seconds,
+                        ..
+                    } => Some(retry_after_seconds),
+                    _ => None,
+                },
+            },
             CatalogError::Storage(storage_error) => storage_error.into(),
         }
     }
@@ -1644,6 +1722,13 @@ impl IntoResponse for AppError {
             | AppError::RateLimited {
                 retry_after_seconds,
             } => Some(*retry_after_seconds),
+            // Epic 32: a rate-limited agent gets the same treatment, and for the
+            // same reason — an autonomous caller left to invent its own backoff
+            // invents "immediately".
+            AppError::AgentRefused {
+                retry_after_seconds,
+                ..
+            } => *retry_after_seconds,
             _ => None,
         };
         if let Some(retry_after_seconds) = retry_after_seconds
@@ -8582,4 +8667,283 @@ mod extension_filter_parsing_tests {
         assert!(filters.is_empty());
         assert!(rest.is_empty());
     }
+}
+
+// ---- Epic 32: agent capabilities ----
+
+/// A grant as a human writes one.
+///
+/// **The agent is named in the path, not the body.** A body-supplied agent id
+/// would let a caller who may write one grant write anybody's, and the path is
+/// what a reviewer reads when auditing who changed what.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct AgentGrantRequest {
+    /// Capability names from the closed set. **An unrecognised name is a `400`,
+    /// never silently dropped**: a grant that quietly ignored half of what it
+    /// was given would be a grant nobody wrote, and the caller would believe it
+    /// had granted more than it did.
+    capabilities: Vec<String>,
+    #[serde(default)]
+    scope_fqn_prefix: Option<String>,
+    #[serde(default)]
+    max_writes: Option<u32>,
+    #[serde(default)]
+    window_seconds: Option<u32>,
+    #[serde(default)]
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ValidateBody for AgentGrantRequest {
+    /// Validated against the **raw body**, before deserializing.
+    ///
+    /// That ordering is what lets an unrecognised capability be a `400` naming
+    /// the offending entry rather than being silently dropped by serde. A grant
+    /// that quietly ignored half of what it was given would be a grant nobody
+    /// wrote, and the caller would believe it had granted more than it did.
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut problems = Vec::new();
+
+        match value.get("capabilities") {
+            Some(serde_json::Value::Array(names)) => {
+                for (index, entry) in names.iter().enumerate() {
+                    let Some(name) = entry.as_str() else {
+                        problems.push(FieldError::new(
+                            &format!("capabilities[{index}]"),
+                            FieldErrorCode::Type,
+                            "each capability must be a string".to_string(),
+                        ));
+                        continue;
+                    };
+                    if !graph_owl_authz::agent::AgentCapability::ALL
+                        .iter()
+                        .any(|capability| capability.as_str() == name)
+                    {
+                        problems.push(FieldError::new(
+                            &format!("capabilities[{index}]"),
+                            FieldErrorCode::Type,
+                            format!(
+                                "`{name}` is not a capability an agent can hold. \
+                                 There is deliberately no delete, grant, policy, \
+                                 role or certification capability."
+                            ),
+                        ));
+                    }
+                }
+            }
+            Some(_) => problems.push(FieldError::new(
+                "capabilities",
+                FieldErrorCode::Type,
+                "must be an array of capability names".to_string(),
+            )),
+            None => problems.push(FieldError::new(
+                "capabilities",
+                FieldErrorCode::Required,
+                "a grant has to say what it grants; to grant nothing, revoke it".to_string(),
+            )),
+        }
+
+        // A limit of zero refuses every write while looking like a grant, which
+        // is a confusing way to say "revoked" — and revoking has its own verb.
+        for (field, label) in [("maxWrites", "writes"), ("windowSeconds", "seconds")] {
+            if value.get(field).and_then(serde_json::Value::as_u64) == Some(0) {
+                problems.push(FieldError::new(
+                    field,
+                    FieldErrorCode::Type,
+                    format!(
+                        "must be at least 1 {label}; to stop an agent entirely, \
+                         revoke its grant"
+                    ),
+                ));
+            }
+        }
+
+        if value
+            .get("scopeFqnPrefix")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|prefix| prefix.trim().is_empty())
+        {
+            problems.push(FieldError::new(
+                "scopeFqnPrefix",
+                FieldErrorCode::Type,
+                "an empty scope admits nothing; omit the field for estate-wide".to_string(),
+            ));
+        }
+
+        problems
+    }
+}
+
+/// Grant or replace an agent's capabilities. **Admins only, humans only.**
+async fn set_agent_grant(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(agent_id): Path<String>,
+    AppJson(body): AppJson<AgentGrantRequest>,
+) -> Result<(StatusCode, Json<graph_owl_authz::agent::AgentGrant>), AppError> {
+    // The agent has to exist as a principal before it can be trusted with
+    // anything — decision 1's distinct-bot-principal rule, enforced rather than
+    // assumed. A grant naming nobody would be a row the audit could not resolve.
+    let agent = catalog.resolve_principal(&agent_id, &agent_id).await?;
+
+    let capabilities = body
+        .capabilities
+        .iter()
+        .filter_map(|name| {
+            graph_owl_authz::agent::AgentCapability::ALL
+                .into_iter()
+                .find(|capability| capability.as_str() == name)
+        })
+        .collect();
+    let default_limit = graph_owl_authz::agent::RateLimit::default();
+    let grant = graph_owl_authz::agent::AgentGrant {
+        id: Uuid::new_v4(),
+        agent: graph_owl_core::ownership::EntityReference {
+            id: agent.id.clone(),
+            kind: graph_owl_core::ownership::OwnerKind::User,
+            display_name: agent.name.clone(),
+            inherited: false,
+        },
+        capabilities,
+        scope: body
+            .scope_fqn_prefix
+            .clone()
+            .map(|fqn_prefix| graph_owl_authz::agent::ScopeRef { fqn_prefix }),
+        rate_limit: graph_owl_authz::agent::RateLimit {
+            max_writes: body.max_writes.unwrap_or(default_limit.max_writes),
+            window_seconds: body.window_seconds.unwrap_or(default_limit.window_seconds),
+        },
+        expires_at: body.expires_at,
+        granted_by: principal.id.clone(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    catalog.set_agent_grant(&principal, &grant).await?;
+    Ok((StatusCode::OK, Json(grant)))
+}
+
+async fn get_agent_grant(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(agent_id): Path<String>,
+) -> Result<Json<graph_owl_authz::agent::AgentGrant>, AppError> {
+    // Who may see what an agent is trusted with is itself governance
+    // information; a non-admin reading it learns the shape of the estate's
+    // automation.
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    catalog
+        .agent_grant(&agent_id)
+        .await?
+        .map(Json)
+        .ok_or(AppError::NotFound)
+}
+
+async fn list_agent_grants(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<Vec<graph_owl_authz::agent::AgentGrant>>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.list_agent_grants().await?))
+}
+
+async fn revoke_agent_grant(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(agent_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    if catalog.revoke_agent_grant(&principal, &agent_id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
+/// An agent's writes — applied, proposed **and refused**.
+async fn get_agent_activity(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(agent_id): Path<String>,
+    AppQuery(query): AppQuery<ListQuery>,
+) -> Result<Json<Page<graph_owl_authz::agent::AgentActivity>>, AppError> {
+    let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    Ok(Json(catalog.agent_activity(&agent_id, &page).await?))
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ProposalListQuery {
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    after: Option<String>,
+}
+
+async fn list_proposals(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppQuery(query): AppQuery<ProposalListQuery>,
+) -> Result<Json<Page<graph_owl_authz::agent::Proposal>>, AppError> {
+    use graph_owl_authz::agent::ProposalStatus;
+    // An unrecognised status is a `400`, not an empty page: a typo'd filter that
+    // silently matched nothing reads as an answer about the data rather than
+    // about the request, which is the failure `00d` singles out.
+    let status = match query.status.as_deref() {
+        None => None,
+        Some("open") => Some(ProposalStatus::Open),
+        Some("accepted") => Some(ProposalStatus::Accepted),
+        Some("rejected") => Some(ProposalStatus::Rejected),
+        Some("superseded") => Some(ProposalStatus::Superseded),
+        Some(other) => {
+            return Err(AppError::Validation(vec![FieldError::new(
+                "status",
+                FieldErrorCode::Type,
+                format!("`{other}` is not a proposal status"),
+            )]));
+        }
+    };
+    let page = PageRequest::new(query.limit, query.after.as_deref())?;
+    Ok(Json(
+        catalog
+            .list_proposals(query.agent_id.as_deref(), status, &page)
+            .await?,
+    ))
+}
+
+async fn get_proposal(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_authz::agent::Proposal>, AppError> {
+    catalog
+        .get_proposal(id)
+        .await?
+        .map(Json)
+        .ok_or(AppError::NotFound)
+}
+
+/// Accept a proposal: the change lands, **attributed to the agent**, with this
+/// caller recorded as approver.
+async fn accept_proposal(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_authz::agent::Proposal>, AppError> {
+    Ok(Json(catalog.accept_proposal(&principal, id).await?))
+}
+
+async fn reject_proposal(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    catalog.reject_proposal(&principal, id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
