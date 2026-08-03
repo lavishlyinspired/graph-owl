@@ -521,10 +521,10 @@ actually holds could not be asserted at all.
 - [x] **Trust summaries and gaps** *(Slice B)* — lifecycle, certification with expiry *evaluated* (tested at exactly the boundary), quality, and named gaps. **An asset nobody tested reports `Unknown`, never `Healthy`**; `None` and `Some(false)` are kept apart because "never ran" and "ran and failed" are opposite statements. An unrecognised lifecycle is `Unknown` rather than `Production`, and a blank description counts as missing. `gaps` is empty only when genuinely complete
 - [x] **The adapter over `Catalog`** *(30 July 2026)* — `CatalogContext` implements `ContextSource`, and every context now carries its trust summary. Two decisions it rests on: the catalog's fields reach `Observed` as `Option`s **without defaulting on the way in**, because a field that lost its `None` earlier would have thrown away the distinction `trust` protects and the loss is invisible; and **visibility reuses the facade's filtered read** rather than restating the rule — two implementations of "may this principal see it" is one more than can be kept in step, and this is the copy an agent drives. `policy_filtered` is the difference between what exists and what the caller may see, which is the only way to know something was hidden: a filtered read cannot report what it removed
 - [~] **No transport yet** — nothing speaks MCP over stdio or HTTP, so the surface is reachable from Rust and not from an agent. That is the remaining half of Slice A
-- [ ] The remaining six read tools — search, lineage, governance, graph query *(Slices C, D)*
-- [ ] Token-budgeted responses *(Slice E)*
-- [ ] Outbound webhooks, HMAC-signed, at-least-once *(Slice F)*
-- [ ] The thesis test: an agent with only MCP access answers a real question *(Slice G)*
+- [x] The remaining six read tools — search, lineage, governance, graph query *(Slices C, D)*
+- [x] Token-budgeted responses *(Slice E)*
+- [~] Outbound webhooks, HMAC-signed, at-least-once *(Slice F)* — the decisions are built and tested (thin payloads, canonicalization, signing, SSRF admission, backoff); **no sender, no registration persistence yet**
+- [x] The thesis test: an agent with only MCP access answers a real question *(Slice G)* — against the `ContextSource` port; a transport is still pending
 
 ### Epic 31 — Organizational memory ★
 - [x] Memory objects: kind, content, authorship, confidence, `as_of`

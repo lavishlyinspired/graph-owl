@@ -5,6 +5,8 @@
 //! changed. This is what it subscribes to instead of polling
 //! (`08-engine-search.md`).
 
+pub mod webhook;
+
 use chrono::{DateTime, Utc};
 use graph_owl_core::AssetKind;
 use graph_owl_core::envelope::{ChangeDescription, EntityVersion};

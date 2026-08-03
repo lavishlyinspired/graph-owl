@@ -18,12 +18,29 @@ use crate::{
 /// Serves MCP tools from the catalog, filtered by the caller's policy.
 pub struct CatalogContext {
     catalog: Catalog,
+    /// Classification names whose tags mean "the values here are restricted".
+    ///
+    /// **Declared by the deployment, never inferred from a tag's name.** See
+    /// [`crate::lineage::masked_columns_of`] for why a string comparison is the
+    /// wrong place for a security decision. Empty by default: a deployment that
+    /// has said nothing masks nothing.
+    masking: std::collections::HashSet<String>,
 }
 
 impl CatalogContext {
     #[must_use]
     pub fn new(catalog: Catalog) -> Self {
-        Self { catalog }
+        Self {
+            catalog,
+            masking: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Declare which classifications imply masking.
+    #[must_use]
+    pub fn masking(mut self, classifications: impl IntoIterator<Item = String>) -> Self {
+        self.masking = classifications.into_iter().collect();
+        self
     }
 }
 
@@ -151,6 +168,8 @@ impl ContextSource for CatalogContext {
             // filtered one presents the filtered one as complete.
             policy_filtered: visible.len() < all.len(),
             trust: summarise(&observe(&asset, false), chrono::Utc::now()),
+            truncated: false,
+            truncation_reason: None,
         }))
     }
 
@@ -221,6 +240,405 @@ impl ContextSource for CatalogContext {
                 })
                 .collect(),
         ))
+    }
+
+    async fn search(
+        &self,
+        principal: &str,
+        query: &str,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::SearchResults, SourceError> {
+        let who = self
+            .catalog
+            .resolve_principal(principal, principal)
+            .await
+            .map_err(|e| unavailable(&e))?;
+
+        // An unrecognised kind is an **empty answer, not an error**. The agent
+        // asked a well-formed question about a category this catalog does not
+        // model, and "nothing of that kind" is the true answer to it.
+        let kind = match kind {
+            None => None,
+            Some(name) => match serde_json::from_value::<graph_owl_core::AssetKind>(
+                serde_json::Value::String(name.to_string()),
+            ) {
+                Ok(kind) => Some(kind),
+                Err(_) => return Ok(crate::SearchResults::default()),
+            },
+        };
+        let filter = graph_owl_storage::AssetFilter {
+            kind,
+            ..graph_owl_storage::AssetFilter::default()
+        };
+        let page = graph_owl_core::page::PageRequest::new(Some(limit), None)
+            .map_err(|error| SourceError::Unavailable(format!("{error:?}")))?;
+
+        let visible = self
+            .catalog
+            .search_assets_for(&who, query, &filter, &page)
+            .await
+            .map_err(|e| unavailable(&e))?;
+        // The same two-reads trick `asset_context` uses: a filtered read cannot
+        // report what it removed, so the only way to know something was hidden
+        // is to ask the question twice.
+        let all = self
+            .catalog
+            .search_assets_for(&Self::everything(), query, &filter, &page)
+            .await
+            .map_err(|e| unavailable(&e))?;
+
+        let hits: Vec<crate::SearchHit> = visible
+            .data
+            .iter()
+            .map(|asset| crate::SearchHit {
+                fully_qualified_name: asset.fully_qualified_name.clone(),
+                kind: asset.kind.to_string(),
+                snippet: asset.description.clone(),
+                trust: summarise(&observe(asset, false), chrono::Utc::now()),
+            })
+            .collect();
+
+        Ok(crate::SearchResults {
+            // **Counted after the filter.** The pre-filter number would tell the
+            // agent to page for results that will never arrive, and the gap
+            // between the two is an exact count of what is being hidden.
+            total: hits.len(),
+            policy_filtered: visible.data.len() < all.data.len(),
+            hits,
+            truncated: false,
+            truncation_reason: None,
+        })
+    }
+
+    async fn lineage(
+        &self,
+        principal: &str,
+        fqn: &str,
+        direction: crate::Direction,
+    ) -> Result<Option<crate::lineage::LineageWalk>, SourceError> {
+        let who = self
+            .catalog
+            .resolve_principal(principal, principal)
+            .await
+            .map_err(|e| unavailable(&e))?;
+        let Some(root) = self.visible_asset(&who, fqn).await? else {
+            return Ok(None);
+        };
+
+        let (nodes, edges) = self.subgraph(root.id, direction).await?;
+        let names = Self::name_index(&nodes);
+        let visible = self.visible_names(&who, &nodes).await?;
+
+        // **The unfiltered subgraph is read and then walked through the policy
+        // rule, rather than filtered in the query.** The rule that matters here
+        // is what happens *at* the boundary — a denied node ends the branch
+        // instead of being bypassed — and a query that simply omitted the
+        // denied rows would silently join across it. See
+        // [`crate::lineage::walk_upstream`].
+        let by_source: std::collections::HashMap<String, Vec<crate::lineage::RawEdge>> =
+            Self::index_edges(&edges, &names, direction);
+
+        Ok(Some(crate::lineage::walk_upstream(
+            &root.fully_qualified_name,
+            |name| visible.contains(name),
+            |node| by_source.get(node).cloned().unwrap_or_default(),
+        )))
+    }
+
+    async fn impact(
+        &self,
+        principal: &str,
+        fqn: &str,
+    ) -> Result<Option<crate::lineage::ImpactReport>, SourceError> {
+        let who = self
+            .catalog
+            .resolve_principal(principal, principal)
+            .await
+            .map_err(|e| unavailable(&e))?;
+        let Some(root) = self.visible_asset(&who, fqn).await? else {
+            return Ok(None);
+        };
+
+        let (nodes, _) = self.subgraph(root.id, crate::Direction::Downstream).await?;
+        let visible = self.visible_names(&who, &nodes).await?;
+
+        let mut affected_assets: Vec<String> = nodes
+            .iter()
+            .filter(|node| node.id != root.id)
+            .map(|node| node.fully_qualified_name.clone())
+            .filter(|name| visible.contains(name))
+            .collect();
+        affected_assets.sort();
+
+        // Contracts and teams are read for the **affected** assets, not the root:
+        // the promise that breaks is the one made about the thing downstream.
+        let mut affected_contracts = Vec::new();
+        let mut owning_teams: Vec<String> = Vec::new();
+        for node in nodes
+            .iter()
+            .filter(|node| visible.contains(&node.fully_qualified_name))
+        {
+            for contract in self
+                .catalog
+                .list_contracts(Some(&node.fully_qualified_name))
+                .await
+                .map_err(|e| unavailable(&e))?
+            {
+                affected_contracts.push(contract.name);
+                // The producer promised it; the consumers depend on it. Both
+                // need telling, and listing only the producer would leave the
+                // people who find out at 3am off the list.
+                owning_teams.push(contract.producer);
+                owning_teams.extend(contract.consumers);
+            }
+            owning_teams.extend(node.owners.iter().map(|owner| owner.id.clone()));
+        }
+        affected_contracts.sort();
+        affected_contracts.dedup();
+        owning_teams.sort();
+        owning_teams.dedup();
+
+        Ok(Some(crate::lineage::ImpactReport {
+            // Something downstream exists that the caller may not see, so the
+            // blast radius they are shown is smaller than the real one — which
+            // they must be told, or they will under-communicate a change.
+            policy_filtered: affected_assets.len() + 1 < nodes.len(),
+            affected_assets,
+            affected_contracts,
+            owning_teams,
+            truncated: false,
+            truncation_reason: None,
+        }))
+    }
+
+    async fn governance(
+        &self,
+        principal: &str,
+        fqn: &str,
+    ) -> Result<Option<crate::lineage::GovernanceContext>, SourceError> {
+        let who = self
+            .catalog
+            .resolve_principal(principal, principal)
+            .await
+            .map_err(|e| unavailable(&e))?;
+        let Some(asset) = self.visible_asset(&who, fqn).await? else {
+            return Ok(None);
+        };
+
+        let own_labels = self
+            .catalog
+            .labels_on(fqn)
+            .await
+            .map_err(|e| unavailable(&e))?;
+
+        // Columns are read **unfiltered**, because masking is not denial: the
+        // parent is visible, so the columns' *existence* is public and only
+        // their values are restricted. An agent that cannot see a column exists
+        // will not know to ask for access to it.
+        let mut column_labels: Vec<(String, String)> = Vec::new();
+        for child in self
+            .catalog
+            .list_children(Some(asset.id))
+            .await
+            .map_err(|e| unavailable(&e))?
+        {
+            for label in self
+                .catalog
+                .labels_on(&child.fully_qualified_name)
+                .await
+                .map_err(|e| unavailable(&e))?
+            {
+                column_labels.push((child.fully_qualified_name.clone(), label.tag_fqn));
+            }
+        }
+
+        let domain = self
+            .catalog
+            .resolve_asset_domain(asset.id)
+            .await
+            .map_err(|e| unavailable(&e))?;
+
+        Ok(Some(crate::lineage::GovernanceContext {
+            classifications: own_labels
+                .iter()
+                .map(|label| label.tag_fqn.clone())
+                .collect(),
+            masked_columns: crate::lineage::masked_columns_of(&column_labels, &self.masking),
+            // Retention lives in the organization's own fields until a first-class
+            // policy exists; reading it from `extension` is how it is recorded
+            // today, and reporting `None` when it is absent is the honest answer.
+            retention: asset
+                .extension
+                .as_ref()
+                .and_then(|bag| bag.get("retention"))
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string),
+            domain: domain.map(|assignment| assignment.fully_qualified_name),
+            // **What the caller may do, so an agent can plan instead of
+            // probing.** This surface is read-only until Epic 32, and saying so
+            // is more useful than an empty list an agent has to interpret.
+            permitted_operations: vec!["read".to_string()],
+            truncated: false,
+            truncation_reason: None,
+        }))
+    }
+
+    async fn query_graph(
+        &self,
+        principal: &str,
+        query: &str,
+    ) -> Result<Result<crate::QueryAnswer, crate::QueryFault>, SourceError> {
+        let who = self
+            .catalog
+            .resolve_principal(principal, principal)
+            .await
+            .map_err(|e| unavailable(&e))?;
+
+        match self
+            .catalog
+            .sparql(&who, query, None, graph_owl_api::SparqlBudget::default())
+            .await
+        {
+            Ok(outcome) => Ok(Ok(crate::QueryAnswer {
+                rows: outcome.rows,
+                truncated: outcome.truncated,
+            })),
+            // **A query problem is an answer about the query, not a failure to
+            // run it.** `Validation` is what the parser rejects; anything else
+            // is the engine failing, which the agent must not read as "your
+            // query was wrong".
+            Err(CatalogError::Validation(problems)) => Ok(Err(crate::QueryFault::Malformed(
+                problems
+                    .iter()
+                    .map(|problem| problem.detail.clone())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ))),
+            Err(error) => Err(unavailable(&error)),
+        }
+    }
+}
+
+impl CatalogContext {
+    /// A principal that may see everything, used **only** to count what a real
+    /// principal could not — never to build a response.
+    ///
+    /// The count is the whole point: a filtered read cannot report what it
+    /// removed, so `policyFiltered` is unanswerable without asking twice.
+    fn everything() -> graph_owl_core::Principal {
+        graph_owl_core::Principal {
+            id: "system".to_string(),
+            name: "system".to_string(),
+            kind: graph_owl_core::PrincipalKind::Service,
+            roles: Vec::new(),
+            is_admin: true,
+        }
+    }
+
+    /// The asset, or `None` when it is absent **or** withheld.
+    async fn visible_asset(
+        &self,
+        who: &graph_owl_core::Principal,
+        fqn: &str,
+    ) -> Result<Option<graph_owl_core::Asset>, SourceError> {
+        let Some(asset) = self
+            .catalog
+            .get_asset_by_fqn(fqn)
+            .await
+            .map_err(|e| unavailable(&e))?
+        else {
+            return Ok(None);
+        };
+        if self.catalog.get_asset_for(who, asset.id).await.is_err() {
+            return Ok(None);
+        }
+        Ok(Some(asset))
+    }
+
+    /// The unfiltered lineage subgraph in one direction, to the walk's depth.
+    async fn subgraph(
+        &self,
+        root: uuid::Uuid,
+        direction: crate::Direction,
+    ) -> Result<
+        (
+            Vec<graph_owl_core::Asset>,
+            Vec<graph_owl_core::lineage::LineageEdge>,
+        ),
+        SourceError,
+    > {
+        let depth = crate::lineage::MAX_DEPTH;
+        let (up, down) = match direction {
+            crate::Direction::Upstream => (depth, 0),
+            crate::Direction::Downstream => (0, depth),
+        };
+        self.catalog
+            .lineage_graph(root, up, down)
+            .await
+            .map_err(|e| unavailable(&e))
+    }
+
+    fn name_index(
+        nodes: &[graph_owl_core::Asset],
+    ) -> std::collections::HashMap<uuid::Uuid, String> {
+        nodes
+            .iter()
+            .map(|node| (node.id, node.fully_qualified_name.clone()))
+            .collect()
+    }
+
+    /// Which of these the principal may see, by name.
+    async fn visible_names(
+        &self,
+        who: &graph_owl_core::Principal,
+        nodes: &[graph_owl_core::Asset],
+    ) -> Result<std::collections::HashSet<String>, SourceError> {
+        let mut visible = std::collections::HashSet::new();
+        for node in nodes {
+            if self.catalog.get_asset_for(who, node.id).await.is_ok() {
+                visible.insert(node.fully_qualified_name.clone());
+            }
+        }
+        Ok(visible)
+    }
+
+    /// Edges keyed by the node the walk arrives at, pointing at where it goes
+    /// next.
+    ///
+    /// `walk_upstream` always reads `from_fqn` as "the next node" and `to_fqn`
+    /// as "where I am", so a downstream walk **swaps the endpoints** rather
+    /// than needing a second walker. One walker means one place the policy
+    /// boundary rule can be wrong.
+    fn index_edges(
+        edges: &[graph_owl_core::lineage::LineageEdge],
+        names: &std::collections::HashMap<uuid::Uuid, String>,
+        direction: crate::Direction,
+    ) -> std::collections::HashMap<String, Vec<crate::lineage::RawEdge>> {
+        let mut indexed: std::collections::HashMap<String, Vec<crate::lineage::RawEdge>> =
+            std::collections::HashMap::new();
+        for edge in edges {
+            let (Some(from), Some(to)) =
+                (names.get(&edge.from_asset_id), names.get(&edge.to_asset_id))
+            else {
+                continue;
+            };
+            let (near, far) = match direction {
+                crate::Direction::Upstream => (to, from),
+                crate::Direction::Downstream => (from, to),
+            };
+            indexed
+                .entry(near.clone())
+                .or_default()
+                .push(crate::lineage::RawEdge {
+                    from_fqn: far.clone(),
+                    to_fqn: near.clone(),
+                    relationship: edge.relationship.to_string(),
+                    source: format!("{:?}", edge.details.source).to_lowercase(),
+                    query: edge.details.query.clone(),
+                });
+        }
+        indexed
     }
 }
 

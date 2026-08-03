@@ -9,7 +9,9 @@
 //! The one decision worth reading this file for: **denied and absent are the
 //! same answer**. See [`Outcome::NotFound`].
 
+pub mod budget;
 pub mod catalog;
+pub mod lineage;
 pub mod trust;
 
 use async_trait::async_trait;
@@ -55,6 +57,145 @@ pub trait ContextSource: Send + Sync {
         fqn: &str,
         query: &str,
     ) -> Result<Option<Vec<MemoryContext>>, SourceError>;
+
+    /// Ranked hits, **already filtered by policy** — and `total` counted after
+    /// the filter, never before. See [`SearchResults::total`].
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached. There is no
+    /// not-found here: a search matching nothing is a real, complete answer.
+    async fn search(
+        &self,
+        principal: &str,
+        query: &str,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<SearchResults, SourceError>;
+
+    /// A bounded lineage walk from `fqn`.
+    ///
+    /// `Ok(None)` means the asset is unknown **or** withheld, as everywhere
+    /// else. A walk that reaches a denied *neighbour* is different: it succeeds
+    /// with `policy_filtered` set, because the caller may see where they
+    /// started.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached.
+    async fn lineage(
+        &self,
+        principal: &str,
+        fqn: &str,
+        direction: Direction,
+    ) -> Result<Option<lineage::LineageWalk>, SourceError>;
+
+    /// What a change to `fqn` would affect.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached.
+    async fn impact(
+        &self,
+        principal: &str,
+        fqn: &str,
+    ) -> Result<Option<lineage::ImpactReport>, SourceError>;
+
+    /// How `fqn` is governed — classifications, masking, retention, and what
+    /// the caller may do.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached.
+    async fn governance(
+        &self,
+        principal: &str,
+        fqn: &str,
+    ) -> Result<Option<lineage::GovernanceContext>, SourceError>;
+
+    /// Evaluate a graph query with the caller's policy compiled in.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached. A query that
+    /// does not parse, or uses something unsupported, comes back as
+    /// [`QueryFault`] — those are answers about the query, not failures to run
+    /// it, and an agent acts on them differently.
+    async fn query_graph(
+        &self,
+        principal: &str,
+        query: &str,
+    ) -> Result<Result<QueryAnswer, QueryFault>, SourceError>;
+}
+
+/// Which way a lineage walk goes.
+///
+/// Two questions, not one: "where did this come from" and "what breaks if I
+/// change it" have different answers and different audiences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Upstream,
+    Downstream,
+}
+
+/// One search hit as an agent receives it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub fully_qualified_name: String,
+    pub kind: String,
+    /// Enough description to choose between hits, not the whole thing — the
+    /// agent asks for context on the one it picks.
+    pub snippet: Option<String>,
+    /// Carried per hit, because "there are eleven tables called `orders`" is
+    /// only useful alongside "and one of them is certified".
+    pub trust: crate::trust::TrustSummary,
+}
+
+/// A ranked, policy-filtered result set.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResults {
+    pub hits: Vec<SearchHit>,
+    /// **How many the caller may see — counted after the policy filter, never
+    /// before.**
+    ///
+    /// A total taken before filtering is wrong twice over. It tells an agent
+    /// there are ten results when it may have three, so the agent pages for
+    /// seven that will never arrive and concludes the tool is broken; and the
+    /// difference between the two numbers *is* the disclosure the policy exists
+    /// to prevent — an exact count of the assets being hidden.
+    pub total: usize,
+    /// Something matched that the caller may not see.
+    pub policy_filtered: bool,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<budget::TruncationReason>,
+}
+
+/// Bindings from a graph query.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryAnswer {
+    /// One map per solution: variable name to its bound term, rendered.
+    pub rows: Vec<std::collections::BTreeMap<String, String>>,
+    /// The budget cut the scan short, so this may be incomplete. **Always set
+    /// when it happened** — partial results presented as complete is the one
+    /// outcome this crate refuses everywhere.
+    pub truncated: bool,
+}
+
+/// Why a graph query did not run.
+///
+/// **Two kinds, deliberately separated.** A query the agent wrote wrongly is
+/// its problem to fix; a query this engine does not yet support is ours, and an
+/// agent told "malformed" for the second will rewrite a correct query forever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryFault {
+    /// It did not parse.
+    Malformed(String),
+    /// It parsed and asks for something this engine does not implement.
+    Unsupported(String),
 }
 
 /// One recalled memory, as an agent receives it.
@@ -120,6 +261,13 @@ pub struct AssetContext {
     /// context, because retrieval without it is a fact with no weight attached
     /// — and an agent given facts and no confidence reports them all alike.
     pub trust: crate::trust::TrustSummary,
+    /// The response did not fit its token budget whole. Distinct from
+    /// `policy_filtered`: one is "you may not have it", the other is "it did
+    /// not fit", and only the second is worth retrying.
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<budget::TruncationReason>,
 }
 
 /// What a tool call produced.
@@ -130,6 +278,25 @@ pub enum Outcome {
     /// "nothing has been written down" is information, and it is not
     /// [`Outcome::NotFound`].
     Recalled(Vec<MemoryContext>),
+    /// Ranked hits. **Empty is a real answer**, for the same reason
+    /// `Recalled(vec![])` is: "nothing matched" and "no such thing to match
+    /// against" are different statements.
+    Searched(Box<SearchResults>),
+    /// A bounded lineage walk.
+    Lineage(Box<lineage::LineageWalk>),
+    /// What a change would affect.
+    Impact(Box<lineage::ImpactReport>),
+    /// How an asset is governed.
+    Governance(Box<lineage::GovernanceContext>),
+    /// Bindings from a graph query.
+    Bindings(Box<QueryAnswer>),
+    /// **The engine does not implement what the query asked for.**
+    ///
+    /// Distinct from [`Outcome::BadRequest`], which says the caller got it
+    /// wrong. An agent told "malformed" for an unimplemented feature rewrites a
+    /// correct query until it gives up; told "unsupported", it takes a
+    /// different route the first time.
+    Unsupported(String),
     /// **Absent and denied, indistinguishable.**
     ///
     /// A refusal naming an asset the caller cannot see tells them it exists,
@@ -170,12 +337,46 @@ pub const GET_ASSET_CONTEXT: &str = "get_asset_context";
 /// The name the protocol addresses the recall tool by.
 pub const RECALL_MEMORY: &str = "recall_memory";
 
+/// Discovery — Epic 14 Slice C.
+pub const SEARCH_ASSETS: &str = "search_assets";
+
+/// Provenance and flow — Epic 14 Slice C.
+pub const EXPLAIN_LINEAGE: &str = "explain_lineage";
+
+/// Blast radius — Epic 14 Slice C.
+pub const ANALYZE_IMPACT: &str = "analyze_impact";
+
+/// Handling rules — Epic 14 Slice D.
+pub const GET_GOVERNANCE_CONTEXT: &str = "get_governance_context";
+
+/// The escape hatch — Epic 14 Slice D.
+pub const QUERY_GRAPH: &str = "query_graph";
+
+/// How many hits one search returns before it reports truncation.
+///
+/// Twenty-five: enough that a real ranking has room to be wrong about the first
+/// few, and few enough that the response is still something an agent reads
+/// rather than pages. Larger sets are a sign the query was too broad, and the
+/// better fix is a narrower query than a longer answer.
+const DEFAULT_SEARCH_LIMIT: usize = 25;
+
+/// The most an agent may ask for in one search.
+///
+/// A cap rather than an error, because an agent asking for a thousand hits
+/// wants "as many as you have" and refusing it teaches nothing. A hundred is
+/// four screens of the default and still fits a budget alongside per-hit trust.
+const MAX_SEARCH_LIMIT: usize = 100;
+
 /// Everything this server offers.
 ///
 /// A surface advertising tools it cannot serve teaches an agent to distrust the
 /// manifest, and an agent that distrusts the manifest probes instead — the
 /// behaviour a read-only surface least wants to encourage. So a tool appears here
 /// only once [`call`] can serve it.
+// A declaration table is one thing, not many: splitting it into per-tool
+// functions would put the seven descriptions in seven places and make the
+// question "what does this server offer" unanswerable by reading one thing.
+#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn tools() -> Vec<ToolDeclaration> {
     vec![
@@ -222,6 +423,113 @@ pub fn tools() -> Vec<ToolDeclaration> {
                 "additionalProperties": false,
             }),
         },
+        ToolDeclaration {
+            name: SEARCH_ASSETS,
+            description: "Find assets by name or description. Returns ranked hits, \
+                      each with a trust summary saying whether it is certified, \
+                      owned, and tested — so a choice between similarly-named \
+                      tables can be made on more than the name.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Words to match against names and descriptions.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "Optional asset kind to restrict to, \
+                                        e.g. table, column, dashboard.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_SEARCH_LIMIT,
+                        "description": "How many hits to return. Defaults to 25, \
+                                        capped at 100.",
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false,
+            }),
+        },
+        ToolDeclaration {
+            name: EXPLAIN_LINEAGE,
+            description: "Where an asset's data comes from, or what it feeds. Each \
+                      hop says who asserted it and how. A chain that runs into \
+                      something you may not see stops there and says so — it is \
+                      never joined across the gap.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "fullyQualifiedName": {
+                        "type": "string",
+                        "description": "The asset to walk from.",
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["upstream", "downstream"],
+                        "description": "upstream (default) is where the data came \
+                                        from; downstream is what it feeds.",
+                    }
+                },
+                "required": ["fullyQualifiedName"],
+                "additionalProperties": false,
+            }),
+        },
+        ToolDeclaration {
+            name: ANALYZE_IMPACT,
+            description: "What a change to this asset would affect: the assets \
+                      downstream, the contracts that promise something about them, \
+                      and the teams to tell.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "fullyQualifiedName": {
+                        "type": "string",
+                        "description": "The asset being changed.",
+                    }
+                },
+                "required": ["fullyQualifiedName"],
+                "additionalProperties": false,
+            }),
+        },
+        ToolDeclaration {
+            name: GET_GOVERNANCE_CONTEXT,
+            description: "How this asset must be handled: its classifications, which \
+                      columns are masked and why, how long it is retained, and what \
+                      you are permitted to do with it. Masked columns are named — \
+                      you are told they exist even when you cannot read them.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "fullyQualifiedName": {
+                        "type": "string",
+                        "description": "The asset to describe the handling rules for.",
+                    }
+                },
+                "required": ["fullyQualifiedName"],
+                "additionalProperties": false,
+            }),
+        },
+        ToolDeclaration {
+            name: QUERY_GRAPH,
+            description: "Ask the graph directly, in SPARQL, for questions the other \
+                      tools do not shape. Results are filtered to what you may see. \
+                      Prefer the task-shaped tools where one fits — this one makes \
+                      you do the traversal yourself.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "A SPARQL SELECT or ASK query.",
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false,
+            }),
+        },
     ]
 }
 
@@ -240,52 +548,350 @@ pub async fn call(
     tool: &str,
     arguments: &serde_json::Value,
 ) -> Outcome {
+    call_within(
+        source,
+        principal,
+        tool,
+        arguments,
+        budget::TokenBudget::default(),
+    )
+    .await
+}
+
+/// [`call`], with the token budget stated rather than defaulted — Epic 14
+/// Slice E.
+///
+/// Every payload is fitted before it is returned, and **the fitting is done
+/// here rather than in each tool** so five tools cannot end up with five
+/// truncation orderings. See [`budget::fit`] for the ordering and why it is
+/// fixed.
+// Likewise a dispatch table. Each arm is short; the length is the tool count.
+// Extracting them would hide the one property worth reading this function for
+// — that every arm authenticates first and every arm maps absence the same way.
+#[allow(clippy::too_many_lines)]
+pub async fn call_within(
+    source: &dyn ContextSource,
+    principal: Principal<'_>,
+    tool: &str,
+    arguments: &serde_json::Value,
+    limit: budget::TokenBudget,
+) -> Outcome {
     // Authentication first, **before the tool name is checked**. Replying "no
     // such tool" to an unauthenticated caller tells them which tools exist.
     let Some(principal) = principal else {
         return Outcome::Unauthenticated;
     };
 
-    if tool != GET_ASSET_CONTEXT && tool != RECALL_MEMORY {
-        return Outcome::BadRequest(format!("no tool named `{tool}`"));
-    }
-
-    let Some(fqn) = arguments.get("fullyQualifiedName").and_then(|v| v.as_str()) else {
-        return Outcome::BadRequest("`fullyQualifiedName` is required, as a string".to_string());
-    };
-    // An empty name is a mistake, not a lookup. Passing it through returns
-    // `NotFound` and teaches the agent the asset does not exist, when what
-    // happened is that it never asked about one.
-    if fqn.is_empty() {
-        return Outcome::BadRequest("`fullyQualifiedName` must not be empty".to_string());
-    }
-
-    if tool == RECALL_MEMORY {
-        // `query` is optional — "everything you know about this table" is a real
-        // question — but a `query` of the wrong *type* is a mistake worth naming
-        // rather than silently reading as absent, or an agent sending
-        // `{"query": ["a","b"]}` gets unranked results and no idea why.
-        let query = match arguments.get("query") {
-            None | Some(serde_json::Value::Null) => "",
-            Some(serde_json::Value::String(text)) => text.as_str(),
-            Some(_) => {
-                return Outcome::BadRequest("`query`, when given, must be a string".to_string());
+    match tool {
+        RECALL_MEMORY => {
+            let fqn = match required_fqn(arguments) {
+                Ok(fqn) => fqn,
+                Err(problem) => return problem,
+            };
+            // `query` is optional — "everything you know about this table" is a
+            // real question — but a `query` of the wrong *type* is a mistake
+            // worth naming rather than silently reading as absent, or an agent
+            // sending `{"query": ["a","b"]}` gets unranked results and no idea
+            // why.
+            let query = match optional_text(arguments, "query") {
+                Ok(query) => query,
+                Err(problem) => return problem,
+            };
+            match source.recall(principal, fqn, query).await {
+                // **Empty is `Recalled`, not `NotFound`.** "Nothing has been
+                // written down about this table" and "there is no such table"
+                // are opposite statements, and an agent that conflates them
+                // fills the silence.
+                Ok(Some(memories)) => Outcome::Recalled(memories),
+                Ok(None) => Outcome::NotFound,
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
             }
-        };
-        return match source.recall(principal, fqn, query).await {
-            // **Empty is `Recalled`, not `NotFound`.** "Nothing has been written
-            // down about this table" and "there is no such table" are opposite
-            // statements, and an agent that conflates them fills the silence.
-            Ok(Some(memories)) => Outcome::Recalled(memories),
-            Ok(None) => Outcome::NotFound,
-            Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
-        };
+        }
+
+        GET_ASSET_CONTEXT => {
+            let fqn = match required_fqn(arguments) {
+                Ok(fqn) => fqn,
+                Err(problem) => return problem,
+            };
+            match source.asset_context(principal, fqn).await {
+                Ok(Some(mut context)) => {
+                    if let Some(reason) = budget::fit(&mut context, limit) {
+                        context.truncated = true;
+                        context.truncation_reason = Some(reason);
+                    }
+                    Outcome::Found(Box::new(context))
+                }
+                Ok(None) => Outcome::NotFound,
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
+        SEARCH_ASSETS => {
+            let query = match required_text(arguments, "query") {
+                Ok(query) => query,
+                Err(problem) => return problem,
+            };
+            let kind = match arguments.get("kind") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(kind)) => Some(kind.as_str()),
+                Some(_) => {
+                    return Outcome::BadRequest("`kind`, when given, must be a string".to_string());
+                }
+            };
+            let how_many = match search_limit(arguments) {
+                Ok(how_many) => how_many,
+                Err(problem) => return problem,
+            };
+            match source.search(principal, query, kind, how_many).await {
+                Ok(mut results) => {
+                    if let Some(reason) = budget::fit(&mut results, limit) {
+                        results.truncated = true;
+                        results.truncation_reason = Some(reason);
+                    }
+                    Outcome::Searched(Box::new(results))
+                }
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
+        EXPLAIN_LINEAGE => {
+            let fqn = match required_fqn(arguments) {
+                Ok(fqn) => fqn,
+                Err(problem) => return problem,
+            };
+            let direction = match direction_of(arguments) {
+                Ok(direction) => direction,
+                Err(problem) => return problem,
+            };
+            match source.lineage(principal, fqn, direction).await {
+                Ok(Some(mut walk)) => {
+                    if let Some(reason) = budget::fit(&mut walk, limit) {
+                        walk.truncated = true;
+                        walk.truncation_reason = Some(reason);
+                    }
+                    Outcome::Lineage(Box::new(walk))
+                }
+                Ok(None) => Outcome::NotFound,
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
+        ANALYZE_IMPACT => {
+            let fqn = match required_fqn(arguments) {
+                Ok(fqn) => fqn,
+                Err(problem) => return problem,
+            };
+            match source.impact(principal, fqn).await {
+                Ok(Some(mut report)) => {
+                    if let Some(reason) = budget::fit(&mut report, limit) {
+                        report.truncated = true;
+                        report.truncation_reason = Some(reason);
+                    }
+                    Outcome::Impact(Box::new(report))
+                }
+                Ok(None) => Outcome::NotFound,
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
+        GET_GOVERNANCE_CONTEXT => {
+            let fqn = match required_fqn(arguments) {
+                Ok(fqn) => fqn,
+                Err(problem) => return problem,
+            };
+            match source.governance(principal, fqn).await {
+                Ok(Some(mut context)) => {
+                    if let Some(reason) = budget::fit(&mut context, limit) {
+                        context.truncated = true;
+                        context.truncation_reason = Some(reason);
+                    }
+                    Outcome::Governance(Box::new(context))
+                }
+                Ok(None) => Outcome::NotFound,
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
+        QUERY_GRAPH => {
+            let query = match required_text(arguments, "query") {
+                Ok(query) => query,
+                Err(problem) => return problem,
+            };
+            match source.query_graph(principal, query).await {
+                Ok(Ok(mut answer)) => {
+                    if budget::fit(&mut answer, limit).is_some() {
+                        answer.truncated = true;
+                    }
+                    Outcome::Bindings(Box::new(answer))
+                }
+                // The caller's mistake and ours, kept apart: see [`QueryFault`].
+                Ok(Err(QueryFault::Malformed(detail))) => Outcome::BadRequest(detail),
+                Ok(Err(QueryFault::Unsupported(detail))) => Outcome::Unsupported(detail),
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
+        _ => Outcome::BadRequest(format!("no tool named `{tool}`")),
+    }
+}
+
+/// The asset name every asset-shaped tool needs.
+///
+/// An empty name is a mistake, not a lookup. Passing it through returns
+/// `NotFound` and teaches the agent the asset does not exist, when what
+/// happened is that it never asked about one.
+fn required_fqn(arguments: &serde_json::Value) -> Result<&str, Outcome> {
+    required_text(arguments, "fullyQualifiedName")
+}
+
+fn required_text<'a>(arguments: &'a serde_json::Value, field: &str) -> Result<&'a str, Outcome> {
+    let Some(text) = arguments.get(field).and_then(|value| value.as_str()) else {
+        return Err(Outcome::BadRequest(format!(
+            "`{field}` is required, as a string"
+        )));
+    };
+    if text.is_empty() {
+        return Err(Outcome::BadRequest(format!("`{field}` must not be empty")));
+    }
+    Ok(text)
+}
+
+fn optional_text<'a>(arguments: &'a serde_json::Value, field: &str) -> Result<&'a str, Outcome> {
+    match arguments.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(""),
+        Some(serde_json::Value::String(text)) => Ok(text.as_str()),
+        Some(_) => Err(Outcome::BadRequest(format!(
+            "`{field}`, when given, must be a string"
+        ))),
+    }
+}
+
+/// Which way to walk.
+///
+/// **An unrecognised value is refused, never defaulted.** Defaulting turns
+/// `"descendants"` — a plausible thing for an agent to try — into an upstream
+/// walk, which is the exact opposite of the question asked, returned with no
+/// indication that anything was misunderstood.
+fn direction_of(arguments: &serde_json::Value) -> Result<Direction, Outcome> {
+    match arguments.get("direction") {
+        None | Some(serde_json::Value::Null) => Ok(Direction::Upstream),
+        Some(serde_json::Value::String(direction)) => match direction.as_str() {
+            "upstream" => Ok(Direction::Upstream),
+            "downstream" => Ok(Direction::Downstream),
+            other => Err(Outcome::BadRequest(format!(
+                "`direction` must be \"upstream\" or \"downstream\", not \"{other}\""
+            ))),
+        },
+        Some(_) => Err(Outcome::BadRequest(
+            "`direction`, when given, must be a string".to_string(),
+        )),
+    }
+}
+
+/// How many hits to ask for, **capped rather than refused**.
+///
+/// An agent asking for a thousand means "as many as you have", and an error
+/// teaches it only that the tool is fussy. Zero is different: it asks for no
+/// answer at all, which is never what anybody meant.
+fn search_limit(arguments: &serde_json::Value) -> Result<usize, Outcome> {
+    match arguments.get("limit") {
+        None | Some(serde_json::Value::Null) => Ok(DEFAULT_SEARCH_LIMIT),
+        Some(serde_json::Value::Number(number)) => {
+            let Some(asked) = number.as_u64() else {
+                return Err(Outcome::BadRequest(
+                    "`limit` must be a positive whole number".to_string(),
+                ));
+            };
+            if asked == 0 {
+                return Err(Outcome::BadRequest(
+                    "`limit` must be at least 1; a limit of zero asks for no answer".to_string(),
+                ));
+            }
+            Ok(usize::try_from(asked)
+                .unwrap_or(MAX_SEARCH_LIMIT)
+                .min(MAX_SEARCH_LIMIT))
+        }
+        Some(_) => Err(Outcome::BadRequest(
+            "`limit`, when given, must be a number".to_string(),
+        )),
+    }
+}
+
+impl budget::Fits for AssetContext {
+    fn shorten_detail(&mut self) -> bool {
+        self.description.take().is_some()
     }
 
-    match source.asset_context(principal, fqn).await {
-        Ok(Some(context)) => Outcome::Found(Box::new(context)),
-        Ok(None) => Outcome::NotFound,
-        Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+    fn shorten_relations(&mut self) -> bool {
+        self.related.pop().is_some()
+    }
+
+    /// **The asset itself is never dropped.** A context response with no asset
+    /// in it is indistinguishable from `NotFound`, which would be a lie about
+    /// something the caller is permitted to see — so the ladder ends here and
+    /// an impossible budget returns a small, honest, over-budget answer.
+    fn drop_entities(&mut self) -> bool {
+        false
+    }
+
+    fn render(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+impl budget::Fits for SearchResults {
+    fn shorten_detail(&mut self) -> bool {
+        let mut changed = false;
+        for hit in &mut self.hits {
+            if hit.snippet.take().is_some() {
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// A hit list has no second tier — every entry is an entity. Stated rather
+    /// than left to fall through, so the ladder goes straight to the flagged
+    /// loss instead of appearing to have tried something.
+    fn shorten_relations(&mut self) -> bool {
+        false
+    }
+
+    /// Drop from the tail: the ranking put the least relevant there, and
+    /// **`total` deliberately does not move** — it is how the caller learns
+    /// there is more to ask for.
+    fn drop_entities(&mut self) -> bool {
+        if self.hits.pop().is_none() {
+            return false;
+        }
+        self.truncated = true;
+        true
+    }
+
+    fn render(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+impl budget::Fits for QueryAnswer {
+    fn shorten_detail(&mut self) -> bool {
+        false
+    }
+
+    fn shorten_relations(&mut self) -> bool {
+        false
+    }
+
+    fn drop_entities(&mut self) -> bool {
+        if self.rows.pop().is_none() {
+            return false;
+        }
+        self.truncated = true;
+        true
+    }
+
+    fn render(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
 }
 
@@ -346,6 +952,8 @@ mod tests {
                     related: vec!["warehouse.customers".into()],
                     policy_filtered: false,
                     trust: unknown_trust(),
+                    truncated: false,
+                    truncation_reason: None,
                 }));
             }
             Ok(None)
@@ -394,6 +1002,177 @@ mod tests {
                 "warehouse.customers" => Ok(Some(Vec::new())),
                 _ => Ok(None),
             }
+        }
+
+        async fn search(
+            &self,
+            principal: &str,
+            query: &str,
+            kind: Option<&str>,
+            limit: usize,
+        ) -> Result<SearchResults, SourceError> {
+            self.asked.lock().expect("lock").push((
+                principal.to_string(),
+                format!("search:{query}|{}|{limit}", kind.unwrap_or("*")),
+            ));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            if principal != "alice" || !"warehouse.orders".contains(query) {
+                return Ok(SearchResults::default());
+            }
+            // Three assets match; `alice` may see two. **`total` is the two.**
+            Ok(SearchResults {
+                hits: vec![
+                    SearchHit {
+                        fully_qualified_name: "warehouse.orders".into(),
+                        kind: "table".into(),
+                        snippet: Some("customer orders".repeat(40)),
+                        trust: unknown_trust(),
+                    },
+                    SearchHit {
+                        fully_qualified_name: "warehouse.orders_archive".into(),
+                        kind: "table".into(),
+                        snippet: Some("archived orders".repeat(40)),
+                        trust: unknown_trust(),
+                    },
+                ]
+                .into_iter()
+                .take(limit)
+                .collect(),
+                total: 2,
+                policy_filtered: true,
+                truncated: false,
+                truncation_reason: None,
+            })
+        }
+
+        async fn lineage(
+            &self,
+            principal: &str,
+            fqn: &str,
+            direction: Direction,
+        ) -> Result<Option<lineage::LineageWalk>, SourceError> {
+            self.asked.lock().expect("lock").push((
+                principal.to_string(),
+                format!("lineage:{fqn}|{direction:?}"),
+            ));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            if principal != "alice" || fqn != "warehouse.orders" {
+                return Ok(None);
+            }
+            // Two directions with **different answers**, so a test can catch a
+            // dispatcher that ignores the parameter.
+            let (from, to) = match direction {
+                Direction::Upstream => ("warehouse.raw_orders", "warehouse.orders"),
+                Direction::Downstream => ("warehouse.orders", "reporting.revenue"),
+            };
+            Ok(Some(lineage::LineageWalk {
+                steps: vec![lineage::LineageStep {
+                    from_fqn: from.into(),
+                    to_fqn: to.into(),
+                    relationship: "feeds".into(),
+                    source: "connector".into(),
+                    query: Some("select ".to_string() + &"col, ".repeat(200)),
+                }],
+                policy_filtered: true,
+                truncated: false,
+                truncation_reason: None,
+                depth_reached: 1,
+            }))
+        }
+
+        async fn impact(
+            &self,
+            principal: &str,
+            fqn: &str,
+        ) -> Result<Option<lineage::ImpactReport>, SourceError> {
+            self.asked
+                .lock()
+                .expect("lock")
+                .push((principal.to_string(), format!("impact:{fqn}")));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            if principal != "alice" || fqn != "warehouse.orders" {
+                return Ok(None);
+            }
+            Ok(Some(lineage::ImpactReport {
+                affected_assets: vec!["reporting.revenue".into()],
+                affected_contracts: vec!["revenue.freshness".into()],
+                owning_teams: vec!["payments".into()],
+                policy_filtered: false,
+                truncated: false,
+                truncation_reason: None,
+            }))
+        }
+
+        async fn governance(
+            &self,
+            principal: &str,
+            fqn: &str,
+        ) -> Result<Option<lineage::GovernanceContext>, SourceError> {
+            self.asked
+                .lock()
+                .expect("lock")
+                .push((principal.to_string(), format!("governance:{fqn}")));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            if principal != "alice" || fqn != "warehouse.orders" {
+                return Ok(None);
+            }
+            Ok(Some(lineage::GovernanceContext {
+                classifications: vec!["PII".into()],
+                masked_columns: vec![lineage::MaskedColumn {
+                    name: "cust_ssn".into(),
+                    reason: "PII.Sensitive".into(),
+                }],
+                retention: Some("P7Y".into()),
+                domain: Some("finance".into()),
+                permitted_operations: vec!["read".into()],
+                truncated: false,
+                truncation_reason: None,
+            }))
+        }
+
+        async fn query_graph(
+            &self,
+            principal: &str,
+            query: &str,
+        ) -> Result<Result<QueryAnswer, QueryFault>, SourceError> {
+            self.asked
+                .lock()
+                .expect("lock")
+                .push((principal.to_string(), format!("query:{query}")));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            if query.contains("SERVICE") {
+                return Ok(Err(QueryFault::Unsupported(
+                    "federated queries (SERVICE) are not implemented; \
+                     ask this server only about its own graph"
+                        .into(),
+                )));
+            }
+            if !query.contains("SELECT") {
+                return Ok(Err(QueryFault::Malformed("expected SELECT or ASK".into())));
+            }
+            // A principal who may see nothing gets **empty bindings**, not an
+            // error: the query ran, and its answer is that there is nothing.
+            if principal != "alice" {
+                return Ok(Ok(QueryAnswer::default()));
+            }
+            Ok(Ok(QueryAnswer {
+                rows: vec![
+                    [("s".to_string(), "warehouse.orders".to_string())]
+                        .into_iter()
+                        .collect(),
+                ],
+                truncated: false,
+            }))
         }
     }
 
@@ -668,7 +1447,22 @@ mod tests {
             let declared = tools();
             let names: Vec<&str> = declared.iter().map(|tool| tool.name).collect();
 
-            assert_eq!(names, vec![RECALL_MEMORY, GET_ASSET_CONTEXT]);
+            assert_eq!(
+                names,
+                vec![
+                    RECALL_MEMORY,
+                    GET_ASSET_CONTEXT,
+                    SEARCH_ASSETS,
+                    EXPLAIN_LINEAGE,
+                    ANALYZE_IMPACT,
+                    GET_GOVERNANCE_CONTEXT,
+                    QUERY_GRAPH,
+                ],
+                "the seven read capabilities Epic 14 promises, and no others — \
+                 a tool that appears here without a dispatch arm teaches an agent \
+                 to distrust the manifest, and one that dispatches without \
+                 appearing here is a capability no agent will ever find"
+            );
         }
 
         // A tool declared twice, or two tools sharing a name, means the
@@ -961,6 +1755,8 @@ mod tests {
                 related: vec![],
                 policy_filtered: true,
                 trust: unknown_trust(),
+                truncated: false,
+                truncation_reason: None,
             };
 
             let json = serde_json::to_value(&filtered).expect("serialises");
@@ -997,11 +1793,537 @@ mod tests {
                 related: vec![],
                 policy_filtered: false,
                 trust: unknown_trust(),
+                truncated: false,
+                truncation_reason: None,
             })
             .expect("serialises");
 
             assert!(json["fullyQualifiedName"].is_string(), "{json}");
             assert!(json.get("fully_qualified_name").is_none(), "{json}");
         }
+    }
+
+    /// Epic 14 Slice C — discovery, provenance, and blast radius.
+    mod the_discovery_tools {
+        use super::*;
+
+        #[tokio::test]
+        async fn search_returns_ranked_hits_each_carrying_its_own_trust() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                SEARCH_ASSETS,
+                &serde_json::json!({ "query": "orders" }),
+            )
+            .await;
+
+            let Outcome::Searched(results) = outcome else {
+                panic!("expected Searched, got {outcome:?}");
+            };
+            assert_eq!(results.hits.len(), 2);
+            assert_eq!(results.hits[0].fully_qualified_name, "warehouse.orders");
+        }
+
+        /// **The total counts what the caller may see, not what matched.**
+        ///
+        /// A total taken before the policy filter is wrong twice: the agent
+        /// pages for results that will never arrive, and the gap between the
+        /// two numbers is an exact count of the assets being hidden.
+        #[tokio::test]
+        async fn the_total_counts_only_what_the_caller_may_see() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                SEARCH_ASSETS,
+                &serde_json::json!({ "query": "orders" }),
+            )
+            .await;
+
+            let Outcome::Searched(results) = outcome else {
+                panic!("expected Searched, got {outcome:?}");
+            };
+            assert_eq!(
+                results.total,
+                results.hits.len(),
+                "three matched, two are visible, and the total is two: {results:?}"
+            );
+            assert!(results.policy_filtered, "{results:?}");
+        }
+
+        /// A search matching nothing is an answer, not a `NotFound` — the same
+        /// rule `recall_memory` follows for an asset nobody wrote about.
+        #[tokio::test]
+        async fn a_search_that_matches_nothing_is_an_empty_answer() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                SEARCH_ASSETS,
+                &serde_json::json!({ "query": "nothing_matches_this" }),
+            )
+            .await;
+
+            let Outcome::Searched(results) = outcome else {
+                panic!("expected Searched, got {outcome:?}");
+            };
+            assert!(results.hits.is_empty());
+            assert_eq!(results.total, 0);
+        }
+
+        #[tokio::test]
+        async fn a_limit_beyond_the_cap_is_capped_rather_than_refused() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                SEARCH_ASSETS,
+                &serde_json::json!({ "query": "orders", "limit": 10_000 }),
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::Searched(_)), "{outcome:?}");
+            assert!(
+                source
+                    .questions()
+                    .iter()
+                    .any(|(_, question)| question.ends_with(&format!("|{MAX_SEARCH_LIMIT}"))),
+                "the cap reached the source: {:?}",
+                source.questions()
+            );
+        }
+
+        /// Zero is different from "a lot": it asks for no answer at all, which
+        /// is never what anybody meant, so it is named rather than served.
+        #[tokio::test]
+        async fn a_limit_of_zero_is_refused() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                SEARCH_ASSETS,
+                &serde_json::json!({ "query": "orders", "limit": 0 }),
+            )
+            .await;
+
+            let Outcome::BadRequest(why) = outcome else {
+                panic!("expected BadRequest, got {outcome:?}");
+            };
+            assert!(why.contains("limit"), "{why}");
+        }
+
+        #[tokio::test]
+        async fn lineage_walks_upstream_by_default() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                EXPLAIN_LINEAGE,
+                &args("warehouse.orders"),
+            )
+            .await;
+
+            let Outcome::Lineage(walk) = outcome else {
+                panic!("expected Lineage, got {outcome:?}");
+            };
+            assert_eq!(walk.steps[0].from_fqn, "warehouse.raw_orders");
+        }
+
+        /// The direction reaches the source. A dispatcher that dropped it would
+        /// answer "where did this come from" when asked "what does this feed" —
+        /// the opposite answer, returned with total confidence.
+        #[tokio::test]
+        async fn asking_downstream_walks_downstream() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                EXPLAIN_LINEAGE,
+                &serde_json::json!({
+                    "fullyQualifiedName": "warehouse.orders",
+                    "direction": "downstream",
+                }),
+            )
+            .await;
+
+            let Outcome::Lineage(walk) = outcome else {
+                panic!("expected Lineage, got {outcome:?}");
+            };
+            assert_eq!(walk.steps[0].to_fqn, "reporting.revenue");
+        }
+
+        /// **An unrecognised direction is refused, not defaulted.** Defaulting
+        /// turns a plausible guess like `"descendants"` into an upstream walk —
+        /// the opposite of the question, with nothing to say it was
+        /// misunderstood.
+        #[tokio::test]
+        async fn an_unrecognised_direction_is_refused_rather_than_defaulted() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                EXPLAIN_LINEAGE,
+                &serde_json::json!({
+                    "fullyQualifiedName": "warehouse.orders",
+                    "direction": "descendants",
+                }),
+            )
+            .await;
+
+            let Outcome::BadRequest(why) = outcome else {
+                panic!("expected BadRequest, got {outcome:?}");
+            };
+            assert!(why.contains("descendants"), "name what was wrong: {why}");
+        }
+
+        #[tokio::test]
+        async fn impact_names_the_assets_the_contracts_and_the_teams() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                ANALYZE_IMPACT,
+                &args("warehouse.orders"),
+            )
+            .await;
+
+            let Outcome::Impact(report) = outcome else {
+                panic!("expected Impact, got {outcome:?}");
+            };
+            assert_eq!(report.affected_assets, vec!["reporting.revenue"]);
+            assert_eq!(report.affected_contracts, vec!["revenue.freshness"]);
+            assert_eq!(
+                report.owning_teams,
+                vec!["payments"],
+                "a count is a number; a team is an action"
+            );
+        }
+
+        /// Every new tool inherits Slice A's rule: an asset the caller may not
+        /// see and one that does not exist give the same answer.
+        #[tokio::test]
+        async fn a_denied_asset_is_not_found_on_every_tool() {
+            let source = Fixture::working();
+
+            for tool in [EXPLAIN_LINEAGE, ANALYZE_IMPACT, GET_GOVERNANCE_CONTEXT] {
+                let denied = call(&source, Some("alice"), tool, &args("finance.salaries")).await;
+                let absent = call(&source, Some("alice"), tool, &args("no.such.thing")).await;
+
+                assert_eq!(denied, Outcome::NotFound, "{tool}");
+                assert_eq!(
+                    denied, absent,
+                    "{tool} must not distinguish denied from absent"
+                );
+            }
+        }
+
+        /// And so does the authentication rule: no principal, no tool names.
+        #[tokio::test]
+        async fn an_unauthenticated_caller_learns_nothing_from_any_new_tool() {
+            let source = Fixture::working();
+
+            for tool in [
+                SEARCH_ASSETS,
+                EXPLAIN_LINEAGE,
+                ANALYZE_IMPACT,
+                GET_GOVERNANCE_CONTEXT,
+                QUERY_GRAPH,
+            ] {
+                let outcome = call(&source, None, tool, &args("warehouse.orders")).await;
+                assert_eq!(outcome, Outcome::Unauthenticated, "{tool}");
+            }
+            assert!(
+                source.questions().is_empty(),
+                "nothing reached the catalog: {:?}",
+                source.questions()
+            );
+        }
+
+        /// A catalog that cannot be reached is `Unavailable`, never `NotFound`
+        /// — "we could not look" and "it is not there" are opposite statements.
+        #[tokio::test]
+        async fn an_unreachable_catalog_is_never_reported_as_absence() {
+            let source = Fixture::broken();
+
+            for tool in [
+                SEARCH_ASSETS,
+                EXPLAIN_LINEAGE,
+                ANALYZE_IMPACT,
+                GET_GOVERNANCE_CONTEXT,
+                QUERY_GRAPH,
+            ] {
+                let outcome = call(
+                    &source,
+                    Some("alice"),
+                    tool,
+                    &serde_json::json!({
+                        "fullyQualifiedName": "warehouse.orders",
+                        "query": "SELECT * WHERE { ?s ?p ?o }",
+                    }),
+                )
+                .await;
+                assert!(
+                    matches!(outcome, Outcome::Unavailable(_)),
+                    "{tool}: {outcome:?}"
+                );
+            }
+        }
+    }
+
+    /// Epic 14 Slice D — handling rules and the escape hatch.
+    mod the_governance_tools {
+        use super::*;
+
+        /// **A masked column is named, with its reason.** An agent that cannot
+        /// see the column exists will not know to ask for access to it.
+        #[tokio::test]
+        async fn governance_names_masked_columns_rather_than_omitting_them() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                GET_GOVERNANCE_CONTEXT,
+                &args("warehouse.orders"),
+            )
+            .await;
+
+            let Outcome::Governance(context) = outcome else {
+                panic!("expected Governance, got {outcome:?}");
+            };
+            assert_eq!(context.masked_columns.len(), 1);
+            assert_eq!(context.masked_columns[0].name, "cust_ssn");
+            assert_eq!(
+                context.masked_columns[0].reason, "PII.Sensitive",
+                "the reason is what routes the access request"
+            );
+            assert_eq!(context.permitted_operations, vec!["read"]);
+        }
+
+        #[tokio::test]
+        async fn a_graph_query_returns_bindings() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                QUERY_GRAPH,
+                &serde_json::json!({ "query": "SELECT ?s WHERE { ?s ?p ?o }" }),
+            )
+            .await;
+
+            let Outcome::Bindings(answer) = outcome else {
+                panic!("expected Bindings, got {outcome:?}");
+            };
+            assert_eq!(answer.rows.len(), 1);
+        }
+
+        /// **A query the principal cannot answer returns empty, not an error.**
+        /// An error would tell them there was something there to be denied.
+        #[tokio::test]
+        async fn a_query_a_principal_cannot_answer_is_empty_not_an_error() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("mallory"),
+                QUERY_GRAPH,
+                &serde_json::json!({ "query": "SELECT ?s WHERE { ?s ?p ?o }" }),
+            )
+            .await;
+
+            let Outcome::Bindings(answer) = outcome else {
+                panic!("expected empty Bindings, got {outcome:?}");
+            };
+            assert!(answer.rows.is_empty());
+            assert!(!answer.truncated, "empty is complete, not truncated");
+        }
+
+        /// **Unsupported is its own answer.** An agent told "malformed" for a
+        /// feature this engine does not implement will rewrite a correct query
+        /// until it gives up.
+        #[tokio::test]
+        async fn an_unsupported_feature_is_distinguished_from_a_malformed_query() {
+            let source = Fixture::working();
+
+            let unsupported = call(
+                &source,
+                Some("alice"),
+                QUERY_GRAPH,
+                &serde_json::json!({ "query": "SELECT ?s WHERE { SERVICE <http://x> {} }" }),
+            )
+            .await;
+            let malformed = call(
+                &source,
+                Some("alice"),
+                QUERY_GRAPH,
+                &serde_json::json!({ "query": "not a query at all" }),
+            )
+            .await;
+
+            let Outcome::Unsupported(why) = unsupported else {
+                panic!("expected Unsupported, got {unsupported:?}");
+            };
+            assert!(
+                why.contains("SERVICE"),
+                "say what is unsupported so the agent can route around it: {why}"
+            );
+            assert!(
+                matches!(malformed, Outcome::BadRequest(_)),
+                "a query the agent wrote wrongly is its problem to fix: {malformed:?}"
+            );
+        }
+    }
+
+    /// Epic 14 Slice E — the budget, applied through the dispatcher.
+    mod the_token_budget {
+        use super::*;
+
+        /// **Detail before entities, through the real dispatcher.** The unit
+        /// tests in [`budget`] prove the ladder; this proves it is wired in.
+        #[tokio::test]
+        async fn a_search_over_budget_loses_snippets_before_hits() {
+            let source = Fixture::working();
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                SEARCH_ASSETS,
+                &serde_json::json!({ "query": "orders" }),
+                budget::TokenBudget { max_tokens: 400 },
+            )
+            .await;
+
+            let Outcome::Searched(results) = outcome else {
+                panic!("expected Searched, got {outcome:?}");
+            };
+            assert_eq!(results.hits.len(), 2, "both hits survived: {results:?}");
+            assert!(results.hits.iter().all(|hit| hit.snippet.is_none()));
+            assert_eq!(
+                results.truncation_reason,
+                Some(budget::TruncationReason::DetailShortened)
+            );
+        }
+
+        /// And when a hit must go, **`total` stays put** — it is how the caller
+        /// learns there is more to ask for.
+        #[tokio::test]
+        async fn a_dropped_hit_does_not_change_the_total() {
+            let source = Fixture::working();
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                SEARCH_ASSETS,
+                &serde_json::json!({ "query": "orders" }),
+                budget::TokenBudget { max_tokens: 20 },
+            )
+            .await;
+
+            let Outcome::Searched(results) = outcome else {
+                panic!("expected Searched, got {outcome:?}");
+            };
+            assert!(results.hits.len() < 2, "{results:?}");
+            assert_eq!(results.total, 2, "the total still says two exist");
+            assert!(results.truncated);
+            assert_eq!(
+                results.truncation_reason,
+                Some(budget::TruncationReason::EntitiesDropped)
+            );
+        }
+
+        /// **The asset itself is never dropped.** A context response with no
+        /// asset in it is indistinguishable from `NotFound`, which would be a
+        /// lie about something the caller may see.
+        #[tokio::test]
+        async fn no_budget_is_small_enough_to_drop_the_asset_being_asked_about() {
+            let source = Fixture::working();
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                GET_ASSET_CONTEXT,
+                &args("warehouse.orders"),
+                budget::TokenBudget { max_tokens: 0 },
+            )
+            .await;
+
+            let Outcome::Found(context) = outcome else {
+                panic!("expected the asset even at an impossible budget, got {outcome:?}");
+            };
+            assert_eq!(context.fully_qualified_name, "warehouse.orders");
+            assert!(context.truncated, "and the loss is reported: {context:?}");
+        }
+
+        /// The default budget leaves ordinary answers alone. A flag set on
+        /// every response is a flag nobody reads.
+        #[tokio::test]
+        async fn an_ordinary_answer_under_the_default_budget_is_not_truncated() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                GET_ASSET_CONTEXT,
+                &args("warehouse.orders"),
+            )
+            .await;
+
+            let Outcome::Found(context) = outcome else {
+                panic!("expected the asset, got {outcome:?}");
+            };
+            assert!(!context.truncated, "{context:?}");
+            assert_eq!(context.truncation_reason, None);
+            assert_eq!(context.description, Some("customer orders".to_string()));
+        }
+    }
+
+    /// Every declared tool must be callable, or the manifest is a lie — and an
+    /// agent that finds one advertised tool unserved probes instead of trusting
+    /// the rest.
+    #[tokio::test]
+    async fn every_declared_tool_is_served() {
+        let source = Fixture::working();
+
+        for declared in tools() {
+            let outcome = call(
+                &source,
+                Some("alice"),
+                declared.name,
+                &serde_json::json!({
+                    "fullyQualifiedName": "warehouse.orders",
+                    "query": "SELECT ?s WHERE { ?s ?p ?o }",
+                }),
+            )
+            .await;
+
+            assert!(
+                !matches!(&outcome, Outcome::BadRequest(why) if why.starts_with("no tool named")),
+                "{} is advertised and not served",
+                declared.name
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_tool_is_still_refused_by_name() {
+        let source = Fixture::working();
+
+        let outcome = call(&source, Some("alice"), "drop_everything", &args("a.b")).await;
+
+        let Outcome::BadRequest(why) = outcome else {
+            panic!("expected BadRequest, got {outcome:?}");
+        };
+        assert!(why.contains("drop_everything"), "{why}");
     }
 }

@@ -51,7 +51,7 @@ is the condition that index exists to catch.
 | **11** | 2 | [`11-people-and-ownership.md`](11-people-and-ownership.md) | In progress | 11/14 (+1 partial) | Epic 3 (envelope carries `owners`) |
 | **12** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 15/15 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **13** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 10/10 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
-| **14** | 5 | [`14-mcp-activation.md`](14-mcp-activation.md) | In progress | 3/8 (+1 partial) | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard… |
+| **14** | 5 | [`14-mcp-activation.md`](14-mcp-activation.md) | In progress | 6/8 (+2 partial) | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard… |
 | **15** | 1 | [`15-connectors.md`](15-connectors.md) | In progress | 13/17 | Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable) |
 | **16** | 6 | [`16-ingestion-apis.md`](16-ingestion-apis.md) | In progress | 5/6 (+1 partial) | Epic 1 (contract), Epic 15 (upsert semantics) |
 | **17** | 6 | [`17-entity-resolution.md`](17-entity-resolution.md) | **Shipped** | 4/4 | Epic 4 (`sameAs` in the graph), Epic 15 + 16 (two write paths make this necessa… |
@@ -322,10 +322,10 @@ is the condition that index exists to catch.
 - [x] Trust summaries and gaps
 - [x] The adapter over `Catalog`
 - [~] No transport yet
-- [ ] The remaining six read tools — search, lineage, governance, graph query *(Slices C, D)*
-- [ ] Token-budgeted responses *(Slice E)*
-- [ ] Outbound webhooks, HMAC-signed, at-least-once *(Slice F)*
-- [ ] The thesis test: an agent with only MCP access answers a real question *(Slice G)*
+- [x] The remaining six read tools — search, lineage, governance, graph query *(Slices C, D)*
+- [x] Token-budgeted responses *(Slice E)*
+- [~] Outbound webhooks, HMAC-signed, at-least-once *(Slice F)* — the decisions are built and 
+- [x] The thesis test: an agent with only MCP access answers a real question *(Slice G)* — aga
 
 ### Epic 15 — Source Connectors *(Demo 1)*
 

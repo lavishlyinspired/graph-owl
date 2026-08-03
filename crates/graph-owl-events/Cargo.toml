@@ -14,3 +14,9 @@ thiserror.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+# Outbound webhook signing (Epic 14 Slice F). Same crates, same reasoning as
+# the inbound verification in `graph-owl-connectors`: hand-rolled HMAC is the
+# canonical security anti-pattern, and there is no "build" side to it.
+hmac.workspace = true
+sha2.workspace = true

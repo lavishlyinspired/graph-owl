@@ -1233,9 +1233,12 @@ dependencies = [
  "async-trait",
  "chrono",
  "graph-owl-core",
+ "hmac 0.12.1",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.19",
+ "uuid",
 ]
 
 [[package]]
