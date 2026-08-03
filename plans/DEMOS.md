@@ -675,10 +675,10 @@ actually holds could not be asserted at all.
 **The claim**: the catalog carries what the business means, not just what the database contains.
 
 ### Epics 22, 23, 25–30
-- [ ] **22** Custom properties, JSON-Schema validated
-- [ ] **23** Domains and data products
-- [ ] **25** Classifications with mutual exclusivity — the PII taxonomy
-- [ ] **26** Lifecycle and certification with issuer and expiry
+- [x] **22** Custom properties — typed definitions, per-key PATCH merge, guarded evolution, indexed filtering *(3 August 2026)*
+- [x] **23** Domains and data products — accountability axis with inheritance, consumable bundles *(3 August 2026)*
+- [x] **25** Classifications with mutual exclusivity — the PII taxonomy, with provenance and a rejection ledger *(3 August 2026)*
+- [x] **26** Lifecycle and certification with issuer and expiry, status computed on read *(3 August 2026)*
 - [ ] **27** Data contracts and compatibility
 - [ ] **28** Usage and popularity signals
 - [ ] **29** Lineage: table, column, with SQL and pipeline payload
@@ -689,13 +689,69 @@ actually holds could not be asserted at all.
 
   **Uniqueness is scoped to the entity type, enforced by the index itself.** The same name on two types is two different properties; a globally-scoped unique index would silently forbid that, and nothing below the database would notice. A name colliding with a built-in envelope field is refused outright — a custom `description` would shadow the real one, and every reader would then get one of two values depending on which layer answered.
 
-- [~] **Values validated on write** *(Slice B, create path only)*. An undefined name is a `400`, never a silently kept value — a bag accepted untyped is the description field again with extra steps, which is the whole failure this epic exists to prevent. Every bad value in one write is reported together. A constraint violation is a `value` error rather than a `type` error, because the fix is different: `type` means send a different *kind* of value, `value` means send a different *one*, and a client that retried a range violation by casting would loop. **Not yet done**: PATCH carries no `extension`, and a value change does not appear in `changeDescription`.
+- [x] **Values validated on write** *(Slices B–D, 3 August 2026)*. An undefined name is a `400`, never a silently kept value — a bag accepted untyped is the description field again with extra steps, which is the whole failure this epic exists to prevent. Every bad value in one write is reported together. A constraint violation is a `value` error rather than a `type` error, because the fix is different: `type` means send a different *kind* of value, `value` means send a different *one*, and a client that retried a range violation by casting would loop. PATCH merges **per key**, so a patch naming `costCenter` cannot clear `retentionDays` — a client forced to send the whole bag is racing every other client doing the same. The **merged** bag is what gets validated, not the patch, or a patch adding a key beside existing ones would never revalidate them.
+
+- [x] **Definitions evolve safely** *(Slice C)*. One rule, not a classification table: apply the change, then re-run the **write path's own validator** over the values that already exist. A widening admits everything it did before; a narrowing that strands values fails and reports how many. It cannot disagree with what a write would do, because it is the same function — and no case can be forgotten because there are no cases. `?force=true` removes a definition and its values row by row, bumping each affected version: a bulk `extension - key` would strip a thousand columns and record none of it.
+
+- [x] **Custom properties are queryable** *(Slice D)*. `?extension.costCenter=CC-1234`, with `.gte`/`.lte` for ranges. Equality is written as JSONB **containment**, because `jsonb_path_ops` supports `@>` and nothing else — written the other way the most common filter there is becomes a sequential scan, and no test would notice. Ranges are deliberately *not* index-backed: a btree on one property's expression supports one property, so a generic range index means an index per definition, which is the per-property migration decision 4 refuses.
 
 - **The plan's stated dependency did not exist, and the difference mattered.** Epic 22 was to give the envelope's reserved `extension` field a schema. The envelope had `properties` instead — and `properties` is what the **source system** reported, replaced wholesale by every connector run. `extension` is what the **organization** curated. Putting custom properties in `properties` would have wiped every hand-set `costCenter` on the first nightly connector run, silently. So `extension` is a new column with the opposite update rule: a connector sending none leaves it alone. Two columns wanting opposite semantics is the clearest evidence they were never the same field.
 
 - **A tooling failure worth recording, because the recovery is the lesson.** Adding a field to `Asset` broke ~30 struct literals. A script that auto-inserted the field by searching for a nearby line inserted 48 duplicates and 12 into the *wrong struct* — it had no idea where each literal ended. The fix was not to patch the patcher's heuristic but to change what it keyed on: track braces from the opening `{` the compiler named to its match, and insert before that. Unambiguous, and it cannot land in a neighbouring struct. Recovering meant `git checkout` on the mangled file and redoing the four intentional edits by hand — cheaper than unpicking sixty bad ones.
 
 - **`ValidateBody` is not optional, and forgetting it fails three layers away.** `AppJson<T>` requires it; without it the error is "handler does not implement `Handler`" at the route. Same shape as the `&dyn Fn` non-`Send` failure in Epic 21 — axum's trait bounds report *where the handler is registered*, never what is missing from it.
+
+### Epic 23 — Domains and data products
+
+- [x] **Domains nest, and the paths move with them** *(Slice A, 3 August 2026)*. FQNs derive from the parent chain and there is no field for a client to supply one. Cycles are refused at depth 1 by a database `CHECK` and at depth 3 by an ancestor walk — the depth-1 case is what a careless edit creates, and the deeper one is what a depth-1 check lets through, leaving an ancestor walk that never terminates. A rename or reparent re-derives the **whole subtree's** paths in one transaction, or every descendant would claim to sit under a name that no longer exists.
+
+- [x] **One asset, one domain, resolved by walking up** *(Slice B)*. A single column, because exclusivity the schema cannot express eventually is not true. Resolution stops at the **nearest** assigned ancestor: accumulating would answer "which domains is this under", a question with several answers, which is the shared accountability decision 1 refuses. A second *direct* assignment is a `409` naming the current domain — but assigning over an *inherited* one is not, because that is the first direct assignment and refusing it would make overriding an inherited value impossible.
+
+- [x] **The cascade is free, and the plan's criteria for it did not survive** *(Slice C)*. Under derived resolution there is nothing on the descendants to update: moving a database is one row, descendants follow instantly, and "a descendant with an explicit assignment is not moved" is true by construction. So **per-descendant version bumps are not emitted** — nothing on the descendant changed, its *resolved* domain did, and five thousand bumps for one edit would bury the ancestor's own history. Written into the plan rather than quietly claimed.
+
+- [x] **Data products bundle across boundaries** *(Slice D)*, many-to-many — the inverse of the domain rule and easy to copy-paste wrong. The same orders table in "Customer 360" and "Finance Reporting" is two consumable views of one thing. A tombstoned asset is refused with its own message, because the caller has the right id and the wrong expectation.
+
+- [x] **Both axes filter list and search** *(Slice E, minus facets)*, matching direct **and inherited** assignment — matching only direct would report a governed estate as almost empty, the more dangerous direction to be wrong in. Facet counts are deferred: the existing mechanism counts over the visible *page*, not the whole filtered set.
+
+- [x] **Deleting a domain does not orphan** *(Slice F)*. `409` with counts, `?reassignTo=` transactional. **Child domains are never reassigned implicitly** — where the assets go says nothing about where the sub-domains should go, and reparenting them would restructure the accountability tree as a side effect of a delete.
+
+- **A wire bug the gate caught, in a new place.** `AssetListQuery` had `deny_unknown_fields` but no `rename_all`, and every field on it was a single lowercase word — so the wire was camelCase *by accident rather than by rule*, and the first two-word filter shipped `data_product`. The standing guard checks **responses**; the class simply moved to query parameters, where nothing was watching.
+
+### Epic 25 — Tags and classification
+
+- [x] **Three of nine slices were already built.** Glossaries, terms, attachment and the review workflow shipped as Epic 24. Rebuilding them here would have produced a second glossary that disagreed with the first — the plan now says so rather than carrying phantom scope.
+
+- [x] **Provenance from day one** *(Slices A–B, 3 August 2026)*. A scanner must be able to suggest `PII.Sensitive` without a human having confirmed it, and a model that cannot say which is which forces a rewrite the moment automation arrives — with labelled data to migrate. A manual application defaults to `confirmed`, an automated one to `suggested`, because a caller that forgot to state it must get the safe answer.
+
+- [x] **Exclusivity is scoped to one classification** *(decision 4)*. Checking across classifications would refuse `Tier.Gold` beside `PII.Sensitive` — the normal case, and the whole reason there is more than one vocabulary. Re-applying the *same* tag is idempotence, not a conflict, or every retry would fail.
+
+- [x] **A rejection is a row, not an absence** *(Slice D)*. One that merely deleted the label would be re-proposed by the next run of the same scanner, and a steward would answer the same question forever. Only *automated* re-proposals are dropped: a person applying a once-rejected tag is changing their mind, which is not the loop this guards.
+
+- [x] **Columns are the point** *(Slice C)*. `PII` belongs on the SSN column, not the table — table-level labelling is too coarse to act on, since masking a table is not a thing anybody wants to do. Labels are keyed by FQN, so they follow the name rather than a position.
+
+- [x] **A governance label cannot vanish by accident** *(Slice H)*. `409` with counts **by entity kind**, because "it is in use" says nothing about whether this is a propagation to undo or a curation to redo. Soft-deleted entities do not count.
+
+- [x] **Propagation never downgrades a manual label** *(Slice I)*. A steward's deliberate choice survives, and relabelling it `propagated` would also be a lie about where it came from. One level unless `?recursive=true`.
+
+- [ ] **`?tags=` filtering** — the one feature-level criterion not delivered. The labels, the usage query and the index exist; the filter does not, because the **column-level** half is a different query: matching a table because one of its *columns* carries `PII.Sensitive` is not matching the table's own label, and shipping only the first would under-report exactly the case the epic exists for.
+
+### Epic 26 — Lifecycle and certification
+
+- [x] **Two orthogonal axes** *(decision 3, 3 August 2026)*, one column each. An asset can be Deprecated-certified — still trustworthy, and going away — and collapsing that into one state loses exactly the distinction somebody deciding whether to build on it needs.
+
+- [x] **The state machine refuses the shortcuts** *(Slice A)*. `Draft → Retired` is not one: an asset that was never active has nothing to retire *from*, and permitting it would make "retired" mean both "we turned it off" and "we abandoned it before it started". `Retired` is terminal; `Deprecated → Active` is legal, because un-deprecating is a real correction.
+
+- [x] **A successor is a reference, not prose** *(Slice B)*, validated to exist and to be usable — pointing users at another dead asset is worse than pointing nowhere, because it looks like an answer. That rule and "a chain A→B→C is traversable" initially read as contradictory; the resolution is that **a chain can only be built forwards in time**, which is how one arises in a real estate.
+
+- [x] **Evidence is enforced, and named when missing** *(Slice C)*. Without enforcement certification is decoration — a stamp anyone can apply for any reason. "Evidence is missing" tells an issuer nothing; the list tells them what to go and get.
+
+- [x] **Status is computed on every read** *(Slice D)*. A stored one goes stale without the entity changing, so an asset would read as certified for as long as nobody wrote to it. The test asserts the same certification reading differently at two instants with **no write between them** — a stored status cannot pass it.
+
+- [x] **Renewal re-checks** *(Slice E)*. The same path as issuance, so a renewal whose evidence has since disappeared fails: renewing on stale grounds is how certification decays into theatre.
+
+- [~] **Discoverable** *(Slice F, partial)*. A deprecated asset is returned **with its marker** — filtering hides reality, unmarking misleads. `?lifecycle=` / `?certification=` filters and facets are not built.
+
+- **`rename_all_fields` missing, for the fourth time in this codebase.** `CertificationStatus::ExpiringSoon` shipped `days_remaining` beside a camelCase wire. `rename_all` on an enum renames *variants*, not the fields inside them — after `Authorship.agent_id`, `SubmissionOutcome.run_id` and `AssetListQuery.data_product`. Caught only because a unit test asserts the serialized bytes, which is now habit rather than luck.
 
 ### Epic 24 — Business semantics
 

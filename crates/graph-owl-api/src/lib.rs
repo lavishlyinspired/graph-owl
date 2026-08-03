@@ -480,6 +480,15 @@ pub struct Catalog {
     /// are genuinely separate contracts — a backend could reasonably implement
     /// one and not the other.
     traversal: Option<Arc<dyn TraversalEngine>>,
+    /// Whether ingested query text is persisted — Epic 28 decision 2.
+    ///
+    /// **Off by default, and that is a data-protection decision rather than a
+    /// tuning knob.** Query bodies carry literals: customer identifiers, filter
+    /// values, occasionally secrets. A deployment opts in with
+    /// [`Catalog::storing_query_text`]; until it does, the text is dropped at
+    /// the boundary and never reaches storage — not filtered on read, which
+    /// would leave it in a dump.
+    store_query_text: bool,
     /// Where committed changes are announced. Optional for the same reason
     /// `graph` is: a catalog with no subscriber is fully functional, and making
     /// the sink required would turn "nothing is listening" into an outage.
@@ -518,6 +527,10 @@ impl Catalog {
             decisions: Arc::new(DecisionCache::default()),
             shape_cache: Arc::new(Mutex::new(None)),
             auto_merge_enabled: false,
+            // Off by default. See the field's own note: this is a
+            // data-protection decision, and the safe default is the one a
+            // deployment has to deliberately leave.
+            store_query_text: false,
         }
     }
 
@@ -534,6 +547,18 @@ impl Catalog {
     #[must_use]
     pub fn with_graph(mut self, graph: Arc<dyn TripleStore>) -> Self {
         self.graph = Some(graph);
+        self
+    }
+
+    /// Persist ingested query text — Epic 28 decision 2.
+    ///
+    /// **Opt-in, and only a deployment can opt in.** Query bodies carry
+    /// literals — customer identifiers, filter values — so storing them is a
+    /// data-protection decision, not something an ingesting client gets to
+    /// choose for the organization it is pushing into.
+    #[must_use]
+    pub fn storing_query_text(mut self) -> Self {
+        self.store_query_text = true;
         self
     }
 
@@ -1038,6 +1063,271 @@ impl Catalog {
                         .collect(),
                 )
             })
+    }
+
+    // ---- Epic 27: data contracts ----
+
+    /// # Errors
+    ///
+    /// `Validation` if the name is blank; `NotFound` if the asset, producer or
+    /// a consumer does not resolve.
+    pub async fn create_contract(
+        &self,
+        principal: &Principal,
+        request: CreateContract,
+    ) -> Result<graph_owl_core::contract::Contract, CatalogError> {
+        if request.name.trim().is_empty() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "name",
+                FieldErrorCode::Required,
+                "a contract needs a name",
+            )]));
+        }
+        let now = Utc::now();
+        let contract = graph_owl_core::contract::Contract {
+            id: Uuid::new_v4(),
+            name: request.name,
+            asset_fqn: request.asset_fqn,
+            producer: request.producer,
+            consumers: request.consumers,
+            schema_guarantee: request.schema_guarantee,
+            slas: request.slas,
+            compatibility: request.compatibility,
+            status: request.status,
+            version: graph_owl_core::envelope::EntityVersion::initial(),
+            updated_by: principal.id.clone(),
+            change_description: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.storage
+            .create_contract(contract.id, &contract)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn get_contract(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::StoredContract>, CatalogError> {
+        Ok(self.storage.get_contract(id).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn list_contracts(
+        &self,
+        asset_fqn: Option<&str>,
+    ) -> Result<Vec<graph_owl_core::contract::Contract>, CatalogError> {
+        Ok(self.storage.list_contracts(asset_fqn).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the contract does not exist.
+    pub async fn set_contract_status(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        status: graph_owl_core::contract::ContractStatus,
+    ) -> Result<(), CatalogError> {
+        if self
+            .storage
+            .set_contract_status(id, status, &principal.id)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(CatalogError::NotFound)
+        }
+    }
+
+    /// Evaluate a schema change against every enforced contract on the asset.
+    ///
+    /// **The change is never blocked** (decision 3). graph-owl observes
+    /// metadata and cannot stop a warehouse `ALTER TABLE`, so refusing here
+    /// would be a promise it has no way to keep. What it does is *report* — to
+    /// the producer and every consumer, by name, so the parties find out from
+    /// the catalog rather than from a broken dashboard.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read or the writes fail.
+    pub async fn evaluate_schema_change(
+        &self,
+        asset_fqn: &str,
+        change: &graph_owl_core::contract::SchemaChange,
+        asset_version: &str,
+    ) -> Result<Vec<graph_owl_storage::BreachReport>, CatalogError> {
+        let reports = self
+            .storage
+            .evaluate_schema_change(asset_fqn, change, asset_version)
+            .await?;
+
+        // Announced so the parties hear about it, and announced against **the
+        // asset** rather than the contract: a consumer watching the table they
+        // depend on is already subscribed to that subject, and inventing a
+        // second one would mean the people who most need the notice are the
+        // ones not listening for it. Best-effort like every other announcement
+        // — a subscriber being down must not make a schema change fail, which
+        // would be decision 3 broken by the back door.
+        if !reports.is_empty()
+            && let Ok(Some(asset)) = self.storage.get_asset_by_fqn(asset_fqn).await
+        {
+            for report in &reports {
+                self.announce(ChangeEvent::updated(
+                    event_subject(&asset),
+                    asset.version,
+                    asset.version,
+                    graph_owl_core::envelope::ChangeDescription::default(),
+                    &report.producer,
+                ));
+            }
+        }
+        Ok(reports)
+    }
+
+    /// # Errors
+    ///
+    /// `NotFound` if the contract does not exist.
+    pub async fn clear_contract_breaches(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<i64, CatalogError> {
+        self.storage
+            .clear_contract_breaches(id, &principal.id)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// Evaluate a contract's SLAs.
+    ///
+    /// **Every one reports `Unknown` today, and that is the correct answer
+    /// rather than a stub.** SLAs are evaluated against Epic 30's freshness,
+    /// completeness and quality signals (decision 5), and Epic 30 is not built
+    /// — so nothing has been measured. Reporting `Met` for an unmeasured SLA
+    /// would manufacture confidence out of missing data, which is the precise
+    /// failure this three-valued result exists to prevent.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the contract does not exist.
+    pub async fn evaluate_slas(
+        &self,
+        id: Uuid,
+    ) -> Result<
+        Vec<(
+            graph_owl_core::contract::Sla,
+            graph_owl_core::contract::SlaEvaluation,
+        )>,
+        CatalogError,
+    > {
+        let stored = self
+            .storage
+            .get_contract(id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        Ok(stored
+            .contract
+            .slas
+            .into_iter()
+            .map(|sla| (sla, graph_owl_core::contract::SlaEvaluation::Unknown))
+            .collect())
+    }
+
+    // ---- Epic 28: usage and popularity ----
+
+    /// Record a batch of usage observations.
+    ///
+    /// **Query text is dropped here when the deployment has not opted in** —
+    /// at the boundary, not filtered on read. The difference between not
+    /// storing data and storing-then-hiding it is the whole of decision 2, and
+    /// only one of them survives a database dump landing somewhere it should
+    /// not.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    pub async fn record_usage(
+        &self,
+        mut batch: Vec<graph_owl_storage::UsageWrite>,
+    ) -> Result<graph_owl_storage::UsageIngest, CatalogError> {
+        if !self.store_query_text {
+            for observation in &mut batch {
+                observation.query_text = None;
+            }
+        }
+        Ok(self.storage.record_usage(&batch).await?)
+    }
+
+    /// How used something is, computed on read.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn popularity(
+        &self,
+        asset_fqn: &str,
+    ) -> Result<graph_owl_core::usage::PopularitySummary, CatalogError> {
+        let rollups = self.storage.usage_rollups(asset_fqn).await?;
+        let last_accessed = self.storage.last_accessed(asset_fqn).await?;
+        Ok(graph_owl_core::usage::summarise(
+            &rollups,
+            last_accessed,
+            Utc::now(),
+        ))
+    }
+
+    /// An asset's daily rollups.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn usage_rollups(
+        &self,
+        asset_fqn: &str,
+    ) -> Result<Vec<graph_owl_core::usage::UsageRollup>, CatalogError> {
+        Ok(self.storage.usage_rollups(asset_fqn).await?)
+    }
+
+    /// Rebuild an asset's rollups from its raw observations.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read or write fails.
+    pub async fn rebuild_usage_rollups(&self, asset_fqn: &str) -> Result<i64, CatalogError> {
+        Ok(self.storage.rebuild_usage_rollups(asset_fqn).await?)
+    }
+
+    /// Delete raw observations older than the retention window.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the delete fails.
+    pub async fn prune_usage(&self) -> Result<i64, CatalogError> {
+        let before = Utc::now() - chrono::Duration::days(USAGE_RETENTION_DAYS);
+        Ok(self.storage.prune_usage(before).await?)
+    }
+
+    /// Re-key an opaque consumer to a principal, retroactively.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    pub async fn resolve_usage_consumer(
+        &self,
+        identifier: &str,
+        principal_id: &str,
+    ) -> Result<i64, CatalogError> {
+        Ok(self
+            .storage
+            .resolve_usage_consumer(identifier, principal_id)
+            .await?)
     }
 
     // ---- Epic 25: tags and classifications ----
@@ -7594,6 +7884,27 @@ fn note_mention<'a>(
     entry.push_str(evidence);
 }
 
+/// What a client sends to define a contract.
+#[derive(Debug, Clone)]
+pub struct CreateContract {
+    pub name: String,
+    pub asset_fqn: String,
+    pub producer: String,
+    pub consumers: Vec<String>,
+    pub schema_guarantee: graph_owl_core::contract::SchemaGuarantee,
+    pub slas: Vec<graph_owl_core::contract::Sla>,
+    pub compatibility: graph_owl_core::contract::CompatibilityMode,
+    pub status: graph_owl_core::contract::ContractStatus,
+}
+
+/// How long raw usage observations are kept.
+///
+/// Ninety days, matching Epic 28's dormancy window: the rollups answer every
+/// aggregate question and survive indefinitely, so the raw rows only need to
+/// outlive the longest window anything computes over. Keeping them longer costs
+/// warehouse-scale storage for a question nobody asks.
+const USAGE_RETENTION_DAYS: i64 = 90;
+
 /// What a client sends to define a certification type.
 #[derive(Debug, Clone, Default)]
 pub struct CreateCertificationType {
@@ -8218,6 +8529,9 @@ mod tests {
         label_rejections: Mutex<Vec<(String, String)>>,
         certification_types: Mutex<Vec<graph_owl_storage::StoredCertificationType>>,
         certifications: Mutex<Vec<graph_owl_storage::StoredCertification>>,
+        contracts: Mutex<Vec<graph_owl_core::contract::Contract>>,
+        contract_breaches: Mutex<Vec<graph_owl_core::contract::ContractBreach>>,
+        observations: Mutex<Vec<graph_owl_storage::UsageWrite>>,
         data_products: Mutex<Vec<graph_owl_core::domain::DataProduct>>,
         product_members: Mutex<Vec<(Uuid, Uuid)>>,
         asset_domains: Mutex<Vec<(Uuid, Uuid)>>,
@@ -10846,6 +11160,333 @@ mod tests {
             let before = held.len();
             held.retain(|(held_id, _)| *held_id != id);
             Ok(held.len() < before)
+        }
+
+        // ---- Epics 27 and 28, and as strict as the port ----
+        //
+        // The **rollups are derived from the stored observations on read**
+        // here, which is deliberately *not* what Postgres does — it accumulates
+        // incrementally. That difference is the point: if the two ever disagree
+        // the equivalence test catches it, and a double that copied the
+        // incremental path would only prove the same code twice.
+
+        async fn create_contract(
+            &self,
+            id: Uuid,
+            contract: &graph_owl_core::contract::Contract,
+        ) -> Result<Option<graph_owl_core::contract::Contract>, StorageError> {
+            self.guard_write("create_contract");
+            // Parties and asset must resolve, exactly as the real adapter
+            // requires — a double that skipped it would let the facade's tests
+            // pass against contracts nobody is accountable for.
+            let teams = self.teams.lock().unwrap();
+            if !teams.iter().any(|t| t.id == contract.producer) {
+                return Ok(None);
+            }
+            for consumer in &contract.consumers {
+                if !teams.iter().any(|t| t.id == *consumer) {
+                    return Ok(None);
+                }
+            }
+            drop(teams);
+            {
+                let assets = self.assets.lock().expect("lock");
+                if !assets
+                    .iter()
+                    .any(|a| a.fully_qualified_name == contract.asset_fqn && !a.deleted)
+                {
+                    return Ok(None);
+                }
+            }
+            let mut created = contract.clone();
+            created.id = id;
+            self.contracts.lock().unwrap().push(created.clone());
+            Ok(Some(created))
+        }
+
+        async fn get_contract(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<graph_owl_storage::StoredContract>, StorageError> {
+            let contracts = self.contracts.lock().unwrap();
+            let Some(contract) = contracts.iter().find(|c| c.id == id).cloned() else {
+                return Ok(None);
+            };
+            let breaches = self
+                .contract_breaches
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|b| b.contract_id == id)
+                .cloned()
+                .collect();
+            Ok(Some(graph_owl_storage::StoredContract {
+                contract,
+                breaches,
+            }))
+        }
+
+        async fn list_contracts(
+            &self,
+            asset_fqn: Option<&str>,
+        ) -> Result<Vec<graph_owl_core::contract::Contract>, StorageError> {
+            let contracts = self.contracts.lock().unwrap();
+            Ok(contracts
+                .iter()
+                .filter(|c| asset_fqn.is_none_or(|fqn| c.asset_fqn == fqn))
+                .cloned()
+                .collect())
+        }
+
+        async fn set_contract_status(
+            &self,
+            id: Uuid,
+            status: graph_owl_core::contract::ContractStatus,
+            updated_by: &str,
+        ) -> Result<bool, StorageError> {
+            self.guard_write("set_contract_status");
+            let mut contracts = self.contracts.lock().unwrap();
+            let Some(contract) = contracts.iter_mut().find(|c| c.id == id) else {
+                return Ok(false);
+            };
+            contract.status = status;
+            contract.updated_by = updated_by.to_string();
+            contract.updated_at = Utc::now();
+            Ok(true)
+        }
+
+        async fn evaluate_schema_change(
+            &self,
+            asset_fqn: &str,
+            change: &graph_owl_core::contract::SchemaChange,
+            asset_version: &str,
+        ) -> Result<Vec<graph_owl_storage::BreachReport>, StorageError> {
+            use graph_owl_core::contract::Compatibility;
+            self.guard_write("evaluate_schema_change");
+
+            let candidates: Vec<graph_owl_core::contract::Contract> = self
+                .contracts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.asset_fqn == asset_fqn && c.status.is_enforced())
+                .cloned()
+                .collect();
+
+            let mut reports = Vec::new();
+            for contract in candidates {
+                let Compatibility::Breach { column, detail } =
+                    graph_owl_core::contract::check_compatibility(
+                        change,
+                        &contract.schema_guarantee,
+                        contract.compatibility,
+                    )
+                else {
+                    continue;
+                };
+                self.contract_breaches.lock().unwrap().push(
+                    graph_owl_core::contract::ContractBreach {
+                        id: Uuid::new_v4(),
+                        contract_id: contract.id,
+                        column: column.clone(),
+                        detail: detail.clone(),
+                        asset_version: asset_version.to_string(),
+                        detected_at: Utc::now(),
+                    },
+                );
+                if let Some(held) = self
+                    .contracts
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|c| c.id == contract.id)
+                {
+                    held.status = graph_owl_core::contract::ContractStatus::Violated;
+                }
+                reports.push(graph_owl_storage::BreachReport {
+                    contract_id: contract.id,
+                    contract_name: contract.name.clone(),
+                    producer: contract.producer.clone(),
+                    consumers: contract.consumers.clone(),
+                    column,
+                    detail,
+                });
+            }
+            Ok(reports)
+        }
+
+        async fn clear_contract_breaches(
+            &self,
+            id: Uuid,
+            updated_by: &str,
+        ) -> Result<Option<i64>, StorageError> {
+            self.guard_write("clear_contract_breaches");
+            if !self.contracts.lock().unwrap().iter().any(|c| c.id == id) {
+                return Ok(None);
+            }
+            let mut breaches = self.contract_breaches.lock().unwrap();
+            let before = breaches.len();
+            breaches.retain(|b| b.contract_id != id);
+            let cleared = before - breaches.len();
+            drop(breaches);
+
+            if let Some(contract) = self
+                .contracts
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|c| c.id == id)
+                && contract.status == graph_owl_core::contract::ContractStatus::Violated
+            {
+                contract.status = graph_owl_core::contract::ContractStatus::Active;
+                contract.updated_by = updated_by.to_string();
+            }
+            Ok(Some(i64::try_from(cleared).unwrap_or(i64::MAX)))
+        }
+
+        async fn record_usage(
+            &self,
+            batch: &[graph_owl_storage::UsageWrite],
+        ) -> Result<graph_owl_storage::UsageIngest, StorageError> {
+            self.guard_write("record_usage");
+            let mut ingest = graph_owl_storage::UsageIngest::default();
+            let now = Utc::now();
+            let mut held = self.observations.lock().unwrap();
+
+            for observation in batch {
+                if observation.occurred_at > now {
+                    ingest.rejected += 1;
+                    continue;
+                }
+                // The same `(asset, query_id)` dedup key the partial unique
+                // index enforces — and only when a `query_id` is present, or an
+                // engine that supplies none would have every observation after
+                // the first counted as a duplicate.
+                if observation.query_id.is_some()
+                    && held.iter().any(|existing| {
+                        existing.asset_fqn == observation.asset_fqn
+                            && existing.query_id == observation.query_id
+                    })
+                {
+                    ingest.duplicates += 1;
+                    continue;
+                }
+                let known = {
+                    let assets = self.assets.lock().expect("lock");
+                    assets
+                        .iter()
+                        .any(|a| a.fully_qualified_name == observation.asset_fqn)
+                };
+                if !known {
+                    ingest.unmatched += 1;
+                }
+                held.push(observation.clone());
+                ingest.accepted += 1;
+            }
+            Ok(ingest)
+        }
+
+        async fn usage_rollups(
+            &self,
+            asset_fqn: &str,
+        ) -> Result<Vec<graph_owl_core::usage::UsageRollup>, StorageError> {
+            let held = self.observations.lock().unwrap();
+            let mut grouped: std::collections::BTreeMap<
+                (
+                    String,
+                    chrono::NaiveDate,
+                    graph_owl_core::usage::UsageOperation,
+                ),
+                (u64, u64),
+            > = std::collections::BTreeMap::new();
+            for observation in held.iter().filter(|o| o.asset_fqn == asset_fqn) {
+                let entry = grouped
+                    .entry((
+                        observation.consumer.key(),
+                        observation.occurred_at.date_naive(),
+                        observation.operation,
+                    ))
+                    .or_default();
+                entry.0 += 1;
+                entry.1 += u64::try_from(observation.row_count.unwrap_or(0)).unwrap_or(0);
+            }
+            Ok(grouped
+                .into_iter()
+                .map(|((consumer_key, day, operation), (count, rows))| {
+                    graph_owl_core::usage::UsageRollup {
+                        consumer_key,
+                        day,
+                        operation,
+                        count,
+                        total_rows: (rows > 0).then_some(rows),
+                    }
+                })
+                .collect())
+        }
+
+        async fn last_accessed(
+            &self,
+            asset_fqn: &str,
+        ) -> Result<Option<DateTime<Utc>>, StorageError> {
+            let held = self.observations.lock().unwrap();
+            Ok(held
+                .iter()
+                .filter(|o| o.asset_fqn == asset_fqn)
+                .map(|o| o.occurred_at)
+                .max())
+        }
+
+        async fn rebuild_usage_rollups(&self, asset_fqn: &str) -> Result<i64, StorageError> {
+            // Derived on read here, so a rebuild is by construction identical
+            // to the incremental answer — which is exactly what the equivalence
+            // test asserts of the *real* adapter, where they are two paths.
+            Ok(i64::try_from(self.usage_rollups(asset_fqn).await?.len()).unwrap_or(i64::MAX))
+        }
+
+        async fn prune_usage(&self, before: DateTime<Utc>) -> Result<i64, StorageError> {
+            self.guard_write("prune_usage");
+            let mut held = self.observations.lock().unwrap();
+            // The most recent per asset survives, whatever its age — deleting
+            // the only evidence an asset was ever used is not pruning.
+            let mut keep: std::collections::BTreeMap<String, DateTime<Utc>> =
+                std::collections::BTreeMap::new();
+            for observation in held.iter() {
+                keep.entry(observation.asset_fqn.clone())
+                    .and_modify(|newest| {
+                        if observation.occurred_at > *newest {
+                            *newest = observation.occurred_at;
+                        }
+                    })
+                    .or_insert(observation.occurred_at);
+            }
+            let count_before = held.len();
+            held.retain(|o| {
+                o.occurred_at >= before || keep.get(&o.asset_fqn) == Some(&o.occurred_at)
+            });
+            Ok(i64::try_from(count_before - held.len()).unwrap_or(i64::MAX))
+        }
+
+        async fn resolve_usage_consumer(
+            &self,
+            identifier: &str,
+            principal_id: &str,
+        ) -> Result<i64, StorageError> {
+            self.guard_write("resolve_usage_consumer");
+            let mut held = self.observations.lock().unwrap();
+            let mut moved = 0_i64;
+            for observation in held.iter_mut() {
+                let matches = observation.consumer
+                    == (graph_owl_core::usage::Consumer::Opaque {
+                        identifier: identifier.to_string(),
+                    });
+                if matches {
+                    observation.consumer = graph_owl_core::usage::Consumer::Principal {
+                        id: principal_id.to_string(),
+                    };
+                    moved += 1;
+                }
+            }
+            Ok(moved)
         }
 
         // ---- Epics 25 and 26, and as strict as the port ----

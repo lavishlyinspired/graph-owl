@@ -1,5 +1,6 @@
 pub mod blocking;
 pub mod classification;
+pub mod contract;
 pub mod contradiction;
 pub mod custom_property;
 pub mod domain;
@@ -19,6 +20,7 @@ pub mod projection;
 pub mod recall;
 pub mod relationship_type;
 pub mod resolution;
+pub mod usage;
 pub mod webhook;
 
 use chrono::{DateTime, Utc};

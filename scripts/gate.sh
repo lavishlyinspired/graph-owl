@@ -87,6 +87,15 @@ fi
 echo "==> fmt"
 cargo fmt --all
 
+# --- 1b. Wire casing (seconds, and it has caught five real bugs) ----------
+# `#[serde(rename_all)]` on an enum renames the VARIANTS, not the fields inside
+# them — a mistake this project has shipped five times, in five epics, because
+# most variants have single-word fields that are immune by luck. See the script
+# for the list and for why the fix is a per-field `rename` rather than
+# `rename_all_fields`.
+echo "==> wire casing"
+python3 scripts/check-wire-casing.py
+
 # --- 2. Lint (changes nothing, but reads everything) ----------------------
 echo "==> clippy"
 cargo clippy "${SCOPE[@]}" --all-targets

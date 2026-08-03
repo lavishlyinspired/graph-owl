@@ -113,24 +113,23 @@ pub struct Deprecation {
 ///
 /// **Computed on read.** See the module note: a stored status goes stale
 /// without the entity changing.
-/// **`rename_all_fields` is not redundant with `rename_all`.** On an enum,
-/// `rename_all` renames the *variants*; the fields inside them keep their Rust
-/// spelling unless `rename_all_fields` says so. Without it this ships
-/// `days_remaining` beside a wire of camelCase — and this codebase has now
-/// made that exact mistake four times (`Authorship.agent_id`,
-/// `SubmissionOutcome.run_id`, `AssetListQuery.data_product`, this).
+/// **`rename_all` on an enum renames the *variants*, not the fields inside
+/// them** — and the fix is a per-field `rename`, not `rename_all_fields`.
+///
+/// Serde honours both. utoipa 5's schema derive reads only the per-field form,
+/// so `rename_all_fields` produces correct JSON beside an OpenAPI schema that
+/// still says `days_remaining` — the two disagree, and every generated client
+/// is built against the wrong one. This type shipped with `rename_all_fields`
+/// for exactly one gate before an audit caught it.
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase",
-    tag = "status"
-)]
+#[serde(rename_all = "camelCase", tag = "status")]
 pub enum CertificationStatus {
     Valid,
     /// Within the warning window, with how long is left. The number is what
     /// makes it actionable — "expiring soon" alone tells a steward nothing
     /// about whether to act today or next quarter.
     ExpiringSoon {
+        #[serde(rename = "daysRemaining")]
         days_remaining: i64,
     },
     Expired,
@@ -500,6 +499,13 @@ mod tests {
         assert_eq!(json["status"], "expiringSoon");
         assert!(json.get("daysRemaining").is_some(), "{json}");
         assert!(json.get("days_remaining").is_none(), "{json}");
+        // Round-trips, so the rename is on both halves — a serialize-only
+        // rename produces a document the server cannot read back.
+        let parsed: CertificationStatus = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(
+            parsed,
+            CertificationStatus::ExpiringSoon { days_remaining: 3 }
+        );
     }
 
     #[test]

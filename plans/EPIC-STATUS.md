@@ -59,15 +59,15 @@ is the condition that index exists to catch.
 | **19** | 6 | [`19-streaming.md`](19-streaming.md) | In progress | 5/6 (+1 partial) | Epic 16 (ingestion contract), Epic 18 (dedup and ordering machinery) |
 | **20** | 6 | [`20-metadata-as-code.md`](20-metadata-as-code.md) | **Shipped** | 2/2 | Epic 15 (idempotent upsert and reconciliation machinery) |
 | **21** | 6 | [`21-document-ingestion.md`](21-document-ingestion.md) | **Shipped** | 3/3 | Epic 16 (ingestion), Epic 17 (mention resolution) |
-| **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | In progress | 1/10 (+1 partial) | Epic 3 (the envelope's `extension` field) |
-| **23** | 7 | [`23-domains.md`](23-domains.md) | Not started | 0/8 | Epic 11 (domains and products are owned) |
+| **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | In progress | 8/12 | Epic 3 (the envelope's `extension` field) |
+| **23** | 7 | [`23-domains.md`](23-domains.md) | In progress | 10/14 | Epic 11 (domains and products are owned) |
 | **24** | 7 | [`24-business-semantics.md`](24-business-semantics.md) | In progress | 8/9 (+1 partial) | Epic 2 (FQN derivation and the hierarchy terms attach to), Epic 11 (term review… |
-| **25** | 7 | [`25-classification.md`](25-classification.md) | Not started | 0/8 | Epic 3 (envelope carries `tags`), Epic 11 (term reviewers are users) |
-| **26** | 7 | [`26-lifecycle-certification.md`](26-lifecycle-certification.md) | Not started | — | Epic 11 (issuers are principals), Epic 24 (metrics are certifiable) |
+| **25** | 7 | [`25-classification.md`](25-classification.md) | In progress | 11/16 | Epic 3 (envelope carries `tags`), Epic 11 (term reviewers are users) |
+| **26** | 7 | [`26-lifecycle-certification.md`](26-lifecycle-certification.md) | In progress | 6/7 (+1 partial) | Epic 11 (issuers are principals), Epic 24 (metrics are certifiable) |
 | **27** | 7 | [`27-contracts.md`](27-contracts.md) | Not started | — | Epic 2 (schemas to guarantee), Epic 3 (version diffs detect breakage) |
 | **28** | 7 | [`28-usage.md`](28-usage.md) | Not started | — | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
 | **29** | 7 | [`29-lineage.md`](29-lineage.md) | In progress | 5/8 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
-| **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | Not started | 0/8 | Epic 29 (lineage, for propagating trust signals) |
+| **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | In progress | 4/8 | Epic 29 (lineage, for propagating trust signals) |
 | **31** | 5 | [`31-memory.md`](31-memory.md) | In progress | 2/5 (+1 partial) | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
 | **32** | 5 | [`32-agent-capabilities.md`](32-agent-capabilities.md) | Not started | 0/2 | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
 | **33** | 9 | [`33-ontology-packs.md`](33-ontology-packs.md) | Not started | 0/8 | Epic 24 (glossary and taxonomy model), Epic 9 (standards import) |
@@ -393,27 +393,35 @@ is the condition that index exists to catch.
 
 ### Epic 22 — Custom Properties *(Demo 7)*
 
-- [ ] 22
-- [ ] 23
-- [ ] 25
-- [ ] 26
+- [x] 22
+- [x] 23
+- [x] 25
+- [x] 26
 - [ ] 27
 - [ ] 28
 - [ ] 29
 - [ ] 30
 - [x] Typed, per-entity-type property definitions
-- [~] Values validated on write
+- [x] Values validated on write
+- [x] Definitions evolve safely
+- [x] Custom properties are queryable
 
 ### Epic 23 — Domains & Data Products *(Demo 7)*
 
-- [ ] 22
-- [ ] 23
-- [ ] 25
-- [ ] 26
+- [x] 22
+- [x] 23
+- [x] 25
+- [x] 26
 - [ ] 27
 - [ ] 28
 - [ ] 29
 - [ ] 30
+- [x] Domains nest, and the paths move with them
+- [x] One asset, one domain, resolved by walking up
+- [x] The cascade is free, and the plan's criteria for it did not survive
+- [x] Data products bundle across boundaries
+- [x] Both axes filter list and search
+- [x] Deleting a domain does not orphan
 
 ### Epic 24 — Business Semantics *(Demo 7)*
 
@@ -429,14 +437,32 @@ is the condition that index exists to catch.
 
 ### Epic 25 — Tags & Classification *(Demo 7)*
 
-- [ ] 22
-- [ ] 23
-- [ ] 25
-- [ ] 26
+- [x] 22
+- [x] 23
+- [x] 25
+- [x] 26
 - [ ] 27
 - [ ] 28
 - [ ] 29
 - [ ] 30
+- [x] Three of nine slices were already built.
+- [x] Provenance from day one
+- [x] Exclusivity is scoped to one classification
+- [x] A rejection is a row, not an absence
+- [x] Columns are the point
+- [x] A governance label cannot vanish by accident
+- [x] Propagation never downgrades a manual label
+- [ ] `?tags=` filtering
+
+### Epic 26 — Lifecycle & Certification *(Demo 7)*
+
+- [x] Two orthogonal axes
+- [x] The state machine refuses the shortcuts
+- [x] A successor is a reference, not prose
+- [x] Evidence is enforced, and named when missing
+- [x] Status is computed on every read
+- [x] Renewal re-checks
+- [~] Discoverable
 
 ### Epic 29 — Lineage *(Demo 7)*
 
@@ -451,10 +477,10 @@ is the condition that index exists to catch.
 
 ### Epic 30 — Quality Signals & Incidents *(Demo 7)*
 
-- [ ] 22
-- [ ] 23
-- [ ] 25
-- [ ] 26
+- [x] 22
+- [x] 23
+- [x] 25
+- [x] 26
 - [ ] 27
 - [ ] 28
 - [ ] 29

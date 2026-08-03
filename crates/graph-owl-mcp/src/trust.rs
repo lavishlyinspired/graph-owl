@@ -38,11 +38,13 @@ pub enum Certification {
     None,
     Certified {
         by: String,
+        #[serde(rename = "expiresAt")]
         expires_at: Option<DateTime<Utc>>,
     },
     /// Certified once, and the certification has run out.
     Expired {
         by: String,
+        #[serde(rename = "expiredAt")]
         expired_at: DateTime<Utc>,
     },
 }

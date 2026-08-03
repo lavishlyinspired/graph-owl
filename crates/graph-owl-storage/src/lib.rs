@@ -4,6 +4,7 @@ use graph_owl_core::envelope::EntityVersion;
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
     classification::{Classification, LabelState, LabelType, Tag, TagLabel},
+    contract::{Contract, ContractBreach, ContractStatus, SchemaChange},
     contradiction::Review,
     custom_property::CustomProperty,
     domain::{DataProduct, Domain, DomainAssignment},
@@ -11,6 +12,7 @@ use graph_owl_core::{
     memory::Memory,
     ownership::{EntityReference, OwnerRef},
     page::{Page, PageRequest},
+    usage::{Consumer, UsageOperation, UsageRollup},
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -434,6 +436,58 @@ pub struct StoredCertificationType {
     pub default_validity_days: i32,
     pub required_evidence: Vec<String>,
     pub authorized_issuers: Vec<String>,
+}
+
+/// An observation as it arrives, before storage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageWrite {
+    pub asset_fqn: String,
+    pub consumer: Consumer,
+    pub operation: UsageOperation,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+    pub row_count: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub query_id: Option<String>,
+    /// **Dropped at the boundary when the deployment has not opted in.** Not
+    /// filtered on read — the difference between not storing data and
+    /// storing-then-hiding it is the whole of decision 2.
+    pub query_text: Option<String>,
+}
+
+/// What a batch of observations did.
+///
+/// **Unmatched is not rejected** (Slice A). An observation about a table nobody
+/// has catalogued yet is still worth keeping — the connector may simply not have
+/// run — and discarding it would throw away exactly the usage that tells you
+/// something is missing from the catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UsageIngest {
+    pub accepted: i64,
+    /// Accepted, but the asset is not in the catalog yet.
+    pub unmatched: i64,
+    /// Already seen, by `(asset, query_id)`.
+    pub duplicates: i64,
+    /// Refused: an observation dated in the future is a clock problem, and
+    /// storing it would make every window computation wrong until it passed.
+    pub rejected: i64,
+}
+
+/// A contract as stored, with its parties and promises resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredContract {
+    pub contract: Contract,
+    pub breaches: Vec<ContractBreach>,
+}
+
+/// What evaluating an asset change against its contracts concluded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BreachReport {
+    pub contract_id: Uuid,
+    pub contract_name: String,
+    pub producer: String,
+    pub consumers: Vec<String>,
+    pub column: String,
+    pub detail: String,
 }
 
 /// What claiming an idempotency key found.
@@ -2577,6 +2631,133 @@ pub trait Storage: Send + Sync {
         property: &CustomProperty,
         previous_name: &str,
     ) -> Result<bool, StorageError>;
+
+    // ---- Epic 27: data contracts ----
+
+    /// Create a contract. `None` when the producer, a consumer or the asset
+    /// does not resolve — said with an `Option` rather than a new error
+    /// variant, the same shape `create_domain` uses.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn create_contract(
+        &self,
+        id: Uuid,
+        contract: &Contract,
+    ) -> Result<Option<Contract>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_contract(&self, id: Uuid) -> Result<Option<StoredContract>, StorageError>;
+
+    /// Contracts on an asset, or every contract when `asset_fqn` is `None`.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_contracts(&self, asset_fqn: Option<&str>) -> Result<Vec<Contract>, StorageError>;
+
+    /// Move a contract's status. `false` if it does not exist.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn set_contract_status(
+        &self,
+        id: Uuid,
+        status: ContractStatus,
+        updated_by: &str,
+    ) -> Result<bool, StorageError>;
+
+    /// Evaluate a schema change against every **enforced** contract on the
+    /// asset, recording each breach and marking those contracts violated.
+    ///
+    /// **The change itself is never blocked** (decision 3): graph-owl observes
+    /// metadata and cannot stop a warehouse `ALTER TABLE`, so refusing here
+    /// would be making a promise it has no way to keep. Returns what broke, for
+    /// the caller to announce.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if any part of the transaction fails.
+    async fn evaluate_schema_change(
+        &self,
+        asset_fqn: &str,
+        change: &SchemaChange,
+        asset_version: &str,
+    ) -> Result<Vec<BreachReport>, StorageError>;
+
+    /// Clear a contract's breaches and return it to `Active`.
+    ///
+    /// **Explicit, never automatic.** A later compatible change does not clear
+    /// an earlier breach — the incident happened, and silent clearing would let
+    /// a producer break something on Monday and look clean on Tuesday.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn clear_contract_breaches(
+        &self,
+        id: Uuid,
+        updated_by: &str,
+    ) -> Result<Option<i64>, StorageError>;
+
+    // ---- Epic 28: usage and popularity ----
+
+    /// Record a batch of observations and fold them into the daily rollups.
+    ///
+    /// **Rollups are updated incrementally here, not rebuilt.** Re-scanning raw
+    /// rows at warehouse scale is the thing decision 4 prunes them to avoid.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn record_usage(&self, batch: &[UsageWrite]) -> Result<UsageIngest, StorageError>;
+
+    /// Daily rollups for an asset, newest day first.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn usage_rollups(&self, asset_fqn: &str) -> Result<Vec<UsageRollup>, StorageError>;
+
+    /// When an asset was last used, kept separately so pruning cannot erase it.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn last_accessed(
+        &self,
+        asset_fqn: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError>;
+
+    /// Rebuild an asset's rollups from its raw observations.
+    ///
+    /// **Exists to be compared against the incremental path**, which is the
+    /// only way to know that path is correct — Slice B's equivalence test. Not
+    /// a repair tool: after pruning the raw rows are gone and a rebuild would
+    /// produce *less* than the truth, which is why nothing calls it in
+    /// production.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read or write fails.
+    async fn rebuild_usage_rollups(&self, asset_fqn: &str) -> Result<i64, StorageError>;
+
+    /// Delete raw observations older than `before`, keeping the most recent one
+    /// per asset.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the delete fails.
+    async fn prune_usage(&self, before: chrono::DateTime<chrono::Utc>)
+    -> Result<i64, StorageError>;
+
+    /// Re-key observations and rollups from an opaque identifier to a
+    /// principal.
+    ///
+    /// **Retroactive by design** (Slice D): creating a matching `User` later
+    /// should reclassify the history rather than starting a second count beside
+    /// it. Returns how many rollup rows moved.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn resolve_usage_consumer(
+        &self,
+        identifier: &str,
+        principal_id: &str,
+    ) -> Result<i64, StorageError>;
 
     // ---- Epic 25: tags and classifications ----
 

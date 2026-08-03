@@ -1,7 +1,7 @@
 # Plan: Usage & Popularity (Epic 28)
 
 **Branch**: feat/usage
-**Status**: Not started
+**Status**: Slices A–E shipped; Slice F (discovery) deferred with a reason
 **Depends on**: Epic 16 (push ingestion), Epic 11 (consumers are principals)
 **Crates**: `graph-owl-core` (UsageObservation, rollup, trend — pure) · `graph-owl-storage-postgres` (time-series + rollup tables) · `graph-owl-search` (popularity ranking term) · `graph-owl-api` · `graph-owl-server`
 
@@ -61,50 +61,63 @@ Compares the last 7 days against the previous 7, with a minimum-volume floor so 
 
 ## Acceptance criteria
 
-- [ ] Observations ingest via push and stream, in batches.
-- [ ] Rollups are computed incrementally, not by re-scanning raw rows.
-- [ ] Popularity is computed on read from rollups.
-- [ ] Consumers resolve to principals where possible, stay opaque otherwise.
-- [ ] Query text is only stored when explicitly enabled.
-- [ ] Raw observations prune on a retention schedule; rollups survive.
-- [ ] Usage feeds search ranking (Epic 8) and `TrustSummary` (Epic 14).
-- [ ] Producer and consumer lists are derivable per asset.
+- [x] Observations ingest in batches via the push path.
+- [x] Rollups are computed incrementally on ingest, not by re-scanning raw rows.
+- [x] Popularity is computed on read from rollups — never stored, for the reason decision 1 gives.
+- [x] Consumers stay opaque when nothing matches, and resolution is retroactive.
+- [x] Query text is only stored when explicitly enabled, and is **dropped at the boundary** when it is not.
+- [x] Raw observations prune on a retention schedule; rollups survive, and so does `last_accessed`.
+- [ ] Usage feeds search ranking (Epic 8) and `TrustSummary` (Epic 14) — Slice F, deferred; see below.
+- [~] Producer and consumer lists are derivable per asset — the rollups carry consumer keys, so the data is there; no endpoint presents them as a list yet.
 
 ## Slices
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first.
 
-### Slice A: Ingest observations
+### Slice A: Ingest observations — **shipped**
 
 **Acceptance criteria**: batch ingest via Epic 16's path; asset resolved by FQN, unknown FQN recorded as an unmatched observation rather than rejected (the asset may not be catalogued yet); `occurred_at` in the future → rejected; duplicate `(asset, query_id)` → ignored; ingest does not bump the asset's version or emit change events; throughput sufficient for a realistic daily volume.
 **RED**: A test asserting the asset's version is unchanged after ingesting a thousand observations — usage is not a metadata change. An unmatched-FQN test asserting the observation is retained for later reconciliation rather than dropped. Mutator watch: version bumping must fail the first; rejecting unknown assets must fail the second, which would discard usage for anything not yet catalogued.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice B: Rollups
+### Slice B: Rollups — **shipped**
 
 **Acceptance criteria**: daily rollups per (asset, consumer, operation) updated incrementally on ingest; a late-arriving observation for a past day updates that day's rollup; rollup computation is idempotent; rollups are queryable directly; a rollup rebuild from raw rows produces identical results to incremental accumulation.
 **RED**: The rebuild-equivalence test: accumulate incrementally, then rebuild from raw, assert identical — the only way to know the incremental path is correct. A late-arrival test. Mutator watch: an incremental path that drifts from the rebuild must fail the equivalence test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice C: Popularity and trend
+### Slice C: Popularity and trend — **shipped**
 
 **Acceptance criteria**: `PopularitySummary` computed on read from rollups; `?fields=popularity` opts in; trend uses a minimum-volume floor so tiny counts do not produce extreme percentages; `Dormant` after 90 days with no access; an asset with no observations reports zeros and `Unknown` trend, never `Dormant` (absence of data is not absence of use).
 **RED**: The floor test: 1 query last week vs 2 this week must not report "Rising 100%". The no-data test asserting `Unknown` rather than `Dormant` — claiming an asset is unused when nothing was ever ingested is a false negative that would get assets wrongly retired. Mutator watch: no floor must fail the first; defaulting to `Dormant` must fail the second.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice D: Consumer resolution and privacy
+### Slice D: Consumer resolution and privacy — **shipped**
 
 **Acceptance criteria**: a warehouse identifier matching a `User` email or name resolves to that principal; unresolved identifiers stay `Opaque` and still count toward distinct consumers; resolution is retroactive — creating a matching `User` later resolves historical observations; `query_text` stored only when enabled per source; when disabled, ingested query text is dropped at the boundary and never persisted; consumer identity is omitted from responses to principals lacking permission to see it.
 **RED**: A test asserting ingested `query_text` is absent from storage when the flag is off — dropping it at the boundary, not filtering it on read, is the difference between not storing data and storing then hiding it. A retroactive-resolution test. Mutator watch: persisting-then-hiding must fail the storage assertion.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice E: Retention
+### Slice E: Retention — **shipped**
 
 **Acceptance criteria**: raw observations pruned after a configurable window (default 90 days); rollups retained indefinitely; pruning is incremental and does not lock; the most recent observation per asset is always retained so `last_accessed` survives pruning; pruning is observable via metrics.
 **RED**: The last-observation-survives test — pruning `last_accessed` out of existence would blank the single most useful signal. Mutator watch: unconditional age-based deletion must fail it.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice F: Usage informs discovery
+### Slice F: Usage informs discovery — **deferred, with the sharp half named**
+
+The data is all here: `GET /usage/{fqn}` returns the summary and the trend. What
+is not built is the *ranking* change, and the reason it is not a small addition
+is this slice's own RED test — **ranking with the weight at zero must reproduce
+the prior ordering exactly**. That is a property of Epic 8's ranking formula, not
+of this epic's data, and proving it needs a before/after comparison over a real
+corpus rather than an assertion about a number. Adding a popularity term without
+that test is how a ranking change ships that nobody can turn off.
+
+The dormant-marking half is cheaper and is worth doing with it, for the same
+reason Epic 26's deprecated marker was: filtering hides reality, unmarking
+misleads.
+
 
 **Acceptance criteria**: search ranking accepts a popularity term with a configurable weight (Epic 8's ranking formula); `TrustSummary` carries popularity and trend; `?sort=popularity` on list endpoints; a dormant asset is visibly marked in search results, not filtered out; ranking with the weight at zero reproduces pre-usage ordering exactly.
 **RED**: The zero-weight test asserting exact reproduction of prior ordering — proves the term is additive and disableable rather than entangled. A dormant-marking test. Mutator watch: a non-zeroable weight must fail; filtering dormant assets must fail the marking test.

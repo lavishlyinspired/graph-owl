@@ -36,6 +36,15 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
 
+      # Seconds, and it has caught five real bugs — so it runs before the
+      # expensive steps rather than after them. `#[serde(rename_all)]` on an
+      # enum renames the VARIANTS, not the fields inside them, and most
+      # variants have single-word fields that are immune by luck. See
+      # `scripts/check-wire-casing.py` for the five, and for why the fix is a
+      # per-field `rename` rather than `rename_all_fields`.
+      - name: wire casing
+        run: python3 scripts/check-wire-casing.py
+
       - name: clippy
         # `-A clippy::pedantic` and not a bare `-D warnings`. The workspace sets
         # `all = "warn", pedantic = "warn"` deliberately: pedantic is read as

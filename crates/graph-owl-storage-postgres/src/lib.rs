@@ -1,24 +1,26 @@
 use async_trait::async_trait;
 use graph_owl_authz::{AccessPredicate, Policy};
 use graph_owl_core::classification::{Classification, LabelState, LabelType, Tag, TagLabel};
+use graph_owl_core::contract::{Contract, ContractBreach, ContractStatus, SchemaChange};
 use graph_owl_core::contradiction::{Review, Verdict};
 use graph_owl_core::custom_property::CustomProperty;
 use graph_owl_core::domain::{DataProduct, Domain, DomainAssignment, domain_fqn};
 use graph_owl_core::lifecycle::{Deprecation, LifecycleState};
 use graph_owl_core::memory::{Authorship, LinkRelation, Memory, MemoryKind, MemoryLink};
 use graph_owl_core::ownership::{EntityReference, OwnerKind, OwnerRef};
+use graph_owl_core::usage::{UsageOperation, UsageRollup};
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Relationship, Table, TableUpdate,
     envelope::{ChangeDescription, EntityVersion, classify},
     page::{Cursor, Page, PageRequest},
 };
 use graph_owl_storage::{
-    ConflictKind, DataProductUpdate, DiscardedClaimRecord, DomainDeletion, DomainHoldings,
-    DomainUpdate, ExtractionRunRecord, FollowOutcome, Holdings, IdempotencyClaim, IssueOutcome,
-    LabelDecision, LabelOutcome, LifecycleOutcome, MembershipRefusal, MemoryWrite, OwnersWrite,
-    PrincipalDeletion, QueuedClaimRecord, ReviewQueueFilter, SplitOutcome, Storage, StorageError,
-    StoredCertification, StoredCertificationType, StoredUser, SupersedeOutcome, TagUsage,
-    UpdateOutcome,
+    BreachReport, ConflictKind, DataProductUpdate, DiscardedClaimRecord, DomainDeletion,
+    DomainHoldings, DomainUpdate, ExtractionRunRecord, FollowOutcome, Holdings, IdempotencyClaim,
+    IssueOutcome, LabelDecision, LabelOutcome, LifecycleOutcome, MembershipRefusal, MemoryWrite,
+    OwnersWrite, PrincipalDeletion, QueuedClaimRecord, ReviewQueueFilter, SplitOutcome, Storage,
+    StorageError, StoredCertification, StoredCertificationType, StoredContract, StoredUser,
+    SupersedeOutcome, TagUsage, UpdateOutcome, UsageIngest, UsageWrite,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -477,6 +479,79 @@ impl PostgresStorage {
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(())
+    }
+
+    /// A contract row plus its consumers, guaranteed columns and SLAs.
+    ///
+    /// Three follow-up reads rather than a join: a join would multiply the
+    /// contract row by each list, and every caller would then have to
+    /// un-multiply it.
+    async fn hydrate_contract(&self, row: &PgRow) -> Result<Contract, StorageError> {
+        let id: Uuid = row.get("id");
+
+        let consumers: Vec<String> = sqlx::query_scalar(
+            "SELECT team_id FROM contract_consumers WHERE contract_id = $1 ORDER BY team_id",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let column_rows = sqlx::query(
+            "SELECT name, data_type, nullable FROM contract_columns
+              WHERE contract_id = $1 ORDER BY name",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let sla_rows: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT definition FROM contract_slas WHERE contract_id = $1 ORDER BY id",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(Contract {
+            id,
+            name: row.get("name"),
+            asset_fqn: row.get("asset_fqn"),
+            producer: row.get("producer"),
+            consumers,
+            schema_guarantee: graph_owl_core::contract::SchemaGuarantee {
+                required_columns: column_rows
+                    .iter()
+                    .map(|c| graph_owl_core::contract::ColumnGuarantee {
+                        name: c.get("name"),
+                        data_type: c.get("data_type"),
+                        nullable: c.get("nullable"),
+                    })
+                    .collect(),
+                allow_additional: row.get("allow_additional"),
+            },
+            slas: sla_rows
+                .into_iter()
+                .filter_map(|value| serde_json::from_value(value).ok())
+                .collect(),
+            compatibility: graph_owl_core::contract::CompatibilityMode::parse(
+                row.get::<String, _>("compatibility").as_str(),
+            )
+            .unwrap_or(graph_owl_core::contract::CompatibilityMode::None),
+            status: ContractStatus::parse(row.get::<String, _>("status").as_str())
+                .unwrap_or(ContractStatus::Draft),
+            version: EntityVersion {
+                major: u32::try_from(row.get::<i32, _>("version_major")).unwrap_or(0),
+                minor: u32::try_from(row.get::<i32, _>("version_minor")).unwrap_or(1),
+            },
+            updated_by: row.get("updated_by"),
+            change_description: row
+                .get::<Option<serde_json::Value>, _>("change_description")
+                .and_then(|v| serde_json::from_value(v).ok()),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        })
     }
 
     /// The named experts on a domain, ordered as they were given.
@@ -5214,6 +5289,509 @@ impl Storage for PostgresStorage {
         Ok(done.rows_affected() > 0)
     }
 
+    // ---- Epic 27: data contracts ----
+
+    async fn create_contract(
+        &self,
+        id: Uuid,
+        contract: &Contract,
+    ) -> Result<Option<Contract>, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // Producer, consumers and asset all have to resolve. A contract whose
+        // parties do not exist is a promise nobody is accountable for, which is
+        // exactly what decision 1 makes it an entity to avoid.
+        let producer: Option<String> = sqlx::query_scalar("SELECT id FROM teams WHERE id = $1")
+            .bind(&contract.producer)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if producer.is_none() {
+            return Ok(None);
+        }
+        let live_asset: Option<bool> =
+            sqlx::query_scalar("SELECT deleted FROM assets WHERE fully_qualified_name = $1")
+                .bind(&contract.asset_fqn)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if live_asset != Some(false) {
+            return Ok(None);
+        }
+        for consumer in &contract.consumers {
+            let found: Option<String> = sqlx::query_scalar("SELECT id FROM teams WHERE id = $1")
+                .bind(consumer)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            if found.is_none() {
+                return Ok(None);
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO contracts
+                 (id, name, asset_fqn, producer, compatibility, status, allow_additional, updated_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(id)
+        .bind(&contract.name)
+        .bind(&contract.asset_fqn)
+        .bind(&contract.producer)
+        .bind(contract.compatibility.as_str())
+        .bind(contract.status.as_str())
+        .bind(contract.schema_guarantee.allow_additional)
+        .bind(&contract.updated_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        for consumer in &contract.consumers {
+            sqlx::query(
+                "INSERT INTO contract_consumers (contract_id, team_id) VALUES ($1, $2)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(id)
+            .bind(consumer)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+        for column in &contract.schema_guarantee.required_columns {
+            sqlx::query(
+                "INSERT INTO contract_columns (contract_id, name, data_type, nullable)
+                 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+            )
+            .bind(id)
+            .bind(&column.name)
+            .bind(&column.data_type)
+            .bind(column.nullable)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+        for sla in &contract.slas {
+            sqlx::query(
+                "INSERT INTO contract_slas (id, contract_id, definition) VALUES ($1, $2, $3)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(id)
+            .bind(serde_json::to_value(sla).unwrap_or_default())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut created = contract.clone();
+        created.id = id;
+        Ok(Some(created))
+    }
+
+    async fn get_contract(&self, id: Uuid) -> Result<Option<StoredContract>, StorageError> {
+        let row = sqlx::query(&format!(
+            "SELECT {CONTRACT_COLUMNS} FROM contracts WHERE id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let Some(row) = row else { return Ok(None) };
+
+        let contract = self.hydrate_contract(&row).await?;
+        let breaches = sqlx::query(
+            "SELECT id, contract_id, column_name, detail, asset_version, detected_at
+               FROM contract_breaches WHERE contract_id = $1 ORDER BY detected_at DESC",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(Some(StoredContract {
+            contract,
+            breaches: breaches.iter().map(breach_from_row).collect(),
+        }))
+    }
+
+    async fn list_contracts(&self, asset_fqn: Option<&str>) -> Result<Vec<Contract>, StorageError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {CONTRACT_COLUMNS} FROM contracts
+              WHERE $1::text IS NULL OR asset_fqn = $1
+              ORDER BY name, id"
+        ))
+        .bind(asset_fqn)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut contracts = Vec::with_capacity(rows.len());
+        for row in &rows {
+            contracts.push(self.hydrate_contract(row).await?);
+        }
+        Ok(contracts)
+    }
+
+    async fn set_contract_status(
+        &self,
+        id: Uuid,
+        status: ContractStatus,
+        updated_by: &str,
+    ) -> Result<bool, StorageError> {
+        let done = sqlx::query(
+            "UPDATE contracts
+                SET status = $2, version_minor = version_minor + 1,
+                    updated_by = $3, updated_at = now()
+              WHERE id = $1",
+        )
+        .bind(id)
+        .bind(status.as_str())
+        .bind(updated_by)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn evaluate_schema_change(
+        &self,
+        asset_fqn: &str,
+        change: &SchemaChange,
+        asset_version: &str,
+    ) -> Result<Vec<BreachReport>, StorageError> {
+        // Read the contracts *outside* the write transaction: the evaluation is
+        // pure and the writes are per-breach, so holding a transaction open
+        // across the whole set would serialise every schema change in the
+        // estate behind the slowest contract.
+        let contracts = self.list_contracts(Some(asset_fqn)).await?;
+
+        let mut reports = Vec::new();
+        for contract in contracts {
+            if !contract.status.is_enforced() {
+                continue;
+            }
+            let verdict = graph_owl_core::contract::check_compatibility(
+                change,
+                &contract.schema_guarantee,
+                contract.compatibility,
+            );
+            let graph_owl_core::contract::Compatibility::Breach { column, detail } = verdict else {
+                continue;
+            };
+
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            sqlx::query(
+                "INSERT INTO contract_breaches
+                     (id, contract_id, column_name, detail, asset_version)
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(contract.id)
+            .bind(&column)
+            .bind(&detail)
+            .bind(asset_version)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            sqlx::query(
+                "UPDATE contracts SET status = 'violated',
+                     version_minor = version_minor + 1, updated_at = now()
+                  WHERE id = $1",
+            )
+            .bind(contract.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+            reports.push(BreachReport {
+                contract_id: contract.id,
+                contract_name: contract.name.clone(),
+                producer: contract.producer.clone(),
+                consumers: contract.consumers.clone(),
+                column,
+                detail,
+            });
+        }
+        Ok(reports)
+    }
+
+    async fn clear_contract_breaches(
+        &self,
+        id: Uuid,
+        updated_by: &str,
+    ) -> Result<Option<i64>, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM contracts WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        if exists.is_none() {
+            return Ok(None);
+        }
+
+        let cleared = sqlx::query("DELETE FROM contract_breaches WHERE contract_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?
+            .rows_affected();
+        sqlx::query(
+            "UPDATE contracts SET status = 'active',
+                 version_minor = version_minor + 1, updated_by = $2, updated_at = now()
+              WHERE id = $1 AND status = 'violated'",
+        )
+        .bind(id)
+        .bind(updated_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(Some(i64::try_from(cleared).unwrap_or(i64::MAX)))
+    }
+
+    // ---- Epic 28: usage and popularity ----
+
+    async fn record_usage(&self, batch: &[UsageWrite]) -> Result<UsageIngest, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let mut ingest = UsageIngest::default();
+        let now = chrono::Utc::now();
+
+        for observation in batch {
+            // An observation dated in the future is a clock problem, and storing
+            // it would make every window computation wrong until it passed.
+            if observation.occurred_at > now {
+                ingest.rejected += 1;
+                continue;
+            }
+
+            let inserted = sqlx::query(
+                "INSERT INTO usage_observations
+                     (id, asset_fqn, consumer_key, operation, occurred_at,
+                      row_count, duration_ms, query_id, query_text)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&observation.asset_fqn)
+            .bind(observation.consumer.key())
+            .bind(observation.operation.as_str())
+            .bind(observation.occurred_at)
+            .bind(observation.row_count)
+            .bind(observation.duration_ms)
+            .bind(&observation.query_id)
+            .bind(&observation.query_text)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+            if inserted.rows_affected() == 0 {
+                ingest.duplicates += 1;
+                continue;
+            }
+
+            // Folded in immediately rather than re-scanned later. A late
+            // arrival for a past day lands on that day's row, which is what the
+            // `(asset, consumer, day, operation)` key is for.
+            sqlx::query(
+                "INSERT INTO usage_rollups
+                     (asset_fqn, consumer_key, day, operation, count, total_rows)
+                 VALUES ($1, $2, $3::timestamptz::date, $4, 1, $5)
+                 ON CONFLICT (asset_fqn, consumer_key, day, operation)
+                 DO UPDATE SET count = usage_rollups.count + 1,
+                               total_rows = coalesce(usage_rollups.total_rows, 0)
+                                            + coalesce(EXCLUDED.total_rows, 0)",
+            )
+            .bind(&observation.asset_fqn)
+            .bind(observation.consumer.key())
+            .bind(observation.occurred_at)
+            .bind(observation.operation.as_str())
+            .bind(observation.row_count)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+            // Kept separately so pruning cannot erase it — Slice E's criterion.
+            // `GREATEST` because a batch may arrive out of order.
+            sqlx::query(
+                "INSERT INTO usage_last_accessed (asset_fqn, occurred_at) VALUES ($1, $2)
+                 ON CONFLICT (asset_fqn)
+                 DO UPDATE SET occurred_at = GREATEST(usage_last_accessed.occurred_at, EXCLUDED.occurred_at)",
+            )
+            .bind(&observation.asset_fqn)
+            .bind(observation.occurred_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+            let known: Option<Uuid> =
+                sqlx::query_scalar("SELECT id FROM assets WHERE fully_qualified_name = $1")
+                    .bind(&observation.asset_fqn)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            if known.is_none() {
+                ingest.unmatched += 1;
+            }
+            ingest.accepted += 1;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(ingest)
+    }
+
+    async fn usage_rollups(&self, asset_fqn: &str) -> Result<Vec<UsageRollup>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT consumer_key, day, operation, count, total_rows
+               FROM usage_rollups WHERE asset_fqn = $1 ORDER BY day DESC, consumer_key",
+        )
+        .bind(asset_fqn)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.iter().map(rollup_from_row).collect())
+    }
+
+    async fn last_accessed(
+        &self,
+        asset_fqn: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError> {
+        sqlx::query_scalar("SELECT occurred_at FROM usage_last_accessed WHERE asset_fqn = $1")
+            .bind(asset_fqn)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    async fn rebuild_usage_rollups(&self, asset_fqn: &str) -> Result<i64, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        sqlx::query("DELETE FROM usage_rollups WHERE asset_fqn = $1")
+            .bind(asset_fqn)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let rebuilt = sqlx::query(
+            "INSERT INTO usage_rollups (asset_fqn, consumer_key, day, operation, count, total_rows)
+             SELECT asset_fqn, consumer_key, occurred_at::date, operation,
+                    COUNT(*), NULLIF(SUM(coalesce(row_count, 0)), 0)
+               FROM usage_observations WHERE asset_fqn = $1
+              GROUP BY asset_fqn, consumer_key, occurred_at::date, operation",
+        )
+        .bind(asset_fqn)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        .rows_affected();
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(i64::try_from(rebuilt).unwrap_or(i64::MAX))
+    }
+
+    async fn prune_usage(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<i64, StorageError> {
+        // **The most recent observation per asset survives**, whatever its age.
+        // `last_accessed` lives in its own table for the same reason, but the
+        // raw row is what a later rebuild or an audit would need, and deleting
+        // the only evidence an asset was ever used is not pruning.
+        let pruned = sqlx::query(
+            "DELETE FROM usage_observations o
+              WHERE o.occurred_at < $1
+                AND o.id <> (SELECT keep.id FROM usage_observations keep
+                              WHERE keep.asset_fqn = o.asset_fqn
+                              ORDER BY keep.occurred_at DESC, keep.id
+                              LIMIT 1)",
+        )
+        .bind(before)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        .rows_affected();
+        Ok(i64::try_from(pruned).unwrap_or(i64::MAX))
+    }
+
+    async fn resolve_usage_consumer(
+        &self,
+        identifier: &str,
+        principal_id: &str,
+    ) -> Result<i64, StorageError> {
+        let opaque = format!("opaque:{identifier}");
+        let principal = format!("principal:{principal_id}");
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        sqlx::query("UPDATE usage_observations SET consumer_key = $2 WHERE consumer_key = $1")
+            .bind(&opaque)
+            .bind(&principal)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // **Merge rather than rename**, because the principal may already have
+        // a row for that day: two keys becoming one has to add, or resolving a
+        // consumer would silently discard whichever half was already resolved.
+        let moved = sqlx::query(
+            "WITH moved AS (DELETE FROM usage_rollups WHERE consumer_key = $1 RETURNING *)
+             INSERT INTO usage_rollups (asset_fqn, consumer_key, day, operation, count, total_rows)
+             SELECT asset_fqn, $2, day, operation, count, total_rows FROM moved
+             ON CONFLICT (asset_fqn, consumer_key, day, operation)
+             DO UPDATE SET count = usage_rollups.count + EXCLUDED.count,
+                           total_rows = coalesce(usage_rollups.total_rows, 0)
+                                        + coalesce(EXCLUDED.total_rows, 0)",
+        )
+        .bind(&opaque)
+        .bind(&principal)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        .rows_affected();
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(i64::try_from(moved).unwrap_or(i64::MAX))
+    }
+
     // ---- Epic 25: tags and classifications ----
 
     async fn create_classification(
@@ -7407,6 +7985,37 @@ fn conflict_or_unexpected(error: &sqlx::Error, detail: String) -> StorageError {
         }
     } else {
         StorageError::Unexpected(error.to_string())
+    }
+}
+
+const CONTRACT_COLUMNS: &str = "id, name, asset_fqn, producer, compatibility, status, \
+     allow_additional, version_major, version_minor, updated_by, change_description, \
+     created_at, updated_at";
+
+fn breach_from_row(row: &PgRow) -> ContractBreach {
+    ContractBreach {
+        id: row.get("id"),
+        contract_id: row.get("contract_id"),
+        column: row.get("column_name"),
+        detail: row.get("detail"),
+        asset_version: row.get("asset_version"),
+        detected_at: row.get("detected_at"),
+    }
+}
+
+fn rollup_from_row(row: &PgRow) -> UsageRollup {
+    UsageRollup {
+        consumer_key: row.get("consumer_key"),
+        day: row.get("day"),
+        // A stored value the enum has never heard of falls back rather than
+        // panicking — the column has a `CHECK`, so this is only reachable by a
+        // migration that widened it.
+        operation: UsageOperation::parse(row.get::<String, _>("operation").as_str())
+            .unwrap_or(UsageOperation::Read),
+        count: u64::try_from(row.get::<i64, _>("count")).unwrap_or(0),
+        total_rows: row
+            .get::<Option<i64>, _>("total_rows")
+            .and_then(|n| u64::try_from(n).ok()),
     }
 }
 

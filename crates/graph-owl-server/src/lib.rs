@@ -23,6 +23,7 @@ use graph_owl_api::{
     validation::{FieldError, FieldErrorCode, ValidateBody, require_non_empty_string},
 };
 use graph_owl_connectors::{Connector, DeletionPlan, RunScope, postgres::PostgresConnector};
+use graph_owl_core::contract::{CompatibilityMode, ContractStatus};
 use graph_owl_core::envelope::EntityVersion;
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
@@ -89,6 +90,20 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             "/custom-properties/{id}",
             patch(update_custom_property).delete(delete_custom_property),
         )
+        // Epic 27. A contract is an entity with parties, not an annotation —
+        // so it gets entity routes, and the evaluation is a sub-resource of the
+        // *asset* whose change triggered it.
+        .route("/contracts", get(list_contracts).post(create_contract))
+        .route("/contracts/{id}", get(get_contract))
+        .route("/contracts/{id}/status", post(set_contract_status))
+        .route("/contracts/{id}/breaches", delete(clear_contract_breaches))
+        .route("/contracts/{id}/slas", get(evaluate_slas))
+        .route("/assets/{fqn}/schema-change", post(evaluate_schema_change))
+        // Epic 28. Usage is pushed, never read from an engine (decision 5).
+        .route("/usage", post(record_usage))
+        .route("/usage/{fqn}", get(asset_popularity))
+        .route("/usage/{fqn}/rollups", get(asset_rollups))
+        .route("/usage/prune", post(prune_usage))
         // Epic 25. Classifications are the operational vocabulary; labels are
         // its application, and they carry where they came from.
         .route(
@@ -5789,6 +5804,406 @@ async fn delete_custom_property(
         .delete_custom_property(&principal, id, query.force.unwrap_or(false))
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- Epic 27: data contracts ----
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateContractBody {
+    name: String,
+    asset_fqn: String,
+    producer: String,
+    #[serde(default)]
+    consumers: Vec<String>,
+    #[serde(default)]
+    schema_guarantee: graph_owl_core::contract::SchemaGuarantee,
+    #[serde(default)]
+    slas: Vec<graph_owl_core::contract::Sla>,
+    /// Defaults to `none`: a contract that has not stated a compatibility mode
+    /// has not agreed to one, and inferring a strict default would make every
+    /// schema change a breach for contracts nobody wrote that intent into.
+    #[serde(default)]
+    compatibility: Option<String>,
+    /// Defaults to `draft`, because a contract is a proposal until somebody
+    /// activates it — and a `Draft` one is not evaluated.
+    #[serde(default)]
+    status: Option<String>,
+}
+
+impl ValidateBody for CreateContractBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        for field in ["name", "assetFqn", "producer"] {
+            require_non_empty_string(
+                value,
+                &graph_owl_api::validation::FieldPath::root().key(field),
+                &mut errors,
+            );
+        }
+        errors
+    }
+}
+
+fn parse_compatibility(raw: Option<&str>) -> Result<CompatibilityMode, AppError> {
+    match raw {
+        None => Ok(CompatibilityMode::None),
+        Some(name) => CompatibilityMode::parse(name).map_err(|unknown| {
+            AppError::Validation(vec![FieldError::new(
+                "compatibility",
+                FieldErrorCode::Value,
+                format!(
+                    "`{unknown}` is not a compatibility mode; expected one of: {}",
+                    CompatibilityMode::all()
+                        .iter()
+                        .map(|m| m.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )])
+        }),
+    }
+}
+
+fn parse_contract_status(raw: Option<&str>) -> Result<ContractStatus, AppError> {
+    match raw {
+        None => Ok(ContractStatus::Draft),
+        Some(name) => ContractStatus::parse(name).map_err(|unknown| {
+            AppError::Validation(vec![FieldError::new(
+                "status",
+                FieldErrorCode::Value,
+                format!(
+                    "`{unknown}` is not a contract status; expected one of: {}",
+                    ContractStatus::all()
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )])
+        }),
+    }
+}
+
+async fn create_contract(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<CreateContractBody>,
+) -> Result<(StatusCode, Json<graph_owl_core::contract::Contract>), AppError> {
+    let compatibility = parse_compatibility(payload.compatibility.as_deref())?;
+    let status = parse_contract_status(payload.status.as_deref())?;
+
+    let created = catalog
+        .create_contract(
+            &principal,
+            graph_owl_api::CreateContract {
+                name: payload.name,
+                asset_fqn: payload.asset_fqn,
+                producer: payload.producer,
+                consumers: payload.consumers,
+                schema_guarantee: payload.schema_guarantee,
+                slas: payload.slas,
+                compatibility,
+                status,
+            },
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContractListQuery {
+    #[serde(default)]
+    asset_fqn: Option<String>,
+}
+
+async fn list_contracts(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppQuery(query): AppQuery<ContractListQuery>,
+) -> Result<Json<Vec<graph_owl_core::contract::Contract>>, AppError> {
+    Ok(Json(
+        catalog.list_contracts(query.asset_fqn.as_deref()).await?,
+    ))
+}
+
+async fn get_contract(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let stored = catalog.get_contract(id).await?.ok_or(AppError::NotFound)?;
+    Ok(Json(json!({
+        "contract": stored.contract,
+        // Breaches ride with the contract rather than behind a second request:
+        // "is this contract in good standing" is the question every reader
+        // has, and answering it in two round trips invites the second one
+        // being skipped.
+        "breaches": stored.breaches,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContractStatusBody {
+    status: String,
+}
+
+impl ValidateBody for ContractStatusBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("status"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+async fn set_contract_status(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<ContractStatusBody>,
+) -> Result<StatusCode, AppError> {
+    let status = parse_contract_status(Some(&payload.status))?;
+    catalog.set_contract_status(&principal, id, status).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn clear_contract_breaches(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let cleared = catalog.clear_contract_breaches(&principal, id).await?;
+    Ok(Json(json!({ "cleared": cleared })))
+}
+
+async fn evaluate_slas(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    Ok(Json(
+        catalog
+            .evaluate_slas(id)
+            .await?
+            .into_iter()
+            .map(|(sla, evaluation)| json!({ "sla": sla, "evaluation": evaluation }))
+            .collect(),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SchemaChangeBody {
+    change: graph_owl_core::contract::SchemaChange,
+    /// The asset version the change produced, so "when did this break" is
+    /// answerable against the asset's own history rather than only a timestamp.
+    #[serde(default)]
+    asset_version: Option<String>,
+}
+
+impl ValidateBody for SchemaChangeBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        if value.get("change").is_none() {
+            errors.push(FieldError::new(
+                "change",
+                FieldErrorCode::Required,
+                "`change` is required",
+            ));
+        }
+        errors
+    }
+}
+
+/// **Reports, never blocks** (decision 3). graph-owl observes metadata and
+/// cannot stop a warehouse `ALTER TABLE`, so this returns `200` with the
+/// breaches it found rather than refusing anything — a `409` here would be a
+/// promise the system has no way to keep.
+async fn evaluate_schema_change(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(fqn): Path<String>,
+    AppJson(payload): AppJson<SchemaChangeBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let version = payload
+        .asset_version
+        .unwrap_or_else(|| "unknown".to_string());
+    let breaches = catalog
+        .evaluate_schema_change(&fqn, &payload.change, &version)
+        .await?;
+
+    Ok(Json(json!({
+        "breaches": breaches
+            .iter()
+            .map(|report| json!({
+                "contractId": report.contract_id,
+                "contractName": report.contract_name,
+                "producer": report.producer,
+                "consumers": report.consumers,
+                "column": report.column,
+                "detail": report.detail,
+            }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+// ---- Epic 28: usage and popularity ----
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UsageBatchBody {
+    observations: Vec<UsageObservationBody>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UsageObservationBody {
+    asset_fqn: String,
+    /// A warehouse identity. Resolved to a principal if one matches, kept
+    /// opaque otherwise — a username nothing here matches is still a distinct
+    /// consumer, and dropping it would under-count exactly the external usage
+    /// nobody has onboarded.
+    consumer: String,
+    #[serde(default)]
+    consumer_is_principal: bool,
+    operation: String,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    row_count: Option<i64>,
+    #[serde(default)]
+    duration_ms: Option<i64>,
+    #[serde(default)]
+    query_id: Option<String>,
+    /// Accepted on the wire and **dropped before storage** unless the
+    /// deployment opted in. Accepting-then-dropping rather than refusing,
+    /// because a client pushing a log it cannot easily strip should not have
+    /// its whole batch rejected over a field the server was never going to keep.
+    #[serde(default)]
+    query_text: Option<String>,
+}
+
+impl ValidateBody for UsageBatchBody {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        if !value
+            .get("observations")
+            .is_some_and(serde_json::Value::is_array)
+        {
+            errors.push(FieldError::new(
+                "observations",
+                FieldErrorCode::Required,
+                "`observations` must be an array",
+            ));
+        }
+        errors
+    }
+}
+
+async fn record_usage(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    AppJson(payload): AppJson<UsageBatchBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use graph_owl_core::usage::{Consumer, UsageOperation};
+
+    let mut batch = Vec::with_capacity(payload.observations.len());
+    for observation in payload.observations {
+        let operation = UsageOperation::parse(&observation.operation).map_err(|unknown| {
+            AppError::Validation(vec![FieldError::new(
+                "observations.operation",
+                FieldErrorCode::Value,
+                format!(
+                    "`{unknown}` is not a usage operation; expected one of: {}",
+                    UsageOperation::all()
+                        .iter()
+                        .map(|o| o.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )])
+        })?;
+        let consumer = if observation.consumer_is_principal {
+            Consumer::Principal {
+                id: observation.consumer,
+            }
+        } else {
+            Consumer::Opaque {
+                identifier: observation.consumer,
+            }
+        };
+        batch.push(graph_owl_storage::UsageWrite {
+            asset_fqn: observation.asset_fqn,
+            consumer,
+            operation,
+            occurred_at: observation.occurred_at,
+            row_count: observation.row_count,
+            duration_ms: observation.duration_ms,
+            query_id: observation.query_id,
+            query_text: observation.query_text,
+        });
+    }
+
+    let ingest = catalog.record_usage(batch).await?;
+    Ok(Json(json!({
+        "accepted": ingest.accepted,
+        // Reported rather than hidden: an operator wants to know how much of a
+        // push landed on assets the catalog has never seen, because that is a
+        // connector gap rather than a usage fact.
+        "unmatched": ingest.unmatched,
+        "duplicates": ingest.duplicates,
+        "rejected": ingest.rejected,
+    })))
+}
+
+async fn asset_popularity(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(fqn): Path<String>,
+) -> Result<Json<graph_owl_core::usage::PopularitySummary>, AppError> {
+    Ok(Json(catalog.popularity(&fqn).await?))
+}
+
+async fn asset_rollups(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(fqn): Path<String>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    Ok(Json(
+        catalog
+            .usage_rollups(&fqn)
+            .await?
+            .iter()
+            .map(|rollup| {
+                json!({
+                    "consumerKey": rollup.consumer_key,
+                    "day": rollup.day,
+                    "operation": rollup.operation,
+                    "count": rollup.count,
+                    "totalRows": rollup.total_rows,
+                })
+            })
+            .collect(),
+    ))
+}
+
+async fn prune_usage(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Admin-only, for the same reason reconciliation is: a scan-and-delete over
+    // the largest table in the system is the cheapest way an unprivileged
+    // caller could load the database.
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let pruned = catalog.prune_usage().await?;
+    Ok(Json(json!({ "pruned": pruned })))
 }
 
 // ---- Epic 25: tags and classifications ----
