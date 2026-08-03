@@ -111,10 +111,7 @@ pub fn fit<T: Fits>(payload: &mut T, budget: TokenBudget) -> Option<TruncationRe
 
     // 1. Prose. The agent can ask for a description by name; it cannot ask for
     //    an entity it was never told about.
-    while estimate_tokens(&payload.render()) > budget.max_tokens {
-        if !payload.shorten_detail() {
-            break;
-        }
+    if drain(payload, budget, T::shorten_detail) {
         worst = Some(TruncationReason::DetailShortened);
     }
     if estimate_tokens(&payload.render()) <= budget.max_tokens {
@@ -122,10 +119,7 @@ pub fn fit<T: Fits>(payload: &mut T, budget: TokenBudget) -> Option<TruncationRe
     }
 
     // 2. Related-entity lists. Every entity is still present and nameable.
-    while estimate_tokens(&payload.render()) > budget.max_tokens {
-        if !payload.shorten_relations() {
-            break;
-        }
+    if drain(payload, budget, T::shorten_relations) {
         worst = Some(TruncationReason::RelationsShortened);
     }
     if estimate_tokens(&payload.render()) <= budget.max_tokens {
@@ -135,14 +129,70 @@ pub fn fit<T: Fits>(payload: &mut T, budget: TokenBudget) -> Option<TruncationRe
     // 3. Entities, last, and **never silently**: the caller sets `truncated`
     //    from this return value, and an agent told the list is incomplete asks
     //    again rather than concluding absence.
-    while estimate_tokens(&payload.render()) > budget.max_tokens {
-        if !payload.drop_entities() {
-            break;
-        }
+    if drain(payload, budget, T::drop_entities) {
         worst = Some(TruncationReason::EntitiesDropped);
     }
     worst
 }
+
+/// Pull one lever until the payload fits, it stops helping, or it stops
+/// shrinking. Returns whether anything was actually cut.
+///
+/// **The `shrank` check is the termination guarantee, and it is not
+/// belt-and-braces.** Without it the loop terminates only because every
+/// implementor honestly reports "nothing changed" — an unenforceable contract
+/// on a public trait, where a lever that returns `true` having done nothing
+/// spins forever. That is a hung tool call and a burned core, in a server whose
+/// callers are autonomous and will simply retry.
+///
+/// Mutation testing found this: replacing any of the six lever bodies with
+/// `-> true` produced eight timeouts rather than eight failures. A hang is a
+/// finding, and this is the third unbounded loop in this project to reach a test
+/// suite — so the rule the other two earned applies here too: **a loop driven by
+/// something else's return value states what makes it stop.**
+///
+/// Progress is measured on the rendered bytes rather than the token estimate,
+/// because the estimate divides by three and a genuine one-character removal can
+/// leave it unchanged. Stopping early there would return a slightly over-budget
+/// answer; stopping late would hang. The first is the safe direction and this
+/// picks it deliberately.
+fn drain<T: Fits>(payload: &mut T, budget: TokenBudget, lever: impl Fn(&mut T) -> bool) -> bool {
+    let mut cut_something = false;
+    let mut previous = payload.render().to_string().len();
+
+    for _ in 0..MAX_PULLS_PER_RUNG {
+        if estimate_tokens(&payload.render()) <= budget.max_tokens {
+            break;
+        }
+        if !lever(payload) {
+            break;
+        }
+        let now = payload.render().to_string().len();
+        if now >= previous {
+            // The lever claimed progress it did not make. Stop rather than
+            // spin, and do not credit a truncation that did not happen.
+            break;
+        }
+        previous = now;
+        cut_something = true;
+    }
+    cut_something
+}
+
+/// A hard ceiling on how many times one rung may be pulled.
+///
+/// **A second, independent termination bound**, so that no single mutated
+/// comparison anywhere in [`drain`] can produce an infinite loop — which is
+/// exactly what a mutation run demonstrated when the progress check was the only
+/// guard: inverting it turned a hang back on.
+///
+/// A thousand cannot bind on a legitimate payload. The largest collection any
+/// tool returns is a search page, capped at 100; the deepest walk is
+/// [`crate::lineage::MAX_DEPTH`]; a governance context's classifications are
+/// bounded by the tag vocabulary. An order of magnitude above the largest of
+/// those means this never truncates a real answer, and turns a pathological
+/// lever into a fast wrong answer rather than a hung request.
+const MAX_PULLS_PER_RUNG: usize = 1_000;
 
 #[cfg(test)]
 mod tests {
@@ -331,6 +381,104 @@ mod tests {
             "a four-chars-per-token reading would be {}, this is {estimated}",
             rendered.len() / 4
         );
+    }
+
+    /// A payload whose levers **lie**: each reports that it cut something and
+    /// none of them does.
+    ///
+    /// Not a hypothetical. `Fits` is a public trait, so its implementors are not
+    /// all in this crate, and "return `true` only if you really changed
+    /// something" is a contract nothing enforces.
+    struct Liar {
+        pulls: std::cell::Cell<usize>,
+    }
+
+    impl Fits for Liar {
+        fn shorten_detail(&mut self) -> bool {
+            self.pulls.set(self.pulls.get() + 1);
+            true
+        }
+        fn shorten_relations(&mut self) -> bool {
+            self.pulls.set(self.pulls.get() + 1);
+            true
+        }
+        fn drop_entities(&mut self) -> bool {
+            self.pulls.set(self.pulls.get() + 1);
+            true
+        }
+        fn render(&self) -> serde_json::Value {
+            serde_json::json!({ "immovable": "x".repeat(500) })
+        }
+    }
+
+    /// **A lever that reports progress it did not make must not spin.**
+    ///
+    /// Found by mutation testing: replacing any lever body with `-> true` timed
+    /// out rather than failed, which means `fit` terminated only by the grace of
+    /// every implementor being honest. In a server whose callers are autonomous
+    /// and retry, that is a hung tool call and a burned core.
+    #[test]
+    fn a_payload_whose_levers_lie_terminates_instead_of_spinning() {
+        let mut payload = Liar {
+            pulls: std::cell::Cell::new(0),
+        };
+
+        let reason = fit(&mut payload, TokenBudget { max_tokens: 1 });
+
+        // It gave up rather than looping, and it did **not** claim a truncation
+        // that never happened.
+        assert_eq!(reason, None, "nothing was actually cut");
+        assert!(
+            payload.pulls.get() <= 3,
+            "one wasted pull per rung is the bound, not one per iteration: \
+             {} pulls",
+            payload.pulls.get()
+        );
+    }
+
+    /// **A payload that lands exactly on the budget stops there.**
+    ///
+    /// The boundary is `>`, not `>=`: a response measuring precisely
+    /// `max_tokens` fits, and cutting one more entity from it is a loss taken
+    /// for nothing. Found by mutation testing — every other test happens to
+    /// leave the payload strictly under budget once a rung is exhausted, so the
+    /// off-by-one was invisible.
+    #[test]
+    fn a_payload_landing_exactly_on_the_budget_is_not_cut_further() {
+        // The size after exactly one entity is dropped, with prose and relations
+        // already gone. Measured, not guessed — see the sibling tests.
+        let max_tokens = {
+            let mut probe = Payload::large();
+            probe.shorten_detail();
+            while probe.shorten_relations() {}
+            probe.drop_entities();
+            estimate_tokens(&probe.render())
+        };
+        let mut payload = Payload::large();
+
+        fit(&mut payload, TokenBudget { max_tokens });
+
+        assert_eq!(
+            payload.entities.len(),
+            5,
+            "exactly one entity was dropped, not two: {payload:?}"
+        );
+    }
+
+    /// And an honest payload still gets fully drained — the guard must not stop
+    /// a lever that is genuinely working.
+    #[test]
+    fn the_progress_guard_does_not_cut_an_honest_drain_short() {
+        let mut payload = Payload::large();
+
+        fit(&mut payload, TokenBudget { max_tokens: 20 });
+
+        assert!(
+            payload.descriptions.iter().all(String::is_empty),
+            "every rung ran to exhaustion: {payload:?}"
+        );
+        assert!(payload.relations.iter().all(Vec::is_empty), "{payload:?}");
+        assert!(payload.entities.is_empty(), "{payload:?}");
     }
 
     #[test]

@@ -235,6 +235,19 @@ pub fn masked_columns_of<S: std::hash::BuildHasher>(
     masked
 }
 
+/// **Two surviving mutants here are equivalent, and that is the finding.**
+///
+/// `cargo mutants` reports `shorten_detail -> true` and `drop_entities -> true`
+/// as MISSED. Neither is a test gap: a lever that reports a cut it did not make
+/// is now absorbed by [`crate::budget::drain`]'s progress check, which sees the
+/// payload has not shrunk and stops without crediting a truncation. The observable
+/// behaviour is identical, so no behavioural test can distinguish them — killing
+/// them would mean asserting how many times a lever was *called*, which is
+/// testing the implementation rather than the contract.
+///
+/// Worth recording rather than chasing: before the progress check these same two
+/// mutants were TIMEOUTs — an infinite loop. The fix converted a hang into an
+/// equivalence, which is the outcome that was wanted.
 impl crate::budget::Fits for GovernanceContext {
     fn shorten_detail(&mut self) -> bool {
         // Retention and domain are single short strings and are *rules*; there
@@ -528,6 +541,117 @@ mod tests {
             vec!["orders.freshness".to_string()]
         );
         assert!(report.truncated, "{report:?}");
+    }
+
+    /// **Contracts go before teams, and only once the asset names are gone.**
+    ///
+    /// The rung below the test above: when shedding every asset name still is
+    /// not enough, a contract the agent can look up is a smaller loss than a
+    /// team that is never told. Mutation testing missed this entirely — the
+    /// ordering test above stops one rung short and never reaches
+    /// `drop_entities`.
+    #[test]
+    fn an_impact_report_sheds_contracts_before_teams() {
+        let mut report = ImpactReport {
+            affected_assets: vec!["svc.db.public.t0".to_string()],
+            affected_contracts: vec!["orders.freshness".to_string()],
+            owning_teams: vec!["payments".to_string()],
+            policy_filtered: false,
+            truncated: false,
+            truncation_reason: None,
+        };
+
+        let reason = fit(&mut report, TokenBudget { max_tokens: 0 });
+
+        assert_eq!(reason, Some(TruncationReason::EntitiesDropped));
+        assert!(report.affected_assets.is_empty(), "{report:?}");
+        assert!(
+            report.affected_contracts.is_empty(),
+            "the contract gave way first: {report:?}"
+        );
+        assert!(
+            report.owning_teams.is_empty(),
+            "and at an impossible budget even the teams go — but last: {report:?}"
+        );
+    }
+
+    /// The rung ordering *within* `drop_entities`: with a contract still
+    /// present, one pull takes the contract and leaves the team.
+    #[test]
+    fn one_drop_takes_the_contract_and_leaves_the_team() {
+        let mut report = ImpactReport {
+            affected_contracts: vec!["orders.freshness".to_string()],
+            owning_teams: vec!["payments".to_string()],
+            ..ImpactReport::default()
+        };
+
+        assert!(report.drop_entities());
+
+        assert!(report.affected_contracts.is_empty(), "{report:?}");
+        assert_eq!(
+            report.owning_teams,
+            vec!["payments".to_string()],
+            "a team that is never told cannot act at all: {report:?}"
+        );
+        assert!(report.truncated);
+    }
+
+    /// A report with nothing left says so, rather than reporting a cut it did
+    /// not make — which is what `fit`'s termination depends on.
+    #[test]
+    fn an_exhausted_impact_report_reports_no_further_cut() {
+        let mut report = ImpactReport::default();
+
+        assert!(!report.drop_entities());
+        assert!(!report.shorten_relations());
+        assert!(!report.shorten_detail());
+        assert!(
+            !report.truncated,
+            "and a lever that cut nothing does not flag a truncation"
+        );
+    }
+
+    /// **`render` must render.** A `render` returning `null` costs two tokens,
+    /// so every governance response would measure as fitting any budget and the
+    /// ladder would never run — a truncation bug that reports success.
+    #[test]
+    fn a_governance_context_renders_its_own_content() {
+        let context = GovernanceContext {
+            classifications: vec!["PII.Basic".to_string()],
+            masked_columns: vec![MaskedColumn {
+                name: "svc.db.t.ssn".to_string(),
+                reason: "PII.Sensitive".to_string(),
+            }],
+            retention: Some("P7Y".to_string()),
+            domain: Some("finance".to_string()),
+            permitted_operations: vec!["read".to_string()],
+            truncated: false,
+            truncation_reason: None,
+        };
+
+        let rendered = context.render();
+
+        assert_eq!(rendered["maskedColumns"][0]["name"], "svc.db.t.ssn");
+        assert_eq!(rendered["retention"], "P7Y");
+        assert!(
+            crate::budget::estimate_tokens(&rendered) > 10,
+            "a payload that measures as nearly free is one the budget cannot \
+             see: {rendered}"
+        );
+    }
+
+    /// Same argument for the other two payloads.
+    #[test]
+    fn a_walk_and_an_impact_report_render_their_own_content() {
+        let walk = walk_upstream("c", |_| true, chain());
+        let rendered = walk.render();
+        assert_eq!(rendered["steps"][0]["fromFqn"], "b");
+
+        let report = ImpactReport {
+            affected_assets: vec!["reporting.revenue".to_string()],
+            ..ImpactReport::default()
+        };
+        assert_eq!(report.render()["affectedAssets"][0], "reporting.revenue");
     }
 
     /// A walk with nothing left to shed reports that it cannot shed more,

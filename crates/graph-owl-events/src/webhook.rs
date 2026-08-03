@@ -388,6 +388,65 @@ mod tests {
         }
     }
 
+    /// **The changed field *names* travel; their values do not.**
+    ///
+    /// This is the whole compromise the thin payload makes: a subscriber that
+    /// cannot tell a description edit from a schema break has to fetch on every
+    /// event, which is the polling this replaces — so the names go. The values
+    /// are the content, so they stay behind a fetch, which is filtered.
+    #[test]
+    fn a_payload_carries_changed_field_names_but_never_their_values() {
+        use graph_owl_core::envelope::FieldChange;
+
+        let mut source = event();
+        source.change = ChangeDescription {
+            fields_added: vec![FieldChange {
+                field: "retentionDays".to_string(),
+                before: None,
+                after: Some(serde_json::json!(30)),
+            }],
+            fields_updated: vec![FieldChange {
+                field: "description".to_string(),
+                before: Some(serde_json::json!("the old text nobody may read")),
+                after: Some(serde_json::json!("the new text nobody may read")),
+            }],
+            fields_deleted: vec![FieldChange {
+                field: "costCentre".to_string(),
+                before: Some(serde_json::json!("CC-4471")),
+                after: None,
+            }],
+        };
+
+        let payload = thin_payload(&source);
+        let rendered = serde_json::to_string(&payload).expect("serialize");
+
+        assert_eq!(
+            payload.changed_fields,
+            vec![
+                "costCentre".to_string(),
+                "description".to_string(),
+                "retentionDays".to_string(),
+            ],
+            "all three kinds of change name their field"
+        );
+        for value in ["the old text", "the new text", "CC-4471", "30"] {
+            assert!(
+                !rendered.contains(value),
+                "`{value}` is content and must stay behind a fetch: {rendered}"
+            );
+        }
+    }
+
+    /// An event that changed nothing nameable carries an empty list rather than
+    /// a placeholder — a subscriber reading `[\"\"]` would refetch for a field
+    /// that does not exist.
+    #[test]
+    fn a_payload_with_no_field_changes_carries_an_empty_list() {
+        let payload = thin_payload(&event());
+
+        assert!(payload.changed_fields.is_empty(), "{payload:?}");
+    }
+
     /// And the identifiers that make a fetch possible **are** there — a payload
     /// so thin the subscriber cannot find the entity is not thin, it is broken.
     #[test]
@@ -537,8 +596,14 @@ mod tests {
             "http://[::1]/hook",
             "http://[fe80::1]/hook",
             "http://[fc00::1]/hook",
-            // IPv4-mapped IPv6 reaches the IPv4 address it maps to.
+            // IPv4-mapped IPv6 reaches the IPv4 address it maps to, so every
+            // v4 rule has to survive the mapping — loopback, private, and
+            // link-local each spelled this way too.
             "http://[::ffff:127.0.0.1]/hook",
+            "http://[::ffff:10.0.0.5]/hook",
+            "http://[::ffff:192.168.1.1]/hook",
+            "http://[::ffff:169.254.169.254]/hook",
+            "http://[::ffff:0.0.0.0]/hook",
         ] {
             assert_eq!(
                 admit_target(target, &nothing_allowed()),
@@ -555,6 +620,38 @@ mod tests {
                 "{target} must be refused"
             );
         }
+    }
+
+    /// **The metadata endpoint is refused however it is spelled.**
+    ///
+    /// `169.254.169.254` is the single most valuable SSRF target on any hosted
+    /// deployment, and an IPv4-mapped IPv6 literal is the obvious way to try it
+    /// twice. Called out separately from the table above because this is the
+    /// one a reader should be able to find by name.
+    #[test]
+    fn the_cloud_metadata_address_is_refused_in_both_spellings() {
+        for target in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::ffff:169.254.169.254]/latest/meta-data/",
+        ] {
+            assert!(
+                matches!(
+                    admit_target(target, &nothing_allowed()),
+                    Err(TargetRefusal::Private { .. })
+                ),
+                "{target} must be refused"
+            );
+        }
+    }
+
+    /// A public IPv4 wearing the mapped spelling is still public — the mapping
+    /// inherits the address's verdict, it does not impose one.
+    #[test]
+    fn a_mapped_public_address_is_still_admitted() {
+        assert_eq!(
+            admit_target("http://[::ffff:93.184.216.34]/hook", &nothing_allowed()),
+            Ok(())
+        );
     }
 
     /// **Userinfo does not launder a private target.** `http://evil.com@127.0.0.1/`
