@@ -1,4 +1,9 @@
 [workspace]
+# The Cypher parser spike (Epic 7b Slice A, 4 Aug 2026) is a throwaway
+# evaluation kept for reproducibility, not a component. Excluded so it never
+# builds, gates, or appears in `cargo check --workspace` — its dependencies are
+# candidates we evaluated, and three of the four were rejected.
+exclude = ["spikes/cypher-parsers-2026-08"]
 resolver = "2"
 members = ["crates/*"]
 

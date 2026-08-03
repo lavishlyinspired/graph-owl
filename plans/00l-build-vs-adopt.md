@@ -341,6 +341,71 @@ Judged on, in order:
 5. **AST usability for lowering** — typed and exhaustive-matchable, or untyped.
 6. **Maintenance and dependency weight.**
 
-**The spike's outcome is Epic 7b Slice A's first commit**, whichever way it
-falls, and this section is updated with the result rather than left as a
-prediction.
+### The spike ran. Here is what it found.
+
+**4 August 2026.** Harness and corpus preserved at
+`spikes/cypher-parsers-2026-08/` (excluded from the workspace). 32 queries: 22
+inside Epic 7b's subset, 6 out of subset, 4 malformed.
+
+| | in-subset parsed | out-of-subset refused | malformed refused | diagnostics |
+|---|---|---|---|---|
+| `decypher` 0.2.0-alpha.6 | **22 / 22** | 0 / 6 | 4 / 4 | positioned |
+| `tree-sitter-cypher` 0.2.6 | **22 / 22** | 1 / 6 | 4 / 4 | **row + column** |
+| `cypher-parser` 0.8.1 | 20 / 22 | 6 / 6 | 4 / 4 | byte offset |
+
+**Result: `cypher-parser` is disqualified, and the spike is why.** It had the
+best provenance of the three — MIT, the real Shopify organisation, a visible
+repository, active releases — and it fails on the two things graph-owl needs
+most:
+
+1. **It cannot parse relationship properties.**
+   `MATCH (a)-[r:FEEDS {confidence: 0.9}]->(b)` →
+   *"expected `]` to close a relationship pattern"*. Edge properties are the
+   defining LPG feature and the entire reason `07c` says this mapping is cheap.
+   A Cypher front end that cannot express them cannot express the thing this
+   product is best at.
+2. **It cannot parse float literals at all.** `0.8` fails in a `WHERE`, in a
+   list, everywhere; only integers parse. `dsc:confidence` is a float, and every
+   lineage and reasoning threshold in this system is one.
+
+Its 6/6 on out-of-subset refusals is also worth less than it looks: the
+refusals are generic syntax errors — `CREATE …` produces *"expected `MATCH`"* —
+which does **not** name the API to use instead, and Slice A's RED requires
+exactly that.
+
+**`decypher` and `tree-sitter-cypher` "failing" the out-of-subset column is not
+a defect.** They are full openCypher parsers, so `CREATE` and `CALL` are valid
+Cypher and parse correctly. The subset restriction is *our* policy, not theirs,
+so the gate belongs in our adapter — which is where it should be anyway, because
+only we can write "use `POST /assets` instead". `decypher`'s `analyze` (HIR)
+layer also accepts writes, so it does not supply the gate either.
+
+**Corrected**: the first run reported tree-sitter as giving no positions. That
+was a bug in the harness — it passed `accepted` as the `positioned` flag, so a
+refusal always recorded "no position". tree-sitter reports **row and column** on
+every `ERROR` and `MISSING` node, which is precisely what Slice A asks for. The
+harness is fixed; the correction is recorded because the original claim was
+published in a commit message.
+
+### The decision, now evidence-backed
+
+**Adopt `decypher` for the engine path, subject to its alpha status.** It is the
+only candidate that parses the whole declared subset including edge properties
+and floats, it yields a typed AST that lowering can match exhaustively, and it
+reports positions. Its `Unsupported` behaviour for unhandled productions is the
+shape Slice A wants.
+
+**The alpha risk is real and is managed, not ignored.** Its README says the AST
+is unstable until 0.2.0. The mitigation is that **the adapter is the only thing
+that touches its AST** — lowering goes `decypher AST → our CypherAst →
+QueryAst`, so an upstream AST change is confined to one file with its own tests.
+That boundary is worth having regardless of which parser wins.
+
+**Adopt `tree-sitter-cypher` for Epic 41's workbench**, as originally reasoned:
+incremental, error-tolerant, row/column diagnostics, and highlight/injection
+queries already in the crate. Its error-tolerance remains the reason it is not
+the engine parser.
+
+**`pest` is no longer the fallback for Slice A** — no candidate failed in a way
+that requires generating our own. It stays listed only in case `decypher` is
+abandoned before 0.2.0.

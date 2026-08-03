@@ -1,0 +1,11 @@
+[package]
+name = "cypher-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cypher-parser = "0.8"
+tree-sitter = "0.26"
+tree-sitter-cypher = "0.2"
+decypher = "0.2.0-alpha.6"

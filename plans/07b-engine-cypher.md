@@ -97,10 +97,13 @@ this slice:
 - **The ~10k-line figure quoted from `07c` is not this slice's size.** It is a
   *complete* front end for the whole language. This subset is eleven clause
   forms.
-- **Spike order**: `cypher-parser` (MIT, Shopify, active, parse/execute
-  separable) → `tree-sitter-cypher` (MIT, mature runtime) → `decypher`
-  (permissive, typed, alpha) → **`opencypher` is blocked** while its repository
-  404s → `pest` from the vendored EBNF as the fallback.
+- **The spike ran on 4 August 2026 and settled it: adopt `decypher`.** It is
+  the only candidate that parses the whole declared subset — 22/22, including
+  relationship properties and float literals — with a typed AST and positioned
+  errors. `cypher-parser` is **disqualified**: it cannot parse
+  `[r:FEEDS {confidence: 0.9}]` and cannot parse `0.8` anywhere. Results, corpus
+  and harness are in `00l-build-vs-adopt.md` and
+  `spikes/cypher-parsers-2026-08/`.
 - **Auditability is a gate, not a score.** `opencypher` is the best API fit on
   paper — a typed, span-annotated AST — and cannot be adopted while its source
   cannot be read, its licence claim cannot be checked against the code, and
@@ -114,11 +117,18 @@ this slice:
   tree-sitter wins for the editor and something typed wins for the engine, two
   parsers is the right answer and the TCK is what keeps them agreeing.
 
-**The spike is this slice's first commit**, whichever way it falls, and it runs
-**one corpus against every candidate** — otherwise it is four impressions rather
-than a comparison. Judged in this order: auditability and licence (a gate);
-subset coverage; refusal behaviour on out-of-subset constructs; diagnostics with
-line and column; AST usability for lowering; maintenance and dependency weight.
+**The spike is done.** What remains for this slice is the *adapter*: `decypher`
+AST → our `CypherAst`, plus the subset gate. Two consequences of the spike bind
+the work:
+
+- **The subset gate is ours, not the parser's.** `decypher` parses `CREATE`,
+  `CALL` and `FOREACH` correctly — they are valid Cypher — so the adapter
+  rejects them, which is where it belongs anyway: only we can say "use
+  `POST /assets` instead", and Slice A's RED requires that wording.
+- **The adapter is the only file that touches `decypher`'s AST.** Its README
+  says that AST is unstable until 0.2.0, so confining it to one boundary with
+  its own tests is what makes an alpha dependency acceptable rather than
+  reckless. If it is abandoned before 0.2.0, that one file is the blast radius.
 
 **Acceptance criteria**: node and relationship patterns with labels, types, direction, and properties; `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT`, `DISTINCT`; variable-length `*1..3`, `*`, `*..5`; a write clause → a specific rejection naming it and pointing at the catalog API; `CALL`/`FOREACH` → "unsupported"; syntax errors report line and column; **an out-of-subset construct is refused explicitly rather than partially parsed** — whichever parser is adopted, a silent partial parse on the engine path is disqualifying.
 **RED**: A query corpus with expected ASTs, plus a malformed corpus with expected positions. Write-clause tests asserting the rejection *names the API to use instead* — a bare "unsupported" leaves the user stuck. **A partial-parse test**: a query that is half in-subset must be refused whole, not lowered as far as it got. Mutator watch: accepting `CREATE` must fail; generic errors must fail the naming assertions; treating a partial parse as success must fail the refusal test.
