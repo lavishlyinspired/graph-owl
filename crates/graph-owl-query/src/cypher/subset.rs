@@ -164,26 +164,33 @@ fn forbidden(kind: SyntaxKind) -> Option<Refusal> {
 ///
 /// [`Refusal`] naming the construct and where to go instead.
 pub fn admit(tree: &SyntaxNode) -> Result<(), Refusal> {
+    // **Forbidden kinds first, statement count second**, and the order is
+    // deliberate. `SHOW DATABASES` parses to a tree with a `SHOW_CLAUSE` and no
+    // `STATEMENT` node at all; counting first would report it as empty, which
+    // is true and useless — the caller wants to know `SHOW` is not served, not
+    // that they sent nothing.
+    walk(tree)?;
+
     match statements(tree) {
-        0 => return Err(Refusal::Empty),
-        1 => {}
-        several => return Err(Refusal::MultipleStatements(several)),
+        0 => Err(Refusal::Empty),
+        1 => Ok(()),
+        several => Err(Refusal::MultipleStatements(several)),
     }
-    walk(tree)
 }
 
+/// How many queries this tree carries.
+///
+/// **No `STATEMENT` node means no query, whatever text came with it.** An
+/// earlier version treated a non-empty source as one statement by default; that
+/// admitted `###`, which `decypher` parses to a bare `SOURCE_FILE` with **no
+/// errors** and no statements. The gate then found nothing forbidden — because
+/// there was nothing at all — and said yes to garbage. Mutation testing found
+/// it: inverting the condition produced *better* behaviour than the original,
+/// which is the tell that the original was wrong.
 fn statements(tree: &SyntaxNode) -> usize {
-    let direct = tree
-        .children()
+    tree.children()
         .filter(|child| child.kind() == SyntaxKind::STATEMENT)
-        .count();
-    // A tree with no `STATEMENT` node at all is either empty source or a shape
-    // this build does not recognise; either way it is not one query.
-    if direct == 0 && tree.text().to_string().trim().is_empty() {
-        0
-    } else {
-        direct.max(1)
-    }
+        .count()
 }
 
 fn walk(node: &SyntaxNode) -> Result<(), Refusal> {
@@ -498,5 +505,98 @@ mod tests {
     fn an_empty_query_is_refused() {
         assert_eq!(gate(""), Err(Refusal::Empty));
         assert_eq!(gate("   \n  "), Err(Refusal::Empty));
+    }
+
+    /// **Garbage is refused, and it used to be admitted.**
+    ///
+    /// `decypher` parses `###` to a bare `SOURCE_FILE` with **no errors** and no
+    /// statements. The first version of `statements` treated any non-empty
+    /// source as one statement, so the walk found nothing forbidden — because
+    /// there was nothing at all — and the gate said yes.
+    ///
+    /// Mutation testing found it by inverting the condition and producing
+    /// *better* behaviour than the original, which is the tell that the original
+    /// was wrong rather than merely untested.
+    #[test]
+    fn source_that_parses_to_no_statement_is_refused() {
+        for garbage in ["###", "@@@ !!!", "%%%"] {
+            assert_eq!(
+                gate(garbage),
+                Err(Refusal::Empty),
+                "`{garbage}` parses to nothing and must not be admitted"
+            );
+        }
+    }
+
+    /// **`SHOW` keeps its own message even though it has no `STATEMENT` node.**
+    ///
+    /// This is why the forbidden-kind walk runs before the statement count:
+    /// counting first would report `SHOW DATABASES` as empty, which is true and
+    /// useless.
+    #[test]
+    fn show_is_refused_by_name_rather_than_as_empty() {
+        let refused = refusal("SHOW DATABASES");
+
+        assert!(
+            matches!(
+                refused,
+                Refusal::OutsideSubset {
+                    construct: "SHOW",
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+        assert!(refused.to_string().contains("GET /assets"));
+    }
+
+    #[test]
+    fn use_and_finish_are_refused_by_name() {
+        let used = refusal("USE mygraph MATCH (n) RETURN n");
+        assert!(
+            matches!(
+                used,
+                Refusal::OutsideSubset {
+                    construct: "USE",
+                    ..
+                }
+            ),
+            "{used:?}"
+        );
+
+        let finished = refusal("MATCH (n) FINISH");
+        assert!(
+            matches!(
+                finished,
+                Refusal::OutsideSubset {
+                    construct: "FINISH",
+                    ..
+                }
+            ),
+            "{finished:?}"
+        );
+    }
+
+    /// **`FOREACH` is named as `FOREACH`, not as the `SET` inside it.**
+    ///
+    /// Every `FOREACH` body is itself a write, so a test asserting only "this is
+    /// refused" passes even with the `FOREACH` arm deleted — the `SET` inside
+    /// catches it, and the author is told to use `PATCH /assets/{id}` for a loop.
+    /// Asserting the *construct* is what makes the arm earn its place.
+    #[test]
+    fn foreach_is_named_rather_than_the_write_inside_it() {
+        let refused = refusal("MATCH (n) FOREACH (x IN [1] | SET n.a = x) RETURN n");
+
+        assert!(
+            matches!(
+                refused,
+                Refusal::Write {
+                    construct: "FOREACH",
+                    ..
+                }
+            ),
+            "the outer construct is the one to report: {refused:?}"
+        );
+        assert!(refused.to_string().contains("batch"));
     }
 }
