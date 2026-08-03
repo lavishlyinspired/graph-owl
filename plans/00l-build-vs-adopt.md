@@ -54,6 +54,10 @@ rejected by default** (`00i`).
 | `antlr4rust` | BSD-3-Clause on crates.io, `NOASSERTION` on GitHub | ANTLR4 runtime for Rust | **Reject** — repository unpushed since 2023-02-14, and the two licence claims disagree |
 | `antlr-rust-runtime` | BSD-3-Clause | Newer ANTLR4 Rust runtime | **Reject for now** — fresh (2026-08-01) but 2,439 downloads; too thin to put a query front end on |
 | `pest` | MIT / Apache-2.0 | PEG parser generator | **Fallback only** — 293M downloads, and the generation target *if every parser candidate fails the spike* |
+| `rust-mcp-sdk` | MIT | MCP server/client SDK over `rust-mcp-schema`; stdio, SSE and streamable-HTTP transports | **Spike, and it is a real candidate we did not check first.** v1.0.1, 43 versions, ~215k downloads, repository visible and pushed 2026-08-03. Epic 14's transport was hand-written before this check ran — see below |
+| `rust-igraph` | **GPL-2.0-or-later** | Graph algorithms: PageRank, centrality, WCC, cycle detection — everything Epic 38 wants | **Rejected on licence, and it is the clearest case for why licence is a gate rather than a score.** Copyleft: adopting it relicenses graph-owl. 175 downloads. Use `petgraph` |
+| `petgraph` | MIT / Apache-2.0 | Graph data structures and algorithms | **Adopt for Epic 38's arithmetic.** 451M downloads. The reified-edge objection does not bite: Epic 38 already specifies "pure algorithms over an in-memory projection the caller supplies", so the projection hides the two-hop encoding and `petgraph` sees an ordinary graph |
+| `sonyflake` / `snowflake` | MIT / Apache-2.0 | Distributed unique **id** generation | **Not applicable — a terminology collision.** A graph-owl *flake* is a fact tuple `{s, p, o, cx, t, op}` in the Datomic sense, not a Snowflake id. Recorded so the suggestion is not made a third time |
 | `horned-owl` | **LGPL-3.0** | OWL parsing and manipulation — RDF/XML, OWL/XML, Functional, Manchester | **Adopt out of process.** See below — the earlier "rejected" was wrong about both the licence and the options |
 
 ### Python
@@ -409,3 +413,42 @@ the engine parser.
 **`pest` is no longer the fallback for Slice A** — no candidate failed in a way
 that requires generating our own. It stays listed only in case `decypher` is
 abandoned before 0.2.0.
+
+
+## MCP: the transport was built before this document was consulted
+
+**4 August 2026, recorded as a process failure rather than a technical one.**
+
+Epic 14's JSON-RPC transport was hand-written — framing, batch handling,
+notification suppression, method dispatch, MCP content rendering — roughly 300
+lines with 24 tests. **`rust-mcp-sdk` was never checked for.** It is MIT, at
+v1.0.1 with 43 releases and ~215k downloads, its repository is public and was
+pushed the day before this was written, and it exists to do exactly that job on
+top of a type-safe `rust-mcp-schema`.
+
+This is the rule in `CLAUDE.md` — *search for an existing crate before writing
+one* — failing on the epic that most obviously called for it. It is written down
+here rather than quietly fixed, because the useful artifact is the miss.
+
+**What the SDK would bring**, and it is not nothing: protocol conformance
+maintained upstream as MCP versions move, type-safe schema objects instead of
+hand-built `serde_json::json!`, and a **stdio transport for free** — which this
+project will want, because stdio is how most MCP clients actually connect and
+`POST /mcp` serves none of them.
+
+**Why it was not swapped in immediately.** The SDK ships `McpHttpServer` and
+owns its transport. graph-owl's MCP endpoint sits at `POST /mcp` on the existing
+axum server, *behind* the `Auth` extractor, admission control, the observability
+middleware and RFC 9457 error rendering. Adopting the SDK means either giving up
+that integration or writing a custom `Transport` against `McpDispatch` — a real
+piece of work, not a dependency swap. Ripping out working, tested code at the
+end of a long session to half-finish a migration would be worse than scheduling
+it honestly.
+
+**So: a spike, on the same terms as the Cypher one.** One corpus — the thirteen
+declared tools and the protocol edge cases already covered by
+`jsonrpc.rs`'s tests — against the SDK, judged on whether the protocol layer is
+usable without surrendering the transport. The existing tests port directly and
+are the corpus. If it fits, `jsonrpc.rs` shrinks to an adapter and stdio comes
+along; if it does not, this section records why and the hand-written transport
+stays with an argument behind it instead of an oversight.

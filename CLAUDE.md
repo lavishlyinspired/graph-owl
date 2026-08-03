@@ -40,6 +40,73 @@ Three things that did **not** change with it:
 
 Never name the third-party systems whose clones sit under `.claude/docs/referenceRepo/` — not in code, comments, commit messages, plan docs, or any other committed file. Those clones may stay on disk for architecture research, but must never be committed or cited by name. This project's git history was deliberately squashed once already to scrub such references; don't reintroduce them. When a design decision was informed by that research, write down the pattern and the reasoning behind it, never the source.
 
+## Search for an existing crate before writing one — every epic, every slice
+
+**Before implementing any slice, check whether something permissively licensed
+already does it.** This is not advice, it is a step in the loop, and it goes
+*before* the RED test rather than after the code is written and somebody asks.
+
+`plans/00l-build-vs-adopt.md` is the standing record. Add a row to it whenever
+this check runs, whichever way it goes — a rejection nobody wrote down gets
+re-proposed every few months.
+
+**The check itself is one command**, and licence is the first thing it returns
+because licence is a gate rather than a score:
+
+```
+curl -s "https://crates.io/api/v1/crates/<name>" | python3 -c "
+import json,sys; d=json.load(sys.stdin); c=d['crate']; v=d['versions'][0]
+print(v.get('license'), c.get('newest_version'), c.get('updated_at','')[:10], c.get('downloads'), c.get('repository'))"
+```
+
+Then judge in this order. The first three are gates: fail one and the crate is
+out however good it looks.
+
+1. **Licence.** Permissive only — MIT, Apache-2.0, BSD, ISC, Unicode, Zlib.
+   **Copyleft is rejected**, and that includes crates that look ideal:
+   `rust-igraph` has every graph algorithm Epic 38 wants and is GPL-2.0-or-later,
+   so adopting it would relicense this project. A disjunctive licence
+   (`EUPL-1.2 OR MIT OR Apache-2.0`) is fine — take the permissive option.
+2. **Auditability.** The repository must resolve and be readable. `opencypher`
+   is the best-fitting Cypher AST on paper and its repository 404s: the licence
+   claim cannot be checked against the source, the history cannot be read, and
+   there is nowhere to file a bug. `ocg` fails the same way on a private
+   enterprise host. **Blocked is not the same as rejected** — record it so it can
+   be revisited if the source appears.
+3. **Maintenance.** Last publish, release cadence, and *who* is behind it.
+   Abandoned is a licence problem waiting to happen.
+4. **Does it actually do the thing** — measured, not read off the README. See
+   below.
+5. **Architectural fit.** Apache AGE has a mature openCypher parser that lowers
+   to a *PostgreSQL* query tree; we lower to our own. Extracting it would import
+   C and Postgres assumptions and cost more than it saves.
+
+**Spike before adopting anything on a correctness or security path — one corpus,
+every candidate, the same assertions.** Four separate impressions are not a
+comparison. This has already paid for itself once: `cypher-parser` had the best
+provenance of any Cypher candidate (MIT, the real Shopify organisation, ten
+releases in six weeks) and the spike found it **cannot parse float literals or
+relationship properties** — both of which this system needs everywhere. It would
+have been adopted on reputation. Keep the harness (`spikes/`, excluded from the
+workspace) so the comparison is re-runnable when a candidate matures.
+
+**Adopting is not the same as trusting.** `decypher` was adopted for Epic 7b and
+*silently drops* `CALL … YIELD …` when lowering to its typed AST — a query the
+gate would never have seen. The fix was architectural, not a patch: gate on its
+**lossless CST** and lower from the AST, so a construct cannot hide from a tree
+that reproduces its own input. Where an adopted crate sits on a security path,
+ask what it would take for the crate to be *wrong* rather than merely absent.
+
+**Confine an unstable dependency to one boundary.** `decypher`'s AST is alpha, so
+exactly one module touches it. That module is the blast radius if the crate
+breaks or is abandoned — worth doing even for a stable dependency.
+
+**Two terminology traps that have already caused a wrong recommendation:** a
+graph-owl **flake** is a fact tuple `{s, p, o, cx, t, op}`, not a Snowflake id —
+`sonyflake` solves a problem this project does not have. And **openCypher** names
+a grammar (Apache-2.0, adopt it) *and* a crate (`opencypher`, blocked): "reuse
+openCypher" means two different things and only one of them was ever in doubt.
+
 ## Licensing — binding during implementation
 
 **Neither reference under `.claude/docs/referenceRepo/` is permissively licensed throughout, and one is not open source at all.** graph-owl contains no code from either, and that is the entire basis on which their non-compete terms do not bind this project. It is a property to actively maintain while writing code, not a claim made once.

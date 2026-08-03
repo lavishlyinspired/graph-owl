@@ -898,7 +898,7 @@ slice.
 
 ### Epics 7b, 7c, 7d, 9, 9a
 - [ ] **7c** Bidirectional flake ⇄ LPG projection, losses enumerated
-- [ ] **7b** openCypher lowering onto the same plan (ships *after* 7c)
+- [~] **7b** openCypher lowering onto the same plan (ships *after* 7c) — **Slice A built**: `decypher` adopted after a controlled spike, and the subset gate reads its **lossless CST** rather than its typed AST. That is not a style choice: `decypher` 0.2.0-alpha.6 silently drops `CALL … YIELD …` on the way to the AST, so an AST-based gate would have executed `RETURN l` in place of the query the caller sent. Every refusal names the API to use instead — `CREATE` points at `POST /assets`, `SET` at `PATCH /assets/{id}` — because a bare "unsupported" leaves the author stuck. Slices B–E (lowering, relationship-isomorphism, aggregates) are not built
 - [ ] **7d** Bolt server: PackStream, handshake, state machine (ships after Epic 12)
 - [ ] **9** JSON-LD, Turtle, DCAT, PROV-O, OpenLineage
 - [ ] **9a** GraphML, bulk CSV, projection targets

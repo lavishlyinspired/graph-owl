@@ -11,6 +11,7 @@
 //! evaluator only ever sees rows the scan already permitted, at the one
 //! transaction time the scan already resolved.
 
+pub mod cypher;
 pub mod dataset;
 pub mod pushdown;
 pub mod term;

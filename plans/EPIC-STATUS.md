@@ -41,12 +41,12 @@ is the condition that index exists to catch.
 | **6** | 4, 12 | [`06-engine-reasoning.md`](06-engine-reasoning.md) | In progress | 7/8 (+1 partial) | Epic 4 (triples), Epic 5 (ontology types) |
 | **7** | 3 | [`07-engine-query.md`](07-engine-query.md) | In progress | 8/9 | Epic 4 (triples), Epic 13 (authorization to compile into queries), **Epic 7a**… |
 | **7a** | 3 | [`07a-engine-traversal.md`](07a-engine-traversal.md) | **Shipped** | 5/5 | Epic 4 (triples, SPOT/POST/OPST indexes) |
-| **7b** | 8 | [`07b-engine-cypher.md`](07b-engine-cypher.md) | Not started | 0/5 | Epic 7 (SPARQL plan is the lowering target), Epic 7a (traversal), **Epic 7c (LP… |
-| **7c** | 8 | [`07c-engine-lpg.md`](07c-engine-lpg.md) | Not started | 0/5 | Epic 4 (flakes), Epic 1 (relationship taxonomy) |
-| **7d** | 8 | [`07d-engine-bolt.md`](07d-engine-bolt.md) | Not started | 0/5 | Epic 7b (Cypher), Epic 7c (LPG projection), Epic 12 (auth), Epic 13 (authorizat… |
+| **7b** | 8 | [`07b-engine-cypher.md`](07b-engine-cypher.md) | In progress | 0/5 (+1 partial) | Epic 7 (SPARQL plan is the lowering target), Epic 7a (traversal), **Epic 7c (LP… |
+| **7c** | 8 | [`07c-engine-lpg.md`](07c-engine-lpg.md) | In progress | 0/5 (+1 partial) | Epic 4 (flakes), Epic 1 (relationship taxonomy) |
+| **7d** | 8 | [`07d-engine-bolt.md`](07d-engine-bolt.md) | In progress | 0/5 (+1 partial) | Epic 7b (Cypher), Epic 7c (LPG projection), Epic 12 (auth), Epic 13 (authorizat… |
 | **8** | 2 | [`08-engine-search.md`](08-engine-search.md) | In progress | 6/8 | Epic 3 (change events to subscribe to), Epic 2 (FQNs to rank on), Epic 25 (tags… |
-| **9** | 8 | [`09-engine-rdf-io.md`](09-engine-rdf-io.md) | Not started | 0/5 | Epic 4 (triples to serialize), Epic 7 (CONSTRUCT produces Turtle) |
-| **9a** | 8 | [`09a-lpg-interchange.md`](09a-lpg-interchange.md) | Not started | 0/5 | Epic 7c (LPG projection), Epic 9 (RDF I/O — shares the streaming-serializer sha… |
+| **9** | 8 | [`09-engine-rdf-io.md`](09-engine-rdf-io.md) | In progress | 0/5 (+1 partial) | Epic 4 (triples to serialize), Epic 7 (CONSTRUCT produces Turtle) |
+| **9a** | 8 | [`09a-lpg-interchange.md`](09a-lpg-interchange.md) | In progress | 0/5 (+1 partial) | Epic 7c (LPG projection), Epic 9 (RDF I/O — shares the streaming-serializer sha… |
 | **10** | 2 | [`10-operability.md`](10-operability.md) | **Shipped** | 17/17 | Epic 1 (a server, an error model, and a contract to instrument) |
 | **11** | 2 | [`11-people-and-ownership.md`](11-people-and-ownership.md) | In progress | 11/14 (+1 partial) | Epic 3 (envelope carries `owners`) |
 | **12** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 15/15 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
@@ -200,7 +200,7 @@ is the condition that index exists to catch.
 ### Epic 7b — Cypher Query Support *(Demo 8)*
 
 - [ ] 7c
-- [ ] 7b
+- [~] 7b
 - [ ] 7d
 - [ ] 9
 - [ ] 9a
@@ -208,7 +208,7 @@ is the condition that index exists to catch.
 ### Epic 7c — Labelled Property Graph Projection ★ *(Demo 8)*
 
 - [ ] 7c
-- [ ] 7b
+- [~] 7b
 - [ ] 7d
 - [ ] 9
 - [ ] 9a
@@ -216,7 +216,7 @@ is the condition that index exists to catch.
 ### Epic 7d — Bolt Protocol Server ★ *(Demo 8)*
 
 - [ ] 7c
-- [ ] 7b
+- [~] 7b
 - [ ] 7d
 - [ ] 9
 - [ ] 9a
@@ -235,7 +235,7 @@ is the condition that index exists to catch.
 ### Epic 9 — RDF Interop & Open Standards *(Demo 8)*
 
 - [ ] 7c
-- [ ] 7b
+- [~] 7b
 - [ ] 7d
 - [ ] 9
 - [ ] 9a
@@ -243,7 +243,7 @@ is the condition that index exists to catch.
 ### Epic 9a — Property-Graph Interchange & External Store Sync *(Demo 8)*
 
 - [ ] 7c
-- [ ] 7b
+- [~] 7b
 - [ ] 7d
 - [ ] 9
 - [ ] 9a

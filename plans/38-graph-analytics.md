@@ -80,6 +80,22 @@ pub struct AnalyticsResult<T> {
 - [ ] `graph-owl-analytics` performs **zero I/O**.
 - [ ] The PageRank bake-off (Slice E) is run and its result recorded in this file.
 
+## Which library, and which is licence-poison
+
+**Checked 4 August 2026**, per `CLAUDE.md`'s search-before-building rule.
+
+**Adopt `petgraph`** (MIT/Apache-2.0, 451M downloads) for the arithmetic —
+PageRank, connected components, cycle detection. Decision 3 above already
+specifies "pure algorithms over an in-memory projection the caller supplies", so
+the projection hides the reified two-hop encoding and `petgraph` sees an
+ordinary graph. What this crate builds is the projection, the caching and the
+budget, not the maths.
+
+**Do not adopt `rust-igraph`.** It has every algorithm this epic wants and is
+**GPL-2.0-or-later** — copyleft, which `00i` rejects and which would relicense
+graph-owl. It has been proposed once already; it is recorded in
+`00l-build-vs-adopt.md` so it is not proposed again.
+
 ## Slices
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first.

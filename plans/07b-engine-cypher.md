@@ -1,7 +1,7 @@
 # Plan: Cypher Query Support (Epic 7b)
 
 **Branch**: feat/engine-cypher
-**Status**: Not started. **Slice A re-scoped 4 August 2026**: adopt an existing Rust Cypher parser if one survives a controlled spike; generate from the Apache-2.0 grammar only if none does. See Slice A and `00l-build-vs-adopt.md`
+**Status**: **Slice A built** (4 August 2026) — `decypher` adopted, subset gate on its lossless CST. Slices B–E not started. **Slice A was re-scoped 4 August 2026**: adopt an existing Rust Cypher parser if one survives a controlled spike; generate from the Apache-2.0 grammar only if none does. See Slice A and `00l-build-vs-adopt.md`
 **Depends on**: Epic 7 (SPARQL plan is the lowering target), Epic 7a (traversal), **Epic 7c (LPG projection — 7c ships before 7b; the letters are labels, not a sequence)**
 **Unblocks**: Epic 7d (Bolt), Epic 41 (query workbench)
 **Crates**: `graph-owl-query` (new `cypher` module — **not a separate crate**) · consumes `graph-owl-lpg` (7c) · consumed by `graph-owl-bolt` (7d)

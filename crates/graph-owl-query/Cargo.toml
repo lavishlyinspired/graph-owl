@@ -13,5 +13,10 @@ graph-owl-engine = { path = "../graph-owl-engine" }
 oxrdf = "0.3.3"
 spareval = "0.2"
 spargebra = "0.4"
+# Epic 7b: the Cypher front end. Chosen by the spike recorded in
+# `plans/00l-build-vs-adopt.md` — the only candidate that parses the declared
+# subset including relationship properties and float literals. Alpha, and
+# deliberately confined to `src/cypher/`, which is the whole blast radius.
+decypher = "0.2.0-alpha.6"
 thiserror.workspace = true
 chrono.workspace = true
