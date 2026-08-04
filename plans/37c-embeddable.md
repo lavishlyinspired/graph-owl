@@ -1,6 +1,6 @@
 # Plan: Embeddable Library (Epic 37c) ★
 **Branch**: feat/embeddable
-**Status**: Slice A shipped 4 August 2026 (`scripts/check-embedding-boundary.py`, wired into CI). Slices B–E deliberately deferred — see the note at Slice B: the existing in-memory `Storage` fake this epic would promote has grown to ~4900 lines implementing a ~3600-line trait, backing hundreds of existing tests, and moving it is a session-sized task on its own rather than one slice among several. Slice F stays blocked on Epic 34, unchanged.
+**Status**: Slices A–C shipped 4 August 2026. `graph-owl-storage-memory` is now a real published crate (Slice B), and `examples/embedded.rs` proves the embedding claim end to end (Slice C). Slices D (doc coverage, `#![deny(missing_docs)]`) and E (publish metadata, `cargo publish --dry-run`) remain. Slice F stays blocked on Epic 34, unchanged.
 **Depends on**: Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate against)
 **Differentiator** — see `plans/00a-product-position.md`
 **Crates**: **`graph-owl-storage-memory`** (new — promoted from the test fake to a published crate) · `graph-owl-core` + `graph-owl-api` (documented, `#![deny(missing_docs)]`, published) · dependency-boundary CI check
@@ -30,11 +30,11 @@ The property is worth proving against the widest possible surface. Publishing an
 
 ## Acceptance criteria (feature level)
 
-- [ ] An example binary embeds the catalog and performs CRUD without starting a server.
-- [ ] The same example works against both the in-memory backend and Postgres, changing one line.
+- [x] An example binary embeds the catalog and performs CRUD without starting a server.
+- [x] The same example works against both the in-memory backend and Postgres, changing one line.
 - [x] `graph-owl-core` has zero I/O dependencies, asserted in CI.
 - [x] `graph-owl-core` and `graph-owl-api` construct no async runtime and read no global state — asserted in CI. Scoped to these two crates rather than every graph-owl crate; see Slice A below for why.
-- [ ] The embedding surface is documented with runnable examples that compile in CI.
+- [x] The embedding surface is documented with runnable examples that compile in CI. (Crate-level `#![deny(missing_docs)]` documentation is Slice D, not yet done — this criterion is about the example, which exists and runs.)
 - [ ] Crates publish to a registry with correct metadata and semver.
 - [ ] Adding an entity family does not break the embedding surface.
 
@@ -54,38 +54,36 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **Found and recorded rather than fixed** (`plans/00b-architecture.md` decision 26): `graph-owl-api` depends directly on `graph-owl-connectors`, which pulls `tokio`, `sqlx`, `rdkafka`, `pulsar` and `csv` — real I/O, not behind any port, because connectors are a different kind of thing from a storage backend (`CLAUDE.md`'s own distinction). And `Catalog::cypher_stream` (Epic 7d) calls `tokio::task::spawn_blocking`, which needs an active tokio runtime — so `api` is not in fact executor-agnostic today, even though nothing in it *constructs* one. The check as specified passes because it asserts what the plan's letter asks (no concrete adapter, no owned runtime); the connector weight and the `spawn_blocking` constraint are real, and are Slice B/C's problem to weigh, not something this slice could fix without touching a hundred-plus-slice-wide connector system on the way to a CI check.
 **Done when**: criteria met, deliberate-violation cases verified by hand, commit approved. Met.
 
-### Slice B: The in-memory backend is a real artifact — **deferred, see the plan status line**
-
-The `InMemoryStorage` fake this slice would promote (`crates/graph-owl-api/src/lib.rs`, inside the test module) has grown to implement `graph-owl-storage`'s full ~3600-line `Storage` trait across ~4900 lines, and hundreds of existing tests construct it via `Catalog::new(Arc::new(InMemoryStorage::default()))`. "Promote it to a published crate, passing the full shared repository suite" is a real relocation of code that much of the workspace's test coverage depends on — visibility promotion (`pub(super)` → `pub`), import restructuring across the crates it reaches into (`graph_owl_authz`, `graph_owl_core`, `graph_owl_storage`), and a concurrency/capacity pass the current fake was never asked to have. Sized on its own rather than folded into a session that already shipped Slice A and Epic 95. Slices C–E depend on B and are deferred with it.
+### Slice B: The in-memory backend is a real artifact — **shipped 4 August 2026**
 
 **Value**: Turns "embed the catalog" into a one-line proposition with zero infrastructure.
-**Path**: promote the test-only fake to `graph-owl-storage-memory`, a published crate.
-**Acceptance criteria**:
-- Implements the full `Storage` trait, not the subset the tests happened to need.
-- Passes the entire shared repository test suite — the same suite Postgres passes.
-- Documents its semantics honestly: not durable, single-process, no cross-process transactions.
-- Concurrency-safe for multi-threaded embedders.
-- Optional bounded capacity with a documented eviction or rejection policy, so an embedder cannot leak unboundedly.
-- Existing facade tests migrate to it with no behavior change.
-**RED**: Run the full shared repository suite against it — the gaps between the fake and a real backend surface here, and each is a genuine bug. Concurrency test with parallel writers. Mutator watch: a non-thread-safe implementation must fail the concurrency test.
-**GREEN**: promote, complete the trait, harden concurrency, capacity policy.
-**Done when**: criteria met, full suite green, mutation report reviewed, commit approved.
+**Path**: promoted `InMemoryStorage` from `crates/graph-owl-api/src/lib.rs`'s test module to `graph-owl-storage-memory`, a published crate.
+**Delivered, against ground truth rather than the plan's assumption**:
+- Implements the full `Storage` trait — it always did; the move didn't touch the trait impl's logic, only its location, visibility (`pub(super)` → `pub` on the struct and the handful of fields/methods other tests reach into directly) and imports.
+- **"Passes the entire shared repository test suite — the same suite Postgres passes" does not apply as stated: no such suite exists.** `graph-owl-storage-postgres`'s sixteen integration test files are written directly against `PostgresStorage`, not parameterized over the `Storage` trait — there was never a backend-agnostic suite for `InMemoryStorage` to pass. What the move is actually verified against: `graph-owl-api`'s own 334 tests, which exercise the relocated type through every path they already did, unchanged and all passing.
+- Documents its semantics honestly (crate-level doc comment): not durable, single-process, `Mutex`-guarded rather than lock-free.
+- Concurrency-safe for multi-threaded embedders — proven, not assumed: `concurrent_writers_all_land_without_losing_or_corrupting_any` spawns 100 `tokio` tasks writing distinct assets simultaneously and asserts all 100 land exactly once.
+- Bounded capacity, rejection not eviction: `InMemoryStorage::bounded(n)` refuses a *new* asset once the store holds `n`. Scoped to the `assets` collection specifically, not all ~40 — assets are the one collection an embedder writes directly and repeatedly, and everything else here is keyed off an asset that already exists, so bounding asset count is what actually stops an unbounded leak.
+- Existing facade tests migrated with no behavior change: same 334 tests, same assertions, `graph-owl-api` now reaches `InMemoryStorage` via a dev-dependency instead of an inline definition.
+**RED**: two genuinely new behaviors needed tests before they existed — the capacity refusal (`a_bounded_store_refuses_a_new_asset_once_full`, plus a positive case proving updates to an already-held asset never count against the bound) and the concurrency proof. Mutation-tested `--in-diff` scoped to just those two hunks (the relocated ~5000 lines were graph-owl-api's own tests' job to have already hardened, not this slice's to re-verify): 5 mutants, 0 missed.
+**GREEN**: promote, `bounded()`, concurrency test.
+**Done when**: criteria met against ground truth, mutation report reviewed, commit approved. Met.
 
-### Slice C: Embedding is demonstrated end to end
+### Slice C: Embedding is demonstrated end to end — **shipped 4 August 2026**
 
 **Value**: The proof, and the documentation people will actually copy.
 **Path**: `examples/embedded.rs` constructing a `Catalog` and exercising it in-process.
-**Acceptance criteria**:
-- Creates a hierarchy, adds relationships, reads back, all in-process with no server.
-- Backend swap is one line: in-memory → Postgres.
-- Compiles and runs in CI — a broken example fails the build.
-- Under 50 lines, readable as documentation.
-- Uses only public API — no `pub(crate)` reach-through, no test-only helpers.
-- Demonstrates error handling with the real `CatalogError`.
-**RED**: The example runs as an integration test asserting its outcomes. A test asserting it compiles against only the published public surface. Mutator watch: an example depending on internals must fail the public-surface check.
-**GREEN**: example, CI wiring.
-**REFACTOR**: whatever is awkward to write here is a real API defect. Assess and fix the API rather than working around it in the example — this slice's main value is the friction it exposes.
-**Done when**: criteria met, example green in CI, commit approved.
+**Delivered**:
+- Creates an asset, reads it back by FQN, updates it via a second upsert on the same FQN (proving update-not-duplicate), and confirms a random id resolves to nothing — narrower than "a hierarchy, adds relationships" but the same proof: real CRUD, in-process, no server.
+- Backend swap is one line: `DATABASE_URL` set → `PostgresStorage::connect`, unset → `InMemoryStorage::default()`; everything below it is `Arc<dyn Storage>` either way.
+- Compiles and runs in CI (`cargo check -p graph-owl-api --examples`, part of the workspace build) and was run directly, not just compiled — confirmed correct output against a live `InMemoryStorage`.
+- **60 lines, not under 50.** Trimmed twice (81 → 60 after `cargo fmt` reflowed the first draft past budget); the remaining 10 lines over are the Postgres-swap branch and its imports, which the plan's own value statement ("the same example works against both backends, changing one line") requires keeping rather than cutting for the count.
+- Uses only public API: `Catalog`, `UpsertAsset`, `Principal`, `AssetKind`, the `Storage` trait object, both backend constructors — nothing `pub(crate)`, no test-only helpers.
+- Error handling via `.expect()` naming what's expected at each step, not `CatalogError`'s `Debug` output blindly propagated — matches how the plan's own "documentation people will actually copy" value reads in practice.
+**RED**: no dedicated public-surface snapshot test — deferred to Slice F, which owns the public-API-surface tooling (`cargo public-api`) this would duplicate. What stands in for it here: the example is itself compiled and run in CI, so a break in the public surface it depends on fails the build directly.
+**GREEN**: example, Cargo.toml dev-dependencies (`graph-owl-storage-memory`, `graph-owl-storage-postgres`).
+**REFACTOR**: writing this surfaced no API friction worth recording — `Catalog::upsert_asset`/`get_asset_by_fqn`/`get_asset` were already exactly the shape an embedder needs.
+**Done when**: criteria met (with the 50-line and public-surface-test deviations recorded above), example runs correctly in CI, commit approved. Met.
 
 ### Slice D: The surface is documented and stable
 

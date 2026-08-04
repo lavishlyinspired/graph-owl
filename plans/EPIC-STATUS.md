@@ -507,7 +507,7 @@ is the condition that index exists to catch.
 
 ### Epic 37c — Embeddable Library ★ *(Demo 9)*
 
-- [~] Embeddable library — **Slice A shipped** *(4 August 2026)*: `scripts/check-embedding-bou
+- [~] Embeddable library — **Slices A–C shipped** *(4 August 2026)*: Slice A's `scripts/check-
 
 ### Epic 38 — Graph Analytics *(Demo 9)*
 
