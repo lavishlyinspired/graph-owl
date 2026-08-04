@@ -137,3 +137,53 @@ describe("a fact provable more than one way", () => {
     expect(rulesUsed({ status: "asserted", fact: fact("1:a", "1:B") })).toEqual([]);
   });
 });
+
+// Epic 95 added four rules to the reasoner (propertyChain,
+// inverseFunctionalProperty, functionalProperty, hasKey) without adding a
+// new `Explanation`/`Chain` shape — `rule` is a plain string this module
+// never special-cases. So the four new wire names (RuleName's derived
+// `Serialize` with `rename_all = "camelCase"`, not the `rule:`-prefixed
+// `as_str()` used elsewhere) need no production change here — this proves
+// that rather than assuming it, matching the wire values a real server
+// response carries.
+describe("the four Epic 95 axioms flow through unchanged", () => {
+  const newAxiomChain: Explanation = {
+    status: "derived",
+    chains: [
+      {
+        rule: "propertyChain",
+        premises: [{ status: "asserted", fact: fact("1:orders", "1:warehouse") }],
+      },
+      {
+        rule: "inverseFunctionalProperty",
+        premises: [{ status: "asserted", fact: fact("1:acct-1", "1:acct-2") }],
+      },
+      {
+        rule: "functionalProperty",
+        premises: [{ status: "asserted", fact: fact("1:table-a", "1:owner-x") }],
+      },
+      {
+        rule: "hasKey",
+        premises: [{ status: "asserted", fact: fact("1:cust-1", "1:cust-2") }],
+      },
+    ],
+  };
+
+  it("names each new rule at the step it fired", () => {
+    expect(flatten(newAxiomChain).filter((r) => r.kind === "rule").map((r) => r.rule)).toEqual([
+      "propertyChain",
+      "inverseFunctionalProperty",
+      "functionalProperty",
+      "hasKey",
+    ]);
+  });
+
+  it("lists all four in rulesUsed, none dropped as unrecognised", () => {
+    expect(rulesUsed(newAxiomChain)).toEqual([
+      "propertyChain",
+      "inverseFunctionalProperty",
+      "functionalProperty",
+      "hasKey",
+    ]);
+  });
+});

@@ -85,7 +85,7 @@ is the condition that index exists to catch.
 | **43** | 5 | [`43-framework-integrations.md`](43-framework-integrations.md) | Not started | 0/4 | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
 | **93** | 3 | [`93-console-overview.md`](93-console-overview.md) | Not started | — | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
 | **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | Not started | 0/7 | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
-| **95** | 10 | [`95-owl-rl-completion.md`](95-owl-rl-completion.md) | In progress | 1/2 | Epic 6 (the eight rules and the fixpoint that runs them) |
+| **95** | 10 | [`95-owl-rl-completion.md`](95-owl-rl-completion.md) | **Shipped** | 2/2 | Epic 6 (the eight rules and the fixpoint that runs them) |
 | **96** | 10 | [`96-shacl-sparql.md`](96-shacl-sparql.md) | Not started | 0/2 | Epic 5 (SHACL Core), Epic 7 (SPARQL) |
 | **97** | 10, 12 | [`97-incremental-parallel-reasoning.md`](97-incremental-parallel-reasoning.md) | Not started | 0/2 | Epic 6 (semi-naive fixpoint), Epic 37a (the measurement) |
 | **98** | 11, 12 | [`98-owl-el-reasoning.md`](98-owl-el-reasoning.md) | Not started | 0/2 | Epic 6 (overlay, budgets, explainability), Epic 24 (ontologies as entities) |
@@ -596,7 +596,7 @@ is the condition that index exists to catch.
 ### Epic 95 — OWL 2 RL Completion *(Demo 10)*
 
 - [x] The four RL axioms in scope beyond Epic 6's eight
-- [ ] Explanation panel extends to the new axioms — same surface, more rules *(UI → Epic 41)*
+- [x] Explanation panel extends to the new axioms — same surface, more rules *(UI → Epic 41, c
 
 ### Epic 96 — SHACL-SPARQL *(Demo 10)*
 
