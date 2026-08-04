@@ -51,7 +51,25 @@
 //! `collect()` produces a genuine list-typed value. Lowering one to the other
 //! would silently hand back a string where the caller asked for a list —
 //! exactly the kind of approximation this module refuses everywhere else
-//! (an undirected relationship, a variable-length hop, a compound label).
+//! (an undirected relationship, a compound label).
+//!
+//! # A variable-length hop is not algebra (Slice D)
+//!
+//! `MATCH (a)-[:FEEDS*1..3]->(b)` cannot lower to a triple pattern the way a
+//! fixed-length relationship does: **expressing it as SPARQL's own property
+//! path would force a full scan** (`pushdown::scans_for` already refuses to
+//! bound a property path, for the same reason Epic 7a's traversal engine
+//! exists — a bounded walk pushed into one Postgres statement beats
+//! materialising every candidate edge and joining it N times over).
+//!
+//! So [`lower`] does not resolve a variable-length hop at all. It **extracts**
+//! one as a [`VariableLengthHop`] and returns it alongside the pattern for the
+//! rest of the query — pure and synchronous, like everything else here. The
+//! *caller* (`graph_owl_api::Catalog::cypher`, which already holds an async
+//! traversal port) walks the graph, filters the reached nodes through the same
+//! authorization predicate the rest of the query is scoped by, and joins the
+//! result back in as a `Values` block — the identical mechanism `UNWIND`
+//! already uses to bind a table graph-owl computed outside the algebra.
 
 use oxrdf::{Literal, NamedNode, Variable};
 use spargebra::algebra::{
@@ -70,6 +88,46 @@ use decypher::ast::query::{
 };
 
 use crate::cypher::vocabulary;
+
+/// A variable-length relationship pattern, extracted rather than lowered.
+///
+/// **`start` is always the topological tail and `end` the head — whichever
+/// side of the arrow they were written on.** `(a)-[*]->(b)` and `(b)<-[*]-(a)`
+/// describe the same walk, and normalising here means the caller only ever
+/// resolves one shape: walk *outgoing* from `start`, discover `end`. Resolving
+/// a hop needs `start` to already be bound to a small, known set of nodes by
+/// the rest of the pattern — a label or a property match — because the
+/// traversal engine walks from a seed, not from "anything". A pattern with
+/// neither endpoint constrained is refused at resolution, not lowering, since
+/// lowering cannot know what the rest of the query will bind.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableLengthHop {
+    pub start: Variable,
+    pub end: Variable,
+    /// `None` follows every relationship type. Cypher's `TYPE1|TYPE2` union
+    /// form is refused, the same way a fixed-length relationship's compound
+    /// label already is — see [`single_relationship_type`].
+    pub relationship_type: Option<String>,
+    /// Inclusive. `*` alone means 1, not 0 — a variable-length pattern with no
+    /// lower bound still requires at least one relationship, per the
+    /// openCypher grammar; zero hops would mean `start` and `end` are the same
+    /// node, which needs an explicit `*0..` this engine does not attempt (the
+    /// traversal engine's own `neighbours` never reports the seed itself).
+    pub min_hops: usize,
+    /// Inclusive, capped at [`UNBOUNDED_HOP_LIMIT`] however large the query
+    /// asks for.
+    pub max_hops: usize,
+}
+
+/// The ceiling for `*` with no upper bound, or `*N..` with no upper bound.
+///
+/// **Reused, not invented.** `graph-owl-server`'s `/assets/{id}/graph` handler
+/// already caps a client-supplied hop count at 6, for the reason its own
+/// comment states: "A client asking for 50 hops on a real estate is asking
+/// for the whole graph, and the bound exists to protect the server rather
+/// than to be polite to the client." A second, independent number here would
+/// be a second guess at the same question.
+const UNBOUNDED_HOP_LIMIT: usize = 6;
 
 /// Why a query in the subset could not be lowered.
 ///
@@ -94,23 +152,35 @@ pub enum LoweringError {
 /// [`recover_dropped_argument`]. Nothing else here reads it; the AST is the
 /// lowering input everywhere else, exactly as the module docs describe.
 ///
+/// **Returns every [`VariableLengthHop`] the query contains, alongside the
+/// pattern for the rest of it.** An empty list is the common case and costs
+/// nothing to check; a non-empty one is the caller's signal to resolve each
+/// hop over the traversal engine before evaluating the pattern — see the
+/// module docs.
+///
 /// # Errors
 ///
 /// [`LoweringError`] naming the construct that has no lowering.
 pub fn lower(
     query: &decypher::ast::query::Query,
     source: &str,
-) -> Result<GraphPattern, LoweringError> {
+) -> Result<(GraphPattern, Vec<VariableLengthHop>), LoweringError> {
     let body = query
         .statements
         .first()
         .ok_or(LoweringError::Unlowerable("an empty query"))?;
-    lower_body(body, source)
+    let mut hops = Vec::new();
+    let pattern = lower_body(body, source, &mut hops)?;
+    Ok((pattern, hops))
 }
 
-fn lower_body(body: &QueryBody, source: &str) -> Result<GraphPattern, LoweringError> {
+fn lower_body(
+    body: &QueryBody,
+    source: &str,
+    hops: &mut Vec<VariableLengthHop>,
+) -> Result<GraphPattern, LoweringError> {
     match body {
-        QueryBody::SingleQuery(single) => lower_single(&single.kind, source),
+        QueryBody::SingleQuery(single) => lower_single(&single.kind, source, hops),
         // **Everything else was already refused by the subset gate**, and this
         // arm is the second line rather than a fallback that quietly copes.
         //
@@ -124,16 +194,20 @@ fn lower_body(body: &QueryBody, source: &str) -> Result<GraphPattern, LoweringEr
     }
 }
 
-fn lower_single(kind: &SingleQueryKind, source: &str) -> Result<GraphPattern, LoweringError> {
+fn lower_single(
+    kind: &SingleQueryKind,
+    source: &str,
+    hops: &mut Vec<VariableLengthHop>,
+) -> Result<GraphPattern, LoweringError> {
     match kind {
-        SingleQueryKind::SinglePart(part) => lower_part(part, source),
+        SingleQueryKind::SinglePart(part) => lower_part(part, source, hops),
         SingleQueryKind::MultiPart(multi) => {
             // **`WITH` is a pipeline boundary.** Each part's reading clauses
             // join onto what came before, and the `WITH` projects — which is
             // what scopes variables to the next part, exactly as Cypher says.
             let mut pattern: Option<GraphPattern> = None;
             for segment in &multi.parts {
-                let reading = lower_reading(&segment.reading_clauses)?;
+                let reading = lower_reading(&segment.reading_clauses, hops)?;
                 pattern = Some(match pattern {
                     None => reading,
                     Some(left) => GraphPattern::Join {
@@ -147,7 +221,7 @@ fn lower_single(kind: &SingleQueryKind, source: &str) -> Result<GraphPattern, Lo
                     source,
                 )?);
             }
-            let tail = lower_part(&multi.final_part, source)?;
+            let tail = lower_part(&multi.final_part, source, hops)?;
             Ok(match pattern {
                 None => tail,
                 Some(left) => GraphPattern::Join {
@@ -159,8 +233,12 @@ fn lower_single(kind: &SingleQueryKind, source: &str) -> Result<GraphPattern, Lo
     }
 }
 
-fn lower_part(part: &SinglePartQuery, source: &str) -> Result<GraphPattern, LoweringError> {
-    let reading = lower_reading(&part.reading_clauses)?;
+fn lower_part(
+    part: &SinglePartQuery,
+    source: &str,
+    hops: &mut Vec<VariableLengthHop>,
+) -> Result<GraphPattern, LoweringError> {
+    let reading = lower_reading(&part.reading_clauses, hops)?;
     match &part.body {
         SinglePartBody::Return(returning) => apply_return(reading, returning, source),
         // The subset gate refuses these; reaching here is a gate/lowering
@@ -171,12 +249,15 @@ fn lower_part(part: &SinglePartQuery, source: &str) -> Result<GraphPattern, Lowe
 }
 
 /// The reading clauses of one query part, joined left to right.
-fn lower_reading(clauses: &[ReadingClause]) -> Result<GraphPattern, LoweringError> {
+fn lower_reading(
+    clauses: &[ReadingClause],
+    hops: &mut Vec<VariableLengthHop>,
+) -> Result<GraphPattern, LoweringError> {
     let mut pattern: Option<GraphPattern> = None;
 
     for clause in clauses {
         let (next, optional) = match clause {
-            ReadingClause::Match(matching) => (lower_match(matching)?, matching.optional),
+            ReadingClause::Match(matching) => (lower_match(matching, hops)?, matching.optional),
             ReadingClause::Unwind(unwind) => (lower_unwind(unwind)?, false),
             _ => return Err(LoweringError::Unlowerable("this reading clause")),
         };
@@ -206,13 +287,17 @@ fn lower_reading(clauses: &[ReadingClause]) -> Result<GraphPattern, LoweringErro
 }
 
 /// One `MATCH`, with its isomorphism constraint.
-fn lower_match(matching: &Match) -> Result<GraphPattern, LoweringError> {
+fn lower_match(
+    matching: &Match,
+    hops: &mut Vec<VariableLengthHop>,
+) -> Result<GraphPattern, LoweringError> {
     let mut patterns = Vec::new();
     let mut relationship_variables = Vec::new();
     lower_pattern(
         &matching.pattern,
         &mut patterns,
         &mut relationship_variables,
+        hops,
     )?;
 
     let mut graph = GraphPattern::Bgp { patterns };
@@ -260,6 +345,7 @@ fn lower_pattern(
     pattern: &Pattern,
     patterns: &mut Vec<TriplePattern>,
     relationships: &mut Vec<Variable>,
+    hops: &mut Vec<VariableLengthHop>,
 ) -> Result<(), LoweringError> {
     for part in &pattern.parts {
         match &part.anonymous.element {
@@ -273,6 +359,7 @@ fn lower_pattern(
                         &right,
                         patterns,
                         relationships,
+                        hops,
                     )?;
                     left = right;
                 }
@@ -316,15 +403,14 @@ fn lower_relationship(
     right: &TermPattern,
     patterns: &mut Vec<TriplePattern>,
     relationships: &mut Vec<Variable>,
+    hops: &mut Vec<VariableLengthHop>,
 ) -> Result<(), LoweringError> {
-    let variable = relationship_variable(relationship, relationships.len());
-    relationships.push(variable.clone());
-    let subject = TermPattern::Variable(variable);
-
     // Direction decides which endpoint is `from` and which is `to`. An
     // undirected pattern is not expressible as one BGP — it is a union — and is
     // reported rather than silently lowered as left-to-right, which would
-    // return half the answer with no indication.
+    // return half the answer with no indication. Variable-length shares this
+    // refusal: `neighbours` walks one topological direction from a seed, and
+    // "either direction" is not a direction.
     let (from, to) = match relationship.direction {
         RelationshipDirection::Right => (left, right),
         RelationshipDirection::Left => (right, left),
@@ -335,14 +421,17 @@ fn lower_relationship(
         }
     };
 
+    if let Some(detail) = &relationship.detail
+        && let Some(range) = &detail.range
+    {
+        return lower_variable_length(detail, range, from, to, patterns, hops);
+    }
+
+    let variable = relationship_variable(relationship, relationships.len());
+    relationships.push(variable.clone());
+    let subject = TermPattern::Variable(variable);
+
     if let Some(detail) = &relationship.detail {
-        if detail.range.is_some() {
-            // Slice D's work. Refused at lowering rather than approximated,
-            // because an approximation here silently changes the answer.
-            return Err(LoweringError::Unlowerable(
-                "a variable-length relationship pattern",
-            ));
-        }
         if let Some(types) = &detail.types {
             patterns.push(TriplePattern {
                 subject: subject.clone(),
@@ -374,6 +463,295 @@ fn lower_relationship(
         object: to.clone(),
     });
     Ok(())
+}
+
+/// Extract a `*min..max` relationship into a [`VariableLengthHop`] instead of
+/// lowering it — see the module docs for why this cannot become algebra.
+///
+/// **Still contributes one triple pattern: a sentinel, not a real one.** If
+/// `start`/`end` appeared nowhere in the BGP, `RETURN`'s own projection would
+/// silently drop whichever of the two it did not name — the sentinel is what
+/// keeps both threaded through every later layer (`WHERE`, `RETURN`,
+/// aggregation) exactly as an ordinary relationship's triples would, so
+/// nothing downstream needs to know a hop is unresolved. It matches no real
+/// data (see [`variable_length_hop_marker`]) and is stripped or substituted
+/// by the caller before the pattern is ever evaluated — see
+/// [`strip_variable_length_hops`] and [`substitute_variable_length_hop`].
+fn lower_variable_length(
+    detail: &decypher::ast::pattern::RelationshipDetail,
+    range: &decypher::ast::pattern::RangeLiteral,
+    from: &TermPattern,
+    to: &TermPattern,
+    patterns: &mut Vec<TriplePattern>,
+    hops: &mut Vec<VariableLengthHop>,
+) -> Result<(), LoweringError> {
+    if detail.variable.is_some() {
+        // `[r*]` asks for the path's own edges, which `neighbours` cannot
+        // supply — it reports reached nodes and their distance, not the route
+        // taken. Getting the actual edges needs `all_paths`, a materially
+        // more expensive call this slice does not make.
+        return Err(LoweringError::Unlowerable(
+            "a variable-length relationship pattern binding the relationship list",
+        ));
+    }
+    if detail.properties.is_some() {
+        // Which edge along a multi-hop walk would a property filter apply
+        // to? Nothing in Cypher's own semantics answers that, so silently
+        // picking one (or ignoring the filter) would be a guess dressed as
+        // a query.
+        return Err(LoweringError::Unlowerable(
+            "a property filter on a variable-length relationship pattern",
+        ));
+    }
+    let relationship_type = detail
+        .types
+        .as_ref()
+        .map(single_relationship_type)
+        .transpose()?;
+
+    let min_hops = match range.start {
+        None => 1,
+        Some(n) => {
+            usize::try_from(n).map_err(|_| LoweringError::Unlowerable("a negative hop count"))?
+        }
+    };
+    let max_hops = match range.end {
+        None => UNBOUNDED_HOP_LIMIT,
+        Some(n) => usize::try_from(n)
+            .map_err(|_| LoweringError::Unlowerable("a negative hop count"))?
+            .min(UNBOUNDED_HOP_LIMIT),
+    };
+    if min_hops > max_hops {
+        return Err(LoweringError::Unlowerable(
+            "a variable-length pattern whose minimum exceeds its maximum",
+        ));
+    }
+
+    let start = variable_of_term(from)?;
+    let end = variable_of_term(to)?;
+
+    patterns.push(TriplePattern {
+        subject: TermPattern::Variable(start.clone()),
+        predicate: NamedNodePattern::NamedNode(variable_length_hop_marker()),
+        object: TermPattern::Variable(end.clone()),
+    });
+
+    hops.push(VariableLengthHop {
+        start,
+        end,
+        relationship_type,
+        min_hops,
+        max_hops,
+    });
+    Ok(())
+}
+
+/// The reserved predicate a variable-length hop's sentinel triple uses.
+///
+/// **A different namespace from the catalog vocabulary, deliberately.**
+/// Everything in `vocabulary.rs` addresses a term real projected data can
+/// carry; this one must never collide with a real predicate, so it lives
+/// under a namespace no connector or projection ever writes to.
+fn variable_length_hop_marker() -> NamedNode {
+    NamedNode::new("https://graph-owl.dev/ns/internal#variableLengthHop")
+        .expect("a fixed IRI literal is always valid")
+}
+
+/// Whether a triple pattern is a [`lower_variable_length`] sentinel — matched
+/// by predicate, not by which variables it names, so a real triple that
+/// happens to connect the same two variables under a different predicate is
+/// never mistaken for one.
+fn is_variable_length_marker(pattern: &TriplePattern) -> bool {
+    pattern.predicate == NamedNodePattern::NamedNode(variable_length_hop_marker())
+}
+
+/// Remove every variable-length sentinel from a lowered pattern, for
+/// discovering what a hop's own starting point is bound to by the rest of
+/// the query. **The sentinel matches no real data**, so evaluating a pattern
+/// that still contains one always returns zero rows — this is what makes
+/// discovery possible at all, by asking the question without it.
+///
+/// Structural, not semantic: this only rewrites tree shape, so a `Bgp` that
+/// held only the sentinel becomes an empty `Bgp` (SPARQL's one-row identity)
+/// rather than vanishing, and every other pattern kind is walked but
+/// otherwise unchanged.
+#[must_use]
+pub fn strip_variable_length_hops(pattern: GraphPattern) -> GraphPattern {
+    rewrite_hop_bgps(pattern, &mut |patterns| {
+        patterns.retain(|triple| !is_variable_length_marker(triple));
+        None
+    })
+}
+
+/// Replace one hop's sentinel triple with the traversal engine's real
+/// answer, wherever in the pattern it appears — the same tree position the
+/// sentinel occupied, so `start`/`end`'s binding reaches every layer that
+/// already expected them to be there.
+///
+/// # Errors
+///
+/// [`LoweringError::Unlowerable`] if the pattern contains no sentinel for
+/// this hop — a caller resolving a hop [`lower`] never extracted.
+pub fn substitute_variable_length_hop(
+    pattern: GraphPattern,
+    hop: &VariableLengthHop,
+    bindings: &[Vec<Option<spargebra::term::GroundTerm>>],
+) -> Result<GraphPattern, LoweringError> {
+    let mut substituted = false;
+    let rewritten = rewrite_hop_bgps(pattern, &mut |patterns| {
+        let index = patterns.iter().position(|triple| {
+            is_variable_length_marker(triple)
+                && triple.subject == TermPattern::Variable(hop.start.clone())
+                && triple.object == TermPattern::Variable(hop.end.clone())
+        })?;
+        patterns.remove(index);
+        substituted = true;
+        Some(GraphPattern::Values {
+            variables: vec![hop.start.clone(), hop.end.clone()],
+            bindings: bindings.to_vec(),
+        })
+    });
+    if !substituted {
+        return Err(LoweringError::Unlowerable(
+            "a variable-length hop with no matching sentinel in its own pattern",
+        ));
+    }
+    Ok(rewritten)
+}
+
+/// Walk every `Bgp` in a pattern, applying `rewrite` to its triple list.
+///
+/// `rewrite` mutates the list in place and may return a pattern to `Join`
+/// alongside whatever remains — `None` for a plain removal (discovery),
+/// `Some(values)` for a substitution. Everything that is not a `Bgp` is
+/// walked structurally so a sentinel nested inside a `Filter`, `Project`,
+/// `Join`, `LeftJoin`, `Distinct`, `Group`, `Extend`, `OrderBy` or `Slice` is
+/// still found — which is every wrapper [`apply_return`] and [`apply_with`]
+/// can produce.
+fn rewrite_hop_bgps(
+    pattern: GraphPattern,
+    rewrite: &mut impl FnMut(&mut Vec<TriplePattern>) -> Option<GraphPattern>,
+) -> GraphPattern {
+    match pattern {
+        GraphPattern::Bgp { mut patterns } => {
+            let joined = rewrite(&mut patterns);
+            let base = GraphPattern::Bgp { patterns };
+            match joined {
+                None => base,
+                Some(values) => GraphPattern::Join {
+                    left: Box::new(base),
+                    right: Box::new(values),
+                },
+            }
+        }
+        GraphPattern::Join { left, right } => GraphPattern::Join {
+            left: Box::new(rewrite_hop_bgps(*left, rewrite)),
+            right: Box::new(rewrite_hop_bgps(*right, rewrite)),
+        },
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => GraphPattern::LeftJoin {
+            left: Box::new(rewrite_hop_bgps(*left, rewrite)),
+            right: Box::new(rewrite_hop_bgps(*right, rewrite)),
+            expression,
+        },
+        GraphPattern::Filter { expr, inner } => GraphPattern::Filter {
+            expr,
+            inner: Box::new(rewrite_hop_bgps(*inner, rewrite)),
+        },
+        GraphPattern::Project { inner, variables } => GraphPattern::Project {
+            inner: Box::new(rewrite_hop_bgps(*inner, rewrite)),
+            variables,
+        },
+        GraphPattern::Distinct { inner } => GraphPattern::Distinct {
+            inner: Box::new(rewrite_hop_bgps(*inner, rewrite)),
+        },
+        GraphPattern::Reduced { inner } => GraphPattern::Reduced {
+            inner: Box::new(rewrite_hop_bgps(*inner, rewrite)),
+        },
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => GraphPattern::Group {
+            inner: Box::new(rewrite_hop_bgps(*inner, rewrite)),
+            variables,
+            aggregates,
+        },
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => GraphPattern::Extend {
+            inner: Box::new(rewrite_hop_bgps(*inner, rewrite)),
+            variable,
+            expression,
+        },
+        GraphPattern::OrderBy { inner, expression } => GraphPattern::OrderBy {
+            inner: Box::new(rewrite_hop_bgps(*inner, rewrite)),
+            expression,
+        },
+        GraphPattern::Slice {
+            inner,
+            start,
+            length,
+        } => GraphPattern::Slice {
+            inner: Box::new(rewrite_hop_bgps(*inner, rewrite)),
+            start,
+            length,
+        },
+        // `Values`, `Path`, `Minus`, `Union` and `Service` never appear in
+        // what this module lowers, so there is nothing inside them a
+        // sentinel could hide in.
+        other => other,
+    }
+}
+
+/// Unwrap `RETURN`/`WITH`'s own modifiers down to the reading pattern
+/// beneath — discovery needs to see past whatever a projection chose to keep,
+/// since a hop's starting point may not be among the columns the query asked
+/// for at all.
+///
+/// **Stops at the first `Join`.** A multi-part query (`WITH … MATCH …`) joins
+/// each segment's own already-projected pattern onto the next; if an earlier
+/// segment's `WITH` dropped the variable a later hop needs, this cannot see
+/// past that boundary, and resolution then reports the hop as unconstrained —
+/// a known limitation of this slice, not a silent wrong answer.
+#[must_use]
+pub fn reading_pattern(pattern: &GraphPattern) -> &GraphPattern {
+    match pattern {
+        GraphPattern::Slice { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Project { inner, .. } => reading_pattern(inner),
+        other => other,
+    }
+}
+
+/// The variable a node-position term names — always a variable, because
+/// [`lower_node`] never produces anything else.
+fn variable_of_term(term: &TermPattern) -> Result<Variable, LoweringError> {
+    match term {
+        TermPattern::Variable(variable) => Ok(variable.clone()),
+        _ => Err(LoweringError::Unlowerable(
+            "a variable-length pattern endpoint that is not a plain node variable",
+        )),
+    }
+}
+
+/// The single relationship type a variable-length pattern follows, or a
+/// refusal for the compound `TYPE1|TYPE2` form — the same restriction a
+/// fixed-length relationship's [`label_node`] already applies. Returns the
+/// raw name rather than an IRI, because the caller filters the traversal
+/// engine's edges by that name directly, not by a vocabulary term.
+fn single_relationship_type(types: &LabelExpression) -> Result<String, LoweringError> {
+    match types {
+        LabelExpression::Static(name) => Ok(name.name.clone()),
+        _ => Err(LoweringError::Unlowerable("a compound label expression")),
+    }
 }
 
 /// `UNWIND [..] AS x` — a table of one column.
@@ -1143,6 +1521,13 @@ mod tests {
 
     fn lowered(query: &str) -> GraphPattern {
         let parsed = parse_subset(query).unwrap_or_else(|e| panic!("{query} -> {e}"));
+        lower(&parsed, query)
+            .unwrap_or_else(|e| panic!("{query} -> {e}"))
+            .0
+    }
+
+    fn lowered_with_hops(query: &str) -> (GraphPattern, Vec<VariableLengthHop>) {
+        let parsed = parse_subset(query).unwrap_or_else(|e| panic!("{query} -> {e}"));
         lower(&parsed, query).unwrap_or_else(|e| panic!("{query} -> {e}"))
     }
 
@@ -1440,13 +1825,310 @@ mod tests {
 
     // ---- refusals happen at lowering, not at execution ----
 
+    /// **A variable-length pattern lowers, but binding its relationship list
+    /// does not.** `[r*1..3]` asks for the path's own edges; `neighbours`
+    /// reports reached nodes and their distance, not the route taken —
+    /// getting the edges needs `all_paths`, a materially more expensive call
+    /// this slice does not make. Refused rather than silently returning
+    /// something else for `r`.
     #[test]
-    fn a_variable_length_pattern_is_refused_at_lowering() {
+    fn a_bound_relationship_list_on_a_variable_length_pattern_is_refused() {
         assert_eq!(
-            refused("MATCH (a)-[r*1..3]->(b) RETURN a"),
-            LoweringError::Unlowerable("a variable-length relationship pattern"),
-            "Slice D's work — refused rather than approximated"
+            refused("MATCH (a)-[r*1..3]->(b) RETURN r"),
+            LoweringError::Unlowerable(
+                "a variable-length relationship pattern binding the relationship list"
+            ),
         );
+    }
+
+    // ---- Slice D: variable-length patterns are extracted, not lowered ----
+
+    /// **The pattern itself carries none of the relationship's usual three
+    /// triples.** They cannot: nothing in the algebra can express "1 to 3
+    /// hops of this type", which is the whole reason this is extracted rather
+    /// than lowered — see the module docs.
+    #[test]
+    fn a_variable_length_pattern_contributes_a_sentinel_not_a_real_relationship() {
+        let (pattern, hops) = lowered_with_hops("MATCH (a)-[:FEEDS*1..3]->(b) RETURN b");
+
+        assert_eq!(hops.len(), 1, "{hops:?}");
+        let triples = triples(&pattern);
+        assert!(
+            triples.iter().all(|t| !t.contains("relType")
+                && !t.contains("fromEntity")
+                && !t.contains("toEntity")),
+            "a hop must not also lower as a real relationship: {triples:?}"
+        );
+        assert!(
+            triples
+                .iter()
+                .any(|t| t.contains("internal#variableLengthHop")),
+            "and must still appear as a sentinel, so RETURN cannot drop `b`: {triples:?}"
+        );
+    }
+
+    #[test]
+    fn a_variable_length_hop_carries_its_bounds_and_type() {
+        let (_, hops) = lowered_with_hops("MATCH (a)-[:FEEDS*1..3]->(b) RETURN b");
+
+        assert_eq!(hops.len(), 1);
+        let hop = &hops[0];
+        assert_eq!(hop.start.as_str(), "a");
+        assert_eq!(hop.end.as_str(), "b");
+        assert_eq!(hop.relationship_type.as_deref(), Some("FEEDS"));
+        assert_eq!(hop.min_hops, 1);
+        assert_eq!(hop.max_hops, 3);
+    }
+
+    /// A bare `*` means "one or more", not "zero or more" — the openCypher
+    /// grammar's own default, not zero, because zero hops would mean `a` and
+    /// `b` are the same node.
+    #[test]
+    fn a_bare_star_defaults_the_minimum_to_one() {
+        let (_, hops) = lowered_with_hops("MATCH (a)-[*]->(b) RETURN b");
+
+        assert_eq!(hops[0].min_hops, 1);
+        assert_eq!(hops[0].relationship_type, None, "no type names any");
+    }
+
+    /// **An unbounded upper end is capped, not refused.** Reusing
+    /// `graph-owl-server`'s own server-side hop cap rather than a fresh
+    /// number — see `UNBOUNDED_HOP_LIMIT`.
+    #[test]
+    fn an_unbounded_upper_end_is_capped_at_the_shared_limit() {
+        let (_, hops) = lowered_with_hops("MATCH (a)-[*2..]->(b) RETURN b");
+
+        assert_eq!(hops[0].min_hops, 2);
+        assert_eq!(hops[0].max_hops, UNBOUNDED_HOP_LIMIT);
+    }
+
+    /// **An explicit upper bound past the cap is capped too**, not honoured —
+    /// a query cannot opt itself out of the server's own protection.
+    #[test]
+    fn an_explicit_upper_bound_past_the_cap_is_still_capped() {
+        let (_, hops) = lowered_with_hops("MATCH (a)-[*1..100]->(b) RETURN b");
+
+        assert_eq!(hops[0].max_hops, UNBOUNDED_HOP_LIMIT);
+    }
+
+    /// **`start` is always the topological tail, `end` the head — regardless
+    /// of which side of the arrow either variable was written on.** Both
+    /// forms describe the same walk, and a caller that resolved them
+    /// differently would answer the same question two different ways.
+    #[test]
+    fn direction_normalises_to_tail_and_head_however_the_arrow_points() {
+        let (_, forward) = lowered_with_hops("MATCH (a)-[*1..3]->(b) RETURN b");
+        let (_, backward) = lowered_with_hops("MATCH (b)<-[*1..3]-(a) RETURN b");
+
+        assert_eq!(forward[0].start.as_str(), "a");
+        assert_eq!(forward[0].end.as_str(), "b");
+        assert_eq!(backward[0].start.as_str(), "a");
+        assert_eq!(backward[0].end.as_str(), "b");
+    }
+
+    #[test]
+    fn a_minimum_exceeding_the_maximum_is_refused() {
+        assert_eq!(
+            refused("MATCH (a)-[*5..2]->(b) RETURN b"),
+            LoweringError::Unlowerable(
+                "a variable-length pattern whose minimum exceeds its maximum"
+            ),
+        );
+    }
+
+    #[test]
+    fn a_property_filter_on_a_variable_length_pattern_is_refused() {
+        let refusal = refused("MATCH (a)-[:FEEDS*1..3 {confidence: 0.9}]->(b) RETURN b");
+        assert!(
+            matches!(refusal, LoweringError::Unlowerable(_)),
+            "{refusal:?}"
+        );
+    }
+
+    #[test]
+    fn a_compound_type_on_a_variable_length_pattern_is_refused() {
+        assert_eq!(
+            refused("MATCH (a)-[:FEEDS|LIKES*1..3]->(b) RETURN b"),
+            LoweringError::Unlowerable("a compound label expression"),
+        );
+    }
+
+    #[test]
+    fn an_undirected_variable_length_pattern_is_refused() {
+        assert_eq!(
+            refused("MATCH (a)-[*1..3]-(b) RETURN b"),
+            LoweringError::Unlowerable("an undirected relationship pattern"),
+        );
+    }
+
+    /// Two independent variable-length patterns in one `MATCH` are both
+    /// extracted — the accumulator must not silently keep only the last one.
+    #[test]
+    fn several_variable_length_patterns_are_all_extracted() {
+        let (_, hops) =
+            lowered_with_hops("MATCH (a)-[:FEEDS*1..2]->(b), (c)-[:LIKES*1..2]->(d) RETURN a, c");
+
+        assert_eq!(hops.len(), 2, "{hops:?}");
+        let starts: std::collections::BTreeSet<&str> =
+            hops.iter().map(|hop| hop.start.as_str()).collect();
+        assert_eq!(starts, ["a", "c"].into_iter().collect());
+    }
+
+    // ---- Slice D: stripping and substituting a hop's sentinel ----
+
+    /// Stripping removes only the sentinel — a real triple pattern elsewhere
+    /// in the same `Bgp` (here, the property binding `WHERE` needs) must
+    /// survive, or discovery would lose the very constraint it exists to
+    /// read.
+    #[test]
+    fn stripping_removes_only_the_sentinel_triple() {
+        let (pattern, hops) =
+            lowered_with_hops("MATCH (a)-[:FEEDS*1..3]->(b) WHERE a.name = 'x' RETURN b");
+        let hop = &hops[0];
+
+        let stripped = strip_variable_length_hops(pattern);
+        let stripped_triples = triples(&stripped);
+
+        assert!(
+            stripped_triples
+                .iter()
+                .all(|t| !t.contains("internal#variableLengthHop")),
+            "{stripped_triples:?}"
+        );
+        assert!(
+            stripped_triples.iter().any(|t| t.contains("catalog#name")),
+            "a.name's own binding must survive stripping: {stripped_triples:?}"
+        );
+        let _ = hop;
+    }
+
+    /// **The pattern is answerable without the hop, and always returns
+    /// nothing while it does** — the sentinel matches no real data, so
+    /// evaluating the *unstripped* pattern is how discovery would fail if
+    /// stripping were skipped. Confirmed by running both for real: the
+    /// unstripped form finds nothing even though `a` exists; the stripped
+    /// form finds it.
+    #[test]
+    fn the_unstripped_pattern_never_matches_and_the_stripped_one_does() {
+        use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+
+        let flakes = vec![Flake::assert(
+            Sid::dsc("a"),
+            Sid::dsc("name"),
+            FlakeValue::String("x".into()),
+            1,
+        )];
+
+        let (pattern, _hops) =
+            lowered_with_hops("MATCH (a)-[:FEEDS*1..3]->(b) WHERE a.name = 'x' RETURN a.name");
+        let unstripped_rows = evaluate_pattern(&flakes, pattern.clone());
+        let stripped_rows = evaluate_pattern(&flakes, strip_variable_length_hops(pattern));
+
+        assert!(unstripped_rows.is_empty(), "{unstripped_rows:?}");
+        assert_eq!(stripped_rows, vec!["\"x\"".to_string()]);
+    }
+
+    /// `reading_pattern` sees past `RETURN`'s own projection — the property
+    /// this exists for. `RETURN b` alone would hide `a` behind a `Project`
+    /// that never named it; discovery needs the pattern underneath.
+    #[test]
+    fn reading_pattern_unwraps_returns_own_projection() {
+        let (pattern, _hops) = lowered_with_hops(
+            "MATCH (a)-[:FEEDS*1..3]->(b) WHERE a.name = 'x' RETURN b ORDER BY b LIMIT 5",
+        );
+
+        let reading = reading_pattern(&pattern);
+
+        assert!(
+            !matches!(
+                reading,
+                GraphPattern::Project { .. }
+                    | GraphPattern::OrderBy { .. }
+                    | GraphPattern::Slice { .. }
+            ),
+            "{reading:?}"
+        );
+        // `a`'s own binding must still be visible from here — the entire
+        // point of unwrapping.
+        let inner_triples = triples(reading);
+        assert!(
+            inner_triples.iter().any(|t| t.contains("catalog#name")),
+            "{inner_triples:?}"
+        );
+    }
+
+    /// **Substitution replaces the sentinel with real data, and the result
+    /// actually evaluates to it** — not just a shape assertion. `RETURN b`
+    /// only ever names `b`; if substitution bound the wrong variable, or
+    /// bound it somewhere `RETURN`'s own `Project` could not see, this would
+    /// still return an empty result set rather than erroring.
+    #[test]
+    fn substituting_a_hop_makes_the_pattern_answer_with_the_real_binding() {
+        let (pattern, hops) = lowered_with_hops("MATCH (a)-[:FEEDS*1..3]->(b) RETURN b");
+        let hop = &hops[0];
+
+        let target = NamedNode::new("https://graph-owl.dev/ns/catalog#target").expect("iri");
+        let bindings = vec![vec![
+            Some(spargebra::term::GroundTerm::NamedNode(
+                NamedNode::new("https://graph-owl.dev/ns/catalog#seed").expect("iri"),
+            )),
+            Some(spargebra::term::GroundTerm::NamedNode(target.clone())),
+        ]];
+        let substituted =
+            substitute_variable_length_hop(pattern, hop, &bindings).expect("should substitute");
+
+        let rows = evaluate_pattern(&[], substituted);
+
+        assert_eq!(rows, vec![target.to_string()], "{rows:?}");
+    }
+
+    #[test]
+    fn substituting_an_unmatched_hop_is_refused() {
+        let (pattern, _hops) = lowered_with_hops("MATCH (a)-[:FEEDS*1..3]->(b) RETURN b");
+        let unrelated_hop = VariableLengthHop {
+            start: Variable::new("nope_start").expect("valid"),
+            end: Variable::new("nope_end").expect("valid"),
+            relationship_type: None,
+            min_hops: 1,
+            max_hops: 1,
+        };
+
+        let result = substitute_variable_length_hop(pattern, &unrelated_hop, &[]);
+
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    /// Evaluates a pattern directly (no `RETURN` lowering involved) over real
+    /// flakes, and returns the sole projected column's rendered values —
+    /// used where the test needs to build or rewrite the algebra itself
+    /// rather than go through a fresh `lowered` call.
+    fn evaluate_pattern(
+        flakes: &[graph_owl_core::flake::Flake],
+        pattern: GraphPattern,
+    ) -> Vec<String> {
+        let query = spargebra::Query::Select {
+            dataset: None,
+            pattern,
+            base_iri: None,
+        };
+        let dataset = crate::dataset::FlakeDataset::from_flakes(flakes).expect("dataset");
+        let results = spareval::QueryEvaluator::new()
+            .prepare(&query)
+            .execute(&dataset)
+            .expect("evaluation should succeed");
+        match results {
+            spareval::QueryResults::Solutions(iter) => iter
+                .map(|solution| {
+                    let solution = solution.expect("solution");
+                    solution
+                        .iter()
+                        .next()
+                        .map(|(_, term)| term.to_string())
+                        .unwrap_or_default()
+                })
+                .collect(),
+            _ => panic!("a SELECT must yield solutions"),
+        }
     }
 
     #[test]

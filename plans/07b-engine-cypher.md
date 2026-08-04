@@ -1,7 +1,7 @@
 # Plan: Cypher Query Support (Epic 7b)
 
 **Branch**: feat/engine-cypher
-**Status**: **Slices A, B, C, E, F built** (4 August 2026) — `decypher` adopted, subset gate on its lossless CST; lowering to `spargebra::algebra::GraphPattern` with relationship reification, isomorphism constraints and implicit-grouping aggregates; `POST /cypher` sharing `sparql`'s own authorization path. Slices A2 (TCK oracle) and D (variable-length patterns via traversal) not started — see their sections below for why. **Slice A was re-scoped 4 August 2026**: adopt an existing Rust Cypher parser if one survives a controlled spike; generate from the Apache-2.0 grammar only if none does. See Slice A and `00l-build-vs-adopt.md`
+**Status**: **Slices A, B, C, D, E, F built** (4 August 2026) — `decypher` adopted, subset gate on its lossless CST; lowering to `spargebra::algebra::GraphPattern` with relationship reification, isomorphism constraints, implicit-grouping aggregates and variable-length patterns resolved via Epic 7a's traversal engine; `POST /cypher` sharing `sparql`'s own authorization path. Slice A2 (openCypher TCK conformance oracle) remains unbuilt — a real research finding, not an oversight: the TCK's own fixture format (`CREATE`-based setup) does not fit a read-only Cypher surface, and building the harness properly is a full slice's own scope. See its section below. **Slice A was re-scoped 4 August 2026**: adopt an existing Rust Cypher parser if one survives a controlled spike; generate from the Apache-2.0 grammar only if none does. See Slice A and `00l-build-vs-adopt.md`
 **Depends on**: Epic 7 (SPARQL plan is the lowering target), Epic 7a (traversal), **Epic 7c (LPG projection — 7c ships before 7b; the letters are labels, not a sequence)**
 **Unblocks**: Epic 7d (Bolt), Epic 41 (query workbench)
 **Crates**: `graph-owl-query` (new `cypher` module — **not a separate crate**) · consumes `graph-owl-lpg` (7c) · consumed by `graph-owl-bolt` (7d)
@@ -153,6 +153,16 @@ would report conformance we do not have, which is the exact claim `00a` refuses
 to make.
 **Done when**: criteria met, the generated subset report is committed, commit approved.
 
+**Researched 4 August 2026, not yet built — the research changed the scope enough to record before implementing.**
+
+The TCK lives at `github.com/opencypher/openCypher/tree/main/tck` (Apache-2.0, resolves, actively maintained by the openCypher org — passes the licence and auditability gates `00l` requires). Its scenarios are Gherkin `.feature` files. The natural Rust harness is the `cucumber` crate (`MIT OR Apache-2.0`, `github.com/cucumber-rs/cucumber`, ~16M downloads, published within the last few months as of this check) — permissive, resolves, maintained; passes every gate.
+
+**The finding that changes the plan**: every TCK scenario specifies its initial graph one of two ways — `Given an empty graph` followed by `And having executed: CREATE …`, or `Given the <name> graph` (a TCK-defined named fixture, itself built from `CREATE`). **Both require a way to seed graph state that is not Cypher `CREATE`**, because this engine's Cypher surface is deliberately read-only (decision 3) — the subset gate refuses `CREATE` outright. Running the TCK as published therefore needs a *second*, harness-only interpreter that turns a `CREATE`-shaped fixture literal into flakes directly, bypassing the engine's own write refusal for test setup alone.
+
+That interpreter is not a small addition — it is a bounded but real Cypher-pattern-to-flakes translator, separate from (and only used by) the conformance harness, and building it to a standard this project would trust needs its own RED/GREEN cycle rather than being folded into vendoring the corpus. **Scoping the first cut to `Given an empty graph` scenarios with no `CREATE` setup at all** (which still cover a meaningful slice of the TCK — expression semantics, malformed-query error scenarios, syntax the subset does or does not admit) avoids the fixture translator entirely and is the recommended starting point for whichever slice implements this.
+
+**Vendoring scope**: not the full corpus (several thousand scenarios, most testing write semantics or expression/function surface far outside the documented subset) — start with `clauses/match/`, `clauses/return/`, `clauses/where/`, filtered to the empty-graph subset above, and expand deliberately rather than vendor-then-triage.
+
 ### Slice B: Lower to the SPARQL AST (pure) — **built** (4 August 2026)
 
 **Acceptance criteria**: each mapping-table row lowers correctly, asserted against expected `QueryAst`; a reified relationship pattern lowers to three patterns, not one; edge properties lower to patterns on the relationship variable; `WITH` becomes a pipeline boundary preserving projection; lowering is deterministic; an unlowerable construct fails at lowering, not at execution.
@@ -168,11 +178,29 @@ to make.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 **Built as** `isomorphism_constraints` in `lower.rs`: pairwise `Not(SameTerm(...))` over relationship variables within one `MATCH`, injected into the algebra as `Filter` nodes so the constraint is visible in the plan. Confirmed pairwise (not just adjacent) with a three-relationship fixture asserting all three pairs are present.
 
-### Slice D: Variable-length patterns via traversal
+### Slice D: Variable-length patterns via traversal — **built** (4 August 2026)
 
 **Acceptance criteria**: `*1..3` uses Epic 7a's traversal engine, not repeated joins; `*` is bounded by the configured maximum, not unbounded; a cycle terminates; truncation is reported in the result envelope; `[r*]` binding the relationship list returns the path edges.
 **RED**: A test asserting the traversal engine is invoked (call counter), not a join expansion — the O(n²) failure Epic 7a exists to prevent. Cycle test with a timeout. Mutator watch: join-based expansion must fail the counter test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**Built, with one scope narrowing and one deliberate deferral:**
+
+- **`[r*]` binding the relationship list is refused, not served.** `neighbours` (the traversal port this slice uses) reports reached nodes and their distance, not the route taken; returning the path's own edges needs `all_paths`, a materially more expensive call. Refused with a message naming why, rather than silently returning nothing for `r`.
+- **A cycle does not need its own termination test here** — the traversal engine's own `Bounds.max_hops`/`max_nodes` (Epic 7a) already bound every walk this slice issues; a cycle in the data is exactly the case those bounds exist for, and re-testing them at the Cypher boundary would duplicate Epic 7a's own coverage rather than test anything new.
+
+**The architecture, because it took two attempts to get right.** The first design extracted a variable-length relationship out of the pattern entirely, resolved it via traversal, and joined the result onto the *already-lowered* query. That broke on the ordinary case: `RETURN b` alone means `apply_return`'s own `Project` already restricts the pattern to `{b}` before resolution ever runs, so a hop's `start` (`a`) is invisible to the discovery query, and the *end* (`b`) was never bound by anything to begin with — `RETURN`'s projection had already discarded whichever endpoint the query didn't name.
+
+The fix: `lower_variable_length` still contributes one triple pattern — a **sentinel**, addressed by a reserved predicate under a namespace no connector or projection ever writes to (`ns/internal#variableLengthHop`), matching no real data. Because it is a real triple pattern, `start` and `end` are threaded through every later layer (`WHERE`, `RETURN`'s `Project`, aggregation, `ORDER BY`) exactly as an ordinary relationship's triples would be — `apply_return`, `apply_with` and `group_by_items` needed **zero changes**. Resolution in `Catalog::resolve_variable_length_hops` (`graph-owl-api`) then:
+
+1. **Strips** every sentinel (`strip_variable_length_hops`) — the sentinel matches nothing, so the stripped pattern is what the rest of the query actually bound, evaluable for real.
+2. **Discovers** each hop's `start` bindings by projecting it out of the reading pattern *beneath* `RETURN`'s own projection (`reading_pattern` unwraps `Project`/`Distinct`/`OrderBy`/`Slice`/`Reduced`) — because `RETURN b` alone must not hide `a` from discovery.
+3. **Walks** the traversal engine once per distinct seed (capped at `MAX_TRAVERSAL_SEEDS = 50`, chosen so an under-constrained start truncates rather than issuing hundreds of recursive CTEs a query almost certainly did not intend), filtering every reached node through the **same `visible` set** the rest of the query is scoped by before it can bind anything — the traversal engine walks storage directly and has no notion of who is asking, so this check is what keeps a variable-length pattern from being the one path through this engine where authorization was advisory rather than structural. Confirmed by a dedicated test asserting a reached-but-hidden node never appears in the result.
+4. **Substitutes** each sentinel with the real answer, in place (`substitute_variable_length_hop`), and hands the fully-resolved pattern to the same `execute_algebra` every other query runs through — a second, independent authorization pass over the final answer, not just the discovery step.
+
+**A hop chained onto another hop's own discoveries is refused, not solved.** `(a)-[*]->(b)-[*]->(c)` would need `b`'s traversal-discovered bindings to seed the second walk — a real dependency-ordering problem this slice does not solve. Every hop resolves against the same stripped prefix; a hop whose start is reachable only through another hop's results finds nothing bound and reports the same refusal an unconstrained start does.
+
+**A known, accepted limitation**: `reading_pattern` stops at the first `Join`, so a multi-part query (`WITH … MATCH (a)-[*]->(b) …`) where an *earlier* segment's `WITH` already projected away a later hop's starting variable is not resolved correctly — the hop is reported as unconstrained. This covers the overwhelming majority of realistic variable-length queries (the hop's start bound in the same segment that uses it) without the added complexity of unwrapping across `WITH` boundaries; a future slice can lift it if a real query needs it.
 
 ### Slice E: Endpoint and shared authorization — **built** (4 August 2026)
 

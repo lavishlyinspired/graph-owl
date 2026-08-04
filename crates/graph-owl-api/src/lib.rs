@@ -290,6 +290,29 @@ pub struct SparqlOutcome {
     pub variables: Vec<String>,
 }
 
+/// The scoped, authorized dataset [`Catalog::scoped_facts`] built — everything
+/// downstream of "which facts may the evaluator see", stopping short of
+/// running the query. See that method's docs for why it exists separately
+/// from [`Catalog::execute_algebra`].
+struct ScopedFacts {
+    dataset: graph_owl_query::dataset::FlakeDataset,
+    /// Asset ids this principal may see, keyed the way [`scope_facts`] and a
+    /// reached traversal node's [`graph_owl_core::flake::Sid::id`] both are.
+    visible: std::collections::HashSet<String>,
+    at: Option<i64>,
+    truncated: bool,
+    plan: Vec<String>,
+    fact_count: usize,
+}
+
+/// One traversal call per candidate seed a variable-length hop's starting
+/// point resolves to. Capped so a hop whose start is under-constrained
+/// truncates rather than issuing a traversal call per node in a large,
+/// loosely-matched prefix — the same shape of problem `SparqlBudget` exists to
+/// bound for a plain query, applied to the number of walks rather than the
+/// number of facts.
+const MAX_TRAVERSAL_SEEDS: usize = 50;
+
 /// The variables a `SELECT` names, in the order it names them.
 ///
 /// Read from the parsed algebra rather than the results: the projection is a
@@ -747,13 +770,21 @@ impl Catalog {
                 error.to_string(),
             )])
         })?;
-        let pattern = graph_owl_query::cypher::lower(&admitted, query).map_err(|error| {
-            CatalogError::Validation(vec![FieldError::new(
-                "query",
-                FieldErrorCode::Type,
-                error.to_string(),
-            )])
-        })?;
+        let (pattern, hops) =
+            graph_owl_query::cypher::lower(&admitted, query).map_err(|error| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "query",
+                    FieldErrorCode::Type,
+                    error.to_string(),
+                )])
+            })?;
+
+        if !hops.is_empty() {
+            return self
+                .resolve_variable_length_hops(principal, pattern, hops, as_of, budget)
+                .await;
+        }
+
         let parsed = spargebra::Query::Select {
             dataset: None,
             pattern,
@@ -779,6 +810,44 @@ impl Catalog {
         as_of: Option<DateTime<Utc>>,
         budget: SparqlBudget,
     ) -> Result<SparqlOutcome, CatalogError> {
+        let scoped = self.scoped_facts(principal, parsed, as_of, budget).await?;
+
+        let results = spareval::QueryEvaluator::new()
+            .prepare(parsed)
+            .execute(&scoped.dataset)
+            .map_err(|e| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "query",
+                    FieldErrorCode::Type,
+                    e.to_string(),
+                )])
+            })?;
+
+        Ok(SparqlOutcome {
+            rows: collect(results),
+            facts_scanned: scoped.fact_count,
+            truncated: scoped.truncated,
+            as_of: scoped.at,
+            plan: scoped.plan,
+            variables: projected_variables(parsed),
+        })
+    }
+
+    /// Steps 1–3 of [`Self::execute_algebra`]: everything that decides *which
+    /// facts the evaluator may see*, stopping short of running the query.
+    ///
+    /// **Split out for Slice D.** Resolving a variable-length hop needs the
+    /// scoped, authorized dataset *before* the final evaluation — to discover
+    /// what a hop's starting node is bound to — so `execute_algebra` alone
+    /// cannot serve it. This is the piece both share; only what happens with
+    /// the dataset differs.
+    async fn scoped_facts(
+        &self,
+        principal: &Principal,
+        parsed: &spargebra::Query,
+        as_of: Option<DateTime<Utc>>,
+        budget: SparqlBudget,
+    ) -> Result<ScopedFacts, CatalogError> {
         let graph = self.graph.as_ref().ok_or_else(|| {
             CatalogError::Storage(StorageError::Unexpected(
                 "this server has no graph engine configured".to_string(),
@@ -838,13 +907,153 @@ impl Catalog {
         all.dedup();
 
         let (facts, truncated) = scope_facts(&all, &visible, budget.max_facts);
-
-        // 4. Evaluate.
+        let fact_count = facts.len();
         let dataset = graph_owl_query::dataset::FlakeDataset::from_flakes(&facts)
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        Ok(ScopedFacts {
+            dataset,
+            visible,
+            at,
+            truncated,
+            plan,
+            fact_count,
+        })
+    }
+
+    /// Resolve every [`graph_owl_query::cypher::VariableLengthHop`] a Cypher
+    /// query extracted rather than lowered, then answer the whole query
+    /// through [`Self::execute_algebra`] — Epic 7b Slice D.
+    ///
+    /// **The pattern still carries a sentinel triple per hop** — see
+    /// `lower_variable_length`'s docs in `graph_owl_query::cypher` — which is
+    /// what lets discovery and the final answer share one pipeline with
+    /// `apply_return`/`apply_with` rather than needing their own copy of
+    /// `RETURN`'s projection logic. Discovery strips every sentinel (the
+    /// pattern then answers, over real data, exactly what the rest of the
+    /// query bound before the hop); the final step substitutes each one for
+    /// the traversal engine's real answer, in place, so `RETURN` sees exactly
+    /// the same variable it would have if the hop had been an ordinary
+    /// relationship.
+    ///
+    /// **Two round trips, not one, and that is inherent rather than a missed
+    /// optimisation.** What the final answer needs to read depends on which
+    /// nodes the traversal discovers, and that is not known until the
+    /// traversal runs — so the facts for the final evaluation cannot be
+    /// fetched in the same pass as the facts that tell the traversal where to
+    /// start.
+    ///
+    /// **Every hop resolves against the same stripped pattern**, deliberately:
+    /// this slice refuses a hop chained onto another hop's own discoveries
+    /// (`b` in `(a)-[*]->(b)-[*]->(c)` seeding the second walk) rather than
+    /// solving the general dependency-ordering problem that would require. A
+    /// hop whose start is only reachable through another hop fails the same
+    /// way an unconstrained one does: nothing binds it once every sentinel is
+    /// stripped, so resolution refuses rather than guesses.
+    ///
+    /// **A reached node is dropped, not disclosed, if the principal may not
+    /// see it.** The traversal engine walks storage directly and has no
+    /// notion of who is asking; every reached node is checked against the
+    /// same `visible` set the rest of the query is scoped by before it can
+    /// bind anything, which is the one thing Cypher's own evaluation gets for
+    /// free by never holding a fact the caller may not see in the first
+    /// place. Without this check, a variable-length pattern would be the one
+    /// path through this engine where authorization was advisory.
+    async fn resolve_variable_length_hops(
+        &self,
+        principal: &Principal,
+        pattern: spargebra::algebra::GraphPattern,
+        hops: Vec<graph_owl_query::cypher::VariableLengthHop>,
+        as_of: Option<DateTime<Utc>>,
+        budget: SparqlBudget,
+    ) -> Result<SparqlOutcome, CatalogError> {
+        let traversal = self.traversal.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no traversal engine configured".to_string(),
+            ))
+        })?;
+
+        let discovery_pattern =
+            graph_owl_query::cypher::strip_variable_length_hops(pattern.clone());
+        let discovery_query = spargebra::Query::Select {
+            dataset: None,
+            pattern: discovery_pattern.clone(),
+            base_iri: None,
+        };
+        let scoped = self
+            .scoped_facts(principal, &discovery_query, as_of, budget)
+            .await?;
+        let mut truncated = scoped.truncated;
+
+        // `RETURN`/`WITH`'s own projection may not have named a hop's start
+        // at all — discovery needs the pattern underneath it, not the one
+        // `RETURN` narrowed to.
+        let reading = graph_owl_query::cypher::reading_pattern(&discovery_pattern).clone();
+
+        let mut resolved = pattern;
+        for hop in &hops {
+            let seeds = Self::discover_hop_seeds(&reading, &scoped, hop)?;
+            if seeds.is_empty() {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "query",
+                    FieldErrorCode::Type,
+                    "a variable-length relationship pattern's starting point must already \
+                     be bound by a label or property matched elsewhere in the query"
+                        .to_string(),
+                )]));
+            }
+            let (bindings, hop_truncated) = self
+                .walk_hop(traversal.as_ref(), &scoped, hop, seeds)
+                .await?;
+            truncated |= hop_truncated;
+
+            resolved =
+                graph_owl_query::cypher::substitute_variable_length_hop(resolved, hop, &bindings)
+                    .map_err(|error| {
+                    CatalogError::Validation(vec![FieldError::new(
+                        "query",
+                        FieldErrorCode::Type,
+                        error.to_string(),
+                    )])
+                })?;
+        }
+
+        let final_query = spargebra::Query::Select {
+            dataset: None,
+            pattern: resolved,
+            base_iri: None,
+        };
+        let mut outcome = self
+            .execute_algebra(principal, &final_query, as_of, budget)
+            .await?;
+        outcome.truncated |= truncated;
+        Ok(outcome)
+    }
+
+    /// The distinct, already-scoped bindings of a hop's starting variable —
+    /// an in-memory evaluation against the dataset [`Self::scoped_facts`]
+    /// already fetched, not a fresh scan. Capped at
+    /// [`MAX_TRAVERSAL_SEEDS`]: one traversal call per seed, so an
+    /// under-constrained start truncates rather than issuing hundreds of
+    /// recursive walks a query almost certainly did not intend.
+    fn discover_hop_seeds(
+        reading: &spargebra::algebra::GraphPattern,
+        scoped: &ScopedFacts,
+        hop: &graph_owl_query::cypher::VariableLengthHop,
+    ) -> Result<Vec<graph_owl_core::flake::Sid>, CatalogError> {
+        let discover = spargebra::Query::Select {
+            dataset: None,
+            pattern: spargebra::algebra::GraphPattern::Distinct {
+                inner: Box::new(spargebra::algebra::GraphPattern::Project {
+                    inner: Box::new(reading.clone()),
+                    variables: vec![hop.start.clone()],
+                }),
+            },
+            base_iri: None,
+        };
         let results = spareval::QueryEvaluator::new()
-            .prepare(parsed)
-            .execute(&dataset)
+            .prepare(&discover)
+            .execute(&scoped.dataset)
             .map_err(|e| {
                 CatalogError::Validation(vec![FieldError::new(
                     "query",
@@ -853,14 +1062,90 @@ impl Catalog {
                 )])
             })?;
 
-        Ok(SparqlOutcome {
-            rows: collect(results),
-            facts_scanned: facts.len(),
-            truncated,
-            as_of: at,
-            plan,
-            variables: projected_variables(parsed),
-        })
+        let spareval::QueryResults::Solutions(iter) = results else {
+            return Ok(Vec::new());
+        };
+        let mut seeds: Vec<graph_owl_core::flake::Sid> = Vec::new();
+        for solution in iter {
+            let solution = solution.map_err(|e| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "query",
+                    FieldErrorCode::Type,
+                    e.to_string(),
+                )])
+            })?;
+            if let Some(term) = solution.get(hop.start.as_ref())
+                && let Ok(graph_owl_core::flake::FlakeValue::Ref(sid)) =
+                    graph_owl_query::term::from_term(term)
+            {
+                seeds.push(sid);
+            }
+        }
+        if seeds.len() > MAX_TRAVERSAL_SEEDS {
+            seeds.truncate(MAX_TRAVERSAL_SEEDS);
+        }
+        Ok(seeds)
+    }
+
+    /// Walk from every seed, filter the reached nodes through the same
+    /// authorization set the rest of the query is scoped by, and return the
+    /// `(start, end)` bindings a `Values` block will join in — see
+    /// [`Self::resolve_variable_length_hops`] for why the security check here
+    /// is load-bearing rather than defensive.
+    async fn walk_hop(
+        &self,
+        traversal: &dyn TraversalEngine,
+        scoped: &ScopedFacts,
+        hop: &graph_owl_query::cypher::VariableLengthHop,
+        seeds: Vec<graph_owl_core::flake::Sid>,
+    ) -> Result<(Vec<Vec<Option<spargebra::term::GroundTerm>>>, bool), CatalogError> {
+        let truncated_by_seed_cap = seeds.len() >= MAX_TRAVERSAL_SEEDS;
+        let mut truncated = truncated_by_seed_cap;
+        let mut bindings = Vec::new();
+
+        for seed in seeds {
+            let walked = traversal
+                .neighbours(
+                    &seed,
+                    Direction::Outgoing,
+                    Bounds {
+                        max_hops: hop.max_hops,
+                        max_nodes: Bounds::default().max_nodes,
+                    },
+                    &EdgeFilter {
+                        relationship_types: hop
+                            .relationship_type
+                            .clone()
+                            .map(|relationship_type| vec![relationship_type]),
+                        as_of: scoped.at,
+                    },
+                )
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            truncated |= walked.truncated;
+
+            for reached in walked.reached {
+                if reached.distance < hop.min_hops {
+                    continue;
+                }
+                // **Never disclose a node the principal may not see, not even
+                // its existence.** The traversal engine walked storage
+                // directly and does not know who is asking; this is the
+                // check that makes it agree with the rest of the query.
+                if !scoped.visible.contains(&reached.node.id) {
+                    continue;
+                }
+                let start_term = graph_owl_query::term::to_named_node(&seed)
+                    .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+                let end_term = graph_owl_query::term::to_named_node(&reached.node)
+                    .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+                bindings.push(vec![
+                    Some(spargebra::term::GroundTerm::NamedNode(start_term)),
+                    Some(spargebra::term::GroundTerm::NamedNode(end_term)),
+                ]);
+            }
+        }
+        Ok((bindings, truncated))
     }
 
     /// Assets the graph does not represent.
@@ -20738,6 +21023,348 @@ mod projection_isolation_tests {
     }
 
     const DSC: &str = "https://graph-owl.dev/ns/catalog#";
+
+    // ---- Epic 7b Slice D: variable-length patterns via the traversal engine ----
+
+    /// A traversal engine whose answers are scripted rather than walked — the
+    /// Cypher-side counterpart of `RecordingGraph`. Only `neighbours` is
+    /// implemented; the others are unreachable from a variable-length hop and
+    /// panic rather than silently returning nothing if that ever changes.
+    struct FakeTraversal {
+        by_seed: std::collections::HashMap<String, graph_owl_traversal::TraversalResult>,
+    }
+
+    #[async_trait::async_trait]
+    impl TraversalEngine for FakeTraversal {
+        async fn neighbours(
+            &self,
+            start: &graph_owl_core::flake::Sid,
+            _direction: Direction,
+            _bounds: Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<graph_owl_traversal::TraversalResult, graph_owl_traversal::TraversalError>
+        {
+            Ok(self.by_seed.get(&start.id).cloned().unwrap_or(
+                graph_owl_traversal::TraversalResult {
+                    reached: Vec::new(),
+                    truncated: false,
+                    truncation_reason: None,
+                },
+            ))
+        }
+
+        async fn subgraph(
+            &self,
+            _seeds: &[graph_owl_core::flake::Sid],
+            _direction: Direction,
+            _bounds: Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<Subgraph, graph_owl_traversal::TraversalError> {
+            unreachable!("a variable-length hop resolves via neighbours, not subgraph")
+        }
+
+        async fn shortest_path(
+            &self,
+            _from: &graph_owl_core::flake::Sid,
+            _to: &graph_owl_core::flake::Sid,
+            _direction: Direction,
+            _bounds: Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<Option<graph_owl_traversal::Path>, graph_owl_traversal::TraversalError>
+        {
+            unreachable!("a variable-length hop resolves via neighbours, not shortest_path")
+        }
+
+        async fn all_paths(
+            &self,
+            _from: &graph_owl_core::flake::Sid,
+            _to: &graph_owl_core::flake::Sid,
+            _direction: Direction,
+            _bounds: Bounds,
+            _max_paths: usize,
+            _filter: &EdgeFilter,
+        ) -> Result<graph_owl_traversal::PathSet, graph_owl_traversal::TraversalError> {
+            unreachable!("a variable-length hop resolves via neighbours, not all_paths")
+        }
+
+        async fn detect_cycles(
+            &self,
+            _start: &graph_owl_core::flake::Sid,
+            _bounds: Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<Vec<graph_owl_traversal::Cycle>, graph_owl_traversal::TraversalError> {
+            unreachable!("a variable-length hop resolves via neighbours, not detect_cycles")
+        }
+    }
+
+    fn reached(id: &str, distance: usize) -> graph_owl_traversal::Reached {
+        graph_owl_traversal::Reached {
+            node: graph_owl_core::flake::Sid::new(graph_owl_core::flake::namespace::DSC, id),
+            distance,
+        }
+    }
+
+    /// **The happy path, proven against a real seed.** `a` is bound by a
+    /// property filter, the fake traversal reports `b` reachable at distance
+    /// 2, and the query must return it — the join `resolve_variable_length_hops`
+    /// injects has to actually connect the discovered node to what the rest
+    /// of the query asked for, not merely avoid erroring.
+    #[tokio::test]
+    async fn a_variable_length_pattern_resolves_via_the_traversal_engine() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let seed = Catalog::new(storage.clone())
+            .with_graph(graph.clone() as Arc<dyn TripleStore>)
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("seed asset");
+        let target = Catalog::new(storage.clone())
+            .with_graph(graph.clone() as Arc<dyn TripleStore>)
+            .upsert_asset(&Principal::system(), service("downstream"))
+            .await
+            .expect("target asset");
+
+        let traversal = Arc::new(FakeTraversal {
+            by_seed: std::collections::HashMap::from([(
+                seed.id.to_string(),
+                graph_owl_traversal::TraversalResult {
+                    reached: vec![reached(&target.id.to_string(), 2)],
+                    truncated: false,
+                    truncation_reason: None,
+                },
+            )]),
+        });
+        let catalog = Catalog::new(storage)
+            .with_graph(graph as Arc<dyn TripleStore>)
+            .with_traversal(traversal);
+
+        let outcome = catalog
+            .cypher(
+                &Principal::system(),
+                "MATCH (a)-[:FEEDS*1..3]->(b) WHERE a.name = 'hdfc-core' RETURN b",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(outcome.rows.len(), 1, "{:?}", outcome.rows);
+        assert!(
+            outcome.rows[0]["b"].contains(&target.id.to_string()),
+            "{:?}",
+            outcome.rows
+        );
+        assert!(!outcome.truncated);
+    }
+
+    /// **The property this slice exists to get right.** The traversal engine
+    /// walks storage directly and has no notion of who is asking; a reached
+    /// node the principal is not allowed to see must be dropped before it can
+    /// bind anything, or a variable-length pattern would be the one path
+    /// through this engine where authorization was advisory rather than
+    /// structural.
+    #[tokio::test]
+    async fn a_reached_node_the_principal_cannot_see_is_dropped_not_disclosed() {
+        use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+
+        let storage = Arc::new(InMemoryStorage::default());
+        storage.policies.lock().unwrap().push(Policy {
+            name: "analyst".to_string(),
+            rules: vec![Rule {
+                name: "read-hdfc".to_string(),
+                effect: Effect::Allow,
+                operations: vec![MetadataOperation::ViewBasic],
+                resources: ResourceMatcher::FqnPrefix("hdfc-core".to_string()),
+            }],
+        });
+        let graph = RecordingGraph::working();
+        let seed = Catalog::new(storage.clone())
+            .with_graph(graph.clone() as Arc<dyn TripleStore>)
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("seed asset");
+        // Not under the allowed prefix — invisible to the analyst.
+        let hidden = Catalog::new(storage.clone())
+            .with_graph(graph.clone() as Arc<dyn TripleStore>)
+            .upsert_asset(&Principal::system(), service("other-bank"))
+            .await
+            .expect("hidden asset");
+
+        let traversal = Arc::new(FakeTraversal {
+            by_seed: std::collections::HashMap::from([(
+                seed.id.to_string(),
+                graph_owl_traversal::TraversalResult {
+                    reached: vec![reached(&hidden.id.to_string(), 1)],
+                    truncated: false,
+                    truncation_reason: None,
+                },
+            )]),
+        });
+        let catalog = Catalog::new(storage)
+            .with_graph(graph as Arc<dyn TripleStore>)
+            .with_traversal(traversal);
+
+        let analyst = Principal {
+            id: "asha".to_string(),
+            name: "Asha".to_string(),
+            kind: graph_owl_core::PrincipalKind::User,
+            roles: vec!["analyst".to_string()],
+            is_admin: false,
+        };
+
+        let outcome = catalog
+            .cypher(
+                &analyst,
+                "MATCH (a)-[:FEEDS*1..3]->(b) WHERE a.name = 'hdfc-core' RETURN b",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert!(
+            outcome.rows.is_empty(),
+            "a node outside the analyst's policy must not appear, even via traversal: {:?}",
+            outcome.rows
+        );
+    }
+
+    /// A distance below the pattern's own minimum is excluded — `*2..3`
+    /// asking for at least two hops must not accept a one-hop answer.
+    #[tokio::test]
+    async fn a_reached_node_closer_than_the_minimum_hop_count_is_excluded() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let seed = Catalog::new(storage.clone())
+            .with_graph(graph.clone() as Arc<dyn TripleStore>)
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("seed asset");
+        let too_close = Catalog::new(storage.clone())
+            .with_graph(graph.clone() as Arc<dyn TripleStore>)
+            .upsert_asset(&Principal::system(), service("one-hop-away"))
+            .await
+            .expect("target asset");
+
+        let traversal = Arc::new(FakeTraversal {
+            by_seed: std::collections::HashMap::from([(
+                seed.id.to_string(),
+                graph_owl_traversal::TraversalResult {
+                    reached: vec![reached(&too_close.id.to_string(), 1)],
+                    truncated: false,
+                    truncation_reason: None,
+                },
+            )]),
+        });
+        let catalog = Catalog::new(storage)
+            .with_graph(graph as Arc<dyn TripleStore>)
+            .with_traversal(traversal);
+
+        let outcome = catalog
+            .cypher(
+                &Principal::system(),
+                "MATCH (a)-[:FEEDS*2..3]->(b) WHERE a.name = 'hdfc-core' RETURN b",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert!(outcome.rows.is_empty(), "{:?}", outcome.rows);
+    }
+
+    /// **A variable-length pattern with nothing binding its start is refused,
+    /// not silently answered as "nothing".** The traversal engine walks from
+    /// a seed; with no seed to walk from, an empty result would look
+    /// identical to a query that ran and genuinely found nothing.
+    #[tokio::test]
+    async fn an_unconstrained_variable_length_start_is_refused() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let traversal = Arc::new(FakeTraversal {
+            by_seed: std::collections::HashMap::new(),
+        });
+        let catalog = Catalog::new(storage)
+            .with_graph(graph as Arc<dyn TripleStore>)
+            .with_traversal(traversal);
+
+        let error = catalog
+            .cypher(
+                &Principal::system(),
+                "MATCH (a)-[:FEEDS*1..3]->(b) RETURN b",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect_err("nothing binds `a`");
+
+        assert!(matches!(error, CatalogError::Validation(_)), "{error:?}");
+    }
+
+    /// Truncation the traversal engine itself reports must reach the
+    /// envelope — the same "never silently incomplete" rule the fact budget
+    /// already honours, extended to the traversal's own budget.
+    #[tokio::test]
+    async fn traversal_side_truncation_is_reported_in_the_envelope() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let seed = Catalog::new(storage.clone())
+            .with_graph(graph.clone() as Arc<dyn TripleStore>)
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("seed asset");
+
+        let traversal = Arc::new(FakeTraversal {
+            by_seed: std::collections::HashMap::from([(
+                seed.id.to_string(),
+                graph_owl_traversal::TraversalResult {
+                    reached: Vec::new(),
+                    truncated: true,
+                    truncation_reason: Some(graph_owl_traversal::TruncationReason::NodeBudget),
+                },
+            )]),
+        });
+        let catalog = Catalog::new(storage)
+            .with_graph(graph as Arc<dyn TripleStore>)
+            .with_traversal(traversal);
+
+        let outcome = catalog
+            .cypher(
+                &Principal::system(),
+                "MATCH (a)-[:FEEDS*1..3]->(b) WHERE a.name = 'hdfc-core' RETURN b",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert!(
+            outcome.truncated,
+            "the traversal engine's own truncation must surface"
+        );
+    }
+
+    /// Missing the traversal engine entirely is a `Storage` error naming why —
+    /// the same shape [`Catalog::asset_subgraph`] already reports, not a
+    /// silent empty answer that looks like "nothing is connected".
+    #[tokio::test]
+    async fn a_variable_length_query_with_no_traversal_engine_configured_is_a_storage_error() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        let error = catalog
+            .cypher(
+                &Principal::system(),
+                "MATCH (a)-[:FEEDS*1..3]->(b) WHERE a.name = 'hdfc-core' RETURN b",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect_err("no traversal engine");
+
+        assert!(matches!(error, CatalogError::Storage(_)), "{error:?}");
+    }
 
     /// Reconstruction reads the graph **at the instant asked for**, not the
     /// present.

@@ -30,7 +30,10 @@ pub mod predicate {
     pub const TO_ENTITY: &str = "toEntity";
 }
 
-pub use lower::{LoweringError, lower};
+pub use lower::{
+    LoweringError, VariableLengthHop, lower, reading_pattern, strip_variable_length_hops,
+    substitute_variable_length_hop,
+};
 pub use subset::Refusal;
 
 /// Why a Cypher request did not produce a plan.

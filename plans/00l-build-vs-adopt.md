@@ -480,3 +480,26 @@ unserved — it is how most MCP clients actually connect, and `POST /mcp` reache
 none of them; the framing is newline-delimited JSON, so it does not need the SDK.
 
 *(The spike described here has now run; its result is the section above.)*
+
+### The openCypher TCK's own harness need — checked, blocked on scope rather than licence
+
+**4 August 2026, for Epic 7b Slice A2.** Two separate adoption questions, both
+checked:
+
+**The TCK corpus itself**: `github.com/opencypher/openCypher/tree/main/tck`,
+Apache-2.0, resolves, maintained by the openCypher org. Passes every gate — this
+is data (Gherkin scenarios), not a competing implementation, and the plan
+already called for adopting it regardless of Slice A's parsing route.
+
+**A Gherkin harness for Rust**: `cucumber` (`crates.io/crates/cucumber`,
+`github.com/cucumber-rs/cucumber`), `MIT OR Apache-2.0`, ~16M downloads,
+published within the last few months as of this check. Passes licence,
+auditability and maintenance. **Not yet adopted, because the blocker found
+during this check is not the crate** — it is that the TCK's own fixture format
+(`Given an empty graph` + `CREATE` statements, or a named fixture built the same
+way) has no way to seed state in an engine whose Cypher surface refuses `CREATE`
+by design. Running it needs a second, harness-only interpreter translating a
+`CREATE`-shaped fixture into flakes directly — real scope, not a dependency
+swap, and specified in `07b-engine-cypher.md`'s Slice A2 section rather than
+rushed alongside it. **Blocked is not rejected**: both the corpus and the
+harness crate are the right choice whenever that translator is built.
