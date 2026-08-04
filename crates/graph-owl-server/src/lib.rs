@@ -75,6 +75,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/overview", get(overview))
         .route("/graph/reconcile", post(reconcile_projection))
         .route("/sparql", post(sparql))
+        .route("/cypher", post(cypher))
         .route("/connectors/postgres/runs", post(run_postgres_connector))
         .route("/connectors/runs", get(list_connector_runs))
         .route("/lineage", post(assert_lineage))
@@ -2265,7 +2266,15 @@ async fn sparql(
         .sparql(&principal, &payload.query, as_of, SparqlBudget::default())
         .await?;
 
-    Ok(Json(json!({
+    Ok(Json(query_outcome_json(&outcome)))
+}
+
+/// The response body shared by `/sparql` and `/cypher` — one envelope, one
+/// pagination shape, one error format, because both endpoints answer through
+/// the identical [`graph_owl_api::SparqlOutcome`]. Factored out rather than
+/// duplicated so the two handlers cannot drift apart one field at a time.
+fn query_outcome_json(outcome: &graph_owl_api::SparqlOutcome) -> serde_json::Value {
+    json!({
         "rows": outcome.rows,
         "factsScanned": outcome.facts_scanned,
         // Always present, never inferred from row count. A truncated answer
@@ -2283,7 +2292,61 @@ async fn sparql(
         // **The order the query named them.** Solutions are sorted maps, so
         // this is the only place the author's own column order survives.
         "variables": outcome.variables,
-    })))
+    })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CypherRequest {
+    query: String,
+    /// RFC 3339. Absent means now.
+    as_of: Option<String>,
+}
+
+impl ValidateBody for CypherRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("query"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// Cypher over the same graph — Epic 7b Slice E.
+///
+/// **Same envelope, same pagination, same error shape as `/sparql`**, because
+/// both handlers render the identical [`graph_owl_api::SparqlOutcome`]
+/// through [`query_outcome_json`]. `POST` for the same reason `/sparql` is
+/// `POST`: a query is a body, not a URL, and this one can carry literal
+/// values from the estate.
+async fn cypher(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<CypherRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let as_of = match payload.as_of {
+        None => None,
+        Some(raw) => Some(
+            chrono::DateTime::parse_from_rfc3339(&raw)
+                .map_err(|e| {
+                    AppError::Validation(vec![FieldError::new(
+                        "asOf",
+                        FieldErrorCode::Type,
+                        format!("`{raw}` is not an RFC 3339 timestamp: {e}"),
+                    )])
+                })?
+                .with_timezone(&chrono::Utc),
+        ),
+    };
+
+    let outcome = catalog
+        .cypher(&principal, &payload.query, as_of, SparqlBudget::default())
+        .await?;
+
+    Ok(Json(query_outcome_json(&outcome)))
 }
 
 /// Run a validation pass and replace the stored queue — Epic 5 Slice C.

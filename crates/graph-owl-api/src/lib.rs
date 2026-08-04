@@ -686,11 +686,9 @@ impl Catalog {
     /// Answer a SPARQL query over the graph, scoped to what this principal may
     /// see and to the transaction time asked for.
     ///
-    /// **The ordering is the security property.** Visibility is resolved
-    /// against *relational* state, the fact set is filtered before it is built,
-    /// and only then does the evaluator run. The evaluator therefore never
-    /// holds a fact the caller may not see, so no amount of optimisation inside
-    /// it can surface one — decision 7 made structural rather than trusted.
+    /// Parses, then hands the algebra to [`Self::execute_algebra`] — see its
+    /// docs for the authorization ordering both this and [`Self::cypher`]
+    /// depend on.
     ///
     /// # Errors
     ///
@@ -714,6 +712,73 @@ impl Catalog {
                 )])
             })?;
 
+        self.execute_algebra(principal, &parsed, as_of, budget)
+            .await
+    }
+
+    /// Answer a Cypher query over the same graph, scoped identically —
+    /// Epic 7b Slice E.
+    ///
+    /// **Lowers to the same [`spargebra::algebra::GraphPattern`] `sparql`
+    /// parses to, then calls the identical [`Self::execute_algebra`].** Not a
+    /// parallel implementation that happens to agree: it is the same
+    /// authorization predicate, the same pushdown, the same budget and the
+    /// same evaluator, because both front ends hand this method the same
+    /// algebra type. Two evaluators would mean two authorization paths, and
+    /// the looser one would be the leak.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the query does not parse, is outside the served
+    /// subset, or cannot be lowered. `Storage` if no graph engine is
+    /// configured, or if the scan fails.
+    #[tracing::instrument(name = "catalog.cypher", skip_all)]
+    pub async fn cypher(
+        &self,
+        principal: &Principal,
+        query: &str,
+        as_of: Option<DateTime<Utc>>,
+        budget: SparqlBudget,
+    ) -> Result<SparqlOutcome, CatalogError> {
+        let admitted = graph_owl_query::cypher::parse_subset(query).map_err(|error| {
+            CatalogError::Validation(vec![FieldError::new(
+                "query",
+                FieldErrorCode::Type,
+                error.to_string(),
+            )])
+        })?;
+        let pattern = graph_owl_query::cypher::lower(&admitted, query).map_err(|error| {
+            CatalogError::Validation(vec![FieldError::new(
+                "query",
+                FieldErrorCode::Type,
+                error.to_string(),
+            )])
+        })?;
+        let parsed = spargebra::Query::Select {
+            dataset: None,
+            pattern,
+            base_iri: None,
+        };
+
+        self.execute_algebra(principal, &parsed, as_of, budget)
+            .await
+    }
+
+    /// The shared body of `sparql` and `cypher`: everything downstream of
+    /// "here is the algebra to answer".
+    ///
+    /// **The ordering is the security property.** Visibility is resolved
+    /// against *relational* state, the fact set is filtered before it is built,
+    /// and only then does the evaluator run. The evaluator therefore never
+    /// holds a fact the caller may not see, so no amount of optimisation inside
+    /// it can surface one — decision 7 made structural rather than trusted.
+    async fn execute_algebra(
+        &self,
+        principal: &Principal,
+        parsed: &spargebra::Query,
+        as_of: Option<DateTime<Utc>>,
+        budget: SparqlBudget,
+    ) -> Result<SparqlOutcome, CatalogError> {
         let graph = self.graph.as_ref().ok_or_else(|| {
             CatalogError::Storage(StorageError::Unexpected(
                 "this server has no graph engine configured".to_string(),
@@ -749,7 +814,7 @@ impl Catalog {
         //    "read what the question names". `None` means the query could not
         //    be bounded — a property path reaches an unknown number of hops —
         //    and a full scan is then the only correct answer, never a guess.
-        let scans = graph_owl_query::pushdown::scans_for(&parsed)
+        let scans = graph_owl_query::pushdown::scans_for(parsed)
             .unwrap_or_else(|| vec![graph_owl_core::flake::TriplePattern::default()]);
 
         let mut all = Vec::new();
@@ -778,7 +843,7 @@ impl Catalog {
         let dataset = graph_owl_query::dataset::FlakeDataset::from_flakes(&facts)
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
         let results = spareval::QueryEvaluator::new()
-            .prepare(&parsed)
+            .prepare(parsed)
             .execute(&dataset)
             .map_err(|e| {
                 CatalogError::Validation(vec![FieldError::new(
@@ -794,7 +859,7 @@ impl Catalog {
             truncated,
             as_of: at,
             plan,
-            variables: projected_variables(&parsed),
+            variables: projected_variables(parsed),
         })
     }
 
@@ -20512,6 +20577,167 @@ mod projection_isolation_tests {
             earlier.rows
         );
     }
+
+    // ---- Epic 7b Slice E: Cypher over the same engine ----
+
+    /// The Cypher counterpart of `sparql_returns_rows_from_the_graph` — same
+    /// assertion, so a bug that only breaks one front end shows up here rather
+    /// than only in the crate that has HTTP tests.
+    #[tokio::test]
+    async fn cypher_returns_rows_from_the_graph() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("create");
+
+        let outcome = catalog
+            .cypher(
+                &Principal::system(),
+                "MATCH (n) RETURN n.name AS name",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(outcome.rows.len(), 1, "{:?}", outcome.rows);
+        assert!(
+            outcome.rows[0]["name"].contains("hdfc-core"),
+            "{:?}",
+            outcome.rows
+        );
+        assert!(!outcome.truncated);
+    }
+
+    /// The variable order is a property of the **query**, read from the
+    /// lowered algebra exactly as `sparql`'s does — proof the two front ends
+    /// share `projected_variables` rather than each carrying their own idea
+    /// of column order.
+    #[tokio::test]
+    async fn cypher_reports_the_variables_in_the_order_the_query_named_them() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        let outcome = catalog
+            .cypher(
+                &Principal::system(),
+                "MATCH (n) RETURN n.name AS name, n.type AS kind",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(outcome.variables, vec!["name", "kind"]);
+    }
+
+    /// A syntactically invalid Cypher query is a `Validation` error naming the
+    /// `query` field — the same shape `sparql`'s own parse failure reports, so
+    /// the HTTP layer needs no per-language branch to turn it into a 400.
+    #[tokio::test]
+    async fn a_malformed_cypher_query_is_a_validation_error_naming_the_field() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        let error = catalog
+            .cypher(
+                &Principal::system(),
+                "MATCH (n RETURN n",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect_err("malformed Cypher must not parse");
+
+        assert!(matches!(error, CatalogError::Validation(_)), "{error:?}");
+    }
+
+    /// **The property Slice E exists for.** `cypher` and `sparql` must agree
+    /// on what one restricted principal may see, because they share
+    /// `execute_algebra` rather than each compiling their own predicate. If
+    /// they ever diverged, one of the two would be leaking what the policy
+    /// denied.
+    #[tokio::test]
+    async fn cypher_and_sparql_agree_on_what_a_restricted_principal_may_see() {
+        use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+
+        let storage = Arc::new(InMemoryStorage::default());
+        storage.policies.lock().unwrap().push(Policy {
+            name: "analyst".to_string(),
+            rules: vec![Rule {
+                name: "read-hdfc".to_string(),
+                effect: Effect::Allow,
+                operations: vec![MetadataOperation::ViewBasic],
+                resources: ResourceMatcher::FqnPrefix("hdfc-core".to_string()),
+            }],
+        });
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("allowed asset");
+        catalog
+            .upsert_asset(&Principal::system(), service("other-bank"))
+            .await
+            .expect("denied asset");
+
+        let analyst = Principal {
+            id: "asha".to_string(),
+            name: "Asha".to_string(),
+            kind: graph_owl_core::PrincipalKind::User,
+            roles: vec!["analyst".to_string()],
+            is_admin: false,
+        };
+
+        let sparql_outcome = catalog
+            .sparql(
+                &analyst,
+                &format!("SELECT ?name WHERE {{ ?s <{DSC}name> ?name }}"),
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("sparql");
+        let cypher_outcome = catalog
+            .cypher(
+                &analyst,
+                "MATCH (s) RETURN s.name AS name",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("cypher");
+
+        let names = |rows: &[std::collections::BTreeMap<String, String>]| -> std::collections::BTreeSet<String> {
+            rows.iter()
+                .filter_map(|row| row.get("name").map(|v| v.trim_matches('"').to_string()))
+                .collect()
+        };
+
+        let sparql_names = names(&sparql_outcome.rows);
+        let cypher_names = names(&cypher_outcome.rows);
+
+        assert_eq!(
+            sparql_names, cypher_names,
+            "one principal must see the same names through both languages"
+        );
+        assert!(
+            sparql_names.contains("hdfc-core"),
+            "the allowed asset must be visible: {sparql_names:?}"
+        );
+        assert!(
+            !sparql_names.contains("other-bank"),
+            "the denied asset must not: {sparql_names:?}"
+        );
+    }
+
+    const DSC: &str = "https://graph-owl.dev/ns/catalog#";
 
     /// Reconstruction reads the graph **at the instant asked for**, not the
     /// present.

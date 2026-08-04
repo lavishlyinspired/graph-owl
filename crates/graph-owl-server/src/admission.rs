@@ -82,9 +82,11 @@ impl Class {
 #[must_use]
 pub fn class_of(route: &str) -> Option<Class> {
     match route {
-        // A whole SPARQL query, and a traversal walk. Both can read a large
-        // fraction of the graph before their own fact/hop budget stops them.
-        "/sparql" | "/assets/{id}/graph" => Some(Class::Query),
+        // A whole SPARQL or Cypher query, and a traversal walk. All three can
+        // read a large fraction of the graph before their own fact/hop budget
+        // stops them — `/cypher` shares the class because it shares the same
+        // evaluator and the same budget, not a lookalike one.
+        "/sparql" | "/cypher" | "/assets/{id}/graph" => Some(Class::Query),
         // A source scan and a full projection rebuild. Both hold a connection
         // for their whole duration and neither is latency-sensitive, so both
         // are better refused than queued.
@@ -537,6 +539,7 @@ mod tests {
         #[test]
         fn a_query_and_a_traversal_are_query_class() {
             assert_eq!(class_of("/sparql"), Some(Class::Query));
+            assert_eq!(class_of("/cypher"), Some(Class::Query));
             assert_eq!(class_of("/assets/{id}/graph"), Some(Class::Query));
         }
 

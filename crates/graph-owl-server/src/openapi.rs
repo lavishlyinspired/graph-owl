@@ -208,6 +208,15 @@ pub static ROUTES: &[Route] = &[
     ),
     route(
         "post",
+        "/cypher",
+        "Run a Cypher query",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "post",
         "/connectors/postgres/runs",
         "Catalogue a Postgres source",
         None,

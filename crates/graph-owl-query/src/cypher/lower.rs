@@ -37,9 +37,26 @@
 //!
 //! Across *separate* `MATCH` clauses reuse is permitted, which is Cypher's
 //! actual rule and not an approximation of it.
+//!
+//! # Aggregates are `GraphPattern::Group`, not a second implementation (Slice F)
+//!
+//! `count`, `sum`, `avg`, `min` and `max` lower onto
+//! [`spargebra::algebra::AggregateExpression`] — the same operator
+//! `spareval` already evaluates for SPARQL's own `GROUP BY`. Grouping is
+//! **implicit**, per Cypher: every non-aggregated `RETURN`/`WITH` item becomes
+//! a grouping key, with no separate `GROUP BY` clause to write.
+//!
+//! **`collect(...)` is refused, not approximated.** SPARQL's nearest operator,
+//! `GROUP_CONCAT`, folds values into one delimited *string*; Cypher's
+//! `collect()` produces a genuine list-typed value. Lowering one to the other
+//! would silently hand back a string where the caller asked for a list —
+//! exactly the kind of approximation this module refuses everywhere else
+//! (an undirected relationship, a variable-length hop, a compound label).
 
 use oxrdf::{Literal, NamedNode, Variable};
-use spargebra::algebra::{Expression, GraphPattern, OrderExpression};
+use spargebra::algebra::{
+    AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression,
+};
 use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
 
 use decypher::ast::clause::{Match, Return, SortDirection, Unwind, With};
@@ -72,20 +89,28 @@ pub enum LoweringError {
 
 /// Lower one admitted query to the shared algebra.
 ///
+/// **Takes the source text as well as the parsed query**, solely to recover
+/// an aggregate argument `decypher` drops from its own typed AST — see
+/// [`recover_dropped_argument`]. Nothing else here reads it; the AST is the
+/// lowering input everywhere else, exactly as the module docs describe.
+///
 /// # Errors
 ///
 /// [`LoweringError`] naming the construct that has no lowering.
-pub fn lower(query: &decypher::ast::query::Query) -> Result<GraphPattern, LoweringError> {
+pub fn lower(
+    query: &decypher::ast::query::Query,
+    source: &str,
+) -> Result<GraphPattern, LoweringError> {
     let body = query
         .statements
         .first()
         .ok_or(LoweringError::Unlowerable("an empty query"))?;
-    lower_body(body)
+    lower_body(body, source)
 }
 
-fn lower_body(body: &QueryBody) -> Result<GraphPattern, LoweringError> {
+fn lower_body(body: &QueryBody, source: &str) -> Result<GraphPattern, LoweringError> {
     match body {
-        QueryBody::SingleQuery(single) => lower_single(&single.kind),
+        QueryBody::SingleQuery(single) => lower_single(&single.kind, source),
         // **Everything else was already refused by the subset gate**, and this
         // arm is the second line rather than a fallback that quietly copes.
         //
@@ -99,9 +124,9 @@ fn lower_body(body: &QueryBody) -> Result<GraphPattern, LoweringError> {
     }
 }
 
-fn lower_single(kind: &SingleQueryKind) -> Result<GraphPattern, LoweringError> {
+fn lower_single(kind: &SingleQueryKind, source: &str) -> Result<GraphPattern, LoweringError> {
     match kind {
-        SingleQueryKind::SinglePart(part) => lower_part(part),
+        SingleQueryKind::SinglePart(part) => lower_part(part, source),
         SingleQueryKind::MultiPart(multi) => {
             // **`WITH` is a pipeline boundary.** Each part's reading clauses
             // join onto what came before, and the `WITH` projects — which is
@@ -119,9 +144,10 @@ fn lower_single(kind: &SingleQueryKind) -> Result<GraphPattern, LoweringError> {
                 pattern = Some(apply_with(
                     pattern.take().expect("just assigned"),
                     &segment.with,
+                    source,
                 )?);
             }
-            let tail = lower_part(&multi.final_part)?;
+            let tail = lower_part(&multi.final_part, source)?;
             Ok(match pattern {
                 None => tail,
                 Some(left) => GraphPattern::Join {
@@ -133,10 +159,10 @@ fn lower_single(kind: &SingleQueryKind) -> Result<GraphPattern, LoweringError> {
     }
 }
 
-fn lower_part(part: &SinglePartQuery) -> Result<GraphPattern, LoweringError> {
+fn lower_part(part: &SinglePartQuery, source: &str) -> Result<GraphPattern, LoweringError> {
     let reading = lower_reading(&part.reading_clauses)?;
     match &part.body {
-        SinglePartBody::Return(returning) => apply_return(reading, returning),
+        SinglePartBody::Return(returning) => apply_return(reading, returning, source),
         // The subset gate refuses these; reaching here is a gate/lowering
         // disagreement rather than a user error.
         SinglePartBody::Updating { .. } => Err(LoweringError::Unlowerable("a write clause")),
@@ -372,15 +398,28 @@ fn lower_unwind(unwind: &Unwind) -> Result<GraphPattern, LoweringError> {
 }
 
 /// `WITH` projects and optionally filters, which is what scopes the next part.
-fn apply_with(inner: GraphPattern, with: &With) -> Result<GraphPattern, LoweringError> {
+fn apply_with(
+    inner: GraphPattern,
+    with: &With,
+    source: &str,
+) -> Result<GraphPattern, LoweringError> {
     let mut properties = Vec::new();
     for item in &with.items {
         collect_properties(&item.expression, &mut properties);
     }
     let inner = with_property_bindings(inner, &properties)?;
-    let variables = projected_variables(&with.items)?;
+    let variables = projected_variables(&with.items, source)?;
+    let projected = if with
+        .items
+        .iter()
+        .any(|item| is_aggregate_expr(&item.expression))
+    {
+        group_by_items(inner, &with.items, source)?
+    } else {
+        bind_aliases(inner, &with.items)?
+    };
     let mut graph = GraphPattern::Project {
-        inner: Box::new(inner),
+        inner: Box::new(projected),
         variables,
     };
     if with.distinct {
@@ -403,7 +442,11 @@ fn apply_with(inner: GraphPattern, with: &With) -> Result<GraphPattern, Lowering
 /// then slice. Sorting before projecting would let a query order by something it
 /// does not return, which Cypher permits and SPARQL's algebra expresses by this
 /// nesting; slicing before sorting would return the wrong rows entirely.
-fn apply_return(inner: GraphPattern, returning: &Return) -> Result<GraphPattern, LoweringError> {
+fn apply_return(
+    inner: GraphPattern,
+    returning: &Return,
+    source: &str,
+) -> Result<GraphPattern, LoweringError> {
     let mut properties = Vec::new();
     for item in &returning.items {
         collect_properties(&item.expression, &mut properties);
@@ -414,9 +457,18 @@ fn apply_return(inner: GraphPattern, returning: &Return) -> Result<GraphPattern,
         }
     }
     let inner = with_property_bindings(inner, &properties)?;
-    let variables = projected_variables(&returning.items)?;
+    let variables = projected_variables(&returning.items, source)?;
+    let projected = if returning
+        .items
+        .iter()
+        .any(|item| is_aggregate_expr(&item.expression))
+    {
+        group_by_items(inner, &returning.items, source)?
+    } else {
+        bind_aliases(inner, &returning.items)?
+    };
     let mut graph = GraphPattern::Project {
-        inner: Box::new(inner),
+        inner: Box::new(projected),
         variables,
     };
     if returning.distinct {
@@ -465,26 +517,311 @@ fn count_of(expression: &CypherExpression) -> Result<usize, LoweringError> {
 
 fn projected_variables(
     items: &[decypher::ast::clause::ProjectionItem],
+    source: &str,
 ) -> Result<Vec<Variable>, LoweringError> {
     let mut variables = Vec::new();
     for item in items {
-        let name = match (&item.alias, &item.expression) {
-            (Some(alias), _) => alias.name.name.clone(),
-            (None, CypherExpression::Variable(variable)) => variable.name.name.clone(),
-            (None, CypherExpression::PropertyLookup { base, property, .. }) => {
-                // `RETURN n.name` with no alias projects a variable named for
-                // the path, which is what Cypher shows in its own result header.
-                format!("{}_{}", base_name(base)?, property.name.name)
-            }
-            _ => return Err(LoweringError::Unlowerable("this projection item")),
-        };
-        variables
-            .push(Variable::new(name).map_err(|_| LoweringError::Unlowerable("a variable name"))?);
+        variables.push(variable_named(&projected_name(item, source)?)?);
     }
     if variables.is_empty() {
         return Err(LoweringError::NothingBound);
     }
     Ok(variables)
+}
+
+/// The output column name for one projection item — an explicit alias, or the
+/// name Cypher itself would show for an unaliased one.
+///
+/// **A function call is checked before the alias, not after.** An alias is
+/// just a name; it says nothing about whether anything binds to it. Without
+/// this guard, `RETURN toUpper(n.name) AS x` would name the column `x` on the
+/// strength of the alias alone and go on to select it from a pattern with
+/// nothing bound to that name — an unbound-column bug rather than a refusal,
+/// and the aliased form would hide it even from a reader checking for a bare
+/// unsupported function call.
+fn projected_name(
+    item: &decypher::ast::clause::ProjectionItem,
+    source: &str,
+) -> Result<String, LoweringError> {
+    if let CypherExpression::FunctionCall(invocation) = &item.expression
+        && aggregate_function(invocation).is_none()
+        && !is_refused_aggregate(invocation)
+    {
+        return Err(LoweringError::Unlowerable(
+            "a function call that is not a supported aggregate",
+        ));
+    }
+    Ok(match (&item.alias, &item.expression) {
+        (Some(alias), _) => alias.name.name.clone(),
+        (None, CypherExpression::Variable(variable)) => variable.name.name.clone(),
+        (None, CypherExpression::PropertyLookup { base, property, .. }) => {
+            // `RETURN n.name` with no alias projects a variable named for the
+            // path, which is what Cypher shows in its own result header.
+            format!("{}_{}", base_name(base)?, property.name.name)
+        }
+        (None, CypherExpression::CountStar { .. }) => "count_star".to_string(),
+        (None, CypherExpression::FunctionCall(invocation)) => aggregate_name(invocation, source)?,
+        _ => return Err(LoweringError::Unlowerable("this projection item")),
+    })
+}
+
+/// A name for an unaliased aggregate column — `count(n)` becomes `count_n`,
+/// mirroring the `{base}_{property}` convention [`projected_variables`]
+/// already uses for an unaliased property lookup. Cypher users almost always
+/// alias an aggregate (`AS c`); this exists so an unaliased one still lowers
+/// rather than refusing on a technicality.
+///
+/// **Falls back to [`recover_dropped_argument`]** when `decypher` has already
+/// dropped the argument from `invocation.arguments` — the same recovery
+/// [`lower_aggregate`] needs, for the same reason: without it, an unaliased
+/// `count(n)` would be named `count_` rather than `count_n`.
+fn aggregate_name(
+    invocation: &decypher::ast::expr::FunctionInvocation,
+    source: &str,
+) -> Result<String, LoweringError> {
+    let function = invocation
+        .name
+        .last()
+        .ok_or(LoweringError::Unlowerable("a function with no name"))?;
+    let argument = match invocation.arguments.first() {
+        Some(arg) => property_variable_name(arg)?,
+        None => recover_dropped_argument(source, invocation.span.start).unwrap_or_default(),
+    };
+    Ok(format!("{}_{argument}", function.name.to_lowercase()))
+}
+
+/// The `{base}_{property}` name a property lookup contributes to a generated
+/// identifier — shared between [`aggregate_name`] and the property-binding
+/// convention so `sum(n.amount)` and `n.amount` never disagree about what the
+/// bound variable is called.
+fn property_variable_name(expression: &CypherExpression) -> Result<String, LoweringError> {
+    match expression {
+        CypherExpression::PropertyLookup { base, property, .. } => {
+            Ok(format!("{}_{}", base_name(base)?, property.name.name))
+        }
+        other => base_name(other),
+    }
+}
+
+/// Whether a projection item is an aggregate rather than a grouping key.
+///
+/// **`count(*)` is a distinct AST node** (`CountStar`), not a `FunctionCall`
+/// named `"count"` — `decypher` gives it special grammar. Both are checked
+/// here so the caller has one place to ask "is this an aggregate" rather than
+/// two.
+fn is_aggregate_expr(expression: &CypherExpression) -> bool {
+    match expression {
+        CypherExpression::CountStar { .. } => true,
+        CypherExpression::FunctionCall(invocation) => {
+            aggregate_function(invocation).is_some() || is_refused_aggregate(invocation)
+        }
+        _ => false,
+    }
+}
+
+/// `collect(...)` is an aggregate by name, and is refused explicitly rather
+/// than falling through to "not an aggregate" — which would misfile it as a
+/// grouping key and refuse it with a confusing `variable_of` error instead of
+/// the honest one in [`lower_aggregate`].
+fn is_refused_aggregate(invocation: &decypher::ast::expr::FunctionInvocation) -> bool {
+    invocation
+        .name
+        .last()
+        .is_some_and(|name| name.name.eq_ignore_ascii_case("collect"))
+}
+
+/// The SPARQL aggregate function a Cypher function name maps onto, if any.
+fn aggregate_function(
+    invocation: &decypher::ast::expr::FunctionInvocation,
+) -> Option<AggregateFunction> {
+    let name = invocation.name.last()?;
+    Some(match name.name.to_lowercase().as_str() {
+        "count" => AggregateFunction::Count,
+        "sum" => AggregateFunction::Sum,
+        "avg" => AggregateFunction::Avg,
+        "min" => AggregateFunction::Min,
+        "max" => AggregateFunction::Max,
+        _ => return None,
+    })
+}
+
+/// Lower one projection item's aggregate, or say it is not one.
+///
+/// `Ok(None)` means "treat this as a grouping key instead" — the caller's
+/// signal to fall through to [`variable_of`] rather than a special case here.
+fn lower_aggregate(
+    expression: &CypherExpression,
+    source: &str,
+) -> Result<Option<AggregateExpression>, LoweringError> {
+    match expression {
+        CypherExpression::CountStar { .. } => Ok(Some(AggregateExpression::CountSolutions {
+            distinct: false,
+        })),
+        CypherExpression::FunctionCall(invocation) if is_refused_aggregate(invocation) => {
+            Err(LoweringError::Unlowerable(
+                "collect(...) — Cypher's list result has no lossless SPARQL \
+                 equivalent; GROUP_CONCAT folds values into a string, not a list",
+            ))
+        }
+        CypherExpression::FunctionCall(invocation) => {
+            let Some(name) = aggregate_function(invocation) else {
+                return Ok(None);
+            };
+            let expr = match invocation.arguments.as_slice() {
+                [only] => lower_expression(only)?,
+                // **`decypher` drops a bare-variable argument from its typed
+                // AST** — confirmed for `count`, `sum`, `min`, `max`, `avg`
+                // and a made-up function name, so this is a general gap in
+                // the AST-building step and not specific to one aggregate. A
+                // property-lookup argument (`sum(n.amount)`) is unaffected;
+                // only `[]` here means it happened. Recovered from the
+                // lossless CST — the same tree `subset.rs`'s gate trusts —
+                // rather than guessed or silently treated as `count(*)`.
+                [] => {
+                    let name = recover_dropped_argument(source, invocation.span.start).ok_or(
+                        LoweringError::Unlowerable(
+                            "an aggregate argument this engine could not recover",
+                        ),
+                    )?;
+                    Expression::Variable(variable_named(&name)?)
+                }
+                _ => {
+                    return Err(LoweringError::Unlowerable(
+                        "an aggregate with other than one argument",
+                    ));
+                }
+            };
+            Ok(Some(AggregateExpression::FunctionCall {
+                name,
+                expr,
+                distinct: invocation.distinct,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Recover a bare-variable aggregate argument `decypher` 0.2.0-alpha.6 drops
+/// from its typed AST — a narrower cousin of the `CALL … YIELD` defect
+/// `subset.rs` already documents. `count(n)`, `sum(r)` and every other
+/// single-bare-variable function call arrive with `arguments: []`; a
+/// property-lookup argument (`sum(n.amount)`) is unaffected.
+///
+/// **The CST is not dropped**: `decypher::parse_cst`'s `FUNCTION_INVOCATION`
+/// node still carries a `VARIABLE` child after `FUNCTION_NAME`. This walks
+/// that lossless tree — matched to the AST node by its span start, which both
+/// trees agree on — rather than the broken AST. `None` when the shape is not
+/// exactly one bare variable, so a caller that cannot recover refuses rather
+/// than guesses.
+fn recover_dropped_argument(source: &str, span_start: usize) -> Option<String> {
+    use decypher::syntax::SyntaxKind;
+
+    fn find(
+        node: &decypher::syntax::SyntaxNode,
+        start: usize,
+    ) -> Option<decypher::syntax::SyntaxNode> {
+        if node.kind() == SyntaxKind::FUNCTION_INVOCATION
+            && usize::from(node.text_range().start()) == start
+        {
+            return Some(node.clone());
+        }
+        node.children().find_map(|child| find(&child, start))
+    }
+
+    let cst = decypher::parse_cst(source).tree;
+    let invocation = find(&cst, span_start)?;
+    let mut variables = invocation
+        .children()
+        .filter(|child| child.kind() == SyntaxKind::VARIABLE);
+    let only = variables.next()?;
+    if variables.next().is_some() {
+        // More than one bare-variable child is not this defect's shape.
+        return None;
+    }
+    Some(only.text().to_string())
+}
+
+/// Group a pattern by every non-aggregate item, computing every aggregate —
+/// Cypher's implicit `GROUP BY`, with no clause of its own to write.
+///
+/// **A renamed grouping key needs `Extend` before it can appear in
+/// `Group.variables`**, because `Group` only knows how to pass an *existing*
+/// bound variable through unchanged; it cannot bind a new name itself.
+/// `RETURN n.dept AS department, count(n) AS c` therefore binds `department`
+/// from `?n_dept` first, then groups by `department` rather than `n_dept` — if
+/// it grouped by the property variable instead, the alias in the final
+/// projection would reference a name nothing bound.
+fn group_by_items(
+    inner: GraphPattern,
+    items: &[decypher::ast::clause::ProjectionItem],
+    source: &str,
+) -> Result<GraphPattern, LoweringError> {
+    let mut extended = inner;
+    let mut group_variables = Vec::new();
+    let mut aggregates = Vec::new();
+
+    for item in items {
+        if let Some(aggregate) = lower_aggregate(&item.expression, source)? {
+            let name = variable_named(&projected_name(item, source)?)?;
+            aggregates.push((name, aggregate));
+            continue;
+        }
+
+        let key = variable_of(&item.expression)?;
+        let name = projected_name(item, source)?;
+        if name == key.as_str() {
+            group_variables.push(key);
+        } else {
+            let renamed = variable_named(&name)?;
+            extended = GraphPattern::Extend {
+                inner: Box::new(extended),
+                variable: renamed.clone(),
+                expression: Expression::Variable(key),
+            };
+            group_variables.push(renamed);
+        }
+    }
+
+    Ok(GraphPattern::Group {
+        inner: Box::new(extended),
+        variables: group_variables,
+        aggregates,
+    })
+}
+
+/// Bind every explicit alias that names something other than its own default
+/// variable, via `Extend` — the non-aggregate counterpart of what
+/// [`group_by_items`] already does for a grouping key.
+///
+/// **Naming a `Project` variable is not the same as binding it.**
+/// `RETURN n.name AS label` must project a column called `label` *and* bind
+/// `?label` from `?n_name`; without this, `Project` selects a variable
+/// nothing in the pattern ever set, and the query silently returns rows with
+/// that column always absent rather than erroring — the same class of bug
+/// [`with_property_bindings`] exists to prevent for an unaliased property
+/// reference. Caught by an end-to-end evaluation test, not a shape assertion:
+/// `plan.contains("name: \"label\"")` is true whether or not `?label` is
+/// bound, because the *name* is right either way.
+fn bind_aliases(
+    inner: GraphPattern,
+    items: &[decypher::ast::clause::ProjectionItem],
+) -> Result<GraphPattern, LoweringError> {
+    let mut extended = inner;
+    for item in items {
+        let Some(alias) = &item.alias else {
+            continue;
+        };
+        let source = variable_of(&item.expression)?;
+        let target = variable_named(&alias.name.name)?;
+        if target.as_str() != source.as_str() {
+            extended = GraphPattern::Extend {
+                inner: Box::new(extended),
+                variable: target,
+                expression: Expression::Variable(source),
+            };
+        }
+    }
+    Ok(extended)
 }
 
 fn base_name(expression: &CypherExpression) -> Result<String, LoweringError> {
@@ -528,6 +865,14 @@ fn collect_properties(expression: &CypherExpression, into: &mut Vec<(String, Str
             collect_properties(operand, into);
         }
         CypherExpression::Parenthesized(inner) => collect_properties(inner, into),
+        // An aggregate's argument is a value expression like any other —
+        // `sum(n.amount)` needs `?n_amount` bound exactly as `WHERE n.amount >
+        // 0` would, or the aggregate silently sums nothing.
+        CypherExpression::FunctionCall(invocation) => {
+            for argument in &invocation.arguments {
+                collect_properties(argument, into);
+            }
+        }
         _ => {}
     }
 }
@@ -798,12 +1143,12 @@ mod tests {
 
     fn lowered(query: &str) -> GraphPattern {
         let parsed = parse_subset(query).unwrap_or_else(|e| panic!("{query} -> {e}"));
-        lower(&parsed).unwrap_or_else(|e| panic!("{query} -> {e}"))
+        lower(&parsed, query).unwrap_or_else(|e| panic!("{query} -> {e}"))
     }
 
     fn refused(query: &str) -> LoweringError {
         let parsed = parse_subset(query).expect("in the subset");
-        lower(&parsed).expect_err("should not lower")
+        lower(&parsed, query).expect_err("should not lower")
     }
 
     fn walk_triples(pattern: &GraphPattern, out: &mut Vec<String>) {
@@ -1178,6 +1523,94 @@ mod tests {
         assert!(plan.contains("name: \"label\""), "{plan}");
     }
 
+    /// **Naming the projected variable is not the same as binding it.** The
+    /// test above passed even before an alias was ever bound to anything,
+    /// because `Project { variables: [label] }` contains the string
+    /// `"label"` whether or not `?label` has a value — the shape looked
+    /// right and the query would have silently returned every row with that
+    /// column absent. Only a real evaluation catches it.
+    #[test]
+    fn an_aliased_property_lookup_actually_binds_its_alias() {
+        use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+
+        let flakes = vec![Flake::assert(
+            Sid::dsc("a"),
+            Sid::dsc("name"),
+            FlakeValue::String("ada".into()),
+            1,
+        )];
+
+        let names = evaluate(&flakes, "MATCH (n) RETURN n.name AS label");
+
+        assert_eq!(
+            names,
+            vec!["\"ada\"".to_string()],
+            "?label must actually be bound to n's name, not merely named: {names:?}"
+        );
+    }
+
+    /// The same gap, for a bare-variable alias (`WITH n AS m`) rather than a
+    /// property lookup — the pipeline-boundary form Slice B's `WITH` test
+    /// only checked the shape of, never that `?m` held anything.
+    #[test]
+    fn an_aliased_bare_variable_actually_binds_its_alias() {
+        use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+
+        let flakes = vec![Flake::assert(
+            Sid::dsc("a"),
+            Sid::dsc("type"),
+            FlakeValue::Ref(Sid::dsc("Row")),
+            1,
+        )];
+
+        // `:Row` labels the node, which is what gives the pattern anything to
+        // bind `n` to in the first place — see
+        // `an_entirely_unconstrained_node_binds_nothing`, a separate,
+        // pre-existing gap this test deliberately avoids.
+        let bound = evaluate(&flakes, "MATCH (n:Row) WITH n AS m RETURN m");
+
+        assert_eq!(
+            bound,
+            vec!["<https://graph-owl.dev/ns/catalog#a>".to_string()],
+            "?m must be bound from ?n, not merely named: {bound:?}"
+        );
+    }
+
+    /// **A known, pre-existing gap this slice found but did not fix.**
+    /// `lower_node` emits a triple pattern only for a label or an inline
+    /// property; a node with neither — `MATCH (n) RETURN n`, the first query
+    /// almost anyone would try — produces an *empty* BGP, which is SPARQL's
+    /// one-row identity. `?n` is therefore never bound to anything, and the
+    /// query returns one row with the column simply absent rather than an
+    /// error or a real answer.
+    ///
+    /// No prior test caught this because every Slice B/C test before this one
+    /// asserted the lowered plan's *shape*, never ran it. Fixing it needs a
+    /// real design decision — what "any node" means over a triple store with
+    /// no universal `rdf:type` — not a rushed patch alongside Slice E/F, so
+    /// this pins the current behaviour rather than changing it. Recorded in
+    /// `plans/07b-engine-cypher.md` for a future slice.
+    #[test]
+    fn an_entirely_unconstrained_node_binds_nothing() {
+        use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+
+        let flakes = vec![Flake::assert(
+            Sid::dsc("a"),
+            Sid::dsc("type"),
+            FlakeValue::Ref(Sid::dsc("Row")),
+            1,
+        )];
+
+        let rendered = evaluate(&flakes, "MATCH (n) RETURN n");
+
+        assert_eq!(
+            rendered,
+            vec![String::new()],
+            "documents today's behaviour: one row, ?n absent from it — not a \
+             row per node in the estate, which is what a reader would expect"
+        );
+    }
+
     /// **`SKIP` and `LIMIT` carry their actual numbers.** A lowering that
     /// returned a constant offset would satisfy "a Slice exists" and silently
     /// page wrongly.
@@ -1282,11 +1715,11 @@ mod tests {
     /// what the arm removed here used to do.
     #[test]
     fn a_union_cannot_be_lowered_even_if_the_gate_let_it_through() {
-        let parsed =
-            decypher::parse("MATCH (n) RETURN n UNION MATCH (m) RETURN m").expect("valid Cypher");
+        let query = "MATCH (n) RETURN n UNION MATCH (m) RETURN m";
+        let parsed = decypher::parse(query).expect("valid Cypher");
 
         assert_eq!(
-            lower(&parsed),
+            lower(&parsed, query),
             Err(LoweringError::Unlowerable("this query shape")),
             "half a UNION is a wrong answer, not a partial one"
         );
@@ -1295,5 +1728,292 @@ mod tests {
     #[test]
     fn not_lowers_to_a_negation() {
         assert!(rendered(&lowered("MATCH (n) WHERE NOT n.a = 1 RETURN n")).contains("Not"));
+    }
+
+    // ---- Slice F: aggregates ----
+
+    #[test]
+    fn count_star_lowers_to_count_solutions() {
+        let plan = rendered(&lowered("MATCH (n) RETURN count(*)"));
+
+        assert!(plan.contains("CountSolutions"), "{plan}");
+    }
+
+    /// **`count(*)` and `count(expr)` must lower to different aggregate
+    /// forms**, because they answer different questions: `count(*)` counts
+    /// rows, `count(expr)` counts non-null bindings of `expr`. Lowering both
+    /// to `CountSolutions` would silently make `count(n.optional)` count rows
+    /// that never bound the property at all.
+    #[test]
+    fn count_of_an_expression_lowers_to_a_function_call_not_count_solutions() {
+        let plan = rendered(&lowered("MATCH (n) RETURN count(n)"));
+
+        assert!(plan.contains("FunctionCall"), "{plan}");
+        assert!(plan.contains("Count"), "{plan}");
+        assert!(
+            !plan.contains("CountSolutions"),
+            "count(n) is not count(*): {plan}"
+        );
+    }
+
+    #[test]
+    fn count_distinct_sets_the_distinct_flag() {
+        let with = rendered(&lowered("MATCH (n) RETURN count(DISTINCT n)"));
+        let without = rendered(&lowered("MATCH (n) RETURN count(n)"));
+
+        assert!(with.contains("distinct: true"), "{with}");
+        assert!(without.contains("distinct: false"), "{without}");
+    }
+
+    #[test]
+    fn sum_avg_min_max_lower_to_their_aggregate_functions() {
+        for (query, function) in [
+            ("MATCH (n) RETURN sum(n.amount)", "Sum"),
+            ("MATCH (n) RETURN avg(n.amount)", "Avg"),
+            ("MATCH (n) RETURN min(n.amount)", "Min"),
+            ("MATCH (n) RETURN max(n.amount)", "Max"),
+        ] {
+            let plan = rendered(&lowered(query));
+            assert!(plan.contains(function), "`{query}` -> {plan}");
+        }
+    }
+
+    /// **The correctness trap this slice exists for.** `GROUP_CONCAT` folds
+    /// values into one delimited *string*; Cypher's `collect()` returns a
+    /// genuine list. Lowering one to the other would hand back a string where
+    /// the caller asked for a list — silently, since both round-trip through
+    /// JSON as *some* value.
+    #[test]
+    fn collect_is_refused_rather_than_approximated_as_group_concat() {
+        let refused = refused("MATCH (n) RETURN collect(n.name)");
+
+        assert!(
+            matches!(refused, LoweringError::Unlowerable(_)),
+            "{refused:?}"
+        );
+        assert!(
+            refused.to_string().contains("list"),
+            "names why, not just that it failed: {refused}"
+        );
+    }
+
+    /// A function this engine does not know at all — aggregate or not — is
+    /// refused even when aliased. An alias is a name, not a binding: nothing
+    /// in the lowered pattern would bind `x`, so accepting it here would be a
+    /// `Project` selecting an unbound variable instead of a refusal.
+    #[test]
+    fn an_unrecognised_function_call_is_refused_even_when_aliased() {
+        assert!(matches!(
+            refused("MATCH (n) RETURN toUpper(n.name) AS x"),
+            LoweringError::Unlowerable(_)
+        ));
+        assert!(matches!(
+            refused("MATCH (n) RETURN toUpper(n.name)"),
+            LoweringError::Unlowerable(_)
+        ));
+    }
+
+    /// **Implicit grouping**: every non-aggregated `RETURN` item is a grouping
+    /// key, with no `GROUP BY` clause to write — that is Cypher's actual rule.
+    #[test]
+    fn non_aggregated_return_items_become_implicit_grouping_keys() {
+        let plan = rendered(&lowered("MATCH (n) RETURN n.dept, count(n)"));
+
+        assert!(plan.contains("Group"), "{plan}");
+        assert!(
+            plan.contains("variables: [Variable { name: \"n_dept\" }]"),
+            "n.dept is the sole grouping key: {plan}"
+        );
+    }
+
+    /// An aggregate with nothing else in `RETURN` groups the *whole* result —
+    /// SPARQL's own reading of an empty `GROUP BY` list, reused rather than
+    /// special-cased.
+    #[test]
+    fn an_aggregate_alone_groups_the_whole_result() {
+        let plan = rendered(&lowered("MATCH (n) RETURN count(n)"));
+
+        assert!(plan.contains("variables: []"), "{plan}");
+    }
+
+    /// **A renamed grouping key is bound by `Extend` before `Group` sees it.**
+    /// `Group` can only pass an *existing* variable through; it cannot bind a
+    /// new name. Asserting only that `Group` appears would pass even if the
+    /// alias in the final projection referenced a name nothing bound.
+    #[test]
+    fn a_renamed_grouping_key_is_extended_before_grouping() {
+        let plan = rendered(&lowered(
+            "MATCH (n) RETURN n.dept AS department, count(n) AS c",
+        ));
+
+        assert!(plan.contains("Extend"), "{plan}");
+        assert!(
+            plan.contains("variable: Variable { name: \"department\" }"),
+            "{plan}"
+        );
+        assert!(
+            plan.contains("variables: [Variable { name: \"department\" }]"),
+            "grouped by the renamed variable, not n_dept: {plan}"
+        );
+    }
+
+    /// The aggregate's own output variable carries its alias — asserting only
+    /// that `Group` exists would pass even if the aggregate bound the wrong
+    /// name for the final projection to select.
+    #[test]
+    fn an_aggregates_output_variable_carries_its_alias() {
+        let plan = rendered(&lowered("MATCH (n) RETURN count(n) AS total"));
+
+        assert!(
+            plan.contains("Variable { name: \"total\" }"),
+            "the aggregate must bind the alias: {plan}"
+        );
+    }
+
+    /// An unaliased aggregate still gets a usable name, mirroring the
+    /// `{base}_{property}` convention an unaliased property lookup already
+    /// uses.
+    #[test]
+    fn an_unaliased_aggregate_is_named_from_the_function_and_its_argument() {
+        assert_eq!(
+            projected_variables_of("MATCH (n) RETURN count(n)"),
+            vec![Variable::new("count_n").expect("valid")]
+        );
+        assert_eq!(
+            projected_variables_of("MATCH (n) RETURN count(*)"),
+            vec![Variable::new("count_star").expect("valid")]
+        );
+    }
+
+    fn projected_variables_of(query: &str) -> Vec<Variable> {
+        let parsed = parse_subset(query).expect("in the subset");
+        let QueryBody::SingleQuery(single) = &parsed.statements[0] else {
+            panic!("a single query");
+        };
+        let SingleQueryKind::SinglePart(part) = &single.kind else {
+            panic!("a single part");
+        };
+        let SinglePartBody::Return(returning) = &part.body else {
+            panic!("a RETURN body");
+        };
+        super::projected_variables(&returning.items, query).expect("should project")
+    }
+
+    /// **Aggregates compose with `ORDER BY` and `LIMIT`**, ordering by the
+    /// aggregate's own alias — the modifiers wrap the grouped projection
+    /// exactly as they wrap a plain one.
+    #[test]
+    fn aggregates_compose_with_order_by_and_limit() {
+        let plan = rendered(&lowered(
+            "MATCH (n) RETURN n.dept AS dept, count(n) AS c ORDER BY c DESC LIMIT 5",
+        ));
+
+        // Outer wrappers render first in the derived `Debug` output, so
+        // `Slice { inner: OrderBy { inner: Project { inner: Group { ...` means
+        // `Slice` appears textually before `OrderBy`, which appears before
+        // `Group` — the same convention `distinct_order_skip_and_limit_lower_in_cypher_order`
+        // already relies on.
+        let slice = plan.find("Slice").expect("a slice");
+        let order = plan.find("OrderBy").expect("an order");
+        let group = plan.find("Group").expect("a group");
+        assert!(slice < order, "slicing wraps ordering: {plan}");
+        assert!(order < group, "ordering wraps grouping: {plan}");
+        assert!(plan.contains("Desc"), "{plan}");
+        assert!(plan.contains("start: 0"), "{plan}");
+        assert!(plan.contains("length: Some(5)"), "{plan}");
+    }
+
+    /// **The classic bug, run for real.** `count(*)` counts rows; `count(expr)`
+    /// counts only rows where `expr` is bound. Over one node with an
+    /// `optional` property that a second node lacks, the two must disagree —
+    /// an algebra-shape assertion could not catch a lowering that collapsed
+    /// both onto `CountSolutions`, only a real evaluation can.
+    #[test]
+    fn count_star_and_count_of_a_property_disagree_when_a_property_is_missing() {
+        use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+
+        let flakes = vec![
+            Flake::assert(
+                Sid::dsc("a"),
+                Sid::dsc("type"),
+                FlakeValue::Ref(Sid::dsc("Row")),
+                1,
+            ),
+            Flake::assert(
+                Sid::dsc("a"),
+                Sid::dsc("optional"),
+                FlakeValue::String("present".into()),
+                1,
+            ),
+            Flake::assert(
+                Sid::dsc("b"),
+                Sid::dsc("type"),
+                FlakeValue::Ref(Sid::dsc("Row")),
+                1,
+            ),
+            // `b` has no `optional` property at all.
+        ];
+
+        let star = evaluate(&flakes, "MATCH (n:Row) RETURN count(*) AS c");
+        let of_property = evaluate(&flakes, "MATCH (n:Row) RETURN count(n.optional) AS c");
+
+        let count = |rendered: &str| -> i64 {
+            rendered
+                .trim_matches('"')
+                .split("^^")
+                .next()
+                .expect("a value")
+                .trim_matches('"')
+                .parse()
+                .unwrap_or_else(|_| panic!("not an integer: {rendered}"))
+        };
+
+        assert_eq!(
+            star.iter()
+                .map(String::as_str)
+                .map(count)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "count(*) counts every row: {star:?}"
+        );
+        assert_eq!(
+            of_property
+                .iter()
+                .map(String::as_str)
+                .map(count)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "count(n.optional) must not count the row where it is unbound: {of_property:?}"
+        );
+    }
+
+    /// Runs a lowered Cypher query over real flakes through the same
+    /// evaluator the catalog uses, and returns the sole column's rendered
+    /// values — the round trip Slice E wires up at the API boundary.
+    fn evaluate(flakes: &[graph_owl_core::flake::Flake], query: &str) -> Vec<String> {
+        let pattern = lowered(query);
+        let sparql_query = spargebra::Query::Select {
+            dataset: None,
+            pattern,
+            base_iri: None,
+        };
+        let dataset = crate::dataset::FlakeDataset::from_flakes(flakes).expect("dataset");
+        let results = spareval::QueryEvaluator::new()
+            .prepare(&sparql_query)
+            .execute(&dataset)
+            .expect("evaluation should succeed");
+        match results {
+            spareval::QueryResults::Solutions(iter) => iter
+                .map(|solution| {
+                    let solution = solution.expect("solution");
+                    solution
+                        .iter()
+                        .next()
+                        .map(|(_, term)| term.to_string())
+                        .unwrap_or_default()
+                })
+                .collect(),
+            _ => panic!("a SELECT must yield solutions"),
+        }
     }
 }

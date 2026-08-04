@@ -566,3 +566,171 @@ async fn an_unauthenticated_sparql_request_is_rejected() {
         .expect("request should be handled");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ---- Epic 7b Slice E: Cypher over the same engine, at the HTTP boundary ----
+
+async fn cypher(app: &axum::Router, subject: &str, query: &str) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/cypher")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", token(subject)))
+                .body(Body::from(json!({ "query": query }).to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    let status = response.status();
+    (status, json_body(response).await)
+}
+
+/// **The demo moment, in Cypher.** The Cypher counterpart of
+/// `two_principals_running_the_same_sparql_get_different_results` — same
+/// fixture, same policy, same two principals, a different query language.
+/// `type` here is the asset's own kind field, a string literal fact, not an
+/// ontology class assertion — Epic 7c draws that distinction deliberately
+/// (`a_literal_valued_type_does_not_become_a_label`), so the query compares
+/// `t.type` as a property rather than matching a Cypher label.
+#[tokio::test]
+async fn two_principals_running_the_same_cypher_get_different_results() {
+    let (app, _container) = fixture().await;
+    let query = "MATCH (t) WHERE t.type = \"table\" RETURN t.name AS name";
+
+    let (status, admin) = cypher(&app, "root", query).await;
+    assert_eq!(status, StatusCode::OK, "{admin}");
+    let (_, analyst) = cypher(&app, "asha", query).await;
+
+    let names = |body: &Value| -> Vec<String> {
+        body["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter_map(|row| {
+                row["name"]
+                    .as_str()
+                    .map(|s| s.trim_matches('"').to_string())
+            })
+            .collect()
+    };
+
+    let admin_names = names(&admin);
+    let analyst_names = names(&analyst);
+
+    assert!(
+        admin_names.iter().any(|n| n == "customers"),
+        "the admin must see the PII table: {admin_names:?}"
+    );
+    assert!(
+        !analyst_names.iter().any(|n| n == "customers"),
+        "the analyst must not: {analyst_names:?}"
+    );
+    assert!(
+        !analyst_names.is_empty(),
+        "and must still see everything else"
+    );
+}
+
+/// **The property Slice E exists for, proved at the HTTP boundary rather than
+/// only at the `Catalog` unit level.** One restricted principal, the same
+/// logical question in both languages, compared. If `/cypher` and `/sparql`
+/// ever authorized differently, this would be the leak.
+#[tokio::test]
+async fn cypher_and_sparql_agree_under_one_restricted_principal() {
+    let (app, _container) = fixture().await;
+
+    let sparql_query =
+        format!("SELECT ?name WHERE {{ ?t <{DSC}type> \"table\" . ?t <{DSC}name> ?name }}");
+    let cypher_query = "MATCH (t) WHERE t.type = \"table\" RETURN t.name AS name";
+
+    let (_, sparql_body) = sparql(&app, "asha", &sparql_query).await;
+    let (_, cypher_body) = cypher(&app, "asha", cypher_query).await;
+
+    let names = |body: &Value| -> std::collections::BTreeSet<String> {
+        body["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter_map(|row| {
+                row["name"]
+                    .as_str()
+                    .map(|s| s.trim_matches('"').to_string())
+            })
+            .collect()
+    };
+
+    let sparql_names = names(&sparql_body);
+    let cypher_names = names(&cypher_body);
+
+    assert_eq!(
+        sparql_names, cypher_names,
+        "one restricted principal must see the same names through both \
+         languages: sparql={sparql_body}, cypher={cypher_body}"
+    );
+    assert!(
+        !sparql_names.iter().any(|n| n == "customers"),
+        "the analyst must not see the denied table through either language: {sparql_names:?}"
+    );
+}
+
+/// A join must not reach a denied schema in Cypher either — the Cypher
+/// counterpart of `a_denied_asset_is_not_reachable_through_a_join`.
+#[tokio::test]
+async fn a_denied_asset_is_not_reachable_through_a_cypher_join() {
+    let (app, _container) = fixture().await;
+    let (_, analyst) = cypher(
+        &app,
+        "asha",
+        "MATCH (c)-[r]->(t) WHERE r.type = \"parentTable\" RETURN t.fqn AS fqn",
+    )
+    .await;
+
+    let body = analyst.to_string();
+    assert!(
+        !body.contains("core_banking"),
+        "a join reached into the denied schema: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_cypher_query_is_a_400_naming_the_field() {
+    let (app, _container) = fixture().await;
+    let (status, body) = cypher(&app, "root", "MATCH (n RETURN n").await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["errors"][0]["field"], "query");
+}
+
+/// A syntactically valid Cypher query outside the served subset — a write —
+/// is the same `400` shape as a parse failure, not a `500`: the subset gate's
+/// refusal surfaces through `Catalog::cypher` as a `Validation` error exactly
+/// like a parse error does.
+#[tokio::test]
+async fn a_write_clause_over_cypher_is_a_400_not_a_500() {
+    let (app, _container) = fixture().await;
+    let (status, body) = cypher(&app, "root", "CREATE (n:Table) RETURN n").await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["errors"][0]["field"], "query");
+}
+
+#[tokio::test]
+async fn an_unauthenticated_cypher_request_is_rejected() {
+    let (app, _container) = fixture().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/cypher")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "query": "MATCH (n) RETURN n" }).to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
