@@ -13,8 +13,24 @@
 //! `spargebra`. If the crate breaks or is abandoned, this module is the blast
 //! radius. The spike that chose it is recorded in `plans/00l-build-vs-adopt.md`.
 
+pub mod lower;
 pub mod subset;
+pub mod vocabulary;
 
+/// The predicates the reified encoding uses.
+///
+/// **The same names `graph-owl-lpg` uses**, because the property-graph
+/// projection and the Cypher lowering describe one encoding — a divergence here
+/// would make `MATCH (a)-[r:FEEDS]->(b)` and the LPG view disagree about the
+/// same edge.
+pub mod predicate {
+    pub const TYPE: &str = "type";
+    pub const REL_TYPE: &str = "relType";
+    pub const FROM_ENTITY: &str = "fromEntity";
+    pub const TO_ENTITY: &str = "toEntity";
+}
+
+pub use lower::{LoweringError, lower};
 pub use subset::Refusal;
 
 /// Why a Cypher request did not produce a plan.

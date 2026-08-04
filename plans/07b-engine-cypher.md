@@ -1,7 +1,7 @@
 # Plan: Cypher Query Support (Epic 7b)
 
 **Branch**: feat/engine-cypher
-**Status**: **Slice A built** (4 August 2026) — `decypher` adopted, subset gate on its lossless CST. Slices B–E not started. **Slice A was re-scoped 4 August 2026**: adopt an existing Rust Cypher parser if one survives a controlled spike; generate from the Apache-2.0 grammar only if none does. See Slice A and `00l-build-vs-adopt.md`
+**Status**: **Slices A, B, C built** (4 August 2026) — `decypher` adopted, subset gate on its lossless CST; lowering to `spargebra::algebra::GraphPattern` with relationship reification and isomorphism constraints. Slices A2, D, E, F not started. **Slice A was re-scoped 4 August 2026**: adopt an existing Rust Cypher parser if one survives a controlled spike; generate from the Apache-2.0 grammar only if none does. See Slice A and `00l-build-vs-adopt.md`
 **Depends on**: Epic 7 (SPARQL plan is the lowering target), Epic 7a (traversal), **Epic 7c (LPG projection — 7c ships before 7b; the letters are labels, not a sequence)**
 **Unblocks**: Epic 7d (Bolt), Epic 41 (query workbench)
 **Crates**: `graph-owl-query` (new `cypher` module — **not a separate crate**) · consumes `graph-owl-lpg` (7c) · consumed by `graph-owl-bolt` (7d)
@@ -153,18 +153,20 @@ would report conformance we do not have, which is the exact claim `00a` refuses
 to make.
 **Done when**: criteria met, the generated subset report is committed, commit approved.
 
-### Slice B: Lower to the SPARQL AST (pure)
+### Slice B: Lower to the SPARQL AST (pure) — **built** (4 August 2026)
 
 **Acceptance criteria**: each mapping-table row lowers correctly, asserted against expected `QueryAst`; a reified relationship pattern lowers to three patterns, not one; edge properties lower to patterns on the relationship variable; `WITH` becomes a pipeline boundary preserving projection; lowering is deterministic; an unlowerable construct fails at lowering, not at execution.
 **RED**: Golden `QueryAst` per mapping row. The edge-property case is the one that proves reification pays off. Mutator watch: lowering an edge to a single predicate must fail the three-pattern assertion, and would lose edge properties entirely.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+**Built as** `crates/graph-owl-query/src/cypher/lower.rs`. Two gaps found while writing, both fixed and covered: a property referenced only in `WHERE`/`RETURN`/`WITH` was never bound by a triple pattern, silently returning zero rows (`collect_properties` + `with_property_bindings` fix it); `decypher` nests chained comparisons (`1 < n.x < 10`) left-recursively, so a naive fold produced `Less(Less(1, ?n_x), 10)` — a boolean compared to an integer — fixed with `lower_comparison` returning the conjunction and the rightmost operand explicitly. A `QueryBody::Regular` (`UNION`) arm was written, found unreachable by mutation testing (the subset gate already refuses `UNION`), and removed rather than left as dead code that reads as "handled".
 
-### Slice C: Relationship-isomorphism semantics
+### Slice C: Relationship-isomorphism semantics — **built** (4 August 2026)
 
 **Value**: The correctness trap. Without it, Cypher users get wrong answers that look right.
 **Acceptance criteria**: `MATCH (a)-[r1]->(b)-[r2]->(c)` does **not** bind `r1` and `r2` to the same relationship; across separate `MATCH` clauses, reuse **is** permitted (Cypher's actual rule); node variables may still coincide; the injected distinctness is visible in the lowered AST, not hidden in execution.
 **RED**: A self-loop fixture where homomorphic semantics would return a row and Cypher would not — the exact inverse of Epic 7 Slice C's homomorphism test. Both tests must pass simultaneously, which proves the two front ends have genuinely different semantics over one engine. Mutator watch: omitting the distinctness constraint must fail; applying it across `MATCH` clauses must fail the cross-clause test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+**Built as** `isomorphism_constraints` in `lower.rs`: pairwise `Not(SameTerm(...))` over relationship variables within one `MATCH`, injected into the algebra as `Filter` nodes so the constraint is visible in the plan. Confirmed pairwise (not just adjacent) with a three-relationship fixture asserting all three pairs are present.
 
 ### Slice D: Variable-length patterns via traversal
 
