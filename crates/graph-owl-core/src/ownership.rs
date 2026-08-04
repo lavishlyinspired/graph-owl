@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OwnerKind {
+    /// A person.
     User,
+    /// A team.
     Team,
 }
 
@@ -34,7 +36,9 @@ pub enum OwnerKind {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntityReference {
+    /// The owning principal's id.
     pub id: String,
+    /// Whether it is a user or a team.
     pub kind: OwnerKind,
     /// What a reader sees. Resolved at read time from the principal's record, so
     /// a renamed team shows its new name everywhere rather than whatever it was
@@ -71,6 +75,7 @@ pub struct EntityReference {
 }
 
 impl EntityReference {
+    /// A direct reference to an owning user.
     #[must_use]
     pub fn user(id: impl Into<String>, display_name: impl Into<String>) -> Self {
         Self {
@@ -81,6 +86,7 @@ impl EntityReference {
         }
     }
 
+    /// A direct reference to an owning team.
     #[must_use]
     pub fn team(id: impl Into<String>, display_name: impl Into<String>) -> Self {
         Self {
@@ -110,7 +116,9 @@ impl EntityReference {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OwnerRef {
+    /// The owning principal's id.
     pub id: String,
+    /// Whether it is a user or a team.
     pub kind: OwnerKind,
 }
 

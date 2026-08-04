@@ -1,3 +1,33 @@
+//! Pure domain types for the graph-owl catalog: entities, envelopes, and the
+//! business rules that operate on them — no I/O, no async runtime, no other
+//! `graph-owl-*` crate.
+//!
+//! # Embedding (Epic 37c)
+//!
+//! This crate is deliberately the smallest thing an embedder can depend on.
+//! Every type here is plain synchronous Rust: no `async fn`, no thread
+//! spawned, no lock held across a call. An embedder does not need to bring
+//! an executor to use anything in this crate directly — only
+//! `graph-owl-api`'s `Catalog`, which wraps a `Storage` port, needs one, and
+//! only because the port itself is `async`.
+//!
+//! `scripts/check-embedding-boundary.py` asserts the dependency half of this
+//! claim in CI: no I/O crate, no async runtime, no other workspace crate.
+//! What it cannot check is *inside* this crate's own code, which is why this
+//! module and every item in it carry a doc comment — `#![deny(missing_docs)]`
+//! is the compiler holding the other half of the same promise.
+//!
+//! # Stability
+//!
+//! This crate is `0.y.z`: under SemVer, any `0.x.0` bump may break the public
+//! API, and `0.x.y` is additive or fix-only. There is no separate
+//! `#[unstable]` tier — every `pub` item is held to the same
+//! `#![deny(missing_docs)]` bar, so "public but not yet promised" is not a
+//! state this crate has. `1.0.0` follows Epic 37c Slice F, once the surface
+//! is proven to survive a second entity family without changing. See
+//! `plans/00b-architecture.md` decision 27.
+#![deny(missing_docs)]
+
 pub mod blocking;
 pub mod classification;
 pub mod contract;
@@ -31,31 +61,54 @@ use uuid::Uuid;
 
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// The pre-Epic-4 table entity — the walking skeleton's own type, kept
+/// separate from [`Asset`] rather than merged into it (see `TableUpdate`'s
+/// own history in the plans): a table created through this path never
+/// projects into the graph.
 pub struct Table {
+    /// The stable identifier.
     pub id: Uuid,
+    /// The table's own name.
     pub name: String,
+    /// The full dotted path from the root.
     pub fully_qualified_name: String,
+    /// A human-readable description, if one was given.
     pub description: Option<String>,
+    /// When the table was first created.
     pub created_at: DateTime<Utc>,
+    /// When the table was most recently changed.
     pub updated_at: DateTime<Utc>,
 }
 
+/// A partial update to a [`Table`]. Absent means "not declared".
 #[derive(utoipa::ToSchema, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableUpdate {
+    /// The new name, if changing it.
     pub name: Option<String>,
+    /// The new description, if changing it.
     pub description: Option<String>,
 }
 
+/// A generic edge between two entities, named by kind rather than typed —
+/// Epic 1's walking-skeleton relationship, predating [`Asset`]'s own
+/// containment edges.
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Relationship {
+    /// The stable identifier.
     pub id: Uuid,
+    /// The kind of the source entity.
     pub from_entity_type: String,
+    /// The source entity.
     pub from_entity_id: Uuid,
+    /// The named relationship, e.g. `feeds`.
     pub relationship_type: String,
+    /// The kind of the target entity.
     pub to_entity_type: String,
+    /// The target entity.
     pub to_entity_id: Uuid,
+    /// When the relationship was created.
     pub created_at: DateTime<Utc>,
 }
 
@@ -69,12 +122,17 @@ pub struct Relationship {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Asset {
+    /// The stable identifier.
     pub id: Uuid,
+    /// Where this asset sits in the hierarchy.
     pub kind: AssetKind,
+    /// The asset's own name — the last segment of its FQN.
     pub name: String,
     /// Derived from the parent chain, never client-set.
     pub fully_qualified_name: String,
+    /// The containing asset, or `None` for a root kind.
     pub parent_id: Option<Uuid>,
+    /// A human-readable description, if one was given.
     pub description: Option<String>,
     /// Free-form, kind-specific: a column's data type, a service's engine.
     /// Kept open because every warehouse reports something slightly different
@@ -119,17 +177,23 @@ pub struct Asset {
     #[serde(default)]
     pub owners: Vec<crate::ownership::EntityReference>,
     // ---- envelope (Epic 3) ----
+    /// The envelope's version, bumped on every change.
     pub version: EntityVersion,
+    /// Who or what made the most recent change.
     pub updated_by: String,
     /// What changed to produce this version. `None` on the initial version:
     /// there was nothing before it to diff against, and an empty diff would
     /// read as "nothing changed" rather than "this is where it began".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_description: Option<ChangeDescription>,
+    /// Whether the asset is tombstoned — a source no longer reports it.
     pub deleted: bool,
+    /// When the asset was tombstoned, if it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<DateTime<Utc>>,
+    /// When the asset was first created.
     pub created_at: DateTime<Utc>,
+    /// When the asset was most recently changed.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -137,11 +201,16 @@ pub struct Asset {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetVersion {
+    /// The envelope's version this snapshot was taken at.
     pub version: EntityVersion,
+    /// The asset as it stood at this version.
     pub snapshot: Asset,
+    /// What changed to produce this version, if this was not the initial one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_description: Option<ChangeDescription>,
+    /// Who or what made the change.
     pub updated_by: String,
+    /// When the change was made.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -151,6 +220,8 @@ pub struct AssetVersion {
 #[derive(utoipa::ToSchema, Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetUpdate {
+    /// The new description. Absent (`None`) leaves it alone; present with an
+    /// inner `None` (explicit JSON `null`) clears it.
     #[serde(default, deserialize_with = "double_option")]
     pub description: Option<Option<String>>,
     /// Organization-defined fields — Epic 22 Slice B.
@@ -208,15 +279,23 @@ where
 
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Where an asset sits in the hierarchy: service → database → schema →
+/// table → column.
 pub enum AssetKind {
+    /// The root of a hierarchy — a database engine, a message broker.
     Service,
+    /// A database within a service.
     Database,
+    /// A schema within a database.
     Schema,
+    /// A table within a schema.
     Table,
+    /// A column within a table.
     Column,
 }
 
 impl AssetKind {
+    /// Every kind, root to leaf.
     pub const ALL: [AssetKind; 5] = [
         AssetKind::Service,
         AssetKind::Database,
@@ -225,6 +304,7 @@ impl AssetKind {
         AssetKind::Column,
     ];
 
+    /// The wire name.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -279,6 +359,7 @@ impl AssetKind {
 /// Echoes what was received, so a client sees its own typo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownAssetKind {
+    /// The string that did not match any kind.
     pub got: String,
 }
 
@@ -342,18 +423,23 @@ mod asset_kind_tests {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Principal {
+    /// The stable identifier — a user id, a service account name.
     pub id: String,
+    /// A human-readable name.
     pub name: String,
+    /// What kind of caller this is.
     pub kind: PrincipalKind,
     /// Roles carry policies. Resolved once when the principal is built, so
     /// every downstream check reads the same set — a per-check lookup would
     /// let permissions change mid-request.
     #[serde(default)]
     pub roles: Vec<String>,
+    /// Whether this principal bypasses policy entirely.
     #[serde(default)]
     pub is_admin: bool,
 }
 
+/// What kind of caller a [`Principal`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PrincipalKind {

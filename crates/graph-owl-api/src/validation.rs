@@ -32,15 +32,19 @@ pub enum FieldErrorCode {
     Value,
 }
 
+/// One violation found while validating a request body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FieldError {
     /// Dotted and indexed path to the offending value, e.g. `owners[0].id`.
     pub field: String,
+    /// Which class of problem this is.
     pub code: FieldErrorCode,
+    /// A human-readable explanation.
     pub detail: String,
 }
 
 impl FieldError {
+    /// Builds one violation.
     #[must_use]
     pub fn new(field: impl Into<String>, code: FieldErrorCode, detail: impl Into<String>) -> Self {
         Self {
@@ -54,7 +58,9 @@ impl FieldError {
 /// One segment of a path into a JSON document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Segment {
+    /// An object field, by name.
     Key(String),
+    /// An array element, by position.
     Index(usize),
 }
 
@@ -64,11 +70,13 @@ pub enum Segment {
 pub struct FieldPath(Vec<Segment>);
 
 impl FieldPath {
+    /// The empty path, at the root of the document.
     #[must_use]
     pub fn root() -> Self {
         Self(Vec::new())
     }
 
+    /// Appends an object-field segment.
     #[must_use]
     pub fn key(&self, key: impl Into<String>) -> Self {
         let mut segments = self.0.clone();
@@ -76,6 +84,7 @@ impl FieldPath {
         Self(segments)
     }
 
+    /// Appends an array-index segment.
     #[must_use]
     pub fn index(&self, index: usize) -> Self {
         let mut segments = self.0.clone();
@@ -83,6 +92,7 @@ impl FieldPath {
         Self(segments)
     }
 
+    /// Renders the dotted/indexed form, e.g. `owners[0].id`.
     #[must_use]
     pub fn render(&self) -> String {
         let mut rendered = String::new();

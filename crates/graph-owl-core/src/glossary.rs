@@ -21,13 +21,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TermStatus {
+    /// Newly written, not yet submitted.
     Draft,
+    /// Submitted, awaiting a reviewer.
     InReview,
+    /// Reviewed and accepted — the only status a term may be attached in.
     Approved,
+    /// No longer current.
     Deprecated,
 }
 
 impl TermStatus {
+    /// The wire name.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -50,6 +55,7 @@ impl TermStatus {
         }
     }
 
+    /// Every status.
     pub const ALL: [TermStatus; 4] = [
         TermStatus::Draft,
         TermStatus::InReview,
@@ -62,13 +68,18 @@ impl TermStatus {
 /// rather than a bare `422`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TransitionError {
+    /// The matrix does not permit this move.
     #[error("a term cannot go from {from} to {to}")]
     NotPermitted {
+        /// The status the term is in.
         from: &'static str,
+        /// The status that was requested.
         to: &'static str,
     },
+    /// Approval was attempted with nobody assigned to review.
     #[error("approval needs at least one assigned reviewer")]
     NoReviewer,
+    /// Approval was attempted by somebody not on the reviewer list.
     #[error("only an assigned reviewer may approve this term")]
     NotAReviewer,
 }
@@ -153,8 +164,11 @@ pub fn is_attachable(status: TermStatus) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind", content = "target")]
 pub enum SkosRelation {
+    /// A more general term.
     Broader(String),
+    /// A more specific term.
     Narrower(String),
+    /// An associated term, neither broader nor narrower.
     Related(String),
     /// An IRI in another vocabulary asserting the same concept.
     ///
@@ -163,10 +177,12 @@ pub enum SkosRelation {
     /// server does, and `exactMatch` is a claim about meaning rather than about
     /// availability.
     ExactMatch(String),
+    /// An IRI in another vocabulary asserting a closely related concept.
     CloseMatch(String),
 }
 
 impl SkosRelation {
+    /// The SKOS predicate this relation projects to.
     #[must_use]
     pub fn predicate(&self) -> &'static str {
         match self {
@@ -178,6 +194,7 @@ impl SkosRelation {
         }
     }
 
+    /// The far end of this relation — a term id or an external IRI.
     #[must_use]
     pub fn target(&self) -> &str {
         match self {

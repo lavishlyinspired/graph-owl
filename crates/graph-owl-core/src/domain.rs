@@ -20,14 +20,18 @@ use chrono::{DateTime, Utc};
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Domain {
+    /// The stable identifier.
     pub id: Uuid,
+    /// The domain's own name.
     pub name: String,
     /// Derived from the parent chain, never client-set — the same rule the
     /// asset hierarchy follows, for the same reason: a path a client supplies
     /// is a path that can disagree with the parent.
     pub fully_qualified_name: String,
+    /// The containing domain, if this one is nested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<Uuid>,
+    /// A human-readable description, if one was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Open text rather than an enum. "Source-aligned", "consumer-aligned" and
@@ -43,14 +47,21 @@ pub struct Domain {
     /// often enough to matter.
     #[serde(default)]
     pub experts: Vec<String>,
+    /// The envelope's version, bumped on every change.
     pub version: EntityVersion,
+    /// Who or what made the most recent change.
     pub updated_by: String,
+    /// A human-readable note on the most recent change, if one was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_description: Option<ChangeDescription>,
+    /// Whether the domain is tombstoned.
     pub deleted: bool,
+    /// When the domain was tombstoned, if it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<DateTime<Utc>>,
+    /// When the domain was first created.
     pub created_at: DateTime<Utc>,
+    /// When the domain was most recently changed.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -58,9 +69,13 @@ pub struct Domain {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataProduct {
+    /// The stable identifier.
     pub id: Uuid,
+    /// The product's own name.
     pub name: String,
+    /// The full dotted path from the root.
     pub fully_qualified_name: String,
+    /// A human-readable description, if one was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// What it is *for*, separate from what it *is*.
@@ -69,16 +84,24 @@ pub struct DataProduct {
     /// prevent: a bundle of tables somebody assembled and nobody can explain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
+    /// The domain accountable for this product, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain_id: Option<Uuid>,
+    /// The envelope's version, bumped on every change.
     pub version: EntityVersion,
+    /// Who or what made the most recent change.
     pub updated_by: String,
+    /// A human-readable note on the most recent change, if one was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_description: Option<ChangeDescription>,
+    /// Whether the product is tombstoned.
     pub deleted: bool,
+    /// When the product was tombstoned, if it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<DateTime<Utc>>,
+    /// When the product was first created.
     pub created_at: DateTime<Utc>,
+    /// When the product was most recently changed.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -92,8 +115,11 @@ pub struct DataProduct {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DomainAssignment {
+    /// The domain's stable identifier.
     pub id: Uuid,
+    /// The domain's own name.
     pub name: String,
+    /// The domain's full dotted path from the root.
     pub fully_qualified_name: String,
     /// True when the domain was found by walking up the containment hierarchy
     /// rather than recorded on the asset itself.

@@ -27,6 +27,7 @@ pub enum LineageSource {
 }
 
 impl LineageSource {
+    /// The wire name.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -45,6 +46,7 @@ impl LineageSource {
         }
     }
 
+    /// Every source.
     pub const ALL: [LineageSource; 2] = [LineageSource::Manual, LineageSource::Connector];
 }
 
@@ -56,9 +58,13 @@ impl LineageSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LineageDetails {
+    /// Who asserted it.
     pub source: LineageSource,
+    /// The SQL that produced the edge, if known — what makes the edge
+    /// checkable rather than merely asserted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
+    /// A human-readable note, if one was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
@@ -67,13 +73,20 @@ pub struct LineageDetails {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LineageEdge {
+    /// The stable identifier.
     pub id: uuid::Uuid,
+    /// The upstream asset.
     pub from_asset_id: uuid::Uuid,
+    /// The downstream asset.
     pub to_asset_id: uuid::Uuid,
+    /// How the two relate.
     pub relationship: RelationshipType,
+    /// Who asserted it, and the evidence.
     #[serde(flatten)]
     pub details: LineageDetails,
+    /// When the edge was created.
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Who or what created it.
     pub created_by: String,
 }
 

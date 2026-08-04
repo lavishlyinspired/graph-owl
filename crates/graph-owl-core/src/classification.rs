@@ -38,6 +38,8 @@ pub enum LabelType {
 }
 
 impl LabelType {
+    /// The wire name — the same string the database's `CHECK` constraint
+    /// accepts.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -48,6 +50,7 @@ impl LabelType {
         }
     }
 
+    /// Every label type.
     #[must_use]
     pub const fn all() -> &'static [LabelType] {
         &[
@@ -78,10 +81,13 @@ pub enum LabelState {
     /// confirmed — a suggestion treated as a fact is how a scanner's false
     /// positive becomes a compliance claim.
     Suggested,
+    /// A human has vouched for it.
     Confirmed,
 }
 
 impl LabelState {
+    /// The wire name — the same string the database's `CHECK` constraint
+    /// accepts.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -106,8 +112,11 @@ impl LabelState {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Classification {
+    /// The stable identifier.
     pub id: Uuid,
+    /// The classification's own name, e.g. `PII`.
     pub name: String,
+    /// A human-readable description, if one was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// **Decision 4.** A `Tier` classification marked exclusive refuses a second
@@ -115,11 +124,16 @@ pub struct Classification {
     /// entity could be Gold and Bronze at once and no consumer could act on
     /// either.
     pub mutually_exclusive: bool,
+    /// The envelope's version, bumped on every change.
     pub version: EntityVersion,
+    /// Who or what made the most recent change.
     pub updated_by: String,
+    /// A human-readable note on the most recent change, if one was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_description: Option<ChangeDescription>,
+    /// When the classification was first created.
     pub created_at: DateTime<Utc>,
+    /// When the classification was most recently changed.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -127,17 +141,25 @@ pub struct Classification {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tag {
+    /// The stable identifier.
     pub id: Uuid,
+    /// The tag's own name, e.g. `Sensitive`.
     pub name: String,
+    /// The classification this tag belongs to.
     pub classification_id: Uuid,
     /// `{classification}.{tag}` — derived, never client-set, for the same
     /// reason every other FQN in this catalog is.
     pub fully_qualified_name: String,
+    /// A human-readable description, if one was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The envelope's version, bumped on every change.
     pub version: EntityVersion,
+    /// Who or what made the most recent change.
     pub updated_by: String,
+    /// When the tag was first created.
     pub created_at: DateTime<Utc>,
+    /// When the tag was most recently changed.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -145,15 +167,21 @@ pub struct Tag {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TagLabel {
+    /// The tag applied, as `{classification}.{tag}`.
     pub tag_fqn: String,
     /// What it is on. An **FQN rather than an id**, because a column is
     /// addressed by FQN — the same choice Epic 24's `term_attachments` made,
     /// and for the same reason.
     pub target_fqn: String,
+    /// Where the label came from.
     pub label_type: LabelType,
+    /// Whether a human has vouched for it.
     pub state: LabelState,
+    /// Who or what applied it.
     pub applied_by: String,
+    /// When it was applied.
     pub applied_at: DateTime<Utc>,
+    /// Who confirmed it, once confirmed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmed_by: Option<String>,
 }

@@ -31,12 +31,19 @@ pub enum CompatibilityMode {
     /// Anything goes. A contract that guarantees nothing about schema is still
     /// useful for its SLAs and its parties.
     None,
+    /// A new reader must be able to read old data: removing or renaming a
+    /// column breaks it.
     Backward,
+    /// An old reader must be able to read new data: adding a *required*
+    /// column breaks it.
     Forward,
+    /// Both directions at once — the strictest mode.
     Full,
 }
 
 impl CompatibilityMode {
+    /// The wire name — the same string the database's `CHECK` constraint
+    /// accepts.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -47,6 +54,7 @@ impl CompatibilityMode {
         }
     }
 
+    /// Every mode, in the order the compatibility matrix's columns are written.
     #[must_use]
     pub const fn all() -> &'static [CompatibilityMode] {
         &[
@@ -78,28 +86,43 @@ impl CompatibilityMode {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "change")]
 pub enum SchemaChange {
+    /// A new column that may be absent — nothing that already reads the
+    /// table breaks.
     AddNullableColumn {
+        /// The column added.
         column: String,
     },
+    /// A new column every row must have — an old reader that built its own
+    /// row without it breaks.
     AddRequiredColumn {
+        /// The column added.
         column: String,
     },
+    /// A column no longer exists.
     RemoveColumn {
+        /// The column removed.
         column: String,
     },
     /// `int → bigint`: every old value still fits, no new one does for an old
     /// reader.
     WidenType {
+        /// The column widened.
         column: String,
+        /// The new type.
         to: String,
     },
     /// `bigint → int`: an old value may no longer fit.
     NarrowType {
+        /// The column narrowed.
         column: String,
+        /// The new type.
         to: String,
     },
+    /// A column keeps its type and moves to a new name.
     RenameColumn {
+        /// The name before the change.
         from: String,
+        /// The name after the change.
         to: String,
     },
 }
@@ -133,8 +156,11 @@ impl SchemaChange {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnGuarantee {
+    /// The column name.
     pub name: String,
+    /// The type the contract promises, in the producer's own vocabulary.
     pub data_type: String,
+    /// Whether the column may be absent on a row.
     pub nullable: bool,
 }
 
@@ -142,6 +168,7 @@ pub struct ColumnGuarantee {
 #[derive(utoipa::ToSchema, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaGuarantee {
+    /// The columns the contract promises will be there.
     pub required_columns: Vec<ColumnGuarantee>,
     /// **Overrides the mode when false.** A consumer that reads with
     /// `SELECT *` into a fixed struct breaks on *any* new column, however
@@ -154,16 +181,21 @@ pub struct SchemaGuarantee {
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ContractStatus {
+    /// Proposed but not yet agreed to — not enforced.
     Draft,
+    /// Agreed to and enforced.
     Active,
     /// A breach was recorded. **Not cleared by a later compatible change** —
     /// silent clearing would hide the incident, which is the thing a contract
     /// exists to surface.
     Violated,
+    /// No longer in force — not enforced, and history rather than a promise.
     Terminated,
 }
 
 impl ContractStatus {
+    /// The wire name — the same string the database's `CHECK` constraint
+    /// accepts.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -174,6 +206,7 @@ impl ContractStatus {
         }
     }
 
+    /// Every status, in the order the wire's `CHECK` constraint lists them.
     #[must_use]
     pub const fn all() -> &'static [ContractStatus] {
         &[
@@ -212,17 +245,21 @@ impl ContractStatus {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "verdict")]
 pub enum Compatibility {
+    /// The change does not breach the guarantee.
     Compatible,
     /// **Names what was breached and why**, because "incompatible" tells a
     /// producer nothing they can act on — they need to know which column and
     /// which promise.
     Breach {
+        /// The column the breach is about.
         column: String,
+        /// What was breached, in words a producer can act on.
         detail: String,
     },
 }
 
 impl Compatibility {
+    /// Whether this verdict is a breach.
     #[must_use]
     pub fn is_breach(&self) -> bool {
         matches!(self, Compatibility::Breach { .. })
@@ -348,21 +385,30 @@ fn describe(change: &SchemaChange) -> String {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum Sla {
+    /// Data must not be older than this.
     Freshness {
+        /// The maximum age, in seconds.
         #[serde(rename = "maxAgeSeconds")]
         max_age_seconds: i64,
     },
+    /// The asset must be queryable at least this fraction of the time.
     Availability {
+        /// The minimum uptime, as a percentage.
         #[serde(rename = "minUptimePct")]
         min_uptime_pct: f64,
     },
+    /// The asset must hold at least this many rows.
     Completeness {
+        /// The minimum row count.
         #[serde(rename = "minRowCount")]
         min_row_count: i64,
     },
+    /// Quality checks over a trailing window must pass at least this often.
     QualityPassRate {
+        /// The minimum pass rate, as a percentage.
         #[serde(rename = "minPct")]
         min_pct: f64,
+        /// The trailing window the rate is measured over, in seconds.
         #[serde(rename = "windowSeconds")]
         window_seconds: i64,
     },
@@ -378,8 +424,12 @@ pub enum Sla {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "state")]
 pub enum SlaEvaluation {
+    /// The SLA is being met.
     Met,
+    /// The SLA is not being met.
     Breached {
+        /// What was actually observed, in words a reader can compare against
+        /// the promise.
         observed: String,
     },
     /// Nothing has been measured. Distinct from `Met` and from `Breached`.
@@ -390,7 +440,9 @@ pub enum SlaEvaluation {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Contract {
+    /// The stable identifier.
     pub id: Uuid,
+    /// A human-readable name.
     pub name: String,
     /// The asset the promise is about.
     pub asset_fqn: String,
@@ -400,17 +452,26 @@ pub struct Contract {
     /// consumer is a special case of the real thing, not the other way round.
     #[serde(default)]
     pub consumers: Vec<String>,
+    /// What the contract promises about shape.
     #[serde(default)]
     pub schema_guarantee: SchemaGuarantee,
+    /// What the contract promises about behaviour.
     #[serde(default)]
     pub slas: Vec<Sla>,
+    /// How tolerant the contract is of schema change.
     pub compatibility: CompatibilityMode,
+    /// Where the contract stands.
     pub status: ContractStatus,
+    /// The envelope's version, bumped on every change.
     pub version: EntityVersion,
+    /// Who or what made the most recent change.
     pub updated_by: String,
+    /// A human-readable note on the most recent change, if one was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_description: Option<ChangeDescription>,
+    /// When the contract was first created.
     pub created_at: DateTime<Utc>,
+    /// When the contract was most recently changed.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -422,13 +483,18 @@ pub struct Contract {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContractBreach {
+    /// The stable identifier.
     pub id: Uuid,
+    /// The contract that was breached.
     pub contract_id: Uuid,
+    /// The column the breach is about.
     pub column: String,
+    /// What was breached, in words a producer can act on.
     pub detail: String,
     /// The asset version that caused it, so "when did this break" is answerable
     /// against the asset's own history.
     pub asset_version: String,
+    /// When the breach was detected.
     pub detected_at: DateTime<Utc>,
 }
 

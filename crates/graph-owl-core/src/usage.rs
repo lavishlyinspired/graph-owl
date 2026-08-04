@@ -29,8 +29,11 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "camelCase")]
 pub enum UsageOperation {
+    /// Rows were read.
     Read,
+    /// Rows were written.
     Write,
+    /// Rows were deleted.
     Delete,
     /// A tool inspected the schema without reading rows. Counted separately
     /// because it is *not* evidence anybody depends on the data — a BI tool
@@ -39,6 +42,8 @@ pub enum UsageOperation {
 }
 
 impl UsageOperation {
+    /// The wire name — the same string the database's `CHECK` constraint
+    /// accepts.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -49,6 +54,7 @@ impl UsageOperation {
         }
     }
 
+    /// Every operation.
     #[must_use]
     pub const fn all() -> &'static [UsageOperation] {
         &[
@@ -90,11 +96,17 @@ impl UsageOperation {
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum Consumer {
     /// Resolved to a `User` in this catalog.
-    Principal { id: String },
+    Principal {
+        /// The user's id.
+        id: String,
+    },
     /// A warehouse identity nothing here matches — **yet**. Resolution is
     /// retroactive, so creating the matching user later reclassifies the
     /// history rather than starting a second count.
-    Opaque { identifier: String },
+    Opaque {
+        /// The unresolved warehouse identity.
+        identifier: String,
+    },
 }
 
 impl Consumer {
@@ -125,8 +137,11 @@ impl Consumer {
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Trend {
+    /// Usage is meaningfully increasing.
     Rising,
+    /// Usage is roughly unchanged.
     Stable,
+    /// Usage is meaningfully decreasing.
     Declining,
     /// No access in [`DORMANT_AFTER_DAYS`]. **The signal that most changes a
     /// recommendation**, and therefore the one that must never be guessed.
@@ -168,21 +183,31 @@ pub const TREND_CHANGE_PCT: f64 = 20.0;
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PopularitySummary {
+    /// Consuming queries in the trailing 7 days.
     pub queries_last_7d: u64,
+    /// Consuming queries in the trailing 30 days.
     pub queries_last_30d: u64,
+    /// Distinct consumers in the trailing 30 days.
     pub distinct_consumers_30d: u64,
+    /// The most recent access, if there has been one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_accessed: Option<DateTime<Utc>>,
+    /// Which way usage is moving.
     pub trend: Trend,
 }
 
 /// A day's worth of one consumer's use of one asset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRollup {
+    /// The consumer, as [`Consumer::key`].
     pub consumer_key: String,
+    /// The day this rollup covers.
     pub day: NaiveDate,
+    /// What was done.
     pub operation: UsageOperation,
+    /// How many times.
     pub count: u64,
+    /// Rows affected, if the source reported it.
     pub total_rows: Option<u64>,
 }
 

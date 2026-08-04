@@ -10,13 +10,22 @@ use std::fmt;
 /// tooling uses, so an operator can paste an FQN from a SQL client.
 pub const SEPARATOR: char = '.';
 
+/// Why a set of segments could not be joined into an FQN.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FqnError {
     /// A segment was empty — `warehouse..orders` addresses nothing.
-    EmptySegment { position: usize },
+    EmptySegment {
+        /// The index of the empty segment.
+        position: usize,
+    },
     /// A segment contained the separator, which would make the FQN ambiguous:
     /// `a.b` as one segment is indistinguishable from two segments `a` and `b`.
-    SeparatorInSegment { position: usize, segment: String },
+    SeparatorInSegment {
+        /// The index of the offending segment.
+        position: usize,
+        /// The segment that contained the separator.
+        segment: String,
+    },
 }
 
 impl fmt::Display for FqnError {

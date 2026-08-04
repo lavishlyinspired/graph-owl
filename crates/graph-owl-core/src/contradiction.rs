@@ -52,11 +52,14 @@ pub enum ContradictionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Contradiction {
+    /// The smaller of the two memory ids.
     pub a: Uuid,
+    /// The larger of the two memory ids.
     pub b: Uuid,
     /// The asset both are anchored to, for a `Candidate`. `None` for a
     /// `Declared` one, which needs no shared subject to be real.
     pub subject: Option<Uuid>,
+    /// Why the pair was flagged.
     pub kind: ContradictionKind,
 }
 
@@ -81,8 +84,11 @@ pub enum Verdict {
 /// state unrepresentable and a change of mind an `UPDATE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Review {
+    /// One memory in the pair.
     pub a: Uuid,
+    /// The other memory in the pair.
     pub b: Uuid,
+    /// What the reviewer decided.
     pub verdict: Verdict,
 }
 

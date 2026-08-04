@@ -1,3 +1,31 @@
+//! The `Catalog` facade: the one type an embedder or the HTTP layer holds.
+//!
+//! # Embedding (Epic 37c)
+//!
+//! `Catalog` wraps an `Arc<dyn Storage>` (the port `graph-owl-storage` defines)
+//! and exposes the catalog's operations as plain async methods — no HTTP, no
+//! server process, no forced transport. An embedder brings its own `Storage`
+//! implementation (or uses `graph-owl-storage-memory`'s `InMemoryStorage`) and
+//! its own async runtime; this crate does not spawn one.
+//!
+//! `scripts/check-embedding-boundary.py` asserts in CI that this crate never
+//! depends on `graph-owl-storage-postgres`, `graph-owl-engine-postgres`, or
+//! either search adapter — those are choices the embedder makes, not
+//! obligations this crate carries. `#![deny(missing_docs)]` is the other half
+//! of the same promise: every public item here is part of the surface an
+//! embedder depends on, so every public item is documented.
+//!
+//! # Stability
+//!
+//! This crate is `0.y.z`: under SemVer, any `0.x.0` bump may break the public
+//! API, and `0.x.y` is additive or fix-only. There is no separate
+//! `#[unstable]` tier — every `pub` item is held to the same
+//! `#![deny(missing_docs)]` bar, so "public but not yet promised" is not a
+//! state this crate has. `1.0.0` follows Epic 37c Slice F, once the surface
+//! is proven to survive a second entity family without changing. See
+//! `plans/00b-architecture.md` decision 27.
+#![deny(missing_docs)]
+
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -34,11 +62,15 @@ use validation::{
     FieldError, FieldErrorCode, FieldPath, ValidateBody, optional_string, require_non_empty_string,
 };
 
+/// The request body for creating a table.
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTable {
+    /// The table's own name.
     pub name: String,
+    /// The derived, globally unique address.
     pub fully_qualified_name: String,
+    /// A human-readable description, if one was given.
     pub description: Option<String>,
 }
 
@@ -56,13 +88,19 @@ impl ValidateBody for CreateTable {
     }
 }
 
+/// The request body for creating or updating an asset.
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertAsset {
+    /// What kind of asset this is.
     pub kind: AssetKind,
+    /// The asset's own name.
     pub name: String,
+    /// The containing asset, if any.
     pub parent_id: Option<Uuid>,
+    /// A human-readable description, if one was given.
     pub description: Option<String>,
+    /// Kind-specific properties.
     pub properties: Option<serde_json::Value>,
     /// Organization-defined fields — Epic 22. Validated against the
     /// definitions for `kind` before anything is stored; an undefined name is
@@ -97,10 +135,13 @@ impl ValidateBody for UpsertAsset {
     }
 }
 
+/// The request body for creating a relationship edge.
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRelationship {
+    /// The relationship's target table.
     pub to_table_id: Uuid,
+    /// The relationship's wire name.
     pub relationship_type: String,
 }
 
@@ -163,8 +204,11 @@ pub enum CatalogError {
     NotFound,
     /// A uniqueness constraint rejected the write.
     Conflict {
+        /// A human-readable explanation.
         detail: String,
+        /// The id of the entity already occupying that identity, if known.
         existing_id: Option<Uuid>,
+        /// What kind of conflict this is.
         kind: ConflictKind,
     },
     /// A field-level failure that got past boundary validation, or one that
@@ -175,14 +219,18 @@ pub enum CatalogError {
     /// a client fixes it by choosing a different relationship, not a different
     /// value.
     IllegalRelationship {
+        /// The source entity kind.
         from: EntityKind,
+        /// The relationship that was attempted.
         relationship: RelationshipType,
+        /// The target entity kind.
         to: EntityKind,
     },
     /// The caller sent `If-Match` naming a version that is no longer current.
     /// Carries the current one, so a client can show what it was about to
     /// overwrite rather than only that it failed.
     PreconditionFailed {
+        /// The version that is actually current.
         current: EntityVersion,
     },
     /// The caller is known and the thing they asked for is visible, but they
@@ -206,6 +254,7 @@ pub enum CatalogError {
     /// The caller here is a program, and a bare 403 gives it nothing to do but
     /// retry.
     AgentRefused(graph_owl_authz::agent::Refusal),
+    /// The storage adapter failed.
     Storage(StorageError),
 }
 
@@ -243,6 +292,7 @@ fn subject_of(principal: &Principal) -> Subject {
 /// outage waiting for the estate to get large enough.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SparqlBudget {
+    /// The most facts a single query may scan before the answer is truncated.
     pub max_facts: usize,
 }
 
@@ -257,10 +307,12 @@ impl Default for SparqlBudget {
     }
 }
 
+/// The result of running one SPARQL query.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SparqlOutcome {
     /// One map per solution: variable name to its bound term, rendered.
     pub rows: Vec<std::collections::BTreeMap<String, String>>,
+    /// How many facts the query actually scanned.
     pub facts_scanned: usize,
     /// The budget cut the fact set short, so the answer may be incomplete.
     /// **Always reported** — a truncated answer presented as complete is the
@@ -299,12 +351,19 @@ pub struct SparqlOutcome {
 /// (Epic 7c) own projection rather than inventing a parallel one.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CypherValue {
+    /// No value.
     Null,
+    /// A boolean.
     Boolean(bool),
+    /// A whole number.
     Integer(i64),
+    /// A floating-point number.
     Float(f64),
+    /// A string.
     String(String),
+    /// A bound node.
     Node(graph_owl_lpg::LpgNode),
+    /// A bound relationship.
     Relationship(graph_owl_lpg::LpgEdge),
 }
 
@@ -319,7 +378,9 @@ pub struct CypherRow(pub Vec<(String, CypherValue)>);
 /// arriving as the evaluator produces them rather than after it finishes.
 #[derive(Debug)]
 pub struct CypherStream {
+    /// The query's projected column names, in order.
     pub fields: Vec<String>,
+    /// Rows as the evaluator produces them.
     pub rows: tokio::sync::mpsc::Receiver<Result<CypherRow, CatalogError>>,
 }
 
@@ -548,7 +609,9 @@ fn collect(results: spareval::QueryResults<'_>) -> Vec<std::collections::BTreeMa
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Overview {
+    /// The total number of assets.
     pub total: i64,
+    /// How many assets of each kind.
     pub by_kind: Vec<(AssetKind, i64)>,
     /// Assets carrying a non-empty description.
     pub described: i64,
@@ -556,15 +619,18 @@ pub struct Overview {
     /// a future coverage metric over a narrower scope does not have to redefine
     /// what it is a fraction of.
     pub documented_total: i64,
+    /// The most recently changed assets.
     pub recently_changed: Vec<Asset>,
     /// `None` when no graph engine is configured — distinct from a graph of
     /// size zero, which is what a configured-but-empty projection looks like.
     pub graph: Option<GraphSize>,
 }
 
+/// The size of the graph projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphSize {
+    /// How many flakes the projection holds.
     pub flakes: u64,
 }
 
@@ -600,6 +666,11 @@ fn syncable_fields(asset: &Asset) -> serde_json::Value {
     })
 }
 
+/// The catalog facade: the one type an embedder or the HTTP layer holds.
+///
+/// Wraps a `Storage` port and exposes the catalog's operations as plain async
+/// methods, with everything else (the graph projection, authorization
+/// decisions, event publication) optional and additive.
 #[derive(Clone)]
 pub struct Catalog {
     storage: Arc<dyn Storage>,
@@ -655,6 +726,16 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    /// Builds a catalog over the given storage port, with every optional
+    /// capability (graph, traversal, events, auto-merge) disabled.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use graph_owl_api::Catalog;
+    /// use graph_owl_storage_memory::InMemoryStorage;
+    ///
+    /// let _catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+    /// ```
     pub fn new(storage: Arc<dyn Storage>) -> Self {
         Self {
             storage,
@@ -3857,10 +3938,39 @@ impl Catalog {
 
     /// Creates or converges an asset, deriving its FQN from the parent chain.
     ///
+    /// Converging means calling this twice with the same `parent_id`/`name`
+    /// updates the existing asset rather than creating a duplicate — a
+    /// connector re-running its ingest gets the same entity back each time.
+    ///
     /// # Errors
     ///
     /// `Validation` if the FQN cannot be derived or the parent is the wrong
     /// kind; `NotFound` if the parent does not exist.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use graph_owl_api::{Catalog, UpsertAsset};
+    /// use graph_owl_core::{AssetKind, Principal};
+    /// use graph_owl_storage_memory::InMemoryStorage;
+    ///
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+    /// let system = Principal::system();
+    ///
+    /// let created = catalog
+    ///     .upsert_asset(&system, UpsertAsset {
+    ///         kind: AssetKind::Service,
+    ///         name: "orders-api".to_string(),
+    ///         parent_id: None,
+    ///         description: Some("Order placement".to_string()),
+    ///         properties: None,
+    ///         extension: None,
+    ///     })
+    ///     .await
+    ///     .expect("a root-kind asset needs no parent");
+    /// assert_eq!(created.fully_qualified_name, "orders-api");
+    /// # });
+    /// ```
     #[tracing::instrument(name = "catalog.upsert_asset", skip_all)]
     pub async fn upsert_asset(
         &self,
@@ -5865,6 +5975,11 @@ impl Catalog {
         Ok(user)
     }
 
+    /// Replaces a user's role set.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::Storage`] if the write fails.
     pub async fn set_user_roles(
         &self,
         id: &str,
@@ -6424,6 +6539,12 @@ impl Catalog {
         Ok(self.storage.set_source_hash(id, hash).await?)
     }
 
+    /// Upserts an asset from a connector's ingested record, deriving its FQN
+    /// from `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError`] if the parent cannot be resolved or the write fails.
     pub async fn ingest_record(
         &self,
         principal: &Principal,
@@ -8701,7 +8822,9 @@ fn describe_repair(repair: &graph_owl_constraint::Repair) -> serde_json::Value {
 /// What a policy would do to the estate as it stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyDryRun {
+    /// How many would be admitted.
     pub admitted: usize,
+    /// How many would be denied.
     pub denied: usize,
     /// Up to five admitted names, so a reader can check the count means what
     /// they think it means.
@@ -8730,10 +8853,15 @@ fn unresolvable_link(index: usize, target: Uuid) -> CatalogError {
 /// knows the path it is at, not the UUIDs this catalog assigned.
 #[derive(Debug, Clone)]
 pub struct IngestItem {
+    /// What kind of asset this is.
     pub kind: AssetKind,
+    /// The asset's own name.
     pub name: String,
+    /// The containing asset's FQN, if any.
     pub parent_fqn: Option<String>,
+    /// A human-readable description, if one was given.
     pub description: Option<String>,
+    /// Kind-specific properties.
     pub properties: Option<serde_json::Value>,
 }
 
@@ -8765,12 +8893,19 @@ fn note_mention<'a>(
 /// What a client sends to register a test case.
 #[derive(Debug, Clone, Default)]
 pub struct CreateTestCase {
+    /// The test case's own name.
     pub name: String,
+    /// The FQN of the asset under test.
     pub target_fqn: String,
+    /// The kind of test.
     pub test_type: String,
+    /// A human-readable description, if one was given.
     pub description: Option<String>,
+    /// The definition this case was generated from, if any.
     pub definition_id: Option<Uuid>,
+    /// The suite this case belongs to, if any.
     pub suite_id: Option<Uuid>,
+    /// How often this test is expected to run, if stated.
     pub expected_cadence: Option<String>,
 }
 
@@ -8778,7 +8913,9 @@ pub struct CreateTestCase {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpstreamHealth {
+    /// The worst health state found.
     pub state: graph_owl_core::quality::Health,
+    /// The FQN of the unhealthy upstream asset.
     pub asset_fqn: String,
     /// How far away, so a steward knows whether this is their neighbour's
     /// problem or three teams removed.
@@ -8810,13 +8947,21 @@ const UPSTREAM_HOPS: usize = 3;
 /// What a client sends to define a contract.
 #[derive(Debug, Clone)]
 pub struct CreateContract {
+    /// The contract's own name.
     pub name: String,
+    /// The FQN of the asset the contract governs.
     pub asset_fqn: String,
+    /// Who is accountable for honouring the contract.
     pub producer: String,
+    /// Who depends on the contract holding.
     pub consumers: Vec<String>,
+    /// What the schema promises.
     pub schema_guarantee: graph_owl_core::contract::SchemaGuarantee,
+    /// The service-level agreements attached.
     pub slas: Vec<graph_owl_core::contract::Sla>,
+    /// How strictly changes are checked against the guarantee.
     pub compatibility: graph_owl_core::contract::CompatibilityMode,
+    /// Whether the contract is active, draft, or retired.
     pub status: graph_owl_core::contract::ContractStatus,
 }
 
@@ -8831,10 +8976,15 @@ const USAGE_RETENTION_DAYS: i64 = 90;
 /// What a client sends to define a certification type.
 #[derive(Debug, Clone, Default)]
 pub struct CreateCertificationType {
+    /// The certification type's own name.
     pub name: String,
+    /// A human-readable description, if one was given.
     pub description: Option<String>,
+    /// How many days a certification of this type is valid for by default.
     pub default_validity_days: i32,
+    /// What evidence an issuer must provide.
     pub required_evidence: Vec<String>,
+    /// Who may issue this certification.
     pub authorized_issuers: Vec<String>,
 }
 
@@ -8849,10 +8999,15 @@ const SUGGESTION_PAGE: i64 = 100;
 /// What a client sends to define a domain.
 #[derive(Debug, Clone, Default)]
 pub struct CreateDomain {
+    /// The domain's own name.
     pub name: String,
+    /// The containing domain, if any.
     pub parent_id: Option<Uuid>,
+    /// A human-readable description, if one was given.
     pub description: Option<String>,
+    /// The kind of domain, if stated.
     pub domain_type: Option<String>,
+    /// Who to ask about this domain.
     pub experts: Vec<String>,
 }
 
@@ -8864,9 +9019,13 @@ pub struct CreateDomain {
 /// skip) is worse than adding them one at a time and being told.
 #[derive(Debug, Clone, Default)]
 pub struct CreateDataProduct {
+    /// The data product's own name.
     pub name: String,
+    /// A human-readable description, if one was given.
     pub description: Option<String>,
+    /// What this data product is for, if stated.
     pub purpose: Option<String>,
+    /// The owning domain, if any.
     pub domain_id: Option<Uuid>,
 }
 
@@ -8914,9 +9073,13 @@ fn coerce_filter_value(
 /// outer `None` means "not mentioned", the inner one means "clear it".
 #[derive(Debug, Clone, Default)]
 pub struct CustomPropertyUpdate {
+    /// A new name, if one was sent.
     pub name: Option<String>,
+    /// A new value type, if one was sent.
     pub property_type: Option<graph_owl_core::custom_property::PropertyType>,
+    /// A new description, doubly optional so clearing it is expressible.
     pub description: Option<Option<String>>,
+    /// New constraints, if any were sent.
     pub constraints: Option<graph_owl_core::custom_property::Constraints>,
 }
 
@@ -9075,11 +9238,15 @@ fn batch_detail(error: &CatalogError) -> String {
 /// mismatched model. Found by a test doing exactly that.
 #[derive(Debug, Clone)]
 pub struct IngestEdge {
+    /// The upstream asset's FQN.
     pub from_fqn: String,
+    /// The downstream asset's FQN.
     pub to_fqn: String,
     /// A lineage relationship — `feeds`, `derivedFrom`, and so on.
     pub relationship: String,
+    /// The SQL that produced the edge, if known.
     pub query: Option<String>,
+    /// A human-readable note, if one was given.
     pub description: Option<String>,
 }
 
@@ -9095,12 +9262,21 @@ pub enum MappingOutcome {
     /// Every required field resolved and the draft passed shape validation.
     Draft(graph_owl_connectors::batch::RowDraft),
     /// A required field's path resolved to nothing.
-    MissingField { field: &'static str },
+    MissingField {
+        /// The field whose path resolved to nothing.
+        field: &'static str,
+    },
     /// `kind` resolved to a string that names no known asset kind.
-    InvalidKind { kind: String },
+    InvalidKind {
+        /// The unrecognised value.
+        kind: String,
+    },
     /// The draft resolved but a shape rejected it — names the shape and
     /// constraint, from [`Catalog::validate_draft`].
-    ShapeViolation { reason: String },
+    ShapeViolation {
+        /// The shape and constraint that rejected it.
+        reason: String,
+    },
 }
 
 /// The internal twin of [`MappingOutcome`] — `resolve_and_validate_draft`'s
@@ -9147,8 +9323,11 @@ pub struct IngestOutcome {
     /// Position in the **submitted** batch, so a client can match this to what it
     /// sent without re-deriving anything.
     pub index: usize,
+    /// The HTTP-style status this item resolved to.
     pub status: u16,
+    /// The resulting entity's id, if one was created or matched.
     pub id: Option<Uuid>,
+    /// A human-readable explanation, if this item did not succeed.
     pub problem: Option<String>,
 }
 
@@ -9160,6 +9339,7 @@ pub struct IngestOutcome {
 /// where it ranks depends on the query that found it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecalledMemory {
+    /// The memory itself.
     pub memory: graph_owl_core::memory::Memory,
     /// **Flagged, never hidden.** "We knew this and it may have changed" is
     /// information; dropping it leaves a reader believing nobody ever looked.
@@ -9172,6 +9352,7 @@ pub struct RecalledMemory {
 /// A finding, and whatever acceptance stands against it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WaivedFinding {
+    /// The finding itself.
     pub finding: graph_owl_storage::ValidationFinding,
     /// The waiver covering this finding, live **or expired**.
     pub waiver: Option<graph_owl_storage::Waiver>,
@@ -9192,8 +9373,11 @@ pub struct ValidationRun {
     /// `true` when nothing of `Violation` severity was found. Warnings and
     /// info do not fail conformance.
     pub conforms: bool,
+    /// How many findings were of `Violation` severity.
     pub violations: usize,
+    /// How many findings were of `Warning` severity.
     pub warnings: usize,
+    /// How many findings were of `Info` severity.
     pub info: usize,
     /// How many shapes ran.
     pub shapes: usize,
@@ -9215,10 +9399,12 @@ pub struct ReasoningReport {
     /// run, and equal to the previous `derived` on a converged one — which is
     /// how an operator sees at a glance that a run replaced rather than grew.
     pub replaced: usize,
+    /// How many fixpoint passes ran.
     pub iterations: usize,
     /// `null` means the run reached fixpoint. Anything else names the wall it
     /// hit, because the four demand different responses.
     pub capped: Option<reasoning::CappedReason>,
+    /// How long the run took, in milliseconds.
     pub duration_ms: u64,
 }
 

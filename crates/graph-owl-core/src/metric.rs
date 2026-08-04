@@ -16,13 +16,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CalculationType {
+    /// Read directly from one source.
     Simple,
+    /// One quantity divided by another.
     Ratio,
+    /// Computed from other metrics.
     Derived,
+    /// Assembled from several metrics.
     Composite,
 }
 
 impl CalculationType {
+    /// The wire name.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -45,6 +50,7 @@ impl CalculationType {
         }
     }
 
+    /// Every calculation type.
     pub const ALL: [CalculationType; 4] = [
         CalculationType::Simple,
         CalculationType::Ratio,
@@ -72,6 +78,7 @@ pub enum MetricGap {
 }
 
 impl MetricGap {
+    /// The wire name.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -85,8 +92,11 @@ impl MetricGap {
 /// What a metric declares about itself, for the parts that get judged.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MetricClaims<'a> {
+    /// The assets this metric claims to derive from.
     pub source_assets: &'a [String],
+    /// The glossary term that defines it, if named.
     pub defined_by: Option<&'a str>,
+    /// The metric's own formula, if stated.
     pub formula: Option<&'a str>,
 }
 
@@ -129,14 +139,18 @@ pub struct DerivedEdge {
 /// of an edit they never saw.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EdgeReconciliation {
+    /// Edges that need to be asserted.
     pub to_add: Vec<DerivedEdge>,
+    /// Edges that need to be retracted.
     pub to_retract: Vec<DerivedEdge>,
 }
 
 /// An edge as stored, with the claim it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredEdge {
+    /// The source asset.
     pub from: String,
+    /// The metric.
     pub to: String,
     /// True when this edge was asserted by the metric's own `source_assets`
     /// rather than by a person or a connector.

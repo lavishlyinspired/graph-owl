@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LifecycleState {
+    /// Not yet finished.
     Draft,
+    /// In normal use.
     Active,
     /// Going away, with a machine-readable successor (decision 2).
     Deprecated,
@@ -38,6 +40,7 @@ impl Default for LifecycleState {
 }
 
 impl LifecycleState {
+    /// The wire name.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -48,6 +51,7 @@ impl LifecycleState {
         }
     }
 
+    /// Every state.
     #[must_use]
     pub const fn all() -> &'static [LifecycleState] {
         &[
@@ -102,6 +106,7 @@ pub struct Deprecation {
     /// wrong in a way the reader cannot detect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub successor_fqn: Option<String>,
+    /// When the deprecation was declared.
     pub deprecated_at: DateTime<Utc>,
     /// When it becomes `Retired`. Absent means "no date decided yet", which is
     /// honest and common.
@@ -124,14 +129,17 @@ pub struct Deprecation {
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "status")]
 pub enum CertificationStatus {
+    /// In force.
     Valid,
     /// Within the warning window, with how long is left. The number is what
     /// makes it actionable — "expiring soon" alone tells a steward nothing
     /// about whether to act today or next quarter.
     ExpiringSoon {
+        /// How many days remain, rounded up.
         #[serde(rename = "daysRemaining")]
         days_remaining: i64,
     },
+    /// No longer in force.
     Expired,
     /// Never certified. Distinct from `Expired`: one was never vouched for, the
     /// other was and no longer is, and a consumer should treat those

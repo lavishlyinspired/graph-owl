@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TestStatus {
+    /// The check passed.
     Success,
+    /// The check ran and found a problem.
     Failed,
     /// The check could not complete — a connection failed, the job was killed.
     ///
@@ -36,6 +38,8 @@ pub enum TestStatus {
 }
 
 impl TestStatus {
+    /// The wire name — the same string the database's `CHECK` constraint
+    /// accepts.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -45,6 +49,7 @@ impl TestStatus {
         }
     }
 
+    /// Every status.
     #[must_use]
     pub const fn all() -> &'static [TestStatus] {
         &[TestStatus::Success, TestStatus::Failed, TestStatus::Aborted]
@@ -66,7 +71,9 @@ impl TestStatus {
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Health {
+    /// Every declared check ran recently and passed.
     Healthy,
+    /// A recent check failed.
     Unhealthy,
     /// Tests exist, but nothing recent enough to rely on.
     Stale,
@@ -84,8 +91,11 @@ pub enum Health {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthSummary {
+    /// The overall verdict.
     pub state: Health,
+    /// How many cases are passing.
     pub passing: usize,
+    /// How many cases are failing.
     pub failing: usize,
     /// Cases whose latest result is older than their cadence, **or aborted**.
     /// Both mean the same thing operationally: no usable recent signal.
@@ -94,6 +104,7 @@ pub struct HealthSummary {
     /// the check.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failing_cases: Vec<String>,
+    /// The stale cases, by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stale_cases: Vec<String>,
 }
@@ -101,11 +112,13 @@ pub struct HealthSummary {
 /// One test case's most recent result, as health is computed from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LatestResult {
+    /// The test case's own name.
     pub case_name: String,
     /// `None` when the case has been registered but never run — which is a
     /// *stale* case rather than an absent one, because somebody declared the
     /// check and it has produced nothing.
     pub status: Option<TestStatus>,
+    /// When the latest result was observed.
     pub observed_at: Option<DateTime<Utc>>,
     /// How often this check is expected to run. `None` means no cadence was
     /// declared, so age cannot make it stale — only its status counts.

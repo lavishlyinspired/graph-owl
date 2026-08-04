@@ -52,15 +52,19 @@ pub enum MemoryKind {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Authorship {
+    /// A person wrote it.
     Human {
+        /// The author's user id.
         #[serde(rename = "userId")]
         user_id: String,
     },
     /// An agent, named. Not "a machine" — which agent matters when its
     /// conclusions turn out to be wrong and somebody has to find the rest.
     Agent {
+        /// The authoring agent's id.
         #[serde(rename = "agentId")]
         agent_id: String,
+        /// The model the agent ran on.
         model: String,
     },
 }
@@ -110,6 +114,7 @@ pub enum LinkRelation {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryLink {
+    /// How this memory relates to the target.
     pub relation: LinkRelation,
     /// The asset, run, or other memory this points at.
     pub target: Uuid,
@@ -123,10 +128,14 @@ pub enum MemoryError {
     /// is written, stored, and invisible, which is worse than being refused.
     #[error("a memory needs at least one `about` link; without one it can never be retrieved")]
     NoAnchor,
+    /// Confidence must be in `[0, 1]`.
     #[error("confidence must be between 0 and 1, got {0}")]
     ConfidenceOutOfRange(f64),
+    /// Content was blank.
     #[error("a memory needs content")]
     NoContent,
+    /// An agent-authored memory stated no confidence, and there is no default
+    /// to fall back on.
     #[error("an agent-authored memory has to state its own confidence")]
     AgentWithoutConfidence,
 }
@@ -140,14 +149,20 @@ pub enum MemoryError {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Memory {
+    /// The stable identifier.
     pub id: Uuid,
+    /// What kind of knowledge this is.
     pub kind: MemoryKind,
+    /// The memory itself.
     pub content: String,
     /// A one-line form for a list or an agent's context budget. Optional: a
     /// forced summary is a truncated first sentence, which is worse than none.
     pub summary: Option<String>,
+    /// Who wrote it, and therefore how much it is worth.
     pub authorship: Authorship,
+    /// How sure the author is, in `[0, 1]`.
     pub confidence: f64,
+    /// What this memory relates to.
     pub links: Vec<MemoryLink>,
     /// The instant this was true of its subject. Compared against the subject's
     /// version to compute staleness.
@@ -170,6 +185,7 @@ pub struct Memory {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryUpdate {
+    /// The new content, if changing it.
     pub content: Option<String>,
     /// `null` clears it, absent leaves it alone. Collapsing the two makes
     /// "remove this summary" unexpressible, and a forced summary is a truncated
@@ -183,7 +199,9 @@ pub struct MemoryUpdate {
     )]
     #[serde(default, deserialize_with = "explicit_null")]
     pub summary: Option<Option<String>>,
+    /// The new confidence, if changing it.
     pub confidence: Option<f64>,
+    /// The new links, if changing them.
     pub links: Option<Vec<MemoryLink>>,
 }
 
@@ -278,10 +296,16 @@ pub enum Staleness {
     /// A **Minor** bump: something was added or described. The memory is
     /// probably still true, and saying "stale" would train readers to ignore the
     /// flag on the many occasions it does not matter.
-    PossiblyStale { since: EntityVersion },
+    PossiblyStale {
+        /// The subject's version that triggered this verdict.
+        since: EntityVersion,
+    },
     /// A **Major** bump — a breaking change. What the memory describes may no
     /// longer exist.
-    Stale { since: EntityVersion },
+    Stale {
+        /// The subject's version that triggered this verdict.
+        since: EntityVersion,
+    },
     /// The subject is gone, or was never resolvable. Distinct from stale: there
     /// is nothing left to compare against, and reporting `Fresh` would be a
     /// confident answer about a subject nobody can see.

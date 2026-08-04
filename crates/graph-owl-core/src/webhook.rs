@@ -60,7 +60,9 @@ impl EventState {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InboundEvent {
+    /// The stable identifier.
     pub id: Uuid,
+    /// The endpoint this delivery arrived on.
     pub endpoint: Uuid,
     /// The sender's own event identifier, when it provides one — the
     /// primary dedup key (Slice B). `None` falls back to a content hash.
@@ -71,8 +73,11 @@ pub struct InboundEvent {
     /// which is only ever arrival order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_timestamp: Option<DateTime<Utc>>,
+    /// When the delivery arrived.
     pub received_at: DateTime<Utc>,
+    /// The delivery's raw bytes.
     pub raw: Vec<u8>,
+    /// Where this event sits in its own lifecycle.
     pub state: EventState,
     /// What [`dedup_key`] computed for this delivery — stored rather than
     /// recomputed, so a later replay (Slice D) compares against exactly the

@@ -37,12 +37,19 @@ use uuid::Uuid;
 /// property of an estate rather than of this code.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Weights {
+    /// How strongly an explicit link to the subject counts.
     pub anchor: f64,
+    /// How strongly matching query words count.
     pub lexical: f64,
+    /// How strongly Epic 8's embedding similarity counts.
     pub semantic: f64,
+    /// How strongly a stale verdict counts against a memory.
     pub staleness: f64,
+    /// How strongly recency counts.
     pub recency: f64,
+    /// How strongly human authorship counts over agent authorship.
     pub authorship: f64,
+    /// How strongly the memory's own stated confidence counts.
     pub confidence: f64,
     /// Days after which a memory's recency term has halved.
     pub recency_half_life_days: f64,
@@ -75,7 +82,9 @@ impl Default for Weights {
 /// do I/O.
 #[derive(Debug, Clone)]
 pub struct Candidate<'a> {
+    /// The memory being ranked.
     pub memory: &'a Memory,
+    /// Whether the memory's subject has moved on since it was written.
     pub staleness: Staleness,
     /// Epic 8's embedding similarity, `None` until it exists.
     ///
@@ -95,22 +104,33 @@ pub struct Candidate<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Score {
+    /// The weighted anchor term.
     pub anchor: f64,
+    /// The weighted lexical-overlap term.
     pub lexical: f64,
+    /// The weighted semantic-similarity term, `None` until measured.
     pub semantic: Option<f64>,
     /// Negative or zero. Kept signed so the total is a plain sum and the sign
     /// says which way the term pushes.
     pub staleness: f64,
+    /// The weighted recency term.
     pub recency: f64,
+    /// The weighted authorship term.
     pub authorship: f64,
+    /// The weighted confidence term.
     pub confidence: f64,
+    /// The sum of every term above.
     pub total: f64,
 }
 
+/// One memory, ranked.
 #[derive(Debug, Clone)]
 pub struct Ranked<'a> {
+    /// The ranked memory.
     pub memory: &'a Memory,
+    /// Whether the memory's subject has moved on since it was written.
     pub staleness: Staleness,
+    /// How it scored, decomposed.
     pub score: Score,
 }
 

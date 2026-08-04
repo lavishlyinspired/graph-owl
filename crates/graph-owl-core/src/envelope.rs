@@ -16,7 +16,9 @@ use std::fmt;
     utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
 )]
 pub struct EntityVersion {
+    /// Bumped on a breaking change.
     pub major: u32,
+    /// Bumped on a backward-compatible change.
     pub minor: u32,
 }
 
@@ -27,6 +29,7 @@ impl EntityVersion {
         Self { major: 0, minor: 1 }
     }
 
+    /// The version after a backward-compatible change.
     #[must_use]
     pub const fn next_minor(self) -> Self {
         Self {
@@ -45,6 +48,7 @@ impl EntityVersion {
         }
     }
 
+    /// The version after a change of this kind.
     #[must_use]
     pub fn bump(self, kind: ChangeKind) -> Self {
         match kind {
@@ -72,6 +76,7 @@ impl EntityVersion {
 /// Echoes what was received, so a client sees its own typo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MalformedVersion {
+    /// The string that did not parse.
     pub got: String,
 }
 
@@ -96,8 +101,11 @@ impl fmt::Display for EntityVersion {
 /// no event, and that is what makes its idempotency observable.
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
+    /// Nothing changed.
     None,
+    /// A backward-compatible change.
     Minor,
+    /// A breaking change.
     Major,
 }
 
@@ -107,8 +115,11 @@ pub enum ChangeKind {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldChange {
+    /// The field that changed.
     pub field: String,
+    /// The value before, or `None` if the field was added.
     pub before: Option<serde_json::Value>,
+    /// The value after, or `None` if the field was removed.
     pub after: Option<serde_json::Value>,
 }
 
@@ -119,12 +130,16 @@ pub struct FieldChange {
 #[derive(utoipa::ToSchema, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeDescription {
+    /// Fields that were absent and are now present.
     pub fields_added: Vec<FieldChange>,
+    /// Fields whose value changed.
     pub fields_updated: Vec<FieldChange>,
+    /// Fields that were present and are now absent.
     pub fields_deleted: Vec<FieldChange>,
 }
 
 impl ChangeDescription {
+    /// Whether nothing changed.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.fields_added.is_empty()

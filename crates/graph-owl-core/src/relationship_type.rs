@@ -14,10 +14,12 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EntityKind {
+    /// A table.
     Table,
 }
 
 impl EntityKind {
+    /// The wire and storage form.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -121,8 +123,10 @@ impl fmt::Display for RelationshipType {
     }
 }
 
+/// The parsed vocabulary rejected a string outside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownRelationshipType {
+    /// The rejected value, so the caller can name it.
     pub got: String,
 }
 
@@ -163,6 +167,7 @@ const LEGAL_TRIPLES: &[(EntityKind, RelationshipType, EntityKind)] = &[
     // Service→Database, Database→Schema, Schema→Table, Table→Column.
 ];
 
+/// Whether this `(from, relationship, to)` triple is in the legality table.
 #[must_use]
 pub fn is_legal(from: EntityKind, relationship: RelationshipType, to: EntityKind) -> bool {
     LEGAL_TRIPLES.contains(&(from, relationship, to))

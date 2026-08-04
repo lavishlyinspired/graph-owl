@@ -167,9 +167,13 @@ pub fn claim_flakes(
 pub enum SubmissionOutcome {
     /// The run was processed.
     Recorded {
+        /// The run's stable identifier.
         run_id: Uuid,
+        /// How many claims were written without review.
         asserted: usize,
+        /// How many claims were queued for review.
         surfaced: usize,
+        /// How many claims were discarded, with a reason each.
         discarded: usize,
     },
     /// This exact document has already been through this exact extractor, so
@@ -179,7 +183,10 @@ pub enum SubmissionOutcome {
     /// re-submitting is normal (at-least-once delivery, a retried job, an
     /// operator re-running a backfill) and it should be able to tell that
     /// graph-owl recognised the document rather than found nothing in it.
-    AlreadyExtracted { run_id: Uuid },
+    AlreadyExtracted {
+        /// The id of the run that already processed this document.
+        run_id: Uuid,
+    },
 }
 
 /// A queued claim as a reviewer sees it.
@@ -191,12 +198,19 @@ pub enum SubmissionOutcome {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingClaim {
+    /// The stable identifier.
     pub id: Uuid,
+    /// The run this claim was extracted by.
     pub run_id: Uuid,
+    /// The subject entity, as text.
     pub subject: String,
+    /// The predicate, from [`CATALOG_PREDICATES`].
     pub predicate: String,
+    /// The object, as text.
     pub object: String,
+    /// The extractor's confidence.
     pub confidence: f64,
+    /// The source text this claim was extracted from.
     pub evidence: String,
 }
 
@@ -208,6 +222,7 @@ pub struct PendingClaim {
 /// machine-asserted claim as human-reviewed, which is precisely the
 /// provenance lie this epic exists to avoid.
 pub const STATE_ASSERTED: &str = "asserted";
+/// A human was asked and has not yet answered.
 pub const STATE_PENDING: &str = "pending";
 
 /// How many pending claims one page of the review queue returns.

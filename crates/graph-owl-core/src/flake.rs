@@ -20,11 +20,14 @@ use uuid::Uuid;
 /// (`plans/04-engine-triples.md` decision 9).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Sid {
+    /// Which vocabulary `id` is drawn from. See [`namespace`].
     pub namespace_code: u16,
+    /// The local name within that vocabulary.
     pub id: String,
 }
 
 impl Sid {
+    /// An identifier in an arbitrary vocabulary.
     #[must_use]
     pub fn new(namespace_code: u16, id: impl Into<String>) -> Self {
         Self {
@@ -73,12 +76,19 @@ pub mod namespace {
     /// This project's catalog vocabulary: `https://graph-owl.dev/ns/catalog#`.
     pub const DSC: u16 = 0x0001;
 
+    /// `http://www.w3.org/1999/02/22-rdf-syntax-ns#`.
     pub const RDF: u16 = 0x0100;
+    /// `http://www.w3.org/2000/01/rdf-schema#`.
     pub const RDFS: u16 = 0x0101;
+    /// `http://www.w3.org/2001/XMLSchema#`.
     pub const XSD: u16 = 0x0102;
+    /// `http://www.w3.org/2002/07/owl#`.
     pub const OWL: u16 = 0x0103;
+    /// `http://www.w3.org/ns/shacl#`.
     pub const SHACL: u16 = 0x0104;
+    /// `https://schema.org/`.
     pub const SCHEMA: u16 = 0x0106;
+    /// `http://purl.org/dc/terms/`.
     pub const DCTERMS: u16 = 0x0107;
 
     /// First code the predicate registry may hand out at runtime.
@@ -162,15 +172,22 @@ impl Sid {
 pub enum FlakeValue {
     /// A reference to another node. Every edge in the graph is one of these.
     Ref(Sid),
+    /// A text value.
     String(String),
+    /// A true/false value.
     Boolean(bool),
+    /// A signed integer.
     Int(i64),
+    /// A floating-point number.
     Float(f64),
+    /// A point in time.
     Instant(DateTime<Utc>),
+    /// An opaque JSON document, stored as text.
     Json(String),
     /// Without this, binary data has no home at all — and the one variant that
     /// cannot be encoded as a string is the worst possible retrofit.
     Bytes(Vec<u8>),
+    /// A UUID value.
     Uuid(Uuid),
     /// Whole seconds. Freshness SLAs are the use case and none of them need
     /// sub-second resolution; `i64` seconds round-trips through Postgres
@@ -181,15 +198,25 @@ pub enum FlakeValue {
 /// Discriminants, pinned. Named constants rather than bare numbers in a match,
 /// so the pinning test and the adapter reference the same thing.
 pub mod value_type {
+    /// [`super::FlakeValue::Ref`].
     pub const REF: i16 = 0;
+    /// [`super::FlakeValue::String`].
     pub const STRING: i16 = 1;
+    /// [`super::FlakeValue::Boolean`].
     pub const BOOLEAN: i16 = 2;
+    /// [`super::FlakeValue::Int`].
     pub const INT: i16 = 3;
+    /// [`super::FlakeValue::Float`].
     pub const FLOAT: i16 = 4;
+    /// [`super::FlakeValue::Instant`].
     pub const INSTANT: i16 = 5;
+    /// [`super::FlakeValue::Json`].
     pub const JSON: i16 = 6;
+    /// [`super::FlakeValue::Bytes`].
     pub const BYTES: i16 = 7;
+    /// [`super::FlakeValue::Uuid`].
     pub const UUID: i16 = 8;
+    /// [`super::FlakeValue::Duration`].
     pub const DURATION: i16 = 9;
 }
 
@@ -225,8 +252,11 @@ impl FlakeValue {
 /// One assertion or retraction, at one transaction time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Flake {
+    /// The subject — the entity this fact is about.
     pub s: Sid,
+    /// The predicate — which fact.
     pub p: Sid,
+    /// The object — the fact's value.
     pub o: FlakeValue,
     /// Named graph. `None` is the default graph holding core catalog facts.
     pub cx: Option<Sid>,
@@ -272,8 +302,11 @@ impl Flake {
 /// A query over flakes. `None` in any position matches anything.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TriplePattern {
+    /// The subject to match, or any.
     pub s: Option<Sid>,
+    /// The predicate to match, or any.
     pub p: Option<Sid>,
+    /// The object to match, or any.
     pub o: Option<FlakeValue>,
     /// Outer `None` means any graph; `Some(None)` means the default graph
     /// specifically. Without the nesting there is no way to ask for "facts not

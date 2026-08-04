@@ -36,11 +36,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextSpan {
+    /// The byte offset of the span's start.
     pub start: usize,
+    /// The byte offset just past the span's end.
     pub end: usize,
 }
 
 impl TextSpan {
+    /// A span over `[start, end)`.
     #[must_use]
     pub const fn new(start: usize, end: usize) -> Self {
         Self { start, end }
@@ -76,6 +79,7 @@ pub struct ParsedDocument {
     /// identity is: the list is open, and it is owned by whoever writes the
     /// next worker.
     pub media_type: String,
+    /// The document reduced to plain text.
     pub text: String,
     /// Optional structure a parser happened to recover — a heading, a
     /// cell, a speaker turn. Nothing downstream *requires* sections, so a
@@ -84,10 +88,13 @@ pub struct ParsedDocument {
     pub sections: Vec<Section>,
 }
 
+/// A piece of document structure a parser happened to recover.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Section {
+    /// The section's heading, if it has one.
     pub heading: Option<String>,
+    /// Where in the document this section lies.
     pub span: TextSpan,
 }
 
@@ -102,9 +109,13 @@ pub struct Section {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Provenance {
+    /// The document the claim came from.
     pub source_id: String,
+    /// The extractor's own chosen name.
     pub extractor: String,
+    /// The extractor's own version.
     pub extractor_version: String,
+    /// When extraction ran.
     pub extracted_at: DateTime<Utc>,
     /// Where in the source this claim was found. **A claim without its
     /// source is unverifiable** (decision 5), so this is not optional — a
@@ -128,6 +139,7 @@ pub struct Claim {
     pub subject: String,
     /// A predicate name from the Epic 1 vocabulary.
     pub predicate: String,
+    /// The claimed value.
     pub object: String,
     /// The worker's own confidence, `0.0..=1.0`.
     ///
@@ -135,6 +147,7 @@ pub struct Claim {
     /// decides what happens to it, in this process — so a worker cannot
     /// assert something below the threshold by claiming otherwise.
     pub confidence: f64,
+    /// Who produced it, and from what.
     pub provenance: Provenance,
 }
 
@@ -190,7 +203,9 @@ impl Disposition {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscardedClaim {
+    /// The claim that was thrown away.
     pub claim: Claim,
+    /// Why it was thrown away.
     pub reason: String,
 }
 
@@ -204,6 +219,7 @@ pub struct DiscardedClaim {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractionResult {
+    /// The claims extracted.
     pub claims: Vec<Claim>,
     /// **Discards are reported, not silent.** Decision 1 says anything that
     /// does not fit the model is discarded *with a reason*; a run that

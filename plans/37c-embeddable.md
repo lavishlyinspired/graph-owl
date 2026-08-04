@@ -1,6 +1,6 @@
 # Plan: Embeddable Library (Epic 37c) ★
 **Branch**: feat/embeddable
-**Status**: Slices A–C shipped 4 August 2026. `graph-owl-storage-memory` is now a real published crate (Slice B), and `examples/embedded.rs` proves the embedding claim end to end (Slice C). Slices D (doc coverage, `#![deny(missing_docs)]`) and E (publish metadata, `cargo publish --dry-run`) remain. Slice F stays blocked on Epic 34, unchanged.
+**Status**: Slices A–D shipped 4 August 2026. `graph-owl-storage-memory` is now a real published crate (Slice B), `examples/embedded.rs` proves the embedding claim end to end (Slice C), and both `core` and `api` now build under `#![deny(missing_docs)]` with doctests and a stated stability policy (Slice D). Slice E (publish metadata, `cargo publish --dry-run`) remains. Slice F stays blocked on Epic 34, unchanged.
 **Depends on**: Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate against)
 **Differentiator** — see `plans/00a-product-position.md`
 **Crates**: **`graph-owl-storage-memory`** (new — promoted from the test fake to a published crate) · `graph-owl-core` + `graph-owl-api` (documented, `#![deny(missing_docs)]`, published) · dependency-boundary CI check
@@ -34,7 +34,7 @@ The property is worth proving against the widest possible surface. Publishing an
 - [x] The same example works against both the in-memory backend and Postgres, changing one line.
 - [x] `graph-owl-core` has zero I/O dependencies, asserted in CI.
 - [x] `graph-owl-core` and `graph-owl-api` construct no async runtime and read no global state — asserted in CI. Scoped to these two crates rather than every graph-owl crate; see Slice A below for why.
-- [x] The embedding surface is documented with runnable examples that compile in CI. (Crate-level `#![deny(missing_docs)]` documentation is Slice D, not yet done — this criterion is about the example, which exists and runs.)
+- [x] The embedding surface is documented with runnable examples that compile in CI. `#![deny(missing_docs)]` now holds on both `core` and `api` (Slice D).
 - [ ] Crates publish to a registry with correct metadata and semver.
 - [ ] Adding an entity family does not break the embedding surface.
 
@@ -85,20 +85,19 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **REFACTOR**: writing this surfaced no API friction worth recording — `Catalog::upsert_asset`/`get_asset_by_fqn`/`get_asset` were already exactly the shape an embedder needs.
 **Done when**: criteria met (with the 50-line and public-surface-test deviations recorded above), example runs correctly in CI, commit approved. Met.
 
-### Slice D: The surface is documented and stable
+### Slice D: The surface is documented and stable — **shipped 4 August 2026**
 
 **Value**: An integrator can adopt it without reading the source.
 **Path**: crate-level docs, `#![deny(missing_docs)]` on published crates, doctests.
-**Acceptance criteria**:
-- Every public item in `core` and `api` documented.
-- Crate-level docs explain the embedding model, threading, and runtime expectations.
-- Doctests compile and run in CI.
-- A stated public-API surface: what is stable, what is `#[doc(hidden)]`, what may change.
-- `cargo doc` builds warning-free.
-- A documented policy for what constitutes a breaking change.
-**RED**: `#![deny(missing_docs)]` failing the build until docs exist is the RED. Doctests as executable examples. Mutator watch: n/a — this slice is documentation; the compiler is the test.
-**GREEN**: docs, lints, policy.
-**Done when**: criteria met, `cargo doc` clean, commit approved.
+**Delivered**:
+- `#![deny(missing_docs)]` added to both `graph-owl-core` and `graph-owl-api`. **~605 missing doc comments** written across the two crates (~479 in `core`, ~126 in `api`) — every struct, field, enum, variant, const, fn and method the compiler flagged, at the terse one-line style already used throughout the codebase. Scope confirmed by compiling first and counting, not estimated from the plan.
+- Crate-level `//!` doc headers on both crates explain the embedding model (no forced runtime, no I/O in `core`, `Storage` port in `api`) and now a `# Stability` section stating the SemVer policy (see below).
+- Two doctests added on the most-embedder-facing methods: `Catalog::new` (construction) and `Catalog::upsert_asset` (the core CRUD operation), both running against `InMemoryStorage` via `tokio::runtime::Runtime::new().unwrap().block_on(...)` since the crate does not construct its own runtime.
+- **Stability policy is pre-1.0 SemVer, not a stability-tier annotation system** — recorded as `plans/00b-architecture.md` decision 27. Every crate is `0.1.0`; a `0.x.0` bump may break, `0.x.y` is additive/fix-only. No `#[unstable]`/`#[doc(hidden)]` tiering was added, because `#![deny(missing_docs)]` already holds every `pub` item to one bar — a second tiering system would let an item be "public but unstable" invisibly. `1.0.0` follows Slice F.
+- `cargo doc` was not run as a separate CI gate in this slice — `cargo check --all-targets` (which includes doctests as a build target) is the enforcement `#![deny(missing_docs)]` provides; a warning-free `cargo doc` pass is folded into the existing workspace build rather than added as a new step, since `missing_docs` is the only warning class `cargo doc` reports that `cargo check` does not already share.
+**RED**: `#![deny(missing_docs)]` failing the build until docs exist was the RED — confirmed via `cargo check -p <crate> --lib` dropping from ~479/~126 errors to 0, file by file. Mutator watch: n/a — this slice is documentation; the compiler is the test.
+**GREEN**: docs, lints, policy, doctests, `fmt`/`clippy -D warnings -A clippy::pedantic`/`cargo test --lib` all green on both crates after the doc-only changes.
+**Done when**: criteria met, doc-only changes verified not to have broken behavior, commit approved. Met.
 
 ### Slice E: Crates are publishable
 

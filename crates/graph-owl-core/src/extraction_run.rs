@@ -29,8 +29,11 @@ pub const EXTRACTION_GRAPH: &str = "graph:extraction";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ReviewState {
+    /// Awaiting a decision.
     Pending,
+    /// A human confirmed the claim.
     Confirmed,
+    /// A human rejected the claim.
     Rejected,
 }
 
@@ -38,16 +41,22 @@ pub enum ReviewState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueuedClaim {
+    /// The stable identifier of this queue entry.
     pub id: Uuid,
+    /// The extracted claim itself.
     pub claim: Claim,
+    /// Where it sits in review.
     pub state: ReviewState,
     /// **The claim's own words from the source.** A reviewer asked to
     /// confirm "the orders table is append-only" without seeing the
     /// sentence it came from is being asked to trust the extractor, which
     /// is the thing under review.
     pub evidence_text: String,
+    /// When the claim was queued.
     pub queued_at: DateTime<Utc>,
+    /// When it was decided, once decided.
     pub decided_at: Option<DateTime<Utc>>,
+    /// Who decided it, once decided.
     pub decided_by: Option<String>,
 }
 
@@ -88,16 +97,24 @@ impl QueuedClaim {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractionRun {
+    /// The stable identifier of this run.
     pub id: Uuid,
+    /// The document extracted from.
     pub source_id: String,
     /// Content hash of the source at extraction time — the whole basis of
     /// idempotent re-ingestion (Slice F). See [`content_fingerprint`].
     pub source_fingerprint: String,
+    /// Which extractor ran.
     pub extractor: String,
+    /// Which version of it ran.
     pub extractor_version: String,
+    /// When the run began.
     pub started_at: DateTime<Utc>,
+    /// Claims asserted directly.
     pub asserted: usize,
+    /// Claims surfaced for review.
     pub surfaced: usize,
+    /// Claims discarded outright.
     pub discarded: usize,
 }
 

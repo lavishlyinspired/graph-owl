@@ -25,12 +25,19 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PropertyType {
+    /// Free text.
     String,
+    /// A whole number.
     Integer,
+    /// A number, whole or fractional.
     Number,
+    /// A true/false value.
     Boolean,
+    /// A calendar date, `YYYY-MM-DD`.
     Date,
+    /// A point in time, RFC 3339.
     Timestamp,
+    /// One of a fixed set of strings.
     Enum,
     /// An FQN naming another catalog entity. Validated for *existence* by the
     /// facade — this module has no catalog to ask.
@@ -99,8 +106,10 @@ pub struct Constraints {
     /// Inclusive upper bound for `Integer` and `Number`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maximum: Option<f64>,
+    /// Inclusive minimum character count for `String`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_length: Option<usize>,
+    /// Inclusive maximum character count for `String`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_length: Option<usize>,
     /// The permitted values for an `Enum`.
@@ -115,14 +124,18 @@ pub struct Constraints {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomProperty {
+    /// The field's own name, e.g. `costCenter`.
     pub name: String,
     /// Which entity type it applies to. **Per type** (decision 2):
     /// `costCenter` on a table need not exist on a user, and a globally-scoped
     /// vocabulary would force every organization's fields onto every entity.
     pub entity_type: String,
+    /// The field's value type.
     pub property_type: PropertyType,
+    /// A human-readable description, if one was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Bounds on the field's values.
     #[serde(default)]
     pub constraints: Constraints,
 }
@@ -162,7 +175,7 @@ pub enum DefinitionError {
     Name(String),
     /// An enum with no values can never be satisfied.
     EnumWithoutValues,
-    /// Constraints that no value can satisfy.
+    /// Constraints that no value can satisfy, e.g. a minimum above the maximum.
     Impossible(String),
 }
 
@@ -252,15 +265,28 @@ impl CustomProperty {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueError {
     /// No definition by that name on this entity type.
-    Undefined { name: String, entity_type: String },
+    Undefined {
+        /// The name that has no definition.
+        name: String,
+        /// The entity type it was looked up against.
+        entity_type: String,
+    },
     /// The value is not of the declared type.
     WrongType {
+        /// The property's name.
         name: String,
+        /// The type the definition declares.
         expected: String,
+        /// The type the value actually was.
         found: String,
     },
     /// The value is of the right type but outside its bounds.
-    Constraint { name: String, detail: String },
+    Constraint {
+        /// The property's name.
+        name: String,
+        /// What was wrong with the value.
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for ValueError {

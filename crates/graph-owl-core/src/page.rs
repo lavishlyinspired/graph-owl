@@ -9,7 +9,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// The page size when a caller does not state one.
 pub const DEFAULT_LIMIT: usize = 25;
+/// The largest page size a caller may request.
 pub const MAX_LIMIT: usize = 1000;
 
 /// A decoded position in a sorted result set: the sort key plus the id that
@@ -17,10 +19,13 @@ pub const MAX_LIMIT: usize = 1000;
 /// sharing one would make the cursor ambiguous.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor {
+    /// The value the result set is sorted by.
     pub sort_key: String,
+    /// The tie-breaker.
     pub id: Uuid,
 }
 
+/// Why a cursor token could not be decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorError {
     /// Not valid base64, or not the expected `key\0uuid` shape.
@@ -28,6 +33,7 @@ pub enum CursorError {
 }
 
 impl Cursor {
+    /// A cursor at this position.
     #[must_use]
     pub fn new(sort_key: impl Into<String>, id: Uuid) -> Self {
         Self {
@@ -71,21 +77,27 @@ impl Cursor {
 /// A validated page request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageRequest {
+    /// How many rows to return.
     pub limit: usize,
+    /// The position to resume from, if this is not the first page.
     pub after: Option<Cursor>,
 }
 
+/// Why a page request could not be validated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageRequestError {
     /// `limit` exceeded [`MAX_LIMIT`]. Rejected rather than clamped: silently
     /// returning 1000 of a requested 5000 makes a client believe it has read
     /// everything when it has not.
     LimitTooLarge {
+        /// The limit that was requested.
         requested: usize,
+        /// The largest limit permitted.
         max: usize,
     },
     /// `limit` was zero — a page of nothing is never what a caller means.
     LimitZero,
+    /// The `after` cursor could not be decoded.
     MalformedCursor,
 }
 
@@ -117,10 +129,13 @@ impl PageRequest {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Page<T> {
+    /// This page's rows.
     pub data: Vec<T>,
+    /// How to fetch the next page.
     pub paging: Paging,
 }
 
+/// How to fetch the page after this one.
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Paging {
