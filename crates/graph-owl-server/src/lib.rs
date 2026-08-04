@@ -4097,7 +4097,7 @@ fn parse_calculation_type(raw: &str) -> Result<graph_owl_core::metric::Calculati
 fn metric_body(metric: &graph_owl_storage::MetricRecord) -> serde_json::Value {
     let gaps = graph_owl_core::metric::gaps(&graph_owl_core::metric::MetricClaims {
         source_assets: &metric.source_assets,
-        defined_by: metric.defined_by.map(|_| "_").as_deref(),
+        defined_by: metric.defined_by.map(|_| "_"),
         formula: metric.formula.as_deref(),
     });
     json!({
@@ -5625,8 +5625,8 @@ async fn run_postgres_connector(
     };
 
     run.finished_at = Some(chrono::Utc::now());
-    run.created = i32::try_from(created).unwrap_or(i32::MAX);
-    run.skipped = i32::try_from(skipped).unwrap_or(i32::MAX);
+    run.created = created;
+    run.skipped = skipped;
     run.failed = i32::try_from(failures.len()).unwrap_or(i32::MAX);
     run.deleted = deletions
         .as_ref()
@@ -8660,7 +8660,6 @@ mod extension_filter_parsing_tests {
         let (filters, rest) = split_extension_filters(
             "extension.costCenter=CC-1&extension.retentionDays.gte=30&kind=table",
         )
-        .ok()
         .expect("a valid query");
 
         assert_eq!(
@@ -8686,7 +8685,7 @@ mod extension_filter_parsing_tests {
     /// `extension.` prefix leaves the typo for the strict extractor to refuse.
     #[test]
     fn a_parameter_that_is_not_an_extension_filter_is_left_for_the_strict_extractor() {
-        let (filters, rest) = split_extension_filters("ownr=alice").ok().expect("parses");
+        let (filters, rest) = split_extension_filters("ownr=alice").expect("parses");
 
         assert!(filters.is_empty());
         assert_eq!(rest, "ownr=alice");
@@ -8704,9 +8703,8 @@ mod extension_filter_parsing_tests {
     #[test]
     fn both_bounds_are_accepted() {
         for (suffix, expected) in [("gte", ExtensionOp::Gte), ("lte", ExtensionOp::Lte)] {
-            let (filters, _) = split_extension_filters(&format!("extension.d.{suffix}=1"))
-                .ok()
-                .expect("a valid bound");
+            let (filters, _) =
+                split_extension_filters(&format!("extension.d.{suffix}=1")).expect("a valid bound");
             assert_eq!(filters[0].1, expected);
         }
     }
@@ -8721,14 +8719,12 @@ mod extension_filter_parsing_tests {
     /// silently matches nothing.
     #[test]
     fn values_are_percent_and_plus_decoded() {
-        let (filters, _) = split_extension_filters("extension.owningTeam=Data%20Platform")
-            .ok()
-            .expect("parses");
+        let (filters, _) =
+            split_extension_filters("extension.owningTeam=Data%20Platform").expect("parses");
         assert_eq!(filters[0].2, "Data Platform");
 
-        let (filters, _) = split_extension_filters("extension.owningTeam=Data+Platform")
-            .ok()
-            .expect("parses");
+        let (filters, _) =
+            split_extension_filters("extension.owningTeam=Data+Platform").expect("parses");
         assert_eq!(filters[0].2, "Data Platform");
     }
 
@@ -8760,7 +8756,7 @@ mod extension_filter_parsing_tests {
 
     #[test]
     fn an_empty_query_yields_nothing() {
-        let (filters, rest) = split_extension_filters("").ok().expect("parses");
+        let (filters, rest) = split_extension_filters("").expect("parses");
         assert!(filters.is_empty());
         assert!(rest.is_empty());
     }
@@ -8806,7 +8802,7 @@ impl ValidateBody for AgentGrantRequest {
                 for (index, entry) in names.iter().enumerate() {
                     let Some(name) = entry.as_str() else {
                         problems.push(FieldError::new(
-                            &format!("capabilities[{index}]"),
+                            format!("capabilities[{index}]"),
                             FieldErrorCode::Type,
                             "each capability must be a string".to_string(),
                         ));
@@ -8817,7 +8813,7 @@ impl ValidateBody for AgentGrantRequest {
                         .any(|capability| capability.as_str() == name)
                     {
                         problems.push(FieldError::new(
-                            &format!("capabilities[{index}]"),
+                            format!("capabilities[{index}]"),
                             FieldErrorCode::Type,
                             format!(
                                 "`{name}` is not a capability an agent can hold. \

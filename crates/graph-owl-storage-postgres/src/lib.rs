@@ -4858,7 +4858,7 @@ impl Storage for PostgresStorage {
         id: Uuid,
         update: graph_owl_storage::MetricUpdate,
     ) -> Result<Option<graph_owl_storage::MetricRecord>, StorageError> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(
             "UPDATE metrics
              SET definition = COALESCE($2, definition),
                  formula = COALESCE($3, formula),
@@ -4867,8 +4867,8 @@ impl Storage for PostgresStorage {
                  calculation_type = COALESCE($6, calculation_type),
                  updated_at = now()
              WHERE id = $1
-             RETURNING id"
-        ))
+             RETURNING id",
+        )
         .bind(id)
         .bind(&update.definition)
         .bind(&update.formula)
@@ -9443,86 +9443,6 @@ impl PostgresStorage {
     }
 }
 
-#[cfg(test)]
-mod extension_clause_tests {
-    use super::extension_clauses;
-    use graph_owl_storage::{ExtensionFilter, ExtensionOp};
-
-    fn filter(name: &str, op: ExtensionOp) -> ExtensionFilter {
-        ExtensionFilter {
-            name: name.to_string(),
-            op,
-            value: serde_json::json!("x"),
-        }
-    }
-
-    /// **The whole reason equality is written this way.** `jsonb_path_ops`
-    /// supports `@>` and nothing else, so `extension -> name = value` is a
-    /// sequential scan of the table on the most common filter there is — and
-    /// both spellings return the same rows, so only this assertion can tell
-    /// them apart.
-    #[test]
-    fn equality_is_containment_so_the_gin_index_can_serve_it() {
-        let sql = extension_clauses(&[filter("costCenter", ExtensionOp::Eq)], 9);
-
-        assert!(sql.contains("@>"), "{sql}");
-        assert!(
-            !sql.contains("extension -> $9"),
-            "a direct comparison is unindexable here: {sql}"
-        );
-    }
-
-    /// Placeholders advance by two per condition — one for the name, one for
-    /// the value. Off by one and every filter past the first binds the previous
-    /// filter's value, which returns wrong rows rather than failing.
-    #[test]
-    fn each_condition_consumes_two_placeholders_from_the_offset_given() {
-        let sql = extension_clauses(
-            &[
-                filter("costCenter", ExtensionOp::Eq),
-                filter("retentionDays", ExtensionOp::Gte),
-            ],
-            9,
-        );
-
-        assert!(sql.contains("$9"), "{sql}");
-        assert!(sql.contains("$10"), "{sql}");
-        assert!(sql.contains("$11"), "{sql}");
-        assert!(sql.contains("$12"), "{sql}");
-        assert!(!sql.contains("$13"), "{sql}");
-    }
-
-    /// The two bounds are different comparisons, and swapping them is a silent
-    /// wrong answer rather than an error.
-    #[test]
-    fn the_bounds_compare_in_the_directions_they_are_named_for() {
-        assert!(
-            extension_clauses(&[filter("d", ExtensionOp::Gte)], 1).contains(">="),
-            "gte must be >="
-        );
-        assert!(
-            extension_clauses(&[filter("d", ExtensionOp::Lte)], 1).contains("<="),
-            "lte must be <="
-        );
-    }
-
-    /// **The property name is never interpolated.** It arrives from a query
-    /// string, and a name spliced into SQL is an injection whatever the facade
-    /// checked first.
-    #[test]
-    fn the_property_name_is_bound_not_written_into_the_sql() {
-        let sql = extension_clauses(&[filter("'; DROP TABLE assets; --", ExtensionOp::Eq)], 9);
-
-        assert!(!sql.contains("DROP TABLE"), "{sql}");
-    }
-
-    /// No filters, no clauses — an empty string, not a dangling `AND`.
-    #[test]
-    fn no_filters_produce_no_sql() {
-        assert!(extension_clauses(&[], 9).is_empty());
-    }
-}
-
 // ---- Epic 32 row hydration ----
 
 /// A capability name from the database back into the closed enum.
@@ -9658,5 +9578,85 @@ fn activity_from_row(row: &PgRow) -> graph_owl_authz::agent::AgentActivity {
         outcome: activity_outcome_from_str(&row.get::<String, _>("outcome")),
         refusal: row.get("refusal"),
         at: row.get("at"),
+    }
+}
+
+#[cfg(test)]
+mod extension_clause_tests {
+    use super::extension_clauses;
+    use graph_owl_storage::{ExtensionFilter, ExtensionOp};
+
+    fn filter(name: &str, op: ExtensionOp) -> ExtensionFilter {
+        ExtensionFilter {
+            name: name.to_string(),
+            op,
+            value: serde_json::json!("x"),
+        }
+    }
+
+    /// **The whole reason equality is written this way.** `jsonb_path_ops`
+    /// supports `@>` and nothing else, so `extension -> name = value` is a
+    /// sequential scan of the table on the most common filter there is — and
+    /// both spellings return the same rows, so only this assertion can tell
+    /// them apart.
+    #[test]
+    fn equality_is_containment_so_the_gin_index_can_serve_it() {
+        let sql = extension_clauses(&[filter("costCenter", ExtensionOp::Eq)], 9);
+
+        assert!(sql.contains("@>"), "{sql}");
+        assert!(
+            !sql.contains("extension -> $9"),
+            "a direct comparison is unindexable here: {sql}"
+        );
+    }
+
+    /// Placeholders advance by two per condition — one for the name, one for
+    /// the value. Off by one and every filter past the first binds the previous
+    /// filter's value, which returns wrong rows rather than failing.
+    #[test]
+    fn each_condition_consumes_two_placeholders_from_the_offset_given() {
+        let sql = extension_clauses(
+            &[
+                filter("costCenter", ExtensionOp::Eq),
+                filter("retentionDays", ExtensionOp::Gte),
+            ],
+            9,
+        );
+
+        assert!(sql.contains("$9"), "{sql}");
+        assert!(sql.contains("$10"), "{sql}");
+        assert!(sql.contains("$11"), "{sql}");
+        assert!(sql.contains("$12"), "{sql}");
+        assert!(!sql.contains("$13"), "{sql}");
+    }
+
+    /// The two bounds are different comparisons, and swapping them is a silent
+    /// wrong answer rather than an error.
+    #[test]
+    fn the_bounds_compare_in_the_directions_they_are_named_for() {
+        assert!(
+            extension_clauses(&[filter("d", ExtensionOp::Gte)], 1).contains(">="),
+            "gte must be >="
+        );
+        assert!(
+            extension_clauses(&[filter("d", ExtensionOp::Lte)], 1).contains("<="),
+            "lte must be <="
+        );
+    }
+
+    /// **The property name is never interpolated.** It arrives from a query
+    /// string, and a name spliced into SQL is an injection whatever the facade
+    /// checked first.
+    #[test]
+    fn the_property_name_is_bound_not_written_into_the_sql() {
+        let sql = extension_clauses(&[filter("'; DROP TABLE assets; --", ExtensionOp::Eq)], 9);
+
+        assert!(!sql.contains("DROP TABLE"), "{sql}");
+    }
+
+    /// No filters, no clauses — an empty string, not a dangling `AND`.
+    #[test]
+    fn no_filters_produce_no_sql() {
+        assert!(extension_clauses(&[], 9).is_empty());
     }
 }

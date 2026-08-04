@@ -238,7 +238,7 @@ mod tests {
     fn an_oversized_message_is_refused_before_the_offending_chunk_is_appended() {
         let mut decoder = Decoder::new();
         decoder.feed(&[0x00, 0x64]); // declares a 100-byte chunk
-        decoder.feed(&vec![0u8; 100]);
+        decoder.feed(&[0u8; 100]);
         assert_eq!(
             decoder.next_message(50),
             Err(ChunkError::MessageTooLarge { limit: 50 })
@@ -261,9 +261,9 @@ mod tests {
      {
         let mut decoder = Decoder::new();
         decoder.feed(&[0x00, 0x1E]); // 30 bytes
-        decoder.feed(&vec![0u8; 30]);
+        decoder.feed(&[0u8; 30]);
         decoder.feed(&[0x00, 0x1E]); // another 30 — 60 total, budget is 50
-        decoder.feed(&vec![0u8; 30]);
+        decoder.feed(&[0u8; 30]);
         assert_eq!(
             decoder.next_message(50),
             Err(ChunkError::MessageTooLarge { limit: 50 })

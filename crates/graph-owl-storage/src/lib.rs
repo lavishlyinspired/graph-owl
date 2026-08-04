@@ -2772,6 +2772,7 @@ pub trait Storage: Send + Sync {
     ///
     /// # Errors
     /// [`StorageError::Conflict`] if the name is taken on that target.
+    #[allow(clippy::too_many_arguments)]
     async fn create_test_case(
         &self,
         id: Uuid,
@@ -3189,6 +3190,7 @@ pub trait Storage: Send + Sync {
 
     /// # Errors
     /// [`StorageError::Conflict`] if the name is taken.
+    #[allow(clippy::too_many_arguments)]
     async fn create_certification_type(
         &self,
         id: Uuid,
@@ -3221,6 +3223,7 @@ pub trait Storage: Send + Sync {
     ///
     /// # Errors
     /// [`StorageError::Unexpected`] if the write fails.
+    #[allow(clippy::too_many_arguments)]
     async fn issue_certification(
         &self,
         id: Uuid,
@@ -3263,6 +3266,7 @@ pub trait Storage: Send + Sync {
     ///
     /// # Errors
     /// [`StorageError::Conflict`] if the derived FQN is taken.
+    #[allow(clippy::too_many_arguments)]
     async fn create_domain(
         &self,
         id: Uuid,

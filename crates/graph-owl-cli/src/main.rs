@@ -293,7 +293,7 @@ type Loaded = (
     HttpCatalog,
 );
 
-fn load(cli: &Cli, directory: &PathBuf, scopes: &[String]) -> Result<Loaded, String> {
+fn load(cli: &Cli, directory: &std::path::Path, scopes: &[String]) -> Result<Loaded, String> {
     let declarations = validate_directory(directory).map_err(|errors| {
         format!(
             "{} declarations are invalid; run `validate` for the detail:\n{}",

@@ -251,8 +251,8 @@ pub fn parse_cadence(raw: &str) -> Result<Duration, String> {
             .map_err(|_| format!("`{raw}` has a unit with no number before it"))?;
         number.clear();
         match character {
-            'D' => total = total + Duration::days(value),
-            'W' => total = total + Duration::weeks(value),
+            'D' => total += Duration::days(value),
+            'W' => total += Duration::weeks(value),
             'Y' | 'M' => {
                 return Err(format!(
                     "`{raw}` uses `{character}`, which is not a fixed length of time — \
@@ -281,9 +281,9 @@ pub fn parse_cadence(raw: &str) -> Result<Duration, String> {
                 .map_err(|_| format!("`{raw}` has a unit with no number before it"))?;
             number.clear();
             match character {
-                'H' => total = total + Duration::hours(value),
-                'M' => total = total + Duration::minutes(value),
-                'S' => total = total + Duration::seconds(value),
+                'H' => total += Duration::hours(value),
+                'M' => total += Duration::minutes(value),
+                'S' => total += Duration::seconds(value),
                 other => return Err(format!("`{raw}` has an unrecognised unit `{other}`")),
             }
         }

@@ -654,11 +654,13 @@ mod tests {
         use tracing::subscriber::with_default;
         use tracing_subscriber::layer::SubscriberExt as _;
 
+        type SpanLog = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
         /// Records span names and their parentage, which is the thing the
         /// contract is actually about — a flat list of spans says nothing about
         /// which layer was slow.
         #[derive(Default, Clone)]
-        struct Tree(Arc<Mutex<Vec<(String, Option<String>)>>>);
+        struct Tree(SpanLog);
 
         impl<S> tracing_subscriber::Layer<S> for Tree
         where
@@ -683,8 +685,7 @@ mod tests {
             let tree = Tree::default();
             let subscriber = tracing_subscriber::registry().with(tree.clone());
             with_default(subscriber, work);
-            let seen = tree.0.lock().expect("lock").clone();
-            seen
+            tree.0.lock().expect("lock").clone()
         }
 
         /// The request span carries the correlation id, so every child inherits

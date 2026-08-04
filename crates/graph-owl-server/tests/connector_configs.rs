@@ -11,7 +11,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use common::{json_body, test_app};
+use common::test_app;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
