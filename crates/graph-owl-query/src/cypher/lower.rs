@@ -381,7 +381,7 @@ fn lower_node(
         patterns.push(TriplePattern {
             subject: subject.clone(),
             predicate: NamedNodePattern::NamedNode(vocabulary::type_predicate()),
-            object: TermPattern::NamedNode(label_node(label)?),
+            object: TermPattern::Literal(label_literal(label)?),
         });
     }
     if let Some(Properties::Map(map)) = &node.properties {
@@ -436,7 +436,7 @@ fn lower_relationship(
             patterns.push(TriplePattern {
                 subject: subject.clone(),
                 predicate: NamedNodePattern::NamedNode(vocabulary::rel_type_predicate()),
-                object: TermPattern::NamedNode(label_node(types)?),
+                object: TermPattern::Literal(label_literal(types)?),
             });
         }
         // **Edge properties, and the reason reification pays off.** Each is
@@ -1476,9 +1476,22 @@ fn literal_of(expression: &CypherExpression) -> Result<Literal, LoweringError> {
     }
 }
 
-fn label_node(label: &LabelExpression) -> Result<NamedNode, LoweringError> {
+/// A label or relationship type as the string literal it is actually stored
+/// as.
+///
+/// **Not a `NamedNode`, even though `dsc:type`/`dsc:relType` are IRIs and
+/// this looks like a class reference.** `asset_to_flakes` and
+/// `relationship_to_flakes` (Epic 4) both write the value itself as a plain
+/// `FlakeValue::String` — `dsc:type "Table"`, not `dsc:type dsc:Table` —
+/// because it round-trips back through `asset_from_flakes`'s `text("type")`
+/// the same way every other scalar asset field does. A pattern comparing
+/// against a `NamedNode` here matched nothing against real catalog data;
+/// `graph-owl-lpg`'s `node_from_flakes` already accepts a reference *or* a
+/// string for the identical reason, and this is the matching half on the
+/// query side.
+fn label_literal(label: &LabelExpression) -> Result<Literal, LoweringError> {
     match label {
-        LabelExpression::Static(name) => Ok(vocabulary::class(&name.name)),
+        LabelExpression::Static(name) => Ok(Literal::new_simple_literal(&name.name)),
         // `Person|Company` is a union of patterns rather than one, and
         // `Person&!Deleted` needs a negation the BGP cannot carry. Refused at
         // lowering, because approximating either changes the answer.
@@ -1578,9 +1591,13 @@ mod tests {
     fn a_label_lowers_to_a_type_pattern() {
         let plan = triples(&lowered("MATCH (n:Person) RETURN n"));
 
+        // The object is a plain string literal, not a `dsc:Person` IRI —
+        // `asset_to_flakes` (Epic 4) writes `dsc:type` as a `FlakeValue::String`,
+        // and a pattern matching against a `NamedNode` here would silently
+        // match nothing against real catalog data.
         assert!(
             plan.iter().any(|t| t.contains("catalog#type")
-                && t.contains("catalog#Person")
+                && t.contains("\"Person\"")
                 && t.starts_with("?n ")),
             "{plan:?}"
         );
@@ -2241,7 +2258,10 @@ mod tests {
         let flakes = vec![Flake::assert(
             Sid::dsc("a"),
             Sid::dsc("type"),
-            FlakeValue::Ref(Sid::dsc("Row")),
+            // A string, not a reference — `asset_to_flakes` (Epic 4) is what
+            // actually writes `dsc:type` for every real asset, and it writes
+            // a string; `lower_node` matches that shape now, not an IRI.
+            FlakeValue::String("Row".to_string()),
             1,
         )];
 
@@ -2618,7 +2638,7 @@ mod tests {
             Flake::assert(
                 Sid::dsc("a"),
                 Sid::dsc("type"),
-                FlakeValue::Ref(Sid::dsc("Row")),
+                FlakeValue::String("Row".to_string()),
                 1,
             ),
             Flake::assert(
@@ -2630,7 +2650,7 @@ mod tests {
             Flake::assert(
                 Sid::dsc("b"),
                 Sid::dsc("type"),
-                FlakeValue::Ref(Sid::dsc("Row")),
+                FlakeValue::String("Row".to_string()),
                 1,
             ),
             // `b` has no `optional` property at all.

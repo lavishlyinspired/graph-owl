@@ -1102,6 +1102,7 @@ dependencies = [
  "graph-owl-core",
  "graph-owl-engine",
  "graph-owl-events",
+ "graph-owl-lpg",
  "graph-owl-ontology",
  "graph-owl-query",
  "graph-owl-reasoning",
@@ -1109,6 +1110,7 @@ dependencies = [
  "graph-owl-storage",
  "graph-owl-traversal",
  "hmac 0.12.1",
+ "oxrdf",
  "rand 0.8.7",
  "serde",
  "serde_json",
@@ -1139,7 +1141,13 @@ dependencies = [
 name = "graph-owl-bolt"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "graph-owl-core",
+ "graph-owl-lpg",
  "thiserror 2.0.19",
+ "tokio",
+ "tokio-stream",
+ "tracing",
 ]
 
 [[package]]
@@ -1395,12 +1403,14 @@ dependencies = [
 name = "graph-owl-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "base64",
  "chrono",
  "dotenvy",
  "graph-owl-api",
  "graph-owl-authz",
+ "graph-owl-bolt",
  "graph-owl-connectors",
  "graph-owl-core",
  "graph-owl-engine",
@@ -1425,6 +1435,7 @@ dependencies = [
  "testcontainers 0.24.0",
  "testcontainers-modules 0.11.6",
  "testcontainers-modules 0.12.1",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-stream",
  "tower",

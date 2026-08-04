@@ -4,166 +4,13 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use common::{json_body, test_app_with_secret};
+use common::{authorization_fixture as fixture, call, json_body, token};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-const SECRET: &str = "demo-signing-secret-not-for-production";
-
-/// A bank estate with one schema that must not be readable by everyone.
-async fn seed_source(connection_string: &str) {
-    let pool = sqlx::PgPool::connect(connection_string)
-        .await
-        .expect("source connection");
-    for statement in [
-        "CREATE SCHEMA IF NOT EXISTS core_banking",
-        "CREATE SCHEMA IF NOT EXISTS payments",
-        "CREATE TABLE IF NOT EXISTS core_banking.customers (
-             customer_id BIGINT PRIMARY KEY, pan CHAR(10), aadhaar_last4 CHAR(4))",
-        "CREATE TABLE IF NOT EXISTS payments.upi_transactions (
-             txn_id TEXT PRIMARY KEY, amount NUMERIC(18,2) NOT NULL)",
-    ] {
-        sqlx::query(statement)
-            .execute(&pool)
-            .await
-            .expect("seed statement");
-    }
-}
-
-fn token(subject: &str) -> String {
-    #[derive(serde::Serialize)]
-    struct Claims<'a> {
-        sub: &'a str,
-        name: &'a str,
-        exp: usize,
-    }
-    jsonwebtoken::encode(
-        &jsonwebtoken::Header::default(),
-        &Claims {
-            sub: subject,
-            name: subject,
-            exp: 4_102_444_800, // year 2100
-        },
-        &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes()),
-    )
-    .expect("token should encode")
-}
-
-async fn call(app: &axum::Router, uri: &str, subject: Option<&str>) -> (StatusCode, Value) {
-    let mut builder = Request::builder().method("GET").uri(uri);
-    if let Some(subject) = subject {
-        builder = builder.header("authorization", format!("Bearer {}", token(subject)));
-    }
-    let response = app
-        .clone()
-        .oneshot(builder.body(Body::empty()).expect("request should build"))
-        .await
-        .expect("request should be handled");
-    let status = response.status();
-    (status, json_body(response).await)
-}
-
-/// Sets up the estate, two users, and the policy that separates them.
-async fn fixture() -> (axum::Router, common::TestDb) {
-    let (app, container, connection_string) = test_app_with_secret(SECRET).await;
-    seed_source(&connection_string).await;
-
-    // Catalogue as the admin.
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/connectors/postgres/runs")
-                .header("content-type", "application/json")
-                .header("authorization", format!("Bearer {}", token("root")))
-                .body(Body::from(
-                    json!({
-                        "connectionString": connection_string,
-                        "serviceName": "hdfc-core",
-                        "includeSchemas": ["core_banking", "payments"]
-                    })
-                    .to_string(),
-                ))
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should be handled");
-    assert_eq!(response.status(), StatusCode::OK, "catalogue must succeed");
-
-    // The database the catalog itself lives in, which the connector also
-    // catalogued — so it is the second segment of every FQN below.
-    let database = connection_string
-        .rsplit_once('/')
-        .expect("the connection string names a database")
-        .1
-        .to_string();
-
-    let pool = sqlx::PgPool::connect(&connection_string)
-        .await
-        .expect("catalog connection");
-
-    // `root` is an admin; `asha` is a risk analyst who may read everything
-    // except the PII-bearing customer master.
-    sqlx::query("UPDATE users SET is_admin = TRUE WHERE id = 'root'")
-        .execute(&pool)
-        .await
-        .expect("promote root");
-
-    let rules = json!([
-        {
-            "name": "read-catalog",
-            "effect": "allow",
-            "operations": ["viewBasic", "viewDetails"],
-            "resources": { "type": "all" }
-        },
-        {
-            "name": "no-customer-pii",
-            "effect": "deny",
-            "operations": ["viewBasic", "viewDetails"],
-            "resources": {
-                "type": "fqnPrefix",
-                // Derived, not hardcoded. The database name is a *component
-                // of the FQN* — `service.database.schema.table` — so a policy
-                // written against a literal `postgres` stops matching the
-                // moment each test gets its own database. That is the schema
-                // this policy denies, addressed the way the catalog addresses
-                // it.
-                "value": format!("hdfc-core.{database}.core_banking")
-            }
-        }
-    ]);
-    sqlx::query("INSERT INTO roles (name) VALUES ('risk-analyst') ON CONFLICT DO NOTHING")
-        .execute(&pool)
-        .await
-        .expect("role insert");
-    sqlx::query("INSERT INTO policies (name, rules) VALUES ('analyst-baseline', $1)")
-        .bind(&rules)
-        .execute(&pool)
-        .await
-        .expect("policy insert");
-    // After the policy exists — the foreign key is doing its job.
-    sqlx::query(
-        "INSERT INTO role_policies (role, policy) VALUES ('risk-analyst', 'analyst-baseline')
-         ON CONFLICT DO NOTHING",
-    )
-    .execute(&pool)
-    .await
-    .expect("role-policy link");
-
-    // First request auto-provisions asha; then grant the role.
-    call(&app, "/assets/stats", Some("asha")).await;
-    sqlx::query("INSERT INTO user_roles (user_id, role) VALUES ('asha', 'risk-analyst') ON CONFLICT DO NOTHING")
-        .execute(&pool)
-        .await
-        .expect("grant role");
-
-    (app, container)
-}
-
 #[tokio::test]
 async fn a_request_without_a_token_is_rejected() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
 
     let (status, body) = call(&app, "/assets/stats", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -172,7 +19,7 @@ async fn a_request_without_a_token_is_rejected() {
 
 #[tokio::test]
 async fn a_token_signed_with_the_wrong_key_is_rejected() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
 
     #[derive(serde::Serialize)]
     struct Claims {
@@ -211,7 +58,7 @@ async fn a_token_signed_with_the_wrong_key_is_rejected() {
 /// **The demo moment.** Two principals, one search, different results.
 #[tokio::test]
 async fn two_principals_searching_the_same_corpus_get_different_results() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
 
     let (_, admin) = call(&app, "/assets/search?q=customers&limit=100", Some("root")).await;
     let (_, analyst) = call(&app, "/assets/search?q=customers&limit=100", Some("asha")).await;
@@ -238,7 +85,7 @@ async fn two_principals_searching_the_same_corpus_get_different_results() {
 /// 35 the reader may not see.
 #[tokio::test]
 async fn counts_are_consistent_with_what_the_principal_can_see() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
 
     let (_, admin_stats) = call(&app, "/assets/stats", Some("root")).await;
     let (_, analyst_stats) = call(&app, "/assets/stats", Some("asha")).await;
@@ -272,7 +119,7 @@ async fn counts_are_consistent_with_what_the_principal_can_see() {
 /// that id exists, which is exactly what the policy conceals.
 #[tokio::test]
 async fn a_denied_asset_reads_as_not_found_not_forbidden() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
 
     let (_, found) = call(&app, "/assets/search?q=customers&limit=10", Some("root")).await;
     let hidden_id = found["data"][0]["id"].as_str().expect("id");
@@ -291,7 +138,7 @@ async fn a_denied_asset_reads_as_not_found_not_forbidden() {
 
 #[tokio::test]
 async fn what_a_principal_is_allowed_is_still_fully_visible() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
 
     let (status, payments) = call(&app, "/assets/search?q=upi&limit=100", Some("asha")).await;
     assert_eq!(status, StatusCode::OK);
@@ -303,7 +150,7 @@ async fn what_a_principal_is_allowed_is_still_fully_visible() {
 
 #[tokio::test]
 async fn a_first_time_subject_is_auto_provisioned_without_a_directory_sync() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
 
     let (status, _) = call(&app, "/assets/stats", Some("brand-new-person")).await;
     assert_eq!(status, StatusCode::OK);
@@ -319,7 +166,7 @@ async fn a_first_time_subject_is_auto_provisioned_without_a_directory_sync() {
 
 #[tokio::test]
 async fn writes_are_attributed_to_the_authenticated_principal() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
 
     let (_, found) = call(
         &app,
@@ -359,7 +206,7 @@ async fn writes_are_attributed_to_the_authenticated_principal() {
 /// the exact leak the rest of this file exists to close.
 #[tokio::test]
 async fn the_overview_is_authorization_filtered_like_every_other_count() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
 
     let (_, admin) = call(&app, "/overview", Some("root")).await;
     let (status, analyst) = call(&app, "/overview", Some("asha")).await;
@@ -398,7 +245,7 @@ async fn the_overview_is_authorization_filtered_like_every_other_count() {
 /// reward someone typing a space into every field.
 #[tokio::test]
 async fn documentation_coverage_counts_real_descriptions_only() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
 
     let (_, found) = call(
         &app,
@@ -465,7 +312,7 @@ const DSC: &str = "https://graph-owl.dev/ns/catalog#";
 /// receives the denied facts, so no optimisation inside it could surface them.
 #[tokio::test]
 async fn two_principals_running_the_same_sparql_get_different_results() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
     let query = format!("SELECT ?name WHERE {{ ?t <{DSC}type> \"table\" . ?t <{DSC}name> ?name }}");
 
     let (status, admin) = sparql(&app, "root", &query).await;
@@ -506,7 +353,7 @@ async fn two_principals_running_the_same_sparql_get_different_results() {
 /// rows would still have let the join traverse it.
 #[tokio::test]
 async fn a_denied_asset_is_not_reachable_through_a_join() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
     let (_, analyst) = sparql(
         &app,
         "asha",
@@ -525,7 +372,7 @@ async fn a_denied_asset_is_not_reachable_through_a_join() {
 /// must never have to infer either from the row count.
 #[tokio::test]
 async fn a_sparql_answer_states_its_own_completeness() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
     let (status, body) = sparql(
         &app,
         "root",
@@ -541,7 +388,7 @@ async fn a_sparql_answer_states_its_own_completeness() {
 
 #[tokio::test]
 async fn a_malformed_query_is_a_400_naming_the_field() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
     let (status, body) = sparql(&app, "root", "SELECT ?x WHERE { not sparql").await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -550,7 +397,7 @@ async fn a_malformed_query_is_a_400_naming_the_field() {
 
 #[tokio::test]
 async fn an_unauthenticated_sparql_request_is_rejected() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
     let response = app
         .oneshot(
             Request::builder()
@@ -596,7 +443,7 @@ async fn cypher(app: &axum::Router, subject: &str, query: &str) -> (StatusCode, 
 /// `t.type` as a property rather than matching a Cypher label.
 #[tokio::test]
 async fn two_principals_running_the_same_cypher_get_different_results() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
     let query = "MATCH (t) WHERE t.type = \"table\" RETURN t.name AS name";
 
     let (status, admin) = cypher(&app, "root", query).await;
@@ -639,7 +486,7 @@ async fn two_principals_running_the_same_cypher_get_different_results() {
 /// ever authorized differently, this would be the leak.
 #[tokio::test]
 async fn cypher_and_sparql_agree_under_one_restricted_principal() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
 
     let sparql_query =
         format!("SELECT ?name WHERE {{ ?t <{DSC}type> \"table\" . ?t <{DSC}name> ?name }}");
@@ -679,7 +526,7 @@ async fn cypher_and_sparql_agree_under_one_restricted_principal() {
 /// counterpart of `a_denied_asset_is_not_reachable_through_a_join`.
 #[tokio::test]
 async fn a_denied_asset_is_not_reachable_through_a_cypher_join() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
     let (_, analyst) = cypher(
         &app,
         "asha",
@@ -696,7 +543,7 @@ async fn a_denied_asset_is_not_reachable_through_a_cypher_join() {
 
 #[tokio::test]
 async fn a_malformed_cypher_query_is_a_400_naming_the_field() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
     let (status, body) = cypher(&app, "root", "MATCH (n RETURN n").await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -709,7 +556,7 @@ async fn a_malformed_cypher_query_is_a_400_naming_the_field() {
 /// like a parse error does.
 #[tokio::test]
 async fn a_write_clause_over_cypher_is_a_400_not_a_500() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
     let (status, body) = cypher(&app, "root", "CREATE (n:Table) RETURN n").await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -718,7 +565,7 @@ async fn a_write_clause_over_cypher_is_a_400_not_a_500() {
 
 #[tokio::test]
 async fn an_unauthenticated_cypher_request_is_rejected() {
-    let (app, _container) = fixture().await;
+    let (app, _container, _catalog) = fixture().await;
     let response = app
         .oneshot(
             Request::builder()

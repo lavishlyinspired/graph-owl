@@ -290,6 +290,39 @@ pub struct SparqlOutcome {
     pub variables: Vec<String>,
 }
 
+/// One value in a [`CypherRow`] — Epic 7d Slice D.
+///
+/// **Typed, not rendered.** [`SparqlOutcome`]'s rows stringify every bound
+/// term (`collect`'s `term.to_string()`); a Bolt client wants a bound entity
+/// back as a node or relationship in its own typed API, not a string it
+/// would have to re-parse. `Node`/`Relationship` reuse `graph-owl-lpg`'s
+/// (Epic 7c) own projection rather than inventing a parallel one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CypherValue {
+    Null,
+    Boolean(bool),
+    Integer(i64),
+    Float(f64),
+    String(String),
+    Node(graph_owl_lpg::LpgNode),
+    Relationship(graph_owl_lpg::LpgEdge),
+}
+
+/// One row, **in the query's own projection order** — unlike
+/// [`SparqlOutcome::rows`]'s `BTreeMap`, which alphabetises columns away
+/// before a caller ever sees them. A Bolt client's `RETURN a, r, b` expects
+/// exactly that column order back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherRow(pub Vec<(String, CypherValue)>);
+
+/// A streamed Cypher result: column names available immediately, rows
+/// arriving as the evaluator produces them rather than after it finishes.
+#[derive(Debug)]
+pub struct CypherStream {
+    pub fields: Vec<String>,
+    pub rows: tokio::sync::mpsc::Receiver<Result<CypherRow, CatalogError>>,
+}
+
 /// The scoped, authorized dataset [`Catalog::scoped_facts`] built — everything
 /// downstream of "which facts may the evaluator see", stopping short of
 /// running the query. See that method's docs for why it exists separately
@@ -303,6 +336,15 @@ struct ScopedFacts {
     truncated: bool,
     plan: Vec<String>,
     fact_count: usize,
+    /// The same flakes `dataset` was built from, kept alongside it.
+    ///
+    /// **For Epic 7d Slice D.** A Bolt `RECORD` needs an `LpgNode`/`LpgEdge`
+    /// for any bound variable that names an entity, not the term's rendered
+    /// string — and projecting one needs that entity's own flakes, already
+    /// fetched and already authorized here. Re-fetching them per row would
+    /// be a second, redundant round trip through the exact same
+    /// authorization-scoped read this struct already did once.
+    facts: Vec<graph_owl_core::flake::Flake>,
 }
 
 /// One traversal call per candidate seed a variable-length hop's starting
@@ -417,6 +459,69 @@ fn scope_facts(
     let mut kept = permitted;
     kept.truncate(max_facts);
     (kept, truncated)
+}
+
+/// Convert one bound term into a [`CypherValue`] — Epic 7d Slice D's
+/// counterpart to [`collect`]'s `term.to_string()`, kept separate because it
+/// needs `facts` (to project a reference into a node or relationship) and
+/// can fail (an entity with no `dsc:type` has no label to project).
+fn cypher_value_of_term(
+    term: &oxrdf::Term,
+    facts: &[graph_owl_core::flake::Flake],
+) -> Result<CypherValue, CatalogError> {
+    let value = graph_owl_query::term::from_term(term)
+        .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+    match value {
+        FlakeValue::Ref(sid) => project_entity(&sid, facts),
+        FlakeValue::String(s) | FlakeValue::Json(s) => Ok(CypherValue::String(s)),
+        FlakeValue::Boolean(b) => Ok(CypherValue::Boolean(b)),
+        FlakeValue::Int(n) => Ok(CypherValue::Integer(n)),
+        FlakeValue::Float(f) => Ok(CypherValue::Float(f)),
+        FlakeValue::Instant(dt) => Ok(CypherValue::String(dt.to_rfc3339())),
+        FlakeValue::Uuid(id) => Ok(CypherValue::String(id.to_string())),
+        FlakeValue::Duration(seconds) => Ok(CypherValue::Integer(seconds)),
+        // `from_term` never actually produces this — a hex-binary literal
+        // comes back as `FlakeValue::String` (see its own doc comment on not
+        // being an exact inverse of `to_term`) — kept for exhaustiveness
+        // rather than an `unreachable!()` that a future `FlakeValue` variant
+        // could silently walk past.
+        FlakeValue::Bytes(bytes) => Ok(CypherValue::String(bytes.iter().fold(
+            String::new(),
+            |mut acc, b| {
+                use std::fmt::Write as _;
+                let _ = write!(acc, "{b:02x}");
+                acc
+            },
+        ))),
+    }
+}
+
+/// A bound reference is either a reified relationship or an ordinary entity
+/// — distinguished the same way `graph-owl-lpg`'s own mapping vocabulary
+/// does, by whether it carries `fromEntity`/`relType`.
+fn project_entity(
+    sid: &Sid,
+    facts: &[graph_owl_core::flake::Flake],
+) -> Result<CypherValue, CatalogError> {
+    let subject_flakes: Vec<graph_owl_core::flake::Flake> = facts
+        .iter()
+        .filter(|flake| flake.s == *sid)
+        .cloned()
+        .collect();
+    let is_relationship = subject_flakes.iter().any(|flake| {
+        flake.p.id == graph_owl_lpg::predicate::FROM_ENTITY
+            || flake.p.id == graph_owl_lpg::predicate::REL_TYPE
+    });
+    let mut report = graph_owl_lpg::MappingReport::default();
+    if is_relationship {
+        graph_owl_lpg::edge_from_reified(sid, &subject_flakes, &mut report)
+            .map(CypherValue::Relationship)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    } else {
+        graph_owl_lpg::node_from_flakes(sid, &subject_flakes, &mut report)
+            .map(CypherValue::Node)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
 }
 
 fn collect(results: spareval::QueryResults<'_>) -> Vec<std::collections::BTreeMap<String, String>> {
@@ -795,6 +900,130 @@ impl Catalog {
             .await
     }
 
+    /// Answer a Cypher query, **streaming** LPG-typed rows — Epic 7d Slice D.
+    ///
+    /// Bolt's acceptance criterion is the opposite of [`Self::cypher`]'s in
+    /// both dimensions: a 100k-row result must hold bounded server memory,
+    /// not one `Vec` sized to the whole answer, and a bound node must arrive
+    /// as an [`graph_owl_lpg::LpgNode`], not a rendered string a driver would
+    /// have to re-parse. `channel_capacity` bounds how far the evaluator may
+    /// run ahead of whatever is draining `CypherStream::rows` — `graph-owl-bolt`
+    /// ties it to `BoltLimits::fetch_batch_size`.
+    ///
+    /// **Runs on a blocking thread.** `spareval::QueryResults::Solutions`
+    /// borrows from the dataset it was evaluated against, so the dataset,
+    /// the parsed query, and the results iterator all have to live inside
+    /// one stack frame for as long as iteration continues — `spawn_blocking`
+    /// gives that frame a thread of its own, and only owned, converted
+    /// [`CypherRow`]s cross back out through the channel.
+    ///
+    /// Authorization runs exactly where [`Self::execute_algebra`] runs it —
+    /// before the evaluator exists — so this is the same predicate `sparql`
+    /// and `cypher` apply, not a third implementation of it.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the query does not parse, is outside the served
+    /// subset (a write clause is refused here, before anything below this
+    /// runs), or uses a variable-length hop (not yet supported in the
+    /// streaming path — see the deferral note below). `Storage` if no graph
+    /// engine is configured.
+    pub async fn cypher_stream(
+        &self,
+        principal: &Principal,
+        query: &str,
+        budget: SparqlBudget,
+        channel_capacity: usize,
+    ) -> Result<CypherStream, CatalogError> {
+        let admitted = graph_owl_query::cypher::parse_subset(query).map_err(|error| {
+            CatalogError::Validation(vec![FieldError::new(
+                "query",
+                FieldErrorCode::Type,
+                error.to_string(),
+            )])
+        })?;
+        let (pattern, hops) =
+            graph_owl_query::cypher::lower(&admitted, query).map_err(|error| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "query",
+                    FieldErrorCode::Type,
+                    error.to_string(),
+                )])
+            })?;
+        if !hops.is_empty() {
+            // Deferred, not silently degraded: `resolve_variable_length_hops`
+            // needs two authorized fetches in sequence (see its own docs),
+            // which the single spawn_blocking frame below cannot express
+            // without a second round trip through `scoped_facts` first — a
+            // real piece of work, not a gap to paper over here.
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "query",
+                FieldErrorCode::Type,
+                "variable-length patterns are not yet supported over Bolt's streaming path"
+                    .to_string(),
+            )]));
+        }
+
+        let parsed = spargebra::Query::Select {
+            dataset: None,
+            pattern,
+            base_iri: None,
+        };
+        let scoped = self.scoped_facts(principal, &parsed, None, budget).await?;
+        let fields = projected_variables(&parsed);
+        let facts = scoped.facts;
+        let dataset = scoped.dataset;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(channel_capacity.max(1));
+        tokio::task::spawn_blocking(move || {
+            let results = match spareval::QueryEvaluator::new()
+                .prepare(&parsed)
+                .execute(&dataset)
+            {
+                Ok(results) => results,
+                Err(error) => {
+                    let _ = tx.blocking_send(Err(CatalogError::Validation(vec![FieldError::new(
+                        "query",
+                        FieldErrorCode::Type,
+                        error.to_string(),
+                    )])));
+                    return;
+                }
+            };
+            let spareval::QueryResults::Solutions(solutions) = results else {
+                // `RUN`'s query is always lowered to `Select` above, so this
+                // never actually happens — kept exhaustive rather than
+                // `unreachable!()` because a future caller of this function
+                // with a different query form deserves an error, not a panic.
+                let _ = tx.blocking_send(Err(CatalogError::Storage(StorageError::Unexpected(
+                    "expected a solutions sequence".to_string(),
+                ))));
+                return;
+            };
+            for solution in solutions.flatten() {
+                let mut row = Vec::new();
+                for (variable, term) in solution.iter() {
+                    match cypher_value_of_term(term, &facts) {
+                        Ok(value) => row.push((variable.as_str().to_string(), value)),
+                        // One conversion failure ends the whole stream rather
+                        // than skipping a row: it means the fact set backing
+                        // this result is not what the projection expected,
+                        // which calls the rest of the result into question too.
+                        Err(error) => {
+                            let _ = tx.blocking_send(Err(error));
+                            return;
+                        }
+                    }
+                }
+                if tx.blocking_send(Ok(CypherRow(row))).is_err() {
+                    return; // receiver dropped — nobody is pulling any more
+                }
+            }
+        });
+
+        Ok(CypherStream { fields, rows: rx })
+    }
+
     /// The shared body of `sparql` and `cypher`: everything downstream of
     /// "here is the algebra to answer".
     ///
@@ -918,6 +1147,7 @@ impl Catalog {
             truncated,
             plan,
             fact_count,
+            facts,
         })
     }
 
@@ -20860,6 +21090,170 @@ mod projection_isolation_tests {
             1,
             "the second asset did not exist at t=1: {:?}",
             earlier.rows
+        );
+    }
+
+    // ---- Epic 7d Slice D: streaming, LPG-typed Cypher results ----
+
+    /// `project_entity` classifies purely from the subject's own flakes —
+    /// no `fromEntity`/`relType` present means a node, not a relationship.
+    #[test]
+    fn project_entity_classifies_an_ordinary_subject_as_a_node() {
+        let sid = Sid::dsc("table-1");
+        let facts = vec![
+            Flake::assert(
+                sid.clone(),
+                Sid::dsc("type"),
+                FlakeValue::String("table".to_string()),
+                1,
+            ),
+            Flake::assert(
+                sid.clone(),
+                Sid::dsc("name"),
+                FlakeValue::String("orders".to_string()),
+                1,
+            ),
+        ];
+        let value = project_entity(&sid, &facts).expect("projects");
+        assert!(matches!(value, CypherValue::Node(_)), "{value:?}");
+    }
+
+    /// A subject carrying `fromEntity`/`relType` is a reified relationship —
+    /// the same classification `graph-owl-lpg`'s own mapping vocabulary
+    /// uses, checked directly rather than only through a live Bolt query.
+    #[test]
+    fn project_entity_classifies_a_reified_relationship_as_a_relationship() {
+        let sid = Sid::dsc("rel-1");
+        let facts = vec![
+            Flake::assert(
+                sid.clone(),
+                Sid::dsc(graph_owl_lpg::predicate::FROM_ENTITY),
+                FlakeValue::Ref(Sid::dsc("table-1")),
+                1,
+            ),
+            Flake::assert(
+                sid.clone(),
+                Sid::dsc(graph_owl_lpg::predicate::TO_ENTITY),
+                FlakeValue::Ref(Sid::dsc("table-2")),
+                1,
+            ),
+            Flake::assert(
+                sid.clone(),
+                Sid::dsc(graph_owl_lpg::predicate::REL_TYPE),
+                FlakeValue::String("feeds".to_string()),
+                1,
+            ),
+        ];
+        let value = project_entity(&sid, &facts).expect("projects");
+        assert!(matches!(value, CypherValue::Relationship(_)), "{value:?}");
+    }
+
+    /// A fact set covering several subjects must not leak another subject's
+    /// flakes into this one's projection — the `filter(|flake| flake.s ==
+    /// *sid)` line is exactly what a mutation run flags if this goes
+    /// untested, since a `!=` or dropped filter still "projects something".
+    #[test]
+    fn project_entity_only_uses_the_named_subjects_own_flakes() {
+        let sid = Sid::dsc("table-1");
+        let other = Sid::dsc("table-2");
+        let facts = vec![
+            Flake::assert(
+                sid.clone(),
+                Sid::dsc("type"),
+                FlakeValue::String("table".to_string()),
+                1,
+            ),
+            Flake::assert(
+                sid.clone(),
+                Sid::dsc("name"),
+                FlakeValue::String("orders".to_string()),
+                1,
+            ),
+            // Another subject's `fromEntity` must not make `sid` look like a
+            // relationship, and its `name` must not appear on `sid`'s node.
+            Flake::assert(
+                other.clone(),
+                Sid::dsc(graph_owl_lpg::predicate::FROM_ENTITY),
+                FlakeValue::Ref(sid.clone()),
+                1,
+            ),
+            Flake::assert(
+                other,
+                Sid::dsc("name"),
+                FlakeValue::String("wrong-name".to_string()),
+                1,
+            ),
+        ];
+        let CypherValue::Node(node) = project_entity(&sid, &facts).expect("projects") else {
+            panic!(
+                "must still classify as a node, not borrow the other subject's relationship shape"
+            );
+        };
+        assert_eq!(
+            node.properties.get("name"),
+            Some(&graph_owl_lpg::PropertyValue::String("orders".to_string())),
+            "{node:?}"
+        );
+    }
+
+    /// A variable-length hop is refused in the streaming path, not silently
+    /// executed as if the hop were not there — `resolve_variable_length_hops`
+    /// needs two authorized fetches in sequence, which the streaming path's
+    /// single `spawn_blocking` frame cannot express (see the doc comment on
+    /// `Catalog::cypher_stream`).
+    #[tokio::test]
+    async fn cypher_stream_refuses_a_variable_length_hop() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        let error = catalog
+            .cypher_stream(
+                &Principal::system(),
+                "MATCH (a)-[:FEEDS*1..3]->(b) RETURN b",
+                SparqlBudget::default(),
+                10,
+            )
+            .await
+            .expect_err("a variable-length hop must be refused");
+
+        assert!(matches!(error, CatalogError::Validation(_)), "{error:?}");
+    }
+
+    /// The refusal above must be specific to hops, not a blanket rejection —
+    /// an ordinary query still streams normally through the same method.
+    #[tokio::test]
+    async fn cypher_stream_answers_an_ordinary_query() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        catalog
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("create");
+
+        let mut stream = catalog
+            .cypher_stream(
+                &Principal::system(),
+                "MATCH (n) RETURN n.name AS name",
+                SparqlBudget::default(),
+                10,
+            )
+            .await
+            .expect("query");
+
+        let row = stream
+            .rows
+            .recv()
+            .await
+            .expect("a row")
+            .expect("not an error");
+        assert_eq!(row.0.len(), 1, "{row:?}");
+        assert_eq!(row.0[0].0, "name");
+        assert!(
+            stream.rows.recv().await.is_none(),
+            "exactly one seeded asset"
         );
     }
 

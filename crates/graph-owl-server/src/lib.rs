@@ -1,4 +1,6 @@
 pub mod admission;
+#[cfg(feature = "bolt")]
+pub mod bolt;
 pub mod budget;
 pub mod jwks;
 pub mod observability;
@@ -934,6 +936,52 @@ async fn verify_jwks(
     Ok(Auth(principal))
 }
 
+/// Resolve a bearer token to a [`Principal`], independent of transport.
+///
+/// **Shared by the HTTP `Auth` extractor and the Bolt `HELLO` handler**
+/// (Epic 7d, `crate::bolt`), so both speak the identical precedence — a
+/// divergent identity path is the one nobody audits. Everything HTTP-specific
+/// (reading the `Authorization` header, pulling the `JwksClient` out of
+/// request extensions) stays with the caller; this function only ever sees a
+/// token string.
+///
+/// **Callers only, never this function, decide open mode.** The two current
+/// callers — the HTTP extractor below and Bolt's `HELLO` handler
+/// (`crate::bolt::CatalogAuthenticator`) — each check whether *any*
+/// verification is configured before calling this, so by the time a token
+/// reaches here one of `jwks`/[`signing_secret`] is guaranteed present. A
+/// third fallback branch here granting the system principal would be dead
+/// code today and a silent bypass the moment a caller's own check ever
+/// drifted from this function's assumption — [`AppError::Unauthenticated`]
+/// is the correct answer to "verify this token" finding nothing to verify
+/// it against, not a grant.
+async fn authenticate_bearer_token(
+    token: &str,
+    jwks: Option<&jwks::JwksClient>,
+    catalog: &Catalog,
+) -> Result<Principal, AppError> {
+    if let Some(jwks) = jwks {
+        return verify_jwks(token, jwks, catalog)
+            .await
+            .map(|Auth(principal)| principal);
+    }
+
+    let secret = signing_secret().ok_or(AppError::Unauthenticated)?;
+    let claims = jsonwebtoken::decode::<Claims>(
+        token,
+        &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
+        &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256),
+    )
+    .map_err(|_| AppError::Unauthenticated)?
+    .claims;
+
+    let name = claims.name.unwrap_or_else(|| claims.sub.clone());
+    catalog
+        .resolve_principal(&claims.sub, &name)
+        .await
+        .map_err(AppError::from)
+}
+
 /// Leave the identity where the access log can find it.
 ///
 /// Called on every path that resolves one, including open mode — a log line
@@ -972,41 +1020,24 @@ where
         parts: &mut axum::http::request::Parts,
         state: &S,
     ) -> Result<Self, Self::Rejection> {
-        // OIDC / JWKS — key material fetched from the issuer. Checked first
-        // because `auth_mode` prefers it: a deployment with a stale
-        // `GRAPH_OWL_JWT_SECRET` beside a configured issuer must not be
-        // silently downgraded to the shared secret.
-        if let Some(jwks) = parts.extensions.get::<std::sync::Arc<jwks::JwksClient>>() {
+        // Checked before reading the header at all: `auth_mode` prefers
+        // OIDC, so a deployment with a stale `GRAPH_OWL_JWT_SECRET` beside a
+        // configured issuer must not be silently downgraded, and open mode
+        // must not demand a header nobody was told to send.
+        let jwks = parts
+            .extensions
+            .get::<std::sync::Arc<jwks::JwksClient>>()
+            .cloned();
+        let requires_token = jwks.is_some() || signing_secret().is_some();
+
+        let catalog = <Catalog as axum::extract::FromRef<S>>::from_ref(state);
+        let principal = if requires_token {
             let token = bearer_token(parts)?;
-            let catalog = <Catalog as axum::extract::FromRef<S>>::from_ref(state);
-            let auth = verify_jwks(token, jwks, &catalog).await?;
-            record_principal(parts, &auth.0);
-            return Ok(auth);
-        }
+            authenticate_bearer_token(token, jwks.as_deref(), &catalog).await?
+        } else {
+            Principal::system()
+        };
 
-        // HS256 shared secret (legacy/demo).
-        if let Some(secret) = signing_secret() {
-            let token = bearer_token(parts)?;
-            let claims = jsonwebtoken::decode::<Claims>(
-                token,
-                &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
-                &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256),
-            )
-            .map_err(|_| AppError::Unauthenticated)?
-            .claims;
-
-            let catalog = <Catalog as axum::extract::FromRef<S>>::from_ref(state);
-            let name = claims.name.unwrap_or_else(|| claims.sub.clone());
-            let principal = catalog
-                .resolve_principal(&claims.sub, &name)
-                .await
-                .map_err(AppError::from)?;
-            record_principal(parts, &principal);
-            return Ok(Auth(principal));
-        }
-
-        // No secret and no OIDC — open mode.
-        let principal = Principal::system();
         record_principal(parts, &principal);
         Ok(Auth(principal))
     }
@@ -1147,6 +1178,7 @@ where
 /// strings are part of the wire contract and must not be reworded.
 const PROBLEM_TYPE_BASE: &str = "https://graph-owl.dev/errors/";
 
+#[derive(Debug)]
 enum AppError {
     /// The body was not parseable as the expected shape.
     MalformedBody(String),

@@ -338,11 +338,19 @@ pub fn node_from_flakes(
         }
 
         if flake.p.id == predicate::TYPE {
-            // A type whose object is not a reference is not a type — it is a
-            // literal sharing the predicate name, and treating it as a label
-            // would invent one.
-            if let FlakeValue::Ref(class) = &flake.o {
-                labels.push(class.id.clone());
+            // Both forms are real: `asset_to_flakes` (Epic 4) writes an
+            // asset's kind as a plain string — `dsc:name`/`dsc:fqn` are
+            // strings too, and `asset_from_flakes` reads it back the same
+            // way, so that is the load-bearing shape for every asset in the
+            // catalog. A reference is also accepted, matching
+            // `edge_from_reified`'s identical tolerance for `relType` just
+            // below — some producer may reasonably assert a type as an IRI
+            // naming a class. Only a value that is neither (a number, a
+            // boolean) fails to name anything and is dropped.
+            match &flake.o {
+                FlakeValue::Ref(class) => labels.push(class.id.clone()),
+                FlakeValue::String(class) => labels.push(class.clone()),
+                _ => {}
             }
             continue;
         }
@@ -765,21 +773,42 @@ mod tests {
         );
     }
 
-    /// A type whose object is a literal is not a label — treating it as one
-    /// would invent a label nobody asserted.
+    /// A string-valued type **does** become a label — this is the shape
+    /// every real asset in the catalog actually uses. `asset_to_flakes`
+    /// (Epic 4) writes `dsc:type` as a `FlakeValue::String`, and
+    /// `asset_from_flakes` reads it back the same way; requiring a
+    /// reference here would make every real asset invisible to a
+    /// label-matching Cypher query and untyped from this projection's own
+    /// point of view, which is exactly what a prior version of this
+    /// function did before the gap was found empirically — a real driver
+    /// asking for `MATCH (n:service) RETURN n` against seeded catalog data
+    /// got zero rows.
     #[test]
-    fn a_literal_valued_type_does_not_become_a_label() {
+    fn a_string_valued_type_becomes_a_label() {
         let flakes = vec![fact(
             "orders",
             predicate::TYPE,
             FlakeValue::String("Table".into()),
         )];
 
+        let node = node_from_flakes(&sid("orders"), &flakes, &mut MappingReport::default())
+            .expect("a string names a class as legitimately as a reference does");
+
+        assert_eq!(node.labels, vec!["Table".to_string()]);
+    }
+
+    /// A type whose object is neither a string nor a reference — a number,
+    /// say — names nothing sensible and is dropped rather than invented as
+    /// a label nobody asserted.
+    #[test]
+    fn a_non_string_non_reference_type_does_not_become_a_label() {
+        let flakes = vec![fact("orders", predicate::TYPE, FlakeValue::Int(1))];
+
         let outcome = node_from_flakes(&sid("orders"), &flakes, &mut MappingReport::default());
 
         assert!(
             matches!(outcome, Err(MappingError::Untyped(_))),
-            "a string is not a class reference: {outcome:?}"
+            "an integer names no class: {outcome:?}"
         );
     }
 

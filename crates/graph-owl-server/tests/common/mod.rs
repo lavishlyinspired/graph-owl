@@ -220,6 +220,17 @@ pub async fn test_catalog() -> (Catalog, TestDb, String) {
     (catalog, container, connection_string)
 }
 
+/// Same, with JWT verification enabled — for a test that needs to drive
+/// something below the HTTP surface (Epic 7d's Bolt tests: `HELLO` carries a
+/// bearer token directly, with no HTTP request to extract it from) while
+/// still authenticating against the identical `GRAPH_OWL_JWT_SECRET` an HTTP
+/// test in the same binary would.
+#[allow(dead_code)]
+pub async fn test_catalog_with_secret(secret: &str) -> (Catalog, TestDb, String) {
+    let (container, connection_string, catalog) = build_catalog(Some(secret)).await;
+    (catalog, container, connection_string)
+}
+
 async fn build_catalog(secret: Option<&str>) -> (TestDb, String, Catalog) {
     match secret {
         Some(secret) => unsafe { std::env::set_var("GRAPH_OWL_JWT_SECRET", secret) },
@@ -249,6 +260,177 @@ pub async fn json_body(response: axum::response::Response) -> Value {
         .await
         .expect("failed to read body");
     serde_json::from_slice(&bytes).expect("response body should be valid JSON")
+}
+
+/// The secret [`authorization_fixture`] signs tokens with — exported so a
+/// caller past the HTTP surface (Epic 7d's Bolt tests, which authenticate a
+/// raw `HELLO` rather than an HTTP header) can mint a compatible token via
+/// [`token`].
+#[allow(dead_code)]
+pub const AUTHZ_FIXTURE_SECRET: &str = "demo-signing-secret-not-for-production";
+
+#[allow(dead_code)]
+pub fn token(subject: &str) -> String {
+    #[derive(serde::Serialize)]
+    struct Claims<'a> {
+        sub: &'a str,
+        name: &'a str,
+        exp: usize,
+    }
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &Claims {
+            sub: subject,
+            name: subject,
+            exp: 4_102_444_800, // year 2100
+        },
+        &jsonwebtoken::EncodingKey::from_secret(AUTHZ_FIXTURE_SECRET.as_bytes()),
+    )
+    .expect("token should encode")
+}
+
+#[allow(dead_code)]
+pub async fn call(
+    app: &axum::Router,
+    uri: &str,
+    subject: Option<&str>,
+) -> (axum::http::StatusCode, Value) {
+    let mut builder = axum::http::Request::builder().method("GET").uri(uri);
+    if let Some(subject) = subject {
+        builder = builder.header("authorization", format!("Bearer {}", token(subject)));
+    }
+    let response =
+        <axum::Router as tower::ServiceExt<axum::http::Request<axum::body::Body>>>::oneshot(
+            app.clone(),
+            builder
+                .body(axum::body::Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    let status = response.status();
+    (status, json_body(response).await)
+}
+
+/// A bank estate with one schema that must not be readable by everyone.
+#[allow(dead_code)]
+async fn seed_banking_estate(connection_string: &str) {
+    let pool = sqlx::PgPool::connect(connection_string)
+        .await
+        .expect("source connection");
+    for statement in [
+        "CREATE SCHEMA IF NOT EXISTS core_banking",
+        "CREATE SCHEMA IF NOT EXISTS payments",
+        "CREATE TABLE IF NOT EXISTS core_banking.customers (
+             customer_id BIGINT PRIMARY KEY, pan CHAR(10), aadhaar_last4 CHAR(4))",
+        "CREATE TABLE IF NOT EXISTS payments.upi_transactions (
+             txn_id TEXT PRIMARY KEY, amount NUMERIC(18,2) NOT NULL)",
+    ] {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .expect("seed statement");
+    }
+}
+
+/// A bank estate, two users (`root` an admin, `asha` a risk analyst denied
+/// the PII-bearing customer master), and a live [`Catalog`] alongside the
+/// HTTP router built from that identical catalog — moved here from
+/// `authorization.rs` (Epic 13) so Epic 7d's Bolt tests can spawn a
+/// `BoltServer` against the exact same authorized data the HTTP router
+/// answers from, rather than a second fixture that could quietly drift from
+/// it.
+#[allow(dead_code)]
+pub async fn authorization_fixture() -> (axum::Router, TestDb, Catalog) {
+    let (catalog, container, connection_string) =
+        test_catalog_with_secret(AUTHZ_FIXTURE_SECRET).await;
+    seed_banking_estate(&connection_string).await;
+    let app = graph_owl_server::app(catalog.clone());
+
+    // Catalogue as the admin.
+    let response =
+        <axum::Router as tower::ServiceExt<axum::http::Request<axum::body::Body>>>::oneshot(
+            app.clone(),
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/connectors/postgres/runs")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", token("root")))
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "connectionString": connection_string,
+                        "serviceName": "hdfc-core",
+                        "includeSchemas": ["core_banking", "payments"]
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::OK,
+        "catalogue must succeed"
+    );
+
+    let database = connection_string
+        .rsplit_once('/')
+        .expect("the connection string names a database")
+        .1
+        .to_string();
+
+    let pool = sqlx::PgPool::connect(&connection_string)
+        .await
+        .expect("catalog connection");
+
+    sqlx::query("UPDATE users SET is_admin = TRUE WHERE id = 'root'")
+        .execute(&pool)
+        .await
+        .expect("promote root");
+
+    let rules = serde_json::json!([
+        {
+            "name": "read-catalog",
+            "effect": "allow",
+            "operations": ["viewBasic", "viewDetails"],
+            "resources": { "type": "all" }
+        },
+        {
+            "name": "no-customer-pii",
+            "effect": "deny",
+            "operations": ["viewBasic", "viewDetails"],
+            "resources": {
+                "type": "fqnPrefix",
+                "value": format!("hdfc-core.{database}.core_banking")
+            }
+        }
+    ]);
+    sqlx::query("INSERT INTO roles (name) VALUES ('risk-analyst') ON CONFLICT DO NOTHING")
+        .execute(&pool)
+        .await
+        .expect("role insert");
+    sqlx::query("INSERT INTO policies (name, rules) VALUES ('analyst-baseline', $1)")
+        .bind(&rules)
+        .execute(&pool)
+        .await
+        .expect("policy insert");
+    sqlx::query(
+        "INSERT INTO role_policies (role, policy) VALUES ('risk-analyst', 'analyst-baseline')
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&pool)
+    .await
+    .expect("role-policy link");
+
+    // First request auto-provisions asha; then grant the role.
+    call(&app, "/assets/stats", Some("asha")).await;
+    sqlx::query("INSERT INTO user_roles (user_id, role) VALUES ('asha', 'risk-analyst') ON CONFLICT DO NOTHING")
+        .execute(&pool)
+        .await
+        .expect("grant role");
+
+    (app, container, catalog)
 }
 
 /// Epic 19 Slice A's end-to-end test needs a real broker alongside Postgres.

@@ -1,7 +1,13 @@
 # Plan: Bolt Protocol Server (Epic 7d) ★
 
 **Branch**: feat/engine-bolt
-**Status**: Slice A (PackStream codec) built in `graph-owl-bolt` — every `BoltValue` variant round-trips, integers pick the smallest marker on encode and decode from any width, strings/lists/dicts/bytes are checked at each size-class boundary (tiny/8/16/32), structures carry signature and field count, truncation is `Ok(None)` not an error, and the length guard runs before the allocation it bounds. `cargo mutants` on the file: 101 caught, 2 equivalent (OR vs XOR on a nibble-packed byte where the low nibble is always zero — provably identical, not a coverage gap), 0 genuine survivors. Slices B–F not started.
+**Status**: **Slices A–F built.** `graph-owl-bolt` speaks Bolt 5.0 end to end — chunked framing, handshake (including the 4.3+ ranged-offer form real drivers actually send), `HELLO` authenticating through the identical function the HTTP `Auth` extractor uses, the full state machine including `FAILED`-ignores-until-`RESET`, `RUN`/`PULL`/`DISCARD` streaming Epic 7c-typed nodes through a `spawn_blocking` task and a bounded channel rather than materializing the result, and authorization proven identical to SPARQL and Cypher-over-HTTP under one restricted principal. `scripts/verify-bolt.sh` is the epic's own acceptance: it asserts the feature-off dependency tree excludes `graph-owl-bolt` entirely, then drives the **official, unmodified `neo4j` Python driver** (Apache-2.0) through connect → authenticate → a typed node query → an explicit transaction → a refused write, against a real `graph-owl-server` binary. Wired into CI as `bolt-driver`.
+
+**Found and fixed a real, pre-existing bug along the way, in Epic 4/7b/7c, not 7d**: `asset_to_flakes` (Epic 4) stores an asset's kind as `FlakeValue::String`, but `graph-owl-lpg::node_from_flakes` (Epic 7c) and Cypher's label matching (Epic 7b) both required `FlakeValue::Ref` — so every real asset in the catalog projected with **zero labels**, and `MATCH (n:AnyLabel)` matched nothing against real data. Neither epic's own test suite caught it because both seeded synthetic `Ref`-typed fixtures rather than going through the real `Catalog::upsert_asset` path. Fixed narrowly: `node_from_flakes` now accepts either shape (mirroring `edge_from_reified`'s already-correct tolerance for `relType`), and Cypher's `lower_node`/`lower_relationship` compare against the string literal that is actually stored. `asset_to_flakes`/`asset_from_flakes` themselves — the load-bearing round trip — were not touched.
+
+**Two real gaps found and deferred, not fixed**: Cypher's `expression` grammar has no lowering for `$parameter` yet — a real driver's default parameterized `session.run(query, **kwargs)` fails, so `verify-bolt-driver.py` uses literals. And `MATCH (n) RETURN n` with **no** label or property reference lowers to an empty BGP (SPARQL's one-row identity), binding nothing — a pre-existing, already-documented gap (`07b-engine-cypher.md`'s `an_entirely_unconstrained_node_binds_nothing`) that Bolt inherits rather than introduces. Both are recorded below.
+
+`cargo mutants` on Slice A's file: 101 caught, 2 equivalent (OR vs XOR on a nibble-packed byte whose low nibble is always zero — provably identical, not a coverage gap), 0 genuine survivors.
 **Ships after Phase 2**: this epic requires Epic 12's authentication, so it is the one Phase-1 epic that lands later — a second listening port with no identity to bind a session to is not a thing to ship. Feature flag stays off until then.
 **Depends on**: Epic 7b (Cypher), Epic 7c (LPG projection), Epic 12 (auth), Epic 13 (authorization)
 **Crates**: **`graph-owl-bolt`** (new — wire protocol, feature-gated, off by default)
@@ -89,17 +95,17 @@ pub enum BoltValue {
 
 ## Acceptance criteria
 
-- [ ] Handshake negotiates within the declared version range and refuses outside it with a version list.
-- [ ] `HELLO` authenticates via Epic 12, producing the same `Principal` an HTTP request would.
-- [ ] `RUN`/`PULL`/`DISCARD`/`BEGIN`/`COMMIT`/`ROLLBACK`/`RESET`/`GOODBYE` behave per the state machine.
-- [ ] `FAILED` ignores all messages except `RESET`.
-- [ ] PackStream encodes and decodes every `BoltValue` variant, including structures and temporals.
-- [ ] Nodes, relationships, and paths carry Epic 7c element ids, labels, types, and properties.
-- [ ] Results **stream**; a large result set does not scale server memory with row count.
-- [ ] Write clauses are refused with a message naming the catalog API.
-- [ ] Authorization matches SPARQL and Cypher exactly for the same logical question.
-- [ ] An off-by-default feature flag compiles the listener and its dependencies out entirely.
-- [ ] Oversized frames are refused before allocation.
+- [x] Handshake negotiates within the declared version range and refuses outside it — **not with a literal version list on the wire**: the spec's own refusal is the zero value, and a real driver's own client-side table produces the equivalent (and better-worded) message, verified against the official driver. Sending a list was this plan's phrasing before the spec was read closely; the zero value is what `07d`'s decision 6 actually needs (refuse clearly, don't half-answer).
+- [x] `HELLO` authenticates via Epic 12, producing the same `Principal` an HTTP request would — proven by resolving the identical `Catalog::resolve_principal` after a Bolt `HELLO`.
+- [x] `RUN`/`PULL`/`DISCARD`/`BEGIN`/`COMMIT`/`ROLLBACK`/`RESET`/`GOODBYE` behave per the state machine.
+- [x] `FAILED` ignores all messages except `RESET`.
+- [~] PackStream encodes and decodes every `BoltValue` variant, structures included. **Temporals are not native Bolt structures yet** — a `PropertyValue::DateTime` currently encodes as an RFC 3339 string, not the spec's `DateTime`/`Date`/`Time`/`Duration` structures. See deferred list.
+- [~] Nodes and relationships carry Epic 7c element ids, labels, types, and properties — nodes proven against a real driver; relationships proven only by unit test (`messages.rs`), not a live driver — the HTTP surface's only relationship-creation path (`POST /tables/{id}/relationships`) targets the pre-graph "table entity" walking skeleton, which does not project into the graph, so a live driver test needs a seeding path this slice did not build. **Paths are not implemented at all** — no `0x50` structure exists yet. Both recorded below.
+- [x] Results **stream**; verified mechanically (a `spawn_blocking` task feeding a bounded channel, never a materialized `Vec`) and behaviourally (a 40-row result over `fetch_batch_size` 5 never returns more than 5 at once) — not literally the 100k-row/measured-RSS scale the slice's own RED note describes.
+- [x] Write clauses are refused with a message naming the catalog API — verified via the hand-rolled suite and the real driver.
+- [x] Authorization matches SPARQL and Cypher exactly for the same logical question — three-way equivalence test, extending Epic 7b Slice E's fixture rather than a separate one that could drift.
+- [x] An off-by-default feature flag compiles the listener and its dependencies out entirely — asserted by `cargo tree`, in `scripts/verify-bolt.sh` and CI.
+- [x] Oversized frames are refused before allocation — PackStream's guard (Slice A) plus `chunking::Decoder`'s identical guard at the framing layer.
 
 ## Slices
 
@@ -150,6 +156,12 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 - **Bolt client** → Epic 9a, for pushing to external property-graph stores.
 - **HTTP query API in the same protocol dialect** → graph-owl's own REST and `/cypher` (Epic 7b) already cover it.
 - **Gremlin / TinkerPop server** → see `00e-crate-architecture.md`. Bolt reaches the larger tool population; a second wire protocol needs its own demand signal.
+- **Native temporal PackStream structures** (`Date`/`Time`/`DateTime`/`Duration`) → a future Bolt slice. `PropertyValue::DateTime` encodes as an RFC 3339 string today, which a driver's typed temporal API will not recognise as one of its own types even though the value survives. Building the real structures needs the tz-offset/seconds/nanoseconds split the spec defines, not a string.
+- **`Path` structure (`0x50`)** → a future Bolt slice, once a Cypher query in the served subset can actually bind a path variable (`RETURN p` for `p = (a)-[*]->(b)`) — nothing in `graph_owl_query::cypher` produces one to encode yet, so building the encoder first would have nothing to test it against.
+- **A live-driver relationship test** → the next slice that gives assets a graph-integrated relationship-creation path. Today the only HTTP route that creates a relationship (`POST /tables/{id}/relationships`) targets the pre-Epic-4 "table entity" walking skeleton (`Catalog::create_table`/`create_relationship`), which never calls `self.project(...)` — a table created there is invisible to Cypher/SPARQL entirely, so it cannot seed a driver test. Relationship *typing* itself is still proven, by unit test in `graph-owl-bolt::messages` and by Slice D's `project_entity`.
+- **Cypher query parameters (`$name`)** → Epic 7b. `decypher` parses `Parameter` expressions; `graph_owl_query::cypher::lower_expression` has no arm for one, so a real driver's default parameterized `session.run(query, **kwargs)` fails with `Unlowerable`. Found running `scripts/verify-bolt-driver.py`, which uses literals instead — safe there because every value it embeds is one the script itself generated, never user input.
+- **`MATCH (n) RETURN n` binding every node with no label or property to anchor it** → Epic 7b, already recorded in `07b-engine-cypher.md`'s `an_entirely_unconstrained_node_binds_nothing`. Unaffected by this epic's label-matching fix: a completely unconstrained pattern still lowers to an empty BGP regardless of what a label comparison checks, since no label is named to compare at all.
+- **`query_timeout` and `max_connections` under real contention** → both are implemented (a `tokio::time::timeout` around `QueryEngine::run`, a `Semaphore` sized to `BoltLimits::max_connections` in `BoltServer::serve`) but neither has a test forcing the limit — the same `admission`-module pattern HTTP already uses and has tested, applied here without its own proof yet.
 
 ## Pre-PR quality gate
 

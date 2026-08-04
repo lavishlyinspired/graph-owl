@@ -7,10 +7,25 @@ edition.workspace = true
 default-run = "graph-owl-server"
 license.workspace = true
 
+[features]
+default = []
+# Off by default (`00a`'s operational budget: the default footprint is the
+# small one) — a second listening port, so a deployment that does not want
+# one must be able to leave it out of the binary entirely, not merely
+# unconfigured at runtime.
+bolt = ["dep:graph-owl-bolt", "dep:async-trait", "dep:thiserror"]
+
 [dependencies]
 utoipa.workspace = true
 base64.workspace = true
 graph-owl-api.workspace = true
+# Epic 7d, decision 3: a second listening port, off unless a deployment asks
+# for it. `optional = true` is what makes `cargo build --no-default-features`
+# actually exclude the crate and everything it pulls in, not just skip
+# calling it — see Slice F's dependency-tree assertion.
+graph-owl-bolt = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
 graph-owl-reasoning = { path = "../graph-owl-reasoning" }
 graph-owl-connectors.workspace = true
 graph-owl-ui.workspace = true

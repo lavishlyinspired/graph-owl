@@ -100,6 +100,21 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("failed to bind to {bind}: {e}"));
 
+    // Epic 7d, decision 3: a second listening port, present only when this
+    // binary was built with `--features bolt` *and* `BOLT_BIND_ADDR` is set —
+    // compiled out entirely otherwise, not merely inert.
+    #[cfg(feature = "bolt")]
+    let bolt_listener = match std::env::var("BOLT_BIND_ADDR") {
+        Ok(bolt_bind) => {
+            let listener = tokio::net::TcpListener::bind(&bolt_bind)
+                .await
+                .unwrap_or_else(|e| panic!("failed to bind Bolt listener to {bolt_bind}: {e}"));
+            tracing::info!(bind = %bolt_bind, "Bolt protocol server listening");
+            Some((listener, bolt_bind))
+        }
+        Err(_) => None,
+    };
+
     // A server running without authentication is a legitimate local posture and
     // an alarming production one. It says which it is at startup, because an
     // accidentally-open server must not look identical to a secured one.
@@ -134,6 +149,27 @@ async fn main() {
             "graph-owl listening with authentication DISABLED — every request runs as \
              the system principal. Set OIDC_ISSUER (or GRAPH_OWL_JWT_SECRET) to secure it."
         ),
+    }
+
+    #[cfg(feature = "bolt")]
+    if let Some((listener, _bind)) = bolt_listener {
+        let limits = graph_owl_server::bolt::bolt_limits_from_env(|name| std::env::var(name).ok())
+            .unwrap_or_else(|error| {
+                tracing::error!("{error}");
+                std::process::exit(78); // EX_CONFIG
+            });
+        let server = graph_owl_server::bolt::build_server(
+            catalog.clone(),
+            limits,
+            graph_owl_api::SparqlBudget::default(),
+        );
+        tokio::spawn(async move {
+            server
+                .serve(listener, async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .await;
+        });
     }
 
     axum::serve(

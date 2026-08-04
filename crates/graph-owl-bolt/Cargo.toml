@@ -9,3 +9,12 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tracing.workspace = true
+graph-owl-core.workspace = true
+graph-owl-lpg.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

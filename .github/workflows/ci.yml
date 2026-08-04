@@ -143,6 +143,24 @@ jobs:
       - name: verify-sdks.sh
         run: bash scripts/verify-sdks.sh
 
+  bolt-driver:
+    name: a real Bolt driver against a live service (Epic 7d Slice F)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Only this job builds with --features bolt — every other Rust job in
+      # this workflow exercises the default (feature-off) build, which is
+      # itself half of what this script asserts: the crate must not appear
+      # in the dependency tree until this flag is on.
+      - name: verify-bolt.sh
+        run: bash scripts/verify-bolt.sh
+
   ui:
     name: console typecheck and tests
     runs-on: ubuntu-latest

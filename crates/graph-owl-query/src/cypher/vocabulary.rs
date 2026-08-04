@@ -51,12 +51,6 @@ pub fn property(name: &str) -> NamedNode {
     dsc(name)
 }
 
-/// A label — `:Table` becomes `dsc:Table`.
-#[must_use]
-pub fn class(name: &str) -> NamedNode {
-    dsc(name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +87,5 @@ mod tests {
     #[test]
     fn a_term_resolves_identically_however_it_is_reached() {
         assert_eq!(property("type"), type_predicate());
-        assert_eq!(class("Table"), property("Table"));
     }
 }
