@@ -8650,6 +8650,90 @@ impl Catalog {
         })
     }
 
+    /// Saves a policy and the roles it applies to. `roles` replaces whatever
+    /// was there before, matching [`Self::set_user_roles`]'s semantics.
+    ///
+    /// **Never previewed automatically before saving.** A dry-run is a
+    /// deliberate, separate call — [`Self::dry_run_policy`] — because saving
+    /// what was just previewed and saving what an admin actually submits are
+    /// two different values the instant a form goes stale between them.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the policy name is blank, has no rules, or a rule's
+    /// own name is blank. `Storage` if the write fails.
+    #[tracing::instrument(name = "catalog.upsert_policy", skip_all)]
+    pub async fn upsert_policy(
+        &self,
+        policy: &graph_owl_authz::Policy,
+        roles: &[String],
+    ) -> Result<(), CatalogError> {
+        let mut problems = Vec::new();
+        if policy.name.trim().is_empty() {
+            problems.push(FieldError::new(
+                "name",
+                FieldErrorCode::Required,
+                "a policy needs a name",
+            ));
+        }
+        if policy.rules.is_empty() {
+            problems.push(FieldError::new(
+                "rules",
+                FieldErrorCode::Required,
+                "a policy with no rules can never admit or deny anything",
+            ));
+        }
+        for (index, rule) in policy.rules.iter().enumerate() {
+            if rule.name.trim().is_empty() {
+                problems.push(FieldError::new(
+                    format!("rules[{index}].name"),
+                    FieldErrorCode::Required,
+                    "a rule needs a name",
+                ));
+            }
+        }
+        if !problems.is_empty() {
+            return Err(CatalogError::Validation(problems));
+        }
+
+        self.storage.upsert_policy(policy, roles).await?;
+        // After the write, never before — the same ordering
+        // `set_user_roles` uses, for the same reason: invalidating first
+        // leaves a window in which a concurrent request re-populates the
+        // cache from the policy that is about to be replaced.
+        self.invalidate_authorization();
+        Ok(())
+    }
+
+    /// Every stored policy, with the roles it currently applies to.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    #[tracing::instrument(name = "catalog.list_policies", skip_all)]
+    pub async fn list_policies(
+        &self,
+    ) -> Result<Vec<(graph_owl_authz::Policy, Vec<String>)>, CatalogError> {
+        Ok(self.storage.list_policies().await?)
+    }
+
+    /// Removes a policy. Returns whether one existed.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails.
+    #[tracing::instrument(name = "catalog.delete_policy", skip_all)]
+    pub async fn delete_policy(&self, name: &str) -> Result<bool, CatalogError> {
+        let removed = self.storage.delete_policy(name).await?;
+        if removed {
+            // A deleted policy can no longer apply to anyone, which is
+            // exactly the kind of change a cached decision would otherwise
+            // outlive.
+            self.invalidate_authorization();
+        }
+        Ok(removed)
+    }
+
     /// The stored queue, filtered and paged.
     ///
     /// Reads results rather than recomputing: this is polled by a queue view,
@@ -12571,6 +12655,145 @@ mod validation_decides_before_it_stores {
 
         assert_eq!(outcome.admitted, 12);
         assert_eq!(outcome.examples.len(), 5, "the sample is bounded");
+    }
+
+    mod saving_a_policy {
+        use super::*;
+
+        fn deny_pii() -> graph_owl_authz::Policy {
+            graph_owl_authz::Policy {
+                name: "deny-pii".to_string(),
+                rules: vec![graph_owl_authz::Rule {
+                    name: "no-pii".to_string(),
+                    effect: graph_owl_authz::Effect::Deny,
+                    operations: vec![MetadataOperation::ViewSensitive],
+                    resources: graph_owl_authz::ResourceMatcher::Tagged("pii".to_string()),
+                }],
+            }
+        }
+
+        #[tokio::test]
+        async fn a_saved_policy_is_returned_by_list_policies_with_its_roles() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let catalog = Catalog::new(storage);
+
+            catalog
+                .upsert_policy(&deny_pii(), &["analyst".to_string(), "steward".to_string()])
+                .await
+                .expect("a valid policy saves");
+
+            let stored = catalog.list_policies().await.expect("list");
+            assert_eq!(stored.len(), 1);
+            let (policy, mut roles) = stored[0].clone();
+            assert_eq!(policy, deny_pii());
+            roles.sort();
+            assert_eq!(roles, vec!["analyst".to_string(), "steward".to_string()]);
+        }
+
+        /// **Replace, not add.** Saving the same policy again with a smaller
+        /// role set must actually shrink it — an admin revoking a role's
+        /// access to a policy is exactly the case a merge-only write would
+        /// get backwards.
+        #[tokio::test]
+        async fn saving_again_with_fewer_roles_replaces_the_attachment() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let catalog = Catalog::new(storage);
+
+            catalog
+                .upsert_policy(&deny_pii(), &["analyst".to_string(), "steward".to_string()])
+                .await
+                .expect("first save");
+            catalog
+                .upsert_policy(&deny_pii(), &["analyst".to_string()])
+                .await
+                .expect("second save");
+
+            let stored = catalog.list_policies().await.expect("list");
+            assert_eq!(stored.len(), 1, "one policy, updated in place, not two");
+            assert_eq!(stored[0].1, vec!["analyst".to_string()]);
+        }
+
+        #[tokio::test]
+        async fn a_policy_with_no_name_is_rejected() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let catalog = Catalog::new(storage);
+            let mut blank = deny_pii();
+            blank.name = String::new();
+
+            let error = catalog
+                .upsert_policy(&blank, &[])
+                .await
+                .expect_err("a nameless policy must be rejected");
+
+            assert!(matches!(error, CatalogError::Validation(_)), "{error:?}");
+        }
+
+        /// A policy that can never admit or deny anything is not a policy —
+        /// and unlike the dry-run path (which legitimately simulates "what if
+        /// nothing applied"), *saving* one is a mistake worth catching before
+        /// it lands.
+        #[tokio::test]
+        async fn a_policy_with_no_rules_is_rejected() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let catalog = Catalog::new(storage);
+
+            let error = catalog
+                .upsert_policy(&allow_nothing(), &[])
+                .await
+                .expect_err("an empty policy must be rejected");
+
+            assert!(matches!(error, CatalogError::Validation(_)), "{error:?}");
+        }
+
+        #[tokio::test]
+        async fn a_rule_with_no_name_is_rejected() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let catalog = Catalog::new(storage);
+            let mut unnamed_rule = deny_pii();
+            unnamed_rule.rules[0].name = String::new();
+
+            let error = catalog
+                .upsert_policy(&unnamed_rule, &[])
+                .await
+                .expect_err("an unnamed rule must be rejected");
+
+            assert!(matches!(error, CatalogError::Validation(_)), "{error:?}");
+        }
+
+        #[tokio::test]
+        async fn a_deleted_policy_no_longer_appears_in_the_list() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let catalog = Catalog::new(storage);
+            catalog
+                .upsert_policy(&deny_pii(), &["analyst".to_string()])
+                .await
+                .expect("save");
+
+            let removed = catalog
+                .delete_policy("deny-pii")
+                .await
+                .expect("delete succeeds");
+
+            assert!(removed);
+            assert!(catalog.list_policies().await.expect("list").is_empty());
+        }
+
+        /// Deleting a policy that was never saved is not an error — the
+        /// caller's goal ("this policy does not apply to anyone") is already
+        /// true, which is the same idempotent-delete convention the rest of
+        /// this facade uses.
+        #[tokio::test]
+        async fn deleting_an_unknown_policy_reports_nothing_removed_rather_than_erroring() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let catalog = Catalog::new(storage);
+
+            let removed = catalog
+                .delete_policy("never-existed")
+                .await
+                .expect("deleting an unknown policy is not an error");
+
+            assert!(!removed);
+        }
     }
 
     /// **An assignment belongs to one finding.** The match is on all four

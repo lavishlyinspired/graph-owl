@@ -241,6 +241,8 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/validation/assignments", post(assign_finding))
         .route("/validation/assignments/{id}", delete(unassign_finding))
         .route("/policies/dry-run", post(dry_run_policy))
+        .route("/policies", get(list_policies).post(upsert_policy))
+        .route("/policies/{name}", delete(delete_policy))
         .route("/users/{id}/roles", put(set_user_roles))
         .route("/teams", get(list_teams).post(upsert_team))
         .route("/teams/{id}/children", get(list_child_teams))
@@ -5087,6 +5089,80 @@ async fn dry_run_policy(
         // correct one in a count alone.
         "admitsEverything": outcome.admits_everything,
     })))
+}
+
+fn policy_body(policy: &graph_owl_authz::Policy, roles: &[String]) -> serde_json::Value {
+    json!({
+        "policy": policy,
+        "roles": roles,
+    })
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PolicyRequest {
+    policy: graph_owl_authz::Policy,
+    #[serde(default)]
+    roles: Vec<String>,
+}
+
+impl ValidateBody for PolicyRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Create or update a policy, and which roles it applies to — Epic 41.
+///
+/// **Distinct from the dry-run endpoint on purpose.** Saving what was just
+/// previewed and saving what an admin actually submits are two different
+/// values the instant a form goes stale between them, so this call always
+/// takes the request body fresh rather than trusting an earlier dry-run.
+async fn upsert_policy(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<PolicyRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    catalog
+        .upsert_policy(&payload.policy, &payload.roles)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(policy_body(&payload.policy, &payload.roles)),
+    ))
+}
+
+/// Every stored policy, with the roles it applies to — Epic 41.
+async fn list_policies(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let policies = catalog.list_policies().await?;
+    Ok(Json(json!(
+        policies
+            .iter()
+            .map(|(policy, roles)| policy_body(policy, roles))
+            .collect::<Vec<_>>()
+    )))
+}
+
+/// Removes a policy — Epic 41.
+async fn delete_policy(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(name): Path<String>,
+) -> Result<StatusCode, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    catalog.delete_policy(&name).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, serde::Deserialize)]

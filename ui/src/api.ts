@@ -329,6 +329,11 @@ async function request<T>(path: string, init?: RequestInit, retried?: boolean): 
     // for honouring this; see `isUnauthenticated`.
     throw new ApiError(problem);
   }
+  // `204 No Content` carries no body — `delete_team`/`delete_policy` and
+  // every other idempotent-delete endpoint return it. Calling `.json()` on
+  // an empty body throws `Unexpected end of JSON input`, which every caller
+  // typed `request<void>()` was silently exposed to.
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
@@ -468,6 +473,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ policy, roles }),
     }),
+  /** Every stored policy, with the roles it currently applies to. */
+  policies: () =>
+    request<{ policy: import("./admin/policy").Policy; roles: string[] }[]>("/policies"),
+  /** Create or update a policy. `roles` replaces whatever it applied to
+   *  before, not an addition to it. */
+  savePolicy: (policy: unknown, roles: string[]) =>
+    request<{ policy: import("./admin/policy").Policy; roles: string[] }>("/policies", {
+      method: "POST",
+      body: JSON.stringify({ policy, roles }),
+    }),
+  deletePolicy: (name: string) =>
+    request<void>(`/policies/${encodeURIComponent(name)}`, { method: "DELETE" }),
   /** What a connector needs configured, as its own JSON Schema — so a hundred
    *  connectors do not become a hundred hand-written forms. */
   connectorSchema: (connector: string) =>

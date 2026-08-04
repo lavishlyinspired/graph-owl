@@ -114,6 +114,11 @@ pub struct InMemoryStorage {
     versions: Mutex<Vec<AssetVersion>>,
     users: Mutex<Vec<StoredUser>>,
     pub policies: Mutex<Vec<Policy>>,
+    /// `(role, policy name)` pairs — deliberately separate from `policies`'s
+    /// own name-matching convention `policies_for_roles` already relies on,
+    /// so adding a real write path here cannot change what that pre-existing
+    /// read already does for tests written against it.
+    role_policies: Mutex<Vec<(String, String)>>,
     inserted: Mutex<Vec<Table>>,
     relationships: Mutex<Vec<Relationship>>,
     /// The last validation pass, as the port stores it: the graph instant
@@ -2016,6 +2021,52 @@ impl Storage for InMemoryStorage {
     async fn set_source_hash(&self, id: Uuid, hash: &[u8]) -> Result<(), StorageError> {
         self.source_hashes.lock().unwrap().insert(id, hash.to_vec());
         Ok(())
+    }
+
+    async fn upsert_policy(&self, policy: &Policy, roles: &[String]) -> Result<(), StorageError> {
+        let mut policies = self.policies.lock().unwrap();
+        if let Some(existing) = policies.iter_mut().find(|p| p.name == policy.name) {
+            *existing = policy.clone();
+        } else {
+            policies.push(policy.clone());
+        }
+        drop(policies);
+
+        let mut attachments = self.role_policies.lock().unwrap();
+        attachments.retain(|(_, p)| p != &policy.name);
+        attachments.extend(roles.iter().map(|role| (role.clone(), policy.name.clone())));
+        Ok(())
+    }
+
+    async fn list_policies(&self) -> Result<Vec<(Policy, Vec<String>)>, StorageError> {
+        let attachments = self.role_policies.lock().unwrap();
+        Ok(self
+            .policies
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|policy| {
+                let roles = attachments
+                    .iter()
+                    .filter(|(_, p)| p == &policy.name)
+                    .map(|(role, _)| role.clone())
+                    .collect();
+                (policy.clone(), roles)
+            })
+            .collect())
+    }
+
+    async fn delete_policy(&self, name: &str) -> Result<bool, StorageError> {
+        let mut policies = self.policies.lock().unwrap();
+        let before = policies.len();
+        policies.retain(|p| p.name != name);
+        let removed = policies.len() != before;
+        drop(policies);
+        self.role_policies
+            .lock()
+            .unwrap()
+            .retain(|(_, p)| p != name);
+        Ok(removed)
     }
 
     async fn policies_for_roles(&self, roles: &[String]) -> Result<Vec<Policy>, StorageError> {

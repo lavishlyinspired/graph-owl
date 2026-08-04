@@ -194,13 +194,16 @@
             ]
           },
           "createdAt": {
+            "description": "When the asset was first created.",
             "format": "date-time",
             "type": "string"
           },
           "deleted": {
+            "description": "Whether the asset is tombstoned — a source no longer reports it.",
             "type": "boolean"
           },
           "deletedAt": {
+            "description": "When the asset was tombstoned, if it has been.",
             "format": "date-time",
             "type": [
               "string",
@@ -219,6 +222,7 @@
             ]
           },
           "description": {
+            "description": "A human-readable description, if one was given.",
             "type": [
               "string",
               "null"
@@ -240,17 +244,20 @@
             "type": "string"
           },
           "id": {
+            "description": "The stable identifier.",
             "format": "uuid",
             "type": "string"
           },
           "kind": {
-            "$ref": "#/components/schemas/AssetKind"
+            "$ref": "#/components/schemas/AssetKind",
+            "description": "Where this asset sits in the hierarchy."
           },
           "lifecycle": {
             "$ref": "#/components/schemas/LifecycleState",
             "description": "Where this asset is in its life — Epic 26.\n\n**Orthogonal to `deleted`.** A tombstone says the source no longer\nreports it; a lifecycle state says what the organization intends. An\nasset can be Active and tombstoned (a connector lost sight of it) or\nRetired and present (deliberately turned off), and collapsing them would\nmake both unanswerable."
           },
           "name": {
+            "description": "The asset's own name — the last segment of its FQN.",
             "type": "string"
           },
           "owners": {
@@ -261,6 +268,7 @@
             "type": "array"
           },
           "parentId": {
+            "description": "The containing asset, or `None` for a root kind.",
             "format": "uuid",
             "type": [
               "string",
@@ -271,14 +279,17 @@
             "description": "Free-form, kind-specific: a column's data type, a service's engine.\nKept open because every warehouse reports something slightly different\nand normalising it prematurely loses information the catalog is for."
           },
           "updatedAt": {
+            "description": "When the asset was most recently changed.",
             "format": "date-time",
             "type": "string"
           },
           "updatedBy": {
+            "description": "Who or what made the most recent change.",
             "type": "string"
           },
           "version": {
-            "$ref": "#/components/schemas/EntityVersion"
+            "$ref": "#/components/schemas/EntityVersion",
+            "description": "The envelope's version, bumped on every change."
           }
         },
         "required": [
@@ -295,6 +306,7 @@
         "type": "object"
       },
       "AssetKind": {
+        "description": "Where an asset sits in the hierarchy: service → database → schema →\ntable → column.",
         "enum": [
           "service",
           "database",
@@ -308,6 +320,7 @@
         "description": "A partial update. Absent means \"not declared\"; explicit `null` means clear.\nThe distinction is what stops a connector's null description from blanking\nwhat a human wrote (`15-connectors.md` decision 3).",
         "properties": {
           "description": {
+            "description": "The new description. Absent (`None`) leaves it alone; present with an\ninner `None` (explicit JSON `null`) clears it.",
             "type": [
               "string",
               "null"
@@ -336,22 +349,27 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/ChangeDescription"
+                "$ref": "#/components/schemas/ChangeDescription",
+                "description": "What changed to produce this version, if this was not the initial one."
               }
             ]
           },
           "snapshot": {
-            "$ref": "#/components/schemas/Asset"
+            "$ref": "#/components/schemas/Asset",
+            "description": "The asset as it stood at this version."
           },
           "updatedAt": {
+            "description": "When the change was made.",
             "format": "date-time",
             "type": "string"
           },
           "updatedBy": {
+            "description": "Who or what made the change.",
             "type": "string"
           },
           "version": {
-            "$ref": "#/components/schemas/EntityVersion"
+            "$ref": "#/components/schemas/EntityVersion",
+            "description": "The envelope's version this snapshot was taken at."
           }
         },
         "required": [
@@ -378,6 +396,7 @@
         "description": "Who wrote this, and therefore how much it is worth.\n\n**Immutable once set.** An agent-authored memory relabelled as human-authored\ndestroys the trust model: a reader weighing a claim needs to know whether a\nperson stood behind it, and a field somebody can edit is a field that will be\nedited by a migration script. [`MemoryUpdate`] has no authorship field, so\nthere is nothing to send.",
         "oneOf": [
           {
+            "description": "A person wrote it.",
             "properties": {
               "kind": {
                 "enum": [
@@ -386,6 +405,7 @@
                 "type": "string"
               },
               "userId": {
+                "description": "The author's user id.",
                 "type": "string"
               }
             },
@@ -399,6 +419,7 @@
             "description": "An agent, named. Not \"a machine\" — which agent matters when its\nconclusions turn out to be wrong and somebody has to find the rest.",
             "properties": {
               "agentId": {
+                "description": "The authoring agent's id.",
                 "type": "string"
               },
               "kind": {
@@ -408,6 +429,7 @@
                 "type": "string"
               },
               "model": {
+                "description": "The model the agent ran on.",
                 "type": "string"
               }
             },
@@ -424,19 +446,23 @@
         "description": "One candidate, scored, with the evidence that produced the score — what\na review queue displays and what an `Ambiguous` resolution carries so a\nsteward sees why each candidate was proposed, not only that it was.",
         "properties": {
           "entity": {
+            "description": "The candidate entity.",
             "format": "uuid",
             "type": "string"
           },
           "evidence": {
+            "description": "Why the scorer reached that confidence.",
             "items": {
               "$ref": "#/components/schemas/Evidence"
             },
             "type": "array"
           },
           "fqn": {
+            "description": "The candidate's fully qualified name.",
             "type": "string"
           },
           "score": {
+            "description": "The scorer's confidence that this candidate is the same entity.",
             "format": "double",
             "type": "number"
           }
@@ -463,18 +489,21 @@
         "description": "Computed server-side by diffing before against after — never supplied by the\nclient. This is why PATCH stays DTO-shaped rather than JSON Patch: a state\ndiff describes *effect*, a patch document describes *intent*, and an audit\ntrail wants effect.",
         "properties": {
           "fieldsAdded": {
+            "description": "Fields that were absent and are now present.",
             "items": {
               "$ref": "#/components/schemas/FieldChange"
             },
             "type": "array"
           },
           "fieldsDeleted": {
+            "description": "Fields that were present and are now absent.",
             "items": {
               "$ref": "#/components/schemas/FieldChange"
             },
             "type": "array"
           },
           "fieldsUpdated": {
+            "description": "Fields whose value changed.",
             "items": {
               "$ref": "#/components/schemas/FieldChange"
             },
@@ -498,11 +527,14 @@
         "type": "string"
       },
       "CreateRelationship": {
+        "description": "The request body for creating a relationship edge.",
         "properties": {
           "relationshipType": {
+            "description": "The relationship's wire name.",
             "type": "string"
           },
           "toTableId": {
+            "description": "The relationship's target table.",
             "format": "uuid",
             "type": "string"
           }
@@ -514,17 +546,21 @@
         "type": "object"
       },
       "CreateTable": {
+        "description": "The request body for creating a table.",
         "properties": {
           "description": {
+            "description": "A human-readable description, if one was given.",
             "type": [
               "string",
               "null"
             ]
           },
           "fullyQualifiedName": {
+            "description": "The derived, globally unique address.",
             "type": "string"
           },
           "name": {
+            "description": "The table's own name.",
             "type": "string"
           }
         },
@@ -538,6 +574,7 @@
         "description": "Why something is going away, and what to use instead.",
         "properties": {
           "deprecatedAt": {
+            "description": "When the deprecation was declared.",
             "format": "date-time",
             "type": "string"
           },
@@ -575,6 +612,7 @@
             "type": "string"
           },
           "id": {
+            "description": "The owning principal's id.",
             "type": "string"
           },
           "inherited": {
@@ -582,7 +620,8 @@
             "type": "boolean"
           },
           "kind": {
-            "$ref": "#/components/schemas/OwnerKind"
+            "$ref": "#/components/schemas/OwnerKind",
+            "description": "Whether it is a user or a team."
           }
         },
         "required": [
@@ -596,11 +635,13 @@
         "description": "`Major.Minor`, starting at `0.1`.\n\nMinor for backward-compatible change (description, tags, owners); Major for\nbreaking change (a column dropped, a type changed, a rename). The split\nmatters because a consumer can subscribe to Major alone and get exactly the\nchanges that could break it.",
         "properties": {
           "major": {
+            "description": "Bumped on a breaking change.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
           "minor": {
+            "description": "Bumped on a backward-compatible change.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -616,6 +657,7 @@
         "description": "Why two entities were judged the same. Kept on the record rather than\nonly the final score, so a wrong merge is diagnosable — \"these matched on\n`SameParent` and a `0.61` name similarity\" is checkable by a steward;\n\"these scored `0.61`\" is not.",
         "oneOf": [
           {
+            "description": "The two entities' fully qualified names are identical.",
             "properties": {
               "kind": {
                 "enum": [
@@ -630,6 +672,7 @@
             "type": "object"
           },
           {
+            "description": "The two entities' fully qualified names are identical once normalized\n(case, punctuation).",
             "properties": {
               "kind": {
                 "enum": [
@@ -644,6 +687,7 @@
             "type": "object"
           },
           {
+            "description": "The two entities have the same name within a shared scope.",
             "properties": {
               "kind": {
                 "enum": [
@@ -652,6 +696,7 @@
                 "type": "string"
               },
               "scope": {
+                "description": "The scope the names were compared within.",
                 "type": "string"
               }
             },
@@ -662,6 +707,7 @@
             "type": "object"
           },
           {
+            "description": "The two entities' names scored above a similarity threshold.",
             "properties": {
               "kind": {
                 "enum": [
@@ -670,9 +716,11 @@
                 "type": "string"
               },
               "metric": {
+                "description": "The similarity metric used.",
                 "type": "string"
               },
               "value": {
+                "description": "The score the metric produced.",
                 "format": "double",
                 "type": "number"
               }
@@ -685,6 +733,7 @@
             "type": "object"
           },
           {
+            "description": "The two entities share enough structure (columns, in practice) to be\njudged the same.",
             "properties": {
               "kind": {
                 "enum": [
@@ -693,10 +742,12 @@
                 "type": "string"
               },
               "sharedColumns": {
+                "description": "How many columns the two entities share.",
                 "minimum": 0,
                 "type": "integer"
               },
               "total": {
+                "description": "The total column count the overlap was measured against.",
                 "minimum": 0,
                 "type": "integer"
               }
@@ -709,6 +760,7 @@
             "type": "object"
           },
           {
+            "description": "The two entities share a parent.",
             "properties": {
               "kind": {
                 "enum": [
@@ -723,6 +775,7 @@
             "type": "object"
           },
           {
+            "description": "The two entities came from the same source system.",
             "properties": {
               "kind": {
                 "enum": [
@@ -741,9 +794,14 @@
       "FieldChange": {
         "description": "One field's before and after. `None` on either side means the field was\nadded or removed — distinct from changed, because a consumer reacts\ndifferently to a dropped column than to a retyped one.",
         "properties": {
-          "after": {},
-          "before": {},
+          "after": {
+            "description": "The value after, or `None` if the field was removed."
+          },
+          "before": {
+            "description": "The value before, or `None` if the field was added."
+          },
           "field": {
+            "description": "The field that changed.",
             "type": "string"
           }
         },
@@ -783,23 +841,29 @@
             "type": "string"
           },
           "authorship": {
-            "$ref": "#/components/schemas/Authorship"
+            "$ref": "#/components/schemas/Authorship",
+            "description": "Who wrote it, and therefore how much it is worth."
           },
           "confidence": {
+            "description": "How sure the author is, in `[0, 1]`.",
             "format": "double",
             "type": "number"
           },
           "content": {
+            "description": "The memory itself.",
             "type": "string"
           },
           "id": {
+            "description": "The stable identifier.",
             "format": "uuid",
             "type": "string"
           },
           "kind": {
-            "$ref": "#/components/schemas/MemoryKind"
+            "$ref": "#/components/schemas/MemoryKind",
+            "description": "What kind of knowledge this is."
           },
           "links": {
+            "description": "What this memory relates to.",
             "items": {
               "$ref": "#/components/schemas/MemoryLink"
             },
@@ -854,7 +918,8 @@
         "description": "One edge from a memory to something in the catalog.",
         "properties": {
           "relation": {
-            "$ref": "#/components/schemas/LinkRelation"
+            "$ref": "#/components/schemas/LinkRelation",
+            "description": "How this memory relates to the target."
           },
           "target": {
             "description": "The asset, run, or other memory this points at.",
@@ -887,6 +952,7 @@
             "type": "object"
           },
           {
+            "description": "A person, reviewing the review queue.",
             "properties": {
               "kind": {
                 "enum": [
@@ -895,6 +961,7 @@
                 "type": "string"
               },
               "userId": {
+                "description": "The deciding user's id.",
                 "type": "string"
               }
             },
@@ -905,8 +972,10 @@
             "type": "object"
           },
           {
+            "description": "An automated agent.",
             "properties": {
               "agentId": {
+                "description": "The deciding agent's id.",
                 "type": "string"
               },
               "kind": {
@@ -916,6 +985,7 @@
                 "type": "string"
               },
               "model": {
+                "description": "The model the agent ran on.",
                 "type": "string"
               }
             },
@@ -932,31 +1002,38 @@
         "description": "The reversibility contract (decision 1, `17-entity-resolution.md`): a\nmerge is a record, not a destructive rewrite. `split_at` turns it from a\nlive merge into a historical one without deleting the evidence that\nproduced it.",
         "properties": {
           "canonical": {
+            "description": "The entity that survives the merge.",
             "format": "uuid",
             "type": "string"
           },
           "confidence": {
+            "description": "The scorer's confidence in the merge.",
             "format": "double",
             "type": "number"
           },
           "decidedAt": {
+            "description": "When the merge was decided.",
             "format": "date-time",
             "type": "string"
           },
           "decidedBy": {
-            "$ref": "#/components/schemas/MergeDecidedBy"
+            "$ref": "#/components/schemas/MergeDecidedBy",
+            "description": "Who or what decided it."
           },
           "evidence": {
+            "description": "Why the two were judged the same.",
             "items": {
               "$ref": "#/components/schemas/Evidence"
             },
             "type": "array"
           },
           "id": {
+            "description": "The stable identifier of this merge record.",
             "format": "uuid",
             "type": "string"
           },
           "merged": {
+            "description": "The entity merged into the canonical one.",
             "format": "uuid",
             "type": "string"
           },
@@ -966,6 +1043,7 @@
             "type": "integer"
           },
           "splitAt": {
+            "description": "When the merge was reversed, if it has been.",
             "format": "date-time",
             "type": [
               "string",
@@ -1066,6 +1144,7 @@
         "type": "object"
       },
       "Paging": {
+        "description": "How to fetch the page after this one.",
         "properties": {
           "after": {
             "description": "Token for the next page, or `None` on the last one. Nullness is the\nonly end-of-results signal a client gets, so it must be exact.",
@@ -1220,30 +1299,38 @@
         "type": "object"
       },
       "Relationship": {
+        "description": "A generic edge between two entities, named by kind rather than typed —\nEpic 1's walking-skeleton relationship, predating [`Asset`]'s own\ncontainment edges.",
         "properties": {
           "createdAt": {
+            "description": "When the relationship was created.",
             "format": "date-time",
             "type": "string"
           },
           "fromEntityId": {
+            "description": "The source entity.",
             "format": "uuid",
             "type": "string"
           },
           "fromEntityType": {
+            "description": "The kind of the source entity.",
             "type": "string"
           },
           "id": {
+            "description": "The stable identifier.",
             "format": "uuid",
             "type": "string"
           },
           "relationshipType": {
+            "description": "The named relationship, e.g. `feeds`.",
             "type": "string"
           },
           "toEntityId": {
+            "description": "The target entity.",
             "format": "uuid",
             "type": "string"
           },
           "toEntityType": {
+            "description": "The kind of the target entity.",
             "type": "string"
           }
         },
@@ -1286,10 +1373,12 @@
             "description": "Merged (auto-merge band) or already the same entity. `entity` is the\ncanonical id after the merge.",
             "properties": {
               "confidence": {
+                "description": "The scorer's confidence in the merge.",
                 "format": "double",
                 "type": "number"
               },
               "entity": {
+                "description": "The canonical id after the merge.",
                 "format": "uuid",
                 "type": "string"
               },
@@ -1311,6 +1400,7 @@
             "description": "Review band: nothing merged, nothing created, and here is what a\nhuman would need to decide.",
             "properties": {
               "candidates": {
+                "description": "The candidates a human would choose between.",
                 "items": {
                   "$ref": "#/components/schemas/Candidate"
                 },
@@ -1345,28 +1435,35 @@
         "type": "object"
       },
       "Table": {
+        "description": "The pre-Epic-4 table entity — the walking skeleton's own type, kept\nseparate from [`Asset`] rather than merged into it (see `TableUpdate`'s\nown history in the plans): a table created through this path never\nprojects into the graph.",
         "properties": {
           "createdAt": {
+            "description": "When the table was first created.",
             "format": "date-time",
             "type": "string"
           },
           "description": {
+            "description": "A human-readable description, if one was given.",
             "type": [
               "string",
               "null"
             ]
           },
           "fullyQualifiedName": {
+            "description": "The full dotted path from the root.",
             "type": "string"
           },
           "id": {
+            "description": "The stable identifier.",
             "format": "uuid",
             "type": "string"
           },
           "name": {
+            "description": "The table's own name.",
             "type": "string"
           },
           "updatedAt": {
+            "description": "When the table was most recently changed.",
             "format": "date-time",
             "type": "string"
           }
@@ -1381,14 +1478,17 @@
         "type": "object"
       },
       "TableUpdate": {
+        "description": "A partial update to a [`Table`]. Absent means \"not declared\".",
         "properties": {
           "description": {
+            "description": "The new description, if changing it.",
             "type": [
               "string",
               "null"
             ]
           },
           "name": {
+            "description": "The new name, if changing it.",
             "type": [
               "string",
               "null"
@@ -1398,8 +1498,10 @@
         "type": "object"
       },
       "UpsertAsset": {
+        "description": "The request body for creating or updating an asset.",
         "properties": {
           "description": {
+            "description": "A human-readable description, if one was given.",
             "type": [
               "string",
               "null"
@@ -1417,19 +1519,24 @@
             ]
           },
           "kind": {
-            "$ref": "#/components/schemas/AssetKind"
+            "$ref": "#/components/schemas/AssetKind",
+            "description": "What kind of asset this is."
           },
           "name": {
+            "description": "The asset's own name.",
             "type": "string"
           },
           "parentId": {
+            "description": "The containing asset, if any.",
             "format": "uuid",
             "type": [
               "string",
               "null"
             ]
           },
-          "properties": {}
+          "properties": {
+            "description": "Kind-specific properties."
+          }
         },
         "required": [
           "kind",
@@ -4496,6 +4603,56 @@
         "summary": "Everything the landing page needs"
       }
     },
+    "/policies": {
+      "get": {
+        "operationId": "get_policies",
+        "responses": {
+          "200": {
+            "description": "Every stored policy, with the roles it applies to"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every stored policy, with the roles it applies to"
+      },
+      "post": {
+        "operationId": "post_policies",
+        "responses": {
+          "201": {
+            "description": "Create or update a policy, replacing which roles it applies to"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create or update a policy, replacing which roles it applies to"
+      }
+    },
     "/policies/dry-run": {
       "post": {
         "operationId": "post_policies_dry-run",
@@ -4520,6 +4677,32 @@
           }
         ],
         "summary": "What a policy would do to the estate, without saving it"
+      }
+    },
+    "/policies/{name}": {
+      "delete": {
+        "operationId": "delete_policies__name_",
+        "responses": {
+          "204": {
+            "description": "Remove a policy"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Remove a policy"
       }
     },
     "/proposals": {

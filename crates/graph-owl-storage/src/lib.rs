@@ -1478,6 +1478,20 @@ pub trait Storage: Send + Sync {
     /// Every policy attached to any of these roles, deduplicated.
     async fn policies_for_roles(&self, roles: &[String]) -> Result<Vec<Policy>, StorageError>;
 
+    /// Creates or replaces a policy, and replaces which roles it applies to.
+    ///
+    /// `roles` is the complete set going forward, not an addition to whatever
+    /// was there before — the same replace-the-whole-set semantics
+    /// `Catalog::set_user_roles` uses for a user's roles. A caller that wants
+    /// to add one role to an existing policy reads its current roles first.
+    async fn upsert_policy(&self, policy: &Policy, roles: &[String]) -> Result<(), StorageError>;
+
+    /// Every stored policy, with the roles it currently applies to.
+    async fn list_policies(&self) -> Result<Vec<(Policy, Vec<String>)>, StorageError>;
+
+    /// Removes a policy and its role attachments. Returns whether one existed.
+    async fn delete_policy(&self, name: &str) -> Result<bool, StorageError>;
+
     /// Assert a lineage edge.
     ///
     /// # Errors

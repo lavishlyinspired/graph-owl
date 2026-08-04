@@ -3966,6 +3966,87 @@ impl Storage for PostgresStorage {
             .collect())
     }
 
+    async fn upsert_policy(&self, policy: &Policy, roles: &[String]) -> Result<(), StorageError> {
+        let rules = serde_json::to_value(&policy.rules)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO policies (name, rules) VALUES ($1, $2)
+             ON CONFLICT (name) DO UPDATE SET rules = EXCLUDED.rules",
+        )
+        .bind(&policy.name)
+        .bind(&rules)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        // Full replace, not an addition: a role dropped from `roles` must
+        // stop applying, which an INSERT-only upsert (like `upsert_user`'s
+        // for `user_roles`) would silently fail to do.
+        sqlx::query("DELETE FROM role_policies WHERE policy = $1")
+            .bind(&policy.name)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        for role in roles {
+            sqlx::query("INSERT INTO roles (name) VALUES ($1) ON CONFLICT DO NOTHING")
+                .bind(role)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            sqlx::query("INSERT INTO role_policies (role, policy) VALUES ($1, $2)")
+                .bind(role)
+                .bind(&policy.name)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    async fn list_policies(&self) -> Result<Vec<(Policy, Vec<String>)>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT p.name, p.rules, rp.role
+             FROM policies p LEFT JOIN role_policies rp ON rp.policy = p.name
+             ORDER BY p.name",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut policies: Vec<(Policy, Vec<String>)> = Vec::new();
+        for row in rows {
+            let name: String = row.get("name");
+            let role: Option<String> = row.get("role");
+            if let Some((_, roles)) = policies.iter_mut().find(|(p, _)| p.name == name) {
+                roles.extend(role);
+            } else {
+                let rules = serde_json::from_value(row.get("rules"))
+                    .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+                policies.push((Policy { name, rules }, role.into_iter().collect()));
+            }
+        }
+        Ok(policies)
+    }
+
+    async fn delete_policy(&self, name: &str) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM policies WHERE name = $1")
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
+    }
+
     #[tracing::instrument(name = "storage.list_assets_visible", skip_all)]
     async fn list_assets_visible(
         &self,

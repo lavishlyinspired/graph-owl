@@ -77,6 +77,7 @@ import {
   type Draft as PolicyDraft,
   type DryRun,
   type Operation,
+  type Policy,
   incomplete as policyIncomplete,
   toPolicy,
   verdict as policyVerdict,
@@ -2777,19 +2778,46 @@ function PolicyPanel() {
   const [run, setRun] = useState<DryRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState<{ policy: Policy; roles: string[] }[]>([]);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const loadSaved = useCallback(() => {
+    api
+      .policies()
+      .then((p) => {
+        if (!Array.isArray(p)) {
+          setSaveError("the server returned an unexpected shape for /policies");
+          return;
+        }
+        setSaved(p);
+        setSaveError(null);
+      })
+      .catch((e: unknown) =>
+        setSaveError(e instanceof Error ? e.message : "could not load saved policies"),
+      );
+  }, []);
+  useEffect(loadSaved, [loadSaved]);
 
   const missing = policyIncomplete(draft);
+  const parsedRoles = () => roles.split(",").map((r) => r.trim()).filter((r) => r !== "");
   const preview = () => {
     setBusy(true);
     setError(null);
     api
-      .dryRunPolicy(
-        toPolicy(draft),
-        roles.split(",").map((r) => r.trim()).filter((r) => r !== ""),
-      )
+      .dryRunPolicy(toPolicy(draft), parsedRoles())
       .then(setRun)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : "the dry-run failed"))
       .finally(() => setBusy(false));
+  };
+  const save = () => {
+    setSaving(true);
+    setSaveError(null);
+    api
+      .savePolicy(toPolicy(draft), parsedRoles())
+      .then(loadSaved)
+      .catch((e: unknown) => setSaveError(e instanceof Error ? e.message : "could not save"))
+      .finally(() => setSaving(false));
   };
 
   const OPERATIONS: Operation[] = [
@@ -2807,10 +2835,10 @@ function PolicyPanel() {
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Alert
-        type="info"
+        type="warning"
         showIcon
-        title="Policies are previewed here, not saved here"
-        description="There is no write path for policies yet — nothing in the API inserts one. Compose and dry-run to see what a policy would do; applying it is an Epic 13 surface that does not exist."
+        title="Dry-run before saving"
+        description="A policy saved without preview is a production access change made blind. Compose, dry-run to see what it would do, then save."
       />
 
       <Card size="small" title="Compose">
@@ -2889,6 +2917,9 @@ function PolicyPanel() {
             <Button type="primary" onClick={preview} loading={busy} disabled={missing.length > 0}>
               Dry run
             </Button>
+            <Button onClick={save} loading={saving} disabled={missing.length > 0}>
+              Save
+            </Button>
             {missing.length > 0 && (
               <Text type="secondary" style={{ fontSize: 13 }}>
                 still needed: {missing.join(", ")}
@@ -2900,6 +2931,76 @@ function PolicyPanel() {
 
       {error && <Alert type="error" showIcon title="Dry run failed" description={error} />}
       {run && <DryRunResult run={run} />}
+
+      {saveError && (
+        // Shared by save, load and delete — the description names the
+        // specific failure, so a generic title here does not misreport a
+        // failed delete as a failed save.
+        <Alert type="error" showIcon title="Saved policies" description={saveError} />
+      )}
+
+      <Card size="small" title={`Saved policies (${saved.length})`}>
+        <Table
+          size="small"
+          rowKey={({ policy }) => policy.name}
+          dataSource={saved}
+          pagination={false}
+          locale={{ emptyText: "No policies saved yet. Compose and save one above." }}
+          columns={[
+            {
+              title: "Policy",
+              key: "policy",
+              render: (_: unknown, { policy }: { policy: Policy; roles: string[] }) => (
+                <Space direction="vertical" size={0}>
+                  <Text strong>{policy.name}</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {policy.rules.map((r) => `${r.effect} ${r.name}`).join(", ")}
+                  </Text>
+                </Space>
+              ),
+            },
+            {
+              title: "Roles",
+              key: "roles",
+              render: (_: unknown, { roles: appliesTo }: { policy: Policy; roles: string[] }) =>
+                appliesTo.length === 0 ? (
+                  <Text type="secondary" style={{ fontSize: 13 }}>
+                    no roles — does not apply to anyone yet
+                  </Text>
+                ) : (
+                  <Space size={4} wrap>
+                    {appliesTo.map((r) => (
+                      <Tag key={r}>{r}</Tag>
+                    ))}
+                  </Space>
+                ),
+            },
+            {
+              title: "",
+              key: "actions",
+              width: 90,
+              render: (_: unknown, { policy }: { policy: Policy; roles: string[] }) => (
+                <Button
+                  size="small"
+                  type="text"
+                  danger
+                  onClick={() => {
+                    setSaveError(null);
+                    api
+                      .deletePolicy(policy.name)
+                      .then(loadSaved)
+                      .catch((e: unknown) =>
+                        setSaveError(e instanceof Error ? e.message : "could not delete"),
+                      );
+                  }}
+                >
+                  Delete
+                </Button>
+              ),
+            },
+          ]}
+        />
+      </Card>
     </Space>
   );
 }

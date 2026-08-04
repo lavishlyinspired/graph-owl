@@ -436,6 +436,33 @@ pub static ROUTES: &[Route] = &[
         200,
         true,
     ),
+    route(
+        "post",
+        "/policies",
+        "Create or update a policy, replacing which roles it applies to",
+        None,
+        None,
+        201,
+        true,
+    ),
+    route(
+        "get",
+        "/policies",
+        "Every stored policy, with the roles it applies to",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "delete",
+        "/policies/{name}",
+        "Remove a policy",
+        None,
+        None,
+        204,
+        true,
+    ),
     // Epic 31. Bodies are documented by name where a schema exists; the recall
     // and contradiction reads return composed envelopes rather than a single
     // domain type, so they carry no `response` name — the same choice the other
