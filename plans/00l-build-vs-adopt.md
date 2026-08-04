@@ -503,3 +503,38 @@ by design. Running it needs a second, harness-only interpreter translating a
 swap, and specified in `07b-engine-cypher.md`'s Slice A2 section rather than
 rushed alongside it. **Blocked is not rejected**: both the corpus and the
 harness crate are the right choice whenever that translator is built.
+
+### PackStream/Bolt server crates — checked, not adopted
+
+**4 August 2026, for Epic 7d Slice A.** Searched crates.io for a PackStream
+codec and a Bolt server framework before writing either by hand, per the
+standing rule. Candidates and why each was set aside:
+
+| Crate | Licence | Why not |
+|---|---|---|
+| `packs` | non-standard | Fails the licence gate outright |
+| `packstream` | Apache-2.0 | Last published 2019-06-20 — seven years stale, an explicit co-dependency of an abandoned Neo4j driver |
+| `boltwire` | MIT OR Apache-2.0 | A *client* driver (decision 1 rules out anything graph-owl would connect *out* with); 16 downloads |
+| `kglite-bolt-server`, `meshdb-bolt` | MIT | Named "for kglite"/"for Mesh" — built as another project's internal dependency, not offered as a general-purpose library |
+| `boltr` | MIT OR Apache-2.0 | The closest fit on paper — see below |
+
+**`boltr` got a real spike, not just a licence check**, because it is the one
+candidate that could plausibly replace this whole epic's transport and
+session layer: `BoltServer::builder(backend).serve(addr)` plus a
+`BoltBackend` trait, a `PackStream` codec, chunked framing and pluggable auth,
+all in ~38 transitive crates with no C dependency. It builds cleanly. **Not
+adopted**, on the maintenance gate specifically: 4 releases in a 7-week burst
+(20 Feb – 11 Apr 2026), nothing published or pushed since, 4 GitHub stars,
+2,509 total downloads. That is a young, effectively single-maintainer project
+with no track record past its own initial build — for a wire protocol that
+carries authentication credentials, `00i` rule 4's "ask a human when stuck"
+applies to the *decision to trust it* as much as to any code question. Worth
+revisiting if it gains real adoption or a second maintainer; recorded here so
+that reconsideration starts from what was actually checked, not from zero.
+
+**Slice A is hand-rolled against the spec instead**, and that is not a
+fallback so much as the actually-correct call: `00i` names "the published
+Bolt/PackStream spec" as an authorised source in its own right, and unlike a
+full query grammar, PackStream's type system is small — roughly a dozen
+marker-byte forms with three size classes each. The size where hand-rolling
+stopped being reasonable for Cypher (a full grammar) is not the size here.

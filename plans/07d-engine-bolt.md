@@ -1,7 +1,7 @@
 # Plan: Bolt Protocol Server (Epic 7d) ★
 
 **Branch**: feat/engine-bolt
-**Status**: Not started
+**Status**: Slice A (PackStream codec) built in `graph-owl-bolt` — every `BoltValue` variant round-trips, integers pick the smallest marker on encode and decode from any width, strings/lists/dicts/bytes are checked at each size-class boundary (tiny/8/16/32), structures carry signature and field count, truncation is `Ok(None)` not an error, and the length guard runs before the allocation it bounds. `cargo mutants` on the file: 101 caught, 2 equivalent (OR vs XOR on a nibble-packed byte where the low nibble is always zero — provably identical, not a coverage gap), 0 genuine survivors. Slices B–F not started.
 **Ships after Phase 2**: this epic requires Epic 12's authentication, so it is the one Phase-1 epic that lands later — a second listening port with no identity to bind a session to is not a thing to ship. Feature flag stays off until then.
 **Depends on**: Epic 7b (Cypher), Epic 7c (LPG projection), Epic 12 (auth), Epic 13 (authorization)
 **Crates**: **`graph-owl-bolt`** (new — wire protocol, feature-gated, off by default)
