@@ -929,7 +929,7 @@ slice.
 - [ ] **36** Reference applications (Python, published surfaces only)
 - [ ] **37a** 100k-entity scale validation
 - [ ] **37b** Backup, export, restore
-- [ ] **37c** Embeddable library, `graph-owl-storage-memory` published
+- [~] **37c** Embeddable library — **Slice A shipped** *(4 August 2026)*: `scripts/check-embedding-boundary.py`, in CI, asserts `graph-owl-core` stays I/O-free and `graph-owl-api` reaches every backend only through the `graph-owl-storage` port, never a concrete adapter — checked against the crates' real dependency sets, not the plan's stale literal list. Found and recorded rather than fixed (`00b` decision 26): `api` still pulls real I/O weight (tokio, sqlx, rdkafka, pulsar) transitively via `graph-owl-connectors`, and `Catalog::cypher_stream` needs an active tokio runtime — so `api` is not fully executor-agnostic today even though it constructs no runtime itself. Slices B–E (promoting the in-memory `Storage` fake — now ~4900 lines implementing a ~3600-line trait — to a published crate, the embedding example, docs, and publish metadata) deferred: sized as their own session, not a slice to fold in alongside this one. `graph-owl-storage-memory` is not yet published
 - [ ] **38** Analytics: degree, components, orphans, silos
 
 

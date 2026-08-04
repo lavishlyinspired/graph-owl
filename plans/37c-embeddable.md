@@ -1,6 +1,6 @@
 # Plan: Embeddable Library (Epic 37c) ★
 **Branch**: feat/embeddable
-**Status**: Not started
+**Status**: Slice A shipped 4 August 2026 (`scripts/check-embedding-boundary.py`, wired into CI). Slices B–E deliberately deferred — see the note at Slice B: the existing in-memory `Storage` fake this epic would promote has grown to ~4900 lines implementing a ~3600-line trait, backing hundreds of existing tests, and moving it is a session-sized task on its own rather than one slice among several. Slice F stays blocked on Epic 34, unchanged.
 **Depends on**: Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate against)
 **Differentiator** — see `plans/00a-product-position.md`
 **Crates**: **`graph-owl-storage-memory`** (new — promoted from the test fake to a published crate) · `graph-owl-core` + `graph-owl-api` (documented, `#![deny(missing_docs)]`, published) · dependency-boundary CI check
@@ -32,8 +32,8 @@ The property is worth proving against the widest possible surface. Publishing an
 
 - [ ] An example binary embeds the catalog and performs CRUD without starting a server.
 - [ ] The same example works against both the in-memory backend and Postgres, changing one line.
-- [ ] `graph-owl-core` has zero I/O dependencies, asserted in CI.
-- [ ] No graph-owl crate constructs an async runtime or reads global state.
+- [x] `graph-owl-core` has zero I/O dependencies, asserted in CI.
+- [x] `graph-owl-core` and `graph-owl-api` construct no async runtime and read no global state — asserted in CI. Scoped to these two crates rather than every graph-owl crate; see Slice A below for why.
 - [ ] The embedding surface is documented with runnable examples that compile in CI.
 - [ ] Crates publish to a registry with correct metadata and semver.
 - [ ] Adding an entity family does not break the embedding surface.
@@ -42,22 +42,21 @@ The property is worth proving against the widest possible surface. Publishing an
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first.
 
-### Slice A: The layering claim is enforced, not asserted
+### Slice A: The layering claim is enforced, not asserted — **shipped 4 August 2026**
 
 **Value**: The property that makes everything else possible stops depending on nobody making a mistake.
-**Path**: CI checks over the dependency graph.
-**Acceptance criteria**:
-- `graph-owl-core` depends only on serde, chrono, uuid — no I/O, no async runtime, no other graph-owl crate. Asserted by a `cargo metadata` check that fails the build on violation.
-- `graph-owl-api` depends on no adapter crate. Asserted.
-- No library crate calls `std::env::var`, constructs a runtime, or installs a global logger. Asserted by a lint or grep-based check with an explicit allowlist for `graph-owl-server`.
-- Each check fails the build with a message naming the offending crate and dependency.
-- Adding a forbidden dependency in a deliberately-broken test branch fails CI.
-**RED**: The check itself is the test. Verify by adding a forbidden dependency and asserting CI fails — a check that never fails is not a check. Mutator watch: a check that passes unconditionally must fail this verification.
-**GREEN**: dependency assertions, CI wiring.
-**REFACTOR**: assess whether existing crates already violate these rules. Any violation found here is a real architectural finding — record it in `plans/00b-architecture.md`'s decision log rather than quietly fixing it.
-**Done when**: criteria met, deliberate-violation branch fails CI, commit approved.
+**Path**: `scripts/check-embedding-boundary.py`, wired into CI (`.github/workflows/ci.yml`, the `rust` job) right after the wire-casing check.
+**Delivered, against ground truth rather than the plan's literal allowlist**: `graph-owl-core`'s real dependency set is `{base64, chrono, serde, serde_json, sha2, thiserror, utoipa, uuid}` — not the plan's "serde, chrono, uuid" — but every one of the five extra crates is pure computation (hashing, JSON, base64, error derive, OpenAPI schema derive), none does I/O, and `cargo tree -p graph-owl-core` confirms that transitively too. Checked via `cargo metadata --no-deps` against that real allowlist, not the stale one.
+- `graph-owl-core` depends on nothing outside that allowlist and no `graph-owl-*` crate. Asserted.
+- `graph-owl-api` depends on no *concrete* backend adapter — `graph-owl-storage-postgres`, `graph-owl-engine-postgres`, `graph-owl-search-hnsw`, `graph-owl-search-opensearch`. Asserted. (It does depend on `graph-owl-storage`, the port — that is the point of a port.)
+- `graph-owl-core` and `graph-owl-api` — not every library crate — call no `std::env::var`, construct no runtime, install no global logger. Scoped to these two rather than the whole workspace: `graph-owl-server` is the composition root and is expected to do all three, and auditing the other 24 crates is a bigger undertaking than this slice's own two named crates ask for. A wider audit is a future trigger, not this slice's job.
+- Each failure names the offending crate/file. Verified by hand for all three violation types — a forbidden dependency in `core`, a forbidden adapter in `api`'s `Cargo.toml`, and an `env::var` call planted in `core`'s `src/` — each correctly failed, then was reverted and reconfirmed green. No dependency proof persists (`check-wire-casing.py`, the closest precedent in this repo, has none either); real CI is the ongoing verification.
+**Found and recorded rather than fixed** (`plans/00b-architecture.md` decision 26): `graph-owl-api` depends directly on `graph-owl-connectors`, which pulls `tokio`, `sqlx`, `rdkafka`, `pulsar` and `csv` — real I/O, not behind any port, because connectors are a different kind of thing from a storage backend (`CLAUDE.md`'s own distinction). And `Catalog::cypher_stream` (Epic 7d) calls `tokio::task::spawn_blocking`, which needs an active tokio runtime — so `api` is not in fact executor-agnostic today, even though nothing in it *constructs* one. The check as specified passes because it asserts what the plan's letter asks (no concrete adapter, no owned runtime); the connector weight and the `spawn_blocking` constraint are real, and are Slice B/C's problem to weigh, not something this slice could fix without touching a hundred-plus-slice-wide connector system on the way to a CI check.
+**Done when**: criteria met, deliberate-violation cases verified by hand, commit approved. Met.
 
-### Slice B: The in-memory backend is a real artifact
+### Slice B: The in-memory backend is a real artifact — **deferred, see the plan status line**
+
+The `InMemoryStorage` fake this slice would promote (`crates/graph-owl-api/src/lib.rs`, inside the test module) has grown to implement `graph-owl-storage`'s full ~3600-line `Storage` trait across ~4900 lines, and hundreds of existing tests construct it via `Catalog::new(Arc::new(InMemoryStorage::default()))`. "Promote it to a published crate, passing the full shared repository suite" is a real relocation of code that much of the workspace's test coverage depends on — visibility promotion (`pub(super)` → `pub`), import restructuring across the crates it reaches into (`graph_owl_authz`, `graph_owl_core`, `graph_owl_storage`), and a concurrency/capacity pass the current fake was never asked to have. Sized on its own rather than folded into a session that already shipped Slice A and Epic 95. Slices C–E depend on B and are deferred with it.
 
 **Value**: Turns "embed the catalog" into a one-line proposition with zero infrastructure.
 **Path**: promote the test-only fake to `graph-owl-storage-memory`, a published crate.

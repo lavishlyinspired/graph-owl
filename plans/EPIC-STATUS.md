@@ -59,25 +59,25 @@ is the condition that index exists to catch.
 | **19** | 6 | [`19-streaming.md`](19-streaming.md) | In progress | 5/6 (+1 partial) | Epic 16 (ingestion contract), Epic 18 (dedup and ordering machinery) |
 | **20** | 6 | [`20-metadata-as-code.md`](20-metadata-as-code.md) | **Shipped** | 2/2 | Epic 15 (idempotent upsert and reconciliation machinery) |
 | **21** | 6 | [`21-document-ingestion.md`](21-document-ingestion.md) | **Shipped** | 3/3 | Epic 16 (ingestion), Epic 17 (mention resolution) |
-| **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | **Shipped** | 9/9 | Epic 3 (the envelope's `extension` field) |
-| **23** | 7 | [`23-domains.md`](23-domains.md) | **Shipped** | 11/11 | Epic 11 (domains and products are owned) |
+| **22** | 7 | [`22-custom-properties.md`](22-custom-properties.md) | **Shipped** | 5/5 | Epic 3 (the envelope's `extension` field) |
+| **23** | 7 | [`23-domains.md`](23-domains.md) | **Shipped** | 7/7 | Epic 11 (domains and products are owned) |
 | **24** | 7 | [`24-business-semantics.md`](24-business-semantics.md) | In progress | 8/9 (+1 partial) | Epic 2 (FQN derivation and the hierarchy terms attach to), Epic 11 (term review… |
-| **25** | 7 | [`25-classification.md`](25-classification.md) | In progress | 12/13 | Epic 3 (envelope carries `tags`), Epic 11 (term reviewers are users) |
-| **26** | 7 | [`26-lifecycle-certification.md`](26-lifecycle-certification.md) | In progress | 6/7 (+1 partial) | Epic 11 (issuers are principals), Epic 24 (metrics are certifiable) |
-| **27** | 7 | [`27-contracts.md`](27-contracts.md) | In progress | 3/5 (+1 partial) | Epic 2 (schemas to guarantee), Epic 3 (version diffs detect breakage) |
-| **28** | 7 | [`28-usage.md`](28-usage.md) | In progress | 4/5 | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
-| **29** | 7 | [`29-lineage.md`](29-lineage.md) | In progress | 8/12 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
-| **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | In progress | 11/12 | Epic 29 (lineage, for propagating trust signals) |
+| **25** | 7 | [`25-classification.md`](25-classification.md) | In progress | 8/9 | Epic 3 (envelope carries `tags`), Epic 11 (term reviewers are users) |
+| **26** | 7 | [`26-lifecycle-certification.md`](26-lifecycle-certification.md) | In progress | 7/8 (+1 partial) | Epic 11 (issuers are principals), Epic 24 (metrics are certifiable) |
+| **27** | 7 | [`27-contracts.md`](27-contracts.md) | In progress | 4/6 (+1 partial) | Epic 2 (schemas to guarantee), Epic 3 (version diffs detect breakage) |
+| **28** | 7 | [`28-usage.md`](28-usage.md) | In progress | 5/6 | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
+| **29** | 7 | [`29-lineage.md`](29-lineage.md) | In progress | 9/13 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
+| **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | In progress | 7/8 | Epic 29 (lineage, for propagating trust signals) |
 | **31** | 5 | [`31-memory.md`](31-memory.md) | In progress | 2/4 (+1 partial) | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
 | **32** | 5 | [`32-agent-capabilities.md`](32-agent-capabilities.md) | In progress | 1/2 (+1 partial) | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
-| **33** | 9 | [`33-ontology-packs.md`](33-ontology-packs.md) | Not started | 0/5 | Epic 24 (glossary and taxonomy model), Epic 9 (standards import) |
-| **34** | 9 | [`34-entity-expansion.md`](34-entity-expansion.md) | Not started | — | Epic 8 (each new type indexes for free — the property being demonstrated), Epic… |
-| **35** | 9 | [`35-collaboration.md`](35-collaboration.md) | Not started | — | Epic 11 (users), Epic 12 (real identity on posts) |
-| **36** | 9 | [`36-reference-apps.md`](36-reference-apps.md) | Not started | 0/5 | Epic 14 (MCP), Epic 16 (SDKs), Epic 29 (graph API) |
-| **37a** | 9 | [`37a-scale.md`](37a-scale.md) | Not started | 0/5 | Epic 34 (a realistic entity mix to generate) |
-| **37b** | 9 | [`37b-portability.md`](37b-portability.md) | Not started | — | Epic 3 (history is part of what must survive) |
-| **37c** | 9 | [`37c-embeddable.md`](37c-embeddable.md) | Not started | — | Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate again… |
-| **38** | 9 | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | 0/5 | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
+| **33** | 9 | [`33-ontology-packs.md`](33-ontology-packs.md) | Not started | 0/1 | Epic 24 (glossary and taxonomy model), Epic 9 (standards import) |
+| **34** | 9 | [`34-entity-expansion.md`](34-entity-expansion.md) | Not started | 0/1 | Epic 8 (each new type indexes for free — the property being demonstrated), Epic… |
+| **35** | 9 | [`35-collaboration.md`](35-collaboration.md) | Not started | 0/1 | Epic 11 (users), Epic 12 (real identity on posts) |
+| **36** | 9 | [`36-reference-apps.md`](36-reference-apps.md) | Not started | 0/1 | Epic 14 (MCP), Epic 16 (SDKs), Epic 29 (graph API) |
+| **37a** | 9 | [`37a-scale.md`](37a-scale.md) | Not started | 0/1 | Epic 34 (a realistic entity mix to generate) |
+| **37b** | 9 | [`37b-portability.md`](37b-portability.md) | Not started | 0/1 | Epic 3 (history is part of what must survive) |
+| **37c** | 9 | [`37c-embeddable.md`](37c-embeddable.md) | In progress | 0/1 (+1 partial) | Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate again… |
+| **38** | 9 | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | 0/1 | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
 | **39** | 1 | [`39-ui-foundation.md`](39-ui-foundation.md) | **Shipped** | 23/23 | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
 | **40** | 3 | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | **Shipped** | 11/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
 | **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | In progress | 10/14 (+1 partial) | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
@@ -374,10 +374,6 @@ is the condition that index exists to catch.
 ### Epic 22 — Custom Properties *(Demo 7)*
 
 - [x] Custom properties — typed definitions, per-key PATCH merge, guarded evolution, indexed f
-- [x] 26
-- [x] 27
-- [x] 28
-- [x] 29
 - [x] Typed, per-entity-type property definitions
 - [x] Values validated on write
 - [x] Definitions evolve safely
@@ -386,10 +382,6 @@ is the condition that index exists to catch.
 ### Epic 23 — Domains & Data Products *(Demo 7)*
 
 - [x] Domains and data products — accountability axis with inheritance, consumable bundles *(3
-- [x] 26
-- [x] 27
-- [x] 28
-- [x] 29
 - [x] Domains nest, and the paths move with them
 - [x] One asset, one domain, resolved by walking up
 - [x] The cascade is free, and the plan's criteria for it did not survive
@@ -412,10 +404,6 @@ is the condition that index exists to catch.
 ### Epic 25 — Tags & Classification *(Demo 7)*
 
 - [x] Classifications with mutual exclusivity — the PII taxonomy, with provenance and a reject
-- [x] 26
-- [x] 27
-- [x] 28
-- [x] 29
 - [x] Three of nine slices were already built.
 - [x] Provenance from day one
 - [x] Exclusivity is scoped to one classification
@@ -427,6 +415,7 @@ is the condition that index exists to catch.
 
 ### Epic 26 — Lifecycle & Certification *(Demo 7)*
 
+- [x] Lifecycle and certification with issuer and expiry, status computed on read *(3 August 2
 - [x] Two orthogonal axes
 - [x] The state machine refuses the shortcuts
 - [x] A successor is a reference, not prose
@@ -437,6 +426,7 @@ is the condition that index exists to catch.
 
 ### Epic 27 — Data Contracts *(Demo 7)*
 
+- [x] Data contracts and compatibility — the 24-cell matrix, breaches that report rather than 
 - [x] The compatibility matrix, written out cell by cell
 - [x] Two rules outside the matrix, applied first.
 - [x] A breach reports and never blocks
@@ -445,6 +435,7 @@ is the condition that index exists to catch.
 
 ### Epic 28 — Usage & Popularity *(Demo 7)*
 
+- [x] Usage and popularity signals — rollups, trend with a volume floor, query text dropped at
 - [x] Observations ingest, rollups fold in incrementally
 - [x] Popularity computed on read
 - [x] Query text is dropped at the boundary
@@ -461,6 +452,7 @@ is the condition that index exists to catch.
 - [ ] Column-level lineage — the legality table already admits `column feeds column`; nothing 
 - [ ] Connector-asserted lineage reconciles with curated edges → the two-source model above is
 - [ ] Lineage survives entity deletion → today a hard delete cascades the edge away; a tombsto
+- [x] Lineage: table and column, with source-scoped reconciliation *(Slices A–C 29 Jul, D–F 3 
 - [x] Column-level mappings, many-to-one
 - [x] Source-scoped reconciliation
 - [x] Edges survive soft delete and return on restore
@@ -468,10 +460,6 @@ is the condition that index exists to catch.
 
 ### Epic 30 — Quality Signals & Incidents *(Demo 7)*
 
-- [x] 26
-- [x] 27
-- [x] 28
-- [x] 29
 - [x] Quality: definitions, suites, results, derived health *(3 August 2026)*
 - [x] The boundary held
 - [x] Definitions, cases and suites
@@ -496,33 +484,33 @@ is the condition that index exists to catch.
 ### Epic 33 — Domain Ontology Packs *(Demo 9)*
 
 - [ ] Domain ontology packs — a banking/BFSI pack
-- [ ] 34
-- [ ] 35
-- [ ] 37b
-- [ ] 37c
+
+### Epic 34 — Entity Expansion *(Demo 9)*
+
+- [ ] Entity expansion: dashboards, pipelines, topics, models, APIs
+
+### Epic 35 — Collaboration *(Demo 9)*
+
+- [ ] Collaboration: threads and proposals
 
 ### Epic 36 — Reference Applications *(Demo 9)*
 
-- [ ] 34
-- [ ] 35
 - [ ] Reference applications (Python, published surfaces only)
-- [ ] 37b
-- [ ] 37c
 
 ### Epic 37a — Scale Validation *(Demo 9)*
 
-- [ ] 34
-- [ ] 35
 - [ ] 100k-entity scale validation
-- [ ] 37b
-- [ ] 37c
+
+### Epic 37b — Backup & Portability *(Demo 9)*
+
+- [ ] Backup, export, restore
+
+### Epic 37c — Embeddable Library ★ *(Demo 9)*
+
+- [~] Embeddable library — **Slice A shipped** *(4 August 2026)*: `scripts/check-embedding-bou
 
 ### Epic 38 — Graph Analytics *(Demo 9)*
 
-- [ ] 34
-- [ ] 35
-- [ ] 37b
-- [ ] 37c
 - [ ] Analytics: degree, components, orphans, silos
 
 ### Epic 39 — Console Foundation, Discovery & Entity Pages *(Demo 1)*

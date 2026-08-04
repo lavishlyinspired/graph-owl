@@ -45,6 +45,14 @@ jobs:
       - name: wire casing
         run: python3 scripts/check-wire-casing.py
 
+      # Epic 37c Slice A: `graph-owl-core` and `graph-owl-api` stay
+      # embeddable — no I/O dependency in `core`, no concrete backend
+      # adapter in `api`, neither crate owns a runtime or reads the
+      # environment. `cargo metadata --no-deps`, not a build, so it costs
+      # nothing beyond the checkout already paid for.
+      - name: embedding boundary
+        run: python3 scripts/check-embedding-boundary.py
+
       - name: clippy
         # `-A clippy::pedantic` and not a bare `-D warnings`. The workspace sets
         # `all = "warn", pedantic = "warn"` deliberately: pedantic is read as

@@ -34,6 +34,40 @@ def epic_numbers(title: str) -> list[str]:
     return re.findall(r"\d+[a-z]?", match.group(1))
 
 
+def expand_epic_range(text: str) -> list[str]:
+    """'22, 23, 25–30' -> ['22','23','25','26','27','28','29','30'].
+    '37a–c' -> ['37a','37b','37c']. A lone token expands to itself.
+
+    Found needed alongside the terminator fix above: that fix stopped a
+    heading's own capture from being truncated at the first dash, but the
+    numbers were still only ever *read*, never *expanded* — so
+    'Epics 22, 23, 25–30' correctly captured the text '25–30' and then
+    extracted just its two endpoints, 25 and 30. Epics 26-29 then failed
+    every `bold in current` check on this heading's own checkboxes and fell
+    through to the old every-epic-in-heading fallback, corrupting 22/23/25/30
+    with four bogus entries apiece rather than 26-29 getting their own.
+    """
+    numbers = []
+    for token in re.split(r",\s*|\s*/\s*", text.strip()):
+        token = token.strip()
+        if not token:
+            continue
+        span = re.fullmatch(r"(\d+)([a-z]?)\s*[–—-]\s*(\d*)([a-z]?)", token)
+        if not span:
+            single = re.fullmatch(r"\d+[a-z]?", token)
+            if single:
+                numbers.append(token)
+            continue
+        start_digits, start_letter, end_digits, end_letter = span.groups()
+        if start_letter or end_letter:
+            # An alpha-suffix range on one base number: 37a-c.
+            lo, hi = start_letter or "a", end_letter or start_letter
+            numbers.extend(f"{start_digits}{chr(c)}" for c in range(ord(lo), ord(hi) + 1))
+        else:
+            numbers.extend(str(n) for n in range(int(start_digits), int(end_digits) + 1))
+    return list(dict.fromkeys(numbers))  # de-duplicated, order preserved
+
+
 def plans_by_epic() -> dict[str, dict]:
     """Every epic number mapped to the plan that owns it."""
     owners: dict[str, dict] = {}
@@ -84,7 +118,7 @@ def slices_by_epic() -> dict[str, list[tuple[str, str]]]:
             r"^###\s+Epics?\s+([0-9a-z,\s/–—-]+?)(?:\s+[—–]\s|\s*$)", line
         )
         if heading:
-            current = re.findall(r"\d+[a-z]?", heading.group(1))
+            current = expand_epic_range(heading.group(1))
             pending_block = False
             continue
         if line.startswith("### ") or line.startswith("## "):
