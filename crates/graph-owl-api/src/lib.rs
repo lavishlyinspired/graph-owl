@@ -7349,6 +7349,54 @@ impl Catalog {
         }
     }
 
+    /// Mark a memory as no longer believed, without replacing it.
+    ///
+    /// **Idempotent, not a conflict.** A second retraction's goal — "this
+    /// memory no longer applies" — is already true, matching the
+    /// idempotent-delete convention the rest of this facade uses; unlike
+    /// `supersede_memory`, there is no caller-supplied replacement that
+    /// could fail to apply, so there is nothing a second call could get
+    /// wrong. The *original* reason is returned either way — a second call
+    /// does not get to rewrite history.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the memory does not exist. `Validation` if the reason
+    /// is blank. `Storage` if the write fails.
+    #[tracing::instrument(name = "catalog.retract_memory", skip_all)]
+    pub async fn retract_memory(
+        &self,
+        id: Uuid,
+        reason: &str,
+    ) -> Result<graph_owl_core::memory::Memory, CatalogError> {
+        if reason.trim().is_empty() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "reason",
+                FieldErrorCode::Required,
+                "a retraction needs a reason so a later reader can act on it",
+            )]));
+        }
+        match self.storage.retract_memory(id, reason).await? {
+            graph_owl_storage::RetractOutcome::Retracted(memory)
+            | graph_owl_storage::RetractOutcome::AlreadyRetracted(memory) => Ok(memory),
+            graph_owl_storage::RetractOutcome::NotFound => Err(CatalogError::NotFound),
+        }
+    }
+
+    /// Every memory matching a cross-entity search, and the total before
+    /// paging.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    #[tracing::instrument(name = "catalog.search_memories", skip_all)]
+    pub async fn search_memories(
+        &self,
+        filter: &graph_owl_storage::MemorySearchFilter,
+    ) -> Result<(Vec<graph_owl_core::memory::Memory>, i64), CatalogError> {
+        Ok(self.storage.search_memories(filter).await?)
+    }
+
     /// Every open contradiction about a subject, declared and candidate.
     ///
     /// **Nothing is resolved and nothing is hidden.** The pair is reported; a

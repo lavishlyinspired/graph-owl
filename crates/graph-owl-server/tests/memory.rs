@@ -708,6 +708,212 @@ async fn an_absent_memory_is_a_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+// ---- Epic 41 Slice E: retraction, and cross-entity search ----
+
+#[tokio::test]
+async fn a_memory_can_be_retracted_and_the_reason_is_returned() {
+    let (app, _database, _) = test_app().await;
+    let table = subject(&app, "orders").await;
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/memories",
+        Some(memory_body("Refunds are included.", &table)),
+    )
+    .await;
+    let id = created["id"].as_str().expect("an id").to_string();
+
+    let (status, retracted) = send(
+        &app,
+        "POST",
+        &format!("/memories/{id}/retract"),
+        Some(json!({ "reason": "confirmed wrong by finance" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{retracted}");
+    assert!(retracted["retractedAt"].is_string(), "{retracted}");
+    assert_eq!(retracted["retractionReason"], "confirmed wrong by finance");
+}
+
+/// Retraction is never a delete: the row stays readable afterward, matching
+/// how a superseded memory stays readable.
+#[tokio::test]
+async fn a_retracted_memory_is_still_readable() {
+    let (app, _database, _) = test_app().await;
+    let table = subject(&app, "orders").await;
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/memories",
+        Some(memory_body("Refunds are included.", &table)),
+    )
+    .await;
+    let id = created["id"].as_str().expect("an id").to_string();
+    send(
+        &app,
+        "POST",
+        &format!("/memories/{id}/retract"),
+        Some(json!({ "reason": "no longer true" })),
+    )
+    .await;
+
+    let (status, found) = send(&app, "GET", &format!("/memories/{id}"), None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(found["id"], id);
+    assert!(found["retractedAt"].is_string());
+}
+
+#[tokio::test]
+async fn retracting_without_a_reason_is_a_400() {
+    let (app, _database, _) = test_app().await;
+    let table = subject(&app, "orders").await;
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/memories",
+        Some(memory_body("Refunds are included.", &table)),
+    )
+    .await;
+    let id = created["id"].as_str().expect("an id").to_string();
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/memories/{id}/retract"),
+        Some(json!({ "reason": "" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+/// A second retraction is not an error, and it does not get to rewrite the
+/// reason history already recorded — the same idempotent-delete convention
+/// the rest of the facade uses.
+#[tokio::test]
+async fn retracting_an_already_retracted_memory_keeps_the_original_reason() {
+    let (app, _database, _) = test_app().await;
+    let table = subject(&app, "orders").await;
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/memories",
+        Some(memory_body("Refunds are included.", &table)),
+    )
+    .await;
+    let id = created["id"].as_str().expect("an id").to_string();
+    send(
+        &app,
+        "POST",
+        &format!("/memories/{id}/retract"),
+        Some(json!({ "reason": "first reason" })),
+    )
+    .await;
+
+    let (status, second) = send(
+        &app,
+        "POST",
+        &format!("/memories/{id}/retract"),
+        Some(json!({ "reason": "second reason" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["retractionReason"], "first reason");
+}
+
+#[tokio::test]
+async fn retracting_an_absent_memory_is_a_404() {
+    let (app, _database, _) = test_app().await;
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/memories/{}/retract", uuid::Uuid::new_v4()),
+        Some(json!({ "reason": "cleanup" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cross_entity_search_finds_memories_across_different_subjects() {
+    let (app, _database, _) = test_app().await;
+    let orders = subject(&app, "orders").await;
+    let payments = subject(&app, "payments").await;
+    send(
+        &app,
+        "POST",
+        "/memories",
+        Some(memory_body("Orders are append-only.", &orders)),
+    )
+    .await;
+    send(
+        &app,
+        "POST",
+        "/memories",
+        Some(memory_body("Payments settle T+1.", &payments)),
+    )
+    .await;
+
+    let (status, results) = send(&app, "GET", "/memories", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{results}");
+    assert_eq!(results["total"], 2, "{results}");
+    assert_eq!(results["data"].as_array().expect("data").len(), 2);
+}
+
+#[tokio::test]
+async fn search_filters_by_minimum_confidence() {
+    let (app, _database, _) = test_app().await;
+    let table = subject(&app, "orders").await;
+    let mut low = memory_body("A guess.", &table);
+    low["confidence"] = json!(0.2);
+    send(&app, "POST", "/memories", Some(low)).await;
+    let mut high = memory_body("A near-certainty.", &table);
+    high["confidence"] = json!(0.95);
+    send(&app, "POST", "/memories", Some(high)).await;
+
+    let (status, results) = send(&app, "GET", "/memories?minConfidence=0.5", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{results}");
+    assert_eq!(results["total"], 1, "{results}");
+    assert_eq!(results["data"][0]["content"], "A near-certainty.");
+}
+
+/// Retracted memories are excluded by default, even from the admin search —
+/// the working view should not be cluttered with what nobody believes any
+/// more, and `includeRetracted=true` is how an admin asks for them anyway.
+#[tokio::test]
+async fn search_excludes_retracted_memories_unless_asked_for() {
+    let (app, _database, _) = test_app().await;
+    let table = subject(&app, "orders").await;
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/memories",
+        Some(memory_body("Refunds are included.", &table)),
+    )
+    .await;
+    let id = created["id"].as_str().expect("an id").to_string();
+    send(
+        &app,
+        "POST",
+        &format!("/memories/{id}/retract"),
+        Some(json!({ "reason": "wrong" })),
+    )
+    .await;
+
+    let (_, excluded) = send(&app, "GET", "/memories", None).await;
+    assert_eq!(excluded["total"], 0, "{excluded}");
+
+    let (_, included) = send(&app, "GET", "/memories?includeRetracted=true", None).await;
+    assert_eq!(included["total"], 1, "{included}");
+}
+
 // ---- Epic 31: a person, not just `system`, authoring a memory ----
 //
 // Every fixture above runs unauthenticated, which `test_app()` resolves to

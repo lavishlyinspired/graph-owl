@@ -302,9 +302,10 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         // asset, because "what do we know about this table" is the question, and
         // a client that has an asset id should not have to know a second noun to
         // ask it.
-        .route("/memories", post(create_memory))
+        .route("/memories", post(create_memory).get(search_memories))
         .route("/memories/{id}", get(get_memory))
         .route("/memories/{id}/supersede", post(supersede_memory))
+        .route("/memories/{id}/retract", post(retract_memory))
         // Epic 17 Slice G: mention resolution. `{id}` is the mention's
         // source.
         .route("/memories/{id}/mentions", post(resolve_mention))
@@ -4414,6 +4415,82 @@ async fn supersede_memory(
 
     catalog.supersede_memory(id, &replacement).await?;
     Ok((StatusCode::CREATED, Json(memory_body(&replacement))))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetractMemoryRequest {
+    reason: String,
+}
+
+impl ValidateBody for RetractMemoryRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Retract a memory without replacing it — Epic 41 Slice E.
+///
+/// Distinct from `supersede`: a correction replaces a memory with a better
+/// one, a retraction says the memory is no longer believed and there may be
+/// nothing to replace it with. Never a delete — the row stays readable,
+/// `retractedAt`/`retractionReason` set on it.
+async fn retract_memory(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<RetractMemoryRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let memory = catalog.retract_memory(id, &payload.reason).await?;
+    Ok(Json(memory_body(&memory)))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MemorySearchQuery {
+    author: Option<String>,
+    min_confidence: Option<f64>,
+    max_confidence: Option<f64>,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    include_superseded: bool,
+    #[serde(default)]
+    include_retracted: bool,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+/// Cross-entity memory search, for administration — Epic 41 Slice E.
+///
+/// **Defaults to excluding retracted memories**, the opposite default from
+/// the read path everywhere else in this epic: administration is the one
+/// place a retracted memory needs to stay findable at all, but the working
+/// view should not be cluttered with what nobody believes any more.
+async fn search_memories(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppQuery(query): AppQuery<MemorySearchQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let filter = graph_owl_storage::MemorySearchFilter {
+        author: query.author,
+        min_confidence: query.min_confidence,
+        max_confidence: query.max_confidence,
+        since: query.since,
+        until: query.until,
+        include_superseded: query.include_superseded,
+        include_retracted: query.include_retracted,
+        limit: query.limit.unwrap_or(50),
+        offset: query.offset.unwrap_or(0),
+    };
+    let (memories, total) = catalog.search_memories(&filter).await?;
+    Ok(Json(json!({
+        "data": memories.iter().map(memory_body).collect::<Vec<_>>(),
+        "total": total,
+    })))
 }
 
 #[derive(Debug, serde::Deserialize)]

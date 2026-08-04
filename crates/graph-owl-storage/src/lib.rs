@@ -221,6 +221,51 @@ pub enum SupersedeOutcome {
     },
 }
 
+/// What retracting a memory did.
+///
+/// Idempotency has the same shape as [`SupersedeOutcome`]'s and for the same
+/// reason: a second retraction is not an error, but silently reporting
+/// success a second time would hide that the reason given this time was
+/// never recorded — so the *first* retraction's reason is what a caller gets
+/// back either way.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RetractOutcome {
+    /// Retracted, returned in full.
+    Retracted(Memory),
+    NotFound,
+    /// Already retracted. Carries the original retraction, not the reason
+    /// this call supplied — a second call does not get to rewrite history.
+    AlreadyRetracted(Memory),
+}
+
+/// What slice of memories a cross-entity search wants — Epic 41 Slice E.
+///
+/// Every field a filter, `None`/`false` meaning "do not narrow on this" —
+/// the same shape [`ReviewQueueFilter`] uses, for the same reason: a search
+/// with every filter absent is "everything", not an error.
+#[derive(Debug, Clone, Default)]
+pub struct MemorySearchFilter {
+    /// A user id or agent id — whichever authored it. Matches either
+    /// column, because a caller searching "what did Asha write" does not
+    /// know or care which authorship shape backs the match.
+    pub author: Option<String>,
+    pub min_confidence: Option<f64>,
+    pub max_confidence: Option<f64>,
+    /// `as_of >= since`.
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// `as_of <= until`.
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+    /// `false` — the default — excludes superseded memories, matching
+    /// [`Storage::memories_about`]'s own default.
+    pub include_superseded: bool,
+    /// `false` — the default — excludes retracted memories. Administration
+    /// is the one place a retracted memory needs to stay findable at all,
+    /// which is why this defaults the other way from every other read.
+    pub include_retracted: bool,
+    pub limit: usize,
+    pub offset: usize,
+}
+
 /// Whether a follow created an edge or found one already there.
 ///
 /// Distinguished so a caller can report honestly, not so it can fail: both are
@@ -2073,6 +2118,29 @@ pub trait Storage: Send + Sync {
         original: Uuid,
         replacement: &Memory,
     ) -> Result<SupersedeOutcome, StorageError>;
+
+    /// Mark a memory as no longer believed, without replacing it.
+    ///
+    /// Never a delete — the retracted row stays readable, matching every
+    /// other retraction in this schema.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn retract_memory(&self, id: Uuid, reason: &str) -> Result<RetractOutcome, StorageError>;
+
+    /// Every memory matching a cross-entity search, and the total before
+    /// paging — the same `(rows, total)` shape [`Self::list_review_queue`]
+    /// returns, for the same reason: a filtered count a page cannot show
+    /// answers "is there more" without a second round trip.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn search_memories(
+        &self,
+        filter: &MemorySearchFilter,
+    ) -> Result<(Vec<Memory>, i64), StorageError>;
 
     /// Record what a human decided about a candidate contradiction.
     ///

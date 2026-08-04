@@ -485,6 +485,61 @@ export const api = {
     }),
   deletePolicy: (name: string) =>
     request<void>(`/policies/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  /** What we know about a subject, best first, each with its staleness and
+   *  score decomposition. Entity-scoped — the Knowledge tab's own read. */
+  recallMemories: (subjectId: string, query = "", includeSuperseded = false) =>
+    request<import("./memory/memory").RecalledMemory[]>(
+      `/assets/${encodeURIComponent(subjectId)}/memories?q=${encodeURIComponent(query)}` +
+        (includeSuperseded ? "&includeSuperseded=true" : ""),
+    ),
+  createMemory: (body: {
+    kind: import("./memory/memory").Memory["kind"];
+    content: string;
+    summary?: string | null;
+    confidence?: number;
+    links: import("./memory/memory").MemoryLink[];
+  }) => request<import("./memory/memory").Memory>("/memories", { method: "POST", body: JSON.stringify(body) }),
+  supersedeMemory: (
+    id: string,
+    body: {
+      kind: import("./memory/memory").Memory["kind"];
+      content: string;
+      summary?: string | null;
+      confidence?: number;
+      links: import("./memory/memory").MemoryLink[];
+    },
+  ) =>
+    request<import("./memory/memory").Memory>(`/memories/${encodeURIComponent(id)}/supersede`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  retractMemory: (id: string, reason: string) =>
+    request<import("./memory/memory").Memory>(`/memories/${encodeURIComponent(id)}/retract`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
+  /** Cross-entity search over every memory, for administration. Retracted
+   *  memories are excluded unless asked for — the working view should not
+   *  be cluttered with what nobody believes any more. */
+  searchMemories: (filter: {
+    author?: string;
+    minConfidence?: number;
+    maxConfidence?: number;
+    since?: string;
+    until?: string;
+    includeRetracted?: boolean;
+  }) => {
+    const params = new URLSearchParams();
+    if (filter.author) params.set("author", filter.author);
+    if (filter.minConfidence !== undefined) params.set("minConfidence", String(filter.minConfidence));
+    if (filter.maxConfidence !== undefined) params.set("maxConfidence", String(filter.maxConfidence));
+    if (filter.since) params.set("since", filter.since);
+    if (filter.until) params.set("until", filter.until);
+    if (filter.includeRetracted) params.set("includeRetracted", "true");
+    return request<{ data: import("./memory/memory").Memory[]; total: number }>(
+      `/memories?${params.toString()}`,
+    );
+  },
   /** What a connector needs configured, as its own JSON Schema — so a hundred
    *  connectors do not become a hundred hand-written forms. */
   connectorSchema: (connector: string) =>

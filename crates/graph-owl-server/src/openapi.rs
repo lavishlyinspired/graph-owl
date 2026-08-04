@@ -797,6 +797,15 @@ pub static ROUTES: &[Route] = &[
     ),
     route(
         "get",
+        "/memories",
+        "Cross-entity memory search, for administration",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "get",
         "/memories/{id}",
         "One memory, superseded or not",
         None,
@@ -811,6 +820,15 @@ pub static ROUTES: &[Route] = &[
         None,
         Some("Memory"),
         201,
+        true,
+    ),
+    route(
+        "post",
+        "/memories/{id}/retract",
+        "Mark a memory as no longer believed, without replacing it",
+        None,
+        Some("Memory"),
+        200,
         true,
     ),
     route(

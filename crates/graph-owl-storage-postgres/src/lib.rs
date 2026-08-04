@@ -18,11 +18,11 @@ use graph_owl_storage::{
     BreachReport, ColumnMapping, ConflictKind, DataProductUpdate, DiscardedClaimRecord,
     DomainDeletion, DomainHoldings, DomainUpdate, ExtractionRunRecord, FollowOutcome, Holdings,
     IdempotencyClaim, IssueOutcome, LabelDecision, LabelOutcome, LifecycleOutcome,
-    LineageReconciliation, MembershipRefusal, MemoryWrite, OwnersWrite, PrincipalDeletion,
-    QueuedClaimRecord, ResultIngest, ReviewQueueFilter, SplitOutcome, Storage, StorageError,
-    StoredCertification, StoredCertificationType, StoredContract, StoredTestCase,
-    StoredTestDefinition, StoredTestResult, StoredUser, SupersedeOutcome, TagUsage,
-    TestResultWrite, UpdateOutcome, UsageIngest, UsageWrite,
+    LineageReconciliation, MembershipRefusal, MemorySearchFilter, MemoryWrite, OwnersWrite,
+    PrincipalDeletion, QueuedClaimRecord, ResultIngest, RetractOutcome, ReviewQueueFilter,
+    SplitOutcome, Storage, StorageError, StoredCertification, StoredCertificationType,
+    StoredContract, StoredTestCase, StoredTestDefinition, StoredTestResult, StoredUser,
+    SupersedeOutcome, TagUsage, TestResultWrite, UpdateOutcome, UsageIngest, UsageWrite,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -30,7 +30,8 @@ use uuid::Uuid;
 /// Every column a `Memory` is rebuilt from, by id. Named once so the shape
 /// cannot drift between the single read and the by-subject read.
 const MEMORY_COLUMNS: &str = "SELECT id, kind, content, summary, author_kind, author_user_id,
-            author_agent_id, author_model, confidence, as_of, supersedes, superseded_by
+            author_agent_id, author_model, confidence, as_of, supersedes, superseded_by,
+            retracted_at, retraction_reason
      FROM memories WHERE id = $1";
 
 /// The wire spelling of a kind.
@@ -268,6 +269,8 @@ fn memory_from_row(row: &PgRow, links: Vec<MemoryLink>) -> Result<Memory, Storag
         as_of: row.get("as_of"),
         supersedes: row.get("supersedes"),
         superseded_by: row.get("superseded_by"),
+        retracted_at: row.get("retracted_at"),
+        retraction_reason: row.get("retraction_reason"),
     })
 }
 
@@ -1871,7 +1874,7 @@ impl Storage for PostgresStorage {
         let rows = sqlx::query(
             "SELECT m.id, m.kind, m.content, m.summary, m.author_kind, m.author_user_id,
                     m.author_agent_id, m.author_model, m.confidence, m.as_of,
-                    m.supersedes, m.superseded_by
+                    m.supersedes, m.superseded_by, m.retracted_at, m.retraction_reason
              FROM memories m
              JOIN memory_links l ON l.memory_id = m.id
              WHERE (l.asset_target = $1 OR l.memory_target = $1)
@@ -1977,6 +1980,96 @@ impl Storage for PostgresStorage {
             .await
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(SupersedeOutcome::Superseded)
+    }
+
+    async fn retract_memory(&self, id: Uuid, reason: &str) -> Result<RetractOutcome, StorageError> {
+        let Some(row) = sqlx::query(MEMORY_COLUMNS)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?
+        else {
+            return Ok(RetractOutcome::NotFound);
+        };
+        let links = read_links(&self.pool, id).await?;
+        let existing = memory_from_row(&row, links)?;
+        if existing.is_retracted() {
+            return Ok(RetractOutcome::AlreadyRetracted(existing));
+        }
+
+        sqlx::query(
+            "UPDATE memories SET retracted_at = now(), retraction_reason = $2, updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(reason)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let retracted = self.find_memory(id).await?.ok_or_else(|| {
+            StorageError::Unexpected("memory vanished mid-retraction".to_string())
+        })?;
+        Ok(RetractOutcome::Retracted(retracted))
+    }
+
+    async fn search_memories(
+        &self,
+        filter: &MemorySearchFilter,
+    ) -> Result<(Vec<Memory>, i64), StorageError> {
+        let where_clause = "($1::text IS NULL OR author_user_id = $1 OR author_agent_id = $1)
+              AND ($2::double precision IS NULL OR confidence >= $2)
+              AND ($3::double precision IS NULL OR confidence <= $3)
+              AND ($4::timestamptz IS NULL OR as_of >= $4)
+              AND ($5::timestamptz IS NULL OR as_of <= $5)
+              AND ($6 OR superseded_by IS NULL)
+              AND ($7 OR retracted_at IS NULL)";
+
+        let total: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM memories WHERE {where_clause}"
+        ))
+        .bind(&filter.author)
+        .bind(filter.min_confidence)
+        .bind(filter.max_confidence)
+        .bind(filter.since)
+        .bind(filter.until)
+        .bind(filter.include_superseded)
+        .bind(filter.include_retracted)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let limit = i64::try_from(filter.limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(filter.offset).unwrap_or(0);
+        let rows = sqlx::query(&format!(
+            "SELECT id, kind, content, summary, author_kind, author_user_id,
+                    author_agent_id, author_model, confidence, as_of,
+                    supersedes, superseded_by, retracted_at, retraction_reason
+             FROM memories
+             WHERE {where_clause}
+             ORDER BY as_of DESC, id
+             LIMIT $8 OFFSET $9"
+        ))
+        .bind(&filter.author)
+        .bind(filter.min_confidence)
+        .bind(filter.max_confidence)
+        .bind(filter.since)
+        .bind(filter.until)
+        .bind(filter.include_superseded)
+        .bind(filter.include_retracted)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut memories = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id: Uuid = row.get("id");
+            let links = read_links(&self.pool, id).await?;
+            memories.push(memory_from_row(row, links)?);
+        }
+        Ok((memories, total))
     }
 
     async fn review_contradiction(

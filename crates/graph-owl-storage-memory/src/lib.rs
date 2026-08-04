@@ -372,6 +372,71 @@ impl Storage for InMemoryStorage {
         Ok(graph_owl_storage::SupersedeOutcome::Superseded)
     }
 
+    async fn retract_memory(
+        &self,
+        id: Uuid,
+        reason: &str,
+    ) -> Result<graph_owl_storage::RetractOutcome, StorageError> {
+        self.guard_write("retract_memory");
+        let mut held = self.memories.lock().expect("lock");
+        let Some(memory) = held.iter_mut().find(|memory| memory.id == id) else {
+            return Ok(graph_owl_storage::RetractOutcome::NotFound);
+        };
+        if memory.is_retracted() {
+            return Ok(graph_owl_storage::RetractOutcome::AlreadyRetracted(
+                memory.clone(),
+            ));
+        }
+        memory.retracted_at = Some(chrono::Utc::now());
+        memory.retraction_reason = Some(reason.to_string());
+        Ok(graph_owl_storage::RetractOutcome::Retracted(memory.clone()))
+    }
+
+    async fn search_memories(
+        &self,
+        filter: &graph_owl_storage::MemorySearchFilter,
+    ) -> Result<(Vec<graph_owl_core::memory::Memory>, i64), StorageError> {
+        let matched: Vec<graph_owl_core::memory::Memory> = self
+            .memories
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|memory| {
+                filter
+                    .author
+                    .as_deref()
+                    .is_none_or(|author| match &memory.authorship {
+                        graph_owl_core::memory::Authorship::Human { user_id } => user_id == author,
+                        graph_owl_core::memory::Authorship::Agent { agent_id, .. } => {
+                            agent_id == author
+                        }
+                    })
+            })
+            .filter(|memory| {
+                filter
+                    .min_confidence
+                    .is_none_or(|min| memory.confidence >= min)
+            })
+            .filter(|memory| {
+                filter
+                    .max_confidence
+                    .is_none_or(|max| memory.confidence <= max)
+            })
+            .filter(|memory| filter.since.is_none_or(|since| memory.as_of >= since))
+            .filter(|memory| filter.until.is_none_or(|until| memory.as_of <= until))
+            .filter(|memory| filter.include_superseded || memory.superseded_by.is_none())
+            .filter(|memory| filter.include_retracted || !memory.is_retracted())
+            .cloned()
+            .collect();
+        let total = i64::try_from(matched.len()).unwrap_or(i64::MAX);
+        let page = matched
+            .into_iter()
+            .skip(filter.offset)
+            .take(filter.limit)
+            .collect();
+        Ok((page, total))
+    }
+
     async fn review_contradiction(
         &self,
         review: graph_owl_core::contradiction::Review,

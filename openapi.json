@@ -869,6 +869,21 @@
             },
             "type": "array"
           },
+          "retractedAt": {
+            "description": "When this memory was retracted, if it has been.\n\n**Distinct from `superseded_by`.** A correction replaces a memory with\na better one; a retraction says the memory is no longer believed at\nall, and there may be nothing to replace it with. Never a delete —\nthe same reason `superseded_by` is set rather than the row removed.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retractionReason": {
+            "description": "Why this memory was retracted. Always present alongside\n`retracted_at`, never alone: a retraction with no reason is one\nnobody reading it later can act on.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "summary": {
             "description": "A one-line form for a list or an agent's context budget. Optional: a\nforced summary is a truncated first sentence, which is worse than none.",
             "type": [
@@ -4326,6 +4341,30 @@
       }
     },
     "/memories": {
+      "get": {
+        "operationId": "get_memories",
+        "responses": {
+          "200": {
+            "description": "Cross-entity memory search, for administration"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Cross-entity memory search, for administration"
+      },
       "post": {
         "operationId": "post_memories",
         "responses": {
@@ -4457,6 +4496,60 @@
           }
         ],
         "summary": "Resolve a textual mention found in this memory against the catalog"
+      }
+    },
+    "/memories/{id}/retract": {
+      "post": {
+        "operationId": "post_memories__id__retract",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Memory"
+                }
+              }
+            },
+            "description": "Mark a memory as no longer believed, without replacing it"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Mark a memory as no longer believed, without replacing it"
       }
     },
     "/memories/{id}/supersede": {

@@ -82,6 +82,13 @@ import {
   toPolicy,
   verdict as policyVerdict,
 } from "./admin/policy";
+import {
+  type Memory,
+  type RecalledMemory,
+  authorLabel,
+  isVisibleOnEntityPage,
+  stalenessLabel,
+} from "./memory/memory";
 import { type GraphModel, expand, performedExpansions, replay, seed } from "./graph/model";
 import { brand, darkTheme, lightTheme, palette } from "./theme";
 import { GenericSourceMark, PostgresMark } from "./icons";
@@ -1746,6 +1753,15 @@ function AssetDetail({
             ),
             children: <ReasoningView assetId={asset.id} colors={colors} />,
           },
+          {
+            key: "knowledge",
+            label: (
+              <span>
+                <BulbOutlined /> Knowledge
+              </span>
+            ),
+            children: <KnowledgeView assetId={asset.id} colors={colors} />,
+          },
         ]}
         destroyOnHidden
       />
@@ -2351,6 +2367,262 @@ function DerivationChain({
 /** A fact as a reader reads it, without the namespace codes. */
 function triple(fact: { s: string; p: string; o: string }): string {
   return `${localName(fact.s)} ${localName(fact.p)} ${localName(fact.o)}`;
+}
+
+/** Institutional memory about one entity — Epic 31 recall, Epic 41 Slice E
+ *  on screen.
+ *
+ *  **Confidence gates what is shown here, not what exists.** A memory below
+ *  [`IGNORE_BAND`] is real and stays findable in Admin's cross-entity
+ *  search; hiding it here is about not cluttering the default view with
+ *  guesses, never about hiding the fact that somebody guessed.
+ */
+function KnowledgeView({
+  assetId,
+  colors,
+}: {
+  assetId: string;
+  colors: (typeof palette)["light"];
+}) {
+  const [recalled, setRecalled] = useState<RecalledMemory[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [composing, setComposing] = useState(false);
+
+  const load = useCallback(() => {
+    api
+      .recallMemories(assetId)
+      .then((found) => {
+        if (!Array.isArray(found)) {
+          setError("the server returned an unexpected shape for memories");
+          return;
+        }
+        setRecalled(found);
+        setError(null);
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "could not load memories"));
+  }, [assetId]);
+  useEffect(load, [load]);
+
+  if (error) return <Alert type="error" showIcon message={error} />;
+  if (recalled === null) return <Spin />;
+
+  const visible = recalled.filter(isVisibleOnEntityPage);
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Flex justify="space-between" align="center">
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          What people and agents have recorded about this asset.
+        </Text>
+        <Button size="small" onClick={() => setComposing(true)} disabled={composing}>
+          Add what we know
+        </Button>
+      </Flex>
+
+      {composing && (
+        <MemoryForm
+          assetId={assetId}
+          onSaved={() => {
+            setComposing(false);
+            load();
+          }}
+          onCancel={() => setComposing(false)}
+        />
+      )}
+
+      {visible.length === 0 ? (
+        <Paragraph type="secondary" style={{ fontSize: 13 }}>
+          Nothing recorded here yet — or nothing confident enough to show. A
+          steward can find lower-confidence memories in Admin.
+        </Paragraph>
+      ) : (
+        visible.map((item) => (
+          <MemoryCard key={item.memory.id} recalled={item} colors={colors} onChanged={load} />
+        ))
+      )}
+    </Space>
+  );
+}
+
+/** One recalled memory: content, confidence, provenance, and the score that
+ *  put it here — the retrieval context a reader needs to weigh it, not just
+ *  trust it. */
+function MemoryCard({
+  recalled,
+  colors,
+  onChanged,
+}: {
+  recalled: RecalledMemory;
+  colors: (typeof palette)["light"];
+  onChanged: () => void;
+}) {
+  const { memory, staleness, score } = recalled;
+  const [correcting, setCorrecting] = useState(false);
+  const [retracting, setRetracting] = useState(false);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showScore, setShowScore] = useState(false);
+
+  const retract = () => {
+    if (reason.trim() === "") return;
+    setBusy(true);
+    setError(null);
+    api
+      .retractMemory(memory.id, reason.trim())
+      .then(onChanged)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "could not retract"))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <Card size="small">
+      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+        <Flex justify="space-between" align="start" wrap gap={8}>
+          <Text>{memory.content}</Text>
+          <Tag color={staleness.state === "fresh" ? "green" : staleness.state === "possiblyStale" ? "gold" : "red"}>
+            {stalenessLabel(staleness)}
+          </Tag>
+        </Flex>
+        <Space size={12} wrap>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {authorLabel(memory.authorship)}
+          </Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            confidence {memory.confidence.toFixed(2)}
+          </Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            as of {new Date(memory.asOf).toLocaleDateString()}
+          </Text>
+          <Button size="small" type="link" onClick={() => setShowScore(!showScore)} style={{ padding: 0, height: "auto" }}>
+            {showScore ? "hide" : "why this ranks here"}
+          </Button>
+        </Space>
+
+        {showScore && (
+          <div style={{ fontSize: 12, color: colors.textMuted }}>
+            anchor {score.anchor.toFixed(2)} · lexical {score.lexical.toFixed(2)} · semantic{" "}
+            {score.semantic === null ? "not measured" : score.semantic.toFixed(2)} · staleness{" "}
+            {score.staleness.toFixed(2)} · recency {score.recency.toFixed(2)} · authorship{" "}
+            {score.authorship.toFixed(2)} · confidence {score.confidence.toFixed(2)} · total{" "}
+            {score.total.toFixed(2)}
+          </div>
+        )}
+
+        <Flex gap={8}>
+          <Button size="small" onClick={() => setCorrecting(true)} disabled={correcting}>
+            Correct
+          </Button>
+          <Button size="small" danger onClick={() => setRetracting(!retracting)}>
+            Retract
+          </Button>
+        </Flex>
+
+        {retracting && (
+          <Flex gap={8} align="center">
+            <Input
+              placeholder="why is this no longer believed?"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              style={{ maxWidth: 320 }}
+            />
+            <Button size="small" danger type="primary" onClick={retract} loading={busy} disabled={reason.trim() === ""}>
+              Confirm retraction
+            </Button>
+          </Flex>
+        )}
+        {error && <Alert type="error" showIcon description={error} />}
+
+        {correcting && (
+          <MemoryForm
+            assetId={memory.links.find((l) => l.relation === "about")?.target ?? ""}
+            supersedes={memory}
+            onSaved={() => {
+              setCorrecting(false);
+              onChanged();
+            }}
+            onCancel={() => setCorrecting(false)}
+          />
+        )}
+      </Space>
+    </Card>
+  );
+}
+
+/** Records a new memory, or a correction to an existing one when
+ *  `supersedes` is given. One form for both, because a correction is a
+ *  memory with an extra step at the end — the fields somebody fills in are
+ *  identical either way. */
+function MemoryForm({
+  assetId,
+  supersedes,
+  onSaved,
+  onCancel,
+}: {
+  assetId: string;
+  supersedes?: Memory;
+  onSaved: () => void;
+  onCancel: () => void;
+}) {
+  const [content, setContent] = useState(supersedes?.content ?? "");
+  const [confidence, setConfidence] = useState(supersedes?.confidence ?? 0.9);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = () => {
+    if (content.trim() === "") return;
+    setBusy(true);
+    setError(null);
+    const body = {
+      kind: supersedes?.kind ?? ("decision" as const),
+      content: content.trim(),
+      confidence,
+      links: [{ relation: "about" as const, target: assetId }],
+    };
+    const request = supersedes
+      ? api.supersedeMemory(supersedes.id, body)
+      : api.createMemory(body);
+    request
+      .then(onSaved)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "could not save"))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <Card size="small" title={supersedes ? "Correct this memory" : "Add what we know"}>
+      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+        <Input.TextArea
+          placeholder="what should the next reader know?"
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          rows={2}
+        />
+        <Flex gap={8} align="center">
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            confidence
+          </Text>
+          <Input
+            type="number"
+            min={0}
+            max={1}
+            step={0.05}
+            value={confidence}
+            onChange={(e) => setConfidence(Number(e.target.value))}
+            style={{ maxWidth: 100 }}
+          />
+        </Flex>
+        {error && <Alert type="error" showIcon description={error} />}
+        <Flex gap={8}>
+          <Button type="primary" size="small" onClick={save} loading={busy} disabled={content.trim() === ""}>
+            Save
+          </Button>
+          <Button size="small" onClick={onCancel}>
+            Cancel
+          </Button>
+        </Flex>
+      </Space>
+    </Card>
+  );
 }
 
 /** Severity, as a colour and a word.
@@ -3039,6 +3311,114 @@ function DryRunResult({ run }: { run: DryRun }) {
   );
 }
 
+/** Cross-entity memory search, for administration — Epic 41 Slice E.
+ *
+ *  **Retracted memories default to excluded, matching the server's own
+ *  default.** This is the one screen where they need to stay findable at
+ *  all, which is what `Show retracted` is for — but the *default* view
+ *  should not be cluttered with what nobody believes any more, same as the
+ *  entity page.
+ */
+function MemoryAdminPanel({ colors }: { colors: (typeof palette)["light"] }) {
+  const [author, setAuthor] = useState("");
+  const [minConfidence, setMinConfidence] = useState("");
+  const [includeRetracted, setIncludeRetracted] = useState(false);
+  const [results, setResults] = useState<{ data: Memory[]; total: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const search = useCallback(() => {
+    setBusy(true);
+    setError(null);
+    api
+      .searchMemories({
+        author: author.trim() === "" ? undefined : author.trim(),
+        minConfidence: minConfidence === "" ? undefined : Number(minConfidence),
+        includeRetracted,
+      })
+      .then(setResults)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "could not search"))
+      .finally(() => setBusy(false));
+  }, [author, minConfidence, includeRetracted]);
+  useEffect(search, [search]);
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Card size="small" title="Search">
+        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+          <Flex gap={8} wrap align="center">
+            <Input
+              placeholder="author (user or agent id)"
+              value={author}
+              onChange={(e) => setAuthor(e.target.value)}
+              style={{ maxWidth: 220 }}
+            />
+            <Input
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              placeholder="min confidence"
+              value={minConfidence}
+              onChange={(e) => setMinConfidence(e.target.value)}
+              style={{ maxWidth: 140 }}
+            />
+            <Tag.CheckableTag checked={includeRetracted} onChange={setIncludeRetracted}>
+              Show retracted
+            </Tag.CheckableTag>
+            <Button size="small" onClick={search} loading={busy}>
+              Search
+            </Button>
+          </Flex>
+        </Space>
+      </Card>
+
+      {error && <Alert type="error" showIcon title="Could not search" description={error} />}
+
+      <Card size="small" title={`Results (${results?.total ?? 0})`}>
+        <Table
+          size="small"
+          rowKey={(memory: Memory) => memory.id}
+          dataSource={results?.data ?? []}
+          pagination={false}
+          locale={{ emptyText: "No memories match this search." }}
+          columns={[
+            {
+              title: "Memory",
+              key: "content",
+              render: (_: unknown, memory: Memory) => (
+                <Space direction="vertical" size={0}>
+                  <Text>{memory.content}</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {authorLabel(memory.authorship)} · confidence {memory.confidence.toFixed(2)}
+                  </Text>
+                </Space>
+              ),
+            },
+            {
+              title: "State",
+              key: "state",
+              width: 160,
+              render: (_: unknown, memory: Memory) =>
+                memory.retractedAt ? (
+                  <Tag color="red">retracted: {memory.retractionReason}</Tag>
+                ) : memory.supersededBy ? (
+                  <Tag color="default">corrected</Tag>
+                ) : (
+                  <Tag color="green">current</Tag>
+                ),
+            },
+          ]}
+        />
+      </Card>
+      <Text type="secondary" style={{ fontSize: 12, color: colors.textMuted }}>
+        Below-confidence and retracted memories are hidden from entity pages
+        but always findable here.
+      </Text>
+    </Space>
+  );
+}
+
 /** The admin section — Epic 41 Slice F.
  *
  *  **`SchemaForm` is the only form renderer here.** A hundred connectors with
@@ -3062,6 +3442,7 @@ function AdminPage({ colors }: { colors: (typeof palette)["light"] }) {
           { key: "principals", label: "People & teams", children: <PrincipalsPanel colors={colors} /> },
           { key: "connectors", label: "Connector config", children: <ConnectorConfigPanel /> },
           { key: "policies", label: "Policies", children: <PolicyPanel /> },
+          { key: "memories", label: "Memories", children: <MemoryAdminPanel colors={colors} /> },
         ]}
       />
     </Space>

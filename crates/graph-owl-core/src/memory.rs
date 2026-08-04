@@ -173,6 +173,17 @@ pub struct Memory {
     /// what people believed survives being corrected — which is most of the
     /// value of keeping a record at all.
     pub superseded_by: Option<Uuid>,
+    /// When this memory was retracted, if it has been.
+    ///
+    /// **Distinct from `superseded_by`.** A correction replaces a memory with
+    /// a better one; a retraction says the memory is no longer believed at
+    /// all, and there may be nothing to replace it with. Never a delete —
+    /// the same reason `superseded_by` is set rather than the row removed.
+    pub retracted_at: Option<DateTime<Utc>>,
+    /// Why this memory was retracted. Always present alongside
+    /// `retracted_at`, never alone: a retraction with no reason is one
+    /// nobody reading it later can act on.
+    pub retraction_reason: Option<String>,
 }
 
 /// What a client may change.
@@ -267,6 +278,8 @@ impl Memory {
             as_of,
             supersedes: None,
             superseded_by: None,
+            retracted_at: None,
+            retraction_reason: None,
         })
     }
 
@@ -274,6 +287,12 @@ impl Memory {
     #[must_use]
     pub fn is_superseded(&self) -> bool {
         self.superseded_by.is_some()
+    }
+
+    /// Whether this memory has been retracted.
+    #[must_use]
+    pub fn is_retracted(&self) -> bool {
+        self.retracted_at.is_some()
     }
 
     /// Everything this memory is anchored to.

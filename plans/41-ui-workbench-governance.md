@@ -1,7 +1,7 @@
 # Plan: Query Workbench, Governance & Admin (Epic 41)
 
 **Branch**: feat/ui-workbench
-**Status**: Not started
+**Status**: Shipped — Slices A–F, 5 August 2026 (DEMOS.md's Epic 41 section is the authority on what shipped and when; this line had gone stale). Slice G (standards-depth surfaces for Epics 96/97/100/101/102) remains, gated on those epics.
 **Depends on**: Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5 (constraints), Epic 7 (SPARQL), Epic 7b (Cypher), Epic 13 (authz), Epic 15 (connectors), Epic 31 (memory)
 **Crates**: frontend in **`ui/`** (features `workbench`, `governance`, `memory`, `admin`) · served by **`graph-owl-ui`** · consumes Epic 7/7b query, Epic 5 validation, Epic 31 memory, and Epic 13 policy APIs
 
@@ -98,11 +98,12 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: The waiver-visibility test. A waiver that hides a violation from the asset page is how a governance tool becomes a way to make problems disappear — the violation must remain visible with its reason and its expiry. Second RED: resolution-by-revalidation, because a "resolved" state a human can set without the constraint passing makes the whole dashboard advisory fiction. Mutator watch: accepting a waiver with an empty reason must fail; treating an expired waiver as active must fail a boundary test at the expiry instant.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice E: Memory panel and memory administration
+### Slice E: Memory panel and memory administration — **shipped 5 August 2026**
 
 **Acceptance criteria**: entity-scoped memories on the Epic 39 Knowledge tab; each shows content, confidence, provenance (which agent or human, when, from what), and the retrieval context that produced it; a human can add, correct, or retract a memory; retraction is a retraction (`op = false`), never a delete, so the history survives; cross-entity search over memories with filters by author, confidence, and age; a memory below the ignore band (<0.5) is not surfaced on the entity page but **is** findable in administration.
-**RED**: The retraction-preserves-history test — a memory deleted rather than retracted destroys the audit trail of what an agent believed and when, which is the entire reason decision 6 exists. Second RED: the confidence-band test at exactly 0.5 and exactly 0.8, since `00c-domain-model.md`'s bands are boundary-defined and an off-by-one changes what users see. Mutator watch: `>=` becoming `>` at a band edge must fail.
-**Done when**: criteria met, mutation report reviewed, commit approved.
+**Delivered**: all of the above — see the Epic 41 write-up in `DEMOS.md` for the full account, including `V45`'s `retracted_at`/`retraction_reason` columns, `Storage::retract_memory`/`search_memories`, and the two new HTTP endpoints. **The `0.8` boundary named below was not found to exist for memory confidence** — `00c-domain-model.md` states only the `<0.5` ignore band this slice's own acceptance criteria line states; `0.8` matches Epic 21 extraction's *assert* band (`Disposition::for_confidence`), a different feature. Tested at `0.5` only, which is the boundary the acceptance criteria and the domain model both actually name; recorded here rather than silently dropped in case `0.8` was meant to name something not yet written down.
+**RED**: The retraction-preserves-history test — a memory deleted rather than retracted destroys the audit trail of what an agent believed and when, which is the entire reason decision 6 exists. Second RED: the confidence-band boundary test at exactly `0.5`. Mutator watch: `>=` becoming `>` at the band edge must fail — covered by `a memory exactly at the band is shown` in `ui/src/memory/memory.test.ts`.
+**Done when**: criteria met, mutation report reviewed, commit approved. Met.
 
 ### Slice F: Admin — policies, principals, connectors, jobs
 
