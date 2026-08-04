@@ -110,11 +110,35 @@ def slices_by_epic() -> dict[str, list[tuple[str, str]]]:
 
         mark = re.match(r"^- (\[[x~ ]\])\s*(.+)", line)
         if mark and current:
-            # First bold run, else the first clause — enough to identify the
-            # slice without reproducing DEMOS in full.
             text = mark.group(2)
-            label = re.match(r"\*\*(.+?)\*\*", text)
-            summary = label.group(1) if label else text.split(".")[0]
+            label = re.match(r"\*\*(.+?)\*\*\s*(.*)", text)
+            bold = label.group(1) if label else None
+            rest = label.group(2) if label else ""
+
+            # Under a heading naming several epics (`### Epics 7b, 7c, 7d, 9,
+            # 9a`), each checkbox names its own in bold at the start
+            # (`**7d** Bolt server: ...`) precisely so a mark can be
+            # attributed to the one epic it is actually about — not every
+            # epic the heading covers. Skipping this was the bug: all five
+            # epics under that heading read identically, each showing every
+            # other epic's one-line marks as if they were its own, because
+            # the loop below filed every checkbox under every `current`
+            # epic regardless of which one its own bold prefix named.
+            if bold and bold in current:
+                summary = rest.strip(" —-:.") or bold
+                marks.setdefault(bold, []).append((mark.group(1), summary[:88]))
+                continue
+
+            # A short bold run that is *not* an epic number is a label, not
+            # a summary — a slice letter (`**A**`, `**B2**`). Several
+            # bullets sharing one slice letter would otherwise all read as
+            # the single word "A"; the real summary is what follows it.
+            if bold and rest and re.fullmatch(r"[A-Z][0-9]?", bold):
+                summary = rest.strip(" —-:.")
+            elif bold:
+                summary = bold
+            else:
+                summary = text.split(".")[0]
             for number in current:
                 marks.setdefault(number, []).append((mark.group(1), summary[:88]))
     return marks
