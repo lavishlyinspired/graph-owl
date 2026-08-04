@@ -62,6 +62,7 @@ graph-owl-core = { path = "crates/graph-owl-core" }
 graph-owl-events = { path = "crates/graph-owl-events" }
 graph-owl-storage = { path = "crates/graph-owl-storage" }
 graph-owl-storage-postgres = { path = "crates/graph-owl-storage-postgres" }
+graph-owl-storage-memory = { path = "crates/graph-owl-storage-memory" }
 graph-owl-authz = { path = "crates/graph-owl-authz" }
 graph-owl-mcp = { path = "crates/graph-owl-mcp" }
 graph-owl-lpg = { path = "crates/graph-owl-lpg" }
