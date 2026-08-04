@@ -12,7 +12,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use common::test_app;
+use common::{test_app, test_app_with_secret};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -706,4 +706,161 @@ async fn an_absent_memory_is_a_404() {
     .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ---- Epic 31: a person, not just `system`, authoring a memory ----
+//
+// Every fixture above runs unauthenticated, which `test_app()` resolves to
+// the `system` principal — the only reachable path before Epic 12 shipped a
+// real `Auth` extractor. Epic 12 is shipped now (`resolve_principal` maps
+// any auto-provisioned, non-bot JWT subject to `PrincipalKind::User`), so a
+// real person authoring a memory over HTTP is reachable; it had just never
+// been exercised here. The human-confidence-default *rule* was already
+// proven in `graph_owl_core::memory`'s unit tests
+// (`a_human_memory_defaults_to_full_confidence`); what was missing is proof
+// that a real request, carrying a real token, actually reaches that rule
+// through `Auth` and `authorship_of` rather than only through a
+// hand-constructed `Principal` in a unit test.
+
+const MEMORY_TEST_SECRET: &str = "memory-demo-signing-secret-not-for-production";
+
+fn person_token(subject: &str) -> String {
+    #[derive(serde::Serialize)]
+    struct Claims<'a> {
+        sub: &'a str,
+        name: &'a str,
+        exp: usize,
+    }
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &Claims {
+            sub: subject,
+            name: subject,
+            exp: 4_102_444_800, // year 2100
+        },
+        &jsonwebtoken::EncodingKey::from_secret(MEMORY_TEST_SECRET.as_bytes()),
+    )
+    .expect("token should encode")
+}
+
+async fn send_as(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    subject: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {}", person_token(subject)));
+    request = if body.is_some() {
+        request.header("content-type", "application/json")
+    } else {
+        request
+    };
+    let request = match body {
+        Some(body) => request.body(Body::from(body.to_string())),
+        None => request.body(Body::empty()),
+    }
+    .expect("request should build");
+
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("request should be handled");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let parsed = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes)))
+    };
+    (status, parsed)
+}
+
+/// **The property Epic 31 was missing proof of.** A real, JWT-authenticated
+/// person — not `Principal::system()`, not a hand-built `Principal` in a
+/// unit test — posts a memory with no stated confidence, and it must be
+/// recorded as human-authored, defaulted to full confidence, and attributed
+/// to that exact subject.
+#[tokio::test]
+async fn a_real_person_authors_a_memory_and_it_defaults_to_full_confidence() {
+    let (app, _database, _) = test_app_with_secret(MEMORY_TEST_SECRET).await;
+
+    let (status, asset) = send_as(
+        &app,
+        "POST",
+        "/assets",
+        "priya",
+        Some(json!({ "kind": "service", "name": "orders" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{asset}");
+    let table = asset["id"].as_str().expect("an id").to_string();
+
+    let (created, body) = send_as(
+        &app,
+        "POST",
+        "/memories",
+        "priya",
+        Some(json!({
+            "kind": "decision",
+            "content": "Refunds are excluded from revenue.",
+            "links": [{ "relation": "about", "target": table }],
+        })),
+    )
+    .await;
+
+    assert_eq!(created, StatusCode::CREATED, "{body}");
+    assert_eq!(body["authorship"]["kind"], "human", "{body}");
+    assert_eq!(body["authorship"]["userId"], "priya", "{body}");
+    assert_eq!(
+        body["confidence"].as_f64().expect("a confidence"),
+        1.0,
+        "a person who writes something down means it: {body}"
+    );
+}
+
+/// The other half of the same rule: a person's *stated* confidence still
+/// wins over the default, exercised over HTTP rather than only in
+/// `graph_owl_core::memory`'s `a_stated_confidence_overrides_the_human_default`.
+#[tokio::test]
+async fn a_real_persons_stated_confidence_overrides_the_human_default() {
+    let (app, _database, _) = test_app_with_secret(MEMORY_TEST_SECRET).await;
+
+    let (_, asset) = send_as(
+        &app,
+        "POST",
+        "/assets",
+        "priya",
+        Some(json!({ "kind": "service", "name": "orders" })),
+    )
+    .await;
+    let table = asset["id"].as_str().expect("an id").to_string();
+
+    let (created, body) = send_as(
+        &app,
+        "POST",
+        "/memories",
+        "priya",
+        Some(json!({
+            "kind": "decision",
+            "content": "Refunds are excluded from revenue, tentatively.",
+            "confidence": 0.4,
+            "links": [{ "relation": "about", "target": table }],
+        })),
+    )
+    .await;
+
+    assert_eq!(created, StatusCode::CREATED, "{body}");
+    assert_eq!(body["authorship"]["kind"], "human", "{body}");
+    assert_eq!(
+        body["confidence"].as_f64().expect("a confidence"),
+        0.4,
+        "{body}"
+    );
 }

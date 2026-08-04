@@ -45,12 +45,23 @@ similarity and labelling it semantic — which destroys the distinction
 `Score.semantic: Option<f64>` exists to preserve, since a reader could no longer
 tell "measured, not similar" from "never measured" — or inventing a seam with no
 implementation on either side, which `00e`'s growth trigger and that module's docs
-both refuse in writing. It waits for Epic 8. **And one thing this build cannot exercise**: no
-request can currently resolve to a *person*, because `Principal::system()` is the
-placeholder until Epic 12 — so every memory written over HTTP today is recorded
-as agent-authored, honestly, and the "a human defaults to confidence 1.0" path is
-covered by unit tests only. Mapping `system` to human authorship to make the
-fixtures read nicely would be exactly the relabelling the trust model refuses.
+both refuse in writing. It waits for Epic 8.
+
+**Closed 4 August 2026**: a request resolving to a *person* rather than
+`Principal::system()`. The note above was written before Epic 12 shipped and
+was never revisited once it did — `resolve_principal` already maps any
+auto-provisioned, non-bot JWT subject to `PrincipalKind::User`, and
+`create_memory`'s `authorship_of` already had the correct split; nothing in
+the domain or HTTP layer needed to change. What was missing was proof: the
+"a human defaults to confidence 1.0" rule was unit-tested only, never
+exercised through a real JWT-authenticated request over
+`POST /memories`. Two HTTP tests now do
+(`crates/graph-owl-server/tests/memory.rs`,
+`a_real_person_authors_a_memory_and_it_defaults_to_full_confidence` and
+`a_real_persons_stated_confidence_overrides_the_human_default`). Mapping
+`system` to human authorship to make the fixtures read nicely would still be
+exactly the relabelling the trust model refuses — the fix was proving the
+real path works, not changing what `system` means.
 
 **Two schema decisions worth reading before extending this.**
 

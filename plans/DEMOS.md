@@ -537,10 +537,18 @@ actually holds could not be asserted at all.
   fabricating a lexical similarity and labelling it semantic would destroy the
   distinction `Score.semantic: Option<f64>` exists to preserve between "measured,
   not similar" and "never measured".
-- A person cannot author a memory over HTTP yet. `Principal::system()` is the
-  placeholder until Epic 12, so every memory written through the API today is
-  recorded as agent-authored — honestly, but it means the human-confidence default
-  is unit-tested only.
+
+**Closed 4 August 2026** — a person authoring a memory over HTTP: the note
+above was stale. Epic 12 shipped a real `Auth` extractor and
+`resolve_principal` already maps any auto-provisioned, non-bot JWT subject to
+`PrincipalKind::User`; `create_memory`'s `authorship_of` already had the
+correct human/agent split. What was actually missing was proof — the domain
+rule (`a_human_memory_defaults_to_full_confidence`) was unit-tested, but no
+test exercised a real JWT-authenticated person through `POST /memories` and
+back. Two HTTP tests now do:
+`a_real_person_authors_a_memory_and_it_defaults_to_full_confidence` and
+`a_real_persons_stated_confidence_overrides_the_human_default`
+(`crates/graph-owl-server/tests/memory.rs`). No production code changed.
 
 ### Epic 32 — Agent capabilities
 - [x] Write-back with agent authorship — grants, the closed capability set, propose-by-default, the rate limit, and the audit that records refusals too *(Slices A–F)*
