@@ -959,8 +959,8 @@ slice.
 - [ ] Export dialog offers RDF 1.2 output and previews it *(UI → Epic 42)*
 
 ### Epic 95 — OWL 2 RL completion
-- [ ] The remaining RL axioms beyond Epic 6's eight
-- [ ] Explanation panel extends to the new axioms — same surface, more rules *(UI → Epic 41)*
+- [x] **The four RL axioms in scope beyond Epic 6's eight** *(4 August 2026)* — `owl:propertyChainAxiom`, `owl:InverseFunctionalProperty`, `owl:FunctionalProperty`, `owl:hasKey`, added to `graph-owl-reasoning`'s existing semi-naive fixpoint rather than a new engine. Property chains are decoded from an ordinary `rdf:first`/`rdf:rest`/`rdf:nil` list (arbitrary length, not hard-coded to the plan's two-property example), the same encoding OWL itself uses, reusing named nodes rather than adding blank-node support this reasoner has never needed. Every path is recomputed per pass rather than delta-tracked per chain position — a chain has few links in any ontology this project models, and the existing fixpoint's dedup already makes re-scanning safe, just not maximally cheap; what *is* delta-gated is emission, so a path built entirely of old edges is not re-emitted as new. The disjointness/cardinality/existential rules the plan scopes out stay out, unchanged. **Found a real bug while writing the fixpoint-cost test**: `hasKey`'s instance comparison walked a `HashSet` in one direction only (`i < j`), so which of `x sameAs y` / `y sameAs x` got derived depended on the process's hash seed rather than the data — passed on first run, failed intermittently on a later one. Fixed to match `InverseFunctionalProperty`'s already-correct both-directions iteration; both rules' own tests now assert both directions explicitly
+- [ ] Explanation panel extends to the new axioms — same surface, more rules *(UI → Epic 41)*. The backend needs nothing further: `explain()` and `RuleName`'s serialization are generic over every rule, Epic 6's included, so the four new ones already appear wherever the existing ones do — only the console-side rendering is unbuilt
 
 ### Epic 96 — SHACL-SPARQL
 - [ ] SPARQL-based constraint components

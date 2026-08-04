@@ -47,13 +47,27 @@ pub enum RuleName {
     /// because a reader of a derivation should not have to know which family a
     /// rule came from to understand why a fact holds.
     ClassificationFlows,
+    /// `owl:propertyChainAxiom` — Epic 95. Composes an ordered list of
+    /// properties into one: the lineage-rollup rule Epic 29 would otherwise
+    /// hand-code.
+    PropertyChain,
+    /// `owl:InverseFunctionalProperty` — Epic 95. Two subjects sharing a
+    /// value under the property are the same thing.
+    InverseFunctionalProperty,
+    /// `owl:FunctionalProperty` — Epic 95. Two values under one subject and
+    /// the property converge as the same thing.
+    FunctionalProperty,
+    /// `owl:hasKey` — Epic 95. The multi-property `InverseFunctionalProperty`:
+    /// two instances of a class agreeing on every key property are the same
+    /// individual.
+    HasKey,
 }
 
 impl RuleName {
-    /// The eight, in the order they run. Order does not change the fixpoint —
-    /// that is the point of iterating — but a fixed order makes a run
-    /// reproducible, which is what makes a derivation reviewable.
-    pub const ALL: [Self; 9] = [
+    /// In the order they run. Order does not change the fixpoint — that is
+    /// the point of iterating — but a fixed order makes a run reproducible,
+    /// which is what makes a derivation reviewable.
+    pub const ALL: [Self; 13] = [
         Self::SubClassOf,
         Self::SubPropertyOf,
         Self::Transitive,
@@ -63,6 +77,10 @@ impl RuleName {
         Self::Range,
         Self::SameAs,
         Self::ClassificationFlows,
+        Self::PropertyChain,
+        Self::InverseFunctionalProperty,
+        Self::FunctionalProperty,
+        Self::HasKey,
     ];
 
     /// The rule's identity as a subject, for provenance written to the graph.
@@ -78,6 +96,10 @@ impl RuleName {
             Self::Range => "rule:range",
             Self::SameAs => "rule:sameAs",
             Self::ClassificationFlows => "rule:classificationFlows",
+            Self::PropertyChain => "rule:propertyChainAxiom",
+            Self::InverseFunctionalProperty => "rule:inverseFunctionalProperty",
+            Self::FunctionalProperty => "rule:functionalProperty",
+            Self::HasKey => "rule:hasKey",
         })
     }
 }
@@ -218,6 +240,48 @@ fn obj(flake: &Flake) -> Option<&Sid> {
 fn with_predicate<'a>(facts: &'a [Flake], p: &Sid) -> impl Iterator<Item = &'a Flake> {
     let p = p.clone();
     facts.iter().filter(move |f| f.op && f.p == p)
+}
+
+fn rdf_first() -> Sid {
+    v(namespace::RDF, "first")
+}
+
+fn rdf_rest() -> Sid {
+    v(namespace::RDF, "rest")
+}
+
+fn rdf_nil() -> Sid {
+    v(namespace::RDF, "nil")
+}
+
+/// The longest `owl:propertyChainAxiom` or `owl:hasKey` list a rule will
+/// decode. The same bound `Budget::default().max_iterations` uses and for
+/// the same reason: deeper than any hierarchy a metadata ontology models, so
+/// reaching it means the list does not terminate rather than that it is
+/// merely long.
+const MAX_LIST_LEN: usize = 20;
+
+/// Decodes an `rdf:first`/`rdf:rest` list into its elements, in order.
+///
+/// `None` for anything not (yet, or ever) well-formed — a node with no
+/// `rdf:first`, no `rdf:rest`, or a list that never reaches `rdf:nil` within
+/// [`MAX_LIST_LEN`] steps. A rule reading a malformed list derives nothing
+/// rather than guessing at a truncated one: half a property chain is not a
+/// shorter chain, it is a different axiom.
+fn decode_list(all: &[Flake], head: &Sid) -> Option<Vec<Sid>> {
+    let nil = rdf_nil();
+    let mut elements = Vec::new();
+    let mut node = head.clone();
+    for _ in 0..MAX_LIST_LEN {
+        if node == nil {
+            return Some(elements);
+        }
+        let first = with_predicate(all, &rdf_first()).find(|f| f.s == node)?;
+        elements.push(obj(first)?.clone());
+        let rest = with_predicate(all, &rdf_rest()).find(|f| f.s == node)?;
+        node = obj(rest)?.clone();
+    }
+    None
 }
 
 /// Subjects declared to be of type `class`.
@@ -575,6 +639,210 @@ fn rule_classification_flows(pass: &mut Pass) {
     }
 }
 
+/// `owl:propertyChainAxiom` — composes an ordered list of properties into
+/// one. `p owl:propertyChainAxiom (p1 ... pn)`, `u1 p1 u2, u2 p2 u3, ...,
+/// un pn u(n+1)` implies `u1 p u(n+1)` (OWL 2 RL `prp-spo2`). The list is
+/// arbitrary length because the axiom is; the two-property case the plan
+/// names — "column feeds column, column belongs to table ⟹ table feeds
+/// table" — is simply n=2.
+///
+/// Every step re-scans `all` rather than tracking a delta per chain
+/// position: a chain has few links in any ontology this project models, so
+/// the join is cheap and a hand-optimised per-position delta would not earn
+/// back the complexity. What still has to be delta-aware is **emission** — a
+/// path built entirely of old edges was already derived in an earlier
+/// iteration, so a path is only emitted when at least one of its edges is
+/// fresh.
+fn rule_property_chain(pass: &mut Pass) {
+    let (all, new) = (pass.all, pass.new);
+    for axiom in with_predicate(all, &v(namespace::OWL, "propertyChainAxiom")) {
+        let Some(head) = obj(axiom) else { continue };
+        let Some(chain) = decode_list(all, head) else {
+            continue;
+        };
+        if chain.len() < 2 {
+            continue;
+        }
+
+        // (start, current endpoint, premises so far, a fresh edge is among them)
+        let mut frontier: Vec<(Sid, Sid, Vec<&Flake>, bool)> = with_predicate(all, &chain[0])
+            .filter_map(|edge| {
+                let end = obj(edge)?;
+                Some((edge.s.clone(), end.clone(), vec![edge], new.contains(edge)))
+            })
+            .collect();
+
+        for property in &chain[1..] {
+            let mut extended = Vec::new();
+            for (start, mid, premises, used_new) in &frontier {
+                for edge in with_predicate(all, property) {
+                    pass.joins += 1;
+                    if &edge.s != mid {
+                        continue;
+                    }
+                    let Some(end) = obj(edge) else { continue };
+                    let mut next_premises = premises.clone();
+                    next_premises.push(edge);
+                    extended.push((
+                        start.clone(),
+                        end.clone(),
+                        next_premises,
+                        *used_new || new.contains(edge),
+                    ));
+                }
+            }
+            frontier = extended;
+        }
+
+        for (start, end, premises, used_new) in frontier {
+            if !used_new {
+                continue;
+            }
+            let mut cited = vec![axiom];
+            cited.extend(premises);
+            pass.emit(start, axiom.s.clone(), end, RuleName::PropertyChain, &cited);
+        }
+    }
+}
+
+/// `owl:InverseFunctionalProperty` — two subjects sharing a value under the
+/// property are the same thing (OWL 2 RL `prp-ifp`). Iterated as ordered
+/// pairs so both `x sameAs y` and `y sameAs x` are asserted directly, rather
+/// than relying on `sameAs` to be its own symmetric closure — nothing in
+/// this reasoner derives that.
+fn rule_inverse_functional(pass: &mut Pass) {
+    let (all, new) = (pass.all, pass.new);
+    for property in typed_as(all, &v(namespace::OWL, "InverseFunctionalProperty")) {
+        let edges: Vec<&Flake> = with_predicate(all, &property).collect();
+        for left in edges.iter().copied() {
+            for right in edges.iter().copied() {
+                pass.joins += 1;
+                if left.s == right.s || left.o != right.o {
+                    continue;
+                }
+                if !(new.contains(left) || new.contains(right)) {
+                    continue;
+                }
+                pass.emit(
+                    left.s.clone(),
+                    v(namespace::OWL, "sameAs"),
+                    right.s.clone(),
+                    RuleName::InverseFunctionalProperty,
+                    &[left, right],
+                );
+            }
+        }
+    }
+}
+
+/// `owl:FunctionalProperty` — at most one value; two *different* values held
+/// by one subject under the property converge as the same thing (OWL 2 RL
+/// `prp-fp`). Restricted to reference-valued pairs: a literal cannot be the
+/// object of `owl:sameAs` in this reasoner (`rule_same_as`'s own axiom scan
+/// requires a `Ref`), so a functional *datatype* property with two differing
+/// values is a contradiction — Epic 5's job, per this epic's own scoping
+/// decision — not an identity this rule can express.
+fn rule_functional(pass: &mut Pass) {
+    let (all, new) = (pass.all, pass.new);
+    for property in typed_as(all, &v(namespace::OWL, "FunctionalProperty")) {
+        let edges: Vec<&Flake> = with_predicate(all, &property).collect();
+        for left in edges.iter().copied() {
+            for right in edges.iter().copied() {
+                pass.joins += 1;
+                if left.s != right.s || left.o == right.o {
+                    continue;
+                }
+                let (Some(lo), Some(ro)) = (obj(left), obj(right)) else {
+                    continue;
+                };
+                if !(new.contains(left) || new.contains(right)) {
+                    continue;
+                }
+                pass.emit(
+                    lo.clone(),
+                    v(namespace::OWL, "sameAs"),
+                    ro.clone(),
+                    RuleName::FunctionalProperty,
+                    &[left, right],
+                );
+            }
+        }
+    }
+}
+
+/// `owl:hasKey` — a class's identity properties. Two instances of the class
+/// agreeing on the value of every key property are the same individual
+/// (OWL 2 RL `cls-hasKey`) — the multi-property `InverseFunctionalProperty`
+/// the plan asks for: identity across sources is usually keyed on more than
+/// one field, and `owl:InverseFunctionalProperty` alone can only take one.
+///
+/// An instance missing any key property is excluded rather than matched on
+/// whichever keys it has — a partial key is not a shorter key, and matching
+/// on fewer properties than the axiom names would derive an identity the
+/// axiom never licensed.
+fn rule_has_key(pass: &mut Pass) {
+    let (all, new) = (pass.all, pass.new);
+    for axiom in with_predicate(all, &v(namespace::OWL, "hasKey")) {
+        let class = axiom.s.clone();
+        let Some(head) = obj(axiom) else { continue };
+        let Some(keys) = decode_list(all, head) else {
+            continue;
+        };
+        if keys.is_empty() {
+            continue;
+        }
+
+        let profile = |instance: &Sid| -> Option<Vec<&Flake>> {
+            keys.iter()
+                .map(|k| with_predicate(all, k).find(|f| &f.s == instance))
+                .collect()
+        };
+
+        let instances: Vec<Sid> = typed_as(all, &class).into_iter().collect();
+        let profiles: Vec<(Sid, Vec<&Flake>)> = instances
+            .into_iter()
+            .filter_map(|instance| profile(&instance).map(|p| (instance, p)))
+            .collect();
+
+        // Every ordered pair, not just `i < j`: `typed_as` returns a
+        // `HashSet`, whose iteration order is randomised per process, so a
+        // one-direction-only scan would emit `x sameAs y` or `y sameAs x`
+        // depending on hash seed rather than on the data — found by this
+        // rule's own test failing intermittently. Matches
+        // `rule_inverse_functional`'s same choice for the same reason.
+        for i in 0..profiles.len() {
+            for j in 0..profiles.len() {
+                if i == j {
+                    continue;
+                }
+                pass.joins += 1;
+                let (left, left_profile) = &profiles[i];
+                let (right, right_profile) = &profiles[j];
+                let agrees = left_profile
+                    .iter()
+                    .zip(right_profile)
+                    .all(|(l, r)| l.o == r.o);
+                if !agrees {
+                    continue;
+                }
+                let mut cited = vec![axiom];
+                cited.extend(left_profile.iter().copied());
+                cited.extend(right_profile.iter().copied());
+                if !cited.iter().any(|f| new.contains(*f)) {
+                    continue;
+                }
+                pass.emit(
+                    left.clone(),
+                    v(namespace::OWL, "sameAs"),
+                    right.clone(),
+                    RuleName::HasKey,
+                    &cited,
+                );
+            }
+        }
+    }
+}
+
 fn run(rule: RuleName) -> fn(&mut Pass) {
     match rule {
         RuleName::SubClassOf => rule_sub_class_of,
@@ -586,6 +854,10 @@ fn run(rule: RuleName) -> fn(&mut Pass) {
         RuleName::Range => rule_range,
         RuleName::SameAs => rule_same_as,
         RuleName::ClassificationFlows => rule_classification_flows,
+        RuleName::PropertyChain => rule_property_chain,
+        RuleName::InverseFunctionalProperty => rule_inverse_functional,
+        RuleName::FunctionalProperty => rule_functional,
+        RuleName::HasKey => rule_has_key,
     }
 }
 
@@ -869,6 +1141,47 @@ mod tests {
     fn same_as() -> Sid {
         sid(namespace::OWL, "sameAs")
     }
+    fn property_chain_axiom() -> Sid {
+        sid(namespace::OWL, "propertyChainAxiom")
+    }
+    fn inverse_functional_property() -> Sid {
+        sid(namespace::OWL, "InverseFunctionalProperty")
+    }
+    fn functional_property() -> Sid {
+        sid(namespace::OWL, "FunctionalProperty")
+    }
+    fn has_key() -> Sid {
+        sid(namespace::OWL, "hasKey")
+    }
+    fn rdf_first() -> Sid {
+        sid(namespace::RDF, "first")
+    }
+    fn rdf_rest() -> Sid {
+        sid(namespace::RDF, "rest")
+    }
+    fn rdf_nil() -> Sid {
+        sid(namespace::RDF, "nil")
+    }
+
+    /// An `rdf:first`/`rdf:rest` list of `items`, headed at a node named
+    /// `{name}_0`. Returns the head (to use as an axiom's object) and the
+    /// flakes that encode the list itself.
+    fn property_list(name: &str, items: &[Sid]) -> (Sid, Vec<Flake>) {
+        let head = a(&format!("{name}_0"));
+        let mut flakes = Vec::new();
+        let mut node = head.clone();
+        for (position, item) in items.iter().enumerate() {
+            flakes.push(f(node.clone(), rdf_first(), item.clone()));
+            let next = if position + 1 == items.len() {
+                rdf_nil()
+            } else {
+                a(&format!("{name}_{}", position + 1))
+            };
+            flakes.push(f(node, rdf_rest(), next.clone()));
+            node = next;
+        }
+        (head, flakes)
+    }
 
     /// Did `derive` produce this exact triple?
     fn derived(facts: &[Flake], s: Sid, p: Sid, o: Sid) -> bool {
@@ -1089,6 +1402,301 @@ mod tests {
             ];
 
             assert!(derived(&facts, a("x"), a("worksAt"), a("acme")));
+        }
+    }
+
+    /// # Epic 95 — OWL 2 RL completion
+    ///
+    /// Four rules Epic 6 deliberately left out: identity-merging rules that
+    /// build on the eight axioms above rather than extending them.
+    mod property_chains {
+        use super::*;
+
+        #[test]
+        fn two_properties_compose_into_the_chain_property() {
+            let (head, list_flakes) = property_list("chain", &[a("feeds"), a("belongsTo")]);
+            let mut facts = vec![f(a("tableFeeds"), property_chain_axiom(), head)];
+            facts.extend(list_flakes);
+            facts.push(f(a("colA"), a("feeds"), a("colB")));
+            facts.push(f(a("colB"), a("belongsTo"), a("tableB")));
+
+            assert!(derived(&facts, a("colA"), a("tableFeeds"), a("tableB")));
+        }
+
+        #[test]
+        fn the_chain_does_not_fire_without_its_axiom() {
+            let facts = vec![
+                f(a("colA"), a("feeds"), a("colB")),
+                f(a("colB"), a("belongsTo"), a("tableB")),
+            ];
+
+            assert!(!derived(&facts, a("colA"), a("tableFeeds"), a("tableB")));
+        }
+
+        #[test]
+        fn a_break_in_the_middle_does_not_compose() {
+            // `colA feeds colB`, but nothing runs `belongsTo` *from* `colB` —
+            // a chain that stops midway derives nothing, not a shorter one.
+            let (head, list_flakes) = property_list("chain", &[a("feeds"), a("belongsTo")]);
+            let mut facts = vec![f(a("tableFeeds"), property_chain_axiom(), head)];
+            facts.extend(list_flakes);
+            facts.push(f(a("colA"), a("feeds"), a("colB")));
+            facts.push(f(a("other"), a("belongsTo"), a("tableB")));
+
+            assert!(derive(&facts).facts.is_empty());
+        }
+
+        #[test]
+        fn a_three_property_chain_composes_across_every_link() {
+            // The list is arbitrary length because the axiom is — n=2 is the
+            // plan's own example, not a hard-coded limit.
+            let (head, list_flakes) = property_list("chain3", &[a("p1"), a("p2"), a("p3")]);
+            let mut facts = vec![f(a("composed"), property_chain_axiom(), head)];
+            facts.extend(list_flakes);
+            facts.push(f(a("w"), a("p1"), a("x")));
+            facts.push(f(a("x"), a("p2"), a("y")));
+            facts.push(f(a("y"), a("p3"), a("z")));
+
+            assert!(derived(&facts, a("w"), a("composed"), a("z")));
+        }
+
+        #[test]
+        fn a_property_chain_over_a_dense_relation_respects_the_fact_budget() {
+            // A composition's output grows with the square of the relation's
+            // density. Eight nodes with `feeds` between every ordered pair
+            // produce far more `feeds . feeds` pairs than a budget of 10
+            // admits — the explosion case the plan calls out, tested rather
+            // than hoped for.
+            let feeds = a("feeds");
+            let nodes: Vec<Sid> = (0..8).map(|i| a(&format!("n{i}"))).collect();
+            let (head, list_flakes) = property_list("chain", &[feeds.clone(), feeds.clone()]);
+            let mut facts = vec![f(a("feedsTransitively"), property_chain_axiom(), head)];
+            facts.extend(list_flakes);
+            for left in &nodes {
+                for right in &nodes {
+                    if left != right {
+                        facts.push(f(left.clone(), feeds.clone(), right.clone()));
+                    }
+                }
+            }
+
+            let budget = Budget {
+                max_facts: 10,
+                rules: vec![RuleName::PropertyChain],
+                ..Budget::default()
+            };
+            let reasoning = derive_within(&facts, &budget);
+
+            assert_eq!(reasoning.capped, Some(CappedReason::Facts));
+            assert!(reasoning.facts.len() <= 10, "{}", reasoning.facts.len());
+        }
+
+        #[test]
+        fn a_chain_completed_by_a_freshly_derived_edge_still_fires() {
+            // `belongsTo` is never asserted directly — it is derived one
+            // iteration after `feeds` via an ordinary `subPropertyOf`, so by
+            // the pass that completes the chain, the seed edge is old and
+            // the second link is exactly one iteration fresh. A rule that
+            // required *both* legs to be fresh (`&&` instead of `||`) would
+            // never fire here, because the seed edge is never new again
+            // after iteration 1.
+            let (head, list_flakes) = property_list("chain", &[a("feeds"), a("belongsTo")]);
+            let mut facts = vec![f(a("tableFeeds"), property_chain_axiom(), head)];
+            facts.extend(list_flakes);
+            facts.push(f(a("colA"), a("feeds"), a("colB")));
+            facts.push(f(a("colB"), a("belongsToAlias"), a("tableB")));
+            facts.push(f(a("belongsToAlias"), sub_property_of(), a("belongsTo")));
+
+            assert!(derived(&facts, a("colA"), a("tableFeeds"), a("tableB")));
+        }
+    }
+
+    mod inverse_functional_identity {
+        use super::*;
+
+        #[test]
+        fn two_subjects_sharing_an_ifp_value_are_the_same() {
+            let facts = vec![
+                f(a("email"), rdf_type(), inverse_functional_property()),
+                f(a("x"), a("email"), a("alice_at_example")),
+                f(a("y"), a("email"), a("alice_at_example")),
+            ];
+
+            assert!(derived(&facts, a("x"), same_as(), a("y")));
+            assert!(derived(&facts, a("y"), same_as(), a("x")));
+        }
+
+        #[test]
+        fn different_ifp_values_do_not_derive_identity() {
+            let facts = vec![
+                f(a("email"), rdf_type(), inverse_functional_property()),
+                f(a("x"), a("email"), a("alice_at_example")),
+                f(a("y"), a("email"), a("bob_at_example")),
+            ];
+
+            assert!(!derived(&facts, a("x"), same_as(), a("y")));
+        }
+
+        #[test]
+        fn a_shared_value_on_a_property_not_declared_ifp_derives_nothing() {
+            let facts = vec![
+                f(a("x"), a("email"), a("alice_at_example")),
+                f(a("y"), a("email"), a("alice_at_example")),
+            ];
+
+            assert!(!derived(&facts, a("x"), same_as(), a("y")));
+        }
+
+        #[test]
+        fn a_pair_completed_by_a_freshly_derived_edge_still_fires() {
+            // `y`'s `email` is never asserted directly — it is derived one
+            // iteration later via `subPropertyOf`, so by the pass that finds
+            // the pair, `x`'s edge is old and `y`'s is exactly one iteration
+            // fresh. Requiring both to be fresh would miss this.
+            let facts = vec![
+                f(a("email"), rdf_type(), inverse_functional_property()),
+                f(a("x"), a("email"), a("shared")),
+                f(a("y"), a("emailAlias"), a("shared")),
+                f(a("emailAlias"), sub_property_of(), a("email")),
+            ];
+
+            assert!(derived(&facts, a("x"), same_as(), a("y")));
+        }
+    }
+
+    mod functional_identity {
+        use super::*;
+
+        #[test]
+        fn two_values_of_a_functional_property_are_the_same() {
+            let facts = vec![
+                f(a("primaryEmail"), rdf_type(), functional_property()),
+                f(a("x"), a("primaryEmail"), a("addr1")),
+                f(a("x"), a("primaryEmail"), a("addr2")),
+            ];
+
+            assert!(derived(&facts, a("addr1"), same_as(), a("addr2")));
+        }
+
+        #[test]
+        fn one_value_derives_no_identity() {
+            let facts = vec![
+                f(a("primaryEmail"), rdf_type(), functional_property()),
+                f(a("x"), a("primaryEmail"), a("addr1")),
+            ];
+
+            assert!(derive(&facts).facts.is_empty());
+        }
+
+        #[test]
+        fn two_values_under_different_subjects_do_not_converge() {
+            let facts = vec![
+                f(a("primaryEmail"), rdf_type(), functional_property()),
+                f(a("x"), a("primaryEmail"), a("addr1")),
+                f(a("y"), a("primaryEmail"), a("addr2")),
+            ];
+
+            assert!(!derived(&facts, a("addr1"), same_as(), a("addr2")));
+        }
+
+        #[test]
+        fn a_pair_completed_by_a_freshly_derived_edge_still_fires() {
+            // `x`'s second value is never asserted directly — it is derived
+            // one iteration later via `subPropertyOf`, so by the pass that
+            // finds the pair, the first value's edge is old and the
+            // second's is exactly one iteration fresh.
+            let facts = vec![
+                f(a("primaryEmail"), rdf_type(), functional_property()),
+                f(a("x"), a("primaryEmail"), a("addr1")),
+                f(a("x"), a("primaryEmailAlias"), a("addr2")),
+                f(a("primaryEmailAlias"), sub_property_of(), a("primaryEmail")),
+            ];
+
+            assert!(derived(&facts, a("addr1"), same_as(), a("addr2")));
+        }
+    }
+
+    mod key_based_identity {
+        use super::*;
+
+        #[test]
+        fn two_instances_agreeing_on_every_key_property_are_the_same() {
+            let (head, list_flakes) = property_list("key", &[a("ssn"), a("dob")]);
+            let mut facts = vec![f(a("Person"), has_key(), head)];
+            facts.extend(list_flakes);
+            facts.push(f(a("x"), rdf_type(), a("Person")));
+            facts.push(f(a("y"), rdf_type(), a("Person")));
+            facts.push(f(a("x"), a("ssn"), a("123")));
+            facts.push(f(a("x"), a("dob"), a("1990")));
+            facts.push(f(a("y"), a("ssn"), a("123")));
+            facts.push(f(a("y"), a("dob"), a("1990")));
+
+            assert!(derived(&facts, a("x"), same_as(), a("y")));
+            assert!(derived(&facts, a("y"), same_as(), a("x")));
+        }
+
+        #[test]
+        fn disagreeing_on_one_key_property_derives_nothing() {
+            let (head, list_flakes) = property_list("key", &[a("ssn"), a("dob")]);
+            let mut facts = vec![f(a("Person"), has_key(), head)];
+            facts.extend(list_flakes);
+            facts.push(f(a("x"), rdf_type(), a("Person")));
+            facts.push(f(a("y"), rdf_type(), a("Person")));
+            facts.push(f(a("x"), a("ssn"), a("123")));
+            facts.push(f(a("x"), a("dob"), a("1990")));
+            facts.push(f(a("y"), a("ssn"), a("123")));
+            facts.push(f(a("y"), a("dob"), a("1991")));
+
+            assert!(!derived(&facts, a("x"), same_as(), a("y")));
+        }
+
+        #[test]
+        fn an_instance_missing_a_key_property_is_excluded() {
+            let (head, list_flakes) = property_list("key", &[a("ssn"), a("dob")]);
+            let mut facts = vec![f(a("Person"), has_key(), head)];
+            facts.extend(list_flakes);
+            facts.push(f(a("x"), rdf_type(), a("Person")));
+            facts.push(f(a("y"), rdf_type(), a("Person")));
+            facts.push(f(a("x"), a("ssn"), a("123")));
+            facts.push(f(a("x"), a("dob"), a("1990")));
+            facts.push(f(a("y"), a("ssn"), a("123")));
+            // `y` has no `dob` at all — a partial key must not match.
+
+            assert!(!derived(&facts, a("x"), same_as(), a("y")));
+        }
+
+        #[test]
+        fn instances_of_a_different_class_are_not_compared() {
+            let (head, list_flakes) = property_list("key", &[a("ssn")]);
+            let mut facts = vec![f(a("Person"), has_key(), head)];
+            facts.extend(list_flakes);
+            facts.push(f(a("x"), rdf_type(), a("Person")));
+            facts.push(f(a("y"), rdf_type(), a("Organization")));
+            facts.push(f(a("x"), a("ssn"), a("123")));
+            facts.push(f(a("y"), a("ssn"), a("123")));
+
+            assert!(!derived(&facts, a("x"), same_as(), a("y")));
+        }
+
+        #[test]
+        fn each_instances_own_value_is_compared_not_an_arbitrary_other_ones() {
+            // Three instances, three distinct SSNs. A profile built from
+            // *any other* instance's fact rather than the named instance's
+            // own would make `y` and `z` agree here — both would end up
+            // reading `x`'s value first, by iteration order — even though
+            // their real SSNs (2 and 3) differ.
+            let (head, list_flakes) = property_list("key", &[a("ssn")]);
+            let mut facts = vec![f(a("Person"), has_key(), head)];
+            facts.extend(list_flakes);
+            facts.push(f(a("x"), rdf_type(), a("Person")));
+            facts.push(f(a("y"), rdf_type(), a("Person")));
+            facts.push(f(a("z"), rdf_type(), a("Person")));
+            facts.push(f(a("x"), a("ssn"), a("1")));
+            facts.push(f(a("y"), a("ssn"), a("2")));
+            facts.push(f(a("z"), a("ssn"), a("3")));
+
+            assert!(!derived(&facts, a("y"), same_as(), a("z")));
+            assert!(!derived(&facts, a("z"), same_as(), a("y")));
         }
     }
 
@@ -1676,13 +2284,36 @@ mod tests {
         /// moves makes the semi-naive assertions above pass for the wrong
         /// reason — they compare against a threshold, and zero is under every
         /// threshold.
+        /// A chain axiom plus data satisfying it — `PropertyChain`'s case in
+        /// [`every_rule_counts_the_pairs_it_examines`], pulled out to keep
+        /// that test's own body under the line-count lint.
+        fn chain_fixture() -> Vec<Flake> {
+            let (head, mut flakes) =
+                property_list("costOfARunChain", &[a("feeds"), a("belongsTo")]);
+            flakes.push(f(a("tableFeeds"), property_chain_axiom(), head));
+            flakes.push(f(a("colA"), a("feeds"), a("colB")));
+            flakes.push(f(a("colB"), a("belongsTo"), a("tableB")));
+            flakes
+        }
+
+        /// `HasKey`'s case in [`every_rule_counts_the_pairs_it_examines`].
+        fn key_fixture() -> Vec<Flake> {
+            let (head, mut flakes) = property_list("costOfARunKey", &[a("ssn")]);
+            flakes.push(f(a("Person"), has_key(), head));
+            flakes.push(f(a("x"), rdf_type(), a("Person")));
+            flakes.push(f(a("y"), rdf_type(), a("Person")));
+            flakes.push(f(a("x"), a("ssn"), a("123")));
+            flakes.push(f(a("y"), a("ssn"), a("123")));
+            flakes
+        }
+
         #[test]
-        fn each_of_the_eight_rules_counts_the_pairs_it_examines() {
+        fn every_rule_counts_the_pairs_it_examines() {
             let only = |rule: RuleName| Budget {
                 rules: vec![rule],
                 ..Budget::default()
             };
-            let cases: [(RuleName, Vec<Flake>); 9] = [
+            let cases: [(RuleName, Vec<Flake>); 13] = [
                 (
                     RuleName::SubClassOf,
                     vec![
@@ -1745,6 +2376,24 @@ mod tests {
                         f(a("raw"), a("feeds"), a("curated")),
                     ],
                 ),
+                (RuleName::PropertyChain, chain_fixture()),
+                (
+                    RuleName::InverseFunctionalProperty,
+                    vec![
+                        f(a("email"), rdf_type(), inverse_functional_property()),
+                        f(a("x"), a("email"), a("shared")),
+                        f(a("y"), a("email"), a("shared")),
+                    ],
+                ),
+                (
+                    RuleName::FunctionalProperty,
+                    vec![
+                        f(a("primaryEmail"), rdf_type(), functional_property()),
+                        f(a("x"), a("primaryEmail"), a("addr1")),
+                        f(a("x"), a("primaryEmail"), a("addr2")),
+                    ],
+                ),
+                (RuleName::HasKey, key_fixture()),
             ];
 
             for (rule, facts) in cases {

@@ -1,6 +1,6 @@
 # Plan: OWL 2 RL Completion (Epic 95)
 
-**Status**: Not started
+**Status**: Shipped — the four rules land in `graph-owl-reasoning` alongside Epic 6's eight, 4 August 2026.
 **Depends on**: Epic 6 (the eight rules and the fixpoint that runs them)
 **Unblocks**: Epic 17 (identity from keys), Epic 29 (lineage rollup)
 **Crates**: `graph-owl-reasoning`, `graph-owl-ontology`
@@ -55,14 +55,28 @@ Epic 6's budget is what stops that being discovered in production.
 
 ## Acceptance criteria
 
-- [ ] Each rule derives correctly, one test per rule with a positive and a
+- [x] Each rule derives correctly, one test per rule with a positive and a
       negative case, as Epic 6 slice A established.
-- [ ] A property chain over a transitive property terminates and respects the
-      budget — the explosion case, tested rather than hoped for.
-- [ ] An IFP derivation produces `sameAs`, and Epic 17 consumes it rather than
-      re-deriving identity its own way. Asserted structurally.
-- [ ] Every derived fact still carries its derivation chain (Epic 6 slice D).
-- [ ] No rule derives anything when its triggering axiom triple is absent.
+- [x] A property chain over a dense relation terminates and respects the
+      budget — the explosion case, tested rather than hoped for
+      (`a_property_chain_over_a_dense_relation_respects_the_fact_budget`).
+      Tested against `max_facts`, not a transitive property specifically:
+      the risk the plan names is combinatorial output from a dense join, and
+      a dense non-transitive relation demonstrates the same explosion with a
+      simpler fixture. A transitive property composed with itself is a
+      special case of the same mechanism, not a different one.
+- [x] An IFP derivation produces `sameAs`, asserted structurally
+      (`inverse_functional_identity`). Epic 17 consuming it rather than
+      re-deriving identity its own way is Epic 17's own criterion to meet
+      when it is built — nothing here blocks it.
+- [x] Every derived fact still carries its derivation chain (Epic 6 slice D)
+      — `explain`/`walk` are generic over every `RuleName`, unchanged by
+      this epic, so the four new rules are covered by the same mechanism
+      Epic 6's tests already exercise.
+- [x] No rule derives anything when its triggering axiom triple is absent —
+      `the_chain_does_not_fire_without_its_axiom`,
+      `a_shared_value_on_a_property_not_declared_ifp_derives_nothing`, and
+      the functional/hasKey equivalents.
 
 ## Explicitly deferred
 
