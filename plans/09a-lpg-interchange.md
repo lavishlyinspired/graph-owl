@@ -1,7 +1,7 @@
 # Plan: Property-Graph Interchange & External Store Sync (Epic 9a)
 
 **Branch**: feat/lpg-interchange
-**Status**: **Slices A–B shipped (5–6 August 2026) — Slices C–F not started.**
+**Status**: **Slices A–D and F shipped, Slice E partially shipped (5–6 August 2026).** Real, checked gaps remain — see Slice E's write-up and the acceptance-criteria checklist below — so this epic is *not* marked fully shipped.
 **Depends on**: Epic 7c (LPG projection) — shipped, and its `FlakeValue::Ref`-vs-`String` kind bug already found and fixed (`07d-engine-bolt.md`). Epic 9 (RDF I/O — shares the streaming-serializer shape) — Slice A shipped, which is what this epic's own Slice A needed: not the whole of Epic 9, only its streaming-to-scratch-files pattern to mirror.
 **Crates**: **`graph-owl-lpg-io`** (per-format and per-driver features)
 
@@ -71,15 +71,15 @@ Projection is re-runnable. Elements are written with `MERGE` on the Epic 7c elem
 
 ## Acceptance criteria
 
-- [~] Every format above exports; GraphML and JSON Lines also import. **GraphML export and import shipped (Slices A–B), byte-identical round trip; every other format not started.**
-- [x] Export **streams** — memory is bounded regardless of graph size. Verified structurally (schema state bounded by distinct-key count, not element count; elements written through to disk as they arrive) at 5,000-element scale, not measured by OS-level RSS at the plan's own 1M — see Slice A's own scope note.
-- [ ] GraphML export → import round-trips losslessly, including typed property declarations.
-- [ ] Bulk CSV output loads into a real target store without hand-editing.
-- [ ] Projection to an external store is idempotent; re-running converges.
-- [ ] `checkpoint` enables incremental projection from the last transaction time.
-- [ ] Projection never reads from the target to answer a query — asserted structurally.
-- [ ] Each format and driver is behind its own feature; the default build includes no driver.
-- [ ] Authorization applies: an export runs as a principal and contains nothing they cannot read.
+- [x] Every format above exports; GraphML and JSON Lines also import. All five formats (GraphML, Bulk CSV, Cypher script, JSON Graph, JSON Lines) export; GraphML and JSON Lines both import.
+- [x] Export **streams** — memory is bounded regardless of graph size. Verified structurally (schema state bounded by distinct-key count, not element count; elements written through to disk as they arrive) at 5,000-element scale, not measured by OS-level RSS at the plan's own 1M — see Slice A's own scope note. `JsonGraphWriter` is the one deliberate, documented exception: `GraphView` is a single JSON object, so it buffers in memory and is scoped to one bounded Epic 40 neighbourhood, never a whole-catalog export.
+- [x] GraphML export → import round-trips losslessly, including typed property declarations. `export_import_export_is_byte_identical` (Slice B).
+- [x] Bulk CSV output loads into a real target store without hand-editing. Proven against a real Neo4j via testcontainers' `LOAD CSV` (Slice C).
+- [x] Projection to an external store is idempotent; re-running converges. Proven against a real Neo4j (Slice D).
+- [x] `checkpoint` enables incremental projection from the last transaction time. Shipped: checkpoint storage (Slice D) plus `Catalog::project_incremental` consuming it (Slice E).
+- [x] Projection never reads from the target to answer a query — asserted structurally. `no_query_crate_references_a_projection_target` (Slice D), refined in Slice E to wall off the one sanctioned push-only reference rather than exempting the whole crate.
+- [x] Each format and driver is behind its own feature; the default build includes no driver. `bolt-target` gates `neo4rs`; default features are `[]`.
+- [ ] **Authorization applies: an export runs as a principal and contains nothing they cannot read — unmet, found late.** `Catalog::project_incremental` (Slice E) applies `AccessPredicate` before projecting to an external store, but **none of the five file-export writers (`GraphMlWriter`, `BulkCsvWriter`, `CypherScriptWriter`, `JsonGraphWriter`, `JsonLinesWriter`) are wired behind any principal-aware `graph-owl-api` method or HTTP route** — confirmed by grep, zero references to any of them outside `graph-owl-lpg-io` itself. Each writer takes whatever `LpgNode`/`LpgEdge` a caller passes to `.node()`/`.edge()` and writes it unconditionally; there is no `Catalog::export_graphml(principal, ...)` equivalent to `export_dcat`/`export_openlineage` (Epic 9) that filters by `AccessPredicate::admits` first. A file export today would leak everything in the graph to whoever can call it, once such a call site exists — no call site exists yet, so nothing has actually leaked, but the criterion is unmet, not merely partially met.
 
 ## Slices
 
@@ -158,6 +158,14 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 - `serde::Deserialize` added to `ElementId` (custom impl mirroring its existing custom `Serialize`), `PropertyValue`, `PropertyMap`, `LpgNode`, `LpgEdge` (`graph-owl-lpg`) — needed for JSON Lines import; these types previously only derived `Serialize`.
 **Tests**: `graph-owl-lpg-io::tests` — 6 new tests (JSON Lines round-trips a node and an edge including a user property; resuming from a hand-truncated `BufRead` picks up exactly the remaining elements; a truncated final line is `Err(LpgIoError::Parse)`, not silently dropped or stopped; JSON Graph's serialized keys match the real consumer shape field-for-field; `_graph`/`_t` are carried when the source node has them; `mark_truncated` sets `GraphView.truncated`).
 **Scope cut, recorded rather than silently narrowed**: no mutation run this pass (matches every prior slice's own recorded practice). `derived` on `JsonGraphEdge` is always omitted — `LpgEdge` carries no signal distinguishing a derived relationship from an asserted one; that classification lives above this crate, so this format under-states rather than guesses, matching `ui/src/api.ts`'s own documented "absent reads as asserted" convention.
+
+## Epic-level gap found late: export authorization is unmet
+
+**Found while re-checking the acceptance-criteria checklist against the actual code, not assumed from what the slices' own write-ups claimed.** The last acceptance criterion — "an export runs as a principal and contains nothing they cannot read" — is unmet for every file-export format. `grep`ing `graph-owl-api` and `graph-owl-server` for `GraphMlWriter`/`BulkCsvWriter`/`CypherScriptWriter`/`JsonGraphWriter`/`JsonLinesWriter` returns nothing: none of the five writers built across Slices A, C and F are reachable from any principal-aware `Catalog` method or HTTP route. Only `Catalog::project_incremental` (Slice E, the Neo4j *projection* path) applies `AccessPredicate` before sending data anywhere.
+
+**Why this epic is not marked shipped.** This is not the same gap as Slice E's retraction propagation — that is a `TripleStore` capability that does not exist yet anywhere in the engine. This is a wiring gap: the authorization primitive (`graph_owl_authz::AccessPredicate`, `predicate_for`) and the pattern for applying it to an LPG export already exist and are proven, in `project_incremental` itself. What is missing is a `Catalog::export_*(principal, ...)` method per format — the same shape as Epic 9's `export_dcat`/`export_openlineage` — that queries the estate, filters through the predicate, and only then drives the writer. No file-export call site exists yet at all (there is no HTTP route for any of these five formats), so nothing has leaked in production; the criterion is unmet, not violated.
+
+**Left as a named, separable next step** rather than fixed in this pass: closing it means a small new slice (an `authorized_lpg_elements(principal)` helper reusing `project_incremental`'s own query→filter→convert logic, plus five thin `export_*` wrappers and, eventually, the HTTP routes Epic 42's export dialog will call) — scoped and TDD'd on its own rather than folded into this pass after the fact.
 
 ## Explicitly deferred (with destination)
 
