@@ -1615,7 +1615,16 @@ impl Storage for InMemoryStorage {
             .iter()
             .filter(|a| {
                 (a.name.to_lowercase().contains(&needle)
-                    || a.fully_qualified_name.to_lowercase().contains(&needle))
+                    || a.fully_qualified_name.to_lowercase().contains(&needle)
+                    // Epic 34 Slice A: the weight-D component the real
+                    // Postgres `search_vector` gained for the same reason —
+                    // a dashboard's own row carries its charts' names so it
+                    // is findable by them without a per-row search join.
+                    || a.properties
+                        .as_ref()
+                        .and_then(|p| p.get("chartNames"))
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|names| names.to_lowercase().contains(&needle)))
                     && kind.is_none_or(|k| a.kind == k)
             })
             .cloned()
@@ -1893,6 +1902,33 @@ impl Storage for InMemoryStorage {
         Ok(UpdateOutcome::Updated(Box::new(after)))
     }
 
+    async fn bump_version(
+        &self,
+        id: Uuid,
+        next: EntityVersion,
+        change_description: graph_owl_core::envelope::ChangeDescription,
+        updated_by: &str,
+    ) -> Result<Option<Asset>, StorageError> {
+        self.guard_write("bump_version");
+        let mut assets = self.assets.lock().unwrap();
+        let Some(existing) = assets.iter_mut().find(|a| a.id == id) else {
+            return Ok(None);
+        };
+        existing.version = next;
+        existing.updated_by = updated_by.to_string();
+        existing.change_description = Some(change_description.clone());
+        existing.updated_at = Utc::now();
+        let after = existing.clone();
+        self.versions.lock().unwrap().push(AssetVersion {
+            version: after.version,
+            snapshot: after.clone(),
+            change_description: Some(change_description),
+            updated_by: updated_by.to_string(),
+            updated_at: after.updated_at,
+        });
+        Ok(Some(after))
+    }
+
     async fn asset_versions(&self, id: Uuid) -> Result<Vec<AssetVersion>, StorageError> {
         let mut versions: Vec<AssetVersion> = self
             .versions
@@ -2026,6 +2062,20 @@ impl Storage for InMemoryStorage {
             .collect())
     }
 
+    async fn lineage_edges_by_pipeline(
+        &self,
+        pipeline_id: Uuid,
+    ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError> {
+        Ok(self
+            .lineage
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|edge| edge.details.pipeline == Some(pipeline_id))
+            .cloned()
+            .collect())
+    }
+
     async fn begin_run(&self, run: &graph_owl_storage::ConnectorRun) -> Result<(), StorageError> {
         self.runs.lock().unwrap().push(run.clone());
         Ok(())
@@ -2137,12 +2187,28 @@ impl Storage for InMemoryStorage {
     async fn policies_for_roles(&self, roles: &[String]) -> Result<Vec<Policy>, StorageError> {
         self.policy_reads
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Epic 34 Slice F found this checking `roles.contains(&policy.name)`
+        // — a policy's own name treated as if it were a role — which only
+        // ever worked by coincidence, when a test happened to give a policy
+        // and the role that carries it the same name. The real join is
+        // through `role_policies`, the same attachment table
+        // `upsert_policy`/`list_policies`/`delete_policy` already maintain,
+        // matching `graph-owl-storage-postgres`'s `policies p JOIN
+        // role_policies rp ON rp.policy = p.name WHERE rp.role = ANY($1)`.
+        let attached: std::collections::HashSet<String> = self
+            .role_policies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(role, _)| roles.contains(role))
+            .map(|(_, policy)| policy.clone())
+            .collect();
         Ok(self
             .policies
             .lock()
             .unwrap()
             .iter()
-            .filter(|policy| roles.contains(&policy.name))
+            .filter(|policy| attached.contains(&policy.name))
             .cloned()
             .collect())
     }
@@ -3328,6 +3394,7 @@ impl Storage for InMemoryStorage {
                         .unwrap_or(graph_owl_core::lineage::LineageSource::Connector),
                     query: None,
                     description: None,
+                    pipeline: None,
                 },
                 created_at: Utc::now(),
                 created_by: created_by.to_string(),

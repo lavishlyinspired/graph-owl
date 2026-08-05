@@ -34,6 +34,7 @@ pub mod contract;
 pub mod contradiction;
 pub mod custom_property;
 pub mod domain;
+pub mod entity_families;
 pub mod envelope;
 pub mod extraction;
 pub mod extraction_run;
@@ -292,16 +293,72 @@ pub enum AssetKind {
     Table,
     /// A column within a table.
     Column,
+    /// The root of a dashboarding tool — Epic 34 Slice A.
+    DashboardService,
+    /// A dashboard within a dashboarding tool.
+    Dashboard,
+    /// A chart within a dashboard.
+    Chart,
+    /// The root of a message broker — Epic 34 Slice B.
+    MessagingService,
+    /// A topic within a message broker.
+    Topic,
+    /// One field of a topic's message schema — the column machinery, under
+    /// a topic instead of a table.
+    TopicField,
+    /// The root of an orchestration tool — Epic 34 Slice C.
+    PipelineService,
+    /// A pipeline within an orchestration tool.
+    Pipeline,
+    /// A task within a pipeline; tasks form a DAG via `downstreamTasks` in
+    /// `properties`, not via containment.
+    Task,
+    /// The root of a model registry — Epic 34 Slice D.
+    MlModelService,
+    /// A model within a model registry.
+    MlModel,
+    /// A feature of a model, sourced from table columns by FQN.
+    Feature,
+    /// The root of an object store — Epic 34 Slice E.
+    StorageService,
+    /// A container within an object store; containers nest via `contains`,
+    /// and a [`AssetKind::Column`] may live directly under one too (reusing
+    /// the column machinery for structured formats like Parquet or Avro).
+    /// Both are a second valid parent `parent_kind` cannot express — see
+    /// decision 28 in `00b-architecture.md` for the resulting gap in the
+    /// projection predicate's naming.
+    Container,
 }
 
 impl AssetKind {
     /// Every kind, root to leaf.
-    pub const ALL: [AssetKind; 5] = [
+    ///
+    /// **One flat list across every family**, not five-per-chain: nothing in
+    /// this project's containment, envelope, search, or authz machinery reads
+    /// this list as a single hierarchy — `parent_kind` is what defines each
+    /// family's chain, and `ALL` is only ever used to enumerate or validate
+    /// against, so the database hierarchy and the dashboard hierarchy share
+    /// it without implying either contains the other.
+    pub const ALL: [AssetKind; 19] = [
         AssetKind::Service,
         AssetKind::Database,
         AssetKind::Schema,
         AssetKind::Table,
         AssetKind::Column,
+        AssetKind::DashboardService,
+        AssetKind::Dashboard,
+        AssetKind::Chart,
+        AssetKind::MessagingService,
+        AssetKind::Topic,
+        AssetKind::TopicField,
+        AssetKind::PipelineService,
+        AssetKind::Pipeline,
+        AssetKind::Task,
+        AssetKind::MlModelService,
+        AssetKind::MlModel,
+        AssetKind::Feature,
+        AssetKind::StorageService,
+        AssetKind::Container,
     ];
 
     /// The wire name.
@@ -313,6 +370,20 @@ impl AssetKind {
             AssetKind::Schema => "schema",
             AssetKind::Table => "table",
             AssetKind::Column => "column",
+            AssetKind::DashboardService => "dashboardService",
+            AssetKind::Dashboard => "dashboard",
+            AssetKind::Chart => "chart",
+            AssetKind::MessagingService => "messagingService",
+            AssetKind::Topic => "topic",
+            AssetKind::TopicField => "topicField",
+            AssetKind::PipelineService => "pipelineService",
+            AssetKind::Pipeline => "pipeline",
+            AssetKind::Task => "task",
+            AssetKind::MlModelService => "mlModelService",
+            AssetKind::MlModel => "mlModel",
+            AssetKind::Feature => "feature",
+            AssetKind::StorageService => "storageService",
+            AssetKind::Container => "container",
         }
     }
 
@@ -340,6 +411,32 @@ impl AssetKind {
             AssetKind::Schema => Some(AssetKind::Database),
             AssetKind::Table => Some(AssetKind::Schema),
             AssetKind::Column => Some(AssetKind::Table),
+            AssetKind::DashboardService => None,
+            AssetKind::Dashboard => Some(AssetKind::DashboardService),
+            AssetKind::Chart => Some(AssetKind::Dashboard),
+            AssetKind::MessagingService => None,
+            AssetKind::Topic => Some(AssetKind::MessagingService),
+            AssetKind::TopicField => Some(AssetKind::Topic),
+            AssetKind::PipelineService => None,
+            AssetKind::Pipeline => Some(AssetKind::PipelineService),
+            AssetKind::Task => Some(AssetKind::Pipeline),
+            AssetKind::MlModelService => None,
+            AssetKind::MlModel => Some(AssetKind::MlModelService),
+            AssetKind::Feature => Some(AssetKind::MlModel),
+            AssetKind::StorageService => None,
+            // The *declared* parent — used by `depth()`, the flake
+            // projection's predicate naming, and `graph-owl-cli`'s
+            // declarative validator, none of which can express "one of
+            // several kinds". A container's *actual* parent may also be
+            // another container (nesting, nesting again) — see
+            // `Catalog::upsert_asset`'s Container special-case, and the
+            // decision recorded in `00b-architecture.md` for the resulting
+            // gap: a nested container's projected containment predicate
+            // reads `parentStorageService` even when its real parent is a
+            // container. Self-referential (`Some(Container)`) was rejected
+            // for this — `depth()` walks `parent_kind()` to termination, and
+            // a self-referential value would not terminate.
+            AssetKind::Container => Some(AssetKind::StorageService),
         }
     }
 
@@ -399,6 +496,21 @@ mod asset_kind_tests {
     fn depth_counts_hops_to_the_root() {
         assert_eq!(AssetKind::Service.depth(), 0);
         assert_eq!(AssetKind::Column.depth(), 4);
+    }
+
+    /// Epic 34 Slice A: a second, independent chain. Independent, not merged
+    /// into the database hierarchy's root — a dashboard is not contained by a
+    /// database engine, and forcing one root would make "list every root"
+    /// return two unrelated things under one name.
+    #[test]
+    fn the_dashboard_family_is_its_own_chain_rooted_independently() {
+        assert_eq!(AssetKind::DashboardService.parent_kind(), None);
+        assert_eq!(
+            AssetKind::Dashboard.parent_kind(),
+            Some(AssetKind::DashboardService)
+        );
+        assert_eq!(AssetKind::Chart.parent_kind(), Some(AssetKind::Dashboard));
+        assert_eq!(AssetKind::Chart.depth(), 2);
     }
 
     #[test]

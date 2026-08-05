@@ -735,8 +735,9 @@ impl Storage for PostgresStorage {
     ) -> Result<(), StorageError> {
         let result = sqlx::query(
             "INSERT INTO lineage_edges
-                 (id, from_asset_id, to_asset_id, relationship, source, query, description, created_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 (id, from_asset_id, to_asset_id, relationship, source, query, description,
+                  created_by, pipeline_asset_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(edge.id)
         .bind(edge.from_asset_id)
@@ -746,6 +747,7 @@ impl Storage for PostgresStorage {
         .bind(&edge.details.query)
         .bind(&edge.details.description)
         .bind(&edge.created_by)
+        .bind(edge.details.pipeline)
         .execute(&self.pool)
         .await;
 
@@ -779,7 +781,7 @@ impl Storage for PostgresStorage {
         let row = sqlx::query(
             "DELETE FROM lineage_edges WHERE id = $1
              RETURNING id, from_asset_id, to_asset_id, relationship, source,
-                       query, description, created_at, created_by",
+                       query, description, created_at, created_by, pipeline_asset_id",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -803,6 +805,7 @@ impl Storage for PostgresStorage {
                     )?,
                     query: row.get("query"),
                     description: row.get("description"),
+                    pipeline: row.get("pipeline_asset_id"),
                 },
                 created_at: row.get("created_at"),
                 created_by: row.get("created_by"),
@@ -818,7 +821,7 @@ impl Storage for PostgresStorage {
     ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, from_asset_id, to_asset_id, relationship, source, query,
-                    description, created_at, created_by
+                    description, created_at, created_by, pipeline_asset_id
                FROM lineage_edges
               WHERE from_asset_id = ANY($1) OR to_asset_id = ANY($1)",
         )
@@ -849,6 +852,50 @@ impl Storage for PostgresStorage {
                         )?,
                         query: row.get("query"),
                         description: row.get("description"),
+                        pipeline: row.get("pipeline_asset_id"),
+                    },
+                    created_at: row.get("created_at"),
+                    created_by: row.get("created_by"),
+                })
+            })
+            .collect()
+    }
+
+    #[tracing::instrument(name = "storage.lineage_edges_by_pipeline", skip_all)]
+    async fn lineage_edges_by_pipeline(
+        &self,
+        pipeline_id: Uuid,
+    ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, from_asset_id, to_asset_id, relationship, source, query,
+                    description, created_at, created_by, pipeline_asset_id
+               FROM lineage_edges
+              WHERE pipeline_asset_id = $1",
+        )
+        .bind(pipeline_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let relationship: String = row.get("relationship");
+                let source: String = row.get("source");
+                Ok(graph_owl_core::lineage::LineageEdge {
+                    id: row.get("id"),
+                    from_asset_id: row.get("from_asset_id"),
+                    to_asset_id: row.get("to_asset_id"),
+                    relationship: graph_owl_core::relationship_type::RelationshipType::parse(
+                        &relationship,
+                    )
+                    .map_err(|e| StorageError::Unexpected(format!("unknown relationship {e:?}")))?,
+                    details: graph_owl_core::lineage::LineageDetails {
+                        source: graph_owl_core::lineage::LineageSource::parse(&source).map_err(
+                            |e| StorageError::Unexpected(format!("unknown lineage source {e}")),
+                        )?,
+                        query: row.get("query"),
+                        description: row.get("description"),
+                        pipeline: row.get("pipeline_asset_id"),
                     },
                     created_at: row.get("created_at"),
                     created_by: row.get("created_by"),
@@ -3336,6 +3383,72 @@ impl Storage for PostgresStorage {
         written.owners = self.asset_owners(written.id).await?;
         self.recompute_blocking_keys(&written).await?;
         Ok(written)
+    }
+
+    #[tracing::instrument(name = "storage.bump_version", skip_all)]
+    async fn bump_version(
+        &self,
+        id: Uuid,
+        next: graph_owl_core::envelope::EntityVersion,
+        change_description: graph_owl_core::envelope::ChangeDescription,
+        updated_by: &str,
+    ) -> Result<Option<Asset>, StorageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let row = sqlx::query(&format!(
+            "UPDATE assets SET version_major = $2, version_minor = $3, updated_by = $4,
+                 change_description = $5, updated_at = now()
+             WHERE id = $1
+             RETURNING {ASSET_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(i32::try_from(next.major).unwrap_or(i32::MAX))
+        .bind(i32::try_from(next.minor).unwrap_or(i32::MAX))
+        .bind(updated_by)
+        .bind(serde_json::to_value(&change_description).ok())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let Some(row) = row else {
+            tx.rollback()
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            return Ok(None);
+        };
+        let updated = asset_from_row(row);
+
+        // Same history row `update_asset` writes, for the same reason: a
+        // version bump with no entry in `asset_versions` is a version the
+        // "History" tab cannot show.
+        sqlx::query(
+            "INSERT INTO asset_versions
+                 (asset_id, version_major, version_minor, snapshot, change_description, updated_by, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(i32::try_from(next.major).unwrap_or(i32::MAX))
+        .bind(i32::try_from(next.minor).unwrap_or(i32::MAX))
+        .bind(serde_json::to_value(&updated).unwrap_or_default())
+        .bind(serde_json::to_value(&change_description).ok())
+        .bind(updated_by)
+        .bind(updated.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let mut written = updated;
+        written.owners = self.asset_owners(written.id).await?;
+        Ok(Some(written))
     }
 
     #[tracing::instrument(name = "storage.get_asset", skip_all)]

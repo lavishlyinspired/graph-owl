@@ -38,7 +38,7 @@ use graph_owl_core::projection;
 use graph_owl_core::resolution::{Candidate, Evidence, MergeDecidedBy, MergeRecord, Resolution};
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
-    envelope::{ChangeDescription, EntityVersion},
+    envelope::{ChangeDescription, EntityVersion, FieldChange},
     fqn,
     page::{Page, PageRequest},
     relationship_type::{EntityKind, RelationshipType, is_legal},
@@ -134,6 +134,78 @@ impl ValidateBody for UpsertAsset {
         optional_string(value, &FieldPath::root().key("description"), &mut errors);
         errors
     }
+}
+
+/// Validates the closed-enum fields Epic 34's new asset families carry inside
+/// [`UpsertAsset::properties`].
+///
+/// **Family-specific data has no per-kind Rust struct** (see
+/// `plans/34-entity-expansion.md`'s "no core change" constraint) — it lives
+/// in `properties`, an unstructured JSON bag every kind shares. Most of that
+/// bag is opaque by design (a source-reported field graph-owl does not
+/// interpret), but a few fields the plan calls out explicitly as *closed*
+/// enums — "chart types are a closed enum" — still deserve the same
+/// round-trip guarantee every other closed vocabulary here has
+/// ([`AssetKind`] itself, [`graph_owl_core::lineage::LineageSource`]) rather
+/// than silently accepting any string a caller sends.
+fn check_family_properties(
+    kind: AssetKind,
+    properties: Option<&serde_json::Value>,
+) -> Result<(), CatalogError> {
+    match kind {
+        AssetKind::Chart => check_closed_property(
+            properties,
+            "chartType",
+            graph_owl_core::entity_families::ChartType::parse,
+            graph_owl_core::entity_families::ChartType::ALL
+                .iter()
+                .map(|c| c.as_str()),
+        ),
+        AssetKind::TopicField => check_closed_property(
+            properties,
+            "dataType",
+            graph_owl_core::entity_families::SchemaFieldType::parse,
+            graph_owl_core::entity_families::SchemaFieldType::ALL
+                .iter()
+                .map(|t| t.as_str()),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// One property, checked against a closed vocabulary if present — absent is
+/// always fine, since every family's closed field here is optional at the
+/// point of creation. Shared by every family with one of these
+/// ([`AssetKind::Chart`]'s `chartType`, [`AssetKind::TopicField`]'s
+/// `dataType`, and Slices C–E's own as they land) so the "named, not
+/// silently accepted" behavior does not have to be re-derived per family.
+fn check_closed_property<T>(
+    properties: Option<&serde_json::Value>,
+    field: &'static str,
+    parse: impl Fn(&str) -> Result<T, String>,
+    valid: impl Iterator<Item = &'static str>,
+) -> Result<(), CatalogError> {
+    let Some(value) = properties.and_then(|p| p.get(field)) else {
+        return Ok(());
+    };
+    let Some(value) = value.as_str() else {
+        return Err(CatalogError::Validation(vec![FieldError::new(
+            format!("properties.{field}"),
+            FieldErrorCode::Type,
+            "expected a string".to_string(),
+        )]));
+    };
+    parse(value).map_err(|got| {
+        CatalogError::Validation(vec![FieldError::new(
+            format!("properties.{field}"),
+            FieldErrorCode::Type,
+            format!(
+                "`{got}` is not valid for `{field}`; expected one of: {}",
+                valid.collect::<Vec<_>>().join(", ")
+            ),
+        )])
+    })?;
+    Ok(())
 }
 
 /// The request body for creating a relationship edge.
@@ -1803,6 +1875,130 @@ impl Catalog {
     /// undefined name a `400` rather than a silently stored value. A bag
     /// accepted untyped is the description field again, with extra steps —
     /// which is the whole failure this epic exists to prevent.
+    /// Refuses a task edge that would close a cycle in its pipeline's DAG —
+    /// Epic 34 Slice C. `downstreamTasks` names sibling tasks by name (not by
+    /// id: a task is written before the ones downstream of it necessarily
+    /// exist yet, the same forward-reference-by-name shape ingestion already
+    /// allows for edges between batch items).
+    async fn check_no_task_cycle(
+        &self,
+        pipeline_id: Uuid,
+        task_name: &str,
+        properties: Option<&serde_json::Value>,
+    ) -> Result<(), CatalogError> {
+        let downstream: Vec<String> = properties
+            .and_then(|p| p.get("downstreamTasks"))
+            .and_then(|v| v.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if downstream.is_empty() {
+            return Ok(());
+        }
+
+        let siblings = self.storage.list_children(Some(pipeline_id)).await?;
+        let mut edges: Vec<(String, String)> = siblings
+            .iter()
+            .filter(|sibling| sibling.kind == AssetKind::Task && sibling.name != task_name)
+            .flat_map(|sibling| {
+                let from = sibling.name.clone();
+                sibling
+                    .properties
+                    .as_ref()
+                    .and_then(|p| p.get("downstreamTasks"))
+                    .and_then(|v| v.as_array())
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(|entry| entry.as_str().map(str::to_string))
+                            .map(move |to| (from.clone(), to))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        // This task's own other outgoing edges, if it already existed — an
+        // update naming one new downstream task must still see the ones it
+        // already had, or a two-step cycle built one edge per request would
+        // slip through.
+        if let Some(existing) = siblings.iter().find(|sibling| sibling.name == task_name) {
+            if let Some(existing_downstream) = existing
+                .properties
+                .as_ref()
+                .and_then(|p| p.get("downstreamTasks"))
+                .and_then(|v| v.as_array())
+            {
+                edges.extend(
+                    existing_downstream
+                        .iter()
+                        .filter_map(|entry| entry.as_str().map(str::to_string))
+                        .map(|to| (task_name.to_string(), to)),
+                );
+            }
+        }
+
+        for target in &downstream {
+            if target == task_name {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "properties.downstreamTasks",
+                    FieldErrorCode::Type,
+                    format!("`{task_name}` cannot be downstream of itself"),
+                )]));
+            }
+            if graph_owl_core::glossary::would_cycle(task_name, target, &edges) {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "properties.downstreamTasks",
+                    FieldErrorCode::Type,
+                    format!(
+                        "`{task_name}` -> `{target}` would close a cycle in this pipeline's \
+                         task DAG"
+                    ),
+                )]));
+            }
+        }
+        Ok(())
+    }
+
+    /// Every entry in a feature's `properties.featureSources` must resolve
+    /// to a live, non-deleted [`AssetKind::Column`] — see the note above its
+    /// call site in [`Self::upsert_asset`]. Absent is fine (a feature may be
+    /// created before its sources are known); present-but-wrong is the
+    /// plan's own "a feature source naming a nonexistent column → 400".
+    async fn check_feature_sources(
+        &self,
+        properties: Option<&serde_json::Value>,
+    ) -> Result<(), CatalogError> {
+        let Some(sources) = properties
+            .and_then(|p| p.get("featureSources"))
+            .and_then(|v| v.as_array())
+        else {
+            return Ok(());
+        };
+        for source in sources {
+            let Some(fqn) = source.as_str() else {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "properties.featureSources",
+                    FieldErrorCode::Type,
+                    "expected a string FQN".to_string(),
+                )]));
+            };
+            let column = self.storage.get_asset_by_fqn(fqn).await?;
+            let valid = column.is_some_and(|c| c.kind == AssetKind::Column && !c.deleted);
+            if !valid {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "properties.featureSources",
+                    FieldErrorCode::Type,
+                    format!("`{fqn}` is not a known column"),
+                )]));
+            }
+        }
+        Ok(())
+    }
+
     async fn check_extension(
         &self,
         kind: AssetKind,
@@ -4115,6 +4311,11 @@ impl Catalog {
         self.check_extension(request.kind, request.extension.as_ref())
             .await?;
 
+        // Same reasoning, for the closed-enum fields Epic 34 adds inside
+        // `properties` itself (never validated before this epic, because
+        // Table/Column carry nothing closed there).
+        check_family_properties(request.kind, request.properties.as_ref())?;
+
         // Containment is checked against the *actual* parent, not a claim in
         // the request: a column under a schema is a hierarchy corruption every
         // later traversal has to cope with.
@@ -4125,7 +4326,28 @@ impl Catalog {
                     .get_asset(parent_id)
                     .await?
                     .ok_or(CatalogError::NotFound)?;
-                if request.kind.parent_kind() != Some(parent.kind) {
+                // Epic 34 Slice E: a container may also nest inside another
+                // container — `AssetKind::parent_kind` cannot express "one of
+                // several kinds" (it is a single terminating chain, which
+                // `depth()` walks to termination), so the second valid parent
+                // is special-cased here rather than in the kind's own
+                // declared parent. See `AssetKind::Container`'s own doc
+                // comment for the resulting, recorded gap.
+                let is_nested_container =
+                    request.kind == AssetKind::Container && parent.kind == AssetKind::Container;
+                // Epic 34 Slice E, second half: "`data_model` holds columns
+                // where the format is structured (Parquet, Avro), reusing
+                // the column machinery" — the identical single-parent
+                // limitation as the nesting case above, so it gets the same
+                // treatment: a `Column` under a `Container` is a second
+                // special-cased parent, not a new kind. Recorded as decision
+                // 28 in `00b-architecture.md`.
+                let is_column_under_container =
+                    request.kind == AssetKind::Column && parent.kind == AssetKind::Container;
+                if request.kind.parent_kind() != Some(parent.kind)
+                    && !is_nested_container
+                    && !is_column_under_container
+                {
                     return Err(CatalogError::Validation(vec![FieldError::new(
                         "parentId",
                         FieldErrorCode::Type,
@@ -4153,6 +4375,27 @@ impl Catalog {
                 None
             }
         };
+
+        // Epic 34 Slice C: a task DAG cycle is rejected before the write,
+        // the same way the plan reuses Epic 11's own cycle detector for
+        // glossary terms — a poly-hierarchy walk over an edge list, here
+        // built from every sibling task's own `downstreamTasks` rather than
+        // a `broader` relation.
+        if request.kind == AssetKind::Task
+            && let Some(pipeline) = &parent
+        {
+            self.check_no_task_cycle(pipeline.id, &request.name, request.properties.as_ref())
+                .await?;
+        }
+
+        // Epic 34 Slice D: a feature's `featureSources` names table columns
+        // by FQN — checked before the write, the same reasoning as the task
+        // cycle check above, so a nonexistent source is a `400` rather than
+        // a lineage edge silently never derived.
+        if request.kind == AssetKind::Feature {
+            self.check_feature_sources(request.properties.as_ref())
+                .await?;
+        }
 
         let fully_qualified_name = match &parent {
             Some(parent) => fqn::child_of(&parent.fully_qualified_name, &request.name),
@@ -4229,7 +4472,137 @@ impl Catalog {
             ),
         });
 
+        // Epic 34 Slice A: "search ranks a dashboard by its own name and by
+        // its charts' names" — but `search_vector` is a per-row generated
+        // column (Epic 8 Slice A), computed from that row's own name/FQN/
+        // description alone; it has no way to reach into a child row. The
+        // only way to satisfy the criterion without changing how
+        // `search_vector` is computed for every kind is to denormalize the
+        // chart names onto the dashboard's own row, in the weight-D slot the
+        // migration's own comment reserved for exactly this kind of later
+        // need. Recorded in `plans/00b-architecture.md`'s decision log per
+        // the epic's own instruction.
+        if written.kind == AssetKind::Chart
+            && let Some(dashboard_id) = written.parent_id
+        {
+            self.sync_dashboard_chart_names(dashboard_id).await?;
+        }
+
+        // Epic 34 Slice D: "lineage edges are derived from feature sources
+        // rather than asserted separately" — a caller names the columns a
+        // feature was built from and the table-to-model edge follows
+        // automatically, the same "after the write, before it's returned"
+        // shape as the chart-name sync above.
+        if written.kind == AssetKind::Feature
+            && let Some(model_id) = written.parent_id
+        {
+            self.derive_lineage_from_feature_sources(principal, model_id, &written)
+                .await?;
+        }
+
         Ok(written)
+    }
+
+    /// Recomputes and persists a dashboard's `properties.chartNames` from its
+    /// current chart children — see the "search ranks a dashboard" note in
+    /// [`Self::upsert_asset`]. A system-maintained cache field, not a user
+    /// edit: written directly through storage rather than through
+    /// `Catalog::upsert_asset` itself, so refreshing it neither bumps the
+    /// dashboard's own semantic version nor emits a change event a reader
+    /// would have no context for ("what changed?" — nothing a person did).
+    async fn sync_dashboard_chart_names(&self, dashboard_id: Uuid) -> Result<(), CatalogError> {
+        let Some(mut dashboard) = self.storage.get_asset(dashboard_id).await? else {
+            // The dashboard itself may already be gone (e.g. a cascading
+            // delete removed it and this chart with it) — nothing to sync.
+            return Ok(());
+        };
+        let children = self.storage.list_children(Some(dashboard_id)).await?;
+        let chart_names: Vec<&str> = children
+            .iter()
+            .filter(|child| child.kind == AssetKind::Chart && !child.deleted)
+            .map(|child| child.name.as_str())
+            .collect();
+
+        let mut properties = dashboard
+            .properties
+            .and_then(|p| p.as_object().cloned())
+            .unwrap_or_default();
+        if chart_names.is_empty() {
+            properties.remove("chartNames");
+        } else {
+            properties.insert(
+                "chartNames".to_string(),
+                serde_json::Value::String(chart_names.join(" ")),
+            );
+        }
+        dashboard.properties = Some(serde_json::Value::Object(properties));
+        self.storage.upsert_asset(dashboard).await?;
+        Ok(())
+    }
+
+    /// Asserts a `Table -> MlModel` lineage edge for every distinct table
+    /// behind `feature`'s `properties.featureSources` — see the Slice D note
+    /// above its call site in [`Self::upsert_asset`]. Each source column's
+    /// own parent *is* its table (`Column`'s declared parent kind), so no
+    /// further walk up the hierarchy is needed. `check_feature_sources` has
+    /// already confirmed every entry resolves, so a lookup failure here
+    /// (a source deleted between the check and this call) is skipped rather
+    /// than re-reported.
+    async fn derive_lineage_from_feature_sources(
+        &self,
+        principal: &Principal,
+        model_id: Uuid,
+        feature: &Asset,
+    ) -> Result<(), CatalogError> {
+        let Some(sources) = feature
+            .properties
+            .as_ref()
+            .and_then(|p| p.get("featureSources"))
+            .and_then(|v| v.as_array())
+        else {
+            return Ok(());
+        };
+
+        let mut table_ids: Vec<Uuid> = Vec::new();
+        for source in sources {
+            let Some(fqn) = source.as_str() else {
+                continue;
+            };
+            let Some(column) = self.storage.get_asset_by_fqn(fqn).await? else {
+                continue;
+            };
+            if let Some(table_id) = column.parent_id
+                && !table_ids.contains(&table_id)
+            {
+                table_ids.push(table_id);
+            }
+        }
+
+        for table_id in table_ids {
+            match self
+                .assert_lineage(
+                    principal,
+                    table_id,
+                    model_id,
+                    graph_owl_core::relationship_type::RelationshipType::Feeds,
+                    graph_owl_core::lineage::LineageDetails {
+                        source: graph_owl_core::lineage::LineageSource::Connector,
+                        query: None,
+                        description: None,
+                        pipeline: None,
+                    },
+                )
+                .await
+            {
+                // Re-saving a feature against the same sources re-derives
+                // the same edge; already-asserted is success here, not a
+                // failure to surface — the edge the caller wanted exists
+                // either way.
+                Ok(_) | Err(CatalogError::Conflict { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     /// # Errors
@@ -8176,6 +8549,7 @@ impl Catalog {
                             source: graph_owl_core::lineage::LineageSource::Connector,
                             query: edge.query.clone(),
                             description: edge.description.clone(),
+                            pipeline: None,
                         },
                     )
                     .await
@@ -8223,16 +8597,63 @@ impl Catalog {
     ///
     /// # Errors
     ///
-    /// `NotFound` if the asset does not exist.
+    /// `NotFound` if the asset does not exist. `Validation` if the asset is a
+    /// pipeline referenced by lineage — see [`Self::soft_delete_asset_forced`].
     #[tracing::instrument(name = "catalog.soft_delete_asset", skip_all)]
     pub async fn soft_delete_asset(
         &self,
         principal: &Principal,
         id: Uuid,
     ) -> Result<u64, CatalogError> {
+        self.soft_delete_asset_impl(principal, id, false).await
+    }
+
+    /// [`Self::soft_delete_asset`], but a pipeline referenced by lineage is
+    /// deleted anyway rather than refused.
+    ///
+    /// **A separate method, not a `force: bool` on the existing one** —
+    /// Epic 34 Slice C added the one case this guards (only a pipeline can be
+    /// referenced this way today), and every other caller of
+    /// `soft_delete_asset` gets the new protection automatically with no
+    /// signature to update, rather than a `force` parameter every existing
+    /// call site would need to thread through and mean nothing to.
+    ///
+    /// # Errors
+    /// `NotFound` if the asset does not exist.
+    pub async fn soft_delete_asset_forced(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<u64, CatalogError> {
+        self.soft_delete_asset_impl(principal, id, true).await
+    }
+
+    async fn soft_delete_asset_impl(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        force: bool,
+    ) -> Result<u64, CatalogError> {
         let Some(before) = self.storage.get_asset(id).await? else {
             return Err(CatalogError::NotFound);
         };
+        if !force {
+            let referencing = self.storage.lineage_edges_by_pipeline(id).await?;
+            if !referencing.is_empty() {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "id",
+                    FieldErrorCode::Type,
+                    format!(
+                        "`{}` is the pipeline behind {} lineage edge{}; deleting it would leave \
+                         them attributed to nothing. Re-send with `?force=true` to delete it \
+                         anyway",
+                        before.name,
+                        referencing.len(),
+                        if referencing.len() == 1 { "" } else { "s" }
+                    ),
+                )]));
+            }
+        }
         let affected = self.storage.soft_delete_asset(id, &principal.id).await?;
         self.announce(Some(ChangeEvent::soft_deleted(
             event_subject(&before),
@@ -8240,7 +8661,82 @@ impl Catalog {
             before.version,
             &principal.id,
         )));
+
+        // Epic 34 Slice B: "a schema field removal is Major" — but
+        // `ChangeDescription::between` diffs only an `Asset`'s own top-level
+        // fields, deliberately ("a nested diff produces paths nobody reads"),
+        // and a schema field is a *child asset* here (so it is independently
+        // taggable by FQN, exactly as a column is), not a nested value inside
+        // the topic's own `properties`. Removing one is therefore a version
+        // event on the *parent*, propagated explicitly rather than picked up
+        // by the existing field-diff mechanism, which was never going to see
+        // a child's deletion at all.
+        if before.kind == AssetKind::TopicField
+            && let Some(topic_id) = before.parent_id
+        {
+            self.bump_version_for_child_removal(&principal.id, topic_id, &before.name)
+                .await?;
+        } else if before.kind == AssetKind::Feature
+            && let Some(model_id) = before.parent_id
+        {
+            // Epic 34 Slice D: "a feature set change is Major" — a feature
+            // is its own asset, independently taggable exactly like a
+            // schema field, so removing one is a version event on the model
+            // it belonged to. The identical mechanism Slice B built for a
+            // removed schema field, reused rather than re-derived.
+            self.bump_version_for_child_removal(&principal.id, model_id, &before.name)
+                .await?;
+        }
+
         Ok(affected)
+    }
+
+    /// Bumps `asset_id` to its next Major version because a child of it was
+    /// removed — see the Slice B note in [`Self::soft_delete_asset_impl`].
+    /// Written directly through storage (like
+    /// [`Self::sync_dashboard_chart_names`]) because the version to bump to
+    /// is computed here, not diffed from a before/after `Asset` the normal
+    /// `update_asset` path expects.
+    async fn bump_version_for_child_removal(
+        &self,
+        updated_by: &str,
+        asset_id: Uuid,
+        removed_child_name: &str,
+    ) -> Result<(), CatalogError> {
+        let Some(asset) = self.storage.get_asset(asset_id).await? else {
+            // The parent may already be gone too (e.g. deleted alongside its
+            // child by a cascade) — nothing to bump.
+            return Ok(());
+        };
+        let before_version = asset.version;
+        let change_description = ChangeDescription {
+            fields_deleted: vec![FieldChange {
+                field: removed_child_name.to_string(),
+                before: Some(serde_json::Value::String(removed_child_name.to_string())),
+                after: None,
+            }],
+            ..Default::default()
+        };
+        let Some(updated) = self
+            .storage
+            .bump_version(
+                asset_id,
+                asset.version.next_major(),
+                change_description.clone(),
+                updated_by,
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        self.announce(ChangeEvent::updated(
+            event_subject(&updated),
+            before_version,
+            updated.version,
+            change_description,
+            updated_by,
+        ));
+        Ok(())
     }
 
     /// Everything the landing page needs, in one answer.
@@ -16944,15 +17440,21 @@ mod projection_isolation_tests {
             let storage = Arc::new(InMemoryStorage::default());
             // No rule admits "secret-bank" — the analyst is denied it by the
             // same default-deny every other authz test in this file relies on.
-            storage.policies.lock().unwrap().push(Policy {
-                name: "analyst".to_string(),
-                rules: vec![Rule {
-                    name: "read-something-else".to_string(),
-                    effect: Effect::Allow,
-                    operations: vec![MetadataOperation::ViewBasic],
-                    resources: ResourceMatcher::FqnPrefix("irrelevant".to_string()),
-                }],
-            });
+            storage
+                .upsert_policy(
+                    &Policy {
+                        name: "analyst".to_string(),
+                        rules: vec![Rule {
+                            name: "read-something-else".to_string(),
+                            effect: Effect::Allow,
+                            operations: vec![MetadataOperation::ViewBasic],
+                            resources: ResourceMatcher::FqnPrefix("irrelevant".to_string()),
+                        }],
+                    },
+                    &["analyst".to_string()],
+                )
+                .await
+                .expect("policy");
             let graph = RecordingGraph::working();
             let (endpoint, captured, _server) =
                 start_capturing_sparql_endpoint(REMOTE_RESULTS_JSON).await;
@@ -17278,15 +17780,21 @@ mod projection_isolation_tests {
         use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
 
         let storage = Arc::new(InMemoryStorage::default());
-        storage.policies.lock().unwrap().push(Policy {
-            name: "analyst".to_string(),
-            rules: vec![Rule {
-                name: "read-hdfc".to_string(),
-                effect: Effect::Allow,
-                operations: vec![MetadataOperation::ViewBasic],
-                resources: ResourceMatcher::FqnPrefix("hdfc-core".to_string()),
-            }],
-        });
+        storage
+            .upsert_policy(
+                &Policy {
+                    name: "analyst".to_string(),
+                    rules: vec![Rule {
+                        name: "read-hdfc".to_string(),
+                        effect: Effect::Allow,
+                        operations: vec![MetadataOperation::ViewBasic],
+                        resources: ResourceMatcher::FqnPrefix("hdfc-core".to_string()),
+                    }],
+                },
+                &["analyst".to_string()],
+            )
+            .await
+            .expect("policy");
         let graph = RecordingGraph::working();
         let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
 
@@ -17495,15 +18003,21 @@ mod projection_isolation_tests {
         use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
 
         let storage = Arc::new(InMemoryStorage::default());
-        storage.policies.lock().unwrap().push(Policy {
-            name: "analyst".to_string(),
-            rules: vec![Rule {
-                name: "read-hdfc".to_string(),
-                effect: Effect::Allow,
-                operations: vec![MetadataOperation::ViewBasic],
-                resources: ResourceMatcher::FqnPrefix("hdfc-core".to_string()),
-            }],
-        });
+        storage
+            .upsert_policy(
+                &Policy {
+                    name: "analyst".to_string(),
+                    rules: vec![Rule {
+                        name: "read-hdfc".to_string(),
+                        effect: Effect::Allow,
+                        operations: vec![MetadataOperation::ViewBasic],
+                        resources: ResourceMatcher::FqnPrefix("hdfc-core".to_string()),
+                    }],
+                },
+                &["analyst".to_string()],
+            )
+            .await
+            .expect("policy");
         let graph = RecordingGraph::working();
         let seed = Catalog::new(storage.clone())
             .with_graph(graph.clone() as Arc<dyn TripleStore>)
@@ -18058,6 +18572,7 @@ mod projection_isolation_tests {
                 source: LineageSource::Manual,
                 query: None,
                 description: None,
+                pipeline: None,
             }
         }
 
@@ -18316,7 +18831,10 @@ mod projection_isolation_tests {
 
         async fn catalog_with_policy() -> (Catalog, Arc<InMemoryStorage>) {
             let storage = Arc::new(InMemoryStorage::default());
-            storage.policies.lock().unwrap().push(policy("hdfc-core"));
+            storage
+                .upsert_policy(&policy("hdfc-core"), &["analyst".to_string()])
+                .await
+                .expect("policy");
             let catalog = Catalog::new(storage.clone());
             catalog
                 .upsert_asset(&Principal::system(), service("hdfc-core"))
@@ -19008,7 +19526,10 @@ mod projection_isolation_tests {
 
         async fn catalog_with(grant: Option<AgentGrant>) -> (Catalog, Arc<InMemoryStorage>) {
             let storage = Arc::new(InMemoryStorage::default());
-            storage.policies.lock().expect("lock").push(read_policy());
+            storage
+                .upsert_policy(&read_policy(), &["agent".to_string()])
+                .await
+                .expect("policy");
             let catalog = Catalog::new(storage.clone());
             catalog
                 .upsert_asset(&Principal::system(), service("warehouse"))
@@ -20726,5 +21247,1599 @@ impl Catalog {
         page: &PageRequest,
     ) -> Result<Page<graph_owl_authz::agent::AgentActivity>, CatalogError> {
         Ok(self.storage.agent_activity(agent_id, page).await?)
+    }
+}
+
+// ---- Epic 34: Entity Expansion ----
+//
+// Five new asset families, each following `34-entity-expansion.md`'s
+// template: a root "service" kind, hierarchical children, and — because
+// nothing here is a new Rust struct, only new `AssetKind` variants over the
+// same `Asset`/`UpsertAsset` — the envelope, versioning, search indexing,
+// tagging and ownership machinery is exercised for free rather than
+// reimplemented per family. What each slice's tests actually prove is the
+// family-specific acceptance criteria the template does not cover on its own:
+// containment shape, lineage legality, and validation.
+#[cfg(test)]
+mod entity_expansion_tests {
+    use super::*;
+    use graph_owl_core::lineage::{LineageDetails, LineageSource};
+    use graph_owl_core::relationship_type::RelationshipType;
+    use tests::InMemoryStorage;
+
+    fn page() -> PageRequest {
+        PageRequest::new(None, None).expect("a default page")
+    }
+
+    fn asset_req(kind: AssetKind, name: &str, parent_id: Option<Uuid>) -> UpsertAsset {
+        UpsertAsset {
+            kind,
+            name: name.to_string(),
+            parent_id,
+            description: None,
+            properties: None,
+            extension: None,
+        }
+    }
+
+    fn manual() -> LineageDetails {
+        LineageDetails {
+            source: LineageSource::Manual,
+            query: None,
+            description: None,
+            pipeline: None,
+        }
+    }
+
+    /// A real `Service -> Database -> Schema -> Table` chain — every
+    /// family's cross-family lineage test needs a genuine table, not a
+    /// same-kind stand-in.
+    async fn a_table(catalog: &Catalog, service_name: &str, table_name: &str) -> Uuid {
+        let service = catalog
+            .upsert_asset(
+                &Principal::system(),
+                asset_req(AssetKind::Service, service_name, None),
+            )
+            .await
+            .expect("service");
+        let database = catalog
+            .upsert_asset(
+                &Principal::system(),
+                asset_req(AssetKind::Database, "db", Some(service.id)),
+            )
+            .await
+            .expect("database");
+        let schema = catalog
+            .upsert_asset(
+                &Principal::system(),
+                asset_req(AssetKind::Schema, "s", Some(database.id)),
+            )
+            .await
+            .expect("schema");
+        catalog
+            .upsert_asset(
+                &Principal::system(),
+                asset_req(AssetKind::Table, table_name, Some(schema.id)),
+            )
+            .await
+            .expect("table")
+            .id
+    }
+
+    mod dashboards_and_charts {
+        use super::*;
+
+        async fn a_dashboard(catalog: &Catalog, service_name: &str, dashboard_name: &str) -> Uuid {
+            let service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::DashboardService, service_name, None),
+                )
+                .await
+                .expect("dashboard service");
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Dashboard, dashboard_name, Some(service.id)),
+                )
+                .await
+                .expect("dashboard")
+                .id
+        }
+
+        #[tokio::test]
+        async fn a_dashboard_and_its_charts_follow_the_established_containment_chain() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let dashboard = a_dashboard(&catalog, "looker", "revenue").await;
+
+            let chart = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Chart, "mrr-trend", Some(dashboard)),
+                )
+                .await
+                .expect("chart");
+
+            assert_eq!(chart.parent_id, Some(dashboard));
+            assert!(
+                chart.fully_qualified_name.starts_with("looker.revenue."),
+                "{}",
+                chart.fully_qualified_name
+            );
+        }
+
+        /// Containment is the rule in one place ([`AssetKind::parent_kind`]) —
+        /// a chart skipping straight to the service is exactly the
+        /// corruption Epic 2's rule exists to refuse, now for a second
+        /// family.
+        #[tokio::test]
+        async fn a_chart_directly_under_a_dashboard_service_is_refused() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::DashboardService, "looker", None),
+                )
+                .await
+                .expect("service");
+
+            let outcome = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Chart, "orphan", Some(service.id)),
+                )
+                .await;
+
+            assert!(matches!(outcome, Err(CatalogError::Validation(_))));
+        }
+
+        #[tokio::test]
+        async fn chart_type_is_a_closed_enum() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let dashboard = a_dashboard(&catalog, "looker", "revenue").await;
+            let mut request = asset_req(AssetKind::Chart, "mrr-trend", Some(dashboard));
+            request.properties = Some(serde_json::json!({ "chartType": "sankey" }));
+
+            let outcome = catalog.upsert_asset(&Principal::system(), request).await;
+
+            let Err(CatalogError::Validation(fields)) = outcome else {
+                panic!("expected Validation, got {outcome:?}");
+            };
+            assert_eq!(fields[0].field, "properties.chartType");
+        }
+
+        #[tokio::test]
+        async fn a_recognised_chart_type_is_accepted() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let dashboard = a_dashboard(&catalog, "looker", "revenue").await;
+            let mut request = asset_req(AssetKind::Chart, "mrr-trend", Some(dashboard));
+            request.properties = Some(serde_json::json!({ "chartType": "line" }));
+
+            let chart = catalog
+                .upsert_asset(&Principal::system(), request)
+                .await
+                .expect("line is a recognised chart type");
+
+            assert_eq!(chart.properties.unwrap()["chartType"], "line");
+        }
+
+        /// **The slice's own RED test, half one.** Cross-family lineage,
+        /// asserted from both the table's and the dashboard's own id — a
+        /// one-directional storage bug (an edge findable only from its
+        /// source) would pass a test that only checked one end.
+        #[tokio::test]
+        async fn a_table_feeds_a_dashboard_and_the_edge_is_visible_from_either_end() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let table = a_table(&catalog, "warehouse", "orders").await;
+            let dashboard = a_dashboard(&catalog, "looker", "revenue").await;
+
+            catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    table,
+                    dashboard,
+                    RelationshipType::Feeds,
+                    manual(),
+                )
+                .await
+                .expect("a table may feed a dashboard");
+
+            let (from_table, _) = catalog
+                .lineage_graph(table, 0, 1)
+                .await
+                .expect("downstream of the table");
+            assert!(
+                from_table.iter().any(|a| a.id == dashboard),
+                "the dashboard must be reachable downstream of the table"
+            );
+
+            let (from_dashboard, _) = catalog
+                .lineage_graph(dashboard, 1, 0)
+                .await
+                .expect("upstream of the dashboard");
+            assert!(
+                from_dashboard.iter().any(|a| a.id == table),
+                "the table must be reachable upstream of the dashboard"
+            );
+        }
+
+        /// The negative that makes the positive above about *this* pair
+        /// rather than about every kind combination being accepted: a
+        /// dashboard cannot feed the table it reads.
+        #[tokio::test]
+        async fn a_dashboard_does_not_feed_a_table() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let table = a_table(&catalog, "warehouse", "orders").await;
+            let dashboard = a_dashboard(&catalog, "looker", "revenue").await;
+
+            let outcome = catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    dashboard,
+                    table,
+                    RelationshipType::Feeds,
+                    manual(),
+                )
+                .await;
+
+            assert!(matches!(outcome, Err(CatalogError::Validation(_))));
+        }
+
+        /// **The slice's own RED test, half two.** `search_vector` is a
+        /// per-row generated column with no way to reach a child row — this
+        /// proves the denormalization (`sync_dashboard_chart_names`) that
+        /// makes the criterion true anyway. Mutator watch: chart names
+        /// excluded from the parent's indexed document fails this.
+        #[tokio::test]
+        async fn a_dashboard_is_findable_by_its_charts_names() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let dashboard_id = a_dashboard(&catalog, "looker", "revenue").await;
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(
+                        AssetKind::Chart,
+                        "quarterly-active-merchants",
+                        Some(dashboard_id),
+                    ),
+                )
+                .await
+                .expect("chart");
+
+            let hits = catalog
+                .search_assets_for(
+                    &Principal::system(),
+                    "quarterly-active-merchants",
+                    &graph_owl_storage::AssetFilter::default(),
+                    &page(),
+                )
+                .await
+                .expect("search");
+
+            assert!(
+                hits.data.iter().any(|a| a.id == dashboard_id),
+                "searching a chart's name must surface its dashboard: {:?}",
+                hits.data
+            );
+        }
+
+        /// Deleting a dashboard cascades to its charts — the same
+        /// `parent_id` walk every other family already gets, proven for this
+        /// one rather than assumed.
+        #[tokio::test]
+        async fn deleting_a_dashboard_cascades_to_its_charts() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let dashboard_id = a_dashboard(&catalog, "looker", "revenue").await;
+            let chart = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Chart, "mrr-trend", Some(dashboard_id)),
+                )
+                .await
+                .expect("chart");
+
+            catalog
+                .soft_delete_asset(&Principal::system(), dashboard_id)
+                .await
+                .expect("delete");
+
+            let after = catalog
+                .get_asset(chart.id)
+                .await
+                .expect("read")
+                .expect("soft delete keeps the row");
+            assert!(
+                after.deleted,
+                "the chart must be deleted with its dashboard"
+            );
+        }
+    }
+
+    mod topics {
+        use super::*;
+
+        async fn a_topic(catalog: &Catalog, service_name: &str, topic_name: &str) -> Uuid {
+            let service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::MessagingService, service_name, None),
+                )
+                .await
+                .expect("messaging service");
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Topic, topic_name, Some(service.id)),
+                )
+                .await
+                .expect("topic")
+                .id
+        }
+
+        #[tokio::test]
+        async fn a_topic_and_its_schema_fields_follow_the_established_containment_chain() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let topic = a_topic(&catalog, "kafka", "orders-events").await;
+
+            let field = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::TopicField, "order_id", Some(topic)),
+                )
+                .await
+                .expect("field");
+
+            assert_eq!(field.parent_id, Some(topic));
+            assert!(
+                field
+                    .fully_qualified_name
+                    .starts_with("kafka.orders-events."),
+                "{}",
+                field.fully_qualified_name
+            );
+        }
+
+        #[tokio::test]
+        async fn schema_field_data_type_is_a_closed_enum() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let topic = a_topic(&catalog, "kafka", "orders-events").await;
+            let mut request = asset_req(AssetKind::TopicField, "order_id", Some(topic));
+            request.properties = Some(serde_json::json!({ "dataType": "fixed" }));
+
+            let outcome = catalog.upsert_asset(&Principal::system(), request).await;
+
+            let Err(CatalogError::Validation(fields)) = outcome else {
+                panic!("expected Validation, got {outcome:?}");
+            };
+            assert_eq!(fields[0].field, "properties.dataType");
+        }
+
+        #[tokio::test]
+        async fn a_recognised_data_type_is_accepted() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let topic = a_topic(&catalog, "kafka", "orders-events").await;
+            let mut request = asset_req(AssetKind::TopicField, "order_id", Some(topic));
+            request.properties = Some(serde_json::json!({ "dataType": "long" }));
+
+            let field = catalog
+                .upsert_asset(&Principal::system(), request)
+                .await
+                .expect("long is a recognised schema field type");
+
+            assert_eq!(field.properties.unwrap()["dataType"], "long");
+        }
+
+        /// **Half of the slice's own RED test.** A schema field is a real
+        /// asset with its own FQN — not a value nested in the topic's
+        /// `properties` — so tagging it is the identical, already-generic
+        /// mechanism a column already gets, proven here rather than assumed.
+        #[tokio::test]
+        async fn a_schema_field_is_independently_taggable_by_fqn() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let topic = a_topic(&catalog, "kafka", "orders-events").await;
+            let field = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::TopicField, "customer_email", Some(topic)),
+                )
+                .await
+                .expect("field");
+
+            let classification = catalog
+                .create_classification(&Principal::system(), "sensitivity".to_string(), None, false)
+                .await
+                .expect("classification");
+            let tag = catalog
+                .create_tag(
+                    &Principal::system(),
+                    classification.id,
+                    "pii".to_string(),
+                    None,
+                )
+                .await
+                .expect("tag");
+
+            catalog
+                .apply_tag(
+                    &Principal::system(),
+                    &tag.fully_qualified_name,
+                    &field.fully_qualified_name,
+                    graph_owl_core::classification::LabelType::Manual,
+                    graph_owl_core::classification::LabelState::Confirmed,
+                )
+                .await
+                .expect("a schema field takes a tag exactly as a column does");
+        }
+
+        /// **The other half of the slice's own RED test.** A schema field is
+        /// a child asset (so it can be tagged on its own), not a nested value
+        /// in the topic's `properties` — `ChangeDescription::between` only
+        /// diffs an asset's own top-level fields, so it can never see a
+        /// child's removal. This proves the explicit propagation that makes
+        /// "a schema field removal is Major" true anyway.
+        #[tokio::test]
+        async fn removing_a_schema_field_bumps_the_topic_to_major() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let topic_id = a_topic(&catalog, "kafka", "orders-events").await;
+            let field = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::TopicField, "order_id", Some(topic_id)),
+                )
+                .await
+                .expect("field");
+            let before = catalog
+                .get_asset(topic_id)
+                .await
+                .expect("read")
+                .expect("topic exists");
+            assert_eq!(before.version, EntityVersion::initial());
+
+            catalog
+                .soft_delete_asset(&Principal::system(), field.id)
+                .await
+                .expect("delete field");
+
+            let after = catalog
+                .get_asset(topic_id)
+                .await
+                .expect("read")
+                .expect("topic exists");
+            assert_eq!(
+                after.version,
+                before.version.next_major(),
+                "a schema field removal must be Major, not merely a change"
+            );
+            assert!(
+                after
+                    .change_description
+                    .as_ref()
+                    .is_some_and(|d| d.fields_deleted.iter().any(|f| f.field == "order_id")),
+                "{:?}",
+                after.change_description
+            );
+        }
+
+        /// The negative that makes the positive above about deletion
+        /// specifically: a topic with no removed field stays at its initial
+        /// version, so the bump is not simply unconditional.
+        #[tokio::test]
+        async fn a_topic_with_no_removed_field_is_not_bumped() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let topic_id = a_topic(&catalog, "kafka", "orders-events").await;
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::TopicField, "order_id", Some(topic_id)),
+                )
+                .await
+                .expect("field");
+
+            let topic = catalog
+                .get_asset(topic_id)
+                .await
+                .expect("read")
+                .expect("topic exists");
+            assert_eq!(topic.version, EntityVersion::initial());
+        }
+
+        /// **The slice's own cross-family lineage RED test.** Both
+        /// directions are legal and independent — CDC publishes a table's
+        /// changes to a topic, and a warehouse load consumes a topic into a
+        /// table. Proving only one direction would leave the other's
+        /// legality assumed rather than shown.
+        #[tokio::test]
+        async fn a_table_and_a_topic_may_feed_each_other() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let table = a_table(&catalog, "warehouse", "orders").await;
+            let topic = a_topic(&catalog, "kafka", "orders-events").await;
+
+            catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    table,
+                    topic,
+                    RelationshipType::Feeds,
+                    manual(),
+                )
+                .await
+                .expect("a table may feed a topic (CDC)");
+
+            let topic2 = a_topic(&catalog, "kafka", "returns-events").await;
+            let table2 = a_table(&catalog, "warehouse", "returns").await;
+            catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    topic2,
+                    table2,
+                    RelationshipType::Feeds,
+                    manual(),
+                )
+                .await
+                .expect("a topic may feed a table (warehouse load)");
+        }
+    }
+
+    mod pipelines {
+        use super::*;
+
+        async fn a_pipeline(catalog: &Catalog, service_name: &str, pipeline_name: &str) -> Uuid {
+            let service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::PipelineService, service_name, None),
+                )
+                .await
+                .expect("pipeline service");
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Pipeline, pipeline_name, Some(service.id)),
+                )
+                .await
+                .expect("pipeline")
+                .id
+        }
+
+        async fn a_task(
+            catalog: &Catalog,
+            pipeline: Uuid,
+            name: &str,
+            downstream: &[&str],
+        ) -> Asset {
+            let mut request = asset_req(AssetKind::Task, name, Some(pipeline));
+            request.properties = Some(serde_json::json!({ "downstreamTasks": downstream }));
+            catalog
+                .upsert_asset(&Principal::system(), request)
+                .await
+                .expect("task")
+        }
+
+        #[tokio::test]
+        async fn a_pipeline_and_its_tasks_follow_the_established_containment_chain() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let pipeline = a_pipeline(&catalog, "airflow", "nightly-etl").await;
+
+            let task = a_task(&catalog, pipeline, "extract", &[]).await;
+
+            assert_eq!(task.parent_id, Some(pipeline));
+            assert!(
+                task.fully_qualified_name
+                    .starts_with("airflow.nightly-etl."),
+                "{}",
+                task.fully_qualified_name
+            );
+        }
+
+        #[tokio::test]
+        async fn a_non_cyclic_dag_is_accepted() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let pipeline = a_pipeline(&catalog, "airflow", "nightly-etl").await;
+
+            a_task(&catalog, pipeline, "extract", &["transform"]).await;
+            a_task(&catalog, pipeline, "transform", &["load"]).await;
+            a_task(&catalog, pipeline, "load", &[]).await;
+        }
+
+        /// **The slice's own RED test.** A cycle closed at the third edge —
+        /// `extract -> transform -> load -> extract` — must be rejected on
+        /// the edge that actually closes it, proving the walk considers
+        /// every existing sibling's edges, not only a direct pair.
+        #[tokio::test]
+        async fn a_task_dag_cycle_is_rejected_at_depth_three() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let pipeline = a_pipeline(&catalog, "airflow", "nightly-etl").await;
+            a_task(&catalog, pipeline, "extract", &["transform"]).await;
+            a_task(&catalog, pipeline, "transform", &["load"]).await;
+
+            let mut closing_the_loop = asset_req(AssetKind::Task, "load", Some(pipeline));
+            closing_the_loop.properties =
+                Some(serde_json::json!({ "downstreamTasks": ["extract"] }));
+            let outcome = catalog
+                .upsert_asset(&Principal::system(), closing_the_loop)
+                .await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::Validation(_))),
+                "{outcome:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_task_cannot_name_itself_downstream() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let pipeline = a_pipeline(&catalog, "airflow", "nightly-etl").await;
+
+            let mut request = asset_req(AssetKind::Task, "extract", Some(pipeline));
+            request.properties = Some(serde_json::json!({ "downstreamTasks": ["extract"] }));
+            let outcome = catalog.upsert_asset(&Principal::system(), request).await;
+
+            assert!(matches!(outcome, Err(CatalogError::Validation(_))));
+        }
+
+        #[tokio::test]
+        async fn lineage_records_the_pipeline_that_moved_the_data() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let pipeline = a_pipeline(&catalog, "airflow", "nightly-etl").await;
+            let source = a_table(&catalog, "warehouse", "raw_orders").await;
+            let target = a_table(&catalog, "warehouse", "orders").await;
+
+            let edge = catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    source,
+                    target,
+                    RelationshipType::Feeds,
+                    LineageDetails {
+                        source: LineageSource::Manual,
+                        query: None,
+                        description: None,
+                        pipeline: Some(pipeline),
+                    },
+                )
+                .await
+                .expect("lineage with a pipeline attribution");
+
+            assert_eq!(edge.details.pipeline, Some(pipeline));
+        }
+
+        /// **The other half of the slice's own RED test.** Deleting a
+        /// pipeline that lineage still attributes data movement to would
+        /// leave those edges explained by nothing.
+        #[tokio::test]
+        async fn a_pipeline_referenced_by_lineage_resists_deletion() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let pipeline = a_pipeline(&catalog, "airflow", "nightly-etl").await;
+            let source = a_table(&catalog, "warehouse", "raw_orders").await;
+            let target = a_table(&catalog, "warehouse", "orders").await;
+            catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    source,
+                    target,
+                    RelationshipType::Feeds,
+                    LineageDetails {
+                        source: LineageSource::Manual,
+                        query: None,
+                        description: None,
+                        pipeline: Some(pipeline),
+                    },
+                )
+                .await
+                .expect("lineage");
+
+            let outcome = catalog
+                .soft_delete_asset(&Principal::system(), pipeline)
+                .await;
+            assert!(matches!(outcome, Err(CatalogError::Validation(_))));
+
+            catalog
+                .soft_delete_asset_forced(&Principal::system(), pipeline)
+                .await
+                .expect("force deletes it anyway");
+            let after = catalog
+                .get_asset(pipeline)
+                .await
+                .expect("read")
+                .expect("soft delete keeps the row");
+            assert!(after.deleted);
+        }
+
+        /// The negative that makes the resistance above about *this*
+        /// pipeline rather than every deletion failing: one nothing
+        /// references deletes normally.
+        #[tokio::test]
+        async fn an_unreferenced_pipeline_deletes_normally() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let pipeline = a_pipeline(&catalog, "airflow", "nightly-etl").await;
+
+            catalog
+                .soft_delete_asset(&Principal::system(), pipeline)
+                .await
+                .expect("nothing references it");
+        }
+    }
+
+    mod ml_models {
+        use super::*;
+
+        async fn a_model(catalog: &Catalog, service_name: &str, model_name: &str) -> Uuid {
+            let service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::MlModelService, service_name, None),
+                )
+                .await
+                .expect("ml model service");
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::MlModel, model_name, Some(service.id)),
+                )
+                .await
+                .expect("model")
+                .id
+        }
+
+        /// A real table with one named column, for `featureSources` to
+        /// reference by FQN — a same-kind stand-in would not exercise the
+        /// column lookup the validation and derivation both depend on.
+        async fn a_column(
+            catalog: &Catalog,
+            service_name: &str,
+            table_name: &str,
+            column_name: &str,
+        ) -> Asset {
+            let table_id = a_table(catalog, service_name, table_name).await;
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Column, column_name, Some(table_id)),
+                )
+                .await
+                .expect("column")
+        }
+
+        #[tokio::test]
+        async fn an_ml_model_and_its_features_follow_the_established_containment_chain() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let model = a_model(&catalog, "sagemaker", "churn-predictor").await;
+
+            let feature = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Feature, "tenure_days", Some(model)),
+                )
+                .await
+                .expect("feature");
+
+            assert_eq!(feature.parent_id, Some(model));
+            assert!(
+                feature
+                    .fully_qualified_name
+                    .starts_with("sagemaker.churn-predictor."),
+                "{}",
+                feature.fully_qualified_name
+            );
+        }
+
+        /// **The slice's own RED test.** The caller never calls
+        /// `assert_lineage` itself — naming a real column in
+        /// `featureSources` is enough for the `Table -> MlModel` edge to
+        /// exist afterward, visible from either end exactly as Slice A
+        /// proved for `Table -> Dashboard`.
+        #[tokio::test]
+        async fn creating_a_feature_derives_lineage_from_its_sources_without_a_separate_assertion()
+        {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let model = a_model(&catalog, "sagemaker", "churn-predictor").await;
+            let column = a_column(&catalog, "warehouse", "customers", "signup_date").await;
+            let table_id = column.parent_id.expect("column has a table parent");
+
+            let mut request = asset_req(AssetKind::Feature, "tenure_days", Some(model));
+            request.properties = Some(serde_json::json!({
+                "featureSources": [column.fully_qualified_name],
+            }));
+            catalog
+                .upsert_asset(&Principal::system(), request)
+                .await
+                .expect("feature");
+
+            let (downstream_of_table, _) = catalog
+                .lineage_graph(table_id, 0, 1)
+                .await
+                .expect("downstream of the source table");
+            assert!(
+                downstream_of_table.iter().any(|a| a.id == model),
+                "the model must be reachable downstream of its feature's source table, \
+                 derived rather than separately asserted"
+            );
+
+            let (upstream_of_model, _) = catalog
+                .lineage_graph(model, 1, 0)
+                .await
+                .expect("upstream of the model");
+            assert!(
+                upstream_of_model.iter().any(|a| a.id == table_id),
+                "the table must be reachable upstream of the model"
+            );
+        }
+
+        /// The negative that makes the positive above about *sources*
+        /// specifically: a feature with none derives no edge, so the
+        /// derivation is not simply unconditional on every feature write.
+        #[tokio::test]
+        async fn a_feature_with_no_sources_derives_no_lineage() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let model = a_model(&catalog, "sagemaker", "churn-predictor").await;
+
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Feature, "tenure_days", Some(model)),
+                )
+                .await
+                .expect("feature");
+
+            let (upstream_of_model, _) = catalog
+                .lineage_graph(model, 1, 0)
+                .await
+                .expect("upstream of the model");
+            // `lineage_graph` always includes the root itself (it seeds the
+            // walk with it), so "no lineage" is the root alone, not an
+            // empty vec.
+            assert_eq!(
+                upstream_of_model.iter().map(|a| a.id).collect::<Vec<_>>(),
+                vec![model],
+                "{upstream_of_model:?}"
+            );
+        }
+
+        /// **The other half of the slice's own acceptance criteria.** "A
+        /// feature source naming a nonexistent column -> 400" — checked
+        /// before the write, not discovered later as a lineage edge that
+        /// silently never appeared.
+        #[tokio::test]
+        async fn a_feature_source_naming_a_nonexistent_column_is_rejected() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let model = a_model(&catalog, "sagemaker", "churn-predictor").await;
+
+            let mut request = asset_req(AssetKind::Feature, "tenure_days", Some(model));
+            request.properties = Some(serde_json::json!({
+                "featureSources": ["warehouse.customers.does_not_exist"],
+            }));
+            let outcome = catalog.upsert_asset(&Principal::system(), request).await;
+
+            let Err(CatalogError::Validation(fields)) = outcome else {
+                panic!("expected Validation, got {outcome:?}");
+            };
+            assert_eq!(fields[0].field, "properties.featureSources");
+        }
+
+        /// Two features drawing on the same source table must not fail the
+        /// second write with the lineage edge's own uniqueness conflict —
+        /// re-deriving an edge that already exists is success, not an error
+        /// the caller has to know to ignore.
+        #[tokio::test]
+        async fn two_features_sharing_a_source_table_do_not_conflict() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let model = a_model(&catalog, "sagemaker", "churn-predictor").await;
+            let column = a_column(&catalog, "warehouse", "customers", "signup_date").await;
+
+            for name in ["tenure_days", "signup_month"] {
+                let mut request = asset_req(AssetKind::Feature, name, Some(model));
+                request.properties = Some(serde_json::json!({
+                    "featureSources": [column.fully_qualified_name],
+                }));
+                catalog
+                    .upsert_asset(&Principal::system(), request)
+                    .await
+                    .expect("a shared source table must not conflict across features");
+            }
+        }
+
+        /// **Half of "hyperparameter changes are Minor; a feature set
+        /// change is Major".** A re-ingest that changes only
+        /// `properties.hyperparameters` leaves the model's version
+        /// untouched — `upsert_asset` never bumps a version on its own
+        /// (only the explicit paths below do), so "Minor" here means
+        /// exactly that: no Major bump was triggered.
+        #[tokio::test]
+        async fn changing_hyperparameters_does_not_bump_the_model_version() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::MlModelService, "sagemaker", None),
+                )
+                .await
+                .expect("ml model service");
+            let mut first = asset_req(AssetKind::MlModel, "churn-predictor", Some(service.id));
+            first.properties = Some(serde_json::json!({ "hyperparameters": { "depth": 3 } }));
+            let model_id = catalog
+                .upsert_asset(&Principal::system(), first)
+                .await
+                .expect("model")
+                .id;
+
+            let mut second = asset_req(AssetKind::MlModel, "churn-predictor", Some(service.id));
+            second.properties = Some(serde_json::json!({ "hyperparameters": { "depth": 7 } }));
+            catalog
+                .upsert_asset(&Principal::system(), second)
+                .await
+                .expect("re-ingest with new hyperparameters");
+
+            let model = catalog
+                .get_asset(model_id)
+                .await
+                .expect("read")
+                .expect("model exists");
+            assert_eq!(model.version, EntityVersion::initial());
+            assert_eq!(model.properties.unwrap()["hyperparameters"]["depth"], 7);
+        }
+
+        /// **The other half.** A feature is a real asset (independently
+        /// taggable, exactly like a schema field), so removing one is a
+        /// version event on the model — the identical mechanism Slice B
+        /// proved for a removed schema field.
+        #[tokio::test]
+        async fn removing_a_feature_bumps_the_model_to_major() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let model_id = a_model(&catalog, "sagemaker", "churn-predictor").await;
+            let feature = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Feature, "tenure_days", Some(model_id)),
+                )
+                .await
+                .expect("feature");
+            let before = catalog
+                .get_asset(model_id)
+                .await
+                .expect("read")
+                .expect("model exists");
+            assert_eq!(before.version, EntityVersion::initial());
+
+            catalog
+                .soft_delete_asset(&Principal::system(), feature.id)
+                .await
+                .expect("delete feature");
+
+            let after = catalog
+                .get_asset(model_id)
+                .await
+                .expect("read")
+                .expect("model exists");
+            assert_eq!(
+                after.version,
+                before.version.next_major(),
+                "a feature set change must be Major, not merely a change"
+            );
+        }
+    }
+
+    mod storage_containers {
+        use super::*;
+
+        async fn a_storage_service(catalog: &Catalog, service_name: &str) -> Uuid {
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::StorageService, service_name, None),
+                )
+                .await
+                .expect("storage service")
+                .id
+        }
+
+        #[tokio::test]
+        async fn a_storage_service_and_its_containers_follow_the_established_containment_chain() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let service = a_storage_service(&catalog, "s3").await;
+
+            let bucket = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Container, "raw-data", Some(service)),
+                )
+                .await
+                .expect("container");
+
+            assert_eq!(bucket.parent_id, Some(service));
+            assert!(
+                bucket.fully_qualified_name.starts_with("s3."),
+                "{}",
+                bucket.fully_qualified_name
+            );
+        }
+
+        #[tokio::test]
+        async fn containers_nest_inside_one_another() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let service = a_storage_service(&catalog, "s3").await;
+            let bucket = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Container, "raw-data", Some(service)),
+                )
+                .await
+                .expect("bucket");
+
+            let prefix = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Container, "2024", Some(bucket.id)),
+                )
+                .await
+                .expect("a container may nest inside another container");
+
+            assert_eq!(prefix.parent_id, Some(bucket.id));
+            assert_eq!(prefix.fully_qualified_name, "s3.raw-data.2024");
+        }
+
+        /// **Half of the slice's own family-specific criterion.** `data_model`
+        /// reuses the column machinery unchanged — a real `Column`, living
+        /// directly under a `Container` rather than a new kind, for a
+        /// structured format like Parquet or Avro.
+        #[tokio::test]
+        async fn a_column_may_live_directly_under_a_container() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let service = a_storage_service(&catalog, "s3").await;
+            let container = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Container, "events", Some(service)),
+                )
+                .await
+                .expect("container");
+
+            let column = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Column, "event_id", Some(container.id)),
+                )
+                .await
+                .expect("a column may live directly under a container");
+
+            assert_eq!(column.parent_id, Some(container.id));
+            assert_eq!(column.fully_qualified_name, "s3.events.event_id");
+        }
+
+        /// The negative that makes the positive above about *containers*
+        /// specifically: a column still cannot sit under a kind that is
+        /// neither a table nor a container.
+        #[tokio::test]
+        async fn a_column_directly_under_a_storage_service_is_refused() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let service = a_storage_service(&catalog, "s3").await;
+
+            let outcome = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Column, "orphan", Some(service)),
+                )
+                .await;
+
+            assert!(matches!(outcome, Err(CatalogError::Validation(_))));
+        }
+
+        #[tokio::test]
+        async fn a_container_feeds_a_table_for_an_external_table_pattern() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let service = a_storage_service(&catalog, "s3").await;
+            let container = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Container, "raw-events", Some(service)),
+                )
+                .await
+                .expect("container");
+            let table = a_table(&catalog, "warehouse", "events").await;
+
+            catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    container.id,
+                    table,
+                    RelationshipType::Feeds,
+                    manual(),
+                )
+                .await
+                .expect("a container may feed an external table");
+        }
+
+        /// The negative direction: a table does not feed the container it
+        /// was loaded from, the same asymmetry Slice A proved for
+        /// `Table -> Dashboard`.
+        #[tokio::test]
+        async fn a_table_does_not_feed_a_container() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let service = a_storage_service(&catalog, "s3").await;
+            let container = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Container, "raw-events", Some(service)),
+                )
+                .await
+                .expect("container");
+            let table = a_table(&catalog, "warehouse", "events").await;
+
+            let outcome = catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    table,
+                    container.id,
+                    RelationshipType::Feeds,
+                    manual(),
+                )
+                .await;
+
+            assert!(matches!(outcome, Err(CatalogError::Validation(_))));
+        }
+
+        /// **The slice's own RED test.** Epic 2's cascade was proven at
+        /// four levels (service -> database -> schema -> table); nesting a
+        /// bucket one prefix deeper than a single level reaches five, and
+        /// every level's FQN must be derived from its *actual* parent's
+        /// FQN — a depth-limited derivation (one that stopped truncating
+        /// after some fixed number of hops) would fail this the same way a
+        /// depth-limited delete cascade would fail Epic 3's.
+        #[tokio::test]
+        async fn deep_nesting_derives_fqns_correctly_at_five_levels() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let service = a_storage_service(&catalog, "s3").await;
+
+            let mut parent = service;
+            let mut expected_fqn = "s3".to_string();
+            for segment in ["bucket", "2024", "06", "15"] {
+                let container = catalog
+                    .upsert_asset(
+                        &Principal::system(),
+                        asset_req(AssetKind::Container, segment, Some(parent)),
+                    )
+                    .await
+                    .expect("nested container");
+                expected_fqn = format!("{expected_fqn}.{segment}");
+                assert_eq!(container.fully_qualified_name, expected_fqn);
+                parent = container.id;
+            }
+            let deepest = parent;
+
+            let leaf = catalog
+                .get_asset(deepest)
+                .await
+                .expect("read")
+                .expect("deepest container exists");
+            assert_eq!(leaf.fully_qualified_name, "s3.bucket.2024.06.15");
+
+            let ancestry = catalog
+                .ancestors_of(deepest)
+                .await
+                .expect("root-to-self chain");
+            assert_eq!(
+                ancestry.len(),
+                5,
+                "storage service + four nested containers is five levels: {ancestry:?}"
+            );
+            assert_eq!(ancestry.first().map(|a| a.id), Some(service));
+            assert_eq!(ancestry.last().map(|a| a.id), Some(deepest));
+        }
+    }
+
+    /// Slice F: the five families as one graph, not five silos. Design
+    /// principle 10 in this epic's own plan says lineage, search, ownership
+    /// and authorization needed **no change** to reach every family — these
+    /// tests are what makes that claim checked rather than assumed.
+    mod interop {
+        use super::*;
+        use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+
+        fn analyst(id: &str, roles: &[&str]) -> Principal {
+            Principal {
+                id: id.to_string(),
+                name: id.to_string(),
+                kind: graph_owl_core::PrincipalKind::User,
+                roles: roles.iter().map(ToString::to_string).collect(),
+                is_admin: false,
+            }
+        }
+
+        /// **The slice's own cross-family lineage RED test.** `Container ->
+        /// Table -> Table -> Dashboard`, four families in one connected
+        /// graph. The middle hop is attributed to a pipeline via
+        /// `LineageDetails.pipeline` (Slice C's mechanism), not by the
+        /// pipeline itself being an edge endpoint — matching how Slice C
+        /// modeled "the pipeline that moved the data" in the first place.
+        #[tokio::test]
+        async fn a_lineage_chain_crosses_four_families_end_to_end() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+            let storage_service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::StorageService, "s3", None),
+                )
+                .await
+                .expect("storage service");
+            let container = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Container, "raw-events", Some(storage_service.id)),
+                )
+                .await
+                .expect("container");
+
+            let raw_table = a_table(&catalog, "warehouse", "raw_events").await;
+            let curated_table = a_table(&catalog, "warehouse", "events").await;
+
+            let pipeline_service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::PipelineService, "airflow", None),
+                )
+                .await
+                .expect("pipeline service");
+            let pipeline = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(
+                        AssetKind::Pipeline,
+                        "curate-events",
+                        Some(pipeline_service.id),
+                    ),
+                )
+                .await
+                .expect("pipeline");
+
+            let dashboard_service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::DashboardService, "looker", None),
+                )
+                .await
+                .expect("dashboard service");
+            let dashboard = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(
+                        AssetKind::Dashboard,
+                        "events-overview",
+                        Some(dashboard_service.id),
+                    ),
+                )
+                .await
+                .expect("dashboard");
+
+            catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    container.id,
+                    raw_table,
+                    RelationshipType::Feeds,
+                    manual(),
+                )
+                .await
+                .expect("the container feeds the raw table (external-table pattern)");
+            catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    raw_table,
+                    curated_table,
+                    RelationshipType::Feeds,
+                    LineageDetails {
+                        source: LineageSource::Manual,
+                        query: None,
+                        description: None,
+                        pipeline: Some(pipeline.id),
+                    },
+                )
+                .await
+                .expect("the pipeline curates the raw table into the curated one");
+            catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    curated_table,
+                    dashboard.id,
+                    RelationshipType::Feeds,
+                    manual(),
+                )
+                .await
+                .expect("the curated table feeds the dashboard");
+
+            let (downstream, _) = catalog
+                .lineage_graph(container.id, 0, 3)
+                .await
+                .expect("three hops downstream of the container");
+            assert!(
+                downstream.iter().any(|a| a.id == dashboard.id),
+                "the dashboard must be reachable three hops downstream of the container, \
+                 crossing storage, table and dashboard families: {downstream:?}"
+            );
+
+            let (upstream, _) = catalog
+                .lineage_graph(dashboard.id, 3, 0)
+                .await
+                .expect("three hops upstream of the dashboard");
+            assert!(
+                upstream.iter().any(|a| a.id == container.id),
+                "the container must be reachable three hops upstream of the dashboard: \
+                 {upstream:?}"
+            );
+        }
+
+        /// **Half of "a tag applied across families filters across all of
+        /// them."** `tag_usage`'s per-kind breakdown is a join on
+        /// `target_fqn` alone, with no kind-awareness to omit a family from
+        /// — proven here with two families that did not exist before this
+        /// epic, not just the ones the mechanism was built against.
+        #[tokio::test]
+        async fn a_tag_applied_across_families_is_counted_for_each_of_them() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let classification = catalog
+                .create_classification(&Principal::system(), "sensitivity".to_string(), None, false)
+                .await
+                .expect("classification");
+            let tag = catalog
+                .create_tag(
+                    &Principal::system(),
+                    classification.id,
+                    "pii".to_string(),
+                    None,
+                )
+                .await
+                .expect("tag");
+
+            let dashboard_service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::DashboardService, "looker", None),
+                )
+                .await
+                .expect("dashboard service");
+            let dashboard = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(
+                        AssetKind::Dashboard,
+                        "customers",
+                        Some(dashboard_service.id),
+                    ),
+                )
+                .await
+                .expect("dashboard");
+
+            let messaging_service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::MessagingService, "kafka", None),
+                )
+                .await
+                .expect("messaging service");
+            let topic = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(
+                        AssetKind::Topic,
+                        "customer-events",
+                        Some(messaging_service.id),
+                    ),
+                )
+                .await
+                .expect("topic");
+
+            for target in [&dashboard.fully_qualified_name, &topic.fully_qualified_name] {
+                catalog
+                    .apply_tag(
+                        &Principal::system(),
+                        &tag.fully_qualified_name,
+                        target,
+                        graph_owl_core::classification::LabelType::Manual,
+                        graph_owl_core::classification::LabelState::Confirmed,
+                    )
+                    .await
+                    .expect("a tag applies regardless of family");
+            }
+
+            let usage = catalog
+                .tag_usage(&tag.fully_qualified_name)
+                .await
+                .expect("usage");
+            let by_kind: std::collections::HashMap<&str, i64> = usage
+                .by_kind
+                .iter()
+                .map(|(k, n)| (k.as_str(), *n))
+                .collect();
+            assert_eq!(by_kind.get("dashboard"), Some(&1), "{:?}", usage.by_kind);
+            assert_eq!(by_kind.get("topic"), Some(&1), "{:?}", usage.by_kind);
+            assert_eq!(usage.total(), 2);
+        }
+
+        /// **The other half.** `?owner={team}` matches effective ownership
+        /// by a join that has no per-kind branch either — one team owning
+        /// assets in two different families returns both from one filter.
+        #[tokio::test]
+        async fn an_owner_filter_returns_owned_assets_across_families() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            catalog
+                .upsert_team(&graph_owl_storage::Team {
+                    id: "platform".to_string(),
+                    display_name: "Platform".to_string(),
+                    description: None,
+                    members: Vec::new(),
+                    parent_team_id: None,
+                })
+                .await
+                .expect("team");
+
+            let dashboard_service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::DashboardService, "looker", None),
+                )
+                .await
+                .expect("dashboard service");
+            let dashboard = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Dashboard, "revenue", Some(dashboard_service.id)),
+                )
+                .await
+                .expect("dashboard");
+            catalog
+                .set_asset_owners(
+                    dashboard.id,
+                    &[graph_owl_core::ownership::OwnerRef {
+                        id: "platform".to_string(),
+                        kind: graph_owl_core::ownership::OwnerKind::Team,
+                    }],
+                )
+                .await
+                .expect("owner set on the dashboard");
+
+            let messaging_service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::MessagingService, "kafka", None),
+                )
+                .await
+                .expect("messaging service");
+            let topic = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Topic, "orders", Some(messaging_service.id)),
+                )
+                .await
+                .expect("topic");
+            catalog
+                .set_asset_owners(
+                    topic.id,
+                    &[graph_owl_core::ownership::OwnerRef {
+                        id: "platform".to_string(),
+                        kind: graph_owl_core::ownership::OwnerKind::Team,
+                    }],
+                )
+                .await
+                .expect("owner set on the topic");
+
+            // An unowned asset in a third family, to prove the filter
+            // narrows rather than just returning everything.
+            let pipeline_service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::PipelineService, "airflow", None),
+                )
+                .await
+                .expect("pipeline service");
+
+            let owned = catalog
+                .list_assets_for(
+                    &Principal::system(),
+                    &graph_owl_storage::AssetFilter {
+                        owner: Some("platform"),
+                        ..graph_owl_storage::AssetFilter::default()
+                    },
+                    &page(),
+                )
+                .await
+                .expect("owner filter");
+
+            let ids: std::collections::HashSet<Uuid> = owned.data.iter().map(|a| a.id).collect();
+            assert!(ids.contains(&dashboard.id), "{owned:?}");
+            assert!(ids.contains(&topic.id), "{owned:?}");
+            assert!(
+                !ids.contains(&pipeline_service.id),
+                "an unowned asset in a third family must not appear: {owned:?}"
+            );
+        }
+
+        /// **The slice's own authz RED test.** A principal whose only
+        /// policy allows one family's FQN prefix must see nothing from a
+        /// different family in a cross-family search. `AccessPredicate::Fqn`
+        /// is a prefix match with no kind awareness at all — this is what
+        /// makes "a per-family authz predicate that omits one family" (the
+        /// slice's own mutator watch) not a shape this code can even
+        /// express, rather than a case that happens to be covered.
+        #[tokio::test]
+        async fn a_principal_denied_on_one_family_sees_none_of_it_in_cross_family_search() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let catalog = Catalog::new(storage);
+
+            let messaging_service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::MessagingService, "kafka-shared-term", None),
+                )
+                .await
+                .expect("messaging service");
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(
+                        AssetKind::Topic,
+                        "shared-term-orders",
+                        Some(messaging_service.id),
+                    ),
+                )
+                .await
+                .expect("topic");
+
+            let dashboard_service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::DashboardService, "looker-shared-term", None),
+                )
+                .await
+                .expect("dashboard service");
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(
+                        AssetKind::Dashboard,
+                        "shared-term-revenue",
+                        Some(dashboard_service.id),
+                    ),
+                )
+                .await
+                .expect("dashboard");
+
+            catalog
+                .upsert_policy(
+                    &Policy {
+                        name: "topics-only".to_string(),
+                        rules: vec![Rule {
+                            name: "read-kafka".to_string(),
+                            effect: Effect::Allow,
+                            operations: vec![MetadataOperation::ViewBasic],
+                            resources: ResourceMatcher::FqnPrefix("kafka-shared-term".to_string()),
+                        }],
+                    },
+                    &["restricted".to_string()],
+                )
+                .await
+                .expect("policy saves");
+
+            let asha = analyst("asha", &["restricted"]);
+            let visible = catalog
+                .search_assets_for(
+                    &asha,
+                    "shared-term",
+                    &graph_owl_storage::AssetFilter::default(),
+                    &page(),
+                )
+                .await
+                .expect("search");
+
+            assert!(
+                visible.data.iter().all(
+                    |a| a.kind != AssetKind::Dashboard && a.kind != AssetKind::DashboardService
+                ),
+                "the dashboard family must not leak through a predicate scoped to kafka: \
+                 {visible:?}"
+            );
+            assert!(
+                visible.data.iter().any(|a| a.kind == AssetKind::Topic),
+                "the allowed family must still be visible: {visible:?}"
+            );
+        }
     }
 }

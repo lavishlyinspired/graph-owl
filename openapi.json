@@ -312,7 +312,21 @@
           "database",
           "schema",
           "table",
-          "column"
+          "column",
+          "dashboardService",
+          "dashboard",
+          "chart",
+          "messagingService",
+          "topic",
+          "topicField",
+          "pipelineService",
+          "pipeline",
+          "task",
+          "mlModelService",
+          "mlModel",
+          "feature",
+          "storageService",
+          "container"
         ],
         "type": "string"
       },

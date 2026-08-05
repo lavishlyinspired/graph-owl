@@ -1307,6 +1307,26 @@ pub trait Storage: Send + Sync {
     /// (`15-connectors.md` decision 3): the second run over an unchanged source
     /// has to be a no-op, not a wall of conflicts.
     async fn upsert_asset(&self, asset: Asset) -> Result<Asset, StorageError>;
+
+    /// Bumps an asset straight to a computed version, with no diff of its
+    /// own fields to derive one from — Epic 34 Slice B. `upsert_asset`
+    /// cannot do this: neither backend's upsert touches the version columns
+    /// on its update path (only a fresh insert sets them), because ordinary
+    /// upserts are connector syncs that must converge silently, not edits.
+    /// This exists for the one case that is a real, human-relevant version
+    /// event without being an edit to the asset's own fields: a child of it
+    /// (a topic's schema field, taggable and deletable on its own) was
+    /// removed, and "a schema field removal is Major" needs to land on the
+    /// *topic*, which `ChangeDescription::between`'s field-diff can never see
+    /// happen since nothing about the topic's own row changed.
+    async fn bump_version(
+        &self,
+        id: Uuid,
+        next: graph_owl_core::envelope::EntityVersion,
+        change_description: graph_owl_core::envelope::ChangeDescription,
+        updated_by: &str,
+    ) -> Result<Option<Asset>, StorageError>;
+
     async fn get_asset(&self, id: Uuid) -> Result<Option<Asset>, StorageError>;
     async fn get_asset_by_fqn(&self, fqn: &str) -> Result<Option<Asset>, StorageError>;
     async fn list_assets(
@@ -1568,6 +1588,15 @@ pub trait Storage: Send + Sync {
     async fn lineage_edges_touching(
         &self,
         asset_ids: &[Uuid],
+    ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError>;
+
+    /// Every edge naming this asset as the pipeline that moved the data —
+    /// Epic 34 Slice C. What `Catalog::soft_delete_asset`'s force-guard
+    /// checks: a pipeline referenced here resists deletion, because removing
+    /// it would leave the edges it explains attributed to nothing.
+    async fn lineage_edges_by_pipeline(
+        &self,
+        pipeline_id: Uuid,
     ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError>;
 
     /// Replace the stored validation results with a fresh pass.

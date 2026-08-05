@@ -67,6 +67,14 @@ pub struct LineageDetails {
     /// A human-readable note, if one was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The pipeline that moved the data, if the edge came from one — Epic 34
+    /// Slice C. Lineage's missing middle: without this, "table A feeds table
+    /// B" says *that* data moved but not *how* — the job, its schedule, its
+    /// run history. `query` already carries *how* for a single SQL
+    /// transformation; this carries it for a multi-step job that `query`
+    /// cannot express as one string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<uuid::Uuid>,
 }
 
 /// One asserted edge.
@@ -118,6 +126,33 @@ const LEGAL_LINEAGE: &[(AssetKind, RelationshipType, AssetKind)] = &[
         RelationshipType::DerivedFrom,
         AssetKind::Column,
     ),
+    // Epic 34 Slice A: a dashboard is built on a table, one direction only —
+    // nothing flows back from a dashboard into the table it reads.
+    (
+        AssetKind::Table,
+        RelationshipType::Feeds,
+        AssetKind::Dashboard,
+    ),
+    // Epic 34 Slice B: a topic can be either end — a table changed by CDC
+    // publishes to a topic, and a topic consumed into a warehouse feeds a
+    // table. Both are real, common flows and neither implies the other.
+    (AssetKind::Table, RelationshipType::Feeds, AssetKind::Topic),
+    (AssetKind::Topic, RelationshipType::Feeds, AssetKind::Table),
+    // Epic 34 Slice D: a model's features are derived from table columns —
+    // one direction, matching the dashboard case.
+    (
+        AssetKind::Table,
+        RelationshipType::Feeds,
+        AssetKind::MlModel,
+    ),
+    // Epic 34 Slice E: an external-table pattern — a container is queried
+    // in place as if it were a table (e.g. an object-store-backed external
+    // table). One direction: the container is the source of record.
+    (
+        AssetKind::Container,
+        RelationshipType::Feeds,
+        AssetKind::Table,
+    ),
 ];
 
 /// Whether this triple is a lineage edge the catalog will accept.
@@ -163,6 +198,22 @@ mod tests {
             ));
             assert!(!is_legal_lineage(
                 AssetKind::Column,
+                RelationshipType::Feeds,
+                AssetKind::Table
+            ));
+        }
+
+        /// Epic 34 Slice A: a dashboard is built on a table, one direction
+        /// only — a dashboard does not feed the table it reads.
+        #[test]
+        fn a_table_feeds_a_dashboard_but_not_the_reverse() {
+            assert!(is_legal_lineage(
+                AssetKind::Table,
+                RelationshipType::Feeds,
+                AssetKind::Dashboard
+            ));
+            assert!(!is_legal_lineage(
+                AssetKind::Dashboard,
                 RelationshipType::Feeds,
                 AssetKind::Table
             ));

@@ -1,6 +1,6 @@
 # Plan: Entity Expansion (Epic 34)
 **Branch**: feat/entity-expansion (one branch per entity family)
-**Status**: Not started
+**Status**: **Shipped** — six families (dashboards, topics, pipelines, ML models, storage containers, plus the cross-family interop slice), one generic `Asset`/`upsert_asset`, no per-kind Rust struct. Two acceptance-criteria gaps found and recorded rather than silently closed: Slice E's "cascades on rename" (Epic 2 Slice E never shipped) and decision 28 in `00b-architecture.md` (the `Container`/`Column` parent special-case).
 **Depends on**: Epic 8 (each new type indexes for free — the property being demonstrated), Epic 3 (envelope), Epic 3 (search), Epic 3 (tags)
 **Unblocks**: nothing — this is breadth, not depth
 **Crates**: `graph-owl-core` (five entity families) · `graph-owl-storage-postgres` (migrations per family) · `graph-owl-api` · `graph-owl-server` — **no new crates, and no change to `graph-owl-engine`, `graph-owl-search`, or `graph-owl-authz`. A change to any of those is the architectural finding this epic exists to surface.**
@@ -39,12 +39,12 @@ Each family repeats this, and the acceptance criteria below are assumed for ever
 
 ## Acceptance criteria (feature level)
 
-- [ ] Five entity families exist with full CRUD and the envelope.
-- [ ] Each is searchable, taggable, ownable, and access-controlled.
-- [ ] Each participates in lineage where semantically meaningful.
-- [ ] Adding each required zero changes to the relationship table, envelope, search port, or authz resource model.
-- [ ] Cross-family lineage works (pipeline → table → dashboard).
-- [ ] A single search returns hits across all families with correct facet counts.
+- [x] Five entity families exist with full CRUD and the envelope.
+- [x] Each is searchable, taggable, ownable, and access-controlled.
+- [x] Each participates in lineage where semantically meaningful.
+- [x] Adding each required zero changes to the relationship table, envelope, search port, or authz resource model. Two `Storage` trait methods were added (`bump_version`, `lineage_edges_by_pipeline`) and two purely-additive migrations (a fourth `search_vector` weight, a nullable `lineage_edges.pipeline_asset_id` column) — neither is the relationship table, the envelope's shape, the search port's trait, or the authz resource model, so the criterion holds on its own literal terms. Recorded here rather than left to be discovered by a later reader diffing the `Storage` trait.
+- [x] Cross-family lineage works (pipeline → table → dashboard). Proven as `Container → Table → Table (pipeline-attributed) → Dashboard`: Pipeline itself is an attribution on an edge (`LineageDetails.pipeline`), not an edge endpoint, matching Slice C's own design — there is no `(Pipeline, Feeds, X)` row in `LEGAL_LINEAGE` and there should not be one.
+- [x] A single search returns hits across all families with correct facet counts.
 
 ## Slices
 
@@ -117,6 +117,8 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: Deep-nesting FQN cascade test at 5 levels — Epic 2's cascade was proven at 4. Mutator watch: a depth-limited cascade must fail it.
 **Done when**: template criteria plus the above met, mutation report reviewed, commit approved.
 
+**Found while implementing, not before**: "cascades on rename" was written assuming Epic 2 Slice E ("Renaming an ancestor cascades FQNs", `02-entity-hierarchy.md`) had shipped — this plan's own dependency line 4 says the machinery is "reused unchanged". It has not: `AssetUpdate` (the only PATCH DTO any asset kind has) carries `description` and `extension` alone, no `name` field, and no rename/reparent endpoint exists for `Asset` anywhere in `graph-owl-api` or `graph-owl-server`. Five-level FQN *derivation* (the RED test above) is fully implemented and tested — it needs only the create-time machinery Epic 2 actually shipped. "Cascades on rename" is not implementable by this epic without first building Epic 2 Slice E itself, which is out of this epic's scope. Left unchecked below rather than silently marked done.
+
 ### Slice F: The families interoperate
 
 **Value**: The catalog behaves as one graph rather than five silos — the payoff for the whole epic.
@@ -130,6 +132,10 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 - Authorization filters consistently across families — no family leaks through the predicate.
 **RED**: A four-family lineage chain test traversing end to end. A search test asserting facet counts across five types. An authz test asserting a principal denied on one family sees no hits from it in a cross-family search. Mutator watch: a per-family authz predicate that omits one family must fail the last test.
 **REFACTOR**: with five families built, assess how much CRUD wiring is genuinely duplicated *knowledge* versus merely similar shape. This is the right moment for that judgment — with one entity type it was premature, with six the answer is evidence-based.
+
+**Found while implementing the authz RED test**: `InMemoryStorage::policies_for_roles` (the fake `Storage` adapter graph-owl-api's own tests run against) was checking `roles.contains(&policy.name)` — a policy's own name, treated as if it were a role — instead of joining through the `role_policies` attachment table the way `graph-owl-storage-postgres`'s real implementation does (`policies p JOIN role_policies rp ON rp.policy = p.name WHERE rp.role = ANY($1)`). Every existing authz test in this file had, by coincidence, named its test policy and its test role identically (both called `"analyst"`, or both `"agent"`), which is exactly what made the bug invisible: `roles.contains(&policy.name)` and the real role-attachment join produce the same answer whenever the two names happen to match, and diverge the moment they do not — which is what this slice's own policy (`"topics-only"`, attached to role `"restricted"`) finally was. Fixed in the fake (`policies_for_roles` now reads `role_policies`, matching the Postgres contract), and every test call site that pre-seeded `storage.policies` directly was moved onto the real `upsert_policy` path so the attachment table is populated the way a caller would populate it. The real backend was never wrong — this was a test-double-only bug, caught by design principle 10's own authz test working exactly as the plan intended it to.
+
+**REFACTOR, done**: the CRUD wiring is *not* duplicated across families — there is exactly one `Catalog::upsert_asset`, one `check_family_properties`, one `LEGAL_LINEAGE` table, gaining a match arm or a row per family rather than a struct, handler, or endpoint per family. That is design principle 10 working as intended, not an accretion to clean up: a fifth family cost roughly the same lines as the first (containment entry, an optional closed-enum match arm, a lineage row, a test module), and none of it lives in five different places the way five separate handlers would. The one place *near*-duplication actually shows up is the test helpers — `a_dashboard`, `a_topic`, `a_pipeline`, `a_model`, `a_storage_service` each build a two-level parent chain that looks identical in shape. Judged not worth extracting: each is 8–12 lines, the kind and the two names are the only things that differ, and a generic `a_family_chain(catalog, root_kind, root_name, leaf_kind, leaf_name)` would trade a reader matching a helper's name to the family it builds for one more indirection at every call site, to save what amounts to a handful of lines total across five test modules. Similar shape, not shared knowledge — leaving it alone is the correct call, not a deferral.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
 ## Explicitly deferred (with destination)

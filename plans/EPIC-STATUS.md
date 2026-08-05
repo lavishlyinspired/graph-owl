@@ -71,7 +71,7 @@ is the condition that index exists to catch.
 | **31** | 5 | [`31-memory.md`](31-memory.md) | In progress | 2/4 (+1 partial) | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
 | **32** | 5 | [`32-agent-capabilities.md`](32-agent-capabilities.md) | In progress | 1/2 (+1 partial) | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
 | **33** | 9 | [`33-ontology-packs.md`](33-ontology-packs.md) | Not started | 0/1 | Epic 24 (glossary and taxonomy model), Epic 9 (standards import) |
-| **34** | 9 | [`34-entity-expansion.md`](34-entity-expansion.md) | Not started | 0/1 | Epic 8 (each new type indexes for free — the property being demonstrated), Epic… |
+| **34** | 9 | [`34-entity-expansion.md`](34-entity-expansion.md) | **Shipped** | 1/1 | Epic 8 (each new type indexes for free — the property being demonstrated), Epic… |
 | **35** | 9 | [`35-collaboration.md`](35-collaboration.md) | Not started | 0/1 | Epic 11 (users), Epic 12 (real identity on posts) |
 | **36** | 9 | [`36-reference-apps.md`](36-reference-apps.md) | Not started | 0/1 | Epic 14 (MCP), Epic 16 (SDKs), Epic 29 (graph API) |
 | **37a** | 9 | [`37a-scale.md`](37a-scale.md) | Not started | 0/1 | Epic 34 (a realistic entity mix to generate) |
@@ -487,7 +487,7 @@ is the condition that index exists to catch.
 
 ### Epic 34 — Entity Expansion *(Demo 9)*
 
-- [ ] Entity expansion: dashboards, pipelines, topics, models, APIs
+- [x] Entity expansion: dashboards, pipelines, topics, models, storage — **Shipped** *(5 Augus
 
 ### Epic 35 — Collaboration *(Demo 9)*
 

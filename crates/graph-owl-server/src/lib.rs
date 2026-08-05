@@ -5878,6 +5878,9 @@ struct AssertLineage {
     query: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    /// The pipeline that moved the data — Epic 34 Slice C.
+    #[serde(default)]
+    pipeline: Option<Uuid>,
 }
 
 impl ValidateBody for AssertLineage {
@@ -5934,6 +5937,7 @@ async fn assert_lineage(
                 source,
                 query: payload.query,
                 description: payload.description,
+                pipeline: payload.pipeline,
             },
         )
         .await?;
@@ -8427,11 +8431,20 @@ async fn delete_asset(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
     Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<ForceQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Reports the cascade count. A delete that silently tombstoned 400 columns
     // and returned 204 would leave an operator unable to tell whether it did
     // what they meant.
-    let affected = catalog.soft_delete_asset(&principal, id).await?;
+    //
+    // `?force=true` — Epic 34 Slice C: a pipeline referenced by lineage
+    // otherwise refuses deletion, the same idiom `ForceQuery` already gives
+    // custom-property and tag deletion.
+    let affected = if query.force.unwrap_or(false) {
+        catalog.soft_delete_asset_forced(&principal, id).await?
+    } else {
+        catalog.soft_delete_asset(&principal, id).await?
+    };
     Ok(Json(json!({ "deleted": affected })))
 }
 

@@ -273,3 +273,44 @@ async fn a_ranked_result_pages_without_skipping_or_repeating() {
         "paging must reproduce the unpaged order exactly"
     );
 }
+
+/// **Epic 34 Slice F's own search RED test.** The `kind` facet is computed
+/// from `asset.kind.as_str()` over whatever the visible page contains — no
+/// per-kind branch, so it never needed to be taught about the five families
+/// this epic added. One search across six root-level kinds, from five
+/// different families plus the original `service`, proves the facet counts
+/// them all correctly rather than only the kinds it was written against.
+#[tokio::test]
+async fn search_facets_by_kind_span_every_family() {
+    let (app, _container, _) = test_app().await;
+    let roots = [
+        ("service", "acme-warehouse-root"),
+        ("dashboardService", "acme-looker-root"),
+        ("messagingService", "acme-kafka-root"),
+        ("pipelineService", "acme-airflow-root"),
+        ("mlModelService", "acme-sagemaker-root"),
+        ("storageService", "acme-s3-root"),
+    ];
+    for (kind, name) in roots {
+        create(&app, json!({ "kind": kind, "name": name })).await;
+    }
+
+    let (status, result) = send(&app, "GET", "/assets/search?q=acme&limit=50", None).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+
+    let data = result["data"].as_array().expect("a page");
+    assert_eq!(data.len(), roots.len(), "{result}");
+
+    let by_kind = result["facets"]["kind"].as_array().expect("a kind facet");
+    for (kind, _) in roots {
+        let count = by_kind
+            .iter()
+            .find(|entry| entry["value"] == kind)
+            .and_then(|entry| entry["count"].as_u64());
+        assert_eq!(
+            count,
+            Some(1),
+            "missing or wrong count for `{kind}`: {result}"
+        );
+    }
+}
