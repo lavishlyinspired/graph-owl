@@ -56,6 +56,7 @@ use graph_owl_traversal::{Bounds, Direction, EdgeFilter, Subgraph, TraversalEngi
 use serde::Deserialize;
 use uuid::Uuid;
 
+pub mod archive;
 pub mod extraction;
 pub mod federation;
 pub mod validation;
@@ -791,6 +792,30 @@ pub struct GraphSize {
     /// predicate `project_entity` already uses to tell a relationship node
     /// from an ordinary one, not a new convention.
     pub edges: u64,
+}
+
+/// A page request at the size [`Catalog::export_archive`] pages the catalog
+/// by — large enough that 100k entities is ~200 round trips rather than
+/// 100k, small enough that one page is a trivial amount of RAM.
+fn page_request(after: Option<&str>) -> Result<graph_owl_core::page::PageRequest, CatalogError> {
+    graph_owl_core::page::PageRequest::new(Some(500), after)
+        .map_err(|e| CatalogError::Storage(StorageError::Unexpected(format!("{e:?}"))))
+}
+
+fn archive_io_error(e: std::io::Error) -> CatalogError {
+    CatalogError::Storage(StorageError::Unexpected(e.to_string()))
+}
+
+/// Runs a blocking archive operation on a blocking-safe thread — every
+/// `tar`/`zstd`/checksum call `Catalog::export_archive` and
+/// `Catalog::restore_archive` make, none of which is async.
+async fn spawn_blocking_io<T: Send + 'static>(
+    f: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> Result<T, CatalogError> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?
+        .map_err(archive_io_error)
 }
 
 /// An asset as an event names it.
@@ -1654,6 +1679,398 @@ impl Catalog {
         Ok(graph_owl_ontology::profile::override_refusal(
             &detection, profile,
         ))
+    }
+
+    // ---- Epic 37b: portable archive ----
+
+    /// Streams the whole catalog — or a scoped slice of it — into a
+    /// `.tar.zst` archive at `output_path`. Admin-only at the HTTP layer
+    /// (`graph-owl-server`), the same tier that gates a full-estate
+    /// validation pass or a policy write: reading redacted-or-not PII at
+    /// catalog scale is exactly that class of operation, and this method
+    /// itself performs no authorization filtering — the archive is meant
+    /// to hold everything in scope, not what one principal may see.
+    ///
+    /// **Known scope limit, recorded rather than silently claimed away**:
+    /// this is not a point-in-time snapshot. Each page is read from an
+    /// independent query rather than one long-lived transaction spanning
+    /// the whole walk, so a write racing the export may or may not be
+    /// reflected depending on where the walk had reached. A genuine
+    /// snapshot would need `Storage` to expose a transaction handle across
+    /// calls, which is a larger change than this pass makes — Slice A's
+    /// own "internally consistent... a snapshot, not a smear" criterion is
+    /// therefore only partially met, tracked here rather than claimed.
+    ///
+    /// **`--include-references` is not implemented.** A relationship whose
+    /// other endpoint is out of scope is always excluded, never included
+    /// as a stub — the stub half of Slice D's own acceptance criterion.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if `scope` is `Some(&[])` — an empty-but-present scope
+    /// would export nothing, which is never what a caller means; omit
+    /// `scope` for the whole catalog. `Storage` if any read fails, or an
+    /// I/O error building the archive file itself.
+    pub async fn export_archive(
+        &self,
+        scope: Option<Vec<graph_owl_core::archive::ScopeSelector>>,
+        redact_fields: &[String],
+        output_path: &std::path::Path,
+    ) -> Result<graph_owl_core::archive::ArchiveManifest, CatalogError> {
+        use graph_owl_core::archive::{ArchiveManifest, ArchivedRelationship, ScopeSelector};
+
+        if scope.as_ref().is_some_and(Vec::is_empty) {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "scope",
+                FieldErrorCode::Required,
+                "an empty scope would export nothing; omit `scope` for the whole catalog",
+            )]));
+        }
+        let selectors = scope.clone().unwrap_or_default();
+
+        let scratch_dir = std::env::temp_dir().join(format!("graph-owl-export-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&scratch_dir)
+            .await
+            .map_err(archive_io_error)?;
+        let entities_path = scratch_dir.join(crate::archive::ENTITIES_FILE);
+        let relationships_path = scratch_dir.join(crate::archive::RELATIONSHIPS_FILE);
+
+        let mut in_scope_ids: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        let mut entity_count: u64 = 0;
+
+        let mut after: Option<String> = None;
+        loop {
+            let page = page_request(after.as_deref())?;
+            let result = self.storage.list_assets(None, &page).await?;
+            for asset in &result.data {
+                if !ScopeSelector::matches_any(&selectors, asset) {
+                    continue;
+                }
+                in_scope_ids.insert(asset.id);
+                entity_count += self
+                    .write_archived_entity(asset, redact_fields, &entities_path)
+                    .await?;
+            }
+            after = result.paging.after;
+            if after.is_none() {
+                break;
+            }
+        }
+
+        // Ancestor closure (Slice D): an ancestor outside scope is still
+        // required for parent-id integrity on restore.
+        if !selectors.is_empty() {
+            for id in in_scope_ids.clone() {
+                let ancestors = self.storage.ancestors_of(id).await.unwrap_or_default();
+                for ancestor in ancestors {
+                    if in_scope_ids.contains(&ancestor.id) {
+                        continue;
+                    }
+                    in_scope_ids.insert(ancestor.id);
+                    entity_count += self
+                        .write_archived_entity(&ancestor, redact_fields, &entities_path)
+                        .await?;
+                }
+            }
+        }
+
+        let mut relationship_count: u64 = 0;
+        let mut after: Option<String> = None;
+        loop {
+            let page = page_request(after.as_deref())?;
+            let result = self.storage.list_relationships(&page).await?;
+            for relationship in result.data {
+                if !in_scope_ids.contains(&relationship.from_entity_id)
+                    || !in_scope_ids.contains(&relationship.to_entity_id)
+                {
+                    continue;
+                }
+                let archived = ArchivedRelationship { relationship };
+                let path = relationships_path.clone();
+                spawn_blocking_io(move || crate::archive::append_ndjson_line(&path, &archived))
+                    .await?;
+                relationship_count += 1;
+            }
+            after = result.paging.after;
+            if after.is_none() {
+                break;
+            }
+        }
+
+        let mut section_checksums = std::collections::BTreeMap::new();
+        for (name, path) in [
+            (crate::archive::ENTITIES_FILE, entities_path.clone()),
+            (
+                crate::archive::RELATIONSHIPS_FILE,
+                relationships_path.clone(),
+            ),
+        ] {
+            if let Some(sum) =
+                spawn_blocking_io(move || crate::archive::section_checksum(&path)).await?
+            {
+                section_checksums.insert(name.to_string(), sum);
+            }
+        }
+
+        let manifest = ArchiveManifest {
+            format_version: graph_owl_core::archive::FORMAT_VERSION,
+            source_instance: std::env::var("HOSTNAME").unwrap_or_else(|_| "graph-owl".to_string()),
+            created_at: Utc::now(),
+            entity_count,
+            relationship_count,
+            scope,
+            redacted_fields: redact_fields.to_vec(),
+            section_checksums,
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        tokio::fs::write(
+            scratch_dir.join(crate::archive::MANIFEST_FILE),
+            manifest_bytes,
+        )
+        .await
+        .map_err(archive_io_error)?;
+
+        let scratch_for_build = scratch_dir.clone();
+        let output = output_path.to_path_buf();
+        spawn_blocking_io(move || crate::archive::build_tar_zst(&scratch_for_build, &output))
+            .await?;
+        tokio::fs::remove_dir_all(&scratch_dir).await.ok();
+
+        Ok(manifest)
+    }
+
+    /// Writes one entity plus its version history as one NDJSON line,
+    /// redacted per `redact_fields`. Returns `1` so a call site can fold it
+    /// straight into a running count.
+    async fn write_archived_entity(
+        &self,
+        asset: &Asset,
+        redact_fields: &[String],
+        entities_path: &std::path::Path,
+    ) -> Result<u64, CatalogError> {
+        let versions = self
+            .storage
+            .asset_versions(asset.id)
+            .await
+            .unwrap_or_default();
+        let mut entity = graph_owl_core::archive::ArchivedEntity {
+            asset: asset.clone(),
+            versions,
+        };
+        crate::archive::redact_entity(&mut entity, redact_fields);
+        let path = entities_path.to_path_buf();
+        spawn_blocking_io(move || crate::archive::append_ndjson_line(&path, &entity)).await?;
+        Ok(1)
+    }
+
+    /// Restores an archive built by [`Self::export_archive`]. Admin-only at
+    /// the HTTP layer — restoring bypasses every containment/FQN-derivation
+    /// check `upsert_asset` normally runs, because the archive already
+    /// carries a valid FQN and this is a privileged, deliberate bulk
+    /// operation, not a client-composed create.
+    ///
+    /// **Entity ids are preserved on a fresh insert** (decision 6):
+    /// `Storage::upsert_asset` conflicts on FQN, never on id, so an id the
+    /// caller supplies survives whenever the FQN was not already live.
+    /// `regenerate_ids` mints a fresh id for every entity instead,
+    /// rewriting every `parentId` and relationship endpoint through the
+    /// same id map so nothing is left pointing at an id that no longer
+    /// exists.
+    ///
+    /// Under `overwrite`, an existing entity's `description` is replaced
+    /// via the same `AssetUpdate` shape a `PATCH` uses — the system's own
+    /// boundary for what may change without recreating the entity; `kind`,
+    /// `name` and `fullyQualifiedName` never change on a live id, archive
+    /// or not.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the archive's format version is newer than this
+    /// binary understands, or a section checksum does not match. `Storage`
+    /// if a read or write fails.
+    pub async fn restore_archive(
+        &self,
+        principal: &Principal,
+        archive_path: &std::path::Path,
+        conflict_policy: graph_owl_core::archive::ConflictPolicy,
+        regenerate_ids: bool,
+    ) -> Result<crate::archive::RestoreOutcome, CatalogError> {
+        use graph_owl_core::archive::ConflictPolicy;
+
+        let scratch_dir =
+            std::env::temp_dir().join(format!("graph-owl-restore-{}", Uuid::new_v4()));
+        let archive_owned = archive_path.to_path_buf();
+        let scratch_for_extract = scratch_dir.clone();
+        spawn_blocking_io(move || {
+            crate::archive::extract_tar_zst(&archive_owned, &scratch_for_extract)
+        })
+        .await?;
+
+        let manifest = {
+            let dir = scratch_dir.clone();
+            spawn_blocking_io(move || crate::archive::read_manifest(&dir)).await?
+        };
+
+        if !manifest.readable_by_this_binary() {
+            tokio::fs::remove_dir_all(&scratch_dir).await.ok();
+            let (bmaj, bmin, bpatch) = graph_owl_core::archive::FORMAT_VERSION;
+            let (amaj, amin, apatch) = manifest.format_version;
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "archive",
+                FieldErrorCode::Type,
+                format!(
+                    "this archive is format {amaj}.{amin}.{apatch}, which this binary \
+                     (format {bmaj}.{bmin}.{bpatch}) cannot read"
+                ),
+            )]));
+        }
+
+        {
+            let dir = scratch_dir.clone();
+            let manifest = manifest.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::archive::verify_section_checksums(&dir, &manifest)
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            if let Err(e) = outcome {
+                tokio::fs::remove_dir_all(&scratch_dir).await.ok();
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "archive",
+                    FieldErrorCode::Type,
+                    e.to_string(),
+                )]));
+            }
+        }
+
+        let entities = {
+            let dir = scratch_dir.clone();
+            spawn_blocking_io(move || crate::archive::read_entities(&dir)).await?
+        };
+        let relationships = {
+            let dir = scratch_dir.clone();
+            spawn_blocking_io(move || crate::archive::read_relationships(&dir)).await?
+        };
+        tokio::fs::remove_dir_all(&scratch_dir).await.ok();
+
+        // `fail`: pre-scan every entity before a single row is written.
+        if conflict_policy == ConflictPolicy::Fail {
+            let mut conflicts = Vec::new();
+            for entity in &entities {
+                if self
+                    .storage
+                    .get_asset_by_fqn(&entity.asset.fully_qualified_name)
+                    .await?
+                    .is_some()
+                {
+                    conflicts.push(entity.asset.fully_qualified_name.clone());
+                }
+            }
+            if !conflicts.is_empty() {
+                return Ok(crate::archive::RestoreOutcome {
+                    conflicts,
+                    aborted: true,
+                    ..Default::default()
+                });
+            }
+        }
+
+        let mut id_map: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
+        let mut entities_restored = 0u64;
+        let mut entities_skipped = Vec::new();
+
+        for entity in entities {
+            let existing = self
+                .storage
+                .get_asset_by_fqn(&entity.asset.fully_qualified_name)
+                .await?;
+            match (&existing, conflict_policy) {
+                (Some(live), ConflictPolicy::Skip) => {
+                    id_map.insert(entity.asset.id, live.id);
+                    entities_skipped.push(entity.asset.fully_qualified_name.clone());
+                }
+                (Some(live), ConflictPolicy::Overwrite) => {
+                    id_map.insert(entity.asset.id, live.id);
+                    let before = Some(live.clone());
+                    self.storage
+                        .update_asset(
+                            live.id,
+                            &AssetUpdate {
+                                description: Some(entity.asset.description.clone()),
+                                extension: None,
+                            },
+                            &principal.id,
+                            None,
+                        )
+                        .await?;
+                    if let Some(after) = self.storage.get_asset(live.id).await? {
+                        self.project(before, &after).await;
+                    }
+                    entities_restored += 1;
+                }
+                _ => {
+                    let new_id = if regenerate_ids {
+                        Uuid::new_v4()
+                    } else {
+                        entity.asset.id
+                    };
+                    id_map.insert(entity.asset.id, new_id);
+                    let parent_id = entity
+                        .asset
+                        .parent_id
+                        .map(|p| *id_map.get(&p).unwrap_or(&p));
+                    let written = self
+                        .storage
+                        .upsert_asset(Asset {
+                            id: new_id,
+                            parent_id,
+                            updated_by: principal.id.clone(),
+                            ..entity.asset.clone()
+                        })
+                        .await?;
+                    self.project(None, &written).await;
+                    entities_restored += 1;
+                }
+            }
+        }
+
+        let mut relationships_restored = 0u64;
+        for archived in relationships {
+            let r = archived.relationship;
+            let from_entity_id = *id_map.get(&r.from_entity_id).unwrap_or(&r.from_entity_id);
+            let to_entity_id = *id_map.get(&r.to_entity_id).unwrap_or(&r.to_entity_id);
+            let new_id = if regenerate_ids { Uuid::new_v4() } else { r.id };
+            let outcome = self
+                .storage
+                .create_relationship(Relationship {
+                    id: new_id,
+                    from_entity_id,
+                    to_entity_id,
+                    ..r
+                })
+                .await;
+            match outcome {
+                Ok(_) => relationships_restored += 1,
+                // Already present. Treated as the relationship-level
+                // equivalent of an entity `skip` under every policy —
+                // `fail`'s own guarantee covers entities, pre-scanned above;
+                // a relationship-tuple conflict is detected only here, at
+                // write time, which is a narrower guarantee than `fail`
+                // gives entities and is recorded as such rather than
+                // silently claimed equal.
+                Err(StorageError::Conflict { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        Ok(crate::archive::RestoreOutcome {
+            entities_restored,
+            entities_skipped,
+            relationships_restored,
+            conflicts: vec![],
+            aborted: false,
+        })
     }
 
     async fn fetch_rl_tbox(
@@ -24448,5 +24865,538 @@ mod overview_graph_size_tests {
             .expect("overview");
 
         assert!(overview.graph.is_none(), "{:?}", overview.graph);
+    }
+}
+
+#[cfg(test)]
+mod archive_round_trip_tests {
+    //! Epic 37b's own specification: export → restore → export produces an
+    //! identical second archive. Exercised at the `Catalog` facade level
+    //! against `InMemoryStorage`, so these run without a container.
+
+    use super::*;
+    use graph_owl_core::archive::{ConflictPolicy, ScopeSelector};
+    use tests::InMemoryStorage;
+
+    fn scratch_archive() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("graph-owl-archive-rt-{}.tar.zst", Uuid::new_v4()))
+    }
+
+    async fn seed_two_related_tables(catalog: &Catalog) -> (Asset, Asset) {
+        let a = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    // A root kind, on purpose: no parent chain to seed, and
+                    // the fixture only needs "two entities of one kind".
+                    kind: AssetKind::Service,
+                    name: "orders".to_string(),
+                    parent_id: None,
+                    description: Some("the orders table".to_string()),
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("seed a");
+        let b = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    // A root kind, on purpose: no parent chain to seed, and
+                    // the fixture only needs "two entities of one kind".
+                    kind: AssetKind::Service,
+                    name: "shipments".to_string(),
+                    parent_id: None,
+                    description: Some("the shipments table".to_string()),
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("seed b");
+        catalog
+            .storage
+            .create_relationship(Relationship {
+                id: Uuid::new_v4(),
+                from_entity_type: "table".to_string(),
+                from_entity_id: a.id,
+                relationship_type: "feeds".to_string(),
+                to_entity_type: "table".to_string(),
+                to_entity_id: b.id,
+                created_at: Utc::now(),
+            })
+            .await
+            .expect("seed relationship");
+        (a, b)
+    }
+
+    /// **The slice's own specification.** Restoring into an empty instance
+    /// reproduces entity state, ids, FQNs, and relationships exactly.
+    #[tokio::test]
+    async fn restoring_into_an_empty_instance_reproduces_ids_fqns_and_relationships() {
+        let source_storage = Arc::new(InMemoryStorage::default());
+        let source = Catalog::new(source_storage);
+        let (a, b) = seed_two_related_tables(&source).await;
+
+        let archive_path = scratch_archive();
+        source
+            .export_archive(None, &[], &archive_path)
+            .await
+            .expect("export");
+
+        let target_storage = Arc::new(InMemoryStorage::default());
+        let target = Catalog::new(target_storage);
+        let outcome = target
+            .restore_archive(
+                &Principal::system(),
+                &archive_path,
+                ConflictPolicy::Fail,
+                false,
+            )
+            .await
+            .expect("restore");
+
+        assert_eq!(outcome.entities_restored, 2, "{outcome:?}");
+        assert_eq!(outcome.relationships_restored, 1, "{outcome:?}");
+        assert!(!outcome.aborted, "{outcome:?}");
+
+        let restored_a = target
+            .storage
+            .get_asset(a.id)
+            .await
+            .expect("read")
+            .expect("a restored under its original id");
+        assert_eq!(restored_a.fully_qualified_name, a.fully_qualified_name);
+        assert_eq!(restored_a.description, a.description);
+        let restored_b = target
+            .storage
+            .get_asset(b.id)
+            .await
+            .expect("read")
+            .expect("b restored under its original id");
+        assert_eq!(restored_b.fully_qualified_name, b.fully_qualified_name);
+
+        let relationships = target
+            .storage
+            .list_relationships_for_entity("table", a.id)
+            .await
+            .expect("list relationships");
+        assert_eq!(relationships.len(), 1, "{relationships:?}");
+        assert_eq!(relationships[0].to_entity_id, b.id);
+
+        std::fs::remove_file(&archive_path).ok();
+    }
+
+    /// **The round-trip property.** export → restore → export produces an
+    /// identical second manifest (entity/relationship counts, scope,
+    /// redaction) — the closest thing this format has to a byte-identity
+    /// check that does not depend on wall-clock-sensitive fields like
+    /// `createdAt`.
+    #[tokio::test]
+    async fn export_restore_export_produces_the_same_counts() {
+        let source_storage = Arc::new(InMemoryStorage::default());
+        let source = Catalog::new(source_storage);
+        seed_two_related_tables(&source).await;
+
+        let first_archive = scratch_archive();
+        let first_manifest = source
+            .export_archive(None, &[], &first_archive)
+            .await
+            .expect("first export");
+
+        let target_storage = Arc::new(InMemoryStorage::default());
+        let target = Catalog::new(target_storage);
+        target
+            .restore_archive(
+                &Principal::system(),
+                &first_archive,
+                ConflictPolicy::Fail,
+                false,
+            )
+            .await
+            .expect("restore");
+
+        let second_archive = scratch_archive();
+        let second_manifest = target
+            .export_archive(None, &[], &second_archive)
+            .await
+            .expect("second export");
+
+        assert_eq!(second_manifest.entity_count, first_manifest.entity_count);
+        assert_eq!(
+            second_manifest.relationship_count,
+            first_manifest.relationship_count
+        );
+
+        std::fs::remove_file(&first_archive).ok();
+        std::fs::remove_file(&second_archive).ok();
+    }
+
+    /// **Slice C: `fail` refuses before writing anything.** Restoring a
+    /// second time over the same FQNs must not create a duplicate or
+    /// silently drop the conflict.
+    #[tokio::test]
+    async fn fail_policy_aborts_before_writing_anything_on_conflict() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+        seed_two_related_tables(&catalog).await;
+
+        let archive_path = scratch_archive();
+        catalog
+            .export_archive(None, &[], &archive_path)
+            .await
+            .expect("export");
+
+        let outcome = catalog
+            .restore_archive(
+                &Principal::system(),
+                &archive_path,
+                ConflictPolicy::Fail,
+                false,
+            )
+            .await
+            .expect("restore");
+
+        assert!(outcome.aborted, "{outcome:?}");
+        assert_eq!(outcome.entities_restored, 0, "{outcome:?}");
+        assert_eq!(outcome.conflicts.len(), 2, "{outcome:?}");
+
+        std::fs::remove_file(&archive_path).ok();
+    }
+
+    /// **Slice C: `skip` leaves the live entity untouched and reports what
+    /// was skipped.**
+    #[tokio::test]
+    async fn skip_policy_leaves_existing_entities_untouched() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+        let (a, _b) = seed_two_related_tables(&catalog).await;
+
+        let archive_path = scratch_archive();
+        catalog
+            .export_archive(None, &[], &archive_path)
+            .await
+            .expect("export");
+
+        let outcome = catalog
+            .restore_archive(
+                &Principal::system(),
+                &archive_path,
+                ConflictPolicy::Skip,
+                false,
+            )
+            .await
+            .expect("restore");
+
+        assert_eq!(outcome.entities_restored, 0, "{outcome:?}");
+        assert_eq!(outcome.entities_skipped.len(), 2, "{outcome:?}");
+
+        let still_live = catalog
+            .storage
+            .get_asset(a.id)
+            .await
+            .expect("read")
+            .expect("untouched");
+        assert_eq!(still_live.description, a.description);
+
+        std::fs::remove_file(&archive_path).ok();
+    }
+
+    /// **Slice C: `overwrite` replaces the live entity's description,
+    /// bumping its version, never its id.**
+    #[tokio::test]
+    async fn overwrite_policy_replaces_description_without_changing_id() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+        let (a, _b) = seed_two_related_tables(&catalog).await;
+
+        let archive_path = scratch_archive();
+        catalog
+            .export_archive(None, &[], &archive_path)
+            .await
+            .expect("export");
+
+        // Change the live description so overwrite has something to prove.
+        catalog
+            .update_asset(
+                &Principal::system(),
+                a.id,
+                &AssetUpdate {
+                    description: Some(Some("a different description now".to_string())),
+                    extension: None,
+                },
+                None,
+            )
+            .await
+            .expect("mutate before restore");
+
+        let outcome = catalog
+            .restore_archive(
+                &Principal::system(),
+                &archive_path,
+                ConflictPolicy::Overwrite,
+                false,
+            )
+            .await
+            .expect("restore");
+
+        assert_eq!(outcome.entities_restored, 2, "{outcome:?}");
+
+        let restored = catalog
+            .storage
+            .get_asset(a.id)
+            .await
+            .expect("read")
+            .expect("still present under the same id");
+        assert_eq!(restored.id, a.id, "overwrite must never change a live id");
+        assert_eq!(
+            restored.description, a.description,
+            "restored to the archive's own value"
+        );
+
+        std::fs::remove_file(&archive_path).ok();
+    }
+
+    /// **Slice C: `--regenerate-ids` mints fresh ids and rewrites every
+    /// relationship reference consistently** — the subtle criterion the
+    /// plan itself calls out: a rewrite that changed ids without rewriting
+    /// references would be a corruption invisible until traversal.
+    #[tokio::test]
+    async fn regenerate_ids_rewrites_relationship_references_consistently() {
+        let source_storage = Arc::new(InMemoryStorage::default());
+        let source = Catalog::new(source_storage);
+        let (a, b) = seed_two_related_tables(&source).await;
+
+        let archive_path = scratch_archive();
+        source
+            .export_archive(None, &[], &archive_path)
+            .await
+            .expect("export");
+
+        let target_storage = Arc::new(InMemoryStorage::default());
+        let target = Catalog::new(target_storage);
+        let outcome = target
+            .restore_archive(
+                &Principal::system(),
+                &archive_path,
+                ConflictPolicy::Fail,
+                true,
+            )
+            .await
+            .expect("restore");
+        assert_eq!(outcome.entities_restored, 2, "{outcome:?}");
+        assert_eq!(outcome.relationships_restored, 1, "{outcome:?}");
+
+        let restored_a = target
+            .storage
+            .get_asset_by_fqn(&a.fully_qualified_name)
+            .await
+            .expect("read")
+            .expect("a restored under a fresh id");
+        assert_ne!(
+            restored_a.id, a.id,
+            "regenerate-ids must mint a fresh id, not reuse the archive's own"
+        );
+
+        let relationships = target
+            .storage
+            .list_relationships_for_entity("table", restored_a.id)
+            .await
+            .expect("list relationships");
+        assert_eq!(
+            relationships.len(),
+            1,
+            "the relationship must be reachable from the entity's *new* id"
+        );
+        let restored_b = target
+            .storage
+            .get_asset_by_fqn(&b.fully_qualified_name)
+            .await
+            .expect("read")
+            .expect("b restored under a fresh id");
+        assert_eq!(
+            relationships[0].to_entity_id, restored_b.id,
+            "the relationship must point at b's *new* id, not the archive's stale one"
+        );
+
+        std::fs::remove_file(&archive_path).ok();
+    }
+
+    /// **Slice D: a scoped export excludes what is out of scope, and its
+    /// relationships too.**
+    #[tokio::test]
+    async fn a_scoped_export_excludes_out_of_scope_entities_and_their_relationships() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+        seed_two_related_tables(&catalog).await;
+        catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::DashboardService,
+                    name: "events".to_string(),
+                    parent_id: None,
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("seed an out-of-scope kind");
+
+        let archive_path = scratch_archive();
+        let manifest = catalog
+            .export_archive(
+                Some(vec![ScopeSelector::Kind(AssetKind::Service)]),
+                &[],
+                &archive_path,
+            )
+            .await
+            .expect("scoped export");
+
+        assert_eq!(manifest.entity_count, 2, "{manifest:?}");
+        assert_eq!(manifest.relationship_count, 1, "{manifest:?}");
+
+        std::fs::remove_file(&archive_path).ok();
+    }
+
+    /// **Slice D: a scoped export restores standalone into an empty
+    /// instance** — the archive is self-contained, not merely filtered.
+    #[tokio::test]
+    async fn a_scoped_export_restores_standalone() {
+        let source_storage = Arc::new(InMemoryStorage::default());
+        let source = Catalog::new(source_storage);
+        seed_two_related_tables(&source).await;
+
+        let archive_path = scratch_archive();
+        source
+            .export_archive(
+                Some(vec![ScopeSelector::Kind(AssetKind::Service)]),
+                &[],
+                &archive_path,
+            )
+            .await
+            .expect("scoped export");
+
+        let target_storage = Arc::new(InMemoryStorage::default());
+        let target = Catalog::new(target_storage);
+        let outcome = target
+            .restore_archive(
+                &Principal::system(),
+                &archive_path,
+                ConflictPolicy::Fail,
+                false,
+            )
+            .await
+            .expect("restore");
+
+        assert_eq!(outcome.entities_restored, 2, "{outcome:?}");
+        assert!(!outcome.aborted, "{outcome:?}");
+
+        std::fs::remove_file(&archive_path).ok();
+    }
+
+    /// **An empty scope is refused rather than silently exporting
+    /// nothing.**
+    #[tokio::test]
+    async fn an_empty_scope_is_refused() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+
+        let archive_path = scratch_archive();
+        let outcome = catalog
+            .export_archive(Some(vec![]), &[], &archive_path)
+            .await;
+
+        assert!(
+            matches!(outcome, Err(CatalogError::Validation(_))),
+            "{outcome:?}"
+        );
+    }
+
+    /// **Slice E: a redacted description never appears in the archive's
+    /// bytes.** A grep over the decompressed archive, not just an API
+    /// assertion — the byte-level guarantee the plan's own RED test asks
+    /// for, since redacting on read would still leave it recoverable.
+    #[tokio::test]
+    async fn a_redacted_description_appears_nowhere_in_the_archive_bytes() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+        seed_two_related_tables(&catalog).await;
+
+        let archive_path = scratch_archive();
+        catalog
+            .export_archive(None, &["description".to_string()], &archive_path)
+            .await
+            .expect("redacted export");
+
+        // Decompress (but do not untar) and search the raw bytes — the tar
+        // layer would not hide a substring either, but going one level
+        // lower than `read_entities` is what actually proves the claim
+        // rather than trusting this module's own parser not to normalize
+        // it away.
+        let compressed = std::fs::read(&archive_path).expect("read archive");
+        let decompressed =
+            zstd::stream::decode_all(compressed.as_slice()).expect("decompress archive");
+        let as_text = String::from_utf8_lossy(&decompressed);
+        assert!(
+            !as_text.contains("the orders table"),
+            "a redacted field must not survive anywhere in the archive bytes"
+        );
+        assert!(
+            !as_text.contains("the shipments table"),
+            "a redacted field must not survive anywhere in the archive bytes"
+        );
+
+        std::fs::remove_file(&archive_path).ok();
+    }
+
+    /// **A format version newer than this binary understands is refused.**
+    #[tokio::test]
+    async fn a_newer_format_version_is_refused_on_restore() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+        seed_two_related_tables(&catalog).await;
+
+        let archive_path = scratch_archive();
+        catalog
+            .export_archive(None, &[], &archive_path)
+            .await
+            .expect("export");
+
+        // Tamper the manifest to claim a future format version, the same
+        // way a genuinely newer binary's archive would arrive here.
+        let scratch = std::env::temp_dir().join(format!("graph-owl-tamper-{}", Uuid::new_v4()));
+        crate::archive::extract_tar_zst(&archive_path, &scratch).expect("extract");
+        let mut manifest = crate::archive::read_manifest(&scratch).expect("read manifest");
+        manifest.format_version.0 += 1;
+        std::fs::write(
+            scratch.join(crate::archive::MANIFEST_FILE),
+            serde_json::to_vec(&manifest).expect("serialize"),
+        )
+        .expect("write tampered manifest");
+        let tampered_path = scratch_archive();
+        crate::archive::build_tar_zst(&scratch, &tampered_path).expect("rebuild archive");
+
+        let target_storage = Arc::new(InMemoryStorage::default());
+        let target = Catalog::new(target_storage);
+        let outcome = target
+            .restore_archive(
+                &Principal::system(),
+                &tampered_path,
+                ConflictPolicy::Fail,
+                false,
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, Err(CatalogError::Validation(_))),
+            "{outcome:?}"
+        );
+
+        std::fs::remove_dir_all(&scratch).ok();
+        std::fs::remove_file(&archive_path).ok();
+        std::fs::remove_file(&tampered_path).ok();
     }
 }

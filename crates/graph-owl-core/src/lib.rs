@@ -28,6 +28,7 @@
 //! `plans/00b-architecture.md` decision 27.
 #![deny(missing_docs)]
 
+pub mod archive;
 pub mod blocking;
 pub mod classification;
 pub mod contract;

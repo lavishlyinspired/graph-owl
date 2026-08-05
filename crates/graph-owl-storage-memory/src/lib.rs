@@ -2456,6 +2456,24 @@ impl Storage for InMemoryStorage {
         Ok(relationships.len() != original_len)
     }
 
+    async fn list_relationships(
+        &self,
+        page: &graph_owl_core::page::PageRequest,
+    ) -> Result<graph_owl_core::page::Page<Relationship>, StorageError> {
+        use graph_owl_core::page::{Cursor, Page};
+
+        let mut relationships: Vec<Relationship> =
+            self.relationships.lock().unwrap().iter().cloned().collect();
+        relationships.sort_by(|a, b| a.id.to_string().cmp(&b.id.to_string()));
+        if let Some(cursor) = &page.after {
+            relationships.retain(|r| r.id.to_string().as_str() > cursor.sort_key.as_str());
+        }
+        relationships.truncate(page.limit + 1);
+        Ok(Page::from_overfetch(relationships, page.limit, |r| {
+            Cursor::new(r.id.to_string(), r.id)
+        }))
+    }
+
     // ---- Epic 24 Slice A: glossary and terms ----
 
     async fn insert_glossary(
@@ -5439,6 +5457,75 @@ mod tests {
                 100,
                 "every one of 100 concurrent writers should have landed exactly once"
             );
+        }
+    }
+
+    mod relationship_listing {
+        //! Epic 37b's own export primitive — `list_relationships_for_entity`
+        //! needs a starting entity, and a full-catalog export has none.
+
+        use super::*;
+
+        fn relationship(relationship_type: &str) -> Relationship {
+            Relationship {
+                id: Uuid::new_v4(),
+                from_entity_type: "table".to_string(),
+                from_entity_id: Uuid::new_v4(),
+                relationship_type: relationship_type.to_string(),
+                to_entity_type: "table".to_string(),
+                to_entity_id: Uuid::new_v4(),
+                created_at: Utc::now(),
+            }
+        }
+
+        #[tokio::test]
+        async fn every_relationship_is_returned_across_pages_with_none_repeated_or_dropped() {
+            let storage = InMemoryStorage::default();
+            let mut created = Vec::new();
+            for n in 0..25 {
+                let r = storage
+                    .create_relationship(relationship(&format!("feeds{n}")))
+                    .await
+                    .expect("create should succeed");
+                created.push(r.id);
+            }
+
+            let mut seen = std::collections::HashSet::new();
+            let mut after: Option<String> = None;
+            loop {
+                let page = PageRequest::new(Some(10), after.as_deref()).expect("valid page");
+                let result = storage
+                    .list_relationships(&page)
+                    .await
+                    .expect("list should succeed");
+                for r in &result.data {
+                    assert!(seen.insert(r.id), "{} returned twice", r.id);
+                }
+                match result.paging.after {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+            }
+
+            assert_eq!(
+                seen,
+                created.into_iter().collect(),
+                "every created relationship should appear exactly once across all pages"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_empty_store_returns_an_empty_last_page() {
+            let storage = InMemoryStorage::default();
+            let page = PageRequest::new(None, None).expect("valid page");
+
+            let result = storage
+                .list_relationships(&page)
+                .await
+                .expect("list should succeed");
+
+            assert!(result.data.is_empty());
+            assert_eq!(result.paging.after, None);
         }
     }
 }

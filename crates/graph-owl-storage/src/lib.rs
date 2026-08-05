@@ -1299,6 +1299,20 @@ pub trait Storage: Send + Sync {
 
     async fn delete_relationship(&self, id: Uuid) -> Result<bool, StorageError>;
 
+    /// Every relationship in the catalog, paginated — Epic 37b's own export
+    /// primitive. `list_relationships_for_entity` cannot serve this: it needs
+    /// an entity to start from, and a full-catalog export has none. Sorted by
+    /// id, which is enough for a stable, deterministic cursor — relationships
+    /// have no name of their own the way an asset's FQN gives it one.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn list_relationships(
+        &self,
+        page: &PageRequest,
+    ) -> Result<Page<Relationship>, StorageError>;
+
     // ---- asset hierarchy (Epic 2) ----
 
     /// Inserts, or updates in place if the FQN is already known.

@@ -246,6 +246,12 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         // Epic 101 Slice E: read-only — see `list_federation_endpoints`'s doc
         // comment for why there is no write route beside it.
         .route("/admin/federation", get(list_federation_endpoints))
+        // Epic 37b: portable archive. Admin-only, the same tier as a
+        // full-estate validation pass or a policy write — reading the
+        // whole catalog, or replacing entities in bulk with caller-chosen
+        // ids, is exactly that class of operation.
+        .route("/admin/export", post(export_archive))
+        .route("/admin/restore", post(restore_archive))
         .route("/users/{id}/roles", put(set_user_roles))
         .route("/teams", get(list_teams).post(upsert_team))
         .route("/teams/{id}/children", get(list_child_teams))
@@ -2391,6 +2397,124 @@ async fn cypher(
         .await?;
 
     Ok(Json(query_outcome_json(&outcome)))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExportRequest {
+    /// `None` exports the whole catalog (decision 5's default). Present
+    /// but empty is refused by `Catalog::export_archive` itself — an empty
+    /// scope that looked deliberate would be a worse failure than a loud
+    /// one.
+    #[serde(default)]
+    scope: Option<Vec<graph_owl_core::archive::ScopeSelector>>,
+    /// Field names to redact — Slice E. `description` is the only field
+    /// this archive shape carries that is worth redacting today.
+    #[serde(default)]
+    redact: Vec<String>,
+}
+
+impl ValidateBody for ExportRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        // Structural validity (unknown fields, wrong shapes) is already
+        // `deny_unknown_fields` and serde's own job; the one semantic rule
+        // — an empty-but-present scope — is `Catalog::export_archive`'s own
+        // refusal, checked against real storage state rather than the
+        // request body alone.
+        Vec::new()
+    }
+}
+
+/// Streams the whole catalog — or a scoped, redacted slice of it — as a
+/// `.tar.zst` archive — Epic 37b Slice A.
+///
+/// **Admin-only**, the same tier as [`run_validation`] and a policy write:
+/// this is a full-estate read (or, on `/admin/restore`, a bulk write with
+/// caller-chosen ids), not an ordinary API call. A non-admin gets `404`
+/// rather than `403` — an unlisted admin surface is indistinguishable from
+/// one that does not exist, the same reasoning [`run_validation`] already
+/// uses.
+async fn export_archive(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(request): AppJson<ExportRequest>,
+) -> Result<axum::response::Response, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let path =
+        std::env::temp_dir().join(format!("graph-owl-export-http-{}.tar.zst", Uuid::new_v4()));
+    catalog
+        .export_archive(request.scope, &request.redact, &path)
+        .await?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    tokio::fs::remove_file(&path).await.ok();
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/zstd")
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            "attachment; filename=\"catalog.tar.zst\"",
+        )
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreQuery {
+    #[serde(default)]
+    conflict_policy: Option<String>,
+    #[serde(default)]
+    regenerate_ids: Option<bool>,
+}
+
+/// Restores a `.tar.zst` archive built by [`export_archive`] — Epic 37b
+/// Slices B and C. The archive's raw bytes are the whole request body —
+/// mirroring [`receive_webhook`]'s own reasoning for reading
+/// [`axum::body::Bytes`] directly rather than through a JSON extractor:
+/// this is binary, not a payload with a shape to validate.
+async fn restore_archive(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Query(query): Query<RestoreQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<graph_owl_api::archive::RestoreOutcome>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let conflict_policy: graph_owl_core::archive::ConflictPolicy = query
+        .conflict_policy
+        .as_deref()
+        .unwrap_or("fail")
+        .parse()
+        .map_err(|e: String| {
+            AppError::Validation(vec![FieldError::new(
+                "conflictPolicy",
+                FieldErrorCode::Type,
+                e,
+            )])
+        })?;
+
+    let path =
+        std::env::temp_dir().join(format!("graph-owl-restore-http-{}.tar.zst", Uuid::new_v4()));
+    tokio::fs::write(&path, &body)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let outcome = catalog
+        .restore_archive(
+            &principal,
+            &path,
+            conflict_policy,
+            query.regenerate_ids.unwrap_or(false),
+        )
+        .await;
+    tokio::fs::remove_file(&path).await.ok();
+
+    Ok(Json(outcome?))
 }
 
 /// Run a validation pass and replace the stored queue — Epic 5 Slice C.

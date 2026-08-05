@@ -611,3 +611,28 @@ the result back to the same planner, bounded by a rewrite-specific budget
 (branch count and depth, not the fact-count/iteration shape
 `graph-owl-reasoning::Budget` uses for RL's fixpoint, which answers a
 different question).
+
+### Portable archive container format (`tar` + `zstd`) — checked before Epic 37b's Slice A
+
+**5 August 2026, checked before implementation.** Epic 37b needs a
+container format for the export archive: a manifest plus several
+newline-delimited-JSON sections, compressed, with a checksum per section.
+This is exactly the shape a container/codec format solves, not something
+with a standard *specification* the way Cypher or SPARQL has one — decision
+1 ("no parser for a spec we did not write") is about protecting against
+copying an implementation of someone else's grammar; a tar layout and a
+compression algorithm are neither.
+
+| Name | Licence | Newest version | Downloads (5 Aug 2026) | Repository |
+|---|---|---|---|---|
+| `tar` | MIT OR Apache-2.0 | 0.4.46 (18 May 2026) | 203,203,529 | github.com/composefs/tar-rs |
+| `zstd` | MIT | 0.13.3 (20 Feb 2025) | 346,578,369 | github.com/gyscos/zstd-rs |
+
+Both permissive, both maintained, both among the most-downloaded crates in
+the entire Rust ecosystem for their respective jobs — hand-rolling either a
+tar writer or a Zstandard encoder would be reimplementing a binary format
+with no specification-fidelity requirement pulling the other way. **Adopted,
+no spike needed** — this is not a correctness-sensitive parser on a security
+path (`00i` rule 4's heightened bar), it is a well-understood, extremely
+widely used container format with a huge user base that would have already
+surfaced any correctness problem in `tar`'s round-trip behaviour.

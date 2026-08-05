@@ -105,6 +105,50 @@ enum Command {
         #[arg(long = "scope", required = true)]
         scopes: Vec<String>,
     },
+    /// Stream the whole catalog — lossless, history included — to a
+    /// `.tar.zst` archive. Distinct from `export`: that command emits
+    /// declarations (Epic 20, deliberately lossy); this one is the backup
+    /// and cross-instance move Epic 37b's plan is named for.
+    Backup {
+        #[arg(long)]
+        out: PathBuf,
+        /// `domain:x`, `service:x`, or `entity-type:x`. Repeatable;
+        /// combining scopes is a union. Omit for the whole catalog.
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+        /// Field names to redact — only `description` today.
+        #[arg(long)]
+        redact: Vec<String>,
+    },
+    /// Restore an archive `backup` produced.
+    Restore {
+        #[arg(long = "in")]
+        input: PathBuf,
+        #[arg(long, default_value = "fail")]
+        on_conflict: ConflictPolicyArg,
+        /// Mint a fresh id for every entity and relationship, rewriting
+        /// references consistently — for merging two catalogs that would
+        /// otherwise collide on id.
+        #[arg(long)]
+        regenerate_ids: bool,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ConflictPolicyArg {
+    Fail,
+    Skip,
+    Overwrite,
+}
+
+impl std::fmt::Display for ConflictPolicyArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Fail => "fail",
+            Self::Skip => "skip",
+            Self::Overwrite => "overwrite",
+        })
+    }
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -271,6 +315,49 @@ fn run(cli: &Cli) -> Result<i32, String> {
                     "{}",
                     serde_json::to_string_pretty(&declarations).map_err(|e| e.to_string())?
                 ),
+            }
+            Ok(NO_CHANGES)
+        }
+
+        Command::Backup {
+            out,
+            scopes,
+            redact,
+        } => {
+            let server = cli
+                .server
+                .as_deref()
+                .ok_or("no catalog given: pass --server or set GRAPH_OWL_SERVER")?;
+            graph_owl_cli::backup::backup(server, cli.token.as_deref(), out, scopes, redact)?;
+            eprintln!("wrote {}", out.display());
+            Ok(NO_CHANGES)
+        }
+
+        Command::Restore {
+            input,
+            on_conflict,
+            regenerate_ids,
+        } => {
+            let server = cli
+                .server
+                .as_deref()
+                .ok_or("no catalog given: pass --server or set GRAPH_OWL_SERVER")?;
+            let outcome = graph_owl_cli::backup::restore(
+                server,
+                cli.token.as_deref(),
+                input,
+                &on_conflict.to_string(),
+                *regenerate_ids,
+            )?;
+            match cli.format {
+                Format::Json => println!("{outcome}"),
+                Format::Text => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&outcome).map_err(|e| e.to_string())?
+                ),
+            }
+            if outcome["aborted"].as_bool() == Some(true) {
+                return Ok(CHANGES_PENDING);
             }
             Ok(NO_CHANGES)
         }

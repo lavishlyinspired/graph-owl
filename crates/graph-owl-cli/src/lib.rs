@@ -6,6 +6,7 @@
 //! (RED -> GREEN -> MUTATE -> KILL MUTANTS -> REFACTOR) defined in `CLAUDE.md`.
 
 pub mod apply;
+pub mod backup;
 pub mod client;
 pub mod declaration;
 pub mod drift;

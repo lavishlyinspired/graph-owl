@@ -75,7 +75,7 @@ is the condition that index exists to catch.
 | **35** | 9 | [`35-collaboration.md`](35-collaboration.md) | Not started | 0/1 | Epic 11 (users), Epic 12 (real identity on posts) |
 | **36** | 9 | [`36-reference-apps.md`](36-reference-apps.md) | Not started | 0/1 | Epic 14 (MCP), Epic 16 (SDKs), Epic 29 (graph API) |
 | **37a** | 9 | [`37a-scale.md`](37a-scale.md) | Not started | 0/1 | Epic 34 (a realistic entity mix to generate) |
-| **37b** | 9 | [`37b-portability.md`](37b-portability.md) | Not started | 0/1 | Epic 3 (history is part of what must survive) |
+| **37b** | 9 | [`37b-portability.md`](37b-portability.md) | **Shipped** | 1/1 | Epic 3 (history is part of what must survive) — shipped |
 | **37c** | 9 | [`37c-embeddable.md`](37c-embeddable.md) | In progress | 0/1 (+1 partial) | Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate again… |
 | **38** | 9 | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | 0/1 | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
 | **39** | 1 | [`39-ui-foundation.md`](39-ui-foundation.md) | **Shipped** | 23/23 | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
@@ -503,7 +503,7 @@ is the condition that index exists to catch.
 
 ### Epic 37b — Backup & Portability *(Demo 9)*
 
-- [ ] Backup, export, restore
+- [x] Backup, export, restore — **Slices A–E shipped, F's documentation shipped** *(5 August 2
 
 ### Epic 37c — Embeddable Library ★ *(Demo 9)*
 

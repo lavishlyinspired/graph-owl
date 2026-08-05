@@ -58,6 +58,12 @@ hmac = "0.12"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 utoipa = { version = "5", features = ["uuid", "chrono", "preserve_order"] }
+# Portable archive format (Epic 37b). MIT OR Apache-2.0, both maintained,
+# both extremely widely used (`00l-build-vs-adopt.md`: a container/codec
+# format is the canonical thing to adopt, not write) — checked 5 August
+# 2026: `tar` 0.4.46 (203M downloads), `zstd` 0.13.3 (346M downloads).
+tar = "0.4"
+zstd = "0.13"
 graph-owl-core = { path = "crates/graph-owl-core" }
 graph-owl-events = { path = "crates/graph-owl-events" }
 graph-owl-storage = { path = "crates/graph-owl-storage" }

@@ -3315,6 +3315,33 @@ impl Storage for PostgresStorage {
             .map_err(|e| StorageError::Unexpected(e.to_string()))
     }
 
+    async fn list_relationships(
+        &self,
+        page: &PageRequest,
+    ) -> Result<Page<Relationship>, StorageError> {
+        let overfetch = i64::try_from(page.limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let rows = sqlx::query(
+            "SELECT id, from_entity_type, from_entity_id, relationship_type, to_entity_type, to_entity_id, created_at
+             FROM entity_relationships
+             WHERE $1::uuid IS NULL OR id > $1
+             ORDER BY id
+             LIMIT $2",
+        )
+        .bind(page.after.as_ref().map(|c| c.id))
+        .bind(overfetch)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let relationships: Vec<Relationship> =
+            rows.into_iter().map(relationship_from_row).collect();
+        Ok(Page::from_overfetch(relationships, page.limit, |r| {
+            Cursor::new(r.id.to_string(), r.id)
+        }))
+    }
+
     async fn delete_relationship(&self, id: Uuid) -> Result<bool, StorageError> {
         let result = sqlx::query("DELETE FROM entity_relationships WHERE id = $1")
             .bind(id)
