@@ -213,8 +213,10 @@ export interface Overview {
   assets: { total: number; byKind: { kind: AssetKind; count: number }[] };
   documentation: { described: number; total: number };
   /** Null when no graph engine is configured — distinct from a graph of size
-   *  zero, which is what a configured-but-empty projection looks like. */
-  graph: { flakes: number } | null;
+   *  zero, which is what a configured-but-empty projection looks like.
+   *  `nodes` is comparable to `assets.total`: trailing it means the graph
+   *  view is behind the entity store. */
+  graph: { flakes: number; nodes: number; edges: number } | null;
   recentlyChanged: Asset[];
 }
 

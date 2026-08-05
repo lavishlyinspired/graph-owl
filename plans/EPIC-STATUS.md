@@ -83,7 +83,7 @@ is the condition that index exists to catch.
 | **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | **Shipped** | 12/12 | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
 | **42** | 7 | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | Not started | 0/3 | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
 | **43** | 5 | [`43-framework-integrations.md`](43-framework-integrations.md) | Not started | 0/4 | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
-| **93** | 3 | [`93-console-overview.md`](93-console-overview.md) | Not started | — | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
+| **93** | 3 | [`93-console-overview.md`](93-console-overview.md) | **Shipped** | 2/2 | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
 | **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | Not started | 0/7 | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
 | **95** | 10 | [`95-owl-rl-completion.md`](95-owl-rl-completion.md) | **Shipped** | 2/2 | Epic 6 (the eight rules and the fixpoint that runs them) |
 | **96** | 10 | [`96-shacl-sparql.md`](96-shacl-sparql.md) | Not started | 0/2 | Epic 5 (SHACL Core), Epic 7 (SPARQL) |
@@ -580,6 +580,11 @@ is the condition that index exists to catch.
 - [ ] LangGraph toolkit, manifest-parity with MCP
 - [ ] Checkpointer over Epic 31, retraction not deletion
 - [ ] Zero graph-owl crate changes, asserted
+
+### Epic 93 — Console Overview *(Demo 3)*
+
+- [x] `GET /overview` — one request for the whole landing page, authorization-filtered through
+- [x] Graph tile reports `nodes`/`edges`, not only a flake total
 
 ### Epic 94 — RDF 1.2 Alignment *(Demo 10)*
 

@@ -776,8 +776,21 @@ pub struct Overview {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphSize {
-    /// How many flakes the projection holds.
+    /// How many flakes the projection holds — every property of every node
+    /// and every edge, individually.
     pub flakes: u64,
+    /// How many entities are projected — counted by `dsc:type`, which every
+    /// asset gets exactly one of ([`graph_owl_core::projection::fields`]).
+    /// Comparable to [`Overview::total`]: trailing it means the graph view
+    /// is behind the entity store, which is the projection-lag signal
+    /// `93-console-overview.md` decision 4 asks for.
+    pub nodes: u64,
+    /// How many relationships are projected — counted by `fromEntity`,
+    /// which every reified relationship gets exactly one of
+    /// ([`graph_owl_core::projection::relationship_to_flakes`]). The same
+    /// predicate `project_entity` already uses to tell a relationship node
+    /// from an ordinary one, not a new convention.
+    pub edges: u64,
 }
 
 /// An asset as an event names it.
@@ -9458,7 +9471,25 @@ impl Catalog {
                     .count(&graph_owl_core::flake::TriplePattern::default())
                     .await
                     .unwrap_or(0);
-                Some(GraphSize { flakes })
+                let nodes = graph
+                    .count(&graph_owl_core::flake::TriplePattern {
+                        p: Some(Sid::dsc("type")),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap_or(0);
+                let edges = graph
+                    .count(&graph_owl_core::flake::TriplePattern {
+                        p: Some(Sid::dsc(graph_owl_lpg::predicate::FROM_ENTITY)),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap_or(0);
+                Some(GraphSize {
+                    flakes,
+                    nodes,
+                    edges,
+                })
             }
             None => None,
         };
@@ -24318,5 +24349,104 @@ mod ontology_profile_tests {
             matches!(outcome, Err(CatalogError::Storage(_))),
             "{outcome:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod overview_graph_size_tests {
+    //! Epic 93's own remaining gap: `graph` reported only a flake total,
+    //! so the plan's own "node count trailing asset count is visible" (and
+    //! decision 4's "flake count, node count *and* edge count are facts")
+    //! were never actually true — the landing page had nothing to compare
+    //! against `assets.total`. `nodes`/`edges` are counted the same way
+    //! `graph-owl-api`'s own `project_entity` already distinguishes a node
+    //! from a reified relationship: by `dsc:type` (every asset has exactly
+    //! one) versus `fromEntity` (every relationship has exactly one) —
+    //! `graph_owl_lpg::predicate::FROM_ENTITY`, not a new convention.
+
+    use super::*;
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+    use projection_isolation_tests::RecordingGraph;
+    use tests::InMemoryStorage;
+
+    fn dsc(id: &str) -> Sid {
+        Sid::dsc(id)
+    }
+
+    #[tokio::test]
+    async fn graph_size_counts_nodes_and_edges_distinctly_from_the_flake_total() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&[
+                // Two entity nodes — one with an extra property flake, so a
+                // check that (wrongly) counted every flake as a node would
+                // diverge from one that counts `dsc:type` flakes.
+                Flake::assert(
+                    dsc("table-1"),
+                    Sid::dsc("type"),
+                    FlakeValue::String("table".into()),
+                    0,
+                ),
+                Flake::assert(
+                    dsc("table-1"),
+                    Sid::dsc("name"),
+                    FlakeValue::String("orders".into()),
+                    0,
+                ),
+                Flake::assert(
+                    dsc("table-2"),
+                    Sid::dsc("type"),
+                    FlakeValue::String("table".into()),
+                    0,
+                ),
+                // One reified relationship between them — three flakes, one
+                // edge.
+                Flake::assert(
+                    dsc("rel-1"),
+                    Sid::dsc(graph_owl_lpg::predicate::FROM_ENTITY),
+                    FlakeValue::Ref(dsc("table-1")),
+                    0,
+                ),
+                Flake::assert(
+                    dsc("rel-1"),
+                    Sid::dsc(graph_owl_lpg::predicate::TO_ENTITY),
+                    FlakeValue::Ref(dsc("table-2")),
+                    0,
+                ),
+                Flake::assert(
+                    dsc("rel-1"),
+                    Sid::dsc(graph_owl_lpg::predicate::REL_TYPE),
+                    FlakeValue::String("feeds".into()),
+                    0,
+                ),
+            ])
+            .await
+            .expect("seed graph");
+
+        let overview = catalog
+            .overview(&Principal::system())
+            .await
+            .expect("overview");
+
+        let graph_size = overview.graph.expect("graph configured");
+        assert_eq!(graph_size.nodes, 2, "{graph_size:?}");
+        assert_eq!(graph_size.edges, 1, "{graph_size:?}");
+        assert_eq!(graph_size.flakes, 6, "{graph_size:?}");
+    }
+
+    #[tokio::test]
+    async fn graph_size_is_none_without_a_graph_engine() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+
+        let overview = catalog
+            .overview(&Principal::system())
+            .await
+            .expect("overview");
+
+        assert!(overview.graph.is_none(), "{:?}", overview.graph);
     }
 }

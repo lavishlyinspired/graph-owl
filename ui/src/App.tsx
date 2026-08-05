@@ -396,10 +396,15 @@ function OverviewPage({
 
   // Projection lag, surfaced. A node count trailing the asset total means the
   // graph view is behind — a number on the page beats a log line nobody reads.
+  // The lag is named in the hint text itself, not only by the tile's colour,
+  // so it reads the same without colour (00h).
+  const graphLag = graph !== null && graph.nodes < assets.total;
   const graphHint =
     graph === null
       ? "no graph engine configured"
-      : `${graph.flakes.toLocaleString()} facts projected`;
+      : graphLag
+        ? `${(assets.total - graph.nodes).toLocaleString()} assets not yet projected · ${graph.edges.toLocaleString()} edges`
+        : `${graph.flakes.toLocaleString()} facts · ${graph.edges.toLocaleString()} edges`;
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
@@ -426,7 +431,17 @@ function OverviewPage({
           )}
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          {tile("Graph", graph ? graph.flakes.toLocaleString() : "—", graphHint)}
+          {tile(
+            "Graph",
+            graph ? (
+              <span style={{ color: graphLag ? colors.warning : undefined }}>
+                {graph.nodes.toLocaleString()}
+              </span>
+            ) : (
+              "—"
+            ),
+            graphHint,
+          )}
         </Col>
         <Col xs={24} sm={12} lg={6}>
           {tile(

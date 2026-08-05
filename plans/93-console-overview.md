@@ -1,6 +1,6 @@
 # Plan: Console Overview (Epic 93)
 
-**Status**: **In progress** — Overview shipped (Demo 3)
+**Status**: **Shipped**, 5 August 2026 (Demo 3) — Slices A and B were already live; this pass closed the one remaining acceptance criterion (node/edge counts on the graph tile).
 **Depends on**: Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization)
 **Crates**: `graph-owl-server` (one endpoint), `ui/`
 
@@ -64,13 +64,22 @@ rather than a log line nobody reads.
 
 ## Acceptance criteria
 
-- [ ] One request populates the whole page.
-- [ ] Every number is authorization-filtered — two principals see different
+- [x] One request populates the whole page.
+- [x] Every number is authorization-filtered — two principals see different
       overviews, asserted.
-- [ ] Documentation coverage counts non-empty descriptions, not non-null ones.
-- [ ] A brand-new deployment renders zeros with an action, not a broken chart.
-- [ ] Node count trailing asset count is visible rather than hidden.
-- [ ] The page is reachable by keyboard and readable without colour.
+- [x] Documentation coverage counts non-empty descriptions, not non-null ones.
+- [x] A brand-new deployment renders zeros with an action, not a broken chart.
+- [x] Node count trailing asset count is visible rather than hidden — *5
+      August 2026, this pass*. `GraphSize` reported only `flakes`; nothing on
+      the page could actually be compared against `assets.total`, despite the
+      comment above the graph tile already claiming the comparison existed.
+      Fixed both ends: `GraphSize` gains `nodes`/`edges`, counted the same
+      way `project_entity` already tells a relationship from an ordinary
+      entity (`dsc:type` vs `fromEntity` — `graph_owl_lpg::predicate`, not a
+      new convention), and the tile now shows `nodes` against `assets.total`
+      with the lag named in text (`"N assets not yet projected"`), not by
+      colour alone.
+- [x] The page is reachable by keyboard and readable without colour.
 
 ## Slices
 
