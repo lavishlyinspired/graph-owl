@@ -18,6 +18,7 @@ graph-owl-query = { path = "../graph-owl-query" }
 graph-owl-lpg.workspace = true
 graph-owl-reasoning = { path = "../graph-owl-reasoning" }
 graph-owl-reasoning-ql = { path = "../graph-owl-reasoning-ql" }
+graph-owl-reasoning-el = { path = "../graph-owl-reasoning-el" }
 graph-owl-constraint = { path = "../graph-owl-constraint" }
 graph-owl-ontology = { path = "../graph-owl-ontology" }
 graph-owl-resolution = { path = "../graph-owl-resolution" }

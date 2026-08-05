@@ -466,6 +466,17 @@ pub struct QlRewrite {
     pub branches: Vec<graph_owl_reasoning_ql::QlBranch>,
 }
 
+/// What one OWL 2 EL classification produced — Epic 98.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElClassification {
+    /// Every named-class subsumption `whelk` derived — `(subclass,
+    /// superclass)` pairs, transitively closed.
+    pub subsumptions: Vec<(graph_owl_core::flake::Sid, graph_owl_core::flake::Sid)>,
+    /// A class or property carrying a construct EL cannot express —
+    /// reported, never silently dropped (Slice B).
+    pub refused_axioms: Vec<graph_owl_reasoning_el::RefusedAxiom>,
+}
+
 /// One value in a [`CypherRow`] — Epic 7d Slice D.
 ///
 /// **Typed, not rendered.** [`SparqlOutcome`]'s rows stringify every bound
@@ -872,6 +883,25 @@ pub struct Catalog {
     /// internally, and a fresh client per federated call would pay a new
     /// TLS handshake for every query against the same endpoint.
     http_client: reqwest::Client,
+    /// Where to find the `whelk` sidecar for OWL 2 EL classification —
+    /// Epic 98. `None` means the capability is unavailable, the same
+    /// "optional, catalog still fully functional" shape `graph`/`traversal`
+    /// already have — a deployment that never touches EL-profile
+    /// ontologies never needs `whelk` installed at all.
+    el_sidecar: Option<graph_owl_reasoning_el::SidecarConfig>,
+    /// The last classification, keyed on the `TBox`'s own transaction-time
+    /// watermark — Epic 98 Slice E. Same shape as `shape_cache`, for the
+    /// same reason: axum clones `Catalog` per request, so the cache has to
+    /// live behind an `Arc` to survive that.
+    #[allow(clippy::type_complexity)]
+    el_cache: Arc<
+        Mutex<
+            Option<(
+                i64,
+                Vec<(graph_owl_core::flake::Sid, graph_owl_core::flake::Sid)>,
+            )>,
+        >,
+    >,
 }
 
 impl Catalog {
@@ -901,7 +931,19 @@ impl Catalog {
             federation: federation::FederationAllowList::default(),
             federation_timeout: federation::DEFAULT_TIMEOUT,
             http_client: reqwest::Client::new(),
+            el_sidecar: None,
+            el_cache: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Configures the `whelk` sidecar for OWL 2 EL classification —
+    /// [`Self::classify_ontology`] returns a `Validation` error until this
+    /// is set. Deployment-level, like [`Self::with_federation_endpoints`]:
+    /// set once at startup, not settable per request.
+    #[must_use]
+    pub fn with_el_sidecar(mut self, config: graph_owl_reasoning_el::SidecarConfig) -> Self {
+        self.el_sidecar = Some(config);
+        self
     }
 
     /// Disables (or re-enables) automatic merging of `>= 0.9` matches. When
@@ -1282,6 +1324,216 @@ impl Catalog {
         Ok(graph_owl_reasoning_ql::Tbox {
             subclass_of,
             forbidden,
+        })
+    }
+
+    /// Classifies the ontology's `TBox` against OWL 2 EL — Epic 98. Fetches
+    /// `rdfs:subClassOf` edges and every EL-forbidden construct directly
+    /// via the graph engine, bypassing `scoped_facts`' visibility filter —
+    /// the identical reasoning [`Self::fetch_ql_tbox`] already established
+    /// for Epic 99: a `TBox` is schema, not row data with an owner. Cached
+    /// by the `TBox`'s own transaction-time watermark (Slice E); a
+    /// repeated call with no intervening ontology write returns the
+    /// cached hierarchy without invoking the `whelk` sidecar again.
+    ///
+    /// # Errors
+    /// `Storage` if no graph engine is configured, or the read fails.
+    /// `Validation` if no `whelk` sidecar is configured
+    /// ([`Self::with_el_sidecar`]) or the sidecar itself fails.
+    ///
+    /// # Panics
+    /// If the internal classification cache's lock is poisoned by another
+    /// thread panicking while holding it.
+    #[tracing::instrument(name = "catalog.classify_ontology", skip_all)]
+    pub async fn classify_ontology(&self) -> Result<ElClassification, CatalogError> {
+        let Some(graph) = &self.graph else {
+            return Err(CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            )));
+        };
+        let Some(sidecar) = &self.el_sidecar else {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "sidecar",
+                FieldErrorCode::Required,
+                "no whelk sidecar is configured for this deployment".to_string(),
+            )]));
+        };
+
+        let tbox = self.fetch_el_tbox(graph.as_ref()).await?;
+        let refused_axioms = graph_owl_reasoning_el::find_forbidden_axioms(&tbox);
+
+        {
+            let guard = self.el_cache.lock().expect("lock");
+            if let Some((watermark, cached)) = guard.as_ref()
+                && *watermark == tbox.watermark
+            {
+                return Ok(ElClassification {
+                    subsumptions: cached.clone(),
+                    refused_axioms,
+                });
+            }
+        }
+
+        // The sidecar blocks on a subprocess wait — the same
+        // `spawn_blocking` shape `execute_algebra` already uses for
+        // `spareval`'s own blocking evaluation. `class_only_edges` strips
+        // any edge pointing at a restriction before it ever reaches the
+        // sidecar — see its own doc comment.
+        let subclass_of = graph_owl_reasoning_el::class_only_edges(&tbox);
+        let sidecar = sidecar.clone();
+        let subsumptions = tokio::task::spawn_blocking(move || {
+            graph_owl_reasoning_el::classify(&subclass_of, &sidecar)
+        })
+        .await
+        .map_err(|_| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "the classification task panicked".to_string(),
+            ))
+        })?
+        .map_err(|e| {
+            CatalogError::Validation(vec![FieldError::new(
+                "sidecar",
+                FieldErrorCode::Type,
+                e.to_string(),
+            )])
+        })?;
+
+        *self.el_cache.lock().expect("lock") = Some((tbox.watermark, subsumptions.clone()));
+
+        Ok(ElClassification {
+            subsumptions,
+            refused_axioms,
+        })
+    }
+
+    /// Why `subclass` is classified under `superclass` — Epic 98 Slice D.
+    /// `whelk` returns only the flat, transitively closed pairs; this
+    /// re-derives the one-fact explanation locally over the *asserted*
+    /// edges, the same "read the bulk answer, re-derive the one-fact
+    /// explanation" pattern `00l-build-vs-adopt.md` already established
+    /// for `reasonable`.
+    ///
+    /// # Errors
+    /// `Storage` if no graph engine is configured, or the read fails.
+    pub async fn explain_subsumption(
+        &self,
+        subclass: &graph_owl_core::flake::Sid,
+        superclass: &graph_owl_core::flake::Sid,
+    ) -> Result<Option<Vec<graph_owl_core::flake::Sid>>, CatalogError> {
+        let Some(graph) = &self.graph else {
+            return Err(CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            )));
+        };
+        let tbox = self.fetch_el_tbox(graph.as_ref()).await?;
+        Ok(graph_owl_reasoning_el::explain(
+            subclass,
+            superclass,
+            &tbox.subclass_of,
+        ))
+    }
+
+    async fn fetch_el_tbox(
+        &self,
+        graph: &dyn graph_owl_engine::TripleStore,
+    ) -> Result<graph_owl_reasoning_el::Tbox, CatalogError> {
+        use graph_owl_core::flake::{FlakeValue, Sid, TriplePattern, namespace};
+
+        let storage_error = |e: graph_owl_engine::EngineError| {
+            CatalogError::Storage(StorageError::Unexpected(e.to_string()))
+        };
+
+        let subclass_of_flakes = graph
+            .query_pattern(&TriplePattern {
+                p: Some(Sid::new(namespace::RDFS, "subClassOf")),
+                ..Default::default()
+            })
+            .await
+            .map_err(storage_error)?;
+        let mut watermark = subclass_of_flakes.iter().map(|f| f.t).max().unwrap_or(0);
+
+        let mut restriction_constructs = Vec::new();
+        for (construct, predicate) in [
+            (
+                graph_owl_reasoning_el::ForbiddenElConstruct::UniversalQuantification,
+                Sid::new(namespace::OWL, "allValuesFrom"),
+            ),
+            (
+                graph_owl_reasoning_el::ForbiddenElConstruct::Disjunction,
+                Sid::new(namespace::OWL, "unionOf"),
+            ),
+            (
+                graph_owl_reasoning_el::ForbiddenElConstruct::Negation,
+                Sid::new(namespace::OWL, "complementOf"),
+            ),
+        ] {
+            let flakes = graph
+                .query_pattern(&TriplePattern {
+                    p: Some(predicate),
+                    ..Default::default()
+                })
+                .await
+                .map_err(storage_error)?;
+            watermark = watermark.max(flakes.iter().map(|f| f.t).max().unwrap_or(0));
+            restriction_constructs.extend(flakes.into_iter().map(|f| (f.s, construct)));
+        }
+        // Every cardinality-shaped predicate maps to the one construct —
+        // EL forbids cardinality entirely, with no distinction worth
+        // making between exact/min/max or qualified/unqualified.
+        for predicate_name in [
+            "cardinality",
+            "minCardinality",
+            "maxCardinality",
+            "qualifiedCardinality",
+            "minQualifiedCardinality",
+            "maxQualifiedCardinality",
+        ] {
+            let flakes = graph
+                .query_pattern(&TriplePattern {
+                    p: Some(Sid::new(namespace::OWL, predicate_name)),
+                    ..Default::default()
+                })
+                .await
+                .map_err(storage_error)?;
+            watermark = watermark.max(flakes.iter().map(|f| f.t).max().unwrap_or(0));
+            restriction_constructs.extend(flakes.into_iter().map(|f| {
+                (
+                    f.s,
+                    graph_owl_reasoning_el::ForbiddenElConstruct::Cardinality,
+                )
+            }));
+        }
+
+        let inverse_flakes = graph
+            .query_pattern(&TriplePattern {
+                p: Some(Sid::new(namespace::OWL, "inverseOf")),
+                ..Default::default()
+            })
+            .await
+            .map_err(storage_error)?;
+        watermark = watermark.max(inverse_flakes.iter().map(|f| f.t).max().unwrap_or(0));
+        let inverse_properties: Vec<Sid> = inverse_flakes.iter().map(|f| f.s.clone()).collect();
+
+        // Unfiltered — including an edge whose object is a (skolemized)
+        // restriction, which `find_forbidden_axioms` needs to connect a
+        // named class back to the restriction it references.
+        // `Self::classify_ontology` calls `class_only_edges` to get the
+        // subset `classify` itself actually needs, right before the
+        // sidecar call — see that function's own doc comment for why the
+        // filtering lives there and not here.
+        let subclass_of: Vec<(Sid, Sid)> = subclass_of_flakes
+            .iter()
+            .filter_map(|f| match &f.o {
+                FlakeValue::Ref(parent) => Some((f.s.clone(), parent.clone())),
+                _ => None,
+            })
+            .collect();
+
+        Ok(graph_owl_reasoning_el::Tbox {
+            subclass_of,
+            restriction_constructs,
+            inverse_properties,
+            watermark,
         })
     }
 
@@ -23450,5 +23702,184 @@ mod owl_ql_reasoning_tests {
                 .any(|s| s.contains(&denied.to_string())),
             "an admin must still see everything the rewrite expanded to: {admin_subjects:?}"
         );
+    }
+}
+
+/// Epic 98: OWL 2 EL classification, wired through `Catalog::classify_ontology`.
+///
+/// Mirrors `owl_ql_reasoning_tests`' own reasoning for using real assets:
+/// this crate's own 19 tests already prove the pure logic (serialization,
+/// forbidden-construct detection, explanation, caching) exhaustively —
+/// these tests exist to prove the *wiring*: fetching a `Tbox` from real
+/// flakes, threading the sidecar config and cache through `Catalog`, and
+/// filtering a restriction-object edge out of `subclass_of` before it
+/// reaches the sidecar.
+#[cfg(test)]
+mod owl_el_reasoning_tests {
+    use super::*;
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+    use projection_isolation_tests::RecordingGraph;
+    use tests::InMemoryStorage;
+
+    fn dsc(id: &str) -> Sid {
+        Sid::dsc(id)
+    }
+
+    fn subclass_of_predicate() -> Sid {
+        Sid::new(namespace::RDFS, "subClassOf")
+    }
+
+    async fn assert_subclass(graph: &RecordingGraph, child: Sid, parent: Sid) {
+        graph
+            .assert_flakes(&[Flake::assert(
+                child,
+                subclass_of_predicate(),
+                FlakeValue::Ref(parent),
+                0,
+            )])
+            .await
+            .expect("seed subclass");
+    }
+
+    #[tokio::test]
+    async fn classify_ontology_without_a_sidecar_configured_is_a_validation_error() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        let outcome = catalog.classify_ontology().await;
+
+        assert!(
+            matches!(outcome, Err(CatalogError::Validation(_))),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_ontology_without_a_graph_engine_is_a_storage_error() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog =
+            Catalog::new(storage).with_el_sidecar(graph_owl_reasoning_el::SidecarConfig::default());
+
+        let outcome = catalog.classify_ontology().await;
+
+        assert!(
+            matches!(outcome, Err(CatalogError::Storage(_))),
+            "{outcome:?}"
+        );
+    }
+
+    /// **Slice B's own integration test.** A restriction reachable from a
+    /// named class is named in `refused_axioms` — and, since it is the
+    /// *only* edge that class has, `subclass_of` ends up empty and the
+    /// sidecar is never invoked at all, proving the filter in
+    /// `fetch_el_tbox` actually excludes the restriction-object edge
+    /// rather than passing it through as an ordinary class.
+    #[tokio::test]
+    async fn an_ontology_axiom_outside_el_is_named_in_refused_axioms() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage)
+            .with_graph(graph.clone() as Arc<dyn TripleStore>)
+            .with_el_sidecar(graph_owl_reasoning_el::SidecarConfig {
+                // Deliberately invalid — proves the sidecar was never
+                // reached, not merely that it would have failed anyway.
+                binary: "definitely-not-a-real-binary-xyz".into(),
+                budget: graph_owl_reasoning_el::ElBudget::default(),
+            });
+
+        assert_subclass(&graph, dsc("Person"), dsc("restriction-1")).await;
+        graph
+            .assert_flakes(&[Flake::assert(
+                dsc("restriction-1"),
+                Sid::new(namespace::OWL, "allValuesFrom"),
+                FlakeValue::Ref(dsc("Integer")),
+                0,
+            )])
+            .await
+            .expect("seed restriction");
+
+        let outcome = catalog
+            .classify_ontology()
+            .await
+            .expect("no sidecar call needed");
+
+        assert_eq!(
+            outcome.refused_axioms.len(),
+            1,
+            "{:?}",
+            outcome.refused_axioms
+        );
+        assert_eq!(outcome.refused_axioms[0].subject, dsc("Person"));
+        assert_eq!(
+            outcome.refused_axioms[0].construct,
+            graph_owl_reasoning_el::ForbiddenElConstruct::UniversalQuantification
+        );
+        assert!(
+            outcome.subsumptions.is_empty(),
+            "the restriction edge must not appear as an ordinary subsumption: {:?}",
+            outcome.subsumptions
+        );
+    }
+
+    /// **Slice D's own integration test.** `explain_subsumption` needs no
+    /// sidecar at all — it walks the asserted edges already fetched.
+    #[tokio::test]
+    async fn explain_subsumption_names_the_intermediate_classes() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        assert_subclass(&graph, dsc("A"), dsc("B")).await;
+        assert_subclass(&graph, dsc("B"), dsc("C")).await;
+        assert_subclass(&graph, dsc("C"), dsc("D")).await;
+
+        let path = catalog
+            .explain_subsumption(&dsc("A"), &dsc("D"))
+            .await
+            .expect("explain");
+
+        assert_eq!(path, Some(vec![dsc("B"), dsc("C")]));
+    }
+
+    /// **Requires a real `whelk` binary.** Ignored by default — set
+    /// `WHELK_BIN` to the built binary's path and run with `--ignored`.
+    #[tokio::test]
+    #[ignore = "requires WHELK_BIN to point at a built whelk binary"]
+    async fn classifying_real_flake_data_derives_the_transitive_subsumption() {
+        let Ok(bin) = std::env::var("WHELK_BIN") else {
+            panic!("set WHELK_BIN to run this test");
+        };
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage)
+            .with_graph(graph.clone() as Arc<dyn TripleStore>)
+            .with_el_sidecar(graph_owl_reasoning_el::SidecarConfig {
+                binary: bin.into(),
+                budget: graph_owl_reasoning_el::ElBudget::default(),
+            });
+
+        assert_subclass(&graph, dsc("PartitionedTable"), dsc("Table")).await;
+        assert_subclass(&graph, dsc("Table"), dsc("DataAsset")).await;
+
+        let first = catalog
+            .classify_ontology()
+            .await
+            .expect("first classification");
+        assert!(
+            first
+                .subsumptions
+                .contains(&(dsc("PartitionedTable"), dsc("DataAsset"))),
+            "{:?}",
+            first.subsumptions
+        );
+
+        // Slice E, exercised through the real Catalog cache: an unchanged
+        // TBox returns the same answer on a second call.
+        let second = catalog
+            .classify_ontology()
+            .await
+            .expect("second classification");
+        assert_eq!(first.subsumptions, second.subsumptions);
     }
 }

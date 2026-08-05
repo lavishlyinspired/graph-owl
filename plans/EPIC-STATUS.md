@@ -88,8 +88,8 @@ is the condition that index exists to catch.
 | **95** | 10 | [`95-owl-rl-completion.md`](95-owl-rl-completion.md) | **Shipped** | 2/2 | Epic 6 (the eight rules and the fixpoint that runs them) |
 | **96** | 10 | [`96-shacl-sparql.md`](96-shacl-sparql.md) | Not started | 0/2 | Epic 5 (SHACL Core), Epic 7 (SPARQL) |
 | **97** | 10, 12 | [`97-incremental-parallel-reasoning.md`](97-incremental-parallel-reasoning.md) | Not started | 0/2 | Epic 6 (semi-naive fixpoint), Epic 37a (the measurement) |
-| **98** | 11, 12 | [`98-owl-el-reasoning.md`](98-owl-el-reasoning.md) | In progress | 0/2 (+1 partial) | Epic 6 (overlay, budgets, explainability), Epic 24 (ontologies as entities) |
-| **99** | 11, 12 | [`99-owl-ql-reasoning.md`](99-owl-ql-reasoning.md) | In progress | 0/2 (+1 partial) | Epic 7 (query algebra to rewrite), Epic 6 (explanation contract) |
+| **98** | 11, 12 | [`98-owl-el-reasoning.md`](98-owl-el-reasoning.md) | In progress | 1/2 | Epic 6 (overlay, budgets, explainability), Epic 24 (ontologies as entities) |
+| **99** | 11, 12 | [`99-owl-ql-reasoning.md`](99-owl-ql-reasoning.md) | In progress | 1/2 | Epic 7 (query algebra to rewrite), Epic 6 (explanation contract) |
 | **100** | 11, 12 | [`100-profile-detection-and-routing.md`](100-profile-detection-and-routing.md) | Not started | 0/4 | Epic 6 (RL engine), Epic 24 (ontologies as entities) |
 | **101** | 11 | [`101-sparql-federation.md`](101-sparql-federation.md) | **Shipped** | 5/5 | Epic 7 (algebra and executor), Epic 13 (authorization) |
 | **102** | 11 | [`102-read-write-partitions.md`](102-read-write-partitions.md) | Not started | 0/2 | Epic 4 (the flake table), Epic 37a (the measurement) |
@@ -608,12 +608,12 @@ is the condition that index exists to catch.
 
 ### Epic 98 — OWL 2 EL Reasoning *(Demo 11, 12)*
 
-- [~] EL and QL reasoners alongside RL — **Epic 99 (QL) shipped, 5 August 2026; Epic 98 (EL) n
+- [x] EL and QL reasoners alongside RL — **Both shipped, 5 August 2026
 - [ ] No UI of their own
 
 ### Epic 99 — OWL 2 QL Reasoning *(Demo 11, 12)*
 
-- [~] EL and QL reasoners alongside RL — **Epic 99 (QL) shipped, 5 August 2026; Epic 98 (EL) n
+- [x] EL and QL reasoners alongside RL — **Both shipped, 5 August 2026
 - [ ] No UI of their own
 
 ### Epic 100 — Ontology Profile Detection & Routing *(Demo 11, 12)*

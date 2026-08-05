@@ -1108,6 +1108,7 @@ dependencies = [
  "graph-owl-ontology",
  "graph-owl-query",
  "graph-owl-reasoning",
+ "graph-owl-reasoning-el",
  "graph-owl-reasoning-ql",
  "graph-owl-resolution",
  "graph-owl-storage",
@@ -1360,6 +1361,14 @@ dependencies = [
  "graph-owl-core",
  "graph-owl-ontology",
  "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "graph-owl-reasoning-el"
+version = "0.1.0"
+dependencies = [
+ "graph-owl-core",
  "thiserror 2.0.19",
 ]
 
