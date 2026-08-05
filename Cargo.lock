@@ -1166,17 +1166,21 @@ name = "graph-owl-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "clap",
  "graph-owl-api",
  "graph-owl-core",
  "graph-owl-engine-postgres",
  "graph-owl-server",
  "graph-owl-storage-postgres",
+ "rand 0.8.7",
  "reqwest",
  "serde",
  "serde_json",
  "serde_norway",
+ "sha2 0.10.9",
  "sqlx",
+ "tar",
  "testcontainers 0.24.0",
  "testcontainers-modules 0.12.1",
  "thiserror 2.0.19",
@@ -1184,6 +1188,7 @@ dependencies = [
  "tower",
  "uuid",
  "walkdir",
+ "zstd",
 ]
 
 [[package]]

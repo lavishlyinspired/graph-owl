@@ -132,6 +132,21 @@ enum Command {
         #[arg(long)]
         regenerate_ids: bool,
     },
+    /// Generate a deterministic, power-law-shaped synthetic corpus and
+    /// package it as an archive `restore` can load directly — Epic 37a
+    /// Slice A. Writes locally; add `graph-owl restore --in` to actually
+    /// load it into a catalog.
+    GenerateCorpus {
+        /// Same seed, same corpus, always (decision 2).
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Approximately how many tables to generate — the corpus also
+        /// includes the service/database/schema hierarchy above them.
+        #[arg(long, default_value_t = 1000)]
+        tables: usize,
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -182,6 +197,11 @@ fn main() -> ExitCode {
 }
 
 /// Everything fallible, so `main` only decides the exit code.
+///
+/// One match arm per subcommand — length here tracks the subcommand count,
+/// not complexity, so it is allowed rather than split: each arm is already
+/// a handful of lines delegating to its own module.
+#[allow(clippy::too_many_lines)]
 fn run(cli: &Cli) -> Result<i32, String> {
     match &cli.command {
         Command::Validate { directory } => match validate_directory(directory) {
@@ -359,6 +379,20 @@ fn run(cli: &Cli) -> Result<i32, String> {
             if outcome["aborted"].as_bool() == Some(true) {
                 return Ok(CHANGES_PENDING);
             }
+            Ok(NO_CHANGES)
+        }
+
+        Command::GenerateCorpus { seed, tables, out } => {
+            let corpus = graph_owl_cli::corpus::generate(*seed, *tables);
+            graph_owl_cli::corpus::write_archive(&corpus, out).map_err(|e| e.to_string())?;
+            eprintln!(
+                "wrote {} ({} entities, {} relationships, {} soft-deleted, cycle: {})",
+                out.display(),
+                corpus.entities.len(),
+                corpus.relationships.len(),
+                corpus.soft_deleted_count,
+                corpus.has_cycle
+            );
             Ok(NO_CHANGES)
         }
     }

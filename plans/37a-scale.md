@@ -1,8 +1,8 @@
 # Plan: Scale Validation (Epic 37a)
 **Branch**: feat/scale
-**Status**: Not started
-**Depends on**: Epic 34 (a realistic entity mix to generate)
-**Crates**: No new crates. Corpus generator in `graph-owl-cli`; benchmarks as workspace `benches/`; budgets asserted in CI
+**Status**: **Slice A shipped, 5 August 2026 — Slices B–F not started.** See the scope note at the top of "## Slices" for why this pass stops here.
+**Depends on**: Epic 34 (a realistic entity mix to generate) — shipped
+**Crates**: No new crates. Corpus generator in `graph-owl-cli` (shipped) — `graph_owl_cli::corpus`; benchmarks as workspace `benches/` (not yet); budgets asserted in CI (not yet)
 
 ## Goal
 
@@ -67,7 +67,7 @@ The corpus, approximating a large organization:
 
 ## Acceptance criteria (feature level)
 
-- [ ] A deterministic generator produces the corpus reproducibly.
+- [x] A deterministic generator produces the corpus reproducibly.
 - [ ] Every budget below is asserted in CI and fails the build on regression.
 - [ ] Query plans are reviewed for every endpoint; no sequential scan on a hot path.
 - [ ] A soak test shows no memory growth or connection leak over sustained load.
@@ -85,20 +85,27 @@ The corpus, approximating a large organization:
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first. Here the "RED" is a failing budget assertion.
 
-### Slice A: The corpus exists
+**Scope of this pass, decided explicitly rather than discovered by running out of session:** Slice A (the corpus generator) is genuinely achievable, self-contained, and does not require anything this pass cannot honestly deliver. Slices B–F are a different category of work — five more benchmark dimensions (read, traversal, search, write/ingestion) each needing real CI wiring, plus Slice F's **mandatory 1-hour soak test** and budget numbers meant to be *sized* against real LUBM/BSBM/Wikidata downloads (see "Where the data comes from" below). Faking those numbers, or claiming a soak test "passed" without running one for a real hour, would violate this project's own "measured, not assumed" discipline (see `CLAUDE.md`'s build-loop section, and the identical lesson already recorded for Epic 98's sidecar timing). This pass ships Slice A only; Slices B–F are recorded here as **not started**, not silently dropped.
+
+### Slice A: The corpus exists — **shipped, 5 August 2026**
 
 **Value**: Everything else depends on it.
-**Path**: a seeded generator producing the entity mix above, loadable in reasonable time.
-**Acceptance criteria**:
-- Deterministic: the same seed yields an identical corpus.
-- Realistically shaped — power-law tables-per-schema and lineage fan-out (decision 3).
-- Loads in under 10 minutes so CI can use it.
-- Loadable incrementally so a test can request a subset.
-- Includes soft-deleted entities, several versions per entity, and cyclic lineage — the shapes that break naive implementations.
-- Extends Epic absorbed into 4's generator rather than duplicating it.
-**RED**: Determinism test asserting two runs with one seed produce identical checksums. Distribution test asserting the shape is power-law, not uniform. Mutator watch: a uniform generator must fail the distribution assertion — otherwise the whole epic tests the wrong thing.
-**GREEN**: generator, distributions, bulk loading.
-**Done when**: criteria met, corpus reproducible, commit approved.
+**Path**: `graph-owl generate-corpus --seed 1 --tables 1000 --out corpus.tar.zst`, packaged in the *identical* archive shape Epic 37b's `Catalog::export_archive` produces — so `graph-owl restore --in corpus.tar.zst` (already built, already tested in that epic) is the loader. No new bulk-insert endpoint was built; none was needed.
+**Shipped**:
+- Deterministic: `graph_owl_cli::corpus::generate(seed, target_tables)` is a pure function (no I/O) — the same seed always produces the same entity/relationship *shape* (names, FQNs, structure, soft-delete count); ids are freshly minted per call, so determinism is asserted on shape, not on raw bytes.
+- Realistically shaped — power-law tables-per-schema **and** power-law lineage fan-out, both via the same rank-based `1/rank`, harmonic-normalized construction (simple, and genuinely a power law rather than approximately one). Asserted directly: the busiest schema holds more than twice a median schema's table count, checked against a fixture, not eyeballed.
+- Includes soft-deleted entities (~2%), multiple versions per entity (1–3), and a deliberately injected cyclic lineage chain (A→B→C→A) — the three shapes decision 3 and this slice's own criteria name explicitly.
+- Real end-to-end proof, not just a unit test: `graph-owl-cli/tests/corpus.rs` generates a corpus, packages it, and restores it into a real Postgres-backed catalog over real HTTP, asserting the restored entity/relationship counts match exactly.
+**Scope cut, recorded rather than silently narrowed**:
+- **"Extends Epic absorbed into 4's generator"** — that generator does not exist in the current codebase (checked before writing this one; see `[[epic-100-blocked-on-real-gaps]]`-style phantom-dependency pattern, same finding here). This generator is net new, not an extension.
+- **Entities are services/databases/schemas/tables only** — no columns, users, teams, tags, or custom properties, unlike the full target table above. The structural properties Slices B–F would need (hierarchy depth, fan-out shape, version count, soft-delete, cycles) are all present; the additional entity kinds are a bounded, separable addition if a later slice's budget needs them specifically.
+- **"Loads in under 10 minutes"/"loadable incrementally" are not independently verified at 100k-table scale.** The end-to-end test above proves the pipeline at 50 tables; nothing in this pass ran it at the plan's own 60,000-table target. `graph-owl restore` (Epic 37b) pages the *read* side at 500 rows/request during export, but a *generate-and-restore* run's wall-clock time at real scale is unmeasured — the honest position per this project's own "measured, not assumed" rule, not a claim either way.
+- **No dedicated `benches/` workspace member.** Nothing yet asserts a budget in CI (that is Slices B–F's own job); this slice's tests assert *shape* (determinism, power-law, the named shapes) and *correctness* (the real restore), not *speed*.
+**Tests**: `graph-owl-cli::corpus::tests` (6 tests: determinism, distribution, seed-difference, ordering, injected shapes, archive round-trip), `graph-owl-cli/tests/corpus.rs` (1 real end-to-end test against Postgres).
+
+### Slices B–F: not started
+
+Read-path budgets, traversal budgets, search budgets, write/ingestion budgets, and the sustained-load soak test. Each needs real CI wiring and, for B–E, real budget numbers; F additionally needs an actual 1-hour run. None of this is hard to *design* — the plan below already does — but none of it can be honestly marked done without either running it for real (the soak test genuinely takes an hour; the LUBM/BSBM/Wikidata sizing genuinely needs the downloads) or building CI infrastructure changes that deserve their own review rather than arriving as a side effect of a generator slice. Left as originally written below, unstarted.
 
 ### Slice B: Read paths meet budget
 

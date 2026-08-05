@@ -38,6 +38,17 @@ clap = { version = "4", features = ["derive", "env"] }
 # a CLI that dragged in OpenSSL would be harder to ship than the server it
 # talks to.
 reqwest = { workspace = true, features = ["blocking"] }
+# Epic 37a's corpus generator packages its output in the identical archive
+# shape `graph-owl-api::archive` writes (same `tar`+`zstd`, already adopted
+# there — see `00l-build-vs-adopt.md`), so `restore` can load it with no
+# special case. Duplicated here rather than depending on `graph-owl-api`,
+# which decision 6 above rules out for this crate.
+tar.workspace = true
+zstd.workspace = true
+sha2.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 serde_norway = "0.9"

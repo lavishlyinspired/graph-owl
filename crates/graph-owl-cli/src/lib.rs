@@ -8,6 +8,7 @@
 pub mod apply;
 pub mod backup;
 pub mod client;
+pub mod corpus;
 pub mod declaration;
 pub mod drift;
 pub mod exit;
