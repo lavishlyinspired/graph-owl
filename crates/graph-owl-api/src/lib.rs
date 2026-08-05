@@ -341,6 +341,25 @@ pub struct SparqlOutcome {
     ///
     /// Empty when the query form has no projection (`ASK`, `DESCRIBE`).
     pub variables: Vec<String>,
+    /// Endpoints a `SERVICE` clause reached successfully — Epic 101 Slice C.
+    ///
+    /// Query-level, not per-row: `spareval`'s `DefaultServiceHandler` only
+    /// receives a pattern and an endpoint name, and the bindings it returns
+    /// are filtered down to the `SERVICE` clause's own statically-known
+    /// variables before being merged into a result row — there is no hook
+    /// left to tag an individual row with which call produced it. Naming
+    /// which endpoints contributed to the answer at all is what is
+    /// achievable, and still turns an unattributable remote row into a
+    /// named source rather than an unexplained one.
+    pub federated_endpoints: Vec<String>,
+    /// Endpoints a `SERVICE SILENT` clause could not reach — Epic 101 Slice
+    /// C. **Always populated when non-empty, never inferred from row
+    /// count**: a silently-failed clause contributes no error and, for a
+    /// clause with no other bindings to fall back on, no rows either — which
+    /// is otherwise indistinguishable from "this endpoint genuinely has no
+    /// matching data", the exact failure this project's `truncated` field
+    /// already refuses to allow elsewhere.
+    pub silenced_endpoints: Vec<String>,
 }
 
 /// One value in a [`CypherRow`] — Epic 7d Slice D.
@@ -741,6 +760,14 @@ pub struct Catalog {
     /// an unbounded one by omission. Administrative configuration, never
     /// settable by the query itself.
     federation: federation::FederationAllowList,
+    /// How long a single `SERVICE` call may take. See
+    /// [`federation::DEFAULT_TIMEOUT`] for why ten seconds.
+    federation_timeout: std::time::Duration,
+    /// The client every `SERVICE` call reuses. Built once per `Catalog`
+    /// rather than per query — `reqwest::Client` pools connections
+    /// internally, and a fresh client per federated call would pay a new
+    /// TLS handshake for every query against the same endpoint.
+    http_client: reqwest::Client,
 }
 
 impl Catalog {
@@ -768,6 +795,8 @@ impl Catalog {
             // deployment has to deliberately leave.
             store_query_text: false,
             federation: federation::FederationAllowList::default(),
+            federation_timeout: federation::DEFAULT_TIMEOUT,
+            http_client: reqwest::Client::new(),
         }
     }
 
@@ -787,6 +816,27 @@ impl Catalog {
     pub fn with_federation_endpoints(mut self, endpoints: Vec<String>) -> Self {
         self.federation = federation::FederationAllowList::new(endpoints);
         self
+    }
+
+    /// Bounds every `SERVICE` call to this duration, replacing
+    /// [`federation::DEFAULT_TIMEOUT`].
+    #[must_use]
+    pub fn with_federation_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.federation_timeout = timeout;
+        self
+    }
+
+    /// The endpoints currently allow-listed for `SERVICE` clauses — Epic 101
+    /// Slice E. **Deployment-level and read-only from here**: unlike a
+    /// policy, the allow-list has no persisted store behind it yet (it is
+    /// set once, at startup, via [`Self::with_federation_endpoints`]), so
+    /// there is nothing for an admin endpoint to write to at runtime. What
+    /// this exists for is letting an operator confirm what is actually
+    /// configured, and letting a caller check a candidate endpoint against
+    /// it before relying on it in a query.
+    #[must_use]
+    pub fn federation_endpoints(&self) -> &[String] {
+        self.federation.endpoints()
     }
 
     /// The catalog, projecting into a graph as it writes.
@@ -1158,21 +1208,68 @@ impl Catalog {
             )])
         };
 
-        let results = spareval::QueryEvaluator::new()
-            .with_default_service_handler(federation::FederationServiceHandler::new(
-                self.federation.clone(),
+        // A `SERVICE` clause makes evaluation do blocking network I/O (see
+        // `federation.rs`'s module doc), so the whole evaluation — not just
+        // the federated leg — runs on a blocking thread. Mirrors
+        // `cypher_stream`'s existing use of `spawn_blocking` for the same
+        // evaluator.
+        let query = parsed.clone();
+        let dataset = scoped.dataset;
+        let allow_list = self.federation.clone();
+        let client = self.http_client.clone();
+        let timeout = self.federation_timeout;
+        // Held outside the closure so its `activity()` log can still be read
+        // after evaluation finishes — see `SharedFederationServiceHandler`'s
+        // doc comment for why a plain move into the evaluator can't do this.
+        let handler = std::sync::Arc::new(federation::FederationServiceHandler::new(
+            allow_list, client, timeout,
+        ));
+        let handler_for_eval = std::sync::Arc::clone(&handler);
+        let rows = tokio::task::spawn_blocking(move || {
+            let results = spareval::QueryEvaluator::new()
+                .with_default_service_handler(federation::SharedFederationServiceHandler::new(
+                    handler_for_eval,
+                ))
+                .prepare(&query)
+                .execute(&dataset)
+                .map_err(query_error)?;
+            collect(results).map_err(query_error)
+        })
+        .await
+        .map_err(|_| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "the query evaluator task panicked".to_string(),
             ))
-            .prepare(parsed)
-            .execute(&scoped.dataset)
-            .map_err(query_error)?;
+        })??;
+
+        // Reached only on success, which is exactly what makes a recorded
+        // failure here a *silenced* one rather than a query-failing one —
+        // see `FederationServiceHandler`'s doc comment.
+        let activity = handler.activity();
+        let mut federated_endpoints: Vec<String> = activity
+            .iter()
+            .filter(|(_, succeeded)| *succeeded)
+            .map(|(endpoint, _)| endpoint.clone())
+            .collect();
+        let mut silenced_endpoints: Vec<String> = activity
+            .iter()
+            .filter(|(_, succeeded)| !*succeeded)
+            .map(|(endpoint, _)| endpoint.clone())
+            .collect();
+        federated_endpoints.sort_unstable();
+        federated_endpoints.dedup();
+        silenced_endpoints.sort_unstable();
+        silenced_endpoints.dedup();
 
         Ok(SparqlOutcome {
-            rows: collect(results).map_err(query_error)?,
+            rows,
             facts_scanned: scoped.fact_count,
             truncated: scoped.truncated,
             as_of: scoped.at,
             plan: scoped.plan,
             variables: projected_variables(parsed),
+            federated_endpoints,
+            silenced_endpoints,
         })
     }
 
@@ -16544,19 +16641,23 @@ mod projection_isolation_tests {
         async fn an_allow_listed_endpoint_is_not_refused_for_being_unlisted() {
             let storage = Arc::new(InMemoryStorage::default());
             let graph = RecordingGraph::working();
+            // Nothing listens on this loopback port, so the allow-list check
+            // itself is the only thing this test needs to isolate — the
+            // network attempt fails immediately and needs no real server.
+            let endpoint = "http://127.0.0.1:1/sparql".to_string();
             let catalog = Catalog::new(storage)
                 .with_graph(graph as Arc<dyn TripleStore>)
-                .with_federation_endpoints(vec!["https://dbpedia.org/sparql".to_string()]);
+                .with_federation_endpoints(vec![endpoint.clone()]);
 
             let error = catalog
                 .sparql(
                     &Principal::system(),
-                    "SELECT ?o WHERE { SERVICE <https://dbpedia.org/sparql> { ?s ?p ?o } }",
+                    &format!("SELECT ?o WHERE {{ SERVICE <{endpoint}> {{ ?s ?p ?o }} }}"),
                     None,
                     SparqlBudget::default(),
                 )
                 .await
-                .expect_err("real federation is not implemented until Slice B");
+                .expect_err("nothing listens on this port, so the call itself fails");
 
             let CatalogError::Validation(fields) = error else {
                 panic!("expected Validation, got {error:?}");
@@ -16566,6 +16667,361 @@ mod projection_isolation_tests {
                     .detail
                     .contains("is not on the federation allow-list"),
                 "an allow-listed endpoint must not be refused as unlisted: {fields:?}"
+            );
+        }
+
+        /// Spins up a real local SPARQL JSON results endpoint and hands back
+        /// its `http://127.0.0.1:<port>/sparql` URL — Slice B's tests need a
+        /// server that actually answers rather than a placeholder.
+        async fn start_mock_sparql_endpoint(
+            body: &'static str,
+            delay: std::time::Duration,
+        ) -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind a free loopback port");
+            let addr = listener.local_addr().expect("local addr");
+            let router = axum::Router::new().route(
+                "/sparql",
+                // POST, matching `FederationServiceHandler`'s "query via POST
+                // directly" (SPARQL 1.1 Protocol) — the body itself is not
+                // inspected here; the capturing variant below is what proves
+                // what was actually sent.
+                axum::routing::post(move || async move {
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    (
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            "application/sparql-results+json",
+                        )],
+                        body,
+                    )
+                }),
+            );
+            let handle = tokio::spawn(async move {
+                axum::serve(listener, router)
+                    .await
+                    .expect("mock SPARQL endpoint");
+            });
+            (format!("http://{addr}/sparql"), handle)
+        }
+
+        /// Like [`start_mock_sparql_endpoint`], but records every request's
+        /// raw `query` parameter before answering — Slice D's proof of what
+        /// literally left the process, which a result-side assertion could
+        /// never establish on its own.
+        async fn start_capturing_sparql_endpoint(
+            body: &'static str,
+        ) -> (
+            String,
+            std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            let captured: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
+            let captured_for_handler = std::sync::Arc::clone(&captured);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind a free loopback port");
+            let addr = listener.local_addr().expect("local addr");
+            let router = axum::Router::new().route(
+                "/sparql",
+                // POST with the query as the raw body — "query via POST
+                // directly" per the SPARQL 1.1 Protocol spec, which is what
+                // `FederationServiceHandler` actually sends. Capturing the
+                // body text directly (rather than a query parameter) is what
+                // makes this test double able to prove what literally left
+                // the process.
+                axum::routing::post(move |body_text: String| {
+                    let captured = std::sync::Arc::clone(&captured_for_handler);
+                    async move {
+                        captured.lock().expect("capture lock").push(body_text);
+                        (
+                            [(
+                                axum::http::header::CONTENT_TYPE,
+                                "application/sparql-results+json",
+                            )],
+                            body,
+                        )
+                    }
+                }),
+            );
+            let handle = tokio::spawn(async move {
+                axum::serve(listener, router)
+                    .await
+                    .expect("mock SPARQL endpoint");
+            });
+            (format!("http://{addr}/sparql"), captured, handle)
+        }
+
+        const REMOTE_RESULTS_JSON: &str = r#"{
+            "head": { "vars": ["s", "p", "o"] },
+            "results": {
+                "bindings": [
+                    {
+                        "s": { "type": "uri", "value": "https://example.org/subject" },
+                        "p": { "type": "uri", "value": "https://example.org/pred" },
+                        "o": { "type": "literal", "value": "remote-value" }
+                    }
+                ]
+            }
+        }"#;
+
+        /// **The join itself.** An allow-listed `SERVICE` clause reaches a
+        /// real endpoint, and the endpoint's own rows come back through the
+        /// evaluator — proving the HTTP call, the SPARQL-JSON parse, and the
+        /// conversion into `spareval`'s solution iterator all actually work,
+        /// not just that the allow-list gate passes.
+        #[tokio::test]
+        async fn a_service_clause_returns_rows_from_the_remote_endpoint() {
+            let (endpoint, _server) =
+                start_mock_sparql_endpoint(REMOTE_RESULTS_JSON, std::time::Duration::ZERO).await;
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_federation_endpoints(vec![endpoint.clone()]);
+
+            let outcome = catalog
+                .sparql(
+                    &Principal::system(),
+                    &format!("SELECT ?o WHERE {{ SERVICE <{endpoint}> {{ ?s ?p ?o }} }}"),
+                    None,
+                    SparqlBudget::default(),
+                )
+                .await
+                .expect("an allow-listed endpoint answering real results must succeed");
+
+            assert_eq!(outcome.rows.len(), 1, "{:?}", outcome.rows);
+            assert!(
+                outcome.rows[0]["o"].contains("remote-value"),
+                "{:?}",
+                outcome.rows
+            );
+            assert_eq!(
+                outcome.federated_endpoints,
+                vec![endpoint.clone()],
+                "a row an endpoint actually contributed must name that endpoint as federated"
+            );
+            assert!(
+                outcome.silenced_endpoints.is_empty(),
+                "{:?}",
+                outcome.silenced_endpoints
+            );
+        }
+
+        /// **The bounded-call property.** An endpoint that never answers
+        /// within the configured timeout must fail the query — not hang it —
+        /// and must fail close to the timeout rather than waiting out the
+        /// server's own (much longer) delay. This is the plan's first named
+        /// danger: an unbounded outbound call.
+        #[tokio::test]
+        async fn a_service_call_past_its_timeout_fails_instead_of_hanging() {
+            let (endpoint, _server) =
+                start_mock_sparql_endpoint(REMOTE_RESULTS_JSON, std::time::Duration::from_secs(5))
+                    .await;
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_federation_endpoints(vec![endpoint.clone()])
+                .with_federation_timeout(std::time::Duration::from_millis(100));
+
+            let started = std::time::Instant::now();
+            let error = catalog
+                .sparql(
+                    &Principal::system(),
+                    &format!("SELECT ?o WHERE {{ SERVICE <{endpoint}> {{ ?s ?p ?o }} }}"),
+                    None,
+                    SparqlBudget::default(),
+                )
+                .await
+                .expect_err("a server that never answers in time must not succeed");
+            let elapsed = started.elapsed();
+
+            let CatalogError::Validation(fields) = error else {
+                panic!("expected Validation, got {error:?}");
+            };
+            assert!(fields[0].detail.contains(&endpoint), "{fields:?}");
+            assert!(
+                elapsed < std::time::Duration::from_secs(2),
+                "the call must fail near its 100ms timeout, not wait for the server's 5s delay: {elapsed:?}"
+            );
+        }
+
+        /// **The named danger this slice exists for.** A `SILENT` clause
+        /// against an endpoint nothing listens on must not make the query
+        /// fail — but it must also not look like the endpoint simply had no
+        /// matching data. A test that only checked "the query still
+        /// succeeds" would pass a fix that dropped the endpoint from
+        /// `silenced_endpoints` entirely; a test that only checked the list
+        /// would pass a fix that failed the query outright. Both must hold.
+        #[tokio::test]
+        async fn a_silent_service_failure_succeeds_and_names_the_endpoint_as_silenced() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            // Nothing listens here — the same unreachable-port technique the
+            // allow-list test above uses, so no real server is needed to
+            // prove the failure path.
+            let endpoint = "http://127.0.0.1:1/sparql".to_string();
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_federation_endpoints(vec![endpoint.clone()]);
+
+            let outcome = catalog
+                .sparql(
+                    &Principal::system(),
+                    &format!("SELECT ?o WHERE {{ SERVICE SILENT <{endpoint}> {{ ?s ?p ?o }} }}"),
+                    None,
+                    SparqlBudget::default(),
+                )
+                .await
+                .expect("SILENT must swallow the failure rather than fail the query");
+
+            assert_eq!(
+                outcome.silenced_endpoints,
+                vec![endpoint],
+                "the failure must be named, not just tolerated: {:?}",
+                outcome.silenced_endpoints
+            );
+            assert!(
+                outcome.federated_endpoints.is_empty(),
+                "a call that never succeeded must not also be reported as federated: {:?}",
+                outcome.federated_endpoints
+            );
+        }
+
+        /// The negative that makes the test above about `SILENT` specifically,
+        /// not about every failed `SERVICE` call being tolerated: the exact
+        /// same unreachable endpoint, without `SILENT`, must fail the whole
+        /// query. Mutator watch: a `SILENT` flag read but not actually
+        /// threaded to `spareval` (e.g. always constructing a non-silent
+        /// pattern) would make this test and the one above disagree.
+        #[tokio::test]
+        async fn a_non_silent_service_failure_fails_the_whole_query() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let endpoint = "http://127.0.0.1:1/sparql".to_string();
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_federation_endpoints(vec![endpoint.clone()]);
+
+            let error = catalog
+                .sparql(
+                    &Principal::system(),
+                    &format!("SELECT ?o WHERE {{ SERVICE <{endpoint}> {{ ?s ?p ?o }} }}"),
+                    None,
+                    SparqlBudget::default(),
+                )
+                .await
+                .expect_err("without SILENT, an unreachable endpoint must fail the query");
+
+            let CatalogError::Validation(fields) = error else {
+                panic!("expected Validation, got {error:?}");
+            };
+            assert!(fields[0].detail.contains(&endpoint), "{fields:?}");
+        }
+
+        /// **The important test in this epic**, per the plan's own words —
+        /// the only way to prove a leak did not happen, since a result-side
+        /// assertion passes even when the data already left. This is a
+        /// regression guard, not a new filter: `execute_algebra` already
+        /// runs `scoped_facts` and builds the evaluator's dataset *before*
+        /// `spareval` ever executes (see its own doc comment), and
+        /// `spareval` hands `FederationServiceHandler::handle` only the
+        /// `SERVICE` clause's own static inner pattern — never the outer
+        /// bindings a join has accumulated (`eval.rs`'s `evaluate_service`
+        /// builds the outbound pattern text once, before any outer `from`
+        /// is known, and only merges the *response* back in afterward).
+        /// Together, that means a locally-scoped-out value has no path to
+        /// the wire at all — this test captures the literal outbound
+        /// request and proves it.
+        #[tokio::test]
+        async fn a_locally_scoped_out_value_never_reaches_the_outbound_request() {
+            use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+
+            let storage = Arc::new(InMemoryStorage::default());
+            // No rule admits "secret-bank" — the analyst is denied it by the
+            // same default-deny every other authz test in this file relies on.
+            storage.policies.lock().unwrap().push(Policy {
+                name: "analyst".to_string(),
+                rules: vec![Rule {
+                    name: "read-something-else".to_string(),
+                    effect: Effect::Allow,
+                    operations: vec![MetadataOperation::ViewBasic],
+                    resources: ResourceMatcher::FqnPrefix("irrelevant".to_string()),
+                }],
+            });
+            let graph = RecordingGraph::working();
+            let (endpoint, captured, _server) =
+                start_capturing_sparql_endpoint(REMOTE_RESULTS_JSON).await;
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_federation_endpoints(vec![endpoint.clone()]);
+
+            catalog
+                .upsert_asset(&Principal::system(), service("secret-bank"))
+                .await
+                .expect("create");
+
+            let analyst = Principal {
+                id: "asha".to_string(),
+                name: "Asha".to_string(),
+                kind: graph_owl_core::PrincipalKind::User,
+                roles: vec!["analyst".to_string()],
+                is_admin: false,
+            };
+
+            // `OPTIONAL` (rather than a plain join) so the local pattern's
+            // non-match for the denied principal cannot itself suppress the
+            // `SERVICE` call — both principals must produce a captured
+            // request, or the comparison below proves nothing.
+            let query = format!(
+                "SELECT ?localName ?o WHERE {{ \
+                    OPTIONAL {{ ?asset <{DSC}name> ?localName }} . \
+                    SERVICE <{endpoint}> {{ ?s ?p ?o }} \
+                 }}"
+            );
+
+            let denied_outcome = catalog
+                .sparql(&analyst, &query, None, SparqlBudget::default())
+                .await
+                .expect("query");
+            let unrestricted_outcome = catalog
+                .sparql(&Principal::system(), &query, None, SparqlBudget::default())
+                .await
+                .expect("query");
+
+            // The setup actually exercises the denial, rather than the
+            // policy never mattering to this query at all.
+            assert!(
+                denied_outcome
+                    .rows
+                    .iter()
+                    .all(|row| !row.contains_key("localName")),
+                "the analyst must not see secret-bank locally: {:?}",
+                denied_outcome.rows
+            );
+            assert!(
+                unrestricted_outcome.rows.iter().any(|row| row
+                    .get("localName")
+                    .is_some_and(|v| v.contains("secret-bank"))),
+                "the system principal must see it, or this test proves nothing: {:?}",
+                unrestricted_outcome.rows
+            );
+
+            let requests = captured.lock().expect("capture lock").clone();
+            assert_eq!(requests.len(), 2, "{requests:?}");
+            assert_eq!(
+                requests[0], requests[1],
+                "the outbound SERVICE request must not depend on which principal ran the \
+                 query, or on what that principal could see locally: {requests:?}"
+            );
+            assert!(
+                !requests[0].contains("secret-bank"),
+                "a value visible only locally — denied or not — must never appear in a \
+                 SERVICE clause's own static pattern text: {requests:?}"
             );
         }
     }

@@ -152,7 +152,15 @@ export interface Verdict {
  */
 export function verdict(
   solutions: readonly Solution[],
-  meta: { readonly truncated: boolean; readonly factsScanned: number; readonly plan: readonly string[] },
+  meta: {
+    readonly truncated: boolean;
+    readonly factsScanned: number;
+    readonly plan: readonly string[];
+    /** Epic 101: `SERVICE SILENT` endpoints that failed. Must be named, not
+     *  just tolerated — an empty-looking answer and a silently-failed remote
+     *  call are otherwise indistinguishable. */
+    readonly silencedFailures: readonly string[];
+  },
 ): Verdict {
   const warnings: string[] = [];
   if (meta.truncated) {
@@ -165,6 +173,11 @@ export function verdict(
   if (meta.plan.some((scan) => scan.trim() === "? ? ?")) {
     warnings.push(
       `No triple pattern could be bounded, so the whole graph was read (${meta.factsScanned} facts). Binding a predicate or a subject usually fixes this.`,
+    );
+  }
+  if (meta.silencedFailures.length > 0) {
+    warnings.push(
+      `SERVICE SILENT could not reach: ${meta.silencedFailures.join(", ")}. The query still succeeded, but any data from these endpoints is missing, not absent.`,
     );
   }
   return { warnings, canDraw: graphShape(solutions) !== null };

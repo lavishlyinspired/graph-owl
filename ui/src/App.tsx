@@ -1995,6 +1995,7 @@ function WorkbenchPage({ colors }: { colors: (typeof palette)["light"] }) {
             truncated: result.truncated,
             factsScanned: result.factsScanned,
             plan: result.plan,
+            silencedFailures: result.silencedFailures,
           })
         : null,
     [result, rows],
@@ -2028,6 +2029,20 @@ function WorkbenchPage({ colors }: { colors: (typeof palette)["light"] }) {
           <Text type="secondary" style={{ fontSize: 12 }}>
             {rows.length} row{rows.length === 1 ? "" : "s"} · {result.factsScanned} facts read
           </Text>
+        )}
+        {/* Epic 101 Slice E: result-level, not per-row — spareval gives no
+            hook to attribute one bound row to the SERVICE call that produced
+            it, only the query as a whole (see the plan's own scope note). */}
+        {result && result.federatedEndpoints.length > 0 && (
+          <Tooltip title="This answer includes data fetched live from these SERVICE endpoints.">
+            <span>
+              {result.federatedEndpoints.map((endpoint) => (
+                <Tag key={endpoint} color="blue">
+                  federated: {endpoint}
+                </Tag>
+              ))}
+            </span>
+          </Tooltip>
         )}
       </Space>
 
@@ -3277,6 +3292,86 @@ function PolicyPanel() {
   );
 }
 
+/** The `SERVICE` allow-list — Epic 101 Slice E.
+ *
+ *  **Read-only, deliberately.** Unlike a policy, the allow-list has no
+ *  persisted store behind it: it is set once, at startup, from
+ *  `GRAPH_OWL_FEDERATION_ENDPOINTS` (see `main.rs` and `/admin/federation`'s
+ *  own doc comment). An add/remove form here would either silently do
+ *  nothing past the next restart, or need the same kind of dynamically-read
+ *  store policies already have — real future work, not implied by this
+ *  screen. What this gives an operator is confirmation of what is actually
+ *  configured, and a dry-run against it before trusting a query that names
+ *  one of these endpoints. */
+function FederationPanel() {
+  const [endpoints, setEndpoints] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [candidate, setCandidate] = useState("");
+
+  useEffect(() => {
+    api
+      .federationEndpoints()
+      .then((r) => setEndpoints(r.endpoints))
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "could not load the allow-list"));
+  }, []);
+
+  const trimmed = candidate.trim();
+  const allowed = endpoints !== null && trimmed !== "" ? endpoints.includes(trimmed) : null;
+
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Alert
+        type="info"
+        showIcon
+        message="Configured at deployment, not here"
+        description="This allow-list comes from GRAPH_OWL_FEDERATION_ENDPOINTS at startup. Changing it means changing the deployment's environment and restarting — there is nothing to save from this screen."
+      />
+
+      {error && <Alert type="error" showIcon message="Could not load the allow-list" description={error} />}
+
+      <Card size="small" title={`Allow-listed endpoints (${endpoints?.length ?? 0})`}>
+        {endpoints === null ? (
+          <Text type="secondary">Loading…</Text>
+        ) : endpoints.length === 0 ? (
+          <Text type="secondary">
+            No endpoints are allow-listed. Every <Text code>SERVICE</Text> clause is refused.
+          </Text>
+        ) : (
+          <Space size={[4, 4]} wrap>
+            {endpoints.map((endpoint) => (
+              <Tag key={endpoint}>{endpoint}</Tag>
+            ))}
+          </Space>
+        )}
+      </Card>
+
+      <Card size="small" title="Would a query be allowed to reach this endpoint?">
+        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+          <Flex gap={8} wrap>
+            <Input
+              placeholder="https://example.org/sparql"
+              value={candidate}
+              onChange={(e) => setCandidate(e.target.value)}
+              style={{ maxWidth: 320 }}
+            />
+          </Flex>
+          {trimmed !== "" && endpoints !== null && (
+            <Alert
+              type={allowed ? "success" : "warning"}
+              showIcon
+              message={
+                allowed
+                  ? `Allowed — a SERVICE clause naming ${trimmed} would be answered.`
+                  : `Not allowed — a SERVICE clause naming ${trimmed} would be refused.`
+              }
+            />
+          )}
+        </Space>
+      </Card>
+    </Space>
+  );
+}
+
 /** What the preview means. The numbers alone cannot distinguish a correct policy
  *  from one that admits the whole estate, which is why `policyVerdict` exists. */
 function DryRunResult({ run }: { run: DryRun }) {
@@ -3443,6 +3538,7 @@ function AdminPage({ colors }: { colors: (typeof palette)["light"] }) {
           { key: "connectors", label: "Connector config", children: <ConnectorConfigPanel /> },
           { key: "policies", label: "Policies", children: <PolicyPanel /> },
           { key: "memories", label: "Memories", children: <MemoryAdminPanel colors={colors} /> },
+          { key: "federation", label: "Federation", children: <FederationPanel /> },
         ]}
       />
     </Space>

@@ -213,7 +213,12 @@ describe("a term as a reader reads it", () => {
 });
 
 describe("what a reader is told before trusting the answer", () => {
-  const clean = { truncated: false, factsScanned: 12, plan: ["? 1:name ?"] };
+  const clean = {
+    truncated: false,
+    factsScanned: 12,
+    plan: ["? 1:name ?"],
+    silencedFailures: [] as readonly string[],
+  };
 
   // Truncation first, because it is the one that makes a wrong answer look
   // like a complete one.
@@ -254,7 +259,12 @@ describe("what a reader is told before trusting the answer", () => {
   });
 
   it("reports both problems when both apply", () => {
-    const { warnings } = verdict(triples, { truncated: true, factsScanned: 9, plan: ["? ? ?"] });
+    const { warnings } = verdict(triples, {
+      truncated: true,
+      factsScanned: 9,
+      plan: ["? ? ?"],
+      silencedFailures: [],
+    });
 
     expect(warnings).toHaveLength(2);
   });
@@ -262,5 +272,34 @@ describe("what a reader is told before trusting the answer", () => {
   it("reports whether the results can be drawn", () => {
     expect(verdict(triples, clean).canDraw).toBe(true);
     expect(verdict([{ name: "orders" }], clean).canDraw).toBe(false);
+  });
+
+  // Epic 101 Slice C/E: a `SERVICE SILENT` failure must never look like the
+  // endpoint simply had no matching data — it must say so, by name.
+  it("names a SILENT endpoint that could not be reached", () => {
+    const { warnings } = verdict(triples, {
+      ...clean,
+      silencedFailures: ["https://dbpedia.org/sparql"],
+    });
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("dbpedia.org");
+  });
+
+  // Two failures must both be named — a warning that only mentions the
+  // first would pass a fix that dropped every endpoint after it.
+  it("names every silenced endpoint, not just the first", () => {
+    const { warnings } = verdict(triples, {
+      ...clean,
+      silencedFailures: ["https://a.example/sparql", "https://b.example/sparql"],
+    });
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("a.example");
+    expect(warnings[0]).toContain("b.example");
+  });
+
+  it("says nothing about federation when no SILENT clause failed", () => {
+    expect(verdict(triples, clean).warnings).toEqual([]);
   });
 });

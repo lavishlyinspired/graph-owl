@@ -243,6 +243,9 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/policies/dry-run", post(dry_run_policy))
         .route("/policies", get(list_policies).post(upsert_policy))
         .route("/policies/{name}", delete(delete_policy))
+        // Epic 101 Slice E: read-only — see `list_federation_endpoints`'s doc
+        // comment for why there is no write route beside it.
+        .route("/admin/federation", get(list_federation_endpoints))
         .route("/users/{id}/roles", put(set_user_roles))
         .route("/teams", get(list_teams).post(upsert_team))
         .route("/teams/{id}/children", get(list_child_teams))
@@ -2327,6 +2330,12 @@ fn query_outcome_json(outcome: &graph_owl_api::SparqlOutcome) -> serde_json::Val
         // **The order the query named them.** Solutions are sorted maps, so
         // this is the only place the author's own column order survives.
         "variables": outcome.variables,
+        // Epic 101 Slice C: which `SERVICE` endpoints actually contributed
+        // to this answer, and which `SERVICE SILENT` endpoints failed
+        // without failing the query — named rather than left to look like
+        // "no such data" or omitted from the response entirely.
+        "federatedEndpoints": outcome.federated_endpoints,
+        "silencedFailures": outcome.silenced_endpoints,
     })
 }
 
@@ -5227,6 +5236,26 @@ async fn list_policies(
             .map(|(policy, roles)| policy_body(policy, roles))
             .collect::<Vec<_>>()
     )))
+}
+
+/// The `SERVICE` allow-list currently configured — Epic 101 Slice E.
+///
+/// **Read-only.** Unlike a policy, the allow-list has no persisted store
+/// behind it — it is set once, at startup, from
+/// `GRAPH_OWL_FEDERATION_ENDPOINTS` (see `main.rs`), not read fresh per
+/// request the way `catalog.list_policies()` is. A write route here would
+/// either silently do nothing past the next restart or require building the
+/// same kind of persisted, dynamically-read store `Storage`'s policies
+/// already have — real future work, not implied by this one. What this
+/// gives an admin is confirmation of what is actually configured right now.
+async fn list_federation_endpoints(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(json!({ "endpoints": catalog.federation_endpoints() })))
 }
 
 /// Removes a policy — Epic 41.

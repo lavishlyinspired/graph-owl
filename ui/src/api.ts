@@ -114,6 +114,15 @@ export interface SparqlResult {
   /** The projected variables, **in the order the query named them**. Solutions
    *  arrive as sorted maps, so this is the only place that order survives. */
   readonly variables: readonly string[];
+  /** `SERVICE` endpoints that answered — Epic 101. Result-level, not
+   *  per-row: `spareval` gives no hook to attribute one bound row to the
+   *  call that produced it, only the query as a whole. */
+  readonly federatedEndpoints: readonly string[];
+  /** `SERVICE SILENT` endpoints that could not be reached. **Always
+   *  present, never inferred from row count** — a silently-failed clause
+   *  contributes no error and often no rows either, which is otherwise
+   *  indistinguishable from "this endpoint genuinely has no matching data". */
+  readonly silencedFailures: readonly string[];
 }
 
 /** The stored violations queue, and the instant it reflects. */
@@ -485,6 +494,10 @@ export const api = {
     }),
   deletePolicy: (name: string) =>
     request<void>(`/policies/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  /** The `SERVICE` allow-list as currently configured. Read-only — Epic 101
+   *  Slice E — there is nothing to write to yet; see the server route's own
+   *  doc comment. */
+  federationEndpoints: () => request<{ endpoints: string[] }>("/admin/federation"),
   /** What we know about a subject, best first, each with its staleness and
    *  score decomposition. Entity-scoped — the Knowledge tab's own read. */
   recallMemories: (subjectId: string, query = "", includeSuperseded = false) =>

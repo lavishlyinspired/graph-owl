@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use graph_owl_api::Catalog;
 use graph_owl_engine_postgres::PostgresTripleStore;
@@ -81,9 +82,29 @@ async fn main() {
         .unwrap_or_else(|e| panic!("failed to connect the graph engine at {where_from}: {e}"));
     // One backend, seen through both of its capabilities.
     let graph = Arc::new(graph);
+    // Epic 101: comma-separated allow-list, off by default like every other
+    // deployment-level capability here. No error case to report on a bad
+    // value — see `endpoints_from_env`'s own doc comment — so unlike the
+    // budget and admission config above, a malformed list cannot fail startup.
+    let federation_endpoints = graph_owl_api::federation::endpoints_from_env(
+        std::env::var("GRAPH_OWL_FEDERATION_ENDPOINTS")
+            .ok()
+            .as_deref(),
+    );
+    let federation_timeout = match std::env::var("GRAPH_OWL_FEDERATION_TIMEOUT_MS") {
+        Ok(raw) => Duration::from_millis(raw.trim().parse().unwrap_or_else(|_| {
+            panic!(
+                "GRAPH_OWL_FEDERATION_TIMEOUT_MS must be a whole number of milliseconds, got {raw:?}"
+            )
+        })),
+        Err(_) => graph_owl_api::federation::DEFAULT_TIMEOUT,
+    };
+
     let catalog = Catalog::new(Arc::new(storage))
         .with_graph(graph.clone())
-        .with_traversal(graph);
+        .with_traversal(graph)
+        .with_federation_endpoints(federation_endpoints)
+        .with_federation_timeout(federation_timeout);
 
     // Resumes every enabled subscription from its last committed offset —
     // Epic 19 decision 1 ("a durable subscription, not a push endpoint")

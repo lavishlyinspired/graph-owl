@@ -538,3 +538,46 @@ Bolt/PackStream spec" as an authorised source in its own right, and unlike a
 full query grammar, PackStream's type system is small — roughly a dozen
 marker-byte forms with three size classes each. The size where hand-rolling
 stopped being reasonable for Cypher (a full grammar) is not the size here.
+
+### SPARQL Protocol client (outbound `SERVICE` calls) — checked late, for Epic 101 Slice B
+
+**5 August 2026, checked *after* Slice B was already written** (the check
+should have run before — see `plans/101-sparql-federation.md`'s own note and
+the memory this cost). Searched crates.io for a standalone SPARQL 1.1
+Protocol client crate that could replace `federation.rs`'s hand-wired
+`reqwest` call plus `sparesults` parse:
+
+| Crate | Licence | Why not |
+|---|---|---|
+| `sparql-client` | BSD-2-Clause | Repository is a self-hosted Phabricator instance (`devcentral.nasqueron.org`), not a host that resolves the way GitHub does for this kind of check — fails the auditability gate the same way `opencypher`/`ocg` did |
+| `sparql` | Unlicense | Version `0.0.0` — a reserved name, not a released crate |
+| `oxigraph` | MIT OR Apache-2.0 | Does the thing — see below — but at the cost of the whole embedded triple store this project already chose not to adopt |
+
+**`oxigraph` itself has the reference implementation**, and it is worth
+reading even though the crate is not adopted:
+`lib/oxigraph/src/sparql/http.rs` implements exactly this handler, using
+`oxhttp::Client`, **POST with `Content-Type: application/sparql-query`**
+(not GET-with-query-string, which is what Slice B originally shipped), an
+`Accept` header naming both JSON and XML, and a configurable global timeout.
+It is not exported as a separate crate — it is embedded in the full
+`oxigraph` distribution and uses that crate's own internal types, so there is
+nothing here to depend on. This is the same shape as the Apache AGE finding
+in this document's introduction: the capability is *architecturally*
+entangled with a full system graph-owl does not want, even though the
+capability itself is small.
+
+**Not adopted, for the reason already established for `oxigraph` in this
+project**: pulling in the full embeddable store to reuse one internal module
+would import a second query engine and a second storage model this project
+does not use, for a few hundred lines it can read instead. Confirmed against
+the actual spec
+(https://www.w3.org/TR/sparql11-protocol/#query-via-post-direct) that
+POST-directly with `application/sparql-query` is one of the three
+spec-defined submission methods — the spec, not Oxigraph's choice, is what
+`federation.rs`'s doc comment cites as the reason. **Slice B's HTTP call was
+rewritten** from GET-with-query-string to POST-directly with
+content-negotiated response parsing (`QueryResultsFormat::from_media_type`
+against the response's own `Content-Type`, rather than assuming JSON) as a
+direct result of this check — a genuine correctness improvement (GET embeds
+an unbounded `SERVICE` pattern in a URL, which a real proxy can reject on
+length) that would have shipped as a known gap had the check run on schedule.

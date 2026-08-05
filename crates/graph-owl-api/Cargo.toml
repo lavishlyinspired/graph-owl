@@ -22,8 +22,11 @@ graph-owl-ontology = { path = "../graph-owl-ontology" }
 graph-owl-resolution = { path = "../graph-owl-resolution" }
 spareval = "0.2"
 spargebra = "0.4"
+sparesults = "0.3"
 oxrdf = "0.3.3"
 oxiri = "0.2"
+reqwest.workspace = true
+bytes = "1"
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -40,6 +43,7 @@ rand.workspace = true
 base64.workspace = true
 graph-owl-storage-memory.workspace = true
 graph-owl-storage-postgres.workspace = true
+axum.workspace = true
 
 [lints]
 workspace = true
