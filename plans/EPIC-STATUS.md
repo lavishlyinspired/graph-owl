@@ -90,7 +90,7 @@ is the condition that index exists to catch.
 | **97** | 10, 12 | [`97-incremental-parallel-reasoning.md`](97-incremental-parallel-reasoning.md) | Not started | 0/2 | Epic 6 (semi-naive fixpoint), Epic 37a (the measurement) |
 | **98** | 11, 12 | [`98-owl-el-reasoning.md`](98-owl-el-reasoning.md) | In progress | 1/2 | Epic 6 (overlay, budgets, explainability), Epic 24 (ontologies as entities) |
 | **99** | 11, 12 | [`99-owl-ql-reasoning.md`](99-owl-ql-reasoning.md) | In progress | 1/2 | Epic 7 (query algebra to rewrite), Epic 6 (explanation contract) |
-| **100** | 11, 12 | [`100-profile-detection-and-routing.md`](100-profile-detection-and-routing.md) | Not started | 0/4 | Epic 6 (RL engine), Epic 24 (ontologies as entities) |
+| **100** | 11, 12 | [`100-profile-detection-and-routing.md`](100-profile-detection-and-routing.md) | In progress | 4/6 | Epic 6 (RL engine — shipped), ~~Epic 24 (ontologies as entities)~~ — **phantom*… |
 | **101** | 11 | [`101-sparql-federation.md`](101-sparql-federation.md) | **Shipped** | 5/5 | Epic 7 (algebra and executor), Epic 13 (authorization) |
 | **102** | 11 | [`102-read-write-partitions.md`](102-read-write-partitions.md) | Not started | 0/2 | Epic 4 (the flake table), Epic 37a (the measurement) |
 | **103** | 11 | [`103-in-process-traversal.md`](103-in-process-traversal.md) | Not started | 0/2 | Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger) |
@@ -618,8 +618,10 @@ is the condition that index exists to catch.
 
 ### Epic 100 — Ontology Profile Detection & Routing *(Demo 11, 12)*
 
-- [ ] Detection across RL, EL, QL; incomparable profiles not reported as supersets
-- [ ] Out-of-profile reasoning refused, naming the first offending axiom
+- [x] Detection across RL, EL, QL; incomparable profiles not reported as supersets
+- [x] Out-of-profile reasoning refused, naming the first offending axiom
+- [x] Override marks the result partial, carrying what was ignored
+- [x] Detection over 400k axioms completes in seconds
 - [ ] Profile badge + the reasoner that produced each derivation
 - [ ] Out-of-profile and override-partial results marked
 

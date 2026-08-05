@@ -1324,6 +1324,25 @@ impl Catalog {
         // QL's own grammar has no cardinality production in either class-
         // expression position at all (verified against the spec directly,
         // 5 August 2026 — see `99-owl-ql-reasoning.md`).
+        //
+        // **Unlike `hasKey`/`propertyChainAxiom` above, a cardinality
+        // restriction is never asserted directly on the class it
+        // restricts.** In the OWL/RDF mapping it is always an anonymous
+        // class expression — `Person rdfs:subClassOf [ owl:onProperty p ;
+        // owl:maxCardinality 2 ]` — so the predicate's own subject is the
+        // restriction node (skolemized, since this project's `Sid` has no
+        // blank-node type — the same fact `graph-owl-reasoning-el`'s own
+        // doc comment already records), not the named class. Found via
+        // this epic's own integration test asserting against a properly
+        // -shaped fixture rather than one that put the predicate directly
+        // on the class: the earlier version of this loop did exactly
+        // that, silently under-detecting every real cardinality
+        // restriction a caller would actually assert. Fixed the same way
+        // `graph_owl_reasoning_el::find_forbidden_axioms` already does it
+        // — collect the restriction subjects, then walk `subClassOf` to
+        // find which named class points at one.
+        let mut cardinality_restrictions: std::collections::HashSet<Sid> =
+            std::collections::HashSet::new();
         for predicate_name in [
             "cardinality",
             "minCardinality",
@@ -1339,15 +1358,17 @@ impl Catalog {
                 })
                 .await
                 .map_err(storage_error)?;
-            forbidden.extend(
-                flakes
-                    .into_iter()
-                    .map(|f| graph_owl_reasoning_ql::RefusedAxiom {
-                        class: f.s,
-                        construct: graph_owl_reasoning_ql::ForbiddenConstruct::Cardinality,
-                    }),
-            );
+            cardinality_restrictions.extend(flakes.into_iter().map(|f| f.s));
         }
+        forbidden.extend(subclass_of_edges.iter().filter_map(|f| match &f.o {
+            FlakeValue::Ref(object) if cardinality_restrictions.contains(object) => {
+                Some(graph_owl_reasoning_ql::RefusedAxiom {
+                    class: f.s.clone(),
+                    construct: graph_owl_reasoning_ql::ForbiddenConstruct::Cardinality,
+                })
+            }
+            _ => None,
+        }));
 
         Ok(graph_owl_reasoning_ql::Tbox {
             subclass_of,
@@ -1562,6 +1583,166 @@ impl Catalog {
             restriction_constructs,
             inverse_properties,
             watermark,
+        })
+    }
+
+    /// Checks the ontology's `TBox` against every OWL profile at once —
+    /// Epic 100. Reuses [`Self::fetch_el_tbox`]/[`Self::fetch_ql_tbox`]
+    /// directly rather than re-deriving them; RL's own slice is fetched
+    /// here since neither existing method reads it.
+    ///
+    /// # Errors
+    /// `Storage` if no graph engine is configured, or a read fails.
+    pub async fn detect_ontology_profiles(
+        &self,
+    ) -> Result<graph_owl_ontology::profile::Detection, CatalogError> {
+        let Some(graph) = &self.graph else {
+            return Err(CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            )));
+        };
+
+        let rl_tbox = self.fetch_rl_tbox(graph.as_ref()).await?;
+        let el_tbox = self.fetch_el_tbox(graph.as_ref()).await?;
+        let ql_tbox = self.fetch_ql_tbox(graph.as_ref()).await?;
+
+        Ok(graph_owl_ontology::profile::Detection {
+            rl: graph_owl_ontology::profile::detect_rl(&rl_tbox),
+            el: graph_owl_ontology::profile::detect_el(&el_tbox),
+            ql: graph_owl_ontology::profile::detect_ql(&ql_tbox),
+        })
+    }
+
+    /// [`Self::detect_ontology_profiles`], then decision 5's preference
+    /// applied — Epic 100 Slice C.
+    ///
+    /// # Errors
+    /// See [`Self::detect_ontology_profiles`].
+    pub async fn route_ontology_reasoning(
+        &self,
+    ) -> Result<graph_owl_ontology::profile::RoutingDecision, CatalogError> {
+        let detection = self.detect_ontology_profiles().await?;
+        Ok(graph_owl_ontology::profile::route(&detection))
+    }
+
+    /// Decision 3's override: proceed with `profile` past a refusal anyway.
+    /// The `force` flag Epic 100 Slice C's plan places at the caller
+    /// (`Catalog`) rather than in `graph-owl-ontology` itself, since
+    /// choosing to accept a partial result is a policy decision, not
+    /// something the pure profile-grammar check should decide on its own.
+    ///
+    /// # Errors
+    /// See [`Self::detect_ontology_profiles`].
+    pub async fn force_ontology_reasoning(
+        &self,
+        profile: graph_owl_ontology::profile::Profile,
+    ) -> Result<graph_owl_ontology::profile::PartialRouting, CatalogError> {
+        let detection = self.detect_ontology_profiles().await?;
+        Ok(graph_owl_ontology::profile::override_refusal(
+            &detection, profile,
+        ))
+    }
+
+    async fn fetch_rl_tbox(
+        &self,
+        graph: &dyn graph_owl_engine::TripleStore,
+    ) -> Result<graph_owl_ontology::profile::RlTbox, CatalogError> {
+        use graph_owl_core::flake::{FlakeValue, Sid, TriplePattern, namespace};
+
+        let storage_error = |e: graph_owl_engine::EngineError| {
+            CatalogError::Storage(StorageError::Unexpected(e.to_string()))
+        };
+
+        let disjoint_unions = graph
+            .query_pattern(&TriplePattern {
+                p: Some(Sid::new(namespace::OWL, "disjointUnionOf")),
+                ..Default::default()
+            })
+            .await
+            .map_err(storage_error)?
+            .into_iter()
+            .map(|f| f.s)
+            .collect();
+
+        let reflexive_properties = graph
+            .query_pattern(&TriplePattern {
+                p: Some(Sid::new(namespace::RDF, "type")),
+                o: Some(FlakeValue::Ref(Sid::new(
+                    namespace::OWL,
+                    "ReflexiveProperty",
+                ))),
+                ..Default::default()
+            })
+            .await
+            .map_err(storage_error)?
+            .into_iter()
+            .map(|f| f.s)
+            .collect();
+
+        // A cardinality restriction is a (skolemized) restriction node,
+        // reached from a named class only via `subClassOf` — never a
+        // predicate directly on the class itself. The identical fact
+        // `graph_owl_reasoning_el`'s own doc comment already records for
+        // `allValuesFrom`/`unionOf`/`complementOf`; `RlCardinalityShape`'s
+        // own doc comment explains why RL needs the same treatment.
+        let subclass_of_flakes = graph
+            .query_pattern(&TriplePattern {
+                p: Some(Sid::new(namespace::RDFS, "subClassOf")),
+                ..Default::default()
+            })
+            .await
+            .map_err(storage_error)?;
+        let subclass_of: Vec<(Sid, Sid)> = subclass_of_flakes
+            .iter()
+            .filter_map(|f| match &f.o {
+                FlakeValue::Ref(object) => Some((f.s.clone(), object.clone())),
+                _ => None,
+            })
+            .collect();
+
+        let mut restriction_cardinalities = Vec::new();
+        for predicate_name in [
+            "minCardinality",
+            "cardinality",
+            "qualifiedCardinality",
+            "minQualifiedCardinality",
+            "maxQualifiedCardinality",
+        ] {
+            let flakes = graph
+                .query_pattern(&TriplePattern {
+                    p: Some(Sid::new(namespace::OWL, predicate_name)),
+                    ..Default::default()
+                })
+                .await
+                .map_err(storage_error)?;
+            restriction_cardinalities.extend(
+                flakes
+                    .into_iter()
+                    .map(|f| (f.s, graph_owl_ontology::profile::RlCardinalityShape::Other)),
+            );
+        }
+        let max_cardinality_flakes = graph
+            .query_pattern(&TriplePattern {
+                p: Some(Sid::new(namespace::OWL, "maxCardinality")),
+                ..Default::default()
+            })
+            .await
+            .map_err(storage_error)?;
+        restriction_cardinalities.extend(max_cardinality_flakes.into_iter().filter_map(
+            |f| match f.o {
+                FlakeValue::Int(value) => Some((
+                    f.s,
+                    graph_owl_ontology::profile::RlCardinalityShape::MaxCardinality(value),
+                )),
+                _ => None,
+            },
+        ));
+
+        Ok(graph_owl_ontology::profile::RlTbox {
+            disjoint_unions,
+            reflexive_properties,
+            subclass_of,
+            restriction_cardinalities,
         })
     }
 
@@ -23616,14 +23797,22 @@ mod owl_ql_reasoning_tests {
         let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
 
         graph
-            .assert_flakes(&[Flake::assert(
-                dsc("Person"),
-                Sid::new(namespace::OWL, "maxCardinality"),
-                FlakeValue::Int(2),
-                0,
-            )])
+            .assert_flakes(&[
+                Flake::assert(
+                    dsc("Person"),
+                    Sid::new(namespace::RDFS, "subClassOf"),
+                    FlakeValue::Ref(dsc("restriction-1")),
+                    0,
+                ),
+                Flake::assert(
+                    dsc("restriction-1"),
+                    Sid::new(namespace::OWL, "maxCardinality"),
+                    FlakeValue::Int(2),
+                    0,
+                ),
+            ])
             .await
-            .expect("seed maxCardinality");
+            .expect("seed maxCardinality restriction");
 
         let outcome = catalog
             .sparql(
@@ -23635,7 +23824,12 @@ mod owl_ql_reasoning_tests {
             .await
             .expect("query");
 
-        assert_eq!(outcome.refused_axioms.len(), 1, "{:?}", outcome.refused_axioms);
+        assert_eq!(
+            outcome.refused_axioms.len(),
+            1,
+            "{:?}",
+            outcome.refused_axioms
+        );
         assert_eq!(outcome.refused_axioms[0].class, dsc("Person"));
         assert_eq!(
             outcome.refused_axioms[0].construct,
@@ -23947,5 +24141,182 @@ mod owl_el_reasoning_tests {
             .await
             .expect("second classification");
         assert_eq!(first.subsumptions, second.subsumptions);
+    }
+}
+
+/// Epic 100: profile detection and routing, wired through
+/// `Catalog::detect_ontology_profiles`/`route_ontology_reasoning`.
+///
+/// The pure logic (which constructs exclude which profile, routing
+/// preference, refusal, override) is already exhaustively tested in
+/// `graph-owl-ontology::profile`'s own 18 tests. These prove the *wiring*:
+/// fetching all three `Tbox`es from real flakes and combining them
+/// correctly — the same reasoning `owl_ql_reasoning_tests`/
+/// `owl_el_reasoning_tests` already give for not re-testing pure logic a
+/// layer up.
+#[cfg(test)]
+mod ontology_profile_tests {
+    use super::*;
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+    use projection_isolation_tests::RecordingGraph;
+    use tests::InMemoryStorage;
+
+    fn dsc(id: &str) -> Sid {
+        Sid::dsc(id)
+    }
+
+    /// An ordinary ontology — a couple of `rdfs:subClassOf` edges, nothing
+    /// any profile forbids — is a member of all three at once, and routes
+    /// to RL per decision 5's preference.
+    #[tokio::test]
+    async fn an_ordinary_ontology_is_in_every_profile_and_routes_to_rl() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&[Flake::assert(
+                dsc("Table"),
+                Sid::new(namespace::RDFS, "subClassOf"),
+                FlakeValue::Ref(dsc("DataAsset")),
+                0,
+            )])
+            .await
+            .expect("seed subclass");
+
+        let detection = catalog.detect_ontology_profiles().await.expect("detection");
+        assert_eq!(detection.member_profiles().len(), 3, "{detection:?}");
+
+        let routing = catalog.route_ontology_reasoning().await.expect("routing");
+        assert_eq!(
+            routing,
+            graph_owl_ontology::profile::RoutingDecision::Route(
+                graph_owl_ontology::profile::Profile::Rl
+            )
+        );
+    }
+
+    /// **The slice's own RED test.** A construct outside every profile —
+    /// `owl:maxCardinality 2` — is refused, naming the offending class,
+    /// fetched from real flakes rather than a hand-built fixture.
+    #[tokio::test]
+    async fn an_ontology_outside_every_profile_is_refused_naming_the_axiom() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&[
+                Flake::assert(
+                    dsc("Person"),
+                    Sid::new(namespace::RDFS, "subClassOf"),
+                    FlakeValue::Ref(dsc("restriction-1")),
+                    0,
+                ),
+                Flake::assert(
+                    dsc("restriction-1"),
+                    Sid::new(namespace::OWL, "maxCardinality"),
+                    FlakeValue::Int(2),
+                    0,
+                ),
+            ])
+            .await
+            .expect("seed maxCardinality restriction");
+
+        let detection = catalog.detect_ontology_profiles().await.expect("detection");
+        assert!(detection.member_profiles().is_empty(), "{detection:?}");
+
+        let routing = catalog.route_ontology_reasoning().await.expect("routing");
+        assert_eq!(
+            routing,
+            graph_owl_ontology::profile::RoutingDecision::Refused {
+                first_offending_axiom: dsc("Person"),
+                reason: "owl:maxCardinality 2 exceeds OWL 2 RL's 0-or-1 limit".to_string(),
+            }
+        );
+    }
+
+    /// A construct RL permits (`maxCardinality` at 0 or 1) but EL forbids
+    /// entirely — the fetched-from-flakes version of the incomparability
+    /// `graph-owl-ontology`'s own unit test already proves in isolation.
+    #[tokio::test]
+    async fn a_legal_rl_cardinality_still_excludes_el() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&[
+                Flake::assert(
+                    dsc("Person"),
+                    Sid::new(namespace::RDFS, "subClassOf"),
+                    FlakeValue::Ref(dsc("restriction-1")),
+                    0,
+                ),
+                Flake::assert(
+                    dsc("restriction-1"),
+                    Sid::new(namespace::OWL, "maxCardinality"),
+                    FlakeValue::Int(1),
+                    0,
+                ),
+            ])
+            .await
+            .expect("seed maxCardinality restriction");
+
+        let detection = catalog.detect_ontology_profiles().await.expect("detection");
+
+        assert!(detection.rl.member, "{:?}", detection.rl);
+        assert!(!detection.el.member, "{:?}", detection.el);
+    }
+
+    /// **Slice C's own override.** A caller who explicitly forces a profile
+    /// past a refusal gets a result that can never be mistaken for a
+    /// complete one: `partial` plus exactly the axioms that profile's own
+    /// check could not account for.
+    #[tokio::test]
+    async fn forcing_a_profile_past_a_refusal_marks_the_result_partial() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&[
+                Flake::assert(
+                    dsc("Person"),
+                    Sid::new(namespace::RDFS, "subClassOf"),
+                    FlakeValue::Ref(dsc("restriction-1")),
+                    0,
+                ),
+                Flake::assert(
+                    dsc("restriction-1"),
+                    Sid::new(namespace::OWL, "maxCardinality"),
+                    FlakeValue::Int(2),
+                    0,
+                ),
+            ])
+            .await
+            .expect("seed maxCardinality restriction");
+
+        let partial = catalog
+            .force_ontology_reasoning(graph_owl_ontology::profile::Profile::Rl)
+            .await
+            .expect("force");
+
+        assert_eq!(partial.profile, graph_owl_ontology::profile::Profile::Rl);
+        assert_eq!(partial.ignored.len(), 1, "{:?}", partial.ignored);
+        assert_eq!(partial.ignored[0].subject, dsc("Person"));
+    }
+
+    #[tokio::test]
+    async fn detect_ontology_profiles_without_a_graph_engine_is_a_storage_error() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage);
+
+        let outcome = catalog.detect_ontology_profiles().await;
+
+        assert!(
+            matches!(outcome, Err(CatalogError::Storage(_))),
+            "{outcome:?}"
+        );
     }
 }

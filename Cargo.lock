@@ -1325,6 +1325,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "graph-owl-core",
+ "graph-owl-reasoning-el",
+ "graph-owl-reasoning-ql",
  "serde",
  "thiserror 2.0.19",
  "uuid",
