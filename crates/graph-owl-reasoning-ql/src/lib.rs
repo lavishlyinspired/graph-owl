@@ -85,6 +85,13 @@ pub struct QlBranch {
 /// `graph_owl_reasoning::RuleName`'s own vocabulary, since these are the
 /// identical axioms, checked for presence here rather than executed as
 /// rules.
+///
+/// `Cardinality` was added 5 August 2026, found while researching Epic
+/// 100's own profile grammar: the W3C OWL 2 Profiles document's actual QL
+/// grammar (Section 3.2.3, `subClassExpression`/`superClassExpression`,
+/// verified verbatim) has no cardinality production in either position at
+/// all — QL forbids it entirely, the same as EL, and this crate had never
+/// checked for it. Recorded in `99-owl-ql-reasoning.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForbiddenConstruct {
     PropertyChain,
@@ -92,6 +99,7 @@ pub enum ForbiddenConstruct {
     FunctionalProperty,
     InverseFunctionalProperty,
     HasKey,
+    Cardinality,
 }
 
 /// A class the query touched that carries a construct QL cannot rewrite

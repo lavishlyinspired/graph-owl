@@ -1320,6 +1320,34 @@ impl Catalog {
                     }),
             );
         }
+        // Every cardinality-shaped predicate maps to the one construct —
+        // QL's own grammar has no cardinality production in either class-
+        // expression position at all (verified against the spec directly,
+        // 5 August 2026 — see `99-owl-ql-reasoning.md`).
+        for predicate_name in [
+            "cardinality",
+            "minCardinality",
+            "maxCardinality",
+            "qualifiedCardinality",
+            "minQualifiedCardinality",
+            "maxQualifiedCardinality",
+        ] {
+            let flakes = graph
+                .query_pattern(&TriplePattern {
+                    p: Some(Sid::new(namespace::OWL, predicate_name)),
+                    ..Default::default()
+                })
+                .await
+                .map_err(storage_error)?;
+            forbidden.extend(
+                flakes
+                    .into_iter()
+                    .map(|f| graph_owl_reasoning_ql::RefusedAxiom {
+                        class: f.s,
+                        construct: graph_owl_reasoning_ql::ForbiddenConstruct::Cardinality,
+                    }),
+            );
+        }
 
         Ok(graph_owl_reasoning_ql::Tbox {
             subclass_of,
@@ -23574,6 +23602,44 @@ mod owl_ql_reasoning_tests {
             outcome.ql_rewrite.is_none(),
             "no subclasses were declared, so nothing to explain: {:?}",
             outcome.ql_rewrite
+        );
+    }
+
+    /// **Found 5 August 2026, while researching Epic 100's own profile
+    /// grammar.** QL's actual grammar (verified verbatim against the W3C
+    /// spec) has no cardinality production in either class-expression
+    /// position at all — `fetch_ql_tbox` never checked for it until now.
+    #[tokio::test]
+    async fn a_cardinality_restriction_is_named_as_outside_ql() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&[Flake::assert(
+                dsc("Person"),
+                Sid::new(namespace::OWL, "maxCardinality"),
+                FlakeValue::Int(2),
+                0,
+            )])
+            .await
+            .expect("seed maxCardinality");
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?x WHERE { ?x a <https://graph-owl.dev/ns/catalog#Person> }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(outcome.refused_axioms.len(), 1, "{:?}", outcome.refused_axioms);
+        assert_eq!(outcome.refused_axioms[0].class, dsc("Person"));
+        assert_eq!(
+            outcome.refused_axioms[0].construct,
+            graph_owl_reasoning_ql::ForbiddenConstruct::Cardinality
         );
     }
 
