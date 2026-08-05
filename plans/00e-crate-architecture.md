@@ -48,6 +48,7 @@ This plan exists because a 28-crate architecture was proposed by mapping the 54-
 | `graph-owl-mcp` | MCP server | 14 | Protocol implementation |
 | `graph-owl-cli` | metadata-as-code, admin, DevOps tooling | 20 | clap; binary not library |
 | `graph-owl-storage-memory` | In-memory `Storage` impl, promoted from the test fake | 37c | **Publishability** — it is what an embedding consumer links instead of Postgres. Named in `37c-embeddable.md`'s header and previously missing from this table |
+| `graph-owl-reasoning-ql` | OWL 2 QL query rewriting over `spargebra` algebra | 99 | **Distinct dependency set** — it needs `spargebra`'s algebra types, which `graph-owl-reasoning` (RL, forward-chaining over `Flake`s directly) never should: RL reasons over facts, QL rewrites queries, and the two need different inputs entirely. **Also pure logic** — rewrite takes an algebra tree and a slice of subclass/subproperty edges, returns a rewritten tree, no I/O |
 
 **Why the three pure-logic crates are separate**: constraint validation, reasoning, and query planning are the highest-stakes logic in the system and each is a function over data the caller supplies. Separating them makes them testable without a database and keeps I/O out of code that must be exhaustively mutation-tested. That is a real boundary, not a taxonomic one.
 

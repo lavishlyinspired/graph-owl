@@ -581,3 +581,33 @@ against the response's own `Content-Type`, rather than assuming JSON) as a
 direct result of this check — a genuine correctness improvement (GET embeds
 an unbounded `SERVICE` pattern in a URL, which a real proxy can reject on
 length) that would have shipped as a known gap had the check run on schedule.
+
+### OWL 2 QL query rewriting (PerfectRef or equivalent) — checked before Epic 99's slices were written
+
+**5 August 2026, checked before any implementation, per this document's own
+standing rule.** Searched crates.io for a permissively-licensed Rust crate
+implementing OWL 2 QL query rewriting (the PerfectRef/Presto/Rapid family of
+algorithms — expanding a query against a TBox into a union of queries a plain
+database can answer, the DL-Lite literature's own name for what
+`99-owl-ql-reasoning.md` calls "rewriting the query instead of deriving
+facts"):
+
+| Name searched | Result |
+|---|---|
+| `owl-ql`, `dl-lite`, `perfectref`, `owl2ql`, `query-rewriting`, `whelk`, `whelk-rs`, `owlrs` | Do not exist on crates.io |
+| `reasonable` | Exists (BSD-3-Clause, real, 138k downloads) — but it is an **OWL 2 RL** reasoner (see "The pattern that lets us adopt reasoners anyway" above), the profile Epic 6 already ships its own engine for. It materialises facts; it does not rewrite queries, and QL's entire value proposition (first-order rewritable to SQL, §"What QL is genuinely good for" in the plan) is precisely the thing RL-shaped tools do not do |
+| `sparql-algebra` (`rust-rdf/sparql.rs`) | Unlicense, but version `0.0.0` — a reserved name, not a released crate, the same signal `sparql` (`0.0.0`) already carried in the SPARQL Protocol check above |
+| `horned-owl` | LGPL-3.0, already evaluated above for a different purpose (OWL syntax import) — an ontology *parser*, not a query rewriter, so irrelevant to this question even where its licence were acceptable |
+
+**No candidate exists.** This is a build case, and decision 1 in this
+document ("no parser is written for a standard we did not invent") does not
+apply here the way it did for SPARQL/Turtle/Cypher — QL rewriting is not a
+parser for a syntax; it is an algorithm over the algebra `graph-owl-query`'s
+already-adopted `spargebra` parses. The adopted piece (parsing to standard
+SPARQL algebra) is already in place per `99-owl-ql-reasoning.md` decision 1;
+what remains unbuilt is genuinely novel to this system — expanding algebra
+nodes against `graph-owl-ontology`'s subclass/subproperty axioms and handing
+the result back to the same planner, bounded by a rewrite-specific budget
+(branch count and depth, not the fact-count/iteration shape
+`graph-owl-reasoning::Budget` uses for RL's fixpoint, which answers a
+different question).

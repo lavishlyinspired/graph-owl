@@ -367,6 +367,11 @@ fn subject_of(principal: &Principal) -> Subject {
 pub struct SparqlBudget {
     /// The most facts a single query may scan before the answer is truncated.
     pub max_facts: usize,
+    /// How far an Epic 99 OWL 2 QL rewrite may expand a `rdf:type` pattern
+    /// before it reports truncation instead of growing further. Distinct
+    /// from `max_facts`: one bounds what the evaluator reads, this bounds
+    /// what the rewrite writes before the evaluator ever runs.
+    pub ql: graph_owl_reasoning_ql::RewriteBudget,
 }
 
 impl Default for SparqlBudget {
@@ -376,7 +381,10 @@ impl Default for SparqlBudget {
         // that the materialised set stays well inside the memory budget in
         // `00a`. Raised deliberately per deployment, not per query, because a
         // caller who could raise their own budget does not have one.
-        Self { max_facts: 50_000 }
+        Self {
+            max_facts: 50_000,
+            ql: graph_owl_reasoning_ql::RewriteBudget::default(),
+        }
     }
 }
 
@@ -432,6 +440,30 @@ pub struct SparqlOutcome {
     /// matching data", the exact failure this project's `truncated` field
     /// already refuses to allow elsewhere.
     pub silenced_endpoints: Vec<String>,
+    /// The OWL 2 QL rewrite this query underwent, if any — Epic 99 Slice B.
+    /// `None` when nothing was rewritten, deliberately distinct from an
+    /// empty list: silence is the signal that there is nothing to explain,
+    /// not a shape a client has to interpret.
+    pub ql_rewrite: Option<QlRewrite>,
+    /// A `TBox` construct QL cannot express, found on a class or property
+    /// this query touched — Epic 99 Slice C. Reported alongside the answer
+    /// rather than refusing the whole query, and distinct from `ql_rewrite`
+    /// so a client can tell "expanded, and also incomplete" from "expanded,
+    /// fully".
+    pub refused_axioms: Vec<graph_owl_reasoning_ql::RefusedAxiom>,
+}
+
+/// What one query's OWL 2 QL rewrite produced — Epic 99 Slice B. The
+/// explanation Epic 6 requires, met by showing the rewriting itself rather
+/// than a derivation chain (`99-owl-ql-reasoning.md`'s own "different kind
+/// of explanation" note): QL derives nothing, so there is no chain to show.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QlRewrite {
+    /// The rewritten query, rendered — what actually ran.
+    pub expanded_query: String,
+    /// Each `UNION` branch the rewrite added, and the axiom that produced
+    /// it.
+    pub branches: Vec<graph_owl_reasoning_ql::QlBranch>,
 }
 
 /// One value in a [`CypherRow`] — Epic 7d Slice D.
@@ -1071,8 +1103,186 @@ impl Catalog {
                 )])
             })?;
 
-        self.execute_algebra(principal, &parsed, as_of, budget)
+        // Epic 99: rewritten *before* `execute_algebra` ever runs, so the
+        // same predicate `scoped_facts` compiles inside it applies to every
+        // `UNION` branch the rewrite added — see `99-owl-ql-reasoning.md`'s
+        // own "Where this hooks in" note. A query form other than `Select`,
+        // or a catalog with no graph engine configured, rewrites to itself.
+        let (parsed, ql_rewrite, refused_axioms, ql_truncated) =
+            self.rewrite_for_ql(parsed, budget.ql).await?;
+
+        let mut outcome = self
+            .execute_algebra(principal, &parsed, as_of, budget)
+            .await?;
+        outcome.ql_rewrite = ql_rewrite;
+        outcome.refused_axioms = refused_axioms;
+        outcome.truncated = outcome.truncated || ql_truncated;
+        Ok(outcome)
+    }
+
+    /// Epic 99: expands every `rdf:type` triple pattern naming a class with
+    /// known subclasses into a `UNION`, using `graph_owl_reasoning_ql`'s
+    /// pure rewrite function. Fetches the `TBox` slice that function needs
+    /// itself — the crate performs no I/O of its own, per its own doc
+    /// comment.
+    ///
+    /// Returns the (possibly unchanged) query, an explanation if anything
+    /// rewrote, any refused axioms, and whether the rewrite truncated.
+    #[allow(clippy::type_complexity)]
+    async fn rewrite_for_ql(
+        &self,
+        parsed: spargebra::Query,
+        ql_budget: graph_owl_reasoning_ql::RewriteBudget,
+    ) -> Result<
+        (
+            spargebra::Query,
+            Option<QlRewrite>,
+            Vec<graph_owl_reasoning_ql::RefusedAxiom>,
+            bool,
+        ),
+        CatalogError,
+    > {
+        let spargebra::Query::Select {
+            pattern,
+            dataset,
+            base_iri,
+        } = &parsed
+        else {
+            // ASK/CONSTRUCT/DESCRIBE are not rewritten — a stated scope
+            // boundary (`99-owl-ql-reasoning.md`'s own note), not a silent
+            // gap: they simply pass through unchanged.
+            return Ok((parsed, None, Vec::new(), false));
+        };
+        let Some(graph) = &self.graph else {
+            return Ok((parsed, None, Vec::new(), false));
+        };
+
+        let tbox = self.fetch_ql_tbox(graph.as_ref()).await?;
+        if tbox.subclass_of.is_empty() && tbox.forbidden.is_empty() {
+            return Ok((parsed, None, Vec::new(), false));
+        }
+
+        let outcome = graph_owl_reasoning_ql::rewrite(pattern, &tbox, &ql_budget);
+        if outcome.branches.is_empty() && outcome.refused_axioms.is_empty() {
+            return Ok((parsed, None, Vec::new(), outcome.truncated));
+        }
+
+        let rewritten = spargebra::Query::Select {
+            dataset: dataset.clone(),
+            pattern: outcome.pattern.clone(),
+            base_iri: base_iri.clone(),
+        };
+        let ql_rewrite = if outcome.branches.is_empty() {
+            None
+        } else {
+            Some(QlRewrite {
+                expanded_query: outcome.pattern.to_string(),
+                branches: outcome.branches,
+            })
+        };
+        Ok((
+            rewritten,
+            ql_rewrite,
+            outcome.refused_axioms,
+            outcome.truncated,
+        ))
+    }
+
+    /// Reads the `TBox` slice `graph_owl_reasoning_ql::rewrite` needs —
+    /// every `rdfs:subClassOf` edge, and every class or property carrying a
+    /// construct QL cannot express, the identical vocabulary
+    /// `graph_owl_reasoning::RuleName` names for RL. Fetched wholesale
+    /// rather than scoped to the classes one query names: `TBox` data is
+    /// schema-sized, not instance-sized, the same assumption
+    /// `Self::reasoning_base` already makes for RL's own base fact set.
+    async fn fetch_ql_tbox(
+        &self,
+        graph: &dyn graph_owl_engine::TripleStore,
+    ) -> Result<graph_owl_reasoning_ql::Tbox, CatalogError> {
+        use graph_owl_core::flake::{FlakeValue, Sid, TriplePattern, namespace};
+
+        let storage_error = |e: graph_owl_engine::EngineError| {
+            CatalogError::Storage(StorageError::Unexpected(e.to_string()))
+        };
+
+        let subclass_of_edges = graph
+            .query_pattern(&TriplePattern {
+                p: Some(Sid::new(namespace::RDFS, "subClassOf")),
+                ..Default::default()
+            })
             .await
+            .map_err(storage_error)?;
+        let subclass_of: Vec<(Sid, Sid)> = subclass_of_edges
+            .iter()
+            .filter_map(|f| match &f.o {
+                FlakeValue::Ref(parent) => Some((f.s.clone(), parent.clone())),
+                _ => None,
+            })
+            .collect();
+
+        let mut forbidden = Vec::new();
+        for (construct, sid) in [
+            (
+                graph_owl_reasoning_ql::ForbiddenConstruct::TransitiveProperty,
+                Sid::new(namespace::OWL, "TransitiveProperty"),
+            ),
+            (
+                graph_owl_reasoning_ql::ForbiddenConstruct::FunctionalProperty,
+                Sid::new(namespace::OWL, "FunctionalProperty"),
+            ),
+            (
+                graph_owl_reasoning_ql::ForbiddenConstruct::InverseFunctionalProperty,
+                Sid::new(namespace::OWL, "InverseFunctionalProperty"),
+            ),
+        ] {
+            let typed = graph
+                .query_pattern(&TriplePattern {
+                    p: Some(Sid::new(namespace::RDF, "type")),
+                    o: Some(FlakeValue::Ref(sid)),
+                    ..Default::default()
+                })
+                .await
+                .map_err(storage_error)?;
+            forbidden.extend(
+                typed
+                    .into_iter()
+                    .map(|f| graph_owl_reasoning_ql::RefusedAxiom {
+                        class: f.s,
+                        construct,
+                    }),
+            );
+        }
+        for (construct, predicate) in [
+            (
+                graph_owl_reasoning_ql::ForbiddenConstruct::HasKey,
+                Sid::new(namespace::OWL, "hasKey"),
+            ),
+            (
+                graph_owl_reasoning_ql::ForbiddenConstruct::PropertyChain,
+                Sid::new(namespace::OWL, "propertyChainAxiom"),
+            ),
+        ] {
+            let direct = graph
+                .query_pattern(&TriplePattern {
+                    p: Some(predicate),
+                    ..Default::default()
+                })
+                .await
+                .map_err(storage_error)?;
+            forbidden.extend(
+                direct
+                    .into_iter()
+                    .map(|f| graph_owl_reasoning_ql::RefusedAxiom {
+                        class: f.s,
+                        construct,
+                    }),
+            );
+        }
+
+        Ok(graph_owl_reasoning_ql::Tbox {
+            subclass_of,
+            forbidden,
+        })
     }
 
     /// Answer a Cypher query over the same graph, scoped identically —
@@ -1342,6 +1552,12 @@ impl Catalog {
             variables: projected_variables(parsed),
             federated_endpoints,
             silenced_endpoints,
+            // Set by `sparql` after this returns, for the one caller that
+            // rewrites (`cypher`/`cypher_stream` never do — Cypher lowers
+            // straight to a `Select` and Epic 99 scopes rewriting to
+            // queries a caller typed as SPARQL).
+            ql_rewrite: None,
+            refused_axioms: Vec::new(),
         })
     }
 
@@ -22841,5 +23057,398 @@ mod entity_expansion_tests {
                 "the allowed family must still be visible: {visible:?}"
             );
         }
+    }
+}
+
+/// Epic 99: OWL 2 QL query rewriting, wired through `Catalog::sparql`.
+///
+/// **`TBox` axioms are independent of the catalog's own asset kinds.**
+/// `Asset`'s own `dsc:type` is a string property (`projection::fields`), not
+/// an `rdf:type` reference — the same reason RL's own `rule_sub_class_of`
+/// needs a real `rdf:type` triple asserted, not `AssetKind`. These tests
+/// therefore assert an *additional* `rdf:type` fact on a real asset's own
+/// `Sid` directly, alongside a free-standing ontology's `rdfs:subClassOf`
+/// axioms — exactly how a real ontology import or a `SPARQL INSERT` would
+/// attach business-ontology meaning to a catalog asset, independent of the
+/// containment hierarchy `AssetKind::parent_kind` already governs.
+///
+/// **Why real assets, not synthetic subjects.** `scoped_facts` (Epic 13)
+/// keeps only flakes whose *subject* is a currently-visible asset id — a
+/// free-standing ontology node like `:Table` is never one, so a `TBox`
+/// triple never reaches the evaluator (which is correct: it is read
+/// directly by the rewrite step via `fetch_ql_tbox`, bypassing that filter
+/// entirely, since a `TBox` is schema, not row data with an owner). An
+/// *instance* triple's subject must be a real, visible asset for its row to
+/// survive that filter and come back at all.
+#[cfg(test)]
+mod owl_ql_reasoning_tests {
+    use super::*;
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid, TriplePattern, namespace};
+    use projection_isolation_tests::RecordingGraph;
+    use tests::InMemoryStorage;
+
+    fn dsc(id: &str) -> Sid {
+        Sid::dsc(id)
+    }
+
+    fn rdf_type() -> Sid {
+        Sid::new(namespace::RDF, "type")
+    }
+
+    fn subclass_of() -> Sid {
+        Sid::new(namespace::RDFS, "subClassOf")
+    }
+
+    fn service(name: &str) -> UpsertAsset {
+        UpsertAsset {
+            kind: AssetKind::Service,
+            name: name.to_string(),
+            parent_id: None,
+            description: None,
+            properties: None,
+            extension: None,
+        }
+    }
+
+    async fn asset(catalog: &Catalog, name: &str) -> Uuid {
+        catalog
+            .upsert_asset(&Principal::system(), service(name))
+            .await
+            .expect("asset")
+            .id
+    }
+
+    async fn assert_type(graph: &RecordingGraph, subject: Sid, class: Sid) {
+        graph
+            .assert_flakes(&[Flake::assert(
+                subject,
+                rdf_type(),
+                FlakeValue::Ref(class),
+                0,
+            )])
+            .await
+            .expect("seed type");
+    }
+
+    async fn assert_subclass(graph: &RecordingGraph, child: Sid, parent: Sid) {
+        graph
+            .assert_flakes(&[Flake::assert(
+                child,
+                subclass_of(),
+                FlakeValue::Ref(parent),
+                0,
+            )])
+            .await
+            .expect("seed subclass");
+    }
+
+    fn subjects_of(outcome: &SparqlOutcome) -> std::collections::HashSet<String> {
+        outcome
+            .rows
+            .iter()
+            .filter_map(|row| row.get("x").cloned())
+            .collect()
+    }
+
+    /// **The slice's own RED test.** Instances are typed only as `Table` or
+    /// `View`, never directly as `DataAsset` — a rewrite that silently left
+    /// the query unchanged would answer zero rows here.
+    #[tokio::test]
+    async fn a_subclass_query_answers_without_materializing_anything() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let orders = asset(&catalog, "orders").await;
+        let active_orders = asset(&catalog, "active-orders").await;
+        assert_subclass(&graph, dsc("Table"), dsc("DataAsset")).await;
+        assert_subclass(&graph, dsc("View"), dsc("DataAsset")).await;
+        assert_type(
+            &graph,
+            graph_owl_core::projection::entity_sid(orders),
+            dsc("Table"),
+        )
+        .await;
+        assert_type(
+            &graph,
+            graph_owl_core::projection::entity_sid(active_orders),
+            dsc("View"),
+        )
+        .await;
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?x WHERE { ?x a <https://graph-owl.dev/ns/catalog#DataAsset> }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        let subjects = subjects_of(&outcome);
+        assert!(
+            subjects.iter().any(|s| s.contains(&orders.to_string())),
+            "{subjects:?}"
+        );
+        assert!(
+            subjects
+                .iter()
+                .any(|s| s.contains(&active_orders.to_string())),
+            "{subjects:?}"
+        );
+
+        let overlay = graph
+            .query_pattern(&TriplePattern {
+                cx: Some(Some(graph_owl_reasoning::reasoning_graph())),
+                ..Default::default()
+            })
+            .await
+            .expect("read overlay");
+        assert!(overlay.is_empty(), "{overlay:?}");
+    }
+
+    /// The negative that makes the positive above about *subclasses*
+    /// specifically: a class nothing is declared under is not rewritten.
+    #[tokio::test]
+    async fn a_class_with_no_known_subclasses_is_not_rewritten() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let standalone = asset(&catalog, "standalone").await;
+        assert_type(
+            &graph,
+            graph_owl_core::projection::entity_sid(standalone),
+            dsc("Standalone"),
+        )
+        .await;
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?x WHERE { ?x a <https://graph-owl.dev/ns/catalog#Standalone> }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert!(outcome.ql_rewrite.is_none(), "{:?}", outcome.ql_rewrite);
+        assert!(
+            subjects_of(&outcome)
+                .iter()
+                .any(|s| s.contains(&standalone.to_string())),
+            "the unrewritten query must still answer directly: {outcome:?}"
+        );
+    }
+
+    /// **Slice B's own RED test.** The explanation names the specific
+    /// classes that matched, not just how many branches there were.
+    #[tokio::test]
+    async fn the_rewritten_query_is_retrievable_and_names_each_branch() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        assert_subclass(&graph, dsc("Table"), dsc("DataAsset")).await;
+        assert_subclass(&graph, dsc("View"), dsc("DataAsset")).await;
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?x WHERE { ?x a <https://graph-owl.dev/ns/catalog#DataAsset> }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        let rewrite = outcome.ql_rewrite.expect("a rewrite happened");
+        let classes: std::collections::HashSet<Sid> =
+            rewrite.branches.iter().map(|b| b.class.clone()).collect();
+        assert_eq!(
+            classes,
+            std::collections::HashSet::from([dsc("Table"), dsc("View")]),
+            "{classes:?}"
+        );
+        assert!(
+            rewrite.expanded_query.contains("Table") && rewrite.expanded_query.contains("View"),
+            "{}",
+            rewrite.expanded_query
+        );
+    }
+
+    /// **Slice C's own RED test.** A construct QL cannot express is named,
+    /// not silently absorbed.
+    #[tokio::test]
+    async fn an_axiom_outside_ql_is_named_not_silently_dropped() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&[Flake::assert(
+                dsc("Person"),
+                Sid::new(namespace::OWL, "hasKey"),
+                FlakeValue::Ref(dsc("ssn")),
+                0,
+            )])
+            .await
+            .expect("seed hasKey");
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?x WHERE { ?x a <https://graph-owl.dev/ns/catalog#Person> }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(
+            outcome.refused_axioms.len(),
+            1,
+            "{:?}",
+            outcome.refused_axioms
+        );
+        assert_eq!(outcome.refused_axioms[0].class, dsc("Person"));
+        assert_eq!(
+            outcome.refused_axioms[0].construct,
+            graph_owl_reasoning_ql::ForbiddenConstruct::HasKey
+        );
+        assert!(
+            outcome.ql_rewrite.is_none(),
+            "no subclasses were declared, so nothing to explain: {:?}",
+            outcome.ql_rewrite
+        );
+    }
+
+    /// **Slice D's own RED test.** A hierarchy deeper than the budget stops
+    /// and reports it, never silently completing a narrower walk.
+    #[tokio::test]
+    async fn rewriting_past_the_budget_reports_truncation() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        assert_subclass(&graph, dsc("L1"), dsc("Root")).await;
+        assert_subclass(&graph, dsc("L2"), dsc("L1")).await;
+
+        let tight_budget = SparqlBudget {
+            ql: graph_owl_reasoning_ql::RewriteBudget {
+                max_branches: 256,
+                max_depth: 1,
+            },
+            ..SparqlBudget::default()
+        };
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?x WHERE { ?x a <https://graph-owl.dev/ns/catalog#Root> }",
+                None,
+                tight_budget,
+            )
+            .await
+            .expect("query");
+
+        assert!(outcome.truncated, "{outcome:?}");
+        let rewrite = outcome
+            .ql_rewrite
+            .expect("still rewrote as far as it could");
+        assert!(
+            rewrite.branches.iter().any(|b| b.class == dsc("L1")),
+            "{:?}",
+            rewrite.branches
+        );
+        assert!(
+            !rewrite.branches.iter().any(|b| b.class == dsc("L2")),
+            "the excluded level must not silently appear: {:?}",
+            rewrite.branches
+        );
+    }
+
+    /// **The important test in this slice**, per the same reasoning
+    /// `101-sparql-federation.md` gives its own leak-proof test: a
+    /// restricted principal must see only what their policy admits, even
+    /// through a rewrite that expanded the query on their behalf.
+    #[tokio::test]
+    async fn a_restricted_principal_sees_only_what_their_policy_admits_through_a_rewrite() {
+        use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let allowed = asset(&catalog, "warehouse").await;
+        let denied = asset(&catalog, "other-bank").await;
+        assert_subclass(&graph, dsc("Table"), dsc("DataAsset")).await;
+        assert_type(
+            &graph,
+            graph_owl_core::projection::entity_sid(allowed),
+            dsc("Table"),
+        )
+        .await;
+        assert_type(
+            &graph,
+            graph_owl_core::projection::entity_sid(denied),
+            dsc("Table"),
+        )
+        .await;
+
+        catalog
+            .upsert_policy(
+                &Policy {
+                    name: "warehouse-only".to_string(),
+                    rules: vec![Rule {
+                        name: "read-warehouse".to_string(),
+                        effect: Effect::Allow,
+                        operations: vec![MetadataOperation::ViewBasic],
+                        resources: ResourceMatcher::FqnPrefix("warehouse".to_string()),
+                    }],
+                },
+                &["restricted".to_string()],
+            )
+            .await
+            .expect("policy saves");
+        let asha = Principal {
+            id: "asha".to_string(),
+            name: "Asha".to_string(),
+            kind: graph_owl_core::PrincipalKind::User,
+            roles: vec!["restricted".to_string()],
+            is_admin: false,
+        };
+
+        let query = "SELECT ?x WHERE { ?x a <https://graph-owl.dev/ns/catalog#DataAsset> }";
+        let restricted_outcome = catalog
+            .sparql(&asha, query, None, SparqlBudget::default())
+            .await
+            .expect("restricted query");
+        let admin_outcome = catalog
+            .sparql(&Principal::system(), query, None, SparqlBudget::default())
+            .await
+            .expect("admin query");
+
+        let restricted_subjects = subjects_of(&restricted_outcome);
+        assert!(
+            restricted_subjects
+                .iter()
+                .any(|s| s.contains(&allowed.to_string())),
+            "{restricted_subjects:?}"
+        );
+        assert!(
+            !restricted_subjects
+                .iter()
+                .any(|s| s.contains(&denied.to_string())),
+            "the rewrite must not leak past the predicate: {restricted_subjects:?}"
+        );
+        let admin_subjects = subjects_of(&admin_outcome);
+        assert!(
+            admin_subjects
+                .iter()
+                .any(|s| s.contains(&denied.to_string())),
+            "an admin must still see everything the rewrite expanded to: {admin_subjects:?}"
+        );
     }
 }
