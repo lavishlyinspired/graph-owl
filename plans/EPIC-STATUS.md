@@ -91,7 +91,7 @@ is the condition that index exists to catch.
 | **98** | 11, 12 | [`98-owl-el-reasoning.md`](98-owl-el-reasoning.md) | Not started | 0/2 | Epic 6 (overlay, budgets, explainability), Epic 24 (ontologies as entities) |
 | **99** | 11, 12 | [`99-owl-ql-reasoning.md`](99-owl-ql-reasoning.md) | Not started | 0/2 | Epic 7 (query algebra to rewrite), Epic 6 (explanation contract) |
 | **100** | 11, 12 | [`100-profile-detection-and-routing.md`](100-profile-detection-and-routing.md) | Not started | 0/4 | Epic 6 (RL engine), Epic 24 (ontologies as entities) |
-| **101** | 11 | [`101-sparql-federation.md`](101-sparql-federation.md) | Not started | 0/5 | Epic 7 (algebra and executor), Epic 13 (authorization) |
+| **101** | 11 | [`101-sparql-federation.md`](101-sparql-federation.md) | In progress | 1/7 | Epic 7 (algebra and executor), Epic 13 (authorization) |
 | **102** | 11 | [`102-read-write-partitions.md`](102-read-write-partitions.md) | Not started | 0/2 | Epic 4 (the flake table), Epic 37a (the measurement) |
 | **103** | 11 | [`103-in-process-traversal.md`](103-in-process-traversal.md) | Not started | 0/2 | Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger) |
 | **104** | 12 | [`104-ontology-alignment.md`](104-ontology-alignment.md) | Not started | — | Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detecti… |
@@ -625,7 +625,9 @@ is the condition that index exists to catch.
 
 ### Epic 101 — SPARQL Federation — `SERVICE` *(Demo 11)*
 
-- [ ] `SERVICE` against an allow-listed endpoint; unlisted refused by name
+- [x] An unlisted `SERVICE` endpoint is refused by name
+- [ ] `SERVICE` against an allow-listed endpoint joins correctly, bounded by a timeout *(Slice
+- [ ] `SILENT` is honoured and marked; results name their endpoint *(Slice C)*
 - [ ] Bindings denied by policy never transmitted — asserted on the outbound request, the only
 - [ ] Remote rows attributed to their endpoint in the result grid
 - [ ] A `SILENT` failure is visible in the result.

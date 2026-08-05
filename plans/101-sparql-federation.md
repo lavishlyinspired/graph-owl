@@ -75,6 +75,51 @@ suite.
       with the caller's bindings, which is a policy decision wearing a
       configuration costume.
 
+## Slices
+
+Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR.
+
+**Technical grounding, checked before writing slices** (against `spareval`/`spargebra`'s own published API, not the W3C spec — the executor is adopted, not hand-built): `spareval::DefaultServiceHandler` is a **synchronous** trait (`fn handle(&self, service_name: &NamedNode, pattern: &GraphPattern, base_iri: Option<&Iri<String>>) -> Result<QuerySolutionIter<'static>, Self::Error>`), registered via `QueryEvaluator::with_default_service_handler`. `spargebra::algebra::GraphPattern` implements `Display`, producing valid SPARQL syntax for the pattern body — wrapping it as `SELECT * WHERE { <pattern> }` is a complete federated query. `sparesults::QueryResultsParser` parses a remote endpoint's `application/sparql-results+json` response directly into the `QuerySolution`s `QuerySolutionIter::new` expects. Because `execute_algebra` (`graph-owl-api`) runs `spareval` synchronously inside an `async fn` with no `spawn_blocking` (unlike `cypher_stream`, which already isolates blocking work that way), the HTTP call inside `handle()` needs the same isolation — reusing that established pattern rather than introducing a second way to bridge sync/async.
+
+### Slice A: An unlisted endpoint is refused, by name
+
+**Value**: The single most important safety property in this epic — a `SERVICE` clause cannot make an arbitrary outbound call — lands before any capability that could leak data exists to misuse.
+**Path**: A deployment-configured allow-list (a `Catalog` construction-time field, the same shape `SparqlBudget` already uses — "raised deliberately per deployment, not per query, because a caller who could raise their own budget does not have one") → a `FederationServiceHandler` implementing `DefaultServiceHandler`, wired into `execute_algebra`'s evaluator via `.with_default_service_handler(...)` → a query naming an endpoint not on the list fails with a message naming the endpoint and the configured list.
+**Acceptance criteria**: a `SERVICE <https://not-allowed>` query returns an error naming `https://not-allowed` and the allow-list; a `SERVICE` against an allow-listed endpoint reaches the handler (real HTTP still returns "not yet supported" — Slice B's job) rather than being refused for the allow-list reason.
+**RED**: A query with an unlisted endpoint asserts the specific error message names the endpoint. Mutator watch: an allow-list check inverted (`contains` → `!contains`) must fail a test with an *allowed* endpoint reaching the handler.
+**Done when**: criteria met, mutation report reviewed. Met (2026-08-05).
+
+### Slice B: A SERVICE against an allow-listed endpoint joins correctly, bounded by a timeout
+
+**Value**: The actual capability — real federation.
+**Path**: `FederationServiceHandler::handle` serializes the pattern (`SELECT * WHERE { pattern }`), issues an HTTP GET/POST via the SPARQL 1.1 Protocol inside `spawn_blocking` (bridging the sync trait method to the async `reqwest` client already in the workspace), parses `application/sparql-results+json` via `sparesults`, and returns a bounded `QuerySolutionIter`. A configurable per-call timeout (deployment-level, same shape as the allow-list) bounds the wait.
+**Acceptance criteria**: a query with `SERVICE <mock-endpoint> { ?s ?p ?o }` against a local test HTTP server returns the mock's rows, joined with any local pattern in the same query. A timeout returns a clear error rather than hanging the request.
+**RED**: An integration test spinning up a local HTTP server (axum, matching every other test double in this codebase) returning a fixed SPARQL JSON result set; the federated query's rows include it. Second RED: a server that never responds — the query fails at the configured timeout, not the caller's patience. Mutator watch: a timeout duration read but never applied must fail the slow-server test.
+**Done when**: criteria met, mutation report reviewed.
+
+### Slice C: SILENT is honoured and marked; results name their endpoint
+
+**Value**: A network failure must never look like "no such data" — the plan's own named danger.
+**Path**: `SERVICE SILENT <endpoint>` on a failed call yields an empty result for that pattern (per SPARQL 1.1 spec) rather than failing the whole query, but `SparqlOutcome` gains a field recording which endpoints silently failed. Every row contributed by a `SERVICE` clause is tagged with its source endpoint in the outcome.
+**Acceptance criteria**: a `SILENT` service that fails to connect returns an otherwise-successful query with zero rows from that clause **and** a populated "silenced failures" list naming the endpoint. A non-`SILENT` failure fails the whole query. Rows from a federated join carry their endpoint.
+**RED**: A silent failure against an unreachable mock server asserts both "query succeeds" and "silencedFailures contains the endpoint" — a test that only checked one half would pass a fix that dropped the other. Mutator watch: `SILENT` flag read but not threaded through must fail a test where a *non*-silent failure is asserted to fail the whole query.
+**Done when**: criteria met, mutation report reviewed.
+
+### Slice D: Bindings denied by policy are never transmitted
+
+**Value**: **The important test in this epic**, per the plan's own words — the only way to prove a leak did not happen, since a result-side assertion passes even when the data already left.
+**Path**: A test double replacing the real HTTP transport captures every outbound request verbatim. A query joining a policy-filtered local pattern (an asset the caller may not see) against a `SERVICE` clause is run as a principal denied that asset, and the captured outbound request is asserted to never contain the denied value — provable because `execute_algebra`'s existing ordering (`scoped_facts` runs and filters *before* `spareval` ever executes) means the evaluator never holds a denied fact in the first place, so `FederationServiceHandler` has nothing to leak; this slice is the regression guard proving that ordering holds under federation too, not a new filter.
+**Acceptance criteria**: the captured outbound request body contains only the `SERVICE` clause's own static pattern text — never a value from a locally-scoped-out fact.
+**RED**: Two principals, one denied a specific asset; the query joins that asset's local data against a `SERVICE` clause; the outbound capture is inspected byte-for-byte for the denied value's absence, for both principals (so the test can't pass by never containing *any* local value).
+**Done when**: criteria met, mutation report reviewed.
+
+### Slice E: Console — result attribution, SILENT visibility, allow-list admin with dry-run
+
+**Value**: An unattributable remote row and an invisible `SILENT` failure are this epic's own named dangers, rendered on screen exactly as dangerous as they are in the API.
+**Path**: The workbench result grid tags federated rows with their endpoint (reusing the five-pattern design's existing badge/tag idiom) and surfaces `silencedFailures` as a visible warning, not a silently-empty region. A new Admin tab lists allow-listed endpoints with add/remove and a dry-run ("what would a query against this endpoint be permitted to reach") mirroring the Policies panel's own dry-run-before-save shape.
+**Acceptance criteria**: a federated row is visually distinguishable from a local one with its endpoint named; a `SILENT`-failed clause shows a warning naming the endpoint, not an empty table region read as "no data"; the allow-list is addable/removable from Admin.
+**Done when**: criteria met, live-verified against the real stack (agent-browser, matching every other console slice this session).
+
 ## Explicitly deferred
 
 - **Federated `UPDATE`** → writing to a remote store from a query. No.

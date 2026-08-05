@@ -1000,11 +1000,14 @@ slice.
 - [ ] **Out-of-profile and override-partial results marked**, not by colour alone
 
 ### Epic 101 — SPARQL federation
-- [ ] `SERVICE` against an allow-listed endpoint; unlisted refused by name
-- [ ] Bindings denied by policy never transmitted — asserted on the outbound request, the only way to prove a leak did not happen
-- [ ] **Remote rows attributed to their endpoint in the result grid** *(UI → Epic 41 Slice G)* — an unattributed remote row is this epic's own named danger, rendered
-- [ ] **A `SILENT` failure is visible in the result.** An empty region of a grid reads as "no such data" rather than "we could not ask"
-- [ ] **Allow-list admin with dry-run** — adding an endpoint lets the query engine make outbound calls carrying the caller's bindings, which is a policy decision in a configuration costume
+- [x] **An unlisted `SERVICE` endpoint is refused by name** *(Slice A, 5 August 2026)*. The single most important safety property in this epic landed before any capability that could leak data exists to misuse: `graph-owl-api`'s new `federation` module implements `spareval::DefaultServiceHandler` (the executor is adopted — `spargebra` already parses `SERVICE`, `spareval` already takes the handler — this slice is one trait implementation), checked against a `Catalog`-level allow-list (`Catalog::with_federation_endpoints`) that is **empty by default**, the safe direction: a deployment that never configures federation gets none, matching every other off-by-default capability in this facade. An allow-listed endpoint reaches the handler rather than being refused for the allow-list reason, proven by the placeholder error changing shape — real federation is Slice B.
+  **Found a real, pre-existing bug while writing this slice's own RED test**, unrelated to federation itself: `execute_algebra`'s `collect()` silently discarded any per-row evaluation error via `filter_map(Result::ok)`. Nothing before `SERVICE` could produce a row-level error (only query-level ones, already handled), so the gap was invisible — a federation call refused by the handler was surfacing as a **successful query with zero rows**, exactly the "confidently wrong" failure mode this project refuses everywhere else. Fixed to `collect::<Result<Vec<_>, _>>()`, short-circuiting on the first row error the same way a query-level error already does.
+- [ ] `SERVICE` against an allow-listed endpoint joins correctly, bounded by a timeout *(Slice B)*
+- [ ] `SILENT` is honoured and marked; results name their endpoint *(Slice C)*
+- [ ] Bindings denied by policy never transmitted — asserted on the outbound request, the only way to prove a leak did not happen *(Slice D — "the important test in this epic")*
+- [ ] **Remote rows attributed to their endpoint in the result grid** *(Slice E, UI → Epic 41 Slice G)* — an unattributed remote row is this epic's own named danger, rendered
+- [ ] **A `SILENT` failure is visible in the result.** An empty region of a grid reads as "no such data" rather than "we could not ask" *(Slice E)*
+- [ ] **Allow-list admin with dry-run** *(Slice E)* — adding an endpoint lets the query engine make outbound calls carrying the caller's bindings, which is a policy decision in a configuration costume
 
 ### Epic 102 — Read/write partition split
 - [ ] The split itself

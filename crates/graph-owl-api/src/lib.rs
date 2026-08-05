@@ -57,6 +57,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 pub mod extraction;
+pub mod federation;
 pub mod validation;
 use validation::{
     FieldError, FieldErrorCode, FieldPath, ValidateBody, optional_string, require_non_empty_string,
@@ -585,23 +586,34 @@ fn project_entity(
     }
 }
 
-fn collect(results: spareval::QueryResults<'_>) -> Vec<std::collections::BTreeMap<String, String>> {
+/// **A row-level error (a failed `SERVICE` call, most concretely) must fail
+/// the query, not vanish from the result.** The previous `filter_map(Result::ok)`
+/// silently dropped any solution the evaluator could not produce — invisible
+/// as long as nothing in this codebase produced a per-row error, which
+/// changed the instant `SERVICE` gave a row a way to fail independently of
+/// the query as a whole. `collect::<Result<Vec<_>, _>>()` short-circuits on
+/// the first error instead, matching the query-level error already handled
+/// at the call site.
+fn collect(
+    results: spareval::QueryResults<'_>,
+) -> Result<Vec<std::collections::BTreeMap<String, String>>, spareval::QueryEvaluationError> {
     match results {
         spareval::QueryResults::Solutions(iter) => iter
-            .filter_map(Result::ok)
             .map(|solution| {
-                solution
-                    .iter()
-                    .map(|(var, term)| (var.as_str().to_string(), term.to_string()))
-                    .collect()
+                solution.map(|solution| {
+                    solution
+                        .iter()
+                        .map(|(var, term)| (var.as_str().to_string(), term.to_string()))
+                        .collect()
+                })
             })
             .collect(),
         // An ASK is one row with one column, so a caller reading `rows` gets a
         // usable answer without branching on query form.
-        spareval::QueryResults::Boolean(answer) => {
-            vec![std::iter::once(("answer".to_string(), answer.to_string())).collect()]
-        }
-        spareval::QueryResults::Graph(_) => Vec::new(),
+        spareval::QueryResults::Boolean(answer) => Ok(vec![
+            std::iter::once(("answer".to_string(), answer.to_string())).collect(),
+        ]),
+        spareval::QueryResults::Graph(_) => Ok(Vec::new()),
     }
 }
 
@@ -723,6 +735,12 @@ pub struct Catalog {
     /// Deterministic FQN matching (Slice A) is unaffected either way — it is
     /// a different, more certain mechanism than this confidence-band toggle.
     auto_merge_enabled: bool,
+    /// Which endpoints a `SERVICE` clause in a SPARQL query may reach —
+    /// Epic 101 decision 1. **Empty by default**, the safe direction: a
+    /// deployment that never configures federation gets none, rather than
+    /// an unbounded one by omission. Administrative configuration, never
+    /// settable by the query itself.
+    federation: federation::FederationAllowList,
 }
 
 impl Catalog {
@@ -749,6 +767,7 @@ impl Catalog {
             // data-protection decision, and the safe default is the one a
             // deployment has to deliberately leave.
             store_query_text: false,
+            federation: federation::FederationAllowList::default(),
         }
     }
 
@@ -758,6 +777,15 @@ impl Catalog {
     #[must_use]
     pub fn with_auto_merge_enabled(mut self, enabled: bool) -> Self {
         self.auto_merge_enabled = enabled;
+        self
+    }
+
+    /// Allow-lists these endpoints for `SERVICE` clauses in SPARQL queries.
+    /// Replaces whatever was configured before, matching every other
+    /// deployment-level configuration in this facade.
+    #[must_use]
+    pub fn with_federation_endpoints(mut self, endpoints: Vec<String>) -> Self {
+        self.federation = federation::FederationAllowList::new(endpoints);
         self
     }
 
@@ -1122,19 +1150,24 @@ impl Catalog {
     ) -> Result<SparqlOutcome, CatalogError> {
         let scoped = self.scoped_facts(principal, parsed, as_of, budget).await?;
 
+        let query_error = |e: spareval::QueryEvaluationError| {
+            CatalogError::Validation(vec![FieldError::new(
+                "query",
+                FieldErrorCode::Type,
+                e.to_string(),
+            )])
+        };
+
         let results = spareval::QueryEvaluator::new()
+            .with_default_service_handler(federation::FederationServiceHandler::new(
+                self.federation.clone(),
+            ))
             .prepare(parsed)
             .execute(&scoped.dataset)
-            .map_err(|e| {
-                CatalogError::Validation(vec![FieldError::new(
-                    "query",
-                    FieldErrorCode::Type,
-                    e.to_string(),
-                )])
-            })?;
+            .map_err(query_error)?;
 
         Ok(SparqlOutcome {
-            rows: collect(results),
+            rows: collect(results).map_err(query_error)?,
             facts_scanned: scoped.fact_count,
             truncated: scoped.truncated,
             as_of: scoped.at,
@@ -16428,6 +16461,113 @@ mod projection_isolation_tests {
             "the second asset did not exist at t=1: {:?}",
             earlier.rows
         );
+    }
+
+    // ---- Epic 101 Slice A: SERVICE endpoints are allow-listed, not free ----
+
+    mod federating_a_query {
+        use super::*;
+
+        /// **The single most important safety property in this epic.** A
+        /// `SERVICE` clause naming an arbitrary URL is an outbound request
+        /// composed by whoever wrote the query; with no allow-list
+        /// configured (the default), every endpoint is refused.
+        #[tokio::test]
+        async fn a_service_clause_with_no_allow_list_configured_is_refused() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+            let error = catalog
+                .sparql(
+                    &Principal::system(),
+                    "SELECT ?o WHERE { SERVICE <https://dbpedia.org/sparql> { ?s ?p ?o } }",
+                    None,
+                    SparqlBudget::default(),
+                )
+                .await
+                .expect_err("an unconfigured deployment allows no federation");
+
+            let CatalogError::Validation(fields) = error else {
+                panic!("expected Validation, got {error:?}");
+            };
+            assert!(
+                fields[0].detail.contains("dbpedia.org"),
+                "the refusal must name the endpoint: {fields:?}"
+            );
+            assert!(
+                fields[0].detail.contains("none configured"),
+                "an empty allow-list must say so, not print an empty list: {fields:?}"
+            );
+        }
+
+        /// The negative that makes the test above about the allow-list
+        /// rather than about every `SERVICE` clause failing regardless:
+        /// naming a *different*, unlisted endpoint is refused the same way,
+        /// so a hard-coded single-endpoint check could not pass both.
+        #[tokio::test]
+        async fn a_service_clause_naming_an_unlisted_endpoint_is_refused_by_name() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_federation_endpoints(vec!["https://dbpedia.org/sparql".to_string()]);
+
+            let error = catalog
+                .sparql(
+                    &Principal::system(),
+                    "SELECT ?o WHERE { SERVICE <https://not-allowed.example/sparql> { ?s ?p ?o } }",
+                    None,
+                    SparqlBudget::default(),
+                )
+                .await
+                .expect_err("an unlisted endpoint must be refused even with others allowed");
+
+            let CatalogError::Validation(fields) = error else {
+                panic!("expected Validation, got {error:?}");
+            };
+            assert!(
+                fields[0].detail.contains("not-allowed.example"),
+                "{fields:?}"
+            );
+            assert!(
+                fields[0].detail.contains("dbpedia.org"),
+                "the configured allow-list should be named so the fix is obvious: {fields:?}"
+            );
+        }
+
+        /// An allow-listed endpoint must reach the handler rather than being
+        /// refused for the allow-list reason — proven by the error changing
+        /// shape (real federation is Slice B's job; this slice's job is
+        /// only that the allow-list check itself discriminates correctly).
+        #[tokio::test]
+        async fn an_allow_listed_endpoint_is_not_refused_for_being_unlisted() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_federation_endpoints(vec!["https://dbpedia.org/sparql".to_string()]);
+
+            let error = catalog
+                .sparql(
+                    &Principal::system(),
+                    "SELECT ?o WHERE { SERVICE <https://dbpedia.org/sparql> { ?s ?p ?o } }",
+                    None,
+                    SparqlBudget::default(),
+                )
+                .await
+                .expect_err("real federation is not implemented until Slice B");
+
+            let CatalogError::Validation(fields) = error else {
+                panic!("expected Validation, got {error:?}");
+            };
+            assert!(
+                !fields[0]
+                    .detail
+                    .contains("is not on the federation allow-list"),
+                "an allow-listed endpoint must not be refused as unlisted: {fields:?}"
+            );
+        }
     }
 
     // ---- Epic 7d Slice D: streaming, LPG-typed Cypher results ----

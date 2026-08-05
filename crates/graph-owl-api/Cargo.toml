@@ -23,6 +23,7 @@ graph-owl-resolution = { path = "../graph-owl-resolution" }
 spareval = "0.2"
 spargebra = "0.4"
 oxrdf = "0.3.3"
+oxiri = "0.2"
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
