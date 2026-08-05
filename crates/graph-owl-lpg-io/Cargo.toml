@@ -8,3 +8,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+graph-owl-core = { path = "../graph-owl-core" }
+graph-owl-lpg = { path = "../graph-owl-lpg" }
+thiserror.workspace = true
+quick-xml.workspace = true
+uuid.workspace = true

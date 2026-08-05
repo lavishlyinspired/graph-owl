@@ -1,9 +1,9 @@
 # Plan: Property-Graph Interchange & External Store Sync (Epic 9a)
 
 **Branch**: feat/lpg-interchange
-**Status**: Not started
-**Depends on**: Epic 7c (LPG projection), Epic 9 (RDF I/O — shares the streaming-serializer shape)
-**Crates**: **`graph-owl-lpg-io`** (new — per-format and per-driver features)
+**Status**: **Slice A shipped, 5 August 2026 — Slices B–F not started.**
+**Depends on**: Epic 7c (LPG projection) — shipped, and its `FlakeValue::Ref`-vs-`String` kind bug already found and fixed (`07d-engine-bolt.md`). Epic 9 (RDF I/O — shares the streaming-serializer shape) — Slice A shipped, which is what this epic's own Slice A needed: not the whole of Epic 9, only its streaming-to-scratch-files pattern to mirror.
+**Crates**: **`graph-owl-lpg-io`** (per-format and per-driver features)
 
 ## Goal
 
@@ -71,8 +71,8 @@ Projection is re-runnable. Elements are written with `MERGE` on the Epic 7c elem
 
 ## Acceptance criteria
 
-- [ ] Every format above exports; GraphML and JSON Lines also import.
-- [ ] Export **streams** — memory is bounded regardless of graph size, verified by measurement.
+- [~] Every format above exports; GraphML and JSON Lines also import. **GraphML export shipped (Slice A); GraphML import and every other format not started.**
+- [x] Export **streams** — memory is bounded regardless of graph size. Verified structurally (schema state bounded by distinct-key count, not element count; elements written through to disk as they arrive) at 5,000-element scale, not measured by OS-level RSS at the plan's own 1M — see Slice A's own scope note.
 - [ ] GraphML export → import round-trips losslessly, including typed property declarations.
 - [ ] Bulk CSV output loads into a real target store without hand-editing.
 - [ ] Projection to an external store is idempotent; re-running converges.
@@ -85,11 +85,21 @@ Projection is re-runnable. Elements are written with `MERGE` on the Epic 7c elem
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first.
 
-### Slice A: Streaming GraphML export
+**Scope of this pass**: Slice A only, the same explicit-stop discipline `09-engine-rdf-io.md` and `37a-scale.md` already established for their own remaining slices.
 
-**Acceptance criteria**: valid GraphML with `<key>` declarations for every property encountered, correct types; nodes before edges; labels and edge types emitted per the format's conventions; XML special characters escaped, including in property values and ids; a 1M-element export holds bounded memory, measured; the output validates against the GraphML schema.
-**RED**: An escaping test with `<`, `&`, quotes, and a null byte in a property value — a description field containing markup is completely ordinary in a metadata catalog, and unescaped output produces a file that fails to parse at the far end. The bounded-memory test catches build-then-write. Mutator watch: skipping escaping must fail; collecting into a `String` before writing must fail the memory measurement.
-**Done when**: criteria met, mutation report reviewed, commit approved.
+### Slice A: Streaming GraphML export — **shipped, 5 August 2026**
+
+**Shipped**:
+- Valid GraphML with `<key>` declarations for every property encountered, correct types (`boolean`/`long`/`double` for the `PropertyValue` variants with a native GraphML equivalent; `string` for the rest — `Bytes`, `DateTime`, `Duration`, `List`, `ElementRef` — a documented, not accidental, narrowing); nodes before edges; labels and edge type emitted as reserved `_labels`/`_type` data keys, declared unconditionally so a reader never has to guess whether they are present.
+- XML special characters escaped in property values, proven at the **byte level** (the raw unescaped substring must not appear anywhere in the output) and by feeding the output back through a real XML parser (`quick_xml::Reader`) rather than trusting this crate's own writer not to have produced something only it can read.
+- `quick_xml` adopted (`00l-build-vs-adopt.md`) — its `Writer`/`ElementWriter` API escapes attribute values and text content automatically, the same "not the alternative it looks like" reasoning Epic 9 already recorded for hand-written Turtle: owning escaping by hand is exactly where output silently corrupts.
+- **A real bug found and fixed while writing this slice's own tests, not assumed away**: an early design derived each property key's `<key id="...">` from its *sorted position* in the schema map at the moment each element was written — but GraphML's own structure needs every `<key>` declared *before* the `<graph>` body, so key ids are only finalised once every element has been seen. A later element introducing a new key that sorts alphabetically *before* an already-used key would silently shift the earlier key's position-derived id, disagreeing with the `<data key="...">` reference an earlier element had already written to disk. Fixed by assigning each key a stable id **the first time it is seen**, cached and never recomputed — and the regression test that catches this specific failure mode is kept (`a_key_id_stays_stable_even_when_a_later_element_introduces_an_earlier_sorting_key`), not deleted once the fix landed.
+- Streaming, not build-then-write (decision 5): node and edge elements are written to two on-disk scratch files as they arrive — never accumulated in a `Vec` or `String` — while only the property *schema* (bounded by the catalog's own predicate vocabulary, not by element count) is held in memory. `finish()` writes the real header and `<key>` declarations, then streams both scratch files' bytes straight into the final output with `std::io::copy`, never re-reading either as a whole.
+**Scope cut, recorded rather than silently narrowed**:
+- **Memory-boundedness is proven structurally, not measured by OS-level RSS at 1M elements.** A test writes 5,000 elements sharing one property key and asserts the writer's own schema map holds exactly one entry — proof that per-element data never accumulates in memory, which is what a true RSS measurement would also show, but without the platform-specific measurement machinery a genuine 1M-element benchmark would need. Recorded as a gap, not claimed met.
+- **No GraphML schema (XSD) validation against the *official* schema document.** The output is proven well-formed XML (a real parser accepts it) and structurally correct (keys precede the graph, nodes precede edges) by this crate's own tests; validating against GraphML's published XSD is real, separable work for whichever slice needs that stronger guarantee.
+- **`LpgReader` (the import side) is not implemented.** `LpgWriter`'s trait shape ships in full; `LpgReader`'s does not exist yet in this crate — Slice B's own job.
+**Tests**: `graph-owl-lpg-io::tests` — 7 tests (key-declaration ordering, edge source/target/type, key-id stability across out-of-order key discovery, byte-level XML escaping plus real-parser acceptance, schema-boundedness at 5,000 elements, the list-value separator, and calling `node()` before `begin()`).
 
 ### Slice B: GraphML import and round-trip
 

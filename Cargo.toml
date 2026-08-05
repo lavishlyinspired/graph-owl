@@ -69,6 +69,14 @@ zstd = "0.13"
 # pins `oxrdf =0.3.3` exactly, matching the version already resolved here
 # — confirmed 5 August 2026, MIT OR Apache-2.0, 1.1M downloads.
 oxttl = "0.2"
+# GraphML export (Epic 9a). MIT, 357M downloads, the de-facto standard
+# Rust XML crate — checked 5 August 2026. Streaming `Writer` (not a DOM
+# builder) is what "streaming, never build-then-write" (Epic 9a decision
+# 5) needs, and its element/text API escapes automatically, the same
+# "not the alternative it looks like" reasoning Epic 9 already recorded
+# for hand-written Turtle: owning XML escaping by hand on one side of a
+# round trip is exactly where such output silently corrupts.
+quick-xml = "0.41"
 graph-owl-core = { path = "crates/graph-owl-core" }
 graph-owl-events = { path = "crates/graph-owl-events" }
 graph-owl-storage = { path = "crates/graph-owl-storage" }
