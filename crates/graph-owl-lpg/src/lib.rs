@@ -53,7 +53,7 @@ pub const GRAPH_KEY: &str = "_graph";
 pub const TIME_KEY: &str = "_t";
 
 /// A property value: one variant per [`FlakeValue`], plus the LPG-native ones.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type", content = "value")]
 pub enum PropertyValue {
     Boolean(bool),
@@ -114,7 +114,7 @@ impl PropertyValue {
 }
 
 /// A node's or edge's properties, in deterministic order.
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct PropertyMap(BTreeMap<String, PropertyValue>);
 
@@ -184,7 +184,7 @@ impl PropertyMap {
 }
 
 /// A node as a property-graph consumer sees it.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LpgNode {
     pub element_id: ElementId,
@@ -198,7 +198,7 @@ pub struct LpgNode {
 /// **The two-hop reification is an implementation detail of the flake layer.** A
 /// consumer that sees `(:Table)-[:FEEDS {confidence: 0.9}]->(:Table)` is seeing
 /// the truth of the model; one that sees three nodes is seeing the encoding.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LpgEdge {
     /// The reified relationship's own `Sid` — so an edge stays addressable as a

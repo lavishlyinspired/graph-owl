@@ -7,9 +7,37 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# Epic 9a decision 7: every driver is its own feature, so a deployment that
+# only exports GraphML/CSV never compiles a database client. `neo4rs` (MIT,
+# neo4j-labs org, 961K downloads — checked 6 August 2026,
+# `00l-build-vs-adopt.md`) is the Bolt client Slice D's
+# `Neo4jProjectionTarget` uses; `async-trait` is a lightweight proc-macro
+# with no network/runtime footprint of its own, so it stays a plain
+# dependency rather than being gated too.
+bolt-target = ["dep:neo4rs"]
+
 [dependencies]
 graph-owl-core = { path = "../graph-owl-core" }
 graph-owl-lpg = { path = "../graph-owl-lpg" }
 thiserror.workspace = true
 quick-xml.workspace = true
 uuid.workspace = true
+async-trait.workspace = true
+neo4rs = { version = "0.9.0-rc.10", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+# Epic 9a Slice C's own pre-PR gate item: "a real target store's bulk
+# importer consumes the CSV output unmodified" — checked against a real
+# Neo4j via testcontainers, not asserted from the format spec alone.
+# `testcontainers-modules`'s `neo4j` feature is the same
+# container-per-test-binary pattern already used for Postgres/Kafka
+# elsewhere in this workspace.
+neo4rs = "0.9.0-rc.10"
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true, features = ["neo4j"] }
+base64 = { workspace = true }

@@ -108,6 +108,17 @@ impl serde::Serialize for ElementId {
     }
 }
 
+/// Epic 9a Slice F: JSON Lines import needs the inverse of the `Serialize`
+/// above. Deliberately as permissive as [`ElementId::from_wire`] — a
+/// mangled handle is [`ElementId::decode`]'s job to catch, not this one's,
+/// the same division Slice F's own writer/reader split already follows
+/// elsewhere.
+impl<'de> serde::Deserialize<'de> for ElementId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        <String as serde::Deserialize>::deserialize(deserializer).map(Self::from_wire)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ElementIdError {
     #[error(

@@ -10784,6 +10784,131 @@ impl Catalog {
         }
     }
 
+    /// Projects only what changed since `target`'s own checkpoint, as
+    /// `principal` — Epic 9a Slice E. Two criteria in one pass, because
+    /// both are the same filter applied at different points: "only
+    /// elements after the checkpoint" narrows *which* flakes are read;
+    /// "omit everything Epic 13 denies" narrows *which subjects* the
+    /// caller may even name are then projected.
+    ///
+    /// **Retraction propagation is a recorded, checked gap, not
+    /// implemented.** `graph_owl_engine::TripleStore` has no primitive for
+    /// "flakes retracted since time T" — `query_pattern` returns only
+    /// current (non-retracted) state, and `TriplePattern::as_of`
+    /// reconstructs a past *state*, not a list of retraction *events*.
+    /// Confirmed by reading the trait itself before writing this method,
+    /// not assumed: adding that capability is a real `TripleStore`
+    /// extension (touching every backend that implements it), separable
+    /// from what this method can do today. `ElementBatch::retracted`
+    /// exists on the wire shape precisely so a caller who tracks
+    /// retractions some other way already has somewhere to put them.
+    ///
+    /// Authorization treats a subject's own `Sid::id` as the FQN a
+    /// `graph_owl_authz::AccessPredicate` checks — the same convention
+    /// this crate's own shape/lineage fixtures already use for a bare
+    /// `Sid::dsc(name)`. An asset subject encoded any other way (this
+    /// crate's own DCAT/OpenLineage exports use `asset:{uuid}`, for
+    /// example) will not match a prefix-based policy and is filtered out
+    /// as a consequence, not projected past the predicate by accident.
+    ///
+    /// # Errors
+    /// `Storage` if no graph engine is configured, or a read fails.
+    // decision-3-exception: begin — this is the one deliberate, push-only
+    // consumer of `GraphProjectionTarget` in this crate. It reads this
+    // catalog's own store (`query_pattern`) and writes to `target`; it
+    // never reads graph data *from* `target` to answer a query, which is
+    // the read `graph_owl_lpg_io::projection`'s own structural test
+    // (`no_query_crate_references_a_projection_target`) forbids. The
+    // `target.checkpoint()` call below reads only a projection-progress
+    // marker, not query-answerable data.
+    pub async fn project_incremental(
+        &self,
+        principal: &Principal,
+        target: &dyn graph_owl_lpg_io::projection::GraphProjectionTarget,
+    ) -> Result<graph_owl_lpg_io::projection::ProjectionAck, CatalogError> {
+        use graph_owl_authz::MetadataOperation;
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let checkpoint = target
+            .checkpoint()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let all_flakes = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern::default())
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let mut by_subject: std::collections::BTreeMap<&Sid, Vec<Flake>> =
+            std::collections::BTreeMap::new();
+        for flake in &all_flakes {
+            by_subject.entry(&flake.s).or_default().push(flake.clone());
+        }
+        let changed_subjects: std::collections::BTreeSet<&Sid> = all_flakes
+            .iter()
+            .filter(|f| f.t > checkpoint.last_projected_t)
+            .map(|f| &f.s)
+            .collect();
+
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        let mut max_t = checkpoint.last_projected_t;
+        for subject in changed_subjects {
+            if !predicate.admits(&subject.id) {
+                continue;
+            }
+            let Some(subject_flakes) = by_subject.get(subject) else {
+                continue;
+            };
+            max_t = max_t.max(subject_flakes.iter().map(|f| f.t).max().unwrap_or(max_t));
+            let is_relationship = subject_flakes.iter().any(|f| {
+                f.p.id == graph_owl_lpg::predicate::FROM_ENTITY
+                    || f.p.id == graph_owl_lpg::predicate::REL_TYPE
+            });
+            let mut report = graph_owl_lpg::MappingReport::default();
+            if is_relationship {
+                if let Ok(edge) =
+                    graph_owl_lpg::edge_from_reified(subject, subject_flakes, &mut report)
+                {
+                    edges.push(edge);
+                }
+            } else if let Ok(node) =
+                graph_owl_lpg::node_from_flakes(subject, subject_flakes, &mut report)
+            {
+                nodes.push(node);
+            }
+        }
+
+        let batch = graph_owl_lpg_io::projection::ElementBatch {
+            nodes,
+            edges,
+            retracted: Vec::new(),
+        };
+        let ack = target
+            .project(&batch)
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        if max_t > checkpoint.last_projected_t {
+            target
+                .advance_checkpoint(max_t)
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        }
+
+        Ok(ack)
+    }
+    // decision-3-exception: end
+
     /// Imports one `OpenLineage` `RunEvent` — Epic 9 Slice D. Idempotent by
     /// event id **through the same uniqueness [`Self::assert_lineage`]
     /// already enforces** (`from`, `to`, `relationship`, `source`): two
@@ -27591,3 +27716,221 @@ mod lossiness_tests {
         assert!(!manifest.vocabulary_mappings.is_empty());
     }
 }
+
+// decision-3-exception: begin — test-only double for `project_incremental`
+// above, exercising the same push-only path against a `FakeTarget` rather
+// than a real store. See the exception note on `project_incremental` itself.
+/// Epic 9a Slice E: incremental projection and authorization.
+#[cfg(test)]
+mod incremental_projection_tests {
+    use super::*;
+    use graph_owl_lpg_io::projection::{
+        Checkpoint, ElementBatch, GraphProjectionTarget, ProjectionAck, ProjectionScope,
+        TargetError,
+    };
+    use projection_isolation_tests::RecordingGraph;
+    use std::sync::Mutex;
+    use tests::InMemoryStorage;
+
+    #[derive(Default)]
+    struct FakeTarget {
+        nodes: Mutex<Vec<graph_owl_lpg::LpgNode>>,
+        edges: Mutex<Vec<graph_owl_lpg::LpgEdge>>,
+        checkpoint: Mutex<i64>,
+    }
+
+    #[async_trait::async_trait]
+    impl GraphProjectionTarget for FakeTarget {
+        async fn project(&self, batch: &ElementBatch) -> Result<ProjectionAck, TargetError> {
+            self.nodes
+                .lock()
+                .expect("lock")
+                .extend(batch.nodes.iter().cloned());
+            self.edges
+                .lock()
+                .expect("lock")
+                .extend(batch.edges.iter().cloned());
+            Ok(ProjectionAck {
+                nodes_written: batch.nodes.len() as u64,
+                edges_written: batch.edges.len() as u64,
+                retracted: 0,
+            })
+        }
+
+        async fn checkpoint(&self) -> Result<Checkpoint, TargetError> {
+            Ok(Checkpoint {
+                last_projected_t: *self.checkpoint.lock().expect("lock"),
+            })
+        }
+
+        async fn advance_checkpoint(&self, t: i64) -> Result<(), TargetError> {
+            *self.checkpoint.lock().expect("lock") = t;
+            Ok(())
+        }
+
+        async fn reset(&self, _scope: &ProjectionScope) -> Result<(), TargetError> {
+            self.nodes.lock().expect("lock").clear();
+            self.edges.lock().expect("lock").clear();
+            *self.checkpoint.lock().expect("lock") = 0;
+            Ok(())
+        }
+    }
+
+    fn type_flake(subject: &str, class: &str, t: i64) -> Flake {
+        Flake {
+            s: Sid::dsc(subject),
+            p: Sid::new(namespace::RDF, "type"),
+            o: FlakeValue::Ref(Sid::dsc(class)),
+            cx: None,
+            t,
+            op: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_graph_engine_the_call_is_refused_not_silently_empty() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let target = FakeTarget::default();
+        let outcome = catalog
+            .project_incremental(&Principal::system(), &target)
+            .await;
+        assert!(
+            matches!(outcome, Err(CatalogError::Storage(_))),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_subjects_changed_since_the_checkpoint_are_projected() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+        let target = FakeTarget::default();
+
+        let t1 = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[type_flake("orders", "Table", t1)])
+            .await
+            .expect("assert");
+
+        catalog
+            .project_incremental(&Principal::system(), &target)
+            .await
+            .expect("first projection");
+        assert_eq!(target.nodes.lock().expect("lock").len(), 1);
+        assert_eq!(*target.checkpoint.lock().expect("lock"), t1);
+
+        let t2 = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[type_flake("shipments", "Table", t2)])
+            .await
+            .expect("assert");
+
+        catalog
+            .project_incremental(&Principal::system(), &target)
+            .await
+            .expect("second projection");
+        assert_eq!(
+            target.nodes.lock().expect("lock").len(),
+            2,
+            "the second call must add exactly the one new subject, not re-send the first"
+        );
+        assert_eq!(*target.checkpoint.lock().expect("lock"), t2);
+    }
+
+    #[tokio::test]
+    async fn a_denied_subject_is_omitted_from_what_is_sent_to_the_target() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+        let target = FakeTarget::default();
+
+        let t = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[
+                type_flake("public.orders", "Table", t),
+                type_flake("restricted.salaries", "Table", t),
+            ])
+            .await
+            .expect("assert");
+
+        let restricted = Principal {
+            id: "asha".to_string(),
+            name: "Asha".to_string(),
+            kind: graph_owl_core::PrincipalKind::User,
+            roles: vec!["analyst".to_string()],
+            is_admin: false,
+        };
+        catalog
+            .upsert_policy(
+                &graph_owl_authz::Policy {
+                    name: "public-only".to_string(),
+                    rules: vec![graph_owl_authz::Rule {
+                        name: "read-public".to_string(),
+                        effect: graph_owl_authz::Effect::Allow,
+                        operations: vec![graph_owl_authz::MetadataOperation::ViewBasic],
+                        resources: graph_owl_authz::ResourceMatcher::FqnPrefix(
+                            "public.".to_string(),
+                        ),
+                    }],
+                },
+                &["analyst".to_string()],
+            )
+            .await
+            .expect("save policy");
+
+        catalog
+            .project_incremental(&restricted, &target)
+            .await
+            .expect("projection as restricted principal");
+
+        let node_ids: Vec<String> = target
+            .nodes
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|n| n.element_id.as_str().to_string())
+            .collect();
+        assert!(
+            node_ids.iter().any(|id| id.contains("public.orders")),
+            "{node_ids:?}"
+        );
+        assert!(
+            !node_ids.iter().any(|id| id.contains("restricted.salaries")),
+            "a denied subject must not be sent to the target: {node_ids:?}"
+        );
+    }
+
+    /// **An unauthorized export is empty, not an error** — the plan's own
+    /// criterion.
+    #[tokio::test]
+    async fn a_principal_denied_everything_gets_an_empty_projection_not_an_error() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+        let target = FakeTarget::default();
+
+        let t = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[type_flake("orders", "Table", t)])
+            .await
+            .expect("assert");
+
+        let nobody = Principal {
+            id: "outsider".to_string(),
+            name: "Outsider".to_string(),
+            kind: graph_owl_core::PrincipalKind::User,
+            is_admin: false,
+            roles: Vec::new(),
+        };
+        // No policy saved for `outsider` at all — `compile` (graph-owl-authz)
+        // defaults an unmatched, non-admin subject to `AccessPredicate::Nothing`.
+        let ack = catalog
+            .project_incremental(&nobody, &target)
+            .await
+            .expect("must succeed, not error");
+        assert_eq!(ack.nodes_written, 0, "{ack:?}");
+        assert!(target.nodes.lock().expect("lock").is_empty());
+    }
+}
+// decision-3-exception: end

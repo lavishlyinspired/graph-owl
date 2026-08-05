@@ -226,7 +226,7 @@ is the condition that index exists to catch.
 
 ### Epic 9a — Property-Graph Interchange & External Store Sync *(Demo 8)*
 
-- [~] GraphML, bulk CSV, projection targets — **Slices A–B (streaming GraphML export and impor
+- [~] GraphML, bulk CSV, projection targets — **Slices A–D and F shipped, Slice E partially sh
 
 ### Epic 10 — Operability & Resource Budget ★ *(Demo 2)*
 
