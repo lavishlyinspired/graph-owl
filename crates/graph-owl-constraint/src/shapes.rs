@@ -656,6 +656,135 @@ pub fn core_shapes(t: i64) -> Vec<Flake> {
     flakes
 }
 
+/// The DCAT-AP mandatory-property requirements for `dcat:Dataset` and
+/// `dcat:Catalog` — Epic 9 Slice C's "external conformance, not
+/// self-consistency" criterion.
+///
+/// **Not the official SHACL file, and that is a finding, not a shortcut.**
+/// The real shapes were fetched from `SEMICeu/DCAT-AP`, release 3.0.1
+/// (CC-BY-4.0,
+/// <https://github.com/SEMICeu/DCAT-AP/blob/master/releases/3.0.1/html/shacl/shapes.ttl>,
+/// retrieved 6 August 2026) and checked against this crate's own reader —
+/// they do not parse here. Three real incompatibilities, found by reading
+/// `shapes.rs` itself rather than guessed at:
+/// 1. `sh:severity` there is stated **per property**; this engine only
+///    reads it once, at the node-shape level (`read_shape`, not
+///    `read_branch`/`constraint_from`) — a property-level `sh:severity`
+///    triple is an *unrecognised* SHACL term to [`constraint_from`] and
+///    fails the whole shape (`KNOWN` does not contain `"severity"`).
+/// 2. `sh:nodeKind` there takes the real SHACL node-kind IRIs
+///    (`sh:BlankNodeOrIRI`, `sh:IRI`, `sh:Literal`); this engine's
+///    `"nodeKind"` arm only accepts the literal strings `"ref"`/`"literal"`
+///    (see [`core_shapes`] above, and `constraint_from`'s `nodeKind` match) —
+///    a real value is a reference, never text, so [`crate::shapes::values`]'s
+///    `as_text` always returns `None` for it.
+/// 3. `sh:node`/`sh:shape` (shape-reference indirection, e.g. the date-format
+///    check on `dct:issued`) has no arm in `constraint_from` at all.
+///
+/// All three would need extending this engine into a much larger subset of
+/// SHACL to parse the official file unmodified — out of Slice C's scope.
+/// What is preserved exactly, quoted from the same source file so a
+/// reviewer can check without re-fetching: `dcat:Dataset`'s
+/// `sh:property [ sh:minCount 1 ; sh:nodeKind sh:Literal ; sh:path dct:title ; sh:severity sh:Violation ]`
+/// and the identical shape for `dct:description`; `dcat:Catalog`'s same two
+/// properties, plus `sh:property [ sh:maxCount 1 ; sh:minCount 1 ; sh:path dct:publisher ; sh:severity sh:Violation ]`
+/// (`dcat:Dataset`'s own `dct:publisher` property has `sh:maxCount 1` only,
+/// no `sh:minCount` — optional there, unlike on `Catalog`). `dcat:theme` on
+/// `Dataset` carries no cardinality constraint in the source either
+/// (`sh:nodeKind sh:IRI` only), so it is not represented here as a
+/// constraint at all — nothing to violate. Every `minCount`/`maxCount`
+/// below is the official number; only the *encoding* is this engine's own.
+// (property suffix, path, [(term, value)])
+type DcatPropertyDef<'a> = (&'a str, Sid, &'a [(&'a str, FlakeValue)]);
+// (shape id, target class, properties)
+type DcatShapeDef<'a> = (&'a str, Sid, &'a [DcatPropertyDef<'a>]);
+
+#[must_use]
+pub fn dcat_ap_conformance_shapes(t: i64) -> Vec<Flake> {
+    let dcterms = |term: &str| Sid::new(namespace::DCTERMS, term);
+    let dcat = |term: &str| Sid::new(namespace::DCAT, term);
+
+    let mut flakes = Vec::new();
+    let mut state = |s: Sid, p: Sid, o: FlakeValue| {
+        flakes.push(Flake {
+            s,
+            p,
+            o,
+            cx: Some(Sid::dsc("graph:shapes")),
+            t,
+            op: true,
+        });
+    };
+
+    let definitions: &[DcatShapeDef<'_>] = &[
+        (
+            "DcatDatasetShape",
+            dcat("Dataset"),
+            &[
+                (
+                    "title",
+                    dcterms("title"),
+                    &[("minCount", FlakeValue::Int(1))],
+                ),
+                (
+                    "description",
+                    dcterms("description"),
+                    &[("minCount", FlakeValue::Int(1))],
+                ),
+            ],
+        ),
+        (
+            "DcatCatalogShape",
+            dcat("Catalog"),
+            &[
+                (
+                    "title",
+                    dcterms("title"),
+                    &[("minCount", FlakeValue::Int(1))],
+                ),
+                (
+                    "description",
+                    dcterms("description"),
+                    &[("minCount", FlakeValue::Int(1))],
+                ),
+                (
+                    "publisher",
+                    dcterms("publisher"),
+                    &[
+                        ("minCount", FlakeValue::Int(1)),
+                        ("maxCount", FlakeValue::Int(1)),
+                    ],
+                ),
+            ],
+        ),
+    ];
+
+    for (shape, target, properties) in definitions {
+        let id = Sid::dsc(*shape);
+        state(id.clone(), rdf_type(), FlakeValue::Ref(sh("NodeShape")));
+        state(
+            id.clone(),
+            sh("targetClass"),
+            FlakeValue::Ref(target.clone()),
+        );
+
+        for (suffix, path, terms) in *properties {
+            let property = Sid::dsc(format!("{shape}/{suffix}"));
+            state(
+                id.clone(),
+                sh("property"),
+                FlakeValue::Ref(property.clone()),
+            );
+            state(property.clone(), sh("path"), FlakeValue::Ref(path.clone()));
+            for (term, value) in *terms {
+                state(property.clone(), sh(term), value.clone());
+            }
+        }
+    }
+
+    flakes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1435,6 +1564,129 @@ mod tests {
                 .collect();
 
             assert_eq!(first, second);
+        }
+    }
+
+    /// Epic 9 Slice C: the DCAT-AP conformance shapes fixture — see
+    /// [`super::dcat_ap_conformance_shapes`]'s own doc comment for exactly
+    /// what is and is not the official file.
+    mod the_dcat_ap_conformance_shapes {
+        use super::*;
+        use crate::validate;
+        use graph_owl_core::flake::namespace;
+
+        fn dcterms(term: &str) -> Sid {
+            Sid::new(namespace::DCTERMS, term)
+        }
+
+        fn dcat(term: &str) -> Sid {
+            Sid::new(namespace::DCAT, term)
+        }
+
+        #[test]
+        fn every_dcat_ap_shape_compiles() {
+            let (shapes, failures) = read_all(&dcat_ap_conformance_shapes(1));
+            assert!(failures.is_empty(), "{failures:#?}");
+            assert_eq!(shapes.len(), 2, "{shapes:#?}");
+        }
+
+        /// A Dataset with neither title nor description is caught — the
+        /// mutator watch the plan itself names: an export that omits
+        /// `dct:title` must fail this validation.
+        #[test]
+        fn a_dataset_missing_title_and_description_is_rejected() {
+            let mut facts = dcat_ap_conformance_shapes(1);
+            facts.push(f(a("orders"), rdf_type(), FlakeValue::Ref(dcat("Dataset"))));
+
+            let (shapes, _) = read_all(&facts);
+            let report = validate(&shapes, &facts);
+
+            assert!(!report.conforms, "{:#?}", report.violations);
+            let offenders: Vec<&Sid> = report.violations.iter().map(|v| &v.focus_node).collect();
+            assert!(
+                offenders.contains(&&a("orders")),
+                "{:#?}",
+                report.violations
+            );
+        }
+
+        /// And the positive: title + description is enough for a Dataset —
+        /// `dct:publisher`/`dcat:theme` are not mandatory there, matching
+        /// the official shape exactly (see the doc comment).
+        #[test]
+        fn a_dataset_with_title_and_description_conforms() {
+            let mut facts = dcat_ap_conformance_shapes(1);
+            facts.push(f(a("orders"), rdf_type(), FlakeValue::Ref(dcat("Dataset"))));
+            facts.push(f(
+                a("orders"),
+                dcterms("title"),
+                FlakeValue::String("Orders".into()),
+            ));
+            facts.push(f(
+                a("orders"),
+                dcterms("description"),
+                FlakeValue::String("Customer orders".into()),
+            ));
+
+            let (shapes, _) = read_all(&facts);
+            let report = validate(&shapes, &facts);
+            assert!(report.conforms, "{:#?}", report.violations);
+        }
+
+        /// A Catalog additionally requires `dct:publisher` — the one
+        /// property whose cardinality genuinely differs between the two
+        /// official shapes (mandatory on Catalog, optional on Dataset).
+        #[test]
+        fn a_catalog_without_a_publisher_is_rejected_even_with_title_and_description() {
+            let mut facts = dcat_ap_conformance_shapes(1);
+            facts.push(f(
+                a("warehouse"),
+                rdf_type(),
+                FlakeValue::Ref(dcat("Catalog")),
+            ));
+            facts.push(f(
+                a("warehouse"),
+                dcterms("title"),
+                FlakeValue::String("Warehouse".into()),
+            ));
+            facts.push(f(
+                a("warehouse"),
+                dcterms("description"),
+                FlakeValue::String("The service".into()),
+            ));
+
+            let (shapes, _) = read_all(&facts);
+            let report = validate(&shapes, &facts);
+            assert!(!report.conforms, "{:#?}", report.violations);
+        }
+
+        #[test]
+        fn a_catalog_with_a_publisher_conforms() {
+            let mut facts = dcat_ap_conformance_shapes(1);
+            facts.push(f(
+                a("warehouse"),
+                rdf_type(),
+                FlakeValue::Ref(dcat("Catalog")),
+            ));
+            facts.push(f(
+                a("warehouse"),
+                dcterms("title"),
+                FlakeValue::String("Warehouse".into()),
+            ));
+            facts.push(f(
+                a("warehouse"),
+                dcterms("description"),
+                FlakeValue::String("The service".into()),
+            ));
+            facts.push(f(
+                a("warehouse"),
+                dcterms("publisher"),
+                FlakeValue::Ref(a("system")),
+            ));
+
+            let (shapes, _) = read_all(&facts);
+            let report = validate(&shapes, &facts);
+            assert!(report.conforms, "{:#?}", report.violations);
         }
     }
 

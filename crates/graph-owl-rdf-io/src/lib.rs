@@ -8,12 +8,51 @@
 //! thing to a query and another to an export is not a bug this crate can
 //! introduce on its own.
 //!
-//! **Slice A only**: Turtle, N-Triples, N-Quads. `RdfFormat` names the
+//! **Slice A**: Turtle, N-Triples, N-Quads. `RdfFormat` names the
 //! full set the plan's own interface reference specifies (`JsonLd`,
 //! `RdfXml`, `TriG` included) so later slices extend this module rather
-//! than change its public shape; the three not yet implemented return
+//! than change its public shape; the two still not implemented return
 //! [`RdfError::UnsupportedFormat`] rather than panicking or silently
 //! falling back to one that is.
+//!
+//! **Slice B**: JSON-LD, via `oxjsonld` — same Oxigraph family as `oxttl`.
+//! Two things worth knowing before reading [`parse_json_ld`] or
+//! [`serialize_json_ld_with_context`]:
+//!
+//! - **Remote `@context` fetching is refused unless the caller opts in.**
+//!   `oxjsonld` itself refuses any `@context` URL when no
+//!   `load_document_callback` is set (confirmed by reading
+//!   `context.rs` — no callback means the parser's own attempt to resolve
+//!   a remote context returns `Err` before any network call happens), so
+//!   [`parse_json_ld`] is safe by construction, not by an added check.
+//!   [`parse_json_ld_with_allowed_hosts`] is the explicit, separate opt-in
+//!   for a caller that wants specific hosts fetchable — the allowlist is
+//!   checked *before* the request is made.
+//! - **`oxjsonld`'s serializer does not compact terms against its declared
+//!   prefixes.** Read in `from_rdf.rs`: `with_prefix` records a prefix in
+//!   the emitted `@context` object as metadata for a *consumer's* own
+//!   compaction, but this crate's own writer still emits predicate and
+//!   `@type` keys as full IRIs regardless. What the serializer *does* apply
+//!   is `with_base_iri`, which shortens `@id`s relative to it. So in this
+//!   crate, "compact" means base-relative `@id`s under a named
+//!   [`JsonLdContext`], not full CURIE compaction — two different contexts
+//!   (different `base`) produce genuinely different bytes because the
+//!   `@id` shape differs, which is what Slice B's own criterion tests.
+//!
+//! **Frame is a documented subset, not the full W3C algorithm.** Neither
+//! `oxjsonld` 0.2.5 nor `json-ld` 0.21.4 (the two permissively licensed
+//! JSON-LD crates on crates.io as of 5 August 2026 — both checked,
+//! `00l-build-vs-adopt.md`) implements JSON-LD Framing; `oxjsonld`'s
+//! `profile.rs` only names the framing profile IRIs for content
+//! negotiation, and neither crate has a `frame` module. [`frame_json_ld`]
+//! implements the common case directly from
+//! <https://www.w3.org/TR/json-ld-framing/> — the spec, not any reference
+//! implementation — under the spec's own default flags (`@requireAll`,
+//! embed-once): match by `@type` and by every predicate the frame names,
+//! nest referenced nodes once, and turn a repeated reference back into a
+//! bare `{"@id": ...}` rather than looping. `@embed`/`@explicit`/
+//! `@omitDefault`/list framing are not implemented; this is a recorded
+//! scope cut, not a silent gap.
 //!
 //! **Not hand-written text.** The round-trip criterion is
 //! `parse(serialize(x)) == x`, and the parser is `oxttl` regardless —
@@ -34,7 +73,11 @@ use oxrdf::{GraphName, NamedOrBlankNode, Quad, Term, Triple};
 /// than changing this enum's shape underneath every existing caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RdfFormat {
-    /// Not yet implemented — Slice B.
+    /// Implemented — Slice B. `StandardRdfIo`'s trait methods use
+    /// [`JsonLdContext::core_v1`] and never fetch a remote `@context`;
+    /// [`serialize_json_ld_with_context`] and
+    /// [`parse_json_ld_with_allowed_hosts`] are the escape hatches for a
+    /// caller that wants a different context or opted-in remote fetching.
     JsonLd,
     /// Implemented.
     Turtle,
@@ -153,6 +196,7 @@ impl RdfSerializer for StandardRdfIo {
             RdfFormat::Turtle => serialize_turtle(flakes),
             RdfFormat::NTriples => serialize_ntriples(flakes),
             RdfFormat::NQuads => serialize_nquads(flakes),
+            RdfFormat::JsonLd => serialize_json_ld_with_context(flakes, &JsonLdContext::core_v1()),
             other => Err(RdfError::UnsupportedFormat(other)),
         }
     }
@@ -169,6 +213,7 @@ impl RdfParser for StandardRdfIo {
             RdfFormat::Turtle => parse_turtle(bytes, base),
             RdfFormat::NTriples => parse_ntriples(bytes),
             RdfFormat::NQuads => parse_nquads(bytes),
+            RdfFormat::JsonLd => parse_json_ld(bytes, base),
             other => Err(RdfError::UnsupportedFormat(other)),
         }
     }
@@ -324,6 +369,455 @@ fn parse_nquads(bytes: &[u8]) -> Result<Vec<Flake>, RdfError> {
         });
     }
     Ok(flakes)
+}
+
+/// A versioned JSON-LD `@context` — the base IRI compacted output shortens
+/// `@id`s against, served at [`JsonLdContext::url`]. Versioned in its own
+/// URL rather than embedded inline, so a consumer resolves the same
+/// context graph-owl itself would serve (Slice B's own criterion: "output
+/// pins the context version").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonLdContext {
+    /// The version segment of [`Self::url`].
+    pub version: u32,
+    /// `@id`s are shortened relative to this IRI.
+    pub base: String,
+    /// Declared in the emitted `@context` object as metadata — not applied
+    /// to key compaction by `oxjsonld`'s own writer (see the module-level
+    /// doc comment).
+    pub prefixes: Vec<(String, String)>,
+}
+
+impl JsonLdContext {
+    /// The context every `RdfFormat::JsonLd` call through `StandardRdfIo`
+    /// compacts against — the eight namespaces this store already
+    /// registers (`graph_owl_core::flake::namespace_iri`), `dsc` as base.
+    #[must_use]
+    pub fn core_v1() -> Self {
+        Self {
+            version: 1,
+            base: "https://graph-owl.dev/ns/catalog#".to_string(),
+            prefixes: vec![
+                (
+                    "dsc".to_string(),
+                    "https://graph-owl.dev/ns/catalog#".to_string(),
+                ),
+                (
+                    "rdf".to_string(),
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#".to_string(),
+                ),
+                (
+                    "rdfs".to_string(),
+                    "http://www.w3.org/2000/01/rdf-schema#".to_string(),
+                ),
+                (
+                    "xsd".to_string(),
+                    "http://www.w3.org/2001/XMLSchema#".to_string(),
+                ),
+                (
+                    "owl".to_string(),
+                    "http://www.w3.org/2002/07/owl#".to_string(),
+                ),
+                ("sh".to_string(), "http://www.w3.org/ns/shacl#".to_string()),
+                ("schema".to_string(), "https://schema.org/".to_string()),
+                (
+                    "dcterms".to_string(),
+                    "http://purl.org/dc/terms/".to_string(),
+                ),
+            ],
+        }
+    }
+
+    /// The versioned URL this context is served at
+    /// (`GET /rdf/context/v{version}` in `graph-owl-server`). Compacted
+    /// JSON-LD output carries this string as its `@context`, never the
+    /// inline object.
+    #[must_use]
+    pub fn url(&self) -> String {
+        format!("https://graph-owl.dev/context/v{}", self.version)
+    }
+
+    /// The document [`Self::url`] serves — what a document referencing that
+    /// URL resolves to. `graph-owl-server`'s route body is exactly these
+    /// bytes, so the served context and the one this crate compacts
+    /// against cannot drift apart into two different mappings.
+    #[must_use]
+    pub fn to_document(&self) -> Vec<u8> {
+        let mut context = serde_json::Map::new();
+        context.insert(
+            "@base".to_string(),
+            serde_json::Value::String(self.base.clone()),
+        );
+        for (prefix, iri) in &self.prefixes {
+            context.insert(prefix.clone(), serde_json::Value::String(iri.clone()));
+        }
+        let document = serde_json::json!({ "@context": context });
+        serde_json::to_vec(&document).unwrap_or_default()
+    }
+}
+
+/// Turns flakes into JSON-LD, compacted against `context`'s base IRI and
+/// referencing `context`'s served URL. See the module-level doc comment
+/// for what "compact" means given `oxjsonld`'s actual capability.
+///
+/// # Errors
+/// [`RdfError::UnregisteredNamespace`] if any flake names an unmapped
+/// namespace; [`RdfError::Io`] if writing or the context-URL rewrite fails.
+pub fn serialize_json_ld_with_context(
+    flakes: &[Flake],
+    context: &JsonLdContext,
+) -> Result<Vec<u8>, RdfError> {
+    let mut serializer = oxjsonld::JsonLdSerializer::new()
+        .with_base_iri(context.base.as_str())
+        .map_err(|e| RdfError::Io(e.to_string()))?;
+    for (prefix, iri) in &context.prefixes {
+        serializer = serializer
+            .with_prefix(prefix.as_str(), iri.as_str())
+            .map_err(|e| RdfError::Io(e.to_string()))?;
+    }
+    let mut writer = serializer.for_writer(Vec::new());
+    for flake in flakes {
+        let s = to_named_node(&flake.s)?;
+        let p = to_named_node(&flake.p)?;
+        let o = to_term(&flake.o)?;
+        let graph_name = flake_graph_name(flake)?;
+        let quad = Quad::new(s, p, o, graph_name);
+        writer
+            .serialize_quad(&quad)
+            .map_err(|e| RdfError::Io(e.to_string()))?;
+    }
+    let bytes = writer.finish().map_err(|e| RdfError::Io(e.to_string()))?;
+    rewrite_context_as_url(&bytes, &context.url())
+}
+
+/// Replaces the inline `@context` object `oxjsonld` writes with a bare URL
+/// string — the version-pinning half of Slice B's criterion. Safe because
+/// the URL, once served, resolves to exactly the prefixes and base this
+/// function just compacted against; nothing about the already-computed
+/// base-relative `@id`s changes.
+fn rewrite_context_as_url(bytes: &[u8], url: &str) -> Result<Vec<u8>, RdfError> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| RdfError::Io(e.to_string()))?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "@context".to_string(),
+            serde_json::Value::String(url.to_string()),
+        );
+    }
+    serde_json::to_vec(&value).map_err(|e| RdfError::Io(e.to_string()))
+}
+
+/// Parses JSON-LD into flakes. Never fetches a remote `@context` — see the
+/// module-level doc comment for why this is `oxjsonld`'s own default
+/// behaviour, not an added check. `@graph`-nested node objects carrying an
+/// `@id` become `cx`, the same mapping N-Quads' graph slot already gets,
+/// because `oxjsonld` yields the identical `Quad` shape for both.
+///
+/// # Errors
+/// [`RdfError::Parse`] if the bytes are not valid JSON-LD, including a
+/// document whose `@context` cannot be resolved without a remote fetch;
+/// [`RdfError::UnrecognisedIri`] if a subject or predicate names a
+/// namespace this store has no `Sid` for.
+pub fn parse_json_ld(bytes: &[u8], base: Option<&str>) -> Result<Vec<Flake>, RdfError> {
+    let mut parser = oxjsonld::JsonLdParser::new();
+    if let Some(base) = base {
+        parser = parser
+            .with_base_iri(base)
+            .map_err(|e| RdfError::Parse(e.to_string()))?;
+    }
+    quads_to_flakes(parser.for_slice(bytes))
+}
+
+/// [`parse_json_ld`], but a remote `@context` URL whose host is in
+/// `allowed_hosts` is fetched rather than refused — the explicit opt-in
+/// Slice B's own criterion names ("rejected unless the URL is
+/// allowlisted"). The allowlist is checked *before* any request leaves the
+/// process, inside the callback `oxjsonld` calls for every remote
+/// reference.
+///
+/// Uses a blocking HTTP client. This function has no async runtime of its
+/// own — a caller already inside a tokio runtime must wrap it in
+/// `tokio::task::spawn_blocking`, the same way any blocking call must be.
+///
+/// # Errors
+/// Everything [`parse_json_ld`] can return, plus [`RdfError::Parse`] when a
+/// remote `@context` URL's host is not in `allowed_hosts`, or when the
+/// allowed fetch itself fails.
+pub fn parse_json_ld_with_allowed_hosts(
+    bytes: &[u8],
+    base: Option<&str>,
+    allowed_hosts: &[String],
+) -> Result<Vec<Flake>, RdfError> {
+    let allowed_hosts = allowed_hosts.to_vec();
+    parse_json_ld_with_loader(bytes, base, move |remote_url| {
+        if !is_host_allowed(remote_url, &allowed_hosts) {
+            return Err(format!(
+                "remote `@context` host for `{remote_url}` is not in the allowlist \
+                 — refused before any request was made"
+            ));
+        }
+        reqwest::blocking::get(remote_url)
+            .and_then(reqwest::blocking::Response::bytes)
+            .map(|body| body.to_vec())
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// [`parse_json_ld`], but a remote `@context` is resolved through `loader`
+/// instead of refused. [`parse_json_ld_with_allowed_hosts`] is `loader`
+/// fixed to "check the allowlist, then fetch over HTTP" — factored apart so
+/// a test (or an embedding-specific caller) can substitute its own
+/// resolution without touching the network, the same reasoning
+/// `finding-seams` gives for injecting a boundary rather than hard-coding
+/// it.
+///
+/// # Errors
+/// Everything [`parse_json_ld`] can return, plus whatever `loader` itself
+/// returns as its `Err` string, wrapped in [`RdfError::Parse`].
+pub fn parse_json_ld_with_loader(
+    bytes: &[u8],
+    base: Option<&str>,
+    loader: impl Fn(&str) -> Result<Vec<u8>, String>
+    + Send
+    + Sync
+    + std::panic::UnwindSafe
+    + std::panic::RefUnwindSafe
+    + 'static,
+) -> Result<Vec<Flake>, RdfError> {
+    let mut parser = oxjsonld::JsonLdParser::new();
+    if let Some(base) = base {
+        parser = parser
+            .with_base_iri(base)
+            .map_err(|e| RdfError::Parse(e.to_string()))?;
+    }
+    let sliced = parser.for_slice(bytes).with_load_document_callback(
+        move |remote_url,
+              _options|
+              -> Result<
+            oxjsonld::JsonLdRemoteDocument,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            let document = loader(remote_url)
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+            Ok(oxjsonld::JsonLdRemoteDocument {
+                document,
+                document_url: remote_url.to_string(),
+            })
+        },
+    );
+    quads_to_flakes(sliced)
+}
+
+/// Whether `url_str`'s host is in `allowed_hosts` — the check
+/// [`parse_json_ld_with_allowed_hosts`] runs *before* any network access.
+/// Host extraction goes through `url::Url` rather than a hand-rolled split,
+/// specifically so a userinfo trick (`http://allowed.com@evil.com/`)
+/// resolves to the real authority (`evil.com`), not the attacker-chosen
+/// prefix — a classic SSRF-allowlist bypass if parsed naively. A URL that
+/// fails to parse, or has no host at all, is never allowed.
+fn is_host_allowed(url_str: &str, allowed_hosts: &[String]) -> bool {
+    url::Url::parse(url_str)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .is_some_and(|host| allowed_hosts.iter().any(|allowed| allowed == &host))
+}
+
+fn quads_to_flakes(
+    quads: impl Iterator<Item = Result<Quad, oxjsonld::JsonLdSyntaxError>>,
+) -> Result<Vec<Flake>, RdfError> {
+    let mut blanks = BlankNodeMap::new();
+    let mut flakes = Vec::new();
+    for result in quads {
+        let quad = result.map_err(|e| RdfError::Parse(e.to_string()))?;
+        let s = resolve_subject(&quad.subject, &mut blanks)?;
+        let p = Sid::from_iri(quad.predicate.as_str())
+            .ok_or_else(|| RdfError::UnrecognisedIri(quad.predicate.as_str().to_string()))?;
+        let o = resolve_object(&quad.object, &mut blanks)?;
+        let cx = match &quad.graph_name {
+            GraphName::NamedNode(n) => Some(
+                Sid::from_iri(n.as_str())
+                    .ok_or_else(|| RdfError::UnrecognisedIri(n.as_str().to_string()))?,
+            ),
+            GraphName::BlankNode(b) => Some(skolemize(b.as_str(), &mut blanks)),
+            GraphName::DefaultGraph => None,
+        };
+        flakes.push(Flake {
+            s,
+            p,
+            o,
+            cx,
+            t: 0,
+            op: true,
+        });
+    }
+    Ok(flakes)
+}
+
+/// One flake's-worth of `rdf:type` used for frame matching — kept as a
+/// function rather than a constant so it shares `Sid::new`'s own
+/// namespace-code convention instead of a second, hand-written one.
+fn rdf_type() -> Sid {
+    Sid::new(graph_owl_core::flake::namespace::RDF, "type")
+}
+
+/// Frames already-parsed flakes against `frame` — see the module-level doc
+/// comment for exactly which subset of
+/// <https://www.w3.org/TR/json-ld-framing/> this implements. `frame`'s
+/// keys are full IRIs (this function does not resolve CURIEs, matching
+/// `oxjsonld`'s own no-compaction behaviour elsewhere in this crate):
+/// `"@type"` (a single IRI string) selects subjects by their `rdf:type`;
+/// every other key names a predicate the frame requires, and a non-empty
+/// object value for that key is itself a nested frame applied to any
+/// `Ref`-valued object of that predicate. A frame with no predicate keys
+/// at all matches every subject that satisfies `@type` (or every subject,
+/// if `@type` is absent too) and embeds every predicate found on it,
+/// one level deep.
+///
+/// # Errors
+/// [`RdfError::Io`] if the output cannot be assembled into JSON (never in
+/// practice, since every value written is already valid).
+pub fn frame_json_ld(flakes: &[Flake], frame: &serde_json::Value) -> Result<Vec<u8>, RdfError> {
+    let mut by_subject: std::collections::BTreeMap<&Sid, Vec<&Flake>> =
+        std::collections::BTreeMap::new();
+    for flake in flakes {
+        by_subject.entry(&flake.s).or_default().push(flake);
+    }
+
+    let frame_type = frame.get("@type").and_then(serde_json::Value::as_str);
+    let frame_object = frame.as_object();
+    let requested_predicates: Vec<&String> = frame_object
+        .map(|object| object.keys().filter(|k| k.as_str() != "@type").collect())
+        .unwrap_or_default();
+
+    let mut visited = std::collections::HashSet::new();
+    let mut nodes = Vec::new();
+    for (subject, subject_flakes) in &by_subject {
+        let matches_type = match frame_type {
+            Some(wanted) => subject_flakes.iter().any(|f| {
+                f.p == rdf_type()
+                    && matches!(&f.o, FlakeValue::Ref(r) if r.to_iri().as_deref() == Some(wanted))
+            }),
+            None => true,
+        };
+        let has_required_predicates = requested_predicates.iter().all(|predicate| {
+            subject_flakes
+                .iter()
+                .any(|f| f.p.to_iri().as_deref() == Some(predicate.as_str()))
+        });
+        if matches_type && has_required_predicates {
+            nodes.push(frame_node(
+                subject,
+                &by_subject,
+                frame_object,
+                &mut visited,
+            )?);
+        }
+    }
+    let output = serde_json::json!({
+        "@context": JsonLdContext::core_v1().url(),
+        "@graph": nodes,
+    });
+    serde_json::to_vec(&output).map_err(|e| RdfError::Io(e.to_string()))
+}
+
+fn frame_node(
+    subject: &Sid,
+    by_subject: &std::collections::BTreeMap<&Sid, Vec<&Flake>>,
+    frame_object: Option<&serde_json::Map<String, serde_json::Value>>,
+    visited: &mut std::collections::HashSet<Sid>,
+) -> Result<serde_json::Value, RdfError> {
+    let iri = subject
+        .to_iri()
+        .ok_or_else(|| RdfError::UnregisteredNamespace {
+            namespace: subject.namespace_code,
+            id: subject.id.clone(),
+        })?;
+    let mut node = serde_json::Map::new();
+    node.insert("@id".to_string(), serde_json::Value::String(iri));
+
+    if !visited.insert(subject.clone()) {
+        // Already embedded once elsewhere in this frame call — a bare
+        // `{"@id": ...}` reference, not a second copy, which is what keeps
+        // a cycle from recursing forever.
+        return Ok(node.into());
+    }
+
+    let Some(subject_flakes) = by_subject.get(subject) else {
+        return Ok(node.into());
+    };
+
+    let mut by_predicate: std::collections::BTreeMap<String, Vec<&Flake>> =
+        std::collections::BTreeMap::new();
+    for flake in subject_flakes {
+        if let Some(iri) = flake.p.to_iri() {
+            by_predicate.entry(iri).or_default().push(flake);
+        }
+    }
+
+    for (predicate, predicate_flakes) in &by_predicate {
+        let sub_frame = frame_object.and_then(|object| object.get(predicate));
+        // An explicit frame with named predicates includes only those;
+        // one with none listed (besides `@type`) includes everything found.
+        let included = frame_object
+            .is_none_or(|object| object.keys().all(|k| k == "@type") || sub_frame.is_some());
+        if !included {
+            continue;
+        }
+        let mut values = Vec::new();
+        for flake in predicate_flakes {
+            let value = match &flake.o {
+                FlakeValue::Ref(referenced)
+                    if sub_frame.is_none_or(|f| {
+                        f.is_object() && !f.as_object().is_some_and(serde_json::Map::is_empty)
+                    }) =>
+                {
+                    frame_node(
+                        referenced,
+                        by_subject,
+                        sub_frame.and_then(serde_json::Value::as_object),
+                        visited,
+                    )?
+                }
+                other => flake_value_to_json(other)?,
+            };
+            values.push(value);
+        }
+        node.insert(predicate.clone(), values.into());
+    }
+
+    Ok(node.into())
+}
+
+fn flake_value_to_json(value: &FlakeValue) -> Result<serde_json::Value, RdfError> {
+    let mut object = serde_json::Map::new();
+    match value {
+        FlakeValue::Ref(sid) => {
+            let iri = sid
+                .to_iri()
+                .ok_or_else(|| RdfError::UnregisteredNamespace {
+                    namespace: sid.namespace_code,
+                    id: sid.id.clone(),
+                })?;
+            object.insert("@id".to_string(), serde_json::Value::String(iri));
+        }
+        FlakeValue::String(s) => {
+            object.insert("@value".to_string(), serde_json::Value::String(s.clone()));
+        }
+        FlakeValue::Boolean(b) => {
+            object.insert("@value".to_string(), serde_json::Value::Bool(*b));
+        }
+        FlakeValue::Int(i) => {
+            object.insert("@value".to_string(), serde_json::Value::Number((*i).into()));
+        }
+        other => {
+            let term = to_term(other)?;
+            object.insert(
+                "@value".to_string(),
+                serde_json::Value::String(term.to_string()),
+            );
+        }
+    }
+    Ok(object.into())
 }
 
 fn triple_to_flake(triple: &Triple, blanks: &mut BlankNodeMap) -> Result<Flake, RdfError> {
@@ -524,10 +1018,225 @@ mod tests {
 
     #[test]
     fn an_unimplemented_format_is_named_not_a_silent_fallback() {
-        let outcome = StandardRdfIo.serialize(&[], RdfFormat::JsonLd);
+        let outcome = StandardRdfIo.serialize(&[], RdfFormat::TriG);
         assert!(
-            matches!(outcome, Err(RdfError::UnsupportedFormat(RdfFormat::JsonLd))),
+            matches!(outcome, Err(RdfError::UnsupportedFormat(RdfFormat::TriG))),
             "{outcome:?}"
         );
+    }
+
+    // -- Slice B: JSON-LD --------------------------------------------------
+
+    /// Output pins `@context` to a URL (Slice B's own criterion), so
+    /// parsing that output back necessarily means resolving that URL —
+    /// exactly the SSRF-relevant path [`parse_json_ld_with_loader`] exists
+    /// to make testable without a real fetch. The loader here returns the
+    /// same bytes [`JsonLdContext::to_document`] would serve, so this is a
+    /// faithful round trip of what the served endpoint will actually say.
+    #[test]
+    fn json_ld_round_trips_through_the_core_context() {
+        let cases = vec![
+            flake("a", "ref", FlakeValue::Ref(Sid::dsc("b"))),
+            flake("a", "str", FlakeValue::String("hello".into())),
+            flake("a", "int", FlakeValue::Int(42)),
+        ];
+        for input in cases {
+            let bytes = StandardRdfIo
+                .serialize(std::slice::from_ref(&input), RdfFormat::JsonLd)
+                .expect("serialize");
+            let core = JsonLdContext::core_v1();
+            let context_document = core.to_document();
+            let parsed = parse_json_ld_with_loader(&bytes, Some(&core.base), move |_url| {
+                Ok(context_document.clone())
+            })
+            .expect("parse");
+            assert_eq!(
+                parsed,
+                vec![input.clone()],
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+    }
+
+    /// **Version-pinning.** The criterion is literal: output carries the
+    /// context as a URL string, not the inline object `oxjsonld` writes by
+    /// default — a consumer resolves the same prefixes/base by dereferencing
+    /// that URL rather than trusting whatever the document happens to embed.
+    #[test]
+    fn compacted_output_pins_the_context_version_as_a_url() {
+        let input = flake("a", "str", FlakeValue::String("v".into()));
+        let bytes = StandardRdfIo
+            .serialize(&[input], RdfFormat::JsonLd)
+            .expect("serialize");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json");
+        assert_eq!(
+            value.get("@context").and_then(serde_json::Value::as_str),
+            Some(JsonLdContext::core_v1().url().as_str())
+        );
+    }
+
+    /// **The criterion's own wording**: compacting with a different context
+    /// produces different but valid JSON. `oxjsonld` does not compact terms
+    /// against declared prefixes (module doc comment), so what actually
+    /// changes shape between two contexts is the base-relative `@id` — this
+    /// test proves that difference is real, not asserted past the crate's
+    /// own capability.
+    #[test]
+    fn two_different_contexts_compact_the_same_flakes_differently() {
+        let input = flake("a", "str", FlakeValue::String("v".into()));
+        let core = JsonLdContext::core_v1();
+        let alternate = JsonLdContext {
+            version: 2,
+            base: "https://graph-owl.dev/ns/catalog#a".to_string(),
+            prefixes: core.prefixes.clone(),
+        };
+
+        let core_bytes =
+            serialize_json_ld_with_context(std::slice::from_ref(&input), &core).expect("core");
+        let alternate_bytes =
+            serialize_json_ld_with_context(std::slice::from_ref(&input), &alternate)
+                .expect("alternate");
+
+        assert_ne!(
+            core_bytes, alternate_bytes,
+            "different base IRIs must compact `@id` differently"
+        );
+        assert!(serde_json::from_slice::<serde_json::Value>(&core_bytes).is_ok());
+        assert!(serde_json::from_slice::<serde_json::Value>(&alternate_bytes).is_ok());
+
+        let alternate_document = alternate.to_document();
+        let reparsed =
+            parse_json_ld_with_loader(&alternate_bytes, Some(&alternate.base), move |_url| {
+                Ok(alternate_document.clone())
+            })
+            .expect("parse");
+        assert_eq!(reparsed, vec![input], "still the same triple underneath");
+    }
+
+    /// **`@graph` maps to `cx`.** A node object naming both `@id` and
+    /// `@graph` is JSON-LD's own named-graph syntax; `oxjsonld` yields it as
+    /// a `Quad` with that `@id` as `graph_name`, so the same mapping N-Quads
+    /// already gets falls out with no extra code.
+    #[test]
+    fn graph_maps_to_cx_through_json_ld() {
+        let doc = br#"{
+            "@context": {"dsc": "https://graph-owl.dev/ns/catalog#"},
+            "@id": "dsc:graph1",
+            "@graph": [
+                {"@id": "dsc:a", "dsc:name": "hello"}
+            ]
+        }"#;
+        let flakes = parse_json_ld(doc, None).expect("parse");
+        assert_eq!(flakes.len(), 1);
+        assert_eq!(flakes[0].s, Sid::dsc("a"));
+        assert_eq!(flakes[0].cx, Some(Sid::dsc("graph1")));
+    }
+
+    /// **SSRF: refused by default.** No allowlist argument exists on
+    /// [`parse_json_ld`] at all — this proves the refusal is real, not just
+    /// documented.
+    #[test]
+    fn a_remote_context_is_refused_by_default() {
+        let doc = br#"{"@context": "https://evil.example/context.jsonld", "@id": "dsc:a"}"#;
+        let outcome = parse_json_ld(doc, None);
+        assert!(matches!(outcome, Err(RdfError::Parse(_))), "{outcome:?}");
+    }
+
+    /// **SSRF: refused for a host not on the allowlist**, and refused
+    /// *before* any request — the plan's own RED test. `evil.example` is
+    /// never resolved or contacted; `is_host_allowed` rejects it from the
+    /// URL string alone, so this test needs no network.
+    #[test]
+    fn a_remote_context_from_an_unlisted_host_is_refused() {
+        let doc = br#"{"@context": "https://evil.example/context.jsonld", "@id": "dsc:a"}"#;
+        let outcome = parse_json_ld_with_allowed_hosts(doc, None, &["allowed.example".to_string()]);
+        assert!(matches!(outcome, Err(RdfError::Parse(_))), "{outcome:?}");
+    }
+
+    #[test]
+    fn is_host_allowed_matches_the_real_authority_not_a_userinfo_prefix() {
+        let allowed = vec!["allowed.example".to_string()];
+        assert!(is_host_allowed(
+            "https://allowed.example/context.jsonld",
+            &allowed
+        ));
+        assert!(
+            !is_host_allowed(
+                "https://allowed.example@evil.example/context.jsonld",
+                &allowed
+            ),
+            "userinfo before the real authority must not fool the allowlist"
+        );
+        assert!(
+            !is_host_allowed("https://evil-allowed.example/context.jsonld", &allowed),
+            "a suffix/prefix match is not a host match"
+        );
+        assert!(!is_host_allowed("not a url at all", &allowed));
+    }
+
+    fn frame_type_flake(subject: &str, type_local: &str) -> Flake {
+        Flake {
+            s: Sid::dsc(subject),
+            p: rdf_type(),
+            o: FlakeValue::Ref(Sid::dsc(type_local)),
+            cx: None,
+            t: 0,
+            op: true,
+        }
+    }
+
+    #[test]
+    fn frame_selects_by_type_and_nests_a_referenced_node() {
+        let table_iri = Sid::dsc("Table").to_iri().unwrap();
+        let flakes = vec![
+            frame_type_flake("orders", "Table"),
+            flake(
+                "orders",
+                "hasColumn",
+                FlakeValue::Ref(Sid::dsc("orders.id")),
+            ),
+            flake("orders.id", "name", FlakeValue::String("id".into())),
+        ];
+        let frame = serde_json::json!({"@type": table_iri});
+        let bytes = frame_json_ld(&flakes, &frame).expect("frame");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json");
+        let graph = value["@graph"].as_array().expect("@graph array");
+        assert_eq!(graph.len(), 1, "{value}");
+        let node = &graph[0];
+        assert_eq!(
+            node["@id"],
+            serde_json::Value::String(Sid::dsc("orders").to_iri().unwrap())
+        );
+        let column_predicate = Sid::new(namespace::DSC, "hasColumn").to_iri().unwrap();
+        let embedded = &node[&column_predicate][0];
+        assert_eq!(
+            embedded["@id"],
+            serde_json::Value::String(Sid::dsc("orders.id").to_iri().unwrap())
+        );
+        assert!(
+            embedded
+                .get(Sid::new(namespace::DSC, "name").to_iri().unwrap())
+                .is_some(),
+            "the nested node's own properties must be embedded too: {embedded}"
+        );
+    }
+
+    /// **Cycle safety.** Two subjects referencing each other must not
+    /// recurse forever — the second encounter of an already-embedded
+    /// subject becomes a bare `{"@id": ...}` reference.
+    #[test]
+    fn frame_breaks_a_reference_cycle_with_a_bare_id() {
+        let flakes = vec![
+            flake("a", "feeds", FlakeValue::Ref(Sid::dsc("b"))),
+            flake("b", "feeds", FlakeValue::Ref(Sid::dsc("a"))),
+        ];
+        let frame = serde_json::json!({});
+        let bytes = frame_json_ld(&flakes, &frame).expect("frame");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json");
+        // Must terminate at all — the real assertion here is that this test
+        // completes rather than hanging. A shallow shape check besides.
+        let graph = value["@graph"].as_array().expect("@graph array");
+        assert_eq!(graph.len(), 2, "{value}");
     }
 }

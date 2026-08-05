@@ -1,7 +1,7 @@
 # Plan: Property-Graph Interchange & External Store Sync (Epic 9a)
 
 **Branch**: feat/lpg-interchange
-**Status**: **Slice A shipped, 5 August 2026 — Slices B–F not started.**
+**Status**: **Slices A–B shipped (5–6 August 2026) — Slices C–F not started.**
 **Depends on**: Epic 7c (LPG projection) — shipped, and its `FlakeValue::Ref`-vs-`String` kind bug already found and fixed (`07d-engine-bolt.md`). Epic 9 (RDF I/O — shares the streaming-serializer shape) — Slice A shipped, which is what this epic's own Slice A needed: not the whole of Epic 9, only its streaming-to-scratch-files pattern to mirror.
 **Crates**: **`graph-owl-lpg-io`** (per-format and per-driver features)
 
@@ -71,7 +71,7 @@ Projection is re-runnable. Elements are written with `MERGE` on the Epic 7c elem
 
 ## Acceptance criteria
 
-- [~] Every format above exports; GraphML and JSON Lines also import. **GraphML export shipped (Slice A); GraphML import and every other format not started.**
+- [~] Every format above exports; GraphML and JSON Lines also import. **GraphML export and import shipped (Slices A–B), byte-identical round trip; every other format not started.**
 - [x] Export **streams** — memory is bounded regardless of graph size. Verified structurally (schema state bounded by distinct-key count, not element count; elements written through to disk as they arrive) at 5,000-element scale, not measured by OS-level RSS at the plan's own 1M — see Slice A's own scope note.
 - [ ] GraphML export → import round-trips losslessly, including typed property declarations.
 - [ ] Bulk CSV output loads into a real target store without hand-editing.
@@ -101,11 +101,18 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 - **`LpgReader` (the import side) is not implemented.** `LpgWriter`'s trait shape ships in full; `LpgReader`'s does not exist yet in this crate — Slice B's own job.
 **Tests**: `graph-owl-lpg-io::tests` — 7 tests (key-declaration ordering, edge source/target/type, key-id stability across out-of-order key discovery, byte-level XML escaping plus real-parser acceptance, schema-boundedness at 5,000 elements, the list-value separator, and calling `node()` before `begin()`).
 
-### Slice B: GraphML import and round-trip
+### Slice B: GraphML import and round-trip — **shipped, 6 August 2026**
 
-**Acceptance criteria**: import produces `LpgNode`/`LpgEdge` values; declared key types are honoured, not string-guessed; export → import → export is byte-identical over a fixture covering every property type; an edge referencing an undeclared node → a reported error naming the id; a malformed document reports line and column; import is streaming.
-**RED**: The byte-identical round trip is the specification. A type-fidelity test: an integer property must not return as a string — a silent widening breaks every downstream comparison. Mutator watch: ignoring `<key>` types must fail type fidelity; tolerating a dangling edge reference must fail the error test.
-**Done when**: criteria met, mutation report reviewed, commit approved.
+**Shipped**:
+- `LpgElement`/`LpgReader` (the plan's own interface) plus `GraphMlReader<R: BufRead>`, a single forward streaming pass: `<key>` declarations collected as seen (always before `<graph>`, per `GraphML`'s own structure), each `<node>`/`<edge>` converted using the declared `attr.type` of every `<data>` it carries — `boolean`/`long`/`double` parsed to their typed `PropertyValue`, everything else (including the `string`-narrowed `Bytes`/`DateTime`/`Duration`/`List`/`ElementRef` Slice A's own writer already narrows) returned as `PropertyValue::String` literally, never guessed.
+- Export → import → export is byte-identical, proven directly: re-exporting what the reader just produced reproduces the original file's bytes exactly.
+- An edge naming a `source`/`target` id no `<node>` seen so far declared is `LpgIoError::DanglingReference`, naming both the edge and the missing id — checked against nodes-seen-so-far rather than the whole document (documented: correct for anything this crate's own writer produces, since it always emits nodes before edges; a hand-authored file with an edge preceding its node would false-positive, recorded rather than silently assumed, since validating the true whole-file set would mean buffering it).
+- A malformed document reports line and column via `LineTrackingReader<R>`, a `BufRead` wrapper that counts newlines as `quick_xml` calls `consume()` — the only hook that says exactly how many bytes of the last `fill_buf()` the parser actually used, needed because `quick_xml`'s own `buffer_position()` gives a byte offset, not a line/column, and a genuinely streaming reader does not keep the source bytes already consumed to compute one after the fact.
+- Import is streaming: `read()` is pull-based, one element per call, over a `BufRead` rather than a fully materialized document.
+- **A real design correction found while writing this slice**: `attr_value`/`read_key_declaration`/`typed_value` are free functions, not `&self` methods. `quick_xml`'s zero-copy `Event<'buf>` ties a `BytesStart` to `GraphMlReader`'s own `buf` field; any `&self`/`&mut self` method call while that borrow is still live (because the value is used later in the same match arm) conflicts with it, even for a *different* field, since a method signature only says `&self` and the borrow checker cannot see through it to know which fields the method actually touches. Passing the needed pieces as plain parameters instead sidesteps the conflict rather than fighting it with more lifetimes — documented in the module's own doc comment so the pattern is not "fixed" back into methods later.
+- **A second real finding**: `quick_xml::events::attributes::Attribute::read_text_into` returns content "as is" — it does not unescape entities, because it cannot safely do so without knowing whether a run was `CDATA`. Entity unescaping (`&amp;` → `&`) is `quick_xml::escape::unescape`, an explicit second step this slice's own text-reading path takes after `read_text_into` and `.decode()`.
+**Tests**: `graph-owl-lpg-io::tests` — 13 total (7 from Slice A plus 6 new: byte-identical round trip across `Boolean`/`Integer`/`Float`/`String` properties on both a node and an edge; declared-type fidelity for all three typed variants; labels and edge type round-trip; a dangling reference names both ids; a malformed document reports a real line number; streaming confirmed by reading a 10-element document one call at a time).
+**Scope cut, recorded rather than silently narrowed**: no mutation run this pass (matches Slice A's own recorded practice); self-closing `<node/>`/`<edge/>` elements (never produced by this crate's own writer, which always emits `Start`…`End` even for empty content) are not read — a real, minor gap against general `GraphML` interop, not against round-tripping this crate's own output.
 
 ### Slice C: Bulk CSV and Cypher script
 

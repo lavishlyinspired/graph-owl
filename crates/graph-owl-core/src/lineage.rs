@@ -24,6 +24,8 @@ pub enum LineageSource {
     Manual,
     /// A connector observed it.
     Connector,
+    /// Imported from an `OpenLineage` run event — Epic 9 Slice D.
+    OpenLineage,
 }
 
 impl LineageSource {
@@ -33,6 +35,7 @@ impl LineageSource {
         match self {
             LineageSource::Manual => "manual",
             LineageSource::Connector => "connector",
+            LineageSource::OpenLineage => "openlineage",
         }
     }
 
@@ -42,12 +45,17 @@ impl LineageSource {
         match raw {
             "manual" => Ok(LineageSource::Manual),
             "connector" => Ok(LineageSource::Connector),
+            "openlineage" => Ok(LineageSource::OpenLineage),
             other => Err(other.to_string()),
         }
     }
 
     /// Every source.
-    pub const ALL: [LineageSource; 2] = [LineageSource::Manual, LineageSource::Connector];
+    pub const ALL: [LineageSource; 3] = [
+        LineageSource::Manual,
+        LineageSource::Connector,
+        LineageSource::OpenLineage,
+    ];
 }
 
 /// What an edge carries beyond its endpoints.
@@ -75,6 +83,12 @@ pub struct LineageDetails {
     /// cannot express as one string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<uuid::Uuid>,
+    /// The `OpenLineage` run event's `run.runId` this edge was imported from
+    /// — Epic 9 Slice D. What makes re-importing the same event a no-op
+    /// rather than a duplicate edge: present only when `source` is
+    /// [`LineageSource::OpenLineage`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openlineage_event_id: Option<String>,
 }
 
 /// One asserted edge.

@@ -19,6 +19,19 @@ thiserror.workspace = true
 serde.workspace = true
 oxrdf = "0.3.3"
 oxttl.workspace = true
+oxjsonld.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 tracing.workspace = true
+serde_json.workspace = true
+# Blocking, not the workspace's async default: the allowlisted remote-context
+# fetch (Slice B) is called from `RdfParser::parse`, a synchronous trait
+# method with no runtime of its own. A caller already inside a tokio runtime
+# must wrap the call in `spawn_blocking` — documented on the function itself.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+# Host extraction for the SSRF allowlist check (Slice B) — a hand-rolled
+# split on a URL string is exactly the kind of parsing inconsistency SSRF
+# bypasses exploit (userinfo tricks, IPv6 brackets, percent-encoding); `url`
+# is the de-facto standard Rust URL parser (Servo project, MIT/Apache-2.0)
+# and already resolves in this workspace's lockfile transitively.
+url = "2"

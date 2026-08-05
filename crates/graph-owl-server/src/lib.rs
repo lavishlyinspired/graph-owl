@@ -421,6 +421,11 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         // Pointing the UI at the URL keeps one source of truth and keeps
         // `the_endpoint_serves_the_generated_document` true by construction.
         .route("/openapi.json", get(openapi::endpoint))
+        // Epic 9 Slice B: the versioned JSON-LD `@context` compacted output
+        // references by URL rather than embedding inline. Unauthenticated —
+        // a context document is meant to be publicly dereferenceable by any
+        // JSON-LD consumer, the same reasoning as `/openapi.json` above.
+        .route("/context/{version}", get(json_ld_context))
         .route(
             "/assets/{id}",
             get(get_asset).patch(update_asset).delete(delete_asset),
@@ -6062,6 +6067,7 @@ async fn assert_lineage(
                 query: payload.query,
                 description: payload.description,
                 pipeline: payload.pipeline,
+                openlineage_event_id: None,
             },
         )
         .await?;
@@ -8616,6 +8622,27 @@ async fn auth_configuration_endpoint() -> Json<AuthConfig> {
             .ok()
             .filter(|value| !value.is_empty()),
     ))
+}
+
+/// The JSON-LD `@context` document compacted output points at by URL
+/// (Epic 9 Slice B). `JsonLdContext::to_document()` is the exact function
+/// `graph_owl_rdf_io::serialize_json_ld_with_context` compacts against, so
+/// this route and that compaction cannot drift into two different
+/// mappings — only one version is served today (`v1`); an unknown version
+/// is `404`, the same "unlisted is indistinguishable from nonexistent"
+/// reasoning the admin surfaces already use.
+async fn json_ld_context(
+    Path(version): Path<String>,
+) -> Result<axum::response::Response, AppError> {
+    let context = match version.as_str() {
+        "v1" => graph_owl_rdf_io::JsonLdContext::core_v1(),
+        _ => return Err(AppError::NotFound),
+    };
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/ld+json")
+        .body(axum::body::Body::from(context.to_document()))
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 /// Liveness. Deliberately checks nothing: a dependency outage must not

@@ -90,6 +90,14 @@ pub mod namespace {
     pub const SCHEMA: u16 = 0x0106;
     /// `http://purl.org/dc/terms/`.
     pub const DCTERMS: u16 = 0x0107;
+    /// `http://www.w3.org/ns/dcat#` — Epic 9 Slice C.
+    pub const DCAT: u16 = 0x0108;
+    /// `http://www.w3.org/ns/prov#` — Epic 9 Slice C.
+    pub const PROV: u16 = 0x0109;
+    /// `http://xmlns.com/foaf/0.1/` — used by the DCAT-AP conformance
+    /// shapes Epic 9 Slice C validates export against (`foaf:page`,
+    /// `foaf:homepage`), not otherwise emitted by this store.
+    pub const FOAF: u16 = 0x010A;
 
     /// First code the predicate registry may hand out at runtime.
     pub const RUNTIME_START: u16 = 1024;
@@ -120,6 +128,9 @@ pub fn namespace_iri(code: u16) -> Option<&'static str> {
         namespace::SHACL => "http://www.w3.org/ns/shacl#",
         namespace::SCHEMA => "https://schema.org/",
         namespace::DCTERMS => "http://purl.org/dc/terms/",
+        namespace::DCAT => "http://www.w3.org/ns/dcat#",
+        namespace::PROV => "http://www.w3.org/ns/prov#",
+        namespace::FOAF => "http://xmlns.com/foaf/0.1/",
         _ => return None,
     })
 }
@@ -151,6 +162,9 @@ impl Sid {
             namespace::SHACL,
             namespace::SCHEMA,
             namespace::DCTERMS,
+            namespace::DCAT,
+            namespace::PROV,
+            namespace::FOAF,
         ]
         .into_iter()
         .filter_map(|code| {

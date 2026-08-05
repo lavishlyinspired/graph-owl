@@ -224,3 +224,60 @@ async fn a_real_error_matches_the_problem_schema() {
         "`type` is the field a client branches on and must be a stable URI: {problem}"
     );
 }
+
+/// Epic 9 Slice B: the served context is exactly what
+/// `graph_owl_rdf_io::JsonLdContext::core_v1().to_document()` produces —
+/// the same function the crate's own compaction uses, so this route and
+/// that compaction cannot name two different mappings.
+#[tokio::test]
+async fn the_json_ld_context_endpoint_serves_the_core_context() {
+    let (app, _container, _) = test_app().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/context/v1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("handled");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/ld+json")
+    );
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let served: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    let expected: serde_json::Value =
+        serde_json::from_slice(&graph_owl_rdf_io::JsonLdContext::core_v1().to_document())
+            .expect("valid JSON");
+    assert_eq!(served, expected);
+}
+
+/// An unknown context version is `404`, not a stale or default document —
+/// the same "unlisted is indistinguishable from nonexistent" reasoning the
+/// admin surfaces already use.
+#[tokio::test]
+async fn an_unknown_json_ld_context_version_is_not_found() {
+    let (app, _container, _) = test_app().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/context/v99")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("handled");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}

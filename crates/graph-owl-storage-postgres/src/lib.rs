@@ -736,8 +736,8 @@ impl Storage for PostgresStorage {
         let result = sqlx::query(
             "INSERT INTO lineage_edges
                  (id, from_asset_id, to_asset_id, relationship, source, query, description,
-                  created_by, pipeline_asset_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                  created_by, pipeline_asset_id, openlineage_event_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(edge.id)
         .bind(edge.from_asset_id)
@@ -748,6 +748,7 @@ impl Storage for PostgresStorage {
         .bind(&edge.details.description)
         .bind(&edge.created_by)
         .bind(edge.details.pipeline)
+        .bind(&edge.details.openlineage_event_id)
         .execute(&self.pool)
         .await;
 
@@ -781,7 +782,8 @@ impl Storage for PostgresStorage {
         let row = sqlx::query(
             "DELETE FROM lineage_edges WHERE id = $1
              RETURNING id, from_asset_id, to_asset_id, relationship, source,
-                       query, description, created_at, created_by, pipeline_asset_id",
+                       query, description, created_at, created_by, pipeline_asset_id,
+                       openlineage_event_id",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -806,6 +808,7 @@ impl Storage for PostgresStorage {
                     query: row.get("query"),
                     description: row.get("description"),
                     pipeline: row.get("pipeline_asset_id"),
+                    openlineage_event_id: row.get("openlineage_event_id"),
                 },
                 created_at: row.get("created_at"),
                 created_by: row.get("created_by"),
@@ -821,7 +824,8 @@ impl Storage for PostgresStorage {
     ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, from_asset_id, to_asset_id, relationship, source, query,
-                    description, created_at, created_by, pipeline_asset_id
+                    description, created_at, created_by, pipeline_asset_id,
+                    openlineage_event_id
                FROM lineage_edges
               WHERE from_asset_id = ANY($1) OR to_asset_id = ANY($1)",
         )
@@ -853,6 +857,7 @@ impl Storage for PostgresStorage {
                         query: row.get("query"),
                         description: row.get("description"),
                         pipeline: row.get("pipeline_asset_id"),
+                        openlineage_event_id: row.get("openlineage_event_id"),
                     },
                     created_at: row.get("created_at"),
                     created_by: row.get("created_by"),
@@ -868,7 +873,8 @@ impl Storage for PostgresStorage {
     ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, from_asset_id, to_asset_id, relationship, source, query,
-                    description, created_at, created_by, pipeline_asset_id
+                    description, created_at, created_by, pipeline_asset_id,
+                    openlineage_event_id
                FROM lineage_edges
               WHERE pipeline_asset_id = $1",
         )
@@ -896,6 +902,7 @@ impl Storage for PostgresStorage {
                         query: row.get("query"),
                         description: row.get("description"),
                         pipeline: row.get("pipeline_asset_id"),
+                        openlineage_event_id: row.get("openlineage_event_id"),
                     },
                     created_at: row.get("created_at"),
                     created_by: row.get("created_by"),

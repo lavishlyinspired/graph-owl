@@ -1105,8 +1105,10 @@ dependencies = [
  "graph-owl-engine",
  "graph-owl-events",
  "graph-owl-lpg",
+ "graph-owl-lpg-io",
  "graph-owl-ontology",
  "graph-owl-query",
+ "graph-owl-rdf-io",
  "graph-owl-reasoning",
  "graph-owl-reasoning-el",
  "graph-owl-reasoning-ql",
@@ -1368,11 +1370,15 @@ dependencies = [
  "graph-owl-core",
  "graph-owl-engine",
  "graph-owl-query",
+ "oxjsonld",
  "oxrdf",
  "oxttl",
+ "reqwest",
  "serde",
+ "serde_json",
  "thiserror 2.0.19",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -1463,6 +1469,7 @@ dependencies = [
  "graph-owl-engine",
  "graph-owl-engine-postgres",
  "graph-owl-mcp",
+ "graph-owl-rdf-io",
  "graph-owl-reasoning",
  "graph-owl-storage",
  "graph-owl-storage-postgres",
@@ -2417,6 +2424,19 @@ name = "oxiri"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54b4ed3a7192fa19f5f48f99871f2755047fabefd7f222f12a1df1773796a102"
+
+[[package]]
+name = "oxjsonld"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6e1380a504a8571763f13b8bcad629ff90d0300d47d8a519f3c6c599625840e"
+dependencies = [
+ "json-event-parser",
+ "oxiri",
+ "oxrdf",
+ "ryu-js",
+ "thiserror 2.0.19",
+]
 
 [[package]]
 name = "oxrdf"
@@ -3428,6 +3448,12 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "ryu-js"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
 
 [[package]]
 name = "same-file"

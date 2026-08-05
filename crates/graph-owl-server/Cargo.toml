@@ -27,6 +27,10 @@ graph-owl-bolt = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 graph-owl-reasoning = { path = "../graph-owl-reasoning" }
+# Epic 9 Slice B: the served, versioned JSON-LD `@context` route compacted
+# output references by URL — `JsonLdContext::to_document()` is the same
+# function `graph-owl-rdf-io`'s own serializer compacts against.
+graph-owl-rdf-io = { path = "../graph-owl-rdf-io" }
 graph-owl-connectors.workspace = true
 graph-owl-ui.workspace = true
 graph-owl-authz.workspace = true

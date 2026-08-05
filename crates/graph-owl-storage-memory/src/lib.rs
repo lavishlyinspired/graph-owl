@@ -3413,6 +3413,7 @@ impl Storage for InMemoryStorage {
                     query: None,
                     description: None,
                     pipeline: None,
+                    openlineage_event_id: None,
                 },
                 created_at: Utc::now(),
                 created_by: created_by.to_string(),

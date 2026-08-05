@@ -5697,6 +5697,7 @@ impl Catalog {
                         query: None,
                         description: None,
                         pipeline: None,
+                        openlineage_event_id: None,
                     },
                 )
                 .await
@@ -9657,6 +9658,7 @@ impl Catalog {
                             query: edge.query.clone(),
                             description: edge.description.clone(),
                             pipeline: None,
+                            openlineage_event_id: None,
                         },
                     )
                     .await
@@ -10242,6 +10244,829 @@ impl Catalog {
             refused_shapes: refused,
             computed_at_t,
         })
+    }
+
+    // ---- Epic 9 Slice E: import is validated before it lands ----
+
+    /// The named graph a source's imports land in — `graph:import:{source}`,
+    /// following the same `graph:...` convention as [`shapes_graph`] and
+    /// reasoning's own named graph: one predictable place a bad import can
+    /// be dropped wholesale via [`Self::delete_import`], never mixed into
+    /// the default graph where "which triples came from this import" would
+    /// have no answer.
+    #[must_use]
+    pub fn import_graph(source: &str) -> Sid {
+        Sid::dsc(format!("graph:import:{source}"))
+    }
+
+    /// Imports an RDF document: parses it (Epic 9 Slice A), validates every
+    /// subject against the live shapes graph (Epic 5) before anything is
+    /// written, and lands only the subjects that pass — a bad subject is
+    /// named and skipped, not a reason to fail the whole document.
+    ///
+    /// **Deduplication is by subject existence in this source's own import
+    /// graph, not Epic 17 entity resolution.** Checked before writing this
+    /// slice (`verify-blockers-against-code`): Epic 17's matching machinery
+    /// is Asset-table-centric — blocking keys, FQNs, `entity_blocking_keys`
+    /// SQL — and has no entry point that accepts a bare `Sid`/flake set.
+    /// Wiring a raw imported subject into it would mean first materializing
+    /// it as an `Asset` row with a derived FQN, a mapping this slice's own
+    /// scope does not describe and Slice A's parser does not produce. The
+    /// plan's actual acceptance criterion — "a re-import does not
+    /// duplicate" — is satisfied directly: a subject already present in
+    /// `graph:import:{source}` is reported [`ImportOutcome::skipped`]
+    /// rather than re-landed.
+    ///
+    /// **Transactional per subject, not per file**: each accepted subject's
+    /// flakes are asserted together, at their own transaction time; a write
+    /// failure for one subject is reported in
+    /// [`ImportOutcome::rejected`] rather than aborting subjects already
+    /// processed or those still to come.
+    ///
+    /// `dry_run: true` runs parsing, validation, and the dedup check, and
+    /// reports exactly what *would* land — without writing anything.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured. `Validation` if the
+    /// bytes do not parse as `fmt` — a document that does not parse at all
+    /// has no subjects to report per-subject, so this fails the whole call
+    /// rather than reporting an empty result.
+    #[tracing::instrument(name = "catalog.import_rdf", skip(self, bytes))]
+    pub async fn import_rdf(
+        &self,
+        source: &str,
+        bytes: &[u8],
+        fmt: graph_owl_rdf_io::RdfFormat,
+        base: Option<&str>,
+        dry_run: bool,
+    ) -> Result<ImportOutcome, CatalogError> {
+        use graph_owl_rdf_io::{RdfParser, StandardRdfIo};
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let parsed = StandardRdfIo.parse(bytes, fmt, base).map_err(|e| {
+            CatalogError::Validation(vec![FieldError::new(
+                "body",
+                FieldErrorCode::Type,
+                e.to_string(),
+            )])
+        })?;
+
+        let mut by_subject: std::collections::BTreeMap<Sid, Vec<Flake>> =
+            std::collections::BTreeMap::new();
+        for flake in parsed {
+            by_subject.entry(flake.s.clone()).or_default().push(flake);
+        }
+
+        // Validated against the *whole* imported batch, not per-subject
+        // slices — a shape may need to see more than one subject's own
+        // facts (e.g. `sh:class` reading a referenced node's `dsc:type`),
+        // so narrowing the input before validating could manufacture a
+        // violation the full batch would not have.
+        let shape_facts = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(shapes_graph())),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        let (compiled, _refused) = self.compiled_shapes(&shape_facts);
+        let all_flakes: Vec<Flake> = by_subject.values().flatten().cloned().collect();
+        let report = graph_owl_constraint::validate(&compiled, &all_flakes);
+
+        // First `Violation`-severity finding per subject — the one that
+        // actually blocks landing; `Warning`/`Info` do not (mirrors
+        // `ValidationReport::conforms`'s own reasoning).
+        let mut rejected_subjects: std::collections::BTreeMap<Sid, String> =
+            std::collections::BTreeMap::new();
+        for violation in &report.violations {
+            if violation.severity == graph_owl_ontology::Severity::Violation {
+                rejected_subjects
+                    .entry(violation.focus_node.clone())
+                    .or_insert_with(|| violation.message.clone());
+            }
+        }
+
+        let import_cx = Self::import_graph(source);
+        let mut outcome = ImportOutcome::default();
+
+        for (subject, subject_flakes) in by_subject {
+            if let Some(reason) = rejected_subjects.get(&subject) {
+                outcome.rejected.push((subject.to_string(), reason.clone()));
+                continue;
+            }
+
+            let existing = graph
+                .query_pattern(&graph_owl_core::flake::TriplePattern {
+                    s: Some(subject.clone()),
+                    cx: Some(Some(import_cx.clone())),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            if !existing.is_empty() {
+                outcome.skipped.push(subject.to_string());
+                continue;
+            }
+
+            if dry_run {
+                outcome.landed.push(subject.to_string());
+                continue;
+            }
+
+            let t = graph
+                .next_time()
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            let stamped: Vec<Flake> = subject_flakes
+                .into_iter()
+                .map(|f| Flake {
+                    cx: Some(import_cx.clone()),
+                    t,
+                    ..f
+                })
+                .collect();
+            match graph.assert_flakes(&stamped).await {
+                Ok(()) => outcome.landed.push(subject.to_string()),
+                Err(e) => outcome.rejected.push((subject.to_string(), e.to_string())),
+            }
+        }
+
+        Ok(outcome)
+    }
+
+    /// Drops every triple `source` has ever imported, wholesale — a bad
+    /// import is deletable without touching anything else, the reason
+    /// [`Self::import_rdf`] lands in its own named graph rather than the
+    /// default one. The same query-then-retract shape `run_reasoning` uses
+    /// to replace its own derived graph: a `TripleStore` has no dedicated
+    /// "drop this named graph" primitive, so every retraction is named
+    /// explicitly.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured, or the read or write
+    /// fails.
+    pub async fn delete_import(&self, source: &str) -> Result<u64, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let existing = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(Self::import_graph(source))),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        if existing.is_empty() {
+            return Ok(0);
+        }
+
+        let t = graph
+            .next_time()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        let retractions: Vec<Flake> = existing.iter().map(|f| f.retracted_at(t)).collect();
+        let count = retractions.len() as u64;
+        graph
+            .retract_flakes(&retractions)
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        Ok(count)
+    }
+
+    /// One asserted flake about `s`, at time `t` — the small repeated shape
+    /// [`Self::export_dcat`]'s projection is built from.
+    fn stated(s: &Sid, p: Sid, o: FlakeValue, t: i64) -> Flake {
+        Flake {
+            s: s.clone(),
+            p,
+            o,
+            cx: None,
+            t,
+            op: true,
+        }
+    }
+
+    /// Projects the catalog into DCAT + PROV-O — Epic 9 Slice C.
+    ///
+    /// `Table` becomes `dcat:Dataset`, `Service` becomes `dcat:Catalog` (the
+    /// two kinds a real DCAT catalog exchange asks for); every other kind is
+    /// out of scope for this projection and skipped, not stubbed. `title`
+    /// comes from `asset.name`, `description` from `asset.description`
+    /// (falling back to the FQN — DCAT-AP's own shape requires at least one
+    /// `dct:description`, and a table genuinely undescribed still has a
+    /// name), `publisher` from the asset's first owner (falling back to the
+    /// seeded `system` principal — the same "attribution, not
+    /// authorisation" reasoning `V15`'s `system` row already established),
+    /// and `theme` from the asset's own kind — a coarse but unconditional
+    /// classification, since DCAT-AP's shape does not require it but the
+    /// plan's own criterion names it as part of what a `Table` exports with.
+    ///
+    /// PROV-O: one `prov:Activity` per entry in the asset's own version
+    /// history, chained by `prov:wasInformedBy` oldest-to-newest and rooted
+    /// at the dataset/catalog subject via `prov:wasGeneratedBy` on the
+    /// latest — literally the entity's `updated_by`/`updated_at` history,
+    /// not a synthesised one.
+    ///
+    /// # Errors
+    /// `Storage` if the underlying storage fails.
+    pub async fn export_dcat(&self, scope: &DcatExportScope) -> Result<Vec<Flake>, CatalogError> {
+        use graph_owl_core::archive::ScopeSelector;
+
+        let dcterms = |term: &str| Sid::new(graph_owl_core::flake::namespace::DCTERMS, term);
+        let dcat = |term: &str| Sid::new(graph_owl_core::flake::namespace::DCAT, term);
+        let prov = |term: &str| Sid::new(graph_owl_core::flake::namespace::PROV, term);
+        let type_predicate = Sid::new(graph_owl_core::flake::namespace::RDF, "type");
+
+        let mut flakes = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = page_request(after.as_deref())?;
+            let result = self.storage.list_assets(None, &page).await?;
+            for asset in &result.data {
+                if asset.deleted && !scope.include_deleted {
+                    continue;
+                }
+                let class = match asset.kind {
+                    AssetKind::Table => dcat("Dataset"),
+                    AssetKind::Service => dcat("Catalog"),
+                    _ => continue,
+                };
+                if let Some(prefix) = &scope.service_fqn
+                    && !ScopeSelector::FqnPrefix(prefix.clone()).matches(asset)
+                {
+                    continue;
+                }
+                if let Some(domain) = scope.domain_id {
+                    let resolved = self.resolve_asset_domain(asset.id).await?;
+                    if resolved.map(|d| d.id) != Some(domain) {
+                        continue;
+                    }
+                }
+
+                let subject = Sid::dsc(format!("asset:{}", asset.id));
+                let t = asset.updated_at.timestamp_micros();
+                flakes.push(Self::stated(
+                    &subject,
+                    type_predicate.clone(),
+                    FlakeValue::Ref(class),
+                    t,
+                ));
+                flakes.push(Self::stated(
+                    &subject,
+                    dcterms("title"),
+                    FlakeValue::String(asset.name.clone()),
+                    t,
+                ));
+                flakes.push(Self::stated(
+                    &subject,
+                    dcterms("description"),
+                    FlakeValue::String(
+                        asset
+                            .description
+                            .clone()
+                            .unwrap_or_else(|| asset.fully_qualified_name.clone()),
+                    ),
+                    t,
+                ));
+                let publisher = asset.owners.first().map_or_else(
+                    || Sid::dsc("system"),
+                    |owner| Sid::dsc(format!("principal:{}", owner.id)),
+                );
+                flakes.push(Self::stated(
+                    &subject,
+                    dcterms("publisher"),
+                    FlakeValue::Ref(publisher),
+                    t,
+                ));
+                flakes.push(Self::stated(
+                    &subject,
+                    dcat("theme"),
+                    FlakeValue::Ref(Sid::dsc(format!("theme:{:?}", asset.kind).to_lowercase())),
+                    t,
+                ));
+
+                let mut versions = self.asset_versions(asset.id).await?;
+                versions.sort_by_key(|v| (v.version.major, v.version.minor));
+                let mut previous_activity: Option<Sid> = None;
+                for version in &versions {
+                    let activity = Sid::dsc(format!(
+                        "activity:{}:{}.{}",
+                        asset.id, version.version.major, version.version.minor
+                    ));
+                    let activity_t = version.updated_at.timestamp_micros();
+                    flakes.push(Flake {
+                        s: activity.clone(),
+                        p: type_predicate.clone(),
+                        o: FlakeValue::Ref(prov("Activity")),
+                        cx: None,
+                        t: activity_t,
+                        op: true,
+                    });
+                    flakes.push(Flake {
+                        s: activity.clone(),
+                        p: prov("generatedAtTime"),
+                        o: FlakeValue::Instant(version.updated_at),
+                        cx: None,
+                        t: activity_t,
+                        op: true,
+                    });
+                    flakes.push(Flake {
+                        s: activity.clone(),
+                        p: prov("wasAssociatedWith"),
+                        o: FlakeValue::String(version.updated_by.clone()),
+                        cx: None,
+                        t: activity_t,
+                        op: true,
+                    });
+                    if let Some(previous) = &previous_activity {
+                        flakes.push(Flake {
+                            s: activity.clone(),
+                            p: prov("wasInformedBy"),
+                            o: FlakeValue::Ref(previous.clone()),
+                            cx: None,
+                            t: activity_t,
+                            op: true,
+                        });
+                    }
+                    previous_activity = Some(activity);
+                }
+                if let Some(latest) = previous_activity {
+                    flakes.push(Self::stated(
+                        &subject,
+                        prov("wasGeneratedBy"),
+                        FlakeValue::Ref(latest),
+                        t,
+                    ));
+                }
+            }
+            after = result.paging.after;
+            if after.is_none() {
+                break;
+            }
+        }
+        Ok(flakes)
+    }
+
+    /// Exports every in-scope `feeds` edge as an `OpenLineage` `RunEvent` —
+    /// Epic 9 Slice D. One event per table-level edge; `run.runId` is the
+    /// lineage edge's own id (already a UUID, so a re-export is byte-stable
+    /// rather than inventing a second identity for the same fact).
+    /// Column-level `feeds`/`derivedFrom` edges between the two tables'
+    /// columns become the output dataset's `columnLineage` facet, per
+    /// <https://openlineage.io/spec/facets/1-2-0/ColumnLineageDatasetFacet.json>
+    /// (Apache-2.0, `OpenLineage` project — schema fetched and read directly,
+    /// not a reference implementation).
+    ///
+    /// # Errors
+    /// `Storage` if the underlying storage fails.
+    pub async fn export_openlineage(
+        &self,
+        scope: &DcatExportScope,
+    ) -> Result<Vec<serde_json::Value>, CatalogError> {
+        use graph_owl_core::archive::ScopeSelector;
+        use graph_owl_core::relationship_type::RelationshipType;
+
+        let mut events = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = page_request(after.as_deref())?;
+            let result = self
+                .storage
+                .list_assets(Some(AssetKind::Table), &page)
+                .await?;
+            for from in &result.data {
+                if from.deleted && !scope.include_deleted {
+                    continue;
+                }
+                if let Some(prefix) = &scope.service_fqn
+                    && !ScopeSelector::FqnPrefix(prefix.clone()).matches(from)
+                {
+                    continue;
+                }
+                if let Some(domain) = scope.domain_id {
+                    let resolved = self.resolve_asset_domain(from.id).await?;
+                    if resolved.map(|d| d.id) != Some(domain) {
+                        continue;
+                    }
+                }
+
+                let touching = self.storage.lineage_edges_touching(&[from.id]).await?;
+                for edge in touching.iter().filter(|e| {
+                    e.from_asset_id == from.id && e.relationship == RelationshipType::Feeds
+                }) {
+                    let Some(to) = self.storage.get_asset(edge.to_asset_id).await? else {
+                        continue;
+                    };
+                    if to.deleted && !scope.include_deleted {
+                        continue;
+                    }
+                    events.push(self.openlineage_event_for(from, &to, edge).await?);
+                }
+            }
+            after = result.paging.after;
+            if after.is_none() {
+                break;
+            }
+        }
+        Ok(events)
+    }
+
+    async fn openlineage_event_for(
+        &self,
+        from: &Asset,
+        to: &Asset,
+        edge: &graph_owl_core::lineage::LineageEdge,
+    ) -> Result<serde_json::Value, CatalogError> {
+        use graph_owl_core::relationship_type::RelationshipType;
+
+        let mut fields = serde_json::Map::new();
+        let to_columns = self.storage.list_children(Some(to.id)).await?;
+        for to_column in to_columns.iter().filter(|a| a.kind == AssetKind::Column) {
+            let touching = self.storage.lineage_edges_touching(&[to_column.id]).await?;
+            let mut input_fields = Vec::new();
+            for column_edge in touching.iter().filter(|e| {
+                e.to_asset_id == to_column.id
+                    && matches!(
+                        e.relationship,
+                        RelationshipType::Feeds | RelationshipType::DerivedFrom
+                    )
+            }) {
+                let Some(from_column) = self.storage.get_asset(column_edge.from_asset_id).await?
+                else {
+                    continue;
+                };
+                if from_column.parent_id != Some(from.id) {
+                    continue;
+                }
+                input_fields.push(serde_json::json!({
+                    "namespace": "graph-owl",
+                    "name": from.fully_qualified_name,
+                    "field": from_column.name,
+                }));
+            }
+            if !input_fields.is_empty() {
+                fields.insert(
+                    to_column.name.clone(),
+                    serde_json::json!({ "inputFields": input_fields }),
+                );
+            }
+        }
+
+        let mut output = serde_json::json!({
+            "namespace": "graph-owl",
+            "name": to.fully_qualified_name,
+        });
+        if !fields.is_empty() {
+            output["facets"] = serde_json::json!({
+                "columnLineage": { "fields": serde_json::Value::Object(fields) }
+            });
+        }
+
+        Ok(serde_json::json!({
+            "eventType": "COMPLETE",
+            "eventTime": edge.created_at.to_rfc3339(),
+            "producer": "https://graph-owl.dev",
+            "schemaURL": "https://openlineage.io/spec/2-0-2/OpenLineage.json",
+            "run": { "runId": edge.id },
+            "job": {
+                "namespace": "graph-owl",
+                "name": edge.details.pipeline.map_or_else(
+                    || edge.details.source.as_str().to_string(),
+                    |id| id.to_string(),
+                ),
+            },
+            "inputs": [{ "namespace": "graph-owl", "name": from.fully_qualified_name }],
+            "outputs": [output],
+        }))
+    }
+
+    /// Names the format version and vocabulary mappings an export used —
+    /// Epic 9 Slice F's own criterion. Static (no storage access): the
+    /// manifest describes the *mapping*, not any one export's data, so a
+    /// caller pairs it with [`Self::export_dcat`] or
+    /// [`Self::export_openlineage`]'s own output rather than this crate
+    /// re-deriving it per call.
+    #[must_use]
+    pub fn export_manifest(format: ExportFormat) -> ExportManifest {
+        match format {
+            ExportFormat::DcatProvO => ExportManifest {
+                format: "dcat+prov-o".to_string(),
+                format_version: "DCAT-AP 3.0.1 conformance subset (see \
+                    graph_owl_constraint::shapes::dcat_ap_conformance_shapes)"
+                    .to_string(),
+                vocabulary_mappings: vec![
+                    ("dcat".to_string(), "http://www.w3.org/ns/dcat#".to_string()),
+                    ("dct".to_string(), "http://purl.org/dc/terms/".to_string()),
+                    ("prov".to_string(), "http://www.w3.org/ns/prov#".to_string()),
+                ],
+            },
+            ExportFormat::OpenLineage => ExportManifest {
+                format: "openlineage".to_string(),
+                format_version:
+                    "OpenLineage 2-0-2 (https://openlineage.io/spec/2-0-2/OpenLineage.json) \
+                    + ColumnLineageDatasetFacet 1-2-0"
+                        .to_string(),
+                vocabulary_mappings: vec![(
+                    "namespace".to_string(),
+                    "graph-owl (this catalog's own dataset namespace)".to_string(),
+                )],
+            },
+        }
+    }
+
+    /// Imports one `OpenLineage` `RunEvent` — Epic 9 Slice D. Idempotent by
+    /// event id **through the same uniqueness [`Self::assert_lineage`]
+    /// already enforces** (`from`, `to`, `relationship`, `source`): two
+    /// imports of the same event resolve to the same input/output pair, so
+    /// the second hits the existing-edge conflict and is reported as
+    /// skipped rather than as a new edge or an error. `run.runId` is still
+    /// recorded on the edge (`LineageDetails::openlineage_event_id`) as the
+    /// provenance a re-export needs, not as a second dedup key.
+    ///
+    /// A referenced dataset shaped `service.database.schema.table` that
+    /// does not exist is created as a stub, `lifecycle: Draft`, rather than
+    /// failing the import — a real name shaped any other way is a
+    /// validation error naming the dataset, not a silent guess at what its
+    /// containers should be.
+    ///
+    /// # Errors
+    /// `Validation` if the event has no `run.runId`, no `job`, or fewer
+    /// than one input/output, or a dataset name is not
+    /// `database.schema.table`; `Storage` if the underlying storage fails.
+    pub async fn import_openlineage(
+        &self,
+        principal: &Principal,
+        event: &serde_json::Value,
+    ) -> Result<OpenLineageImportOutcome, CatalogError> {
+        use graph_owl_core::relationship_type::RelationshipType;
+
+        let bad_event = |detail: &str| {
+            CatalogError::Validation(vec![FieldError::new(
+                "event",
+                FieldErrorCode::Type,
+                detail.to_string(),
+            )])
+        };
+        let run_id = event["run"]["runId"]
+            .as_str()
+            .ok_or_else(|| bad_event("`run.runId` is required"))?
+            .to_string();
+        let inputs = event["inputs"]
+            .as_array()
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| bad_event("at least one input dataset is required"))?;
+        let outputs = event["outputs"]
+            .as_array()
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| bad_event("at least one output dataset is required"))?;
+
+        let mut outcome = OpenLineageImportOutcome {
+            run_id: run_id.clone(),
+            ..Default::default()
+        };
+
+        for input in inputs {
+            let from = self
+                .resolve_or_stub_dataset(principal, input, &mut outcome.stub_datasets)
+                .await?;
+            for output in outputs {
+                let to = self
+                    .resolve_or_stub_dataset(principal, output, &mut outcome.stub_datasets)
+                    .await?;
+
+                match self
+                    .assert_lineage(
+                        principal,
+                        from.id,
+                        to.id,
+                        RelationshipType::Feeds,
+                        graph_owl_core::lineage::LineageDetails {
+                            source: graph_owl_core::lineage::LineageSource::OpenLineage,
+                            query: None,
+                            description: None,
+                            pipeline: None,
+                            openlineage_event_id: Some(run_id.clone()),
+                        },
+                    )
+                    .await
+                {
+                    Ok(_) => outcome.landed += 1,
+                    Err(CatalogError::Conflict { .. }) => outcome.skipped += 1,
+                    Err(e) => return Err(e),
+                }
+
+                let Some(column_fields) = output
+                    .get("facets")
+                    .and_then(|f| f.get("columnLineage"))
+                    .and_then(|c| c.get("fields"))
+                    .and_then(serde_json::Value::as_object)
+                else {
+                    continue;
+                };
+                for (output_field, mapping) in column_fields {
+                    let Some(input_fields) = mapping
+                        .get("inputFields")
+                        .and_then(serde_json::Value::as_array)
+                    else {
+                        continue;
+                    };
+                    let to_column = self
+                        .resolve_or_stub_column(
+                            principal,
+                            &to,
+                            output_field,
+                            &mut outcome.stub_datasets,
+                        )
+                        .await?;
+                    for input_field in input_fields {
+                        let Some(field_name) =
+                            input_field.get("field").and_then(serde_json::Value::as_str)
+                        else {
+                            continue;
+                        };
+                        let from_column = self
+                            .resolve_or_stub_column(
+                                principal,
+                                &from,
+                                field_name,
+                                &mut outcome.stub_datasets,
+                            )
+                            .await?;
+                        match self
+                            .assert_lineage(
+                                principal,
+                                from_column.id,
+                                to_column.id,
+                                RelationshipType::Feeds,
+                                graph_owl_core::lineage::LineageDetails {
+                                    source: graph_owl_core::lineage::LineageSource::OpenLineage,
+                                    query: None,
+                                    description: None,
+                                    pipeline: None,
+                                    openlineage_event_id: Some(run_id.clone()),
+                                },
+                            )
+                            .await
+                        {
+                            Ok(_) => outcome.landed += 1,
+                            Err(CatalogError::Conflict { .. }) => outcome.skipped += 1,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(outcome)
+    }
+
+    /// Creates `kind` named `name` under `parent_id`, starting `lifecycle:
+    /// Draft` — what stub creation needs and [`Self::upsert_asset`] cannot
+    /// give it: the lifecycle state machine only allows *entering* `Draft`
+    /// at creation (`Draft|Deprecated -> Active`, never the reverse — see
+    /// `graph_owl_core::lifecycle::can_transition`), and `upsert_asset`
+    /// hardcodes `Default::default()` (`Active`) on every new asset. This
+    /// bypasses that default rather than fighting the state machine
+    /// afterwards with a transition it would correctly refuse.
+    async fn create_stub_asset(
+        &self,
+        principal: &Principal,
+        kind: AssetKind,
+        name: &str,
+        parent_id: Option<Uuid>,
+    ) -> Result<Asset, CatalogError> {
+        let fully_qualified_name = match parent_id {
+            Some(parent_id) => {
+                let parent = self
+                    .storage
+                    .get_asset(parent_id)
+                    .await?
+                    .ok_or(CatalogError::NotFound)?;
+                graph_owl_core::fqn::child_of(&parent.fully_qualified_name, name)
+            }
+            None => graph_owl_core::fqn::derive(&[name]),
+        }
+        .map_err(|error| {
+            CatalogError::Validation(vec![FieldError::new(
+                "name",
+                FieldErrorCode::Type,
+                error.to_string(),
+            )])
+        })?;
+
+        let now = Utc::now();
+        let asset = Asset {
+            id: Uuid::new_v4(),
+            kind,
+            name: name.to_string(),
+            fully_qualified_name,
+            parent_id,
+            description: None,
+            properties: None,
+            extension: None,
+            owners: Vec::new(),
+            version: EntityVersion::initial(),
+            updated_by: principal.id.clone(),
+            change_description: None,
+            deleted: false,
+            deleted_at: None,
+            created_at: now,
+            updated_at: now,
+            lifecycle: graph_owl_core::lifecycle::LifecycleState::Draft,
+            deprecation: None,
+        };
+        let written = self.storage.upsert_asset(asset).await?;
+        self.project(None, &written).await;
+        Ok(written)
+    }
+
+    /// Finds the table `dataset` (an `OpenLineage` `{namespace, name}` pair)
+    /// names, or creates it — and every missing container above it — as a
+    /// `lifecycle: Draft` stub via [`Self::create_stub_asset`]. `name` must
+    /// be `database.schema.table`; any other shape is refused rather than
+    /// guessed at.
+    async fn resolve_or_stub_dataset(
+        &self,
+        principal: &Principal,
+        dataset: &serde_json::Value,
+        stubs: &mut Vec<String>,
+    ) -> Result<Asset, CatalogError> {
+        let bad_event = |detail: String| {
+            CatalogError::Validation(vec![FieldError::new("event", FieldErrorCode::Type, detail)])
+        };
+        let namespace = dataset["namespace"]
+            .as_str()
+            .ok_or_else(|| bad_event("a dataset requires `namespace`".to_string()))?;
+        let name = dataset["name"]
+            .as_str()
+            .ok_or_else(|| bad_event("a dataset requires `name`".to_string()))?;
+        let segments: Vec<&str> = name.split('.').collect();
+        let [database, schema, table] = segments.as_slice() else {
+            return Err(bad_event(format!(
+                "`{name}` must be `database.schema.table`; stub creation cannot guess a \
+                 differently-shaped name's containers"
+            )));
+        };
+
+        let levels: [(AssetKind, &str); 4] = [
+            (AssetKind::Service, namespace),
+            (AssetKind::Database, database),
+            (AssetKind::Schema, schema),
+            (AssetKind::Table, table),
+        ];
+        let mut parent_id: Option<Uuid> = None;
+        let mut fqn = String::new();
+        let mut asset = None;
+        for (kind, segment) in levels {
+            fqn = if fqn.is_empty() {
+                (*segment).to_string()
+            } else {
+                format!("{fqn}.{segment}")
+            };
+            let existing = self.storage.get_asset_by_fqn(&fqn).await?;
+            let current = if let Some(found) = existing {
+                found
+            } else {
+                let created = self
+                    .create_stub_asset(principal, kind, segment, parent_id)
+                    .await?;
+                stubs.push(fqn.clone());
+                created
+            };
+            parent_id = Some(current.id);
+            asset = Some(current);
+        }
+        Ok(asset.expect("levels is non-empty, so the loop assigns asset at least once"))
+    }
+
+    /// [`Self::resolve_or_stub_dataset`], one level down: finds `table`'s
+    /// column named `name`, or creates it as a `lifecycle: Draft` stub.
+    async fn resolve_or_stub_column(
+        &self,
+        principal: &Principal,
+        table: &Asset,
+        name: &str,
+        stubs: &mut Vec<String>,
+    ) -> Result<Asset, CatalogError> {
+        let fqn = format!("{}.{name}", table.fully_qualified_name);
+        if let Some(existing) = self.storage.get_asset_by_fqn(&fqn).await? {
+            return Ok(existing);
+        }
+        let created = self
+            .create_stub_asset(principal, AssetKind::Column, name, Some(table.id))
+            .await?;
+        stubs.push(fqn);
+        Ok(created)
     }
 
     /// Write the core shapes into the shapes graph.
@@ -11247,6 +12072,86 @@ pub struct WaivedFinding {
     /// "somebody accepted this" are different statements, and either can hold
     /// without the other.
     pub assignment: Option<graph_owl_storage::Assignment>,
+}
+
+/// What one RDF import actually did — Epic 9 Slice E. Never a result
+/// indistinguishable from "everything landed": a subject that was
+/// rejected or skipped is named, not folded into a single count.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOutcome {
+    /// Subjects written (or, under `dryRun`, that would have been) —
+    /// `Sid`'s own `{namespace}:{id}` form, the same wire convention
+    /// `ValidationRun`'s findings already use for `focus_node`.
+    pub landed: Vec<String>,
+    /// Subjects already present in this source's own import graph — a
+    /// re-import does not duplicate them.
+    pub skipped: Vec<String>,
+    /// Subjects that failed shape validation, or a write, each with why.
+    pub rejected: Vec<(String, String)>,
+}
+
+/// Narrows [`Catalog::export_dcat`] to part of the catalog — Epic 9 Slice C.
+/// `None`/`false` on every field means the whole catalog, the same "empty
+/// scope means everything" convention [`graph_owl_core::archive::ScopeSelector`]
+/// already uses.
+#[derive(Debug, Clone, Default)]
+pub struct DcatExportScope {
+    /// Only assets at or beneath this service's fully-qualified name —
+    /// reuses [`graph_owl_core::archive::ScopeSelector::FqnPrefix`], the
+    /// same mechanism `export_archive` scopes by.
+    pub service_fqn: Option<String>,
+    /// Only assets resolving to this domain (Epic 11).
+    pub domain_id: Option<Uuid>,
+    /// Include soft-deleted assets. Off by default: a tombstoned entity is
+    /// not part of what a catalog-to-catalog exchange should describe
+    /// unless the caller explicitly asks for the full history.
+    pub include_deleted: bool,
+}
+
+/// What one [`Catalog::import_openlineage`] call actually did — Epic 9
+/// Slice D, the same "never indistinguishable from success" reasoning
+/// [`ImportOutcome`] already applies to RDF import.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenLineageImportOutcome {
+    /// The event's own `run.runId`.
+    pub run_id: String,
+    /// How many edges (table- and column-level combined) were newly
+    /// asserted.
+    pub landed: usize,
+    /// How many edges were already present — re-importing the same event
+    /// is a no-op, not a duplicate.
+    pub skipped: usize,
+    /// Fully-qualified names of every dataset or column created as a
+    /// stub, `lifecycle: Draft`, because the event referenced it and it
+    /// did not already exist.
+    pub stub_datasets: Vec<String>,
+}
+
+/// Which interop format [`Catalog::export_manifest`] describes — Epic 9
+/// Slice F.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFormat {
+    /// [`Catalog::export_dcat`]'s output.
+    DcatProvO,
+    /// [`Catalog::export_openlineage`]'s output.
+    OpenLineage,
+}
+
+/// The format version and vocabulary mappings one export format uses —
+/// Epic 9 Slice F's own criterion: "export emits a manifest naming the
+/// format version and vocabulary mappings applied."
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportManifest {
+    /// A short, stable name for the format (`"dcat+prov-o"`,
+    /// `"openlineage"`).
+    pub format: String,
+    /// Which version of the external spec this export targets, and where
+    /// its conformance shapes (if any) live in this codebase.
+    pub format_version: String,
+    /// `(prefix, IRI-or-meaning)` pairs naming every vocabulary this
+    /// export writes terms from.
+    pub vocabulary_mappings: Vec<(String, String)>,
 }
 
 /// What one validation pass found.
@@ -19698,6 +20603,7 @@ mod projection_isolation_tests {
                 query: None,
                 description: None,
                 pipeline: None,
+                openlineage_event_id: None,
             }
         }
 
@@ -22413,6 +23319,7 @@ mod entity_expansion_tests {
             query: None,
             description: None,
             pipeline: None,
+            openlineage_event_id: None,
         }
     }
 
@@ -23020,6 +23927,7 @@ mod entity_expansion_tests {
                         query: None,
                         description: None,
                         pipeline: Some(pipeline),
+                        openlineage_event_id: None,
                     },
                 )
                 .await
@@ -23048,6 +23956,7 @@ mod entity_expansion_tests {
                         query: None,
                         description: None,
                         pipeline: Some(pipeline),
+                        openlineage_event_id: None,
                     },
                 )
                 .await
@@ -23656,6 +24565,7 @@ mod entity_expansion_tests {
                         query: None,
                         description: None,
                         pipeline: Some(pipeline.id),
+                        openlineage_event_id: None,
                     },
                 )
                 .await
@@ -25398,5 +26308,1286 @@ mod archive_round_trip_tests {
         std::fs::remove_dir_all(&scratch).ok();
         std::fs::remove_file(&archive_path).ok();
         std::fs::remove_file(&tampered_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod rdf_import_tests {
+    //! Epic 9 Slice E: import is validated and resolved.
+    //!
+    //! **"Resolved" is a subject-existence check against this source's own
+    //! import graph, not Epic 17.** Checked against real code before
+    //! implementing (`verify-blockers-against-code`): Epic 17's resolution
+    //! machinery is Asset-table-centric (blocking keys, FQNs) with no entry
+    //! point for a bare `Sid`/flake set, so wiring it in would mean
+    //! inventing an Asset-materialization step this slice's own scope does
+    //! not describe. The plan's actual criterion — "a re-import does not
+    //! duplicate" — is what these tests hold to, satisfied more directly.
+
+    use super::*;
+    use graph_owl_rdf_io::RdfFormat;
+    use projection_isolation_tests::RecordingGraph;
+    use tests::InMemoryStorage;
+
+    fn a(id: &str) -> Sid {
+        Sid::dsc(id)
+    }
+    fn sh(term: &str) -> Sid {
+        Sid::new(namespace::SHACL, term)
+    }
+    fn rdf_type() -> Sid {
+        Sid::new(namespace::RDF, "type")
+    }
+
+    /// Every subject named in `targets` needs a non-empty `dsc:name` —
+    /// explicit `sh:targetNode`s rather than `targetSubjectsOf(name)`,
+    /// because a subject *missing* `name` entirely is exactly the case
+    /// this test needs to catch, and `targetSubjectsOf` only selects
+    /// subjects that already carry the path being checked (correct SHACL
+    /// behaviour, and the reason it cannot select an *absent* predicate).
+    fn name_required_shape(t: i64, targets: &[&str]) -> Vec<Flake> {
+        let in_shapes = |s: Sid, p: Sid, o: FlakeValue| Flake {
+            s,
+            p,
+            o,
+            cx: Some(shapes_graph()),
+            t,
+            op: true,
+        };
+        let mut flakes = vec![
+            in_shapes(
+                a("NameRequired"),
+                rdf_type(),
+                FlakeValue::Ref(sh("NodeShape")),
+            ),
+            in_shapes(
+                a("NameRequired"),
+                sh("property"),
+                FlakeValue::Ref(a("NameRequired/name")),
+            ),
+            in_shapes(
+                a("NameRequired/name"),
+                sh("path"),
+                FlakeValue::Ref(a("name")),
+            ),
+            in_shapes(a("NameRequired/name"), sh("minCount"), FlakeValue::Int(1)),
+        ];
+        for target in targets {
+            flakes.push(in_shapes(
+                a("NameRequired"),
+                sh("targetNode"),
+                FlakeValue::Ref(a(target)),
+            ));
+        }
+        flakes
+    }
+
+    fn turtle_naming(subject: &str, value: &str) -> Vec<u8> {
+        format!(
+            "<https://graph-owl.dev/ns/catalog#{subject}> \
+             <https://graph-owl.dev/ns/catalog#name> \"{value}\" .\n"
+        )
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn a_conforming_subject_lands_in_its_sources_own_import_graph() {
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&name_required_shape(0, &["orders"]))
+            .await
+            .expect("seed shape");
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let outcome = catalog
+            .import_rdf(
+                "test-source",
+                &turtle_naming("orders", "Orders"),
+                RdfFormat::Turtle,
+                None,
+                false,
+            )
+            .await
+            .expect("import");
+
+        assert_eq!(outcome.landed.len(), 1, "{outcome:?}");
+        assert!(outcome.rejected.is_empty(), "{outcome:?}");
+        assert!(outcome.skipped.is_empty(), "{outcome:?}");
+
+        let landed = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(Catalog::import_graph("test-source"))),
+                ..Default::default()
+            })
+            .await
+            .expect("query");
+        assert_eq!(
+            landed.len(),
+            1,
+            "the triple must land in its own source graph"
+        );
+    }
+
+    /// **The slice's own RED test.** A subject that would violate a shape
+    /// is rejected and named, without failing the rest of the import.
+    #[tokio::test]
+    async fn a_violating_subject_is_rejected_and_named_without_failing_the_rest() {
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&name_required_shape(0, &["orders", "empty"]))
+            .await
+            .expect("seed shape");
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        // "orders" conforms (has a name); "empty" carries only an
+        // unrelated predicate, so it has no `name` at all and violates
+        // `minCount 1`.
+        let mut document = turtle_naming("orders", "Orders");
+        document.extend_from_slice(
+            b"<https://graph-owl.dev/ns/catalog#empty> \
+              <https://graph-owl.dev/ns/catalog#description> \"no name here\" .\n",
+        );
+
+        let outcome = catalog
+            .import_rdf("test-source", &document, RdfFormat::Turtle, None, false)
+            .await
+            .expect("import");
+
+        assert_eq!(outcome.landed.len(), 1, "{outcome:?}");
+        assert_eq!(outcome.rejected.len(), 1, "{outcome:?}");
+        assert!(
+            outcome.rejected[0].0.contains("empty"),
+            "the rejected subject must be named: {outcome:?}"
+        );
+    }
+
+    /// **"A re-import does not duplicate."**
+    #[tokio::test]
+    async fn reimporting_the_same_subject_is_skipped_not_duplicated() {
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&name_required_shape(0, &["orders"]))
+            .await
+            .expect("seed shape");
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+        let document = turtle_naming("orders", "Orders");
+
+        let first = catalog
+            .import_rdf("test-source", &document, RdfFormat::Turtle, None, false)
+            .await
+            .expect("first import");
+        assert_eq!(first.landed.len(), 1, "{first:?}");
+
+        let second = catalog
+            .import_rdf("test-source", &document, RdfFormat::Turtle, None, false)
+            .await
+            .expect("second import");
+        assert_eq!(second.landed.len(), 0, "{second:?}");
+        assert_eq!(second.skipped.len(), 1, "{second:?}");
+
+        let landed = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(Catalog::import_graph("test-source"))),
+                ..Default::default()
+            })
+            .await
+            .expect("query");
+        assert_eq!(
+            landed.len(),
+            1,
+            "re-importing must not duplicate the triple"
+        );
+    }
+
+    /// A dry run reports what would land without writing anything.
+    #[tokio::test]
+    async fn a_dry_run_reports_without_writing() {
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&name_required_shape(0, &["orders"]))
+            .await
+            .expect("seed shape");
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let outcome = catalog
+            .import_rdf(
+                "test-source",
+                &turtle_naming("orders", "Orders"),
+                RdfFormat::Turtle,
+                None,
+                true,
+            )
+            .await
+            .expect("dry run");
+        assert_eq!(outcome.landed.len(), 1, "{outcome:?}");
+
+        let landed = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(Catalog::import_graph("test-source"))),
+                ..Default::default()
+            })
+            .await
+            .expect("query");
+        assert!(landed.is_empty(), "a dry run must not write anything");
+    }
+
+    /// **A bad import is deletable wholesale.**
+    #[tokio::test]
+    async fn delete_import_drops_every_triple_the_source_ever_landed() {
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&name_required_shape(0, &["orders"]))
+            .await
+            .expect("seed shape");
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+        catalog
+            .import_rdf(
+                "bad-source",
+                &turtle_naming("orders", "Orders"),
+                RdfFormat::Turtle,
+                None,
+                false,
+            )
+            .await
+            .expect("import");
+
+        let deleted = catalog
+            .delete_import("bad-source")
+            .await
+            .expect("delete import");
+        assert_eq!(deleted, 1);
+
+        let remaining = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(Catalog::import_graph("bad-source"))),
+                ..Default::default()
+            })
+            .await
+            .expect("query");
+        assert!(remaining.is_empty(), "nothing from the source must remain");
+    }
+
+    #[tokio::test]
+    async fn deleting_an_import_with_nothing_landed_is_a_no_op_not_an_error() {
+        let graph = RecordingGraph::working();
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let deleted = catalog
+            .delete_import("never-imported")
+            .await
+            .expect("delete import");
+        assert_eq!(deleted, 0);
+    }
+}
+
+/// Epic 9 Slice C: DCAT/PROV-O export.
+///
+/// Validated against `graph_owl_constraint::shapes::dcat_ap_conformance_shapes`
+/// — see that function's own doc comment for exactly what "external
+/// conformance" means here and why it is not the official SHACL file
+/// unmodified.
+#[cfg(test)]
+mod dcat_export_tests {
+    use super::*;
+    use graph_owl_core::flake::namespace;
+    use tests::InMemoryStorage;
+
+    fn dcterms(term: &str) -> Sid {
+        Sid::new(namespace::DCTERMS, term)
+    }
+
+    fn dcat(term: &str) -> Sid {
+        Sid::new(namespace::DCAT, term)
+    }
+
+    fn prov(term: &str) -> Sid {
+        Sid::new(namespace::PROV, term)
+    }
+
+    fn rdf_type() -> Sid {
+        Sid::new(namespace::RDF, "type")
+    }
+
+    fn conforms(flakes: &[Flake]) -> graph_owl_constraint::ValidationReport {
+        let shapes = graph_owl_constraint::shapes::dcat_ap_conformance_shapes(1);
+        let (compiled, failures) = graph_owl_constraint::shapes::read_all(&shapes);
+        assert!(failures.is_empty(), "{failures:#?}");
+        graph_owl_constraint::validate(&compiled, flakes)
+    }
+
+    async fn seeded_catalog() -> (Catalog, Uuid, Uuid) {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        // `AssetKind::Table` requires a parent (a root-kind asset like
+        // `Service` is the cheap fixture) — and `list_assets`, which
+        // `export_dcat` reads from, only ever sees rows written through
+        // `upsert_asset`'s unified `Asset` envelope, not the older,
+        // separate `create_table`/`insert_table` walking-skeleton path.
+        let service = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Service,
+                    name: "warehouse".to_string(),
+                    parent_id: None,
+                    description: Some("The warehouse service".to_string()),
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("upsert_asset service");
+        let database = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Database,
+                    name: "analytics".to_string(),
+                    parent_id: Some(service.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("upsert_asset database");
+        let schema = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Schema,
+                    name: "public".to_string(),
+                    parent_id: Some(database.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("upsert_asset schema");
+        let table = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Table,
+                    name: "orders".to_string(),
+                    parent_id: Some(schema.id),
+                    description: Some("Customer orders".to_string()),
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("upsert_asset table");
+        (catalog, table.id, service.id)
+    }
+
+    /// **The plan's own criterion, verbatim**: `Table` exports as
+    /// `dcat:Dataset` with title, description, publisher, theme;
+    /// `Service` as `dcat:Catalog`.
+    #[tokio::test]
+    async fn a_table_exports_as_a_dataset_and_a_service_as_a_catalog() {
+        let (catalog, table_id, service_id) = seeded_catalog().await;
+
+        let flakes = catalog
+            .export_dcat(&DcatExportScope::default())
+            .await
+            .expect("export_dcat");
+
+        let table_subject = Sid::dsc(format!("asset:{table_id}"));
+        let service_subject = Sid::dsc(format!("asset:{service_id}"));
+
+        let has = |s: &Sid, p: &Sid| flakes.iter().any(|f| &f.s == s && &f.p == p);
+
+        assert!(flakes.iter().any(|f| f.s == table_subject
+            && f.p == rdf_type()
+            && f.o == FlakeValue::Ref(dcat("Dataset"))));
+        assert!(has(&table_subject, &dcterms("title")));
+        assert!(has(&table_subject, &dcterms("description")));
+        assert!(has(&table_subject, &dcterms("publisher")));
+        assert!(has(&table_subject, &dcat("theme")));
+
+        assert!(flakes.iter().any(|f| f.s == service_subject
+            && f.p == rdf_type()
+            && f.o == FlakeValue::Ref(dcat("Catalog"))));
+        assert!(has(&service_subject, &dcterms("title")));
+        assert!(has(&service_subject, &dcterms("description")));
+        assert!(has(&service_subject, &dcterms("publisher")));
+    }
+
+    /// **External conformance, not self-consistency** — the RED test the
+    /// plan itself names, run against real output rather than a hand-built
+    /// fixture.
+    #[tokio::test]
+    async fn the_export_conforms_to_the_dcat_ap_shapes() {
+        let (catalog, _, _) = seeded_catalog().await;
+        let flakes = catalog
+            .export_dcat(&DcatExportScope::default())
+            .await
+            .expect("export_dcat");
+
+        let report = conforms(&flakes);
+        assert!(report.conforms, "{:#?}", report.violations);
+    }
+
+    /// **Mutator watch, from the plan itself**: an export that omits
+    /// `dct:title` must fail SHACL validation. Simulated directly rather
+    /// than mutating the export function, the same way the constraint
+    /// crate's own shape tests assert a rejection.
+    #[tokio::test]
+    async fn an_export_missing_title_fails_the_dcat_ap_shapes() {
+        let (catalog, table_id, _) = seeded_catalog().await;
+        let mut flakes = catalog
+            .export_dcat(&DcatExportScope::default())
+            .await
+            .expect("export_dcat");
+
+        let table_subject = Sid::dsc(format!("asset:{table_id}"));
+        flakes.retain(|f| !(f.s == table_subject && f.p == dcterms("title")));
+
+        let report = conforms(&flakes);
+        assert!(!report.conforms, "{:#?}", report.violations);
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|v| v.focus_node == table_subject),
+            "{:#?}",
+            report.violations
+        );
+    }
+
+    /// PROV-O: the activity chain matches the entity's own version
+    /// history, not a synthesised one — one `prov:Activity` per version,
+    /// and the dataset points at the latest via `prov:wasGeneratedBy`.
+    #[tokio::test]
+    async fn prov_activities_match_the_assets_own_version_history() {
+        let (catalog, table_id, _) = seeded_catalog().await;
+        // Storage only records a history entry on an actual *update*, not on
+        // creation — two updates are needed for a real, more-than-one-entry
+        // chain to assert `wasInformedBy` against.
+        catalog
+            .update_asset(
+                &Principal::system(),
+                table_id,
+                &AssetUpdate {
+                    description: Some(Some("Customer orders, revised".to_string())),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .expect("update_asset (first)");
+        catalog
+            .update_asset(
+                &Principal::system(),
+                table_id,
+                &AssetUpdate {
+                    description: Some(Some("Customer orders, revised again".to_string())),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .expect("update_asset (second)");
+
+        let versions = catalog.asset_versions(table_id).await.expect("versions");
+        let flakes = catalog
+            .export_dcat(&DcatExportScope::default())
+            .await
+            .expect("export_dcat");
+
+        let activities: Vec<&Flake> = flakes
+            .iter()
+            .filter(|f| f.p == rdf_type() && f.o == FlakeValue::Ref(prov("Activity")))
+            .collect();
+        assert_eq!(activities.len(), versions.len(), "{activities:#?}");
+
+        let table_subject = Sid::dsc(format!("asset:{table_id}"));
+        let generated_by: Vec<&Flake> = flakes
+            .iter()
+            .filter(|f| f.s == table_subject && f.p == prov("wasGeneratedBy"))
+            .collect();
+        assert_eq!(generated_by.len(), 1, "{generated_by:#?}");
+
+        assert!(
+            flakes.iter().any(|f| f.p == prov("wasInformedBy")),
+            "a chain of more than one version must link consecutive activities: {flakes:#?}"
+        );
+    }
+
+    /// A soft-deleted entity is excluded unless requested.
+    #[tokio::test]
+    async fn a_soft_deleted_asset_is_excluded_unless_requested() {
+        let (catalog, table_id, _) = seeded_catalog().await;
+        catalog
+            .soft_delete_asset(&Principal::system(), table_id)
+            .await
+            .expect("soft_delete_asset");
+
+        let table_subject = Sid::dsc(format!("asset:{table_id}"));
+
+        let default_scope = catalog
+            .export_dcat(&DcatExportScope::default())
+            .await
+            .expect("export_dcat");
+        assert!(!default_scope.iter().any(|f| f.s == table_subject));
+
+        let including_deleted = catalog
+            .export_dcat(&DcatExportScope {
+                include_deleted: true,
+                ..Default::default()
+            })
+            .await
+            .expect("export_dcat");
+        assert!(including_deleted.iter().any(|f| f.s == table_subject));
+    }
+
+    /// Export is scopeable by service — everything at or beneath its FQN,
+    /// the same mechanism `export_archive` already scopes by.
+    #[tokio::test]
+    async fn export_is_scopeable_by_service() {
+        let (catalog, table_id, service_id) = seeded_catalog().await;
+        let other_service = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Service,
+                    name: "other-warehouse".to_string(),
+                    parent_id: None,
+                    description: Some("A different service".to_string()),
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("upsert_asset other service");
+        let other_database = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Database,
+                    name: "analytics".to_string(),
+                    parent_id: Some(other_service.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("upsert_asset other database");
+        let other_schema = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Schema,
+                    name: "public".to_string(),
+                    parent_id: Some(other_database.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("upsert_asset other schema");
+        let other_table = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Table,
+                    name: "products".to_string(),
+                    parent_id: Some(other_schema.id),
+                    description: Some("Products".to_string()),
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("upsert_asset other table");
+
+        let scoped = catalog
+            .export_dcat(&DcatExportScope {
+                service_fqn: Some("warehouse".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("export_dcat");
+
+        let table_subject = Sid::dsc(format!("asset:{table_id}"));
+        let service_subject = Sid::dsc(format!("asset:{service_id}"));
+        let other_subject = Sid::dsc(format!("asset:{}", other_table.id));
+
+        assert!(scoped.iter().any(|f| f.s == table_subject));
+        assert!(scoped.iter().any(|f| f.s == service_subject));
+        assert!(!scoped.iter().any(|f| f.s == other_subject));
+    }
+}
+
+/// Epic 9 Slice D: `OpenLineage` bidirectional.
+#[cfg(test)]
+mod openlineage_tests {
+    use super::*;
+    use graph_owl_core::lineage::{LineageDetails, LineageSource};
+    use graph_owl_core::relationship_type::RelationshipType;
+    use tests::InMemoryStorage;
+
+    async fn seeded_catalog_with_column_lineage() -> (Catalog, Asset, Asset, Asset, Asset) {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+
+        async fn table(catalog: &Catalog, service: &str, name: &str) -> (Asset, Asset, Asset) {
+            let svc = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    UpsertAsset {
+                        kind: AssetKind::Service,
+                        name: service.to_string(),
+                        parent_id: None,
+                        description: None,
+                        properties: None,
+                        extension: None,
+                    },
+                )
+                .await
+                .expect("service");
+            let db = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    UpsertAsset {
+                        kind: AssetKind::Database,
+                        name: "analytics".to_string(),
+                        parent_id: Some(svc.id),
+                        description: None,
+                        properties: None,
+                        extension: None,
+                    },
+                )
+                .await
+                .expect("database");
+            let schema = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    UpsertAsset {
+                        kind: AssetKind::Schema,
+                        name: "public".to_string(),
+                        parent_id: Some(db.id),
+                        description: None,
+                        properties: None,
+                        extension: None,
+                    },
+                )
+                .await
+                .expect("schema");
+            let tbl = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    UpsertAsset {
+                        kind: AssetKind::Table,
+                        name: name.to_string(),
+                        parent_id: Some(schema.id),
+                        description: None,
+                        properties: None,
+                        extension: None,
+                    },
+                )
+                .await
+                .expect("table");
+            (svc, schema, tbl)
+        }
+
+        let (_svc_a, _schema_a, orders) = table(&catalog, "warehouse", "orders").await;
+        let (_svc_b, _schema_b, orders_summary) =
+            table(&catalog, "warehouse", "orders_summary").await;
+
+        let orders_id = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Column,
+                    name: "id".to_string(),
+                    parent_id: Some(orders.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("column");
+        let summary_order_id = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Column,
+                    name: "order_id".to_string(),
+                    parent_id: Some(orders_summary.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("column");
+
+        catalog
+            .assert_lineage(
+                &Principal::system(),
+                orders.id,
+                orders_summary.id,
+                RelationshipType::Feeds,
+                LineageDetails {
+                    source: LineageSource::Manual,
+                    query: None,
+                    description: None,
+                    pipeline: None,
+                    openlineage_event_id: None,
+                },
+            )
+            .await
+            .expect("table edge");
+        catalog
+            .assert_lineage(
+                &Principal::system(),
+                orders_id.id,
+                summary_order_id.id,
+                RelationshipType::Feeds,
+                LineageDetails {
+                    source: LineageSource::Manual,
+                    query: None,
+                    description: None,
+                    pipeline: None,
+                    openlineage_event_id: None,
+                },
+            )
+            .await
+            .expect("column edge");
+
+        (catalog, orders, orders_summary, orders_id, summary_order_id)
+    }
+
+    /// **The plan's own criterion**: `feeds` edges export as `OpenLineage` run
+    /// events with inputs and outputs; column lineage maps to
+    /// `columnLineage` facets.
+    #[tokio::test]
+    async fn feeds_edges_export_with_column_lineage_facets() {
+        let (catalog, orders, orders_summary, _, _) = seeded_catalog_with_column_lineage().await;
+
+        let events = catalog
+            .export_openlineage(&DcatExportScope::default())
+            .await
+            .expect("export_openlineage");
+
+        assert_eq!(events.len(), 1, "{events:#?}");
+        let event = &events[0];
+        assert_eq!(event["inputs"][0]["name"], orders.fully_qualified_name);
+        assert_eq!(
+            event["outputs"][0]["name"],
+            orders_summary.fully_qualified_name
+        );
+        let fields = &event["outputs"][0]["facets"]["columnLineage"]["fields"];
+        assert_eq!(
+            fields["order_id"]["inputFields"][0]["field"],
+            serde_json::Value::String("id".to_string())
+        );
+        assert_eq!(
+            fields["order_id"]["inputFields"][0]["name"],
+            serde_json::Value::String(orders.fully_qualified_name.clone())
+        );
+    }
+
+    fn simple_event(run_id: &str, from_fqn: &str, to_fqn: &str) -> serde_json::Value {
+        let split = |fqn: &str| {
+            let mut parts = fqn.splitn(2, '.');
+            let namespace = parts.next().unwrap().to_string();
+            let name = parts.next().unwrap().to_string();
+            (namespace, name)
+        };
+        let (from_ns, from_name) = split(from_fqn);
+        let (to_ns, to_name) = split(to_fqn);
+        serde_json::json!({
+            "eventType": "COMPLETE",
+            "eventTime": "2026-08-06T00:00:00Z",
+            "producer": "https://example.test",
+            "schemaURL": "https://openlineage.io/spec/2-0-2/OpenLineage.json",
+            "run": { "runId": run_id },
+            "job": { "namespace": "airflow", "name": "orders_etl" },
+            "inputs": [{ "namespace": from_ns, "name": from_name }],
+            "outputs": [{ "namespace": to_ns, "name": to_name }],
+        })
+    }
+
+    /// Import creates edges with `source: OpenLineage`, and unknown
+    /// datasets become stubs flagged `lifecycle: Draft` rather than
+    /// failing — the plan's own two criteria in one test, since the
+    /// second is only observable through the first succeeding at all.
+    #[tokio::test]
+    async fn import_creates_a_stub_backed_edge_flagged_openlineage() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let event = simple_event(
+            "11111111-1111-4111-8111-111111111111",
+            "warehouse.raw.public.events",
+            "warehouse.analytics.public.events_daily",
+        );
+
+        let outcome = catalog
+            .import_openlineage(&Principal::system(), &event)
+            .await
+            .expect("import_openlineage");
+
+        assert_eq!(outcome.landed, 1, "{outcome:?}");
+        assert!(
+            outcome
+                .stub_datasets
+                .contains(&"warehouse.raw.public.events".to_string()),
+            "{:?}",
+            outcome.stub_datasets
+        );
+
+        let from = catalog
+            .storage
+            .get_asset_by_fqn("warehouse.raw.public.events")
+            .await
+            .expect("get_asset_by_fqn")
+            .expect("stub created");
+        assert_eq!(
+            from.lifecycle,
+            graph_owl_core::lifecycle::LifecycleState::Draft
+        );
+
+        let to = catalog
+            .storage
+            .get_asset_by_fqn("warehouse.analytics.public.events_daily")
+            .await
+            .expect("get_asset_by_fqn")
+            .expect("stub created");
+        let edges = catalog
+            .storage
+            .lineage_edges_touching(&[from.id, to.id])
+            .await
+            .expect("lineage_edges_touching");
+        assert_eq!(edges.len(), 1, "{edges:#?}");
+        assert_eq!(edges[0].details.source, LineageSource::OpenLineage);
+        assert_eq!(
+            edges[0].details.openlineage_event_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+    }
+
+    /// **Import is idempotent by event id** — the plan's own criterion.
+    /// Re-importing the same event a second time lands nothing new.
+    #[tokio::test]
+    async fn reimporting_the_same_event_is_a_no_op() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let event = simple_event(
+            "22222222-2222-4222-8222-222222222222",
+            "warehouse.raw.public.events",
+            "warehouse.analytics.public.events_daily",
+        );
+
+        let first = catalog
+            .import_openlineage(&Principal::system(), &event)
+            .await
+            .expect("first import");
+        assert_eq!(first.landed, 1, "{first:?}");
+
+        let second = catalog
+            .import_openlineage(&Principal::system(), &event)
+            .await
+            .expect("second import");
+        assert_eq!(second.landed, 0, "{second:?}");
+        assert_eq!(second.skipped, 1, "{second:?}");
+
+        let from = catalog
+            .storage
+            .get_asset_by_fqn("warehouse.raw.public.events")
+            .await
+            .expect("get_asset_by_fqn")
+            .expect("exists");
+        let edges = catalog
+            .storage
+            .lineage_edges_touching(&[from.id])
+            .await
+            .expect("lineage_edges_touching");
+        assert_eq!(edges.len(), 1, "re-import must not duplicate: {edges:#?}");
+    }
+
+    /// **Round-trip preserves column mappings** — export what Slice D's
+    /// own import just landed, and the same many-to-one column mapping
+    /// comes back out.
+    #[tokio::test]
+    async fn round_trip_preserves_column_mappings() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let mut event = simple_event(
+            "33333333-3333-4333-8333-333333333333",
+            "warehouse.raw.public.orders",
+            "warehouse.analytics.public.orders_summary",
+        );
+        event["outputs"][0]["facets"] = serde_json::json!({
+            "columnLineage": {
+                "fields": {
+                    "total": {
+                        "inputFields": [
+                            { "namespace": "warehouse", "name": "raw.public.orders", "field": "amount" },
+                            { "namespace": "warehouse", "name": "raw.public.orders", "field": "tax" },
+                        ]
+                    }
+                }
+            }
+        });
+
+        catalog
+            .import_openlineage(&Principal::system(), &event)
+            .await
+            .expect("import_openlineage");
+
+        let events = catalog
+            .export_openlineage(&DcatExportScope::default())
+            .await
+            .expect("export_openlineage");
+        assert_eq!(events.len(), 1, "{events:#?}");
+        let fields = &events[0]["outputs"][0]["facets"]["columnLineage"]["fields"];
+        let mut input_field_names: Vec<String> = fields["total"]["inputFields"]
+            .as_array()
+            .expect("inputFields array")
+            .iter()
+            .map(|f| f["field"].as_str().expect("field name").to_string())
+            .collect();
+        input_field_names.sort();
+        assert_eq!(
+            input_field_names,
+            vec!["amount".to_string(), "tax".to_string()]
+        );
+    }
+}
+
+/// Epic 9 Slice F: lossiness is documented and tested — see
+/// `plans/09-engine-rdf-io.md`'s own lossiness table, which this module's
+/// name in each test mirrors one row of.
+#[cfg(test)]
+mod lossiness_tests {
+    use super::*;
+    use tests::InMemoryStorage;
+
+    /// A table asset carrying `properties` (standing in for both it and
+    /// `extension`, which `export_dcat` maps neither of) and, via an
+    /// update, a real `version` beyond `1.0`.
+    async fn richly_populated_table() -> (Catalog, Asset) {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let service = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Service,
+                    name: "warehouse".to_string(),
+                    parent_id: None,
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("service");
+        let database = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Database,
+                    name: "analytics".to_string(),
+                    parent_id: Some(service.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("database");
+        let schema = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Schema,
+                    name: "public".to_string(),
+                    parent_id: Some(database.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("schema");
+        let table = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Table,
+                    name: "orders".to_string(),
+                    parent_id: Some(schema.id),
+                    description: Some("Customer orders".to_string()),
+                    // `properties` alone is enough to prove the claim (free-
+                    // form data doesn't leak into export) without needing a
+                    // pre-registered custom-property definition, which
+                    // `extension` would require (`check_extension` rejects
+                    // an undefined key) and this test has no need of.
+                    properties: Some(
+                        serde_json::json!({ "engine": "postgres", "costCenter": "CC-100" }),
+                    ),
+                    extension: None,
+                },
+            )
+            .await
+            .expect("table");
+        catalog
+            .update_asset(
+                &Principal::system(),
+                table.id,
+                &AssetUpdate {
+                    description: Some(Some("Customer orders, revised".to_string())),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .expect("update_asset");
+        let table = catalog
+            .get_asset(table.id)
+            .await
+            .expect("get_asset")
+            .expect("exists");
+        (catalog, table)
+    }
+
+    fn assert_no_value_contains(value: &serde_json::Value, needle: &str) {
+        let text = value.to_string();
+        assert!(
+            !text.contains(needle),
+            "expected `{needle}` to be absent, found it in: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dcat_export_omits_extension_and_properties() {
+        let (catalog, _table) = richly_populated_table().await;
+        let flakes = catalog
+            .export_dcat(&DcatExportScope::default())
+            .await
+            .expect("export_dcat");
+        let as_text: Vec<String> = flakes.iter().map(|f| format!("{f:?}")).collect();
+        assert!(
+            !as_text.iter().any(|t| t.contains("costCenter")),
+            "{as_text:#?}"
+        );
+        assert!(
+            !as_text.iter().any(|t| t.contains("postgres")),
+            "{as_text:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dcat_export_omits_lifecycle_and_deprecation() {
+        let (catalog, table) = richly_populated_table().await;
+        assert_eq!(
+            table.lifecycle,
+            graph_owl_core::lifecycle::LifecycleState::Active
+        );
+        let flakes = catalog
+            .export_dcat(&DcatExportScope::default())
+            .await
+            .expect("export_dcat");
+        let predicates: Vec<String> = flakes.iter().map(|f| f.p.id.clone()).collect();
+        assert!(
+            !predicates.iter().any(|p| p.contains("lifecycle")),
+            "{predicates:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dcat_export_omits_raw_version_numbers() {
+        let (catalog, table) = richly_populated_table().await;
+        assert!(
+            table.version.minor >= 1,
+            "the fixture must have a real version bump"
+        );
+        let flakes = catalog
+            .export_dcat(&DcatExportScope::default())
+            .await
+            .expect("export_dcat");
+        let predicates: Vec<String> = flakes.iter().map(|f| f.p.id.clone()).collect();
+        assert!(
+            !predicates.iter().any(|p| p.contains("version")),
+            "{predicates:#?}"
+        );
+    }
+
+    /// Structurally unreachable, not filtered: `export_dcat` reads
+    /// `Asset`/`AssetVersion` only, so there is no code path through which
+    /// a flake-level confidence score or an Epic 17 merge record could
+    /// appear — this test is the standing proof of that claim.
+    #[tokio::test]
+    async fn dcat_export_never_touches_confidence_or_merge_state() {
+        let (catalog, _table) = richly_populated_table().await;
+        let flakes = catalog
+            .export_dcat(&DcatExportScope::default())
+            .await
+            .expect("export_dcat");
+        let predicates: Vec<String> = flakes.iter().map(|f| f.p.id.clone()).collect();
+        assert!(
+            !predicates
+                .iter()
+                .any(|p| p.contains("confidence") || p.contains("merge")),
+            "{predicates:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openlineage_export_omits_query_and_description() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let service = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Service,
+                    name: "warehouse".to_string(),
+                    parent_id: None,
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("service");
+        let database = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Database,
+                    name: "analytics".to_string(),
+                    parent_id: Some(service.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("database");
+        let schema = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Schema,
+                    name: "public".to_string(),
+                    parent_id: Some(database.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("schema");
+        let from = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Table,
+                    name: "raw_orders".to_string(),
+                    parent_id: Some(schema.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("from table");
+        let to = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Table,
+                    name: "orders".to_string(),
+                    parent_id: Some(schema.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("to table");
+        catalog
+            .assert_lineage(
+                &Principal::system(),
+                from.id,
+                to.id,
+                graph_owl_core::relationship_type::RelationshipType::Feeds,
+                graph_owl_core::lineage::LineageDetails {
+                    source: graph_owl_core::lineage::LineageSource::Manual,
+                    query: Some("SELECT * FROM raw_orders WHERE valid".to_string()),
+                    description: Some("dedupes raw orders".to_string()),
+                    pipeline: None,
+                    openlineage_event_id: None,
+                },
+            )
+            .await
+            .expect("assert_lineage");
+
+        let events = catalog
+            .export_openlineage(&DcatExportScope::default())
+            .await
+            .expect("export_openlineage");
+        assert_eq!(events.len(), 1, "{events:#?}");
+        assert_no_value_contains(&events[0], "dedupes raw orders");
+        assert_no_value_contains(&events[0], "SELECT * FROM raw_orders");
+    }
+
+    #[tokio::test]
+    async fn openlineage_import_never_sets_certification_or_extension() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let event = serde_json::json!({
+            "eventType": "COMPLETE",
+            "eventTime": "2026-08-06T00:00:00Z",
+            "producer": "https://example.test",
+            "schemaURL": "https://openlineage.io/spec/2-0-2/OpenLineage.json",
+            "run": { "runId": "44444444-4444-4444-8444-444444444444" },
+            "job": { "namespace": "airflow", "name": "orders_etl" },
+            "inputs": [{ "namespace": "warehouse", "name": "raw.public.events" }],
+            "outputs": [{ "namespace": "warehouse", "name": "analytics.public.events_daily" }],
+        });
+        catalog
+            .import_openlineage(&Principal::system(), &event)
+            .await
+            .expect("import_openlineage");
+
+        let stub = catalog
+            .storage
+            .get_asset_by_fqn("warehouse.raw.public.events")
+            .await
+            .expect("get_asset_by_fqn")
+            .expect("stub created");
+        assert_eq!(
+            stub.lifecycle,
+            graph_owl_core::lifecycle::LifecycleState::Draft
+        );
+        assert_eq!(
+            stub.extension, None,
+            "import has no extension-schema concept to set this from"
+        );
+        assert_eq!(stub.deprecation, None);
+    }
+
+    #[test]
+    fn the_dcat_manifest_names_a_real_version_and_vocabulary() {
+        let manifest = Catalog::export_manifest(ExportFormat::DcatProvO);
+        assert_eq!(manifest.format, "dcat+prov-o");
+        assert!(manifest.format_version.contains("DCAT-AP"));
+        assert!(!manifest.vocabulary_mappings.is_empty());
+    }
+
+    #[test]
+    fn the_openlineage_manifest_names_a_real_version_and_vocabulary() {
+        let manifest = Catalog::export_manifest(ExportFormat::OpenLineage);
+        assert_eq!(manifest.format, "openlineage");
+        assert!(manifest.format_version.contains("OpenLineage"));
+        assert!(!manifest.vocabulary_mappings.is_empty());
     }
 }

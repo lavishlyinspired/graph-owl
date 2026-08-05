@@ -2991,6 +2991,18 @@
         "summary": "Try a connection before saving it; a refused connection is 200 with ok:false"
       }
     },
+    "/context/{version}": {
+      "get": {
+        "operationId": "get_context__version_",
+        "responses": {
+          "200": {
+            "description": "The JSON-LD @context compacted output points at by URL"
+          }
+        },
+        "security": [],
+        "summary": "The JSON-LD @context compacted output points at by URL"
+      }
+    },
     "/contradictions/reviews": {
       "post": {
         "operationId": "post_contradictions_reviews",

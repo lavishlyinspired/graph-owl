@@ -245,6 +245,15 @@ pub static ROUTES: &[Route] = &[
         false,
     ),
     route(
+        "get",
+        "/context/{version}",
+        "The JSON-LD @context compacted output points at by URL",
+        None,
+        None,
+        200,
+        false,
+    ),
+    route(
         "post",
         "/lineage",
         "Assert that one asset feeds another",

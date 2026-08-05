@@ -22,6 +22,8 @@ graph-owl-reasoning-el = { path = "../graph-owl-reasoning-el" }
 graph-owl-constraint = { path = "../graph-owl-constraint" }
 graph-owl-ontology = { path = "../graph-owl-ontology" }
 graph-owl-resolution = { path = "../graph-owl-resolution" }
+graph-owl-rdf-io = { path = "../graph-owl-rdf-io" }
+graph-owl-lpg-io = { path = "../graph-owl-lpg-io" }
 spareval = "0.2"
 spargebra = "0.4"
 sparesults = "0.3"
