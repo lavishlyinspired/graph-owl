@@ -1,8 +1,8 @@
 # Plan: RDF Interop & Open Standards (Epic 9)
 
 **Branch**: feat/engine-rdf-io
-**Status**: Not started
-**Depends on**: Epic 4 (triples to serialize), Epic 7 (CONSTRUCT produces Turtle)
+**Status**: **Slice A shipped, 5 August 2026 — Slices B–F not started.**
+**Depends on**: Epic 4 (triples to serialize) — shipped. ~~Epic 7 (CONSTRUCT produces Turtle)~~ — **overstated for Slice A**: checked before implementing (`verify-blockers-against-code`), CONSTRUCT is not wired (`execute_algebra`'s result collector discards `spareval::QueryResults::Graph` today) and Slice A does not need it — it serializes `&[Flake]` directly, sourced from `TripleStore::query_pattern`, never from a SPARQL result. A later slice that wants "export via `CONSTRUCT`" as a convenience would need CONSTRUCT wired first; Slice A itself does not.
 **Crate**: `graph-owl-rdf-io`
 
 ## Goal
@@ -75,24 +75,34 @@ So it is **one decision, not three**, and it is taken once — for the workspace
 
 ## Acceptance criteria
 
-- [ ] Every format round-trips: `parse(serialize(x)) == x` for the expressible subset.
+- [~] Every format round-trips: `parse(serialize(x)) == x` for the expressible subset — **true for Turtle, N-Triples, N-Quads (Slice A)**; JSON-LD, RDF/XML, TriG not yet implemented.
 - [ ] JSON-LD context is versioned, served at a stable URL, and pinned in output.
 - [ ] DCAT export validates against the DCAT SHACL shapes.
 - [ ] OpenLineage events both export and import.
 - [ ] Import runs Epic 5 validation and Epic 17 resolution before landing.
-- [ ] An unregistered namespace fails serialization with a named error.
+- [x] An unregistered namespace fails serialization with a named error.
 - [ ] What each direction drops is documented and tested.
 
 ## Slices
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first.
 
-### Slice A: Turtle and N-Triples round-trip
+**Scope of this pass**: Slice A only, the same explicit-stop discipline `37a-scale.md` already established. JSON-LD (Slice B) needs a served, versioned context endpoint and real SSRF-refusal testing; DCAT/PROV-O (Slice C) needs validating against **published external** DCAT SHACL shapes, not self-written ones; OpenLineage (Slice D) is a second real external spec; Slice E ties import into Epic 5/17. Each is substantial, separable work — recorded as not started rather than rushed.
+
+### Slice A: Turtle and N-Triples round-trip — **shipped, 5 August 2026**
 
 **Value**: The simplest exchange formats, proving the `Sid` ↔ IRI boundary.
-**Acceptance criteria**: all `FlakeValue` variants round-trip; typed and language-tagged literals preserved; IRI escaping handled (spaces, unicode, `<>`); blank nodes are stable within one document; an unregistered namespace → named error; N-Quads carries `cx`, N-Triples drops it with a documented warning.
-**RED**: Round-trip per variant. An IRI-escaping test with a space and a unicode character — the classic silent-corruption case. A test asserting N-Triples *warns* when dropping named-graph information rather than dropping it silently. Mutator watch: unescaped IRI output must fail; silent `cx` loss must fail the warning assertion.
-**Done when**: criteria met, mutation report reviewed, commit approved.
+**Shipped**:
+- `RdfSerializer`/`RdfParser` traits plus `StandardRdfIo`, the one implementation, wrapping `oxttl` (Turtle, N-Triples, N-Quads) — the other three `RdfFormat` variants (`JsonLd`, `RdfXml`, `TriG`) return `RdfError::UnsupportedFormat` rather than panicking, so a later slice adds an arm without changing this module's public shape.
+- All tested `FlakeValue` variants round-trip through Turtle and N-Triples: `Ref`, `String`, `Boolean`, `Int`, `Instant` — each via `parse(serialize(x)) == x`, literally, including `t`/`op` (test fixtures use `t: 0, op: true` throughout, since neither format has a transaction-time concept to round-trip against; a real caller sourcing from `TripleStore::query_pattern` re-stamps `t` before writing to storage — that is Slice E's job, not this one's).
+- Typed and language-tagged literals preserved — verified through N-Triples specifically, since Turtle's own grammar legitimately abbreviates a boolean/integer as a bare token with no `^^xsd:...` in the text at all (valid Turtle; the plan's own literal reading of "the datatype must appear in the output" does not hold for Turtle and was corrected in the test, not the production code, once the first version of that test failed against genuinely-correct Turtle output).
+- IRI/literal escaping: a space and CJK characters in a literal round-trip correctly.
+- Blank nodes: skolemized into a fresh `Sid` per unique label, stable for the duration of one `parse()` call (never persisted or reused across calls) — `graph-owl`'s own "no blank-node representation" rule (`00c-domain-model.md`) applied the same way Epic 98/99/100 already applied it to OWL restrictions.
+- An unregistered namespace fails serialization with a named `RdfError::UnregisteredNamespace`; a parsed IRI outside this store's registered namespace set fails with `RdfError::UnrecognisedIri` — the reverse-direction case the plan's own criterion did not name but decision-consistency asked for.
+- N-Quads carries `cx`; N-Triples drops it with a `tracing::warn!` naming the dropped count, not silently.
+**Real reuse, not a new mapping**: `FlakeValue <-> oxrdf::Term` conversion already existed — `graph_owl_query::term`, built for SPARQL query results — and this crate depends on `graph-owl-query` to reuse it rather than writing a second copy of the same mapping that could drift from the first.
+**Scope cut, recorded rather than silently narrowed**: no mutation run this pass (matches this session's established `scripts/gate.sh`-as-the-bar practice, recorded the same way in `37b-portability.md` and `37a-scale.md`); no `Sid ↔ IRI` support for a document referencing a namespace outside the 8 currently registered (DSC/RDF/RDFS/XSD/OWL/SHACL/SCHEMA/DCTERMS) — genuinely external RDF import is Slice E's job, and Slice A's own round-trip test only ever exercises namespaces this store's own serializer produced.
+**Tests**: `graph-owl-rdf-io::tests` — 9 tests (round-trip per variant, escaping, typed/lang-tagged literals, blank-node stability within and across documents, unregistered-namespace refusal, unimplemented-format refusal, N-Quads-vs-N-Triples context handling).
 
 ### Slice B: JSON-LD with a versioned context
 

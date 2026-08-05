@@ -10,5 +10,15 @@ workspace = true
 [dependencies]
 graph-owl-core = { path = "../graph-owl-core" }
 graph-owl-engine = { path = "../graph-owl-engine" }
+# `graph_owl_query::term` is the one place `FlakeValue <-> oxrdf::Term`
+# conversion lives (SPARQL query results need it too) — reused rather than
+# duplicated, per this project's standing rule against two copies of one
+# mapping.
+graph-owl-query = { path = "../graph-owl-query" }
 thiserror.workspace = true
 serde.workspace = true
+oxrdf = "0.3.3"
+oxttl.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true

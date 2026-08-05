@@ -64,6 +64,11 @@ utoipa = { version = "5", features = ["uuid", "chrono", "preserve_order"] }
 # 2026: `tar` 0.4.46 (203M downloads), `zstd` 0.13.3 (346M downloads).
 tar = "0.4"
 zstd = "0.13"
+# RDF I/O (Epic 9). Already adopted in `00l-build-vs-adopt.md`; `oxrdf` is
+# already in this tree transitively via `spargebra`/`spareval`. `oxttl`
+# pins `oxrdf =0.3.3` exactly, matching the version already resolved here
+# — confirmed 5 August 2026, MIT OR Apache-2.0, 1.1M downloads.
+oxttl = "0.2"
 graph-owl-core = { path = "crates/graph-owl-core" }
 graph-owl-events = { path = "crates/graph-owl-events" }
 graph-owl-storage = { path = "crates/graph-owl-storage" }
