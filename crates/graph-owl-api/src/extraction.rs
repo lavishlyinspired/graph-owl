@@ -191,10 +191,12 @@ pub enum SubmissionOutcome {
 
 /// A queued claim as a reviewer sees it.
 ///
-/// **Carries the evidence text, not just the span.** Decision 5 made usable:
-/// a reviewer shown "svc.db.orders description append-only" with no sentence
-/// behind it is being asked to trust the extractor, which is the thing under
-/// review. The span alone would put the burden of resolving it on every client.
+/// **Carries the surrounding sentence, not just the span.** Decision 5 made
+/// usable, then widened for Epic 42 Slice D: a reviewer shown
+/// "svc.db.orders description append-only" with no sentence behind it is
+/// being asked to trust the extractor, which is the thing under review, and
+/// the bare matched phrase alone is not enough context to judge it in. The
+/// span alone would put the burden of resolving it on every client.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingClaim {
@@ -210,8 +212,14 @@ pub struct PendingClaim {
     pub object: String,
     /// The extractor's confidence.
     pub confidence: f64,
-    /// The source text this claim was extracted from.
-    pub evidence: String,
+    /// The sentence this claim was extracted from — Epic 42 Slice D's
+    /// "source passage with the extracted span highlighted". Reviewing "X"
+    /// with no sentence behind it is guessing, and a reviewer who is
+    /// guessing approves everything, which launders machine output as
+    /// human-verified.
+    pub passage: String,
+    /// The extracted span's `(start, end)` byte offsets into `passage`.
+    pub span: (usize, usize),
 }
 
 /// The states a queued claim can be in.
@@ -437,6 +445,7 @@ fn record(run_id: Uuid, claim: &Claim, state: &str) -> QueuedClaimRecord {
         evidence_end: i32::try_from(claim.provenance.evidence.end).unwrap_or(i32::MAX),
         state: state.to_string(),
         decided_by: None,
+        reason: None,
     }
 }
 
@@ -452,6 +461,85 @@ pub const CONFIRMED_CONFIDENCE: f64 = 1.0;
 #[must_use]
 pub fn enters_graph_unreviewed(confidence: f64) -> bool {
     Disposition::for_confidence(confidence) == Disposition::Assert
+}
+
+/// Scanned no further than this many characters from the span in either
+/// direction when widening to a sentence — Epic 21 x Epic 42 Slice D.
+/// Unpunctuated text (a transcript, a log dump) has no sentence terminator
+/// to stop at, and without a cap that would return the entire document as
+/// "context" for one claim. 400 holds a few genuine sentences comfortably
+/// (English averages roughly 15-25 words, ~100-150 characters, per
+/// sentence) without risking a multi-KB payload per claim in a queue that
+/// may list dozens of them at once.
+const PASSAGE_SCAN_CAP: usize = 400;
+
+fn is_sentence_terminator(c: char) -> bool {
+    matches!(c, '.' | '!' | '?' | '\n')
+}
+
+/// An extracted span widened to the sentence around it, so a reviewer sees
+/// what the extractor saw rather than an isolated phrase with the sentence
+/// it was cut from stripped away.
+///
+/// `span` is a byte range into `passage` (not into the original source), so
+/// a caller highlights it by slicing `passage` directly rather than
+/// re-deriving an offset.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceWindow {
+    /// The widened sentence (or as much of it as `PASSAGE_SCAN_CAP` allows).
+    pub passage: String,
+    /// The extracted span's `(start, end)` byte offsets into `passage`.
+    pub span: (usize, usize),
+}
+
+/// Widens `source[start..end]` to the sentence it sits in — Epic 21 x Epic
+/// 42 Slice D's "source passage with the extracted span highlighted".
+/// `None` when the span itself does not resolve (out of bounds, reversed,
+/// or landing mid-character) — the same cases the bare-span lookup this
+/// replaces already refused to answer.
+#[must_use]
+pub fn windowed_passage(source: &str, start: usize, end: usize) -> Option<EvidenceWindow> {
+    if start > end
+        || end > source.len()
+        || !source.is_char_boundary(start)
+        || !source.is_char_boundary(end)
+    {
+        return None;
+    }
+
+    let scan_start = source[..start]
+        .char_indices()
+        .rev()
+        .nth(PASSAGE_SCAN_CAP.saturating_sub(1))
+        .map_or(0, |(i, _)| i);
+    let passage_start = source[scan_start..start]
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| is_sentence_terminator(c))
+        .map_or(scan_start, |(i, c)| scan_start + i + c.len_utf8());
+    // A terminator is followed by whitespace before the next sentence
+    // starts — included in the scan so it can be excluded from the passage.
+    // No non-whitespace found means the gap is whitespace all the way to
+    // `start` (or there is no gap at all), so the correct trim target is
+    // `start` itself, not the untrimmed `passage_start`.
+    let passage_start = source[passage_start..start]
+        .find(|c: char| !c.is_whitespace())
+        .map_or(start, |offset| passage_start + offset);
+
+    let scan_end = source[end..]
+        .char_indices()
+        .nth(PASSAGE_SCAN_CAP.saturating_sub(1))
+        .map_or(source.len(), |(i, c)| end + i + c.len_utf8());
+    let passage_end = source[end..scan_end]
+        .char_indices()
+        .find(|&(_, c)| is_sentence_terminator(c))
+        .map_or(scan_end, |(i, c)| end + i + c.len_utf8());
+
+    Some(EvidenceWindow {
+        passage: source[passage_start..passage_end].to_string(),
+        span: (start - passage_start, end - passage_start),
+    })
 }
 
 #[cfg(test)]
@@ -635,7 +723,8 @@ mod tests {
             predicate: "description".to_string(),
             object: "append-only".to_string(),
             confidence: 0.6,
-            evidence: "the orders table is append-only".to_string(),
+            passage: "the orders table is append-only".to_string(),
+            span: (4, 9),
         })
         .expect("serialize");
 
@@ -678,6 +767,7 @@ mod tests {
             evidence_end: 4,
             state: STATE_ASSERTED.to_string(),
             decided_by: None,
+            reason: None,
         }
     }
 
@@ -861,5 +951,164 @@ mod tests {
 
         assert_eq!(kept.claims.len(), 1);
         assert!(dropped.is_empty());
+    }
+
+    mod windowed_passage_tests {
+        use super::super::windowed_passage;
+
+        #[test]
+        fn expands_to_the_containing_sentence_not_only_the_matched_phrase() {
+            let source = "The orders table is append-only. It never accepts updates. Deletes are also refused.";
+            // "append-only" — the extractor's exact match, mid-sentence.
+            let start = source.find("append-only").expect("fixture");
+            let end = start + "append-only".len();
+
+            let window = windowed_passage(source, start, end).expect("resolves");
+
+            assert_eq!(window.passage, "The orders table is append-only.");
+            assert_eq!(&window.passage[window.span.0..window.span.1], "append-only");
+        }
+
+        #[test]
+        fn stops_at_the_previous_sentence_terminator_not_the_document_start() {
+            let source = "Unrelated context here. The table is a fact table. More context follows.";
+            let start = source.find("a fact table").expect("fixture");
+            let end = start + "a fact table".len();
+
+            let window = windowed_passage(source, start, end).expect("resolves");
+
+            assert!(
+                !window.passage.contains("Unrelated"),
+                "the passage must not reach back past the prior sentence: {}",
+                window.passage
+            );
+            assert_eq!(
+                &window.passage[window.span.0..window.span.1],
+                "a fact table"
+            );
+        }
+
+        #[test]
+        fn a_span_at_the_very_start_of_the_document_has_no_left_context_to_include() {
+            let source = "Append-only from the first byte. Trailing sentence.";
+            let end = "Append-only".len();
+
+            let window = windowed_passage(source, 0, end).expect("resolves");
+
+            assert_eq!(&window.passage[window.span.0..window.span.1], "Append-only");
+            assert!(window.passage.starts_with("Append-only"));
+        }
+
+        #[test]
+        fn an_unpunctuated_document_is_capped_rather_than_returned_whole() {
+            // No sentence terminator anywhere — the cap is what stops this from
+            // becoming "the whole document" on a transcript or a log dump.
+            // "word " is 5 ASCII bytes, repeated an exact multiple of the cap so
+            // the expected boundary is computable by hand rather than merely
+            // bounded — a weaker `len() < source.len()` version of this test
+            // passed even when the boundary arithmetic was wrong in three
+            // different ways, because almost any wrong-but-not-panicking
+            // offset still lands somewhere short of the whole document.
+            let filler = "word ".repeat(400); // 2000 bytes, no '.', '!', '?', or '\n'
+            let source = format!("{filler}TARGET{filler}");
+            let start = source.find("TARGET").expect("fixture");
+            let end = start + "TARGET".len();
+
+            let window = windowed_passage(&source, start, end).expect("resolves");
+
+            // 400 chars capped each side of the 6-byte span.
+            assert_eq!(window.passage.len(), 400 + 6 + 400);
+            assert_eq!(window.span, (400, 406));
+            assert_eq!(&window.passage[window.span.0..window.span.1], "TARGET");
+        }
+
+        #[test]
+        fn a_zero_width_span_is_a_valid_degenerate_case_not_a_reversed_one() {
+            let source = "The cat sat on the mat.";
+            let window = windowed_passage(source, 4, 4).expect("start == end is not reversed");
+            assert_eq!(window.span, (4, 4));
+        }
+
+        #[test]
+        fn a_span_ending_exactly_at_the_source_length_is_in_bounds() {
+            let source = "A short passage.";
+            let end = source.len();
+            let window =
+                windowed_passage(source, 0, end).expect("end == source.len() is not out of bounds");
+            assert_eq!(window.span, (0, end));
+        }
+
+        #[test]
+        fn a_start_that_splits_a_character_does_not_resolve_even_when_end_is_valid() {
+            // 'é' occupies bytes 3-4; byte 4 is mid-character, byte 5 (the
+            // space after it) is a valid boundary on its own.
+            let source = "café shop";
+            assert!(windowed_passage(source, 4, 5).is_none());
+        }
+
+        #[test]
+        fn an_end_that_splits_a_character_does_not_resolve_even_when_start_is_valid() {
+            let source = "café shop";
+            assert!(windowed_passage(source, 0, 4).is_none());
+        }
+
+        #[test]
+        fn a_terminator_found_within_a_capped_backward_scan_is_still_located_correctly() {
+            // 450 filler characters exceed the 400-char cap, so the scan
+            // window's own start (not 0) is what the terminator search is
+            // offset from — the arithmetic a shorter fixture cannot exercise.
+            let filler = "x".repeat(450);
+            let source = format!("{filler}. TARGET follows.");
+            let start = source.find("TARGET").expect("fixture");
+            let end = start + "TARGET".len();
+
+            let window = windowed_passage(&source, start, end).expect("resolves");
+
+            assert_eq!(window.passage, "TARGET follows.");
+            assert_eq!(&window.passage[window.span.0..window.span.1], "TARGET");
+        }
+
+        #[test]
+        fn the_whitespace_trim_offset_is_added_to_passage_start_not_subtracted() {
+            // "AAAA" is non-whitespace, so trimming stops there rather than at
+            // "TARGET" — the offset it stops at is what this pins down.
+            // Asserting only the span-sliced substring (as the earlier tests
+            // do) cannot catch a wrong sign here: `start - passage_start` and
+            // the passage slice shift together under this specific mutation,
+            // so the two stay internally consistent with each other while
+            // both being wrong — only a full-string assertion is external to
+            // that symmetry.
+            let source = "First. AAAA TARGET here.";
+            let start = source.find("TARGET").expect("fixture");
+            let end = start + "TARGET".len();
+
+            let window = windowed_passage(source, start, end).expect("resolves");
+
+            assert_eq!(window.passage, "AAAA TARGET here.");
+        }
+
+        #[test]
+        fn a_gap_that_is_entirely_whitespace_is_trimmed_all_the_way_to_the_span() {
+            let source = "First.   TARGET here.";
+            let start = source.find("TARGET").expect("fixture");
+            let end = start + "TARGET".len();
+
+            let window = windowed_passage(source, start, end).expect("resolves");
+
+            assert_eq!(window.passage, "TARGET here.");
+            assert_eq!(&window.passage[window.span.0..window.span.1], "TARGET");
+        }
+
+        #[test]
+        fn an_out_of_bounds_span_does_not_resolve() {
+            let source = "short";
+            assert!(windowed_passage(source, 10, 20).is_none());
+        }
+
+        #[test]
+        fn a_span_with_start_after_end_does_not_resolve() {
+            let source = "the orders table";
+            assert!(windowed_passage(source, 5, 2).is_none());
+        }
     }
 }

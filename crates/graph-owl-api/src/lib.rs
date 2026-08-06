@@ -4913,7 +4913,7 @@ impl Catalog {
             // out-of-range one is untrusted input rather than a bug here — a
             // worker that miscounts must not be able to panic the reviewer's
             // page.
-            let evidence = self
+            let window = self
                 .extraction_evidence(claim.run_id, claim.evidence_start, claim.evidence_end)
                 .await;
             pending.push(extraction::PendingClaim {
@@ -4923,26 +4923,34 @@ impl Catalog {
                 predicate: claim.predicate,
                 object: claim.object,
                 confidence: claim.confidence,
-                evidence,
+                passage: window.passage,
+                span: window.span,
             });
         }
         Ok(pending)
     }
 
-    async fn extraction_evidence(&self, run_id: Uuid, start: i32, end: i32) -> String {
-        const UNRESOLVED: &str = "(the evidence span does not resolve against the source)";
+    async fn extraction_evidence(
+        &self,
+        run_id: Uuid,
+        start: i32,
+        end: i32,
+    ) -> extraction::EvidenceWindow {
+        let unresolved = || extraction::EvidenceWindow {
+            passage: "(the evidence span does not resolve against the source)".to_string(),
+            span: (0, 0),
+        };
         let Ok(Some(run)) = self.storage.find_extraction_run_by_id(run_id).await else {
-            return UNRESOLVED.to_string();
+            return unresolved();
         };
         let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
-            return UNRESOLVED.to_string();
+            return unresolved();
         };
-        run.source_text
-            .get(start..end)
-            .map_or_else(|| UNRESOLVED.to_string(), |text| text.trim().to_string())
+        extraction::windowed_passage(&run.source_text, start, end).unwrap_or_else(unresolved)
     }
 
-    /// Record a reviewer's decision on a queued claim.
+    /// Record a reviewer's decision on a queued claim — Accept, Edit, or
+    /// Reject (Epic 42 decision 2).
     ///
     /// # Errors
     ///
@@ -4950,27 +4958,35 @@ impl Catalog {
     pub async fn decide_extraction_claim(
         &self,
         claim_id: Uuid,
-        confirmed: bool,
+        decision: graph_owl_core::extraction::ReviewDecision,
         decided_by: &str,
     ) -> Result<graph_owl_storage::QueuedClaimRecord, CatalogError> {
+        use graph_owl_core::extraction::ReviewDecision;
+        let confirmed = matches!(
+            decision,
+            ReviewDecision::Accept | ReviewDecision::Edit { .. }
+        );
         let record = self
             .storage
-            .decide_extraction_claim(claim_id, confirmed, decided_by)
+            .decide_extraction_claim(claim_id, decision, decided_by)
             .await
             .map_err(CatalogError::from)?
             .ok_or(CatalogError::NotFound)?;
 
         // **Confirmation is what makes a surfaced claim reason-able.** A human
-        // said yes, so it earns exactly the projection a confident extractor's
-        // claim gets — same graph, same shape. Rejection projects nothing and
-        // has nothing to retract: a pending claim was never in the graph, which
-        // is the containment this epic is built around.
+        // said yes — to the extractor's own claim, or (Edit) to a corrected
+        // one, which `record` already carries since storage wrote the
+        // correction before returning it — so it earns exactly the
+        // projection a confident extractor's claim gets — same graph, same
+        // shape. Rejection projects nothing and has nothing to retract: a
+        // pending claim was never in the graph, which is the containment
+        // this epic is built around.
         if confirmed {
-            let context = self
+            let window = self
                 .extraction_evidence(record.run_id, record.evidence_start, record.evidence_end)
                 .await;
             let resolved = self
-                .resolve_claim_mentions(record.run_id, &record, &context)
+                .resolve_claim_mentions(record.run_id, &record, &window.passage)
                 .await
                 .unwrap_or_default();
             self.project_extraction_claims(std::slice::from_ref(&record), &resolved)

@@ -5112,15 +5112,29 @@ impl Storage for InMemoryStorage {
     async fn decide_extraction_claim(
         &self,
         claim_id: Uuid,
-        confirmed: bool,
+        decision: graph_owl_core::extraction::ReviewDecision,
         decided_by: &str,
     ) -> Result<Option<graph_owl_storage::QueuedClaimRecord>, StorageError> {
+        use graph_owl_core::extraction::ReviewDecision;
         let mut claims = self.extraction_claims.lock().unwrap();
         let Some(claim) = claims.iter_mut().find(|claim| claim.id == claim_id) else {
             return Ok(None);
         };
-        claim.state = if confirmed { "confirmed" } else { "rejected" }.to_string();
+        claim.state = decision.state().to_string();
         claim.decided_by = Some(decided_by.to_string());
+        match decision {
+            ReviewDecision::Accept => {}
+            ReviewDecision::Edit {
+                subject,
+                predicate,
+                object,
+            } => {
+                claim.subject = subject;
+                claim.predicate = predicate;
+                claim.object = object;
+            }
+            ReviewDecision::Reject { reason } => claim.reason = Some(reason),
+        }
         Ok(Some(claim.clone()))
     }
 

@@ -152,11 +152,19 @@ async fn a_middling_confidence_claim_queues_with_the_sentence_it_came_from() {
     let claims = queued.as_array().expect("an array");
     assert_eq!(claims.len(), 1, "{queued}");
 
-    // **Decision 5 made usable.** A reviewer shown a bare triple is being asked
-    // to trust the extractor, which is the thing under review.
+    // **Decision 5 made usable, widened for Epic 42 Slice D.** A reviewer
+    // shown a bare triple is being asked to trust the extractor, which is
+    // the thing under review — and the whole sentence, not just the matched
+    // phrase, is what lets them judge it in context. `SOURCE` is one
+    // sentence, so the passage is the whole thing.
+    assert_eq!(claims[0]["passage"], SOURCE, "{queued}");
+    let span = claims[0]["span"].as_array().expect("a [start, end] span");
+    let start = usize::try_from(span[0].as_u64().expect("start")).expect("fits");
+    let end = usize::try_from(span[1].as_u64().expect("end")).expect("fits");
     assert_eq!(
-        claims[0]["evidence"], "orders service",
-        "the queue must carry the source text, not just the span: {queued}"
+        &claims[0]["passage"].as_str().expect("passage")[start..end],
+        "orders service",
+        "the span must point at the extracted phrase within the passage: {queued}"
     );
 }
 
@@ -444,7 +452,7 @@ async fn a_rejected_claim_is_not_re_queued_when_the_document_is_re_ingested() {
         &app,
         "POST",
         &format!("/extraction/claims/{claim_id}/decision"),
-        Some(json!({ "confirmed": false })),
+        Some(json!({ "outcome": "reject", "reason": "not a real assertion" })),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
@@ -493,13 +501,97 @@ async fn confirming_a_claim_takes_it_out_of_the_queue() {
         &app,
         "POST",
         &format!("/extraction/claims/{claim_id}/decision"),
-        Some(json!({ "confirmed": true })),
+        Some(json!({ "outcome": "accept" })),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (_, queue) = send(&app, "GET", "/extraction/queue", None).await;
     assert!(queue.as_array().expect("an array").is_empty(), "{queue}");
+}
+
+/// **Edit is a third outcome, not confirm-with-extra-steps.** The reviewer's
+/// corrected subject/predicate/object are what reach the graph — the
+/// extractor's original claim is not projected alongside it.
+#[tokio::test]
+async fn editing_a_claim_projects_the_correction_not_the_original() {
+    let (app, _db, _url) = test_app().await;
+    let fqn = known_asset(&app, "orders").await;
+
+    send(
+        &app,
+        "POST",
+        "/extraction/runs",
+        Some(submission(&fqn, 0.6, SOURCE)),
+    )
+    .await;
+    let (_, queued) = send(&app, "GET", "/extraction/queue", None).await;
+    let claim_id = queued[0]["id"].as_str().expect("an id").to_string();
+    assert_eq!(queued[0]["object"], "append-only", "{queued}");
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/extraction/claims/{claim_id}/decision"),
+        Some(json!({
+            "outcome": "edit",
+            "subject": fqn,
+            "predicate": "description",
+            "object": "append-only, verified by a human",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (_, queue) = send(&app, "GET", "/extraction/queue", None).await;
+    assert!(
+        queue.as_array().expect("an array").is_empty(),
+        "an edited claim is decided, not left pending: {queue}"
+    );
+}
+
+/// A rejection with no reason teaches the extractor nothing and is
+/// unauditable later — Epic 42 decision 3, the same rule the merge
+/// adjudication queue enforces.
+#[tokio::test]
+async fn rejecting_without_a_reason_is_refused() {
+    let (app, _db, _url) = test_app().await;
+    let fqn = known_asset(&app, "orders").await;
+
+    send(
+        &app,
+        "POST",
+        "/extraction/runs",
+        Some(submission(&fqn, 0.6, SOURCE)),
+    )
+    .await;
+    let (_, queued) = send(&app, "GET", "/extraction/queue", None).await;
+    let claim_id = queued[0]["id"].as_str().expect("an id").to_string();
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/extraction/claims/{claim_id}/decision"),
+        Some(json!({ "outcome": "reject" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/extraction/claims/{claim_id}/decision"),
+        Some(json!({ "outcome": "reject", "reason": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (_, queue) = send(&app, "GET", "/extraction/queue", None).await;
+    assert_eq!(
+        queue.as_array().expect("an array").len(),
+        1,
+        "a refused decision must not have decided the claim: {queue}"
+    );
 }
 
 /// A review decision has no default. Both directions of a default are wrong:
@@ -527,7 +619,7 @@ async fn deciding_a_claim_that_does_not_exist_is_a_404() {
         &app,
         "POST",
         &format!("/extraction/claims/{}/decision", uuid::Uuid::new_v4()),
-        Some(json!({ "confirmed": true })),
+        Some(json!({ "outcome": "accept" })),
     )
     .await;
 
@@ -638,7 +730,9 @@ async fn every_missing_identity_field_is_reported_in_one_response() {
 // unconfirmed ones.
 
 use graph_owl_api::{Catalog, UpsertAsset};
-use graph_owl_core::extraction::{Claim, ExtractionResult, ParsedDocument, Provenance, TextSpan};
+use graph_owl_core::extraction::{
+    Claim, ExtractionResult, ParsedDocument, Provenance, ReviewDecision, TextSpan,
+};
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
 use graph_owl_core::{AssetKind, Principal, PrincipalKind};
 use graph_owl_engine::TripleStore;
@@ -875,7 +969,7 @@ async fn confirming_a_surfaced_claim_makes_it_reason_able() {
 
     for claim in &queued {
         catalog
-            .decide_extraction_claim(claim.id, true, "reviewer")
+            .decide_extraction_claim(claim.id, ReviewDecision::Accept, "reviewer")
             .await
             .expect("a reviewer should be able to confirm");
     }
@@ -913,7 +1007,13 @@ async fn rejecting_a_surfaced_claim_puts_nothing_in_the_graph() {
 
     for claim in catalog.extraction_queue().await.expect("the queue reads") {
         catalog
-            .decide_extraction_claim(claim.id, false, "reviewer")
+            .decide_extraction_claim(
+                claim.id,
+                ReviewDecision::Reject {
+                    reason: "not a real dependency".to_string(),
+                },
+                "reviewer",
+            )
             .await
             .expect("a reviewer should be able to reject");
     }

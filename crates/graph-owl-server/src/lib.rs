@@ -8409,32 +8409,57 @@ async fn extraction_queue(
     Ok(Json(catalog.extraction_queue().await?))
 }
 
+/// Transparent wrapper so `ValidateBody` — foreign to both this crate and
+/// `graph_owl_core::extraction::ReviewDecision` — can be implemented locally
+/// without the orphan rule standing in the way. `#[serde(transparent)]`
+/// means the wire shape is exactly `ReviewDecision`'s own tagged-enum shape,
+/// not a nested `{ "0": { ... } }`.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ClaimDecision {
-    confirmed: bool,
-}
+#[serde(transparent)]
+struct ClaimDecision(graph_owl_core::extraction::ReviewDecision);
 
 impl ValidateBody for ClaimDecision {
-    /// `confirmed` has no default. A missing field defaulting either way would
-    /// turn a malformed request into a silent decision on somebody's behalf,
-    /// and both directions are wrong: defaulting to true asserts what nobody
-    /// approved, defaulting to false rejects what nobody refused.
+    /// `outcome` has no default, and neither does the payload each outcome
+    /// requires — a missing `outcome` or a `reject` with no `reason` would
+    /// otherwise become a silent decision on somebody's behalf via serde's
+    /// own defaulting, which is wrong in every direction it could default.
     fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
-        if value
-            .get("confirmed")
-            .and_then(serde_json::Value::as_bool)
-            .is_none()
-        {
-            return vec![FieldError::new(
-                "confirmed",
+        let mut errors = Vec::new();
+        match value.get("outcome").and_then(serde_json::Value::as_str) {
+            Some("accept") => {}
+            Some("edit") => {
+                require_non_empty_string(
+                    value,
+                    &graph_owl_api::validation::FieldPath::root().key("subject"),
+                    &mut errors,
+                );
+                require_non_empty_string(
+                    value,
+                    &graph_owl_api::validation::FieldPath::root().key("predicate"),
+                    &mut errors,
+                );
+                require_non_empty_string(
+                    value,
+                    &graph_owl_api::validation::FieldPath::root().key("object"),
+                    &mut errors,
+                );
+            }
+            Some("reject") => {
+                require_non_empty_string(
+                    value,
+                    &graph_owl_api::validation::FieldPath::root().key("reason"),
+                    &mut errors,
+                );
+            }
+            _ => errors.push(FieldError::new(
+                "outcome",
                 FieldErrorCode::Required,
-                "`confirmed` must be true or false — there is no default for a \
-                 review decision"
+                "`outcome` must be one of \"accept\", \"edit\", or \"reject\" — there is \
+                 no default for a review decision"
                     .to_string(),
-            )];
+            )),
         }
-        Vec::new()
+        errors
     }
 }
 
@@ -8449,7 +8474,7 @@ async fn decide_extraction_claim(
     // the client wanted it to say, which is worse than having no audit trail
     // because it looks like one.
     catalog
-        .decide_extraction_claim(id, payload.confirmed, &principal.id)
+        .decide_extraction_claim(id, payload.0, &principal.id)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

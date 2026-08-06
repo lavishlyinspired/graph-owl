@@ -198,6 +198,53 @@ impl Disposition {
     }
 }
 
+/// A reviewer's decision on a queued claim — Epic 21 x Epic 42 decision 2.
+///
+/// `Accept` and `Edit` both confirm the claim — it earns the same
+/// projection a confident extractor's claim gets — and differ only in
+/// whether the subject/predicate/object that get projected are the ones the
+/// extractor proposed or the ones the reviewer corrected them to. `Reject`
+/// carries a `reason` for the same standing rule resolution's review queue
+/// already enforces: an unreasoned rejection teaches the extractor nothing
+/// and is unauditable when someone asks about it later.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(
+    tag = "outcome",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ReviewDecision {
+    /// The claim as extracted is correct.
+    Accept,
+    /// The claim is correct in substance but the extractor got a detail
+    /// wrong — the reviewer's values are what get projected, not the
+    /// extractor's.
+    Edit {
+        /// The corrected subject.
+        subject: String,
+        /// The corrected predicate.
+        predicate: String,
+        /// The corrected object.
+        object: String,
+    },
+    /// The claim does not belong in the graph at all.
+    Reject {
+        /// Why — required, not merely accepted.
+        reason: String,
+    },
+}
+
+impl ReviewDecision {
+    /// The `extraction_claims.state` value this decision writes.
+    #[must_use]
+    pub fn state(&self) -> &'static str {
+        match self {
+            ReviewDecision::Accept | ReviewDecision::Edit { .. } => "confirmed",
+            ReviewDecision::Reject { .. } => "rejected",
+        }
+    }
+}
+
 /// Why a claim was thrown away, kept so a run can be diagnosed rather than
 /// merely counted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

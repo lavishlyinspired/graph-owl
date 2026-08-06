@@ -2729,7 +2729,7 @@ pub trait Storage: Send + Sync {
     async fn decide_extraction_claim(
         &self,
         claim_id: Uuid,
-        confirmed: bool,
+        decision: graph_owl_core::extraction::ReviewDecision,
         decided_by: &str,
     ) -> Result<Option<QueuedClaimRecord>, StorageError>;
 
@@ -3739,6 +3739,8 @@ pub struct QueuedClaimRecord {
     pub evidence_end: i32,
     pub state: String,
     pub decided_by: Option<String>,
+    /// Set on `Reject`, absent on `Accept`/`Edit`/while pending.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

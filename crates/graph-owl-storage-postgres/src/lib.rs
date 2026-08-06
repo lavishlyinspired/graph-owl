@@ -5464,7 +5464,7 @@ impl Storage for PostgresStorage {
     ) -> Result<Vec<QueuedClaimRecord>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, run_id, subject, predicate, object, confidence,
-                    evidence_start, evidence_end, state, decided_by
+                    evidence_start, evidence_end, state, decided_by, reason
              FROM extraction_claims
              WHERE state = 'pending'
              ORDER BY queued_at ASC
@@ -5481,23 +5481,53 @@ impl Storage for PostgresStorage {
     async fn decide_extraction_claim(
         &self,
         claim_id: Uuid,
-        confirmed: bool,
+        decision: graph_owl_core::extraction::ReviewDecision,
         decided_by: &str,
     ) -> Result<Option<QueuedClaimRecord>, StorageError> {
+        use graph_owl_core::extraction::ReviewDecision;
+
+        // `Accept` sends no correction, so `COALESCE` keeps the extractor's
+        // own subject/predicate/object; `Edit` overwrites all three with the
+        // reviewer's. Splitting subject/predicate/object into `Option`s
+        // rather than writing two different SQL statements keeps this one
+        // atomic `RETURNING` rather than a read-modify-write with a race
+        // window between them.
+        let (subject, predicate, object, reason) = match &decision {
+            ReviewDecision::Accept => (None, None, None, None),
+            ReviewDecision::Edit {
+                subject,
+                predicate,
+                object,
+            } => (
+                Some(subject.as_str()),
+                Some(predicate.as_str()),
+                Some(object.as_str()),
+                None,
+            ),
+            ReviewDecision::Reject { reason } => (None, None, None, Some(reason.as_str())),
+        };
+
         // `RETURNING` rather than update-then-read: the read would be a second
         // statement against a row another reviewer may have decided in
         // between, and the answer this returns is what the caller is told
         // happened.
         let row = sqlx::query(
             "UPDATE extraction_claims
-             SET state = $2, decided_at = now(), decided_by = $3
+             SET state = $2, decided_at = now(), decided_by = $3, reason = $4,
+                 subject = COALESCE($5, subject),
+                 predicate = COALESCE($6, predicate),
+                 object = COALESCE($7, object)
              WHERE id = $1
              RETURNING id, run_id, subject, predicate, object, confidence,
-                       evidence_start, evidence_end, state, decided_by",
+                       evidence_start, evidence_end, state, decided_by, reason",
         )
         .bind(claim_id)
-        .bind(if confirmed { "confirmed" } else { "rejected" })
+        .bind(decision.state())
         .bind(decided_by)
+        .bind(reason)
+        .bind(subject)
+        .bind(predicate)
+        .bind(object)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
@@ -8906,6 +8936,7 @@ fn queued_claim_from_row(row: &PgRow) -> QueuedClaimRecord {
         evidence_end: row.get("evidence_end"),
         state: row.get("state"),
         decided_by: row.get("decided_by"),
+        reason: row.get("reason"),
     }
 }
 
