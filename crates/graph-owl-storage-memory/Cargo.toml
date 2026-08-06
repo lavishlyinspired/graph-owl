@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 graph-owl-core.workspace = true
+graph-owl-ontology = { path = "../graph-owl-ontology" }
 graph-owl-storage.workspace = true
 graph-owl-authz.workspace = true
 async-trait.workspace = true

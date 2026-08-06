@@ -173,6 +173,13 @@ pub struct InMemoryStorage {
     pub resolution_queue: Mutex<Vec<graph_owl_core::resolution::ReviewQueueEntry>>,
     pub mention_resolutions: Mutex<Vec<graph_owl_core::resolution::MentionResolution>>,
     pub drift_reports: Mutex<Vec<graph_owl_core::drift::DriftItem>>,
+    pub ontology_packs: Mutex<Vec<graph_owl_ontology::pack::OntologyPack>>,
+    /// `(pack_id, term_id, source_iri)`.
+    #[allow(clippy::type_complexity)]
+    pack_terms: Mutex<Vec<(Uuid, Uuid, String)>>,
+    pub pack_overrides: Mutex<Vec<graph_owl_ontology::pack::PackOverride>>,
+    /// `(pack_id, turtle bytes)`.
+    pack_source_turtle: Mutex<Vec<(Uuid, Vec<u8>)>>,
     /// `(endpoint, secret)` — the secret kept beside the public record so
     /// a test can prove it is kept and still never returned by the read
     /// path, matching the `connectors` field's own precedent.
@@ -5083,6 +5090,237 @@ impl Storage for InMemoryStorage {
                 (!value.is_null()).then(|| (asset.id, value.clone()))
             })
             .collect())
+    }
+
+    async fn insert_pack(
+        &self,
+        pack: graph_owl_ontology::pack::OntologyPack,
+        source_turtle: &[u8],
+    ) -> Result<graph_owl_ontology::pack::OntologyPack, StorageError> {
+        let mut held = self.ontology_packs.lock().unwrap();
+        if held
+            .iter()
+            .any(|p| p.pack_id == pack.pack_id && p.version == pack.version)
+        {
+            return Err(StorageError::Conflict {
+                detail: format!(
+                    "`{}` version `{}` is already imported",
+                    pack.pack_id, pack.version
+                ),
+                existing_id: None,
+                kind: graph_owl_storage::ConflictKind::PackVersionExists,
+            });
+        }
+        held.push(pack.clone());
+        drop(held);
+        self.pack_source_turtle
+            .lock()
+            .unwrap()
+            .push((pack.id, source_turtle.to_vec()));
+        Ok(pack)
+    }
+
+    async fn get_pack_source_turtle(&self, pack_id: Uuid) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self
+            .pack_source_turtle
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| *id == pack_id)
+            .map(|(_, bytes)| bytes.clone()))
+    }
+
+    async fn update_pack_version(
+        &self,
+        id: Uuid,
+        version: &str,
+        term_count: usize,
+        source_turtle: &[u8],
+        imported_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError> {
+        if let Some(pack) = self
+            .ontology_packs
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|p| p.id == id)
+        {
+            pack.version = version.to_string();
+            pack.term_count = term_count;
+            pack.imported_at = imported_at;
+        }
+        let mut turtle = self.pack_source_turtle.lock().unwrap();
+        if let Some(entry) = turtle.iter_mut().find(|(pid, _)| *pid == id) {
+            entry.1 = source_turtle.to_vec();
+        } else {
+            turtle.push((id, source_turtle.to_vec()));
+        }
+        Ok(())
+    }
+
+    async fn get_pack(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_ontology::pack::OntologyPack>, StorageError> {
+        Ok(self
+            .ontology_packs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.id == id)
+            .cloned())
+    }
+
+    async fn get_pack_by_id_and_version(
+        &self,
+        pack_id: &str,
+        version: &str,
+    ) -> Result<Option<graph_owl_ontology::pack::OntologyPack>, StorageError> {
+        Ok(self
+            .ontology_packs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.pack_id == pack_id && p.version == version)
+            .cloned())
+    }
+
+    async fn list_packs(
+        &self,
+    ) -> Result<Vec<graph_owl_ontology::pack::OntologyPack>, StorageError> {
+        let mut packs = self.ontology_packs.lock().unwrap().clone();
+        packs.sort_by(|a, b| (&a.pack_id, &a.version).cmp(&(&b.pack_id, &b.version)));
+        Ok(packs)
+    }
+
+    async fn delete_pack(&self, id: Uuid) -> Result<(), StorageError> {
+        self.ontology_packs.lock().unwrap().retain(|p| p.id != id);
+        Ok(())
+    }
+
+    async fn insert_pack_term(
+        &self,
+        pack_id: Uuid,
+        term_id: Uuid,
+        source_iri: &str,
+    ) -> Result<(), StorageError> {
+        self.pack_terms
+            .lock()
+            .unwrap()
+            .push((pack_id, term_id, source_iri.to_string()));
+        Ok(())
+    }
+
+    async fn pack_terms(&self, pack_id: Uuid) -> Result<Vec<(String, Uuid)>, StorageError> {
+        Ok(self
+            .pack_terms
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(pid, _, _)| *pid == pack_id)
+            .map(|(_, term_id, iri)| (iri.clone(), *term_id))
+            .collect())
+    }
+
+    async fn pack_term_by_iri(
+        &self,
+        pack_id: Uuid,
+        source_iri: &str,
+    ) -> Result<Option<Uuid>, StorageError> {
+        Ok(self
+            .pack_terms
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(pid, _, iri)| *pid == pack_id && iri == source_iri)
+            .map(|(_, term_id, _)| *term_id))
+    }
+
+    async fn pack_attachment_counts(
+        &self,
+        pack_id: Uuid,
+    ) -> Result<Vec<(String, i64)>, StorageError> {
+        let pack_terms = self.pack_terms.lock().unwrap();
+        let attachments = self.term_attachments.lock().unwrap();
+        Ok(pack_terms
+            .iter()
+            .filter(|(pid, _, _)| *pid == pack_id)
+            .filter_map(|(_, term_id, iri)| {
+                let count = attachments
+                    .iter()
+                    .filter(|(attached_term, _)| attached_term == term_id)
+                    .count();
+                (count > 0).then(|| (iri.clone(), i64::try_from(count).unwrap_or(i64::MAX)))
+            })
+            .collect())
+    }
+
+    async fn exact_match_targets_outside_pack(
+        &self,
+        pack_id: Uuid,
+    ) -> Result<Vec<String>, StorageError> {
+        use graph_owl_core::glossary::SkosRelation;
+        let pack_terms = self.pack_terms.lock().unwrap();
+        let other_term_ids: std::collections::HashSet<Uuid> = pack_terms
+            .iter()
+            .filter(|(pid, _, _)| *pid != pack_id)
+            .map(|(_, term_id, _)| *term_id)
+            .collect();
+        Ok(self
+            .term_relations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(owner, _)| other_term_ids.contains(owner))
+            .filter_map(|(_, relation)| match relation {
+                SkosRelation::ExactMatch(target) => Some(target.clone()),
+                _ => None,
+            })
+            .collect())
+    }
+
+    async fn insert_pack_override(
+        &self,
+        override_: graph_owl_ontology::pack::PackOverride,
+    ) -> Result<graph_owl_ontology::pack::PackOverride, StorageError> {
+        self.pack_overrides.lock().unwrap().push(override_.clone());
+        Ok(override_)
+    }
+
+    async fn list_pack_overrides(
+        &self,
+        pack_id: Uuid,
+    ) -> Result<Vec<graph_owl_ontology::pack::PackOverride>, StorageError> {
+        Ok(self
+            .pack_overrides
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| o.pack_id == pack_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn overrides_for_term_path(
+        &self,
+        pack_id: Uuid,
+        term_path: &str,
+    ) -> Result<Vec<graph_owl_ontology::pack::PackOverride>, StorageError> {
+        Ok(self
+            .pack_overrides
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| o.pack_id == pack_id && o.term_path == term_path)
+            .cloned()
+            .collect())
+    }
+
+    async fn delete_pack_override(&self, id: Uuid) -> Result<bool, StorageError> {
+        let mut held = self.pack_overrides.lock().unwrap();
+        let before = held.len();
+        held.retain(|o| o.id != id);
+        Ok(held.len() < before)
     }
 
     async fn update_custom_property(

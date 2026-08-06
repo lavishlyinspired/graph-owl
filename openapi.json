@@ -774,6 +774,34 @@
         ],
         "type": "string"
       },
+      "EffectiveTerm": {
+        "description": "A pack term as a reader actually sees it — pack content plus whatever\noverrides apply, merged transparently (Slice C).",
+        "properties": {
+          "definition": {
+            "type": "string"
+          },
+          "hidden": {
+            "type": "boolean"
+          },
+          "overridden": {
+            "description": "**Never inferred from a diff.** Set the instant any override applies,\nso a reader always knows this is not the pack's own, unmodified word\n— the whole reason Slice C's acceptance criteria call for it visible.",
+            "type": "boolean"
+          },
+          "synonyms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "definition",
+          "synonyms",
+          "hidden",
+          "overridden"
+        ],
+        "type": "object"
+      },
       "EntityReference": {
         "description": "A denormalized pointer to an owning principal.\n\n**Denormalized on purpose.** `00c` requires responses to carry \"name, FQN,\ntype, not bare ids\": a console rendering an owner list should not have to make\nN follow-up requests to turn ids into names, and an agent given bare ids\nreports ids to a human.\n\nThere is no separate `fullyQualifiedName`. For a principal the id **is** the\nqualified name — `users.id` and `teams.id` are globally unique, human-chosen\ntext — and a second field that always equals the first is a field that will\neventually disagree with it.",
         "properties": {
@@ -990,6 +1018,76 @@
           "reason"
         ],
         "type": "object"
+      },
+      "Licence": {
+        "description": "How a pack may be used — tracked per pack and surfaced (decision 3).\n\n**No `Default` and no \"unknown\" variant.** A pack whose manifest omits\nthis must refuse import rather than be guessed permissive — see\n[`crate`]'s module doc and Slice B's own acceptance criterion. Making\nthis required at the type level, not merely validated, is what makes\nthat guarantee structural rather than a check someone could forget to\ncall.",
+        "oneOf": [
+          {
+            "description": "Freely redistributable and usable.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "permissive"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Usable, but the notice must be surfaced wherever a term from this\npack is displayed.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "attributionRequired"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "notice": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "notice",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Import must be explicitly acknowledged — see\n[`import_requires_acknowledgement`].",
+            "properties": {
+              "contact": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "licenceRequired"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "contact",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "LifecycleState": {
         "description": "Where an asset is in its life.",
@@ -1259,6 +1357,68 @@
         ],
         "type": "object"
       },
+      "OntologyPack": {
+        "description": "One imported vocabulary.",
+        "properties": {
+          "glossaryId": {
+            "description": "The pack-owned glossary its terms landed in.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "importedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "licence": {
+            "$ref": "#/components/schemas/Licence"
+          },
+          "packId": {
+            "description": "A short slug (\"fibo\", \"icd10\") — not unique alone, since a pack has\nseveral versions over time; `(pack_id, version)` is the real key.",
+            "type": "string"
+          },
+          "sourceUrl": {
+            "type": "string"
+          },
+          "termCount": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "packId",
+          "version",
+          "licence",
+          "sourceUrl",
+          "glossaryId",
+          "termCount",
+          "importedAt"
+        ],
+        "type": "object"
+      },
+      "OntologyPack_Array": {
+        "items": {
+          "$ref": "#/components/schemas/OntologyPack"
+        },
+        "type": "array"
+      },
+      "OverrideKind": {
+        "description": "What kind of change a [`PackOverride`] makes.",
+        "enum": [
+          "redefine",
+          "hide",
+          "addSynonym",
+          "addRelation"
+        ],
+        "type": "string"
+      },
       "OwnerKind": {
         "description": "What kind of principal owns something.\n\nDeliberately **not** [`crate::PrincipalKind`], which answers a different\nquestion — who is *calling* (User/Service/System). An owner is a person or a\nteam; a service cannot be accountable for an asset, because accountability\nmeans somebody can be asked.",
         "enum": [
@@ -1266,6 +1426,121 @@
           "team"
         ],
         "type": "string"
+      },
+      "PackAttachmentCount": {
+        "description": "One pack term's attachment count — Epic 33 Slice E's removal report.",
+        "properties": {
+          "count": {
+            "description": "How many assets or columns carry this term.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "sourceIri": {
+            "description": "The term's own concept IRI in the source vocabulary.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sourceIri",
+          "count"
+        ],
+        "type": "object"
+      },
+      "PackOverride": {
+        "description": "An organization's local customization of one pack term — decision 2,\n\"extend without fork\". Stored keyed by `term_path`, the term's own\n**source concept IRI**, not its local database id: the id a re-import or\nupgrade assigns is not guaranteed stable across storage adapters or\nmigrations, but the IRI is the one thing the publisher itself promises\nnot to change for the same concept.",
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/OverrideKind"
+          },
+          "packId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "payload": {},
+          "termPath": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "packId",
+          "termPath",
+          "kind",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "PackOverrideRequest": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/OverrideKind"
+          },
+          "payload": {},
+          "termPath": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "termPath",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "PackOverride_Array": {
+        "items": {
+          "$ref": "#/components/schemas/PackOverride"
+        },
+        "type": "array"
+      },
+      "PackRemovalReport": {
+        "description": "What removing a pack would affect, or did affect — Epic 33 Slice E.",
+        "properties": {
+          "attachmentCounts": {
+            "description": "Only terms with at least one attachment appear.",
+            "items": {
+              "$ref": "#/components/schemas/PackAttachmentCount"
+            },
+            "type": "array"
+          },
+          "termCount": {
+            "description": "How many terms this pack has, whether or not any are attached.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "totalAttachments": {
+            "description": "The sum of `attachment_counts` — the number a caller decides on\nwithout having to fold the list themselves.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "termCount",
+          "attachmentCounts",
+          "totalAttachments"
+        ],
+        "type": "object"
+      },
+      "PackUpgradeResult": {
+        "description": "The result of an upgrade attempt — Epic 33 Slice D. `applied` is `false`\nfor a dry run, or when the diff found nothing to do.",
+        "properties": {
+          "applied": {
+            "description": "Whether the diff was actually written.",
+            "type": "boolean"
+          },
+          "report": {
+            "$ref": "#/components/schemas/UpgradeReport",
+            "description": "What differs between the installed version and the candidate."
+          }
+        },
+        "required": [
+          "report",
+          "applied"
+        ],
+        "type": "object"
       },
       "Page_AgentActivity": {
         "properties": {
@@ -1691,6 +1966,51 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "UpgradeReport": {
+        "description": "What upgrading a pack to a new version would do — Slice D.",
+        "properties": {
+          "added": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "attachedRemoved": {
+            "description": "The subset of `removed` that still has assets attached — surfaced as\nits own list, never folded into `removed`, so it cannot be silently\ndeprecated out from under a reader who never sees it called out.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "changed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "orphanedOverrides": {
+            "description": "Overrides whose `term_path` no longer names a concept in the new\nversion — orphaned, not silently dropped.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "removed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "added",
+          "changed",
+          "removed",
+          "attachedRemoved",
+          "orphanedOverrides"
+        ],
         "type": "object"
       },
       "UpsertAsset": {
@@ -5070,6 +5390,450 @@
         },
         "security": [],
         "summary": "Prometheus exposition"
+      }
+    },
+    "/ontology-packs": {
+      "get": {
+        "operationId": "get_ontology-packs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OntologyPack_Array"
+                }
+              }
+            },
+            "description": "Every imported pack"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every imported pack"
+      },
+      "post": {
+        "operationId": "post_ontology-packs",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OntologyPack"
+                }
+              }
+            },
+            "description": "Import a SKOS vocabulary as a new pack version — the Turtle document is the whole body"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Import a SKOS vocabulary as a new pack version — the Turtle document is the whole body"
+      }
+    },
+    "/ontology-packs/{id}": {
+      "delete": {
+        "operationId": "delete_ontology-packs__id_",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackRemovalReport"
+                }
+              }
+            },
+            "description": "Report what removing a pack would affect; `force=true` removes it"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Report what removing a pack would affect; `force=true` removes it"
+      },
+      "get": {
+        "operationId": "get_ontology-packs__id_",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OntologyPack"
+                }
+              }
+            },
+            "description": "One imported pack"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "One imported pack"
+      }
+    },
+    "/ontology-packs/{id}/overrides": {
+      "get": {
+        "operationId": "get_ontology-packs__id__overrides",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackOverride_Array"
+                }
+              }
+            },
+            "description": "Every local customization on a pack"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every local customization on a pack"
+      },
+      "post": {
+        "operationId": "post_ontology-packs__id__overrides",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PackOverrideRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackOverride"
+                }
+              }
+            },
+            "description": "Add a local customization without forking the pack"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request body is invalid; every violation is listed"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Add a local customization without forking the pack"
+      }
+    },
+    "/ontology-packs/{id}/overrides/{override_id}": {
+      "delete": {
+        "operationId": "delete_ontology-packs__id__overrides__override_id_",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Remove a local customization; the pack's own value applies again"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Remove a local customization; the pack's own value applies again"
+      }
+    },
+    "/ontology-packs/{id}/terms": {
+      "get": {
+        "operationId": "get_ontology-packs__id__terms",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every term a pack imported, with overrides applied"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every term a pack imported, with overrides applied"
+      }
+    },
+    "/ontology-packs/{id}/upgrade": {
+      "post": {
+        "operationId": "post_ontology-packs__id__upgrade",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackUpgradeResult"
+                }
+              }
+            },
+            "description": "Diff a candidate new version and, unless `dryRun=true`, apply it"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Diff a candidate new version and, unless `dryRun=true`, apply it"
       }
     },
     "/openapi.json": {

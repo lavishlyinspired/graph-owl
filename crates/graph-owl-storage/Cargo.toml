@@ -10,6 +10,7 @@ serde_json.workspace = true
 serde.workspace = true
 graph-owl-core.workspace = true
 graph-owl-authz.workspace = true
+graph-owl-ontology = { path = "../graph-owl-ontology" }
 async-trait.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

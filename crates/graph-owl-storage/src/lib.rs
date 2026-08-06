@@ -15,6 +15,7 @@ use graph_owl_core::{
     quality::TestStatus,
     usage::{Consumer, UsageOperation, UsageRollup},
 };
+use graph_owl_ontology::pack::{OntologyPack, PackOverride};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -130,6 +131,15 @@ pub enum ConflictKind {
     /// has one: a second decision on the same item must not silently
     /// overwrite the first.
     DriftAlreadyDecided,
+    /// `(pack_id, version)` is already imported — Epic 33 Slice A. The
+    /// facade checks this before writing (Slice A's idempotency), so
+    /// reaching this at the storage layer means a race with a second
+    /// importer rather than the ordinary re-import path.
+    PackVersionExists,
+    /// Removal was refused because another pack's term `exactMatch`es one
+    /// of this pack's terms — Epic 33 Slice E. Removing the referenced
+    /// pack would leave the other pack's assertion pointing at nothing.
+    PackReferencedExternally,
 }
 
 #[derive(Debug, Error)]
@@ -2911,6 +2921,148 @@ pub trait Storage: Send + Sync {
         property: &CustomProperty,
         previous_name: &str,
     ) -> Result<bool, StorageError>;
+
+    // ---- Epic 33: ontology packs ----
+
+    /// `source_turtle` is the exact bytes imported — kept so Slice D's
+    /// upgrade can re-parse "what is installed" rather than reconstruct it
+    /// from term rows.
+    ///
+    /// # Errors
+    /// [`StorageError::Conflict`] if `(pack_id, version)` is already
+    /// imported — Slice A's idempotency is checked *before* this is called
+    /// (the facade reads first), so reaching a conflict here means a race
+    /// with a second importer rather than the ordinary re-import case.
+    async fn insert_pack(
+        &self,
+        pack: OntologyPack,
+        source_turtle: &[u8],
+    ) -> Result<OntologyPack, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_pack(&self, id: Uuid) -> Result<Option<OntologyPack>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails, `None` if the pack
+    /// does not exist.
+    async fn get_pack_source_turtle(&self, pack_id: Uuid) -> Result<Option<Vec<u8>>, StorageError>;
+
+    /// Updates a pack's row **in place** to a new version — the same
+    /// `id`, so [`PackOverride`]s (keyed by `pack_id` + `term_path`) go on
+    /// applying without anyone having to re-point them at a new row.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn update_pack_version(
+        &self,
+        id: Uuid,
+        version: &str,
+        term_count: usize,
+        source_turtle: &[u8],
+        imported_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError>;
+
+    /// The installed version of a pack, if any — Slice A's idempotency
+    /// check and Slice D's upgrade both start here.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_pack_by_id_and_version(
+        &self,
+        pack_id: &str,
+        version: &str,
+    ) -> Result<Option<OntologyPack>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_packs(&self) -> Result<Vec<OntologyPack>, StorageError>;
+
+    /// Removes a pack's own row. The caller is responsible for everything
+    /// that must happen first — the attachment/cross-pack-reference checks
+    /// (Slice E) read state this call would otherwise have already
+    /// destroyed, so they run before it, never inside it.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn delete_pack(&self, id: Uuid) -> Result<(), StorageError>;
+
+    /// Records which glossary term came from which pack, at which source
+    /// concept IRI — the address an override or an upgrade targets a term
+    /// by, since a re-import is not guaranteed to assign the same term id.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn insert_pack_term(
+        &self,
+        pack_id: Uuid,
+        term_id: Uuid,
+        source_iri: &str,
+    ) -> Result<(), StorageError>;
+
+    /// Every `(source_iri, term_id)` pair a pack imported.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn pack_terms(&self, pack_id: Uuid) -> Result<Vec<(String, Uuid)>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn pack_term_by_iri(
+        &self,
+        pack_id: Uuid,
+        source_iri: &str,
+    ) -> Result<Option<Uuid>, StorageError>;
+
+    /// How many things are attached to each of a pack's terms — Slice E's
+    /// removal report. One row per term that has at least one attachment;
+    /// a term with none is simply absent rather than reported as zero.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn pack_attachment_counts(
+        &self,
+        pack_id: Uuid,
+    ) -> Result<Vec<(String, i64)>, StorageError>;
+
+    /// Every `exactMatch` target recorded by a term belonging to a
+    /// *different* pack than `pack_id` — Slice E's cross-pack reference
+    /// guard reads this before permitting a removal.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn exact_match_targets_outside_pack(
+        &self,
+        pack_id: Uuid,
+    ) -> Result<Vec<String>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn insert_pack_override(
+        &self,
+        override_: PackOverride,
+    ) -> Result<PackOverride, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_pack_overrides(&self, pack_id: Uuid) -> Result<Vec<PackOverride>, StorageError>;
+
+    /// Every override targeting one term, applied in insertion order —
+    /// [`graph_owl_ontology::pack::apply_overrides`]'s own input.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn overrides_for_term_path(
+        &self,
+        pack_id: Uuid,
+        term_path: &str,
+    ) -> Result<Vec<PackOverride>, StorageError>;
+
+    /// `false` if it did not exist.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn delete_pack_override(&self, id: Uuid) -> Result<bool, StorageError>;
 
     // ---- Epic 30: quality signals ----
 

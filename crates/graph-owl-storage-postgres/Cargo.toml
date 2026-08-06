@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 tracing.workspace = true
 graph-owl-core.workspace = true
+graph-owl-ontology = { path = "../graph-owl-ontology" }
 graph-owl-storage.workspace = true
 graph-owl-authz.workspace = true
 graph-owl-search.workspace = true

@@ -684,6 +684,87 @@ pub static ROUTES: &[Route] = &[
         204,
         true,
     ),
+    route(
+        "post",
+        "/ontology-packs",
+        "Import a SKOS vocabulary as a new pack version — the Turtle document is the whole body",
+        None,
+        Some("OntologyPack"),
+        201,
+        true,
+    ),
+    route(
+        "get",
+        "/ontology-packs",
+        "Every imported pack",
+        None,
+        Some("OntologyPack_Array"),
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/ontology-packs/{id}",
+        "One imported pack",
+        None,
+        Some("OntologyPack"),
+        200,
+        true,
+    ),
+    route(
+        "delete",
+        "/ontology-packs/{id}",
+        "Report what removing a pack would affect; `force=true` removes it",
+        None,
+        Some("PackRemovalReport"),
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/ontology-packs/{id}/terms",
+        "Every term a pack imported, with overrides applied",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/ontology-packs/{id}/overrides",
+        "Every local customization on a pack",
+        None,
+        Some("PackOverride_Array"),
+        200,
+        true,
+    ),
+    route(
+        "post",
+        "/ontology-packs/{id}/overrides",
+        "Add a local customization without forking the pack",
+        Some("PackOverrideRequest"),
+        Some("PackOverride"),
+        201,
+        true,
+    ),
+    route(
+        "delete",
+        "/ontology-packs/{id}/overrides/{override_id}",
+        "Remove a local customization; the pack's own value applies again",
+        None,
+        None,
+        204,
+        true,
+    ),
+    route(
+        "post",
+        "/ontology-packs/{id}/upgrade",
+        "Diff a candidate new version and, unless `dryRun=true`, apply it",
+        None,
+        Some("PackUpgradeResult"),
+        200,
+        true,
+    ),
     // `/business-metrics`, not `/metrics` — that path already names the
     // Prometheus exposition endpoint below.
     route(
@@ -1421,6 +1502,16 @@ pub static ROUTES: &[Route] = &[
     graph_owl_core::drift::DriftReportItem,
     crate::DriftReportRequest,
     crate::IgnoreDriftRequest,
+    graph_owl_ontology::pack::OntologyPack,
+    graph_owl_ontology::pack::Licence,
+    graph_owl_ontology::pack::PackOverride,
+    graph_owl_ontology::pack::OverrideKind,
+    graph_owl_ontology::pack::EffectiveTerm,
+    graph_owl_ontology::pack::UpgradeReport,
+    graph_owl_api::PackUpgradeResult,
+    graph_owl_api::PackAttachmentCount,
+    graph_owl_api::PackRemovalReport,
+    crate::PackOverrideRequest,
 )))]
 struct Components;
 
@@ -1532,6 +1623,9 @@ pub fn document() -> Value {
         map.insert("AgentGrant_Array".to_string(), array_of("AgentGrant"));
         // Epic 20 x Epic 42 Slice D.
         map.insert("DriftItem_Array".to_string(), array_of("DriftItem"));
+        // Epic 33.
+        map.insert("OntologyPack_Array".to_string(), array_of("OntologyPack"));
+        map.insert("PackOverride_Array".to_string(), array_of("PackOverride"));
     }
 
     let mut paths = serde_json::Map::new();

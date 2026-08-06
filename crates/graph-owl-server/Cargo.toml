@@ -19,6 +19,7 @@ bolt = ["dep:graph-owl-bolt", "dep:async-trait", "dep:thiserror"]
 utoipa.workspace = true
 base64.workspace = true
 graph-owl-api.workspace = true
+graph-owl-ontology = { path = "../graph-owl-ontology" }
 # Epic 7d, decision 3: a second listening port, off unless a deployment asks
 # for it. `optional = true` is what makes `cargo build --no-default-features`
 # actually exclude the crate and everything it pulls in, not just skip

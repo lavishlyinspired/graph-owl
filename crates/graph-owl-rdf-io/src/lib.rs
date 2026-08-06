@@ -62,6 +62,8 @@
 
 use std::collections::HashMap;
 
+pub mod skos;
+
 use graph_owl_core::flake::{Flake, FlakeValue, Sid};
 use graph_owl_query::term::{TermError, from_term, to_named_node, to_term};
 use oxrdf::{GraphName, NamedOrBlankNode, Quad, Term, Triple};

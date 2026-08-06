@@ -11,6 +11,7 @@
 
 use graph_owl_core::flake::{FlakeValue, Sid};
 
+pub mod pack;
 pub mod profile;
 
 /// The kind a value must be, independent of what it says.

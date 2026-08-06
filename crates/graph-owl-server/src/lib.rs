@@ -291,6 +291,25 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             "/glossary-terms/{id}/usage",
             get(term_usage).post(attach_term).delete(detach_term),
         )
+        // Epic 33: ontology packs.
+        .route(
+            "/ontology-packs",
+            get(list_ontology_packs).post(import_pack),
+        )
+        .route(
+            "/ontology-packs/{id}",
+            get(get_ontology_pack).delete(remove_pack),
+        )
+        .route("/ontology-packs/{id}/terms", get(list_pack_terms))
+        .route(
+            "/ontology-packs/{id}/overrides",
+            get(list_pack_overrides).post(create_pack_override),
+        )
+        .route(
+            "/ontology-packs/{id}/overrides/{override_id}",
+            delete(delete_pack_override),
+        )
+        .route("/ontology-packs/{id}/upgrade", post(upgrade_pack))
         // `/business-metrics`, not `/metrics` — that path is already the
         // Prometheus exposition endpoint (Epic 10), and axum panics at
         // startup on a duplicate route rather than silently shadowing one.
@@ -1369,6 +1388,14 @@ impl AppError {
             AppError::IllegalRelationship { .. } => "illegal-relationship",
             AppError::Overloaded { .. } => "overloaded",
             AppError::RateLimited { .. } => "rate-limited",
+            AppError::Conflict {
+                kind: ConflictKind::PackVersionExists,
+                ..
+            } => "pack-version-exists",
+            AppError::Conflict {
+                kind: ConflictKind::PackReferencedExternally,
+                ..
+            } => "pack-referenced-externally",
         }
     }
 
@@ -1472,6 +1499,14 @@ impl AppError {
             AppError::IllegalRelationship { .. } => "Illegal relationship",
             AppError::Overloaded { .. } => "Server overloaded",
             AppError::RateLimited { .. } => "Rate limit exceeded",
+            AppError::Conflict {
+                kind: ConflictKind::PackVersionExists,
+                ..
+            } => "This pack version is already imported",
+            AppError::Conflict {
+                kind: ConflictKind::PackReferencedExternally,
+                ..
+            } => "Another pack references a term in this pack",
         }
     }
 
@@ -1617,6 +1652,16 @@ impl AppError {
             // cannot tell which of the two it needs to change.
             AppError::Conflict {
                 kind: ConflictKind::CustomPropertyExists,
+                detail,
+                ..
+            } => detail.clone(),
+            AppError::Conflict {
+                kind: ConflictKind::PackVersionExists,
+                detail,
+                ..
+            } => detail.clone(),
+            AppError::Conflict {
+                kind: ConflictKind::PackReferencedExternally,
                 detail,
                 ..
             } => detail.clone(),
@@ -4210,6 +4255,245 @@ async fn term_usage(
 ) -> Result<Json<Page<String>>, AppError> {
     let page = PageRequest::new(query.limit, query.after.as_deref())?;
     Ok(Json(catalog.term_usage(id, &page).await?))
+}
+
+// ---- Epic 33: ontology packs ----
+
+fn pack_term_view_body(view: &graph_owl_api::PackTermView) -> serde_json::Value {
+    json!({
+        "sourceIri": view.source_iri,
+        "term": term_body(&view.term),
+        "effective": view.effective,
+    })
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ImportPackQuery {
+    pack_id: String,
+    version: String,
+    source_url: String,
+    licence_kind: String,
+    licence_name: String,
+    #[serde(default)]
+    licence_notice: Option<String>,
+    #[serde(default)]
+    licence_contact: Option<String>,
+    #[serde(default)]
+    acknowledge_licence: bool,
+}
+
+fn licence_from_query(
+    query: &ImportPackQuery,
+) -> Result<graph_owl_ontology::pack::Licence, AppError> {
+    use graph_owl_ontology::pack::Licence;
+    match query.licence_kind.as_str() {
+        "permissive" => Ok(Licence::Permissive {
+            name: query.licence_name.clone(),
+        }),
+        "attributionRequired" => {
+            let Some(notice) = query.licence_notice.clone().filter(|n| !n.is_empty()) else {
+                return Err(AppError::Validation(vec![FieldError::new(
+                    "licenceNotice",
+                    FieldErrorCode::Required,
+                    "an attribution-required licence needs a notice".to_string(),
+                )]));
+            };
+            Ok(Licence::AttributionRequired {
+                name: query.licence_name.clone(),
+                notice,
+            })
+        }
+        "licenceRequired" => {
+            let Some(contact) = query.licence_contact.clone().filter(|c| !c.is_empty()) else {
+                return Err(AppError::Validation(vec![FieldError::new(
+                    "licenceContact",
+                    FieldErrorCode::Required,
+                    "a licence-required pack needs a contact".to_string(),
+                )]));
+            };
+            Ok(Licence::LicenceRequired {
+                name: query.licence_name.clone(),
+                contact,
+            })
+        }
+        other => Err(AppError::Validation(vec![FieldError::new(
+            "licenceKind",
+            FieldErrorCode::Value,
+            format!("'{other}' is not a recognised licence kind"),
+        )])),
+    }
+}
+
+/// `POST /ontology-packs` — Slice A + B. The Turtle document is the whole
+/// request body, matching [`restore_archive`]'s reasoning: this is binary
+/// content with nothing to validate as JSON shape, not a payload.
+async fn import_pack(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppQuery(query): AppQuery<ImportPackQuery>,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<graph_owl_ontology::pack::OntologyPack>), AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let licence = licence_from_query(&query)?;
+    let pack = catalog
+        .import_pack(
+            &principal,
+            query.pack_id,
+            query.version,
+            licence,
+            query.source_url,
+            &body,
+            query.acknowledge_licence,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(pack)))
+}
+
+async fn list_ontology_packs(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<Vec<graph_owl_ontology::pack::OntologyPack>>, AppError> {
+    Ok(Json(catalog.list_ontology_packs(&principal).await?))
+}
+
+async fn get_ontology_pack(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_ontology::pack::OntologyPack>, AppError> {
+    catalog
+        .get_ontology_pack(&principal, id)
+        .await?
+        .map(Json)
+        .ok_or(AppError::NotFound)
+}
+
+async fn list_pack_terms(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let views = catalog.list_pack_terms(&principal, id).await?;
+    Ok(Json(json!(
+        views.iter().map(pack_term_view_body).collect::<Vec<_>>()
+    )))
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct PackOverrideRequest {
+    term_path: String,
+    kind: graph_owl_ontology::pack::OverrideKind,
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
+impl ValidateBody for PackOverrideRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("termPath"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+async fn create_pack_override(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<PackOverrideRequest>,
+) -> Result<(StatusCode, Json<graph_owl_ontology::pack::PackOverride>), AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let created = catalog
+        .create_pack_override(
+            &principal,
+            id,
+            payload.term_path,
+            payload.kind,
+            payload.payload,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+async fn list_pack_overrides(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<graph_owl_ontology::pack::PackOverride>>, AppError> {
+    Ok(Json(catalog.list_pack_overrides(&principal, id).await?))
+}
+
+async fn delete_pack_override(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path((_pack_id, override_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    if catalog
+        .delete_pack_override(&principal, override_id)
+        .await?
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpgradePackQuery {
+    version: String,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// `POST /ontology-packs/{id}/upgrade` — Slice D. Same raw-body reasoning
+/// as [`import_pack`].
+async fn upgrade_pack(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<UpgradePackQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<graph_owl_api::PackUpgradeResult>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let result = catalog
+        .upgrade_pack(&principal, id, query.version, &body, query.dry_run)
+        .await?;
+    Ok(Json(result))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemovePackQuery {
+    #[serde(default)]
+    force: bool,
+}
+
+async fn remove_pack(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<RemovePackQuery>,
+) -> Result<Json<graph_owl_api::PackRemovalReport>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let report = catalog.remove_pack(&principal, id, query.force).await?;
+    Ok(Json(report))
 }
 
 // ---- Epic 24 Slice E: Metric as a first-class entity ----

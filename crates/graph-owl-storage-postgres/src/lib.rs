@@ -398,6 +398,108 @@ fn relation_from_kind(
     }
 }
 
+/// Splits a [`graph_owl_ontology::pack::Licence`] into `ontology_packs`'
+/// four licence columns.
+fn licence_columns(
+    licence: &graph_owl_ontology::pack::Licence,
+) -> (&'static str, &str, Option<&str>, Option<&str>) {
+    use graph_owl_ontology::pack::Licence;
+    match licence {
+        Licence::Permissive { name } => ("permissive", name.as_str(), None, None),
+        Licence::AttributionRequired { name, notice } => (
+            "attributionRequired",
+            name.as_str(),
+            Some(notice.as_str()),
+            None,
+        ),
+        Licence::LicenceRequired { name, contact } => (
+            "licenceRequired",
+            name.as_str(),
+            None,
+            Some(contact.as_str()),
+        ),
+    }
+}
+
+fn licence_from_columns(
+    kind: &str,
+    name: String,
+    notice: Option<String>,
+    contact: Option<String>,
+) -> Result<graph_owl_ontology::pack::Licence, StorageError> {
+    use graph_owl_ontology::pack::Licence;
+    match kind {
+        "permissive" => Ok(Licence::Permissive { name }),
+        "attributionRequired" => Ok(Licence::AttributionRequired {
+            name,
+            notice: notice.unwrap_or_default(),
+        }),
+        "licenceRequired" => Ok(Licence::LicenceRequired {
+            name,
+            contact: contact.unwrap_or_default(),
+        }),
+        other => Err(StorageError::Unexpected(format!(
+            "unknown licence kind '{other}' in ontology_packs"
+        ))),
+    }
+}
+
+fn pack_from_row(row: PgRow) -> Result<graph_owl_ontology::pack::OntologyPack, StorageError> {
+    let licence = licence_from_columns(
+        row.get::<&str, _>("licence_kind"),
+        row.get("licence_name"),
+        row.get("licence_notice"),
+        row.get("licence_contact"),
+    )?;
+    Ok(graph_owl_ontology::pack::OntologyPack {
+        id: row.get("id"),
+        pack_id: row.get("pack_id"),
+        version: row.get("version"),
+        licence,
+        source_url: row.get("source_url"),
+        glossary_id: row.get("glossary_id"),
+        term_count: usize::try_from(row.get::<i32, _>("term_count")).unwrap_or(0),
+        imported_at: row.get("imported_at"),
+    })
+}
+
+const fn override_kind_str(kind: graph_owl_ontology::pack::OverrideKind) -> &'static str {
+    use graph_owl_ontology::pack::OverrideKind;
+    match kind {
+        OverrideKind::Redefine => "redefine",
+        OverrideKind::Hide => "hide",
+        OverrideKind::AddSynonym => "addSynonym",
+        OverrideKind::AddRelation => "addRelation",
+    }
+}
+
+fn override_kind_from_str(
+    value: &str,
+) -> Result<graph_owl_ontology::pack::OverrideKind, StorageError> {
+    use graph_owl_ontology::pack::OverrideKind;
+    match value {
+        "redefine" => Ok(OverrideKind::Redefine),
+        "hide" => Ok(OverrideKind::Hide),
+        "addSynonym" => Ok(OverrideKind::AddSynonym),
+        "addRelation" => Ok(OverrideKind::AddRelation),
+        other => Err(StorageError::Unexpected(format!(
+            "unknown override kind '{other}' in pack_overrides"
+        ))),
+    }
+}
+
+fn pack_override_from_row(
+    row: PgRow,
+) -> Result<graph_owl_ontology::pack::PackOverride, StorageError> {
+    Ok(graph_owl_ontology::pack::PackOverride {
+        id: row.get("id"),
+        pack_id: row.get("pack_id"),
+        term_path: row.get("term_path"),
+        kind: override_kind_from_str(row.get::<&str, _>("kind"))?,
+        payload: row.get("payload"),
+    })
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn relationship_from_row(row: PgRow) -> Relationship {
     Relationship {
@@ -8636,6 +8738,273 @@ impl Storage for PostgresStorage {
             .await
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(true)
+    }
+
+    #[tracing::instrument(name = "storage.insert_pack", skip_all)]
+    async fn insert_pack(
+        &self,
+        pack: graph_owl_ontology::pack::OntologyPack,
+        source_turtle: &[u8],
+    ) -> Result<graph_owl_ontology::pack::OntologyPack, StorageError> {
+        let (licence_kind, licence_name, licence_notice, licence_contact) =
+            licence_columns(&pack.licence);
+        let term_count = i32::try_from(pack.term_count).unwrap_or(i32::MAX);
+        let row = sqlx::query(
+            "INSERT INTO ontology_packs
+                (id, pack_id, version, licence_kind, licence_name, licence_notice,
+                 licence_contact, source_url, glossary_id, term_count, imported_at,
+                 source_turtle)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             RETURNING *",
+        )
+        .bind(pack.id)
+        .bind(&pack.pack_id)
+        .bind(&pack.version)
+        .bind(licence_kind)
+        .bind(licence_name)
+        .bind(licence_notice)
+        .bind(licence_contact)
+        .bind(&pack.source_url)
+        .bind(pack.glossary_id)
+        .bind(term_count)
+        .bind(pack.imported_at)
+        .bind(source_turtle)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| {
+            if e.as_database_error()
+                .is_some_and(|d| d.is_unique_violation())
+            {
+                StorageError::Conflict {
+                    detail: format!(
+                        "`{}` version `{}` is already imported",
+                        pack.pack_id, pack.version
+                    ),
+                    existing_id: None,
+                    kind: ConflictKind::PackVersionExists,
+                }
+            } else {
+                StorageError::Unexpected(e.to_string())
+            }
+        })?;
+        pack_from_row(row)
+    }
+
+    async fn get_pack_source_turtle(&self, pack_id: Uuid) -> Result<Option<Vec<u8>>, StorageError> {
+        sqlx::query_scalar("SELECT source_turtle FROM ontology_packs WHERE id = $1")
+            .bind(pack_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    async fn update_pack_version(
+        &self,
+        id: Uuid,
+        version: &str,
+        term_count: usize,
+        source_turtle: &[u8],
+        imported_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError> {
+        let term_count = i32::try_from(term_count).unwrap_or(i32::MAX);
+        sqlx::query(
+            "UPDATE ontology_packs
+             SET version = $2, term_count = $3, source_turtle = $4, imported_at = $5
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(version)
+        .bind(term_count)
+        .bind(source_turtle)
+        .bind(imported_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_pack(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_ontology::pack::OntologyPack>, StorageError> {
+        let row = sqlx::query("SELECT * FROM ontology_packs WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        row.map(pack_from_row).transpose()
+    }
+
+    async fn get_pack_by_id_and_version(
+        &self,
+        pack_id: &str,
+        version: &str,
+    ) -> Result<Option<graph_owl_ontology::pack::OntologyPack>, StorageError> {
+        let row = sqlx::query("SELECT * FROM ontology_packs WHERE pack_id = $1 AND version = $2")
+            .bind(pack_id)
+            .bind(version)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        row.map(pack_from_row).transpose()
+    }
+
+    async fn list_packs(
+        &self,
+    ) -> Result<Vec<graph_owl_ontology::pack::OntologyPack>, StorageError> {
+        let rows = sqlx::query("SELECT * FROM ontology_packs ORDER BY pack_id, version")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        rows.into_iter().map(pack_from_row).collect()
+    }
+
+    async fn delete_pack(&self, id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM ontology_packs WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn insert_pack_term(
+        &self,
+        pack_id: Uuid,
+        term_id: Uuid,
+        source_iri: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query("INSERT INTO pack_terms (pack_id, term_id, source_iri) VALUES ($1, $2, $3)")
+            .bind(pack_id)
+            .bind(term_id)
+            .bind(source_iri)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn pack_terms(&self, pack_id: Uuid) -> Result<Vec<(String, Uuid)>, StorageError> {
+        let rows = sqlx::query("SELECT source_iri, term_id FROM pack_terms WHERE pack_id = $1")
+            .bind(pack_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get("source_iri"), row.get("term_id")))
+            .collect())
+    }
+
+    async fn pack_term_by_iri(
+        &self,
+        pack_id: Uuid,
+        source_iri: &str,
+    ) -> Result<Option<Uuid>, StorageError> {
+        sqlx::query_scalar("SELECT term_id FROM pack_terms WHERE pack_id = $1 AND source_iri = $2")
+            .bind(pack_id)
+            .bind(source_iri)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    async fn pack_attachment_counts(
+        &self,
+        pack_id: Uuid,
+    ) -> Result<Vec<(String, i64)>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT pt.source_iri AS source_iri, COUNT(ta.target_fqn) AS attachment_count
+             FROM pack_terms pt
+             JOIN term_attachments ta ON ta.term_id = pt.term_id
+             WHERE pt.pack_id = $1
+             GROUP BY pt.source_iri",
+        )
+        .bind(pack_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get("source_iri"), row.get("attachment_count")))
+            .collect())
+    }
+
+    async fn exact_match_targets_outside_pack(
+        &self,
+        pack_id: Uuid,
+    ) -> Result<Vec<String>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT tr.target AS target
+             FROM term_relations tr
+             JOIN pack_terms pt ON pt.term_id = tr.term_id
+             WHERE tr.kind = 'exactMatch' AND pt.pack_id <> $1",
+        )
+        .bind(pack_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(|row| row.get("target")).collect())
+    }
+
+    async fn insert_pack_override(
+        &self,
+        override_: graph_owl_ontology::pack::PackOverride,
+    ) -> Result<graph_owl_ontology::pack::PackOverride, StorageError> {
+        let row = sqlx::query(
+            "INSERT INTO pack_overrides (id, pack_id, term_path, kind, payload)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING *",
+        )
+        .bind(override_.id)
+        .bind(override_.pack_id)
+        .bind(&override_.term_path)
+        .bind(override_kind_str(override_.kind))
+        .bind(&override_.payload)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        pack_override_from_row(row)
+    }
+
+    async fn list_pack_overrides(
+        &self,
+        pack_id: Uuid,
+    ) -> Result<Vec<graph_owl_ontology::pack::PackOverride>, StorageError> {
+        let rows =
+            sqlx::query("SELECT * FROM pack_overrides WHERE pack_id = $1 ORDER BY created_at")
+                .bind(pack_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        rows.into_iter().map(pack_override_from_row).collect()
+    }
+
+    async fn overrides_for_term_path(
+        &self,
+        pack_id: Uuid,
+        term_path: &str,
+    ) -> Result<Vec<graph_owl_ontology::pack::PackOverride>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT * FROM pack_overrides
+             WHERE pack_id = $1 AND term_path = $2
+             ORDER BY created_at",
+        )
+        .bind(pack_id)
+        .bind(term_path)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        rows.into_iter().map(pack_override_from_row).collect()
+    }
+
+    async fn delete_pack_override(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM pack_overrides WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
     }
 
     async fn force_delete_custom_property(

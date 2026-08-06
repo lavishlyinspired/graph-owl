@@ -11,9 +11,10 @@ workspace = true
 graph-owl-core = { path = "../graph-owl-core" }
 graph-owl-reasoning-el = { path = "../graph-owl-reasoning-el" }
 graph-owl-reasoning-ql = { path = "../graph-owl-reasoning-ql" }
-serde.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
+graph-owl-rdf-io = { path = "../graph-owl-rdf-io" }
 chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+utoipa.workspace = true
 uuid.workspace = true

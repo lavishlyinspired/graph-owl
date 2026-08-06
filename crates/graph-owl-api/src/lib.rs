@@ -64,6 +64,61 @@ use validation::{
     FieldError, FieldErrorCode, FieldPath, ValidateBody, optional_string, require_non_empty_string,
 };
 
+/// One pack term as a reader sees it — the stored content plus whatever
+/// overrides apply, already merged (Epic 33 Slice C).
+///
+/// **Deliberately not `Serialize`.** `GlossaryTermRecord.version` is an
+/// `EntityVersion`, and a derived serialization would render it as
+/// `{"major":1,"minor":0}` — but every existing glossary-term response
+/// (`graph_owl_server`'s `term_body`) renders it as the string `"1.0"`. A
+/// second, divergent shape for the same field on a different endpoint is
+/// exactly the inconsistency this project's API conventions exist to
+/// avoid, so the HTTP handler builds this view's JSON by hand, reusing
+/// `term_body` for the nested term.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackTermView {
+    /// The concept's own IRI in the source vocabulary.
+    pub source_iri: String,
+    /// The stored term, pack content only — no override applied.
+    pub term: graph_owl_storage::GlossaryTermRecord,
+    /// The term as a reader sees it, with any override merged in.
+    pub effective: graph_owl_ontology::pack::EffectiveTerm,
+}
+
+/// The result of an upgrade attempt — Epic 33 Slice D. `applied` is `false`
+/// for a dry run, or when the diff found nothing to do.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PackUpgradeResult {
+    /// What differs between the installed version and the candidate.
+    pub report: graph_owl_ontology::pack::UpgradeReport,
+    /// Whether the diff was actually written.
+    pub applied: bool,
+}
+
+/// One pack term's attachment count — Epic 33 Slice E's removal report.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PackAttachmentCount {
+    /// The term's own concept IRI in the source vocabulary.
+    pub source_iri: String,
+    /// How many assets or columns carry this term.
+    pub count: i64,
+}
+
+/// What removing a pack would affect, or did affect — Epic 33 Slice E.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PackRemovalReport {
+    /// How many terms this pack has, whether or not any are attached.
+    pub term_count: usize,
+    /// Only terms with at least one attachment appear.
+    pub attachment_counts: Vec<PackAttachmentCount>,
+    /// The sum of `attachment_counts` — the number a caller decides on
+    /// without having to fold the list themselves.
+    pub total_attachments: i64,
+}
+
 /// The request body for creating a table.
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -9008,6 +9063,521 @@ impl Catalog {
             &principal.id,
         ));
         Ok(updated)
+    }
+
+    // ---- Epic 33: ontology packs ----
+
+    /// Imports a whole SKOS document as a new pack version.
+    ///
+    /// **Not atomic across writes** — the pack row, term rows and relation
+    /// rows land in separate statements, the same non-transactional shape
+    /// every other multi-write facade method in this codebase already has.
+    /// A failure partway through is safely retryable: term writes are
+    /// idempotent by FQN, and `insert_pack`'s own idempotency check (Slice
+    /// A) means a retried import after fixing the cause does not duplicate
+    /// what already landed.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if the licence requires acknowledgement and none was
+    /// given, if the bytes do not parse as well-formed SKOS, or if a
+    /// concept's IRI cannot be turned into a valid FQN segment. `Storage`
+    /// if a write fails.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn import_pack(
+        &self,
+        principal: &Principal,
+        pack_id: String,
+        version: String,
+        licence: graph_owl_ontology::pack::Licence,
+        source_url: String,
+        skos_turtle: &[u8],
+        acknowledge_licence: bool,
+    ) -> Result<graph_owl_ontology::pack::OntologyPack, CatalogError> {
+        use std::collections::HashMap;
+
+        let _ = principal;
+
+        if graph_owl_ontology::pack::import_requires_acknowledgement(&licence)
+            && !acknowledge_licence
+        {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "acknowledgeLicence",
+                FieldErrorCode::Required,
+                "this pack's licence requires an explicit acknowledgement before import"
+                    .to_string(),
+            )]));
+        }
+
+        // Slice A idempotency: re-importing the exact same version is a
+        // no-op, checked before anything is parsed or written.
+        if let Some(existing) = self
+            .storage
+            .get_pack_by_id_and_version(&pack_id, &version)
+            .await?
+        {
+            return Ok(existing);
+        }
+
+        let concepts = graph_owl_rdf_io::skos::parse_skos_turtle(skos_turtle).map_err(|e| {
+            CatalogError::Validation(vec![FieldError::new(
+                "skosTurtle",
+                FieldErrorCode::Value,
+                e.to_string(),
+            )])
+        })?;
+
+        let glossary_fqn = graph_owl_core::fqn::derive(&[&pack_id]).map_err(|e| {
+            CatalogError::Validation(vec![FieldError::new(
+                "packId",
+                FieldErrorCode::Type,
+                e.to_string(),
+            )])
+        })?;
+        let existing_glossary = self
+            .storage
+            .list_glossaries()
+            .await?
+            .into_iter()
+            .find(|g| g.fully_qualified_name == glossary_fqn);
+        let glossary_id = if let Some(existing) = existing_glossary {
+            existing.id
+        } else {
+            let now = Utc::now();
+            self.storage
+                .insert_glossary(graph_owl_storage::Glossary {
+                    id: Uuid::new_v4(),
+                    name: pack_id.clone(),
+                    description: Some(format!("Imported ontology pack `{pack_id}`")),
+                    fully_qualified_name: glossary_fqn.clone(),
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await?
+                .id
+        };
+
+        // Every concept's FQN must be derivable **before** any write lands —
+        // "a malformed pack fails before anything lands" extends the
+        // parser's own missing-label/dangling-reference checks to this
+        // storage-shape concern too.
+        let mut planned = Vec::with_capacity(concepts.len());
+        for concept in &concepts {
+            let local = graph_owl_ontology::pack::local_name_from_iri(&concept.iri);
+            let fqn = graph_owl_core::fqn::child_of(&glossary_fqn, local).map_err(|e| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "skosTurtle",
+                    FieldErrorCode::Value,
+                    format!("`{}`: {e}", concept.iri),
+                )])
+            })?;
+            planned.push((local.to_string(), fqn));
+        }
+
+        let now = Utc::now();
+        let pack = graph_owl_ontology::pack::OntologyPack {
+            id: Uuid::new_v4(),
+            pack_id,
+            version,
+            licence,
+            source_url,
+            glossary_id,
+            term_count: concepts.len(),
+            imported_at: now,
+        };
+        let pack = self.storage.insert_pack(pack, skos_turtle).await?;
+
+        let mut term_ids: HashMap<String, Uuid> = HashMap::with_capacity(concepts.len());
+        for (concept, (name, fqn)) in concepts.iter().zip(planned.iter()) {
+            let term = graph_owl_storage::GlossaryTermRecord {
+                id: Uuid::new_v4(),
+                glossary_id,
+                name: name.clone(),
+                fully_qualified_name: fqn.clone(),
+                definition: concept.definition.clone().unwrap_or_default(),
+                status: graph_owl_core::glossary::TermStatus::Approved,
+                synonyms: concept.alt_labels.clone(),
+                abbreviations: Vec::new(),
+                version: EntityVersion { major: 1, minor: 0 },
+                created_at: now,
+                updated_at: now,
+            };
+            let written = self.storage.insert_term(term).await?;
+            self.storage
+                .insert_pack_term(pack.id, written.id, &concept.iri)
+                .await?;
+            term_ids.insert(concept.iri.clone(), written.id);
+        }
+
+        for (term_id, relation) in graph_owl_ontology::pack::resolve_relations(&concepts, &term_ids)
+        {
+            self.storage.insert_term_relation(term_id, relation).await?;
+        }
+
+        Ok(pack)
+    }
+
+    /// # Errors
+    /// `Storage` if the read fails.
+    pub async fn list_ontology_packs(
+        &self,
+        principal: &Principal,
+    ) -> Result<Vec<graph_owl_ontology::pack::OntologyPack>, CatalogError> {
+        let _ = principal;
+        Ok(self.storage.list_packs().await?)
+    }
+
+    /// # Errors
+    /// `Storage` if the read fails.
+    pub async fn get_ontology_pack(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_ontology::pack::OntologyPack>, CatalogError> {
+        let _ = principal;
+        Ok(self.storage.get_pack(id).await?)
+    }
+
+    /// Every term a pack imported, with its overrides applied — Slice C:
+    /// "reading a pack term applies overrides transparently".
+    ///
+    /// # Errors
+    /// `NotFound` if the pack does not exist. `Storage` if a read fails.
+    pub async fn list_pack_terms(
+        &self,
+        principal: &Principal,
+        pack_id: Uuid,
+    ) -> Result<Vec<PackTermView>, CatalogError> {
+        let _ = principal;
+        if self.storage.get_pack(pack_id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        let mut views = Vec::new();
+        for (source_iri, term_id) in self.storage.pack_terms(pack_id).await? {
+            let Some(term) = self.storage.get_term(term_id).await? else {
+                continue;
+            };
+            let overrides = self
+                .storage
+                .overrides_for_term_path(pack_id, &source_iri)
+                .await?;
+            let effective = graph_owl_ontology::pack::apply_overrides(
+                &term.definition,
+                &term.synonyms,
+                &overrides,
+            );
+            views.push(PackTermView {
+                source_iri,
+                term,
+                effective,
+            });
+        }
+        views.sort_by(|a, b| a.source_iri.cmp(&b.source_iri));
+        Ok(views)
+    }
+
+    /// # Errors
+    /// `NotFound` if the pack does not exist.
+    pub async fn create_pack_override(
+        &self,
+        principal: &Principal,
+        pack_id: Uuid,
+        term_path: String,
+        kind: graph_owl_ontology::pack::OverrideKind,
+        payload: serde_json::Value,
+    ) -> Result<graph_owl_ontology::pack::PackOverride, CatalogError> {
+        let _ = principal;
+        if self.storage.get_pack(pack_id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        let override_ = graph_owl_ontology::pack::PackOverride {
+            id: Uuid::new_v4(),
+            pack_id,
+            term_path,
+            kind,
+            payload,
+        };
+        Ok(self.storage.insert_pack_override(override_).await?)
+    }
+
+    /// `false` if it did not exist.
+    ///
+    /// # Errors
+    /// `Storage` if the write fails.
+    pub async fn delete_pack_override(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<bool, CatalogError> {
+        let _ = principal;
+        Ok(self.storage.delete_pack_override(id).await?)
+    }
+
+    /// # Errors
+    /// `NotFound` if the pack does not exist.
+    pub async fn list_pack_overrides(
+        &self,
+        principal: &Principal,
+        pack_id: Uuid,
+    ) -> Result<Vec<graph_owl_ontology::pack::PackOverride>, CatalogError> {
+        let _ = principal;
+        if self.storage.get_pack(pack_id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self.storage.list_pack_overrides(pack_id).await?)
+    }
+
+    /// Diffs a candidate new version against what is installed, and — unless
+    /// `dry_run` — applies it: adds new terms, updates changed ones'
+    /// definition and synonyms, deprecates removed ones (never deletes,
+    /// decision from Slice D), and adds any new relations. Relation
+    /// **removal** on upgrade is deliberately not attempted — see this
+    /// method's own module notes in `plans/33-ontology-packs.md`'s Extended
+    /// section for why.
+    ///
+    /// # Errors
+    /// `NotFound` if the pack does not exist. `Validation` if the new
+    /// Turtle does not parse. `Storage` if a write fails.
+    pub async fn upgrade_pack(
+        &self,
+        principal: &Principal,
+        pack_id: Uuid,
+        new_version: String,
+        new_skos_turtle: &[u8],
+        dry_run: bool,
+    ) -> Result<PackUpgradeResult, CatalogError> {
+        use std::collections::{HashMap, HashSet};
+
+        let Some(pack) = self.storage.get_pack(pack_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        let Some(old_turtle) = self.storage.get_pack_source_turtle(pack_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        // The installed document was already validated at import (or at a
+        // previous upgrade), so a parse failure here would mean stored
+        // bytes were corrupted rather than a caller mistake — surfaced the
+        // same way regardless, since either way the operation cannot
+        // proceed.
+        let installed = graph_owl_rdf_io::skos::parse_skos_turtle(&old_turtle).map_err(|e| {
+            CatalogError::Validation(vec![FieldError::new(
+                "pack",
+                FieldErrorCode::Value,
+                e.to_string(),
+            )])
+        })?;
+        let candidate =
+            graph_owl_rdf_io::skos::parse_skos_turtle(new_skos_turtle).map_err(|e| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "skosTurtle",
+                    FieldErrorCode::Value,
+                    e.to_string(),
+                )])
+            })?;
+
+        let existing_by_iri: HashMap<String, Uuid> = self
+            .storage
+            .pack_terms(pack_id)
+            .await?
+            .into_iter()
+            .collect();
+        let attached_iris: HashSet<String> = self
+            .storage
+            .pack_attachment_counts(pack_id)
+            .await?
+            .into_iter()
+            .map(|(iri, _)| iri)
+            .collect();
+        let override_paths: HashSet<String> = self
+            .storage
+            .list_pack_overrides(pack_id)
+            .await?
+            .into_iter()
+            .map(|o| o.term_path)
+            .collect();
+
+        let report = graph_owl_ontology::pack::diff_upgrade(
+            &installed,
+            &candidate,
+            &attached_iris,
+            &override_paths,
+        );
+
+        if dry_run || !report.has_changes() {
+            return Ok(PackUpgradeResult {
+                report,
+                applied: false,
+            });
+        }
+
+        let Some(glossary) = self.storage.get_glossary(pack.glossary_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        let candidate_by_iri: HashMap<&str, &graph_owl_rdf_io::skos::SkosConcept> =
+            candidate.iter().map(|c| (c.iri.as_str(), c)).collect();
+        let now = Utc::now();
+
+        let mut new_term_ids: HashMap<String, Uuid> = HashMap::new();
+        for iri in &report.added {
+            let concept = candidate_by_iri[iri.as_str()];
+            let local = graph_owl_ontology::pack::local_name_from_iri(&concept.iri);
+            let fqn = graph_owl_core::fqn::child_of(&glossary.fully_qualified_name, local)
+                .map_err(|e| {
+                    CatalogError::Validation(vec![FieldError::new(
+                        "skosTurtle",
+                        FieldErrorCode::Value,
+                        format!("`{}`: {e}", concept.iri),
+                    )])
+                })?;
+            let term = graph_owl_storage::GlossaryTermRecord {
+                id: Uuid::new_v4(),
+                glossary_id: pack.glossary_id,
+                name: local.to_string(),
+                fully_qualified_name: fqn,
+                definition: concept.definition.clone().unwrap_or_default(),
+                status: graph_owl_core::glossary::TermStatus::Approved,
+                synonyms: concept.alt_labels.clone(),
+                abbreviations: Vec::new(),
+                version: EntityVersion { major: 1, minor: 0 },
+                created_at: now,
+                updated_at: now,
+            };
+            let written = self.storage.insert_term(term).await?;
+            self.storage
+                .insert_pack_term(pack_id, written.id, &concept.iri)
+                .await?;
+            new_term_ids.insert(concept.iri.clone(), written.id);
+        }
+
+        for iri in &report.changed {
+            let concept = candidate_by_iri[iri.as_str()];
+            if let Some(&term_id) = existing_by_iri.get(iri) {
+                self.storage
+                    .update_term(
+                        term_id,
+                        graph_owl_storage::GlossaryTermUpdate {
+                            definition: Some(concept.definition.clone().unwrap_or_default()),
+                            synonyms: Some(concept.alt_labels.clone()),
+                            abbreviations: None,
+                        },
+                    )
+                    .await?;
+            }
+        }
+
+        for iri in &report.removed {
+            if let Some(&term_id) = existing_by_iri.get(iri) {
+                self.storage
+                    .transition_term(
+                        term_id,
+                        graph_owl_core::glossary::TermStatus::Approved,
+                        graph_owl_core::glossary::TermStatus::Deprecated,
+                        &principal.id,
+                        Some(format!(
+                            "removed from pack `{}` at version `{new_version}`",
+                            pack.pack_id
+                        )),
+                        None,
+                    )
+                    .await?;
+            }
+        }
+
+        // Relations for added and changed concepts, resolved against every
+        // term id this pack now has — existing (covers "changed", and any
+        // unchanged concept a changed one points at) plus newly added.
+        // Additive only: a relation the new document dropped is not
+        // retracted here — see this method's doc comment.
+        let mut all_term_ids = existing_by_iri;
+        all_term_ids.extend(new_term_ids);
+        let touched: Vec<graph_owl_rdf_io::skos::SkosConcept> = report
+            .added
+            .iter()
+            .chain(&report.changed)
+            .filter_map(|iri| candidate_by_iri.get(iri.as_str()).map(|c| (*c).clone()))
+            .collect();
+        for (term_id, relation) in
+            graph_owl_ontology::pack::resolve_relations(&touched, &all_term_ids)
+        {
+            self.storage.insert_term_relation(term_id, relation).await?;
+        }
+
+        self.storage
+            .update_pack_version(pack_id, &new_version, candidate.len(), new_skos_turtle, now)
+            .await?;
+
+        Ok(PackUpgradeResult {
+            report,
+            applied: true,
+        })
+    }
+
+    /// Reports what removing a pack would affect; `force` actually removes
+    /// it — the pack row, its terms (which cascades their relations,
+    /// attachments and `pack_terms` rows via foreign key), and its
+    /// overrides.
+    ///
+    /// # Errors
+    /// `NotFound` if the pack does not exist. `Conflict`
+    /// (`kind: PackReferencedExternally`) if another pack's term
+    /// `exactMatch`es one of this pack's terms — checked before any write,
+    /// so a refused removal never leaves the pack partially gone.
+    pub async fn remove_pack(
+        &self,
+        principal: &Principal,
+        pack_id: Uuid,
+        force: bool,
+    ) -> Result<PackRemovalReport, CatalogError> {
+        use std::collections::HashSet;
+
+        let _ = principal;
+        let Some(pack) = self.storage.get_pack(pack_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+
+        let attachment_counts: Vec<PackAttachmentCount> = self
+            .storage
+            .pack_attachment_counts(pack_id)
+            .await?
+            .into_iter()
+            .map(|(source_iri, count)| PackAttachmentCount { source_iri, count })
+            .collect();
+        let total_attachments: i64 = attachment_counts.iter().map(|c| c.count).sum();
+        let report = PackRemovalReport {
+            term_count: pack.term_count,
+            attachment_counts,
+            total_attachments,
+        };
+
+        if !force {
+            return Ok(report);
+        }
+
+        let pack_terms = self.storage.pack_terms(pack_id).await?;
+        let removed_iris: HashSet<String> = pack_terms.iter().map(|(iri, _)| iri.clone()).collect();
+        let outside_targets = self
+            .storage
+            .exact_match_targets_outside_pack(pack_id)
+            .await?;
+        if graph_owl_ontology::pack::removal_blocked_by_cross_pack_reference(
+            &removed_iris,
+            &outside_targets,
+        ) {
+            return Err(CatalogError::Conflict {
+                detail: "another pack's term exactMatches a term in this pack; \
+                         remove that reference first"
+                    .to_string(),
+                existing_id: Some(pack_id),
+                kind: ConflictKind::PackReferencedExternally,
+            });
+        }
+
+        for (_, term_id) in &pack_terms {
+            self.storage.delete_term(*term_id).await?;
+        }
+        self.storage.delete_pack(pack_id).await?;
+
+        Ok(report)
     }
 
     // ---- Epic 31: organizational memory ----

@@ -1,7 +1,7 @@
 # Plan: Domain Ontology Packs (Epic 33)
 
 **Branch**: feat/ontology-packs
-**Status**: Not started
+**Status**: Shipped (Slices A–E, 6 August 2026, driven by Epic 42's need for real pack content to browse)
 **Depends on**: Epic 24 (glossary and taxonomy model), Epic 9 (standards import)
 **Crates**: `graph-owl-ontology` (OntologyPack, PackOverride, Licence) · `graph-owl-rdf-io` (SKOS/RDF pack import) · `graph-owl-storage-postgres` · `graph-owl-api` · `graph-owl-server` — no new crates
 
@@ -148,11 +148,17 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: Idempotency test asserting a re-import creates nothing. A hierarchy-fidelity test asserting `broader` depth matches the source at depth 3 — a flattened import loses the vocabulary's structure, which is most of its value. Mutator watch: flattening the hierarchy must fail the depth test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Shipped, 6 August 2026 — with one real architectural finding that changed the design.** "Via Epic 9's parser" turned out not to mean routing through `graph_owl_rdf_io`'s `Flake`/`Sid` machinery: that parser resolves every subject and predicate IRI against a **fixed, hardcoded namespace registry** (confirmed by reading `Sid::from_iri` and `RdfError::UnrecognisedIri`'s own doc comment, which already names "a genuinely external vocabulary" as unfinished business). A real pack's own concept IRIs — FIBO's, GS1's, anyone's — live in a namespace that registry was never going to have. Rather than extend that shared, cross-cutting registry (used by the triple store, SPARQL, and every other RDF consumer) for a concern that does not belong there, `graph-owl-rdf-io` gained a dedicated `skos` module (`parse_skos_turtle`, via `oxttl` directly) that keeps every concept IRI a plain `String` throughout — the same treatment `SkosRelation::ExactMatch` already gives an external IRI. Glossary terms were never `Sid`-addressed to begin with, so this is the correct layer, not a workaround.
+
+`ontology_packs`, `pack_terms` (pack ↔ term ↔ source IRI, the stable address Slices C and D address a term by across a re-import), `pack_overrides` (`V52`). A concept's local name (the IRI's own trailing fragment or path segment, never its `prefLabel`, which can contain characters an FQN segment forbids) derives its term's FQN. Malformed-pack detection is entirely in the parser, before any storage call: missing `skos:prefLabel`, and a `broader`/`narrower`/`related` target the document never defines. Idempotency is at the **pack**, not the term: `(pack_id, version)` is unique, checked before any parsing happens. 0 missed mutants (17/17 `skos.rs`, 20/20 viable `pack.rs`).
+
 ### Slice B: Licence handling
 
 **Acceptance criteria**: licence recorded per pack from its manifest; `LicenceRequired` packs refuse import without an explicit acknowledgement flag; `AttributionRequired` packs surface the notice wherever their terms are displayed; licence is included in Epic 37b exports; a pack with no licence metadata refuses import rather than defaulting to permissive.
 **RED**: The unknown-licence test asserting refusal rather than a permissive default — defaulting to permissive on missing metadata is how licensing violations happen. An attribution-surfacing test. Mutator watch: defaulting to permissive must fail.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**Shipped, 6 August 2026.** `Licence` has no `Default` impl and no "unknown" variant — a required, tagged field at the type level, so "refuses rather than defaults to permissive" is structural rather than a check that could be forgotten. `import_requires_acknowledgement`/`attribution_notice` are pure and mutation-tested. **Not done**: licence inclusion in Epic 37b exports — Epic 37b's archive format was not extended this session; recorded here rather than silently assumed, since Epic 37b is a separate epic's surface.
 
 ### Slice C: Extend without fork
 
@@ -160,17 +166,23 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: The upgrade-survival test: apply an override, upgrade the pack, assert the override still applies. Without it, decision 2 fails and every customization is lost on update. Mutator watch: storing overrides inside pack content must fail the upgrade test.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Shipped, 6 August 2026.** `apply_overrides` is a pure projection over pack content plus whatever overrides target a `term_path` — "removing an override restores the pack value" is true by construction (recompute without it) rather than an explicit restore path, which is also what makes upgrade-survival automatic: overrides live in their own table, keyed by the term's **source IRI**, never by its local database id, so an upgrade that replaces `pack_terms` rows never touches `pack_overrides` at all. `AddRelation` records the override (and `overridden` reflects it) but does not yet write a `SkosRelation` alongside the pack's own — recorded as a scope cut, since `Redefine`/`Hide`/`AddSynonym` were the three exercised end-to-end this session.
+
 ### Slice D: Upgrade and conflict reporting
 
 **Acceptance criteria**: upgrading to a new pack version adds new terms, updates changed ones, and marks removed ones `Deprecated` rather than deleting; a term removed upstream but attached to assets is reported, not silently deprecated out from under them; an override targeting a term removed upstream is reported as an orphaned override; upgrade is dry-runnable; the report names added, changed, removed, and conflicting counts.
 **RED**: The attached-term test: a term removed upstream but in use must be reported prominently and remain attached. A dry-run test asserting no mutation. Mutator watch: deleting an in-use term must fail; silent deprecation must fail the reporting assertion.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Shipped, 6 August 2026.** `diff_upgrade` compares by source IRI, never by position — added/changed/removed, plus `attached_removed` (a **distinguished** list, not folded into `removed`, so an in-use removed term cannot pass unnoticed) and `orphaned_overrides`. The installed side of the diff is not reconstructed from term rows (which would only ever be as complete as whatever Slice D chose to write back); the pack's own `source_turtle` — the exact bytes last imported — is re-parsed instead, the same *declared-vs-applied* split Epic 20's drift model already uses. Removed terms transition `Approved → Deprecated` (reusing Epic 24's own transition function) and are never deleted; changed terms get their definition and synonyms updated. **A deliberate scope cut, not an oversight**: relation changes on upgrade are additive only — a new `broader`/`related`/etc. is added, but one the new document dropped is not retracted. Full reconciliation needs the old and new relation sets diffed per term, which is a refinement on top of a working upgrade rather than a blocker to shipping one.
+
 ### Slice E: Removal
 
 **Acceptance criteria**: removing a pack reports how many assets have its terms attached, by type; `?force=true` removes the pack and its attachments transactionally, bumping affected asset versions; overrides for the pack are removed with it; removal is refused while another pack references its terms via `exactMatch`; removal is auditable.
 **RED**: A cross-pack reference test asserting removal is refused when another pack points at it — removing a referenced vocabulary would break the referring pack silently. Mutator watch: ignoring cross-pack references must fail it.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**Shipped, 6 August 2026, with two honest deviations from the literal wording.** "By type" is reported **per term** (source IRI → attachment count), not by asset kind: `term_attachments.target_fqn` is an opaque FQN that may not resolve to any `assets` row at all (a column's FQN has none, per Epic 24's own comment on that table), so a kind breakdown would be unreliable for exactly the attachments most worth reporting. "Bumping affected asset versions" is not implemented — checked against the codebase rather than assumed: the existing single-term `detach_term` facade path does not bump an asset's version either, so term attachment is not, in fact, tied into asset versioning anywhere in this system yet. Force-removal deletes the pack's terms (`Storage::delete_term`, reused as-is — its cascades already take `pack_terms`, `term_relations` and `term_attachments` with it) and then the pack row, cascading `pack_overrides`. The cross-pack `exactMatch` guard is checked, and refuses, **before** any write. 0 missed mutants on the guard predicate.
 
 ## Explicitly deferred (with destination)
 
