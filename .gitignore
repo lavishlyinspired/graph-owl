@@ -36,6 +36,7 @@
 # somebody else's commit on 30 July 2026.
 /node_modules/
 /ui/dist/
+/ui/.stryker-tmp/
 
 # Generated SDK artifacts. The client types are derived from `openapi.json`, and
 # a committed copy is a second thing to keep in step with the first — the same

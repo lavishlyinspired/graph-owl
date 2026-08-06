@@ -1,7 +1,7 @@
 # Plan: Console Foundation, Discovery & Entity Pages (Epic 39)
 
 **Branch**: feat/ui-foundation
-**Status**: **In progress** — shell, search, entity page and time control shipped; Slice E's trust components and the base-direction primitive still open
+**Status**: **In progress** — shell, search, entity page, time control, and Slice E's shared trust components shipped (6 August 2026); Slice F's states/budgets/journeys still open
 **Depends on**: Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (authz)
 **Unblocks**: Epic 40 (graph explorer), Epic 41 (workbench & governance)
 **Crates**: **`graph-owl-ui`** (new — embeds and serves the built SPA) · `graph-owl-server` (mounts it) · frontend sources in **`ui/`**, outside `crates/`
@@ -71,7 +71,7 @@ Every tab except Overview is driven by generic API responses and needs no per-ty
 - [ ] OIDC/PKCE login works against Epic 12's provider; tokens are never written to any persistent browser storage.
 - [ ] Search returns results with facets, keyboard-navigable, cursor-paginated per `00d-api-conventions.md`.
 - [ ] Every entity type renders on the composable page, including one with **no registered Overview renderer**.
-- [ ] Confidence, derivation, and certification use **one** shared component set, asserted structurally.
+- [x] Confidence, derivation, and certification use **one** shared component set, asserted structurally. `ui/src/trust/{confidence,direction}.ts` + `TrustComponents.tsx`: `ConfidenceBadge`/`DerivationBadge`/`CertificationBadge`/`ProvenanceLabel`, wired into `TrustBar`, `ReasoningView`, `DerivationChain` (all three row kinds), and `MemoryCard` — the four places these facts rendered ad hoc before. A grep-equivalent structural test (`trust/structural.test.ts`) asserts nothing outside `trust/` imports the raw `describe*` functions, and a second asserts nothing hard-codes `dir="ltr"`. 100% mutation score on `confidence.ts`/`direction.ts` (69/69 killed). **Gap honestly carried forward**: certification/deprecation data does not exist on the `Asset` envelope at all yet (Epic 26 has not wired it through), so `CertificationBadge` renders the same honest "uncertified" `TrustBar` already showed — the component is real and single-sourced, the data behind it is not yet there. Cytoscape graph-node captions (`GraphExplorer`) have **no** base-direction support: cytoscape.js renders labels to canvas with no `text-direction` style property, so `userTextDir` cannot reach them — a real, stated gap for Epic 40's canvas, not silently worked around.
 - [ ] Empty, partial, denied, and error states are designed and tested for every surface in this epic.
 - [ ] Zero axe violations; every journey completable by keyboard alone.
 - [ ] All `00f-ui-architecture.md` budgets enforced in CI as **failures**, not warnings.
@@ -114,6 +114,12 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **Base direction belongs to this slice's component set** (added 28 July 2026, from Epic 94 Slice C). `rdf:dirLangString` carries a base direction, so every component that renders a **user-supplied** label — name, description, tag, graph-node caption — must set `dir` from the data, defaulting to `auto` and never hard-coding `ltr`. It sits here rather than in a screen because it applies wherever a label is drawn, which is the same reason confidence and derivation sit here.
 
 The reason it is a correctness rule and not a nicety: once the store knows a label is right-to-left, a console that renders it left-to-right is **less correct than the database**, and it became so by learning more. **Additional RED**: real Arabic or Hebrew text renders right-to-left in the entity header, in search results, and on a graph node — the same assertion Epic 94 makes server-side, made again at the DOM. Mutator watch: dropping `dir` must fail; hard-coding `ltr` must fail. This is the one rule in the design system whose violation is **invisible to a reviewer who reads only English**, which is why it is pinned to a test rather than to a convention.
+
+**Shipped, 6 August 2026.** `bandOf`/`describeConfidence`/`describeDerivation`/`describeCertification`/`describeProvenance` in `ui/src/trust/confidence.ts`, each returning a label *and* a distinct symbol per state so the not-colour-alone rule is structural rather than a convention — a test asserts the exact symbol per band/state, not merely that they differ pairwise (the first version of these tests only asserted pairwise distinctness and a mutation run found it missed a mutant that blanked a single symbol while leaving the others distinct; the fix was exact-value assertions, `**docs/tdd**`'s "a surviving mutant is almost always a missing negative test" recurring here in a new shape). `ConfidenceBadge`/`DerivationBadge`/`CertificationBadge`/`ProvenanceLabel` in `TrustComponents.tsx` are the only renderers, enforced by `structural.test.ts`.
+
+**Base direction is real but honestly partial.** `userTextDir` (`trust/direction.ts`) returns the single constant `auto` every call site imports rather than writing `dir="ltr"` by hand — the store does not carry a per-label direction flag from Epic 94 yet, so `auto` (the browser's own bidi algorithm reading the first strong character) is the correct behaviour today and stays correct without a call-site change if a real field arrives later. Wired into the entity header name, the description, the search-result name column, and `MemoryCard` content. **Not reachable on the graph canvas**: cytoscape.js has no `text-direction` style property — it renders labels straight to a canvas `fillText` call with no bidi option — so a right-to-left node caption is a real, unresolved gap, left for Epic 40 rather than papered over with an API that does not exist.
+
+100% mutation score (69/69 killed) on `confidence.ts` + `direction.ts`; `tsc --noEmit` strict clean; `npm run build` clean; the pre-existing 327-test suite green throughout. ESLint is not run — Slice F is where a lint config first gets written, so "ESLint clean" is not yet a checkable claim.
 
 ### Slice F: States, budgets, and journeys
 

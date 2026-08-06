@@ -27,5 +27,12 @@ export default {
     // regression fail a run somebody actually does.
     "src/admin/**/*.ts",
     "!src/admin/**/*.test.ts",
+    // `src/trust/` (Epic 39 Slice E) for the same reason: confidence
+    // banding, the asserted/derived distinction, and the certification
+    // fallback are decisions a screen renders but does not make — the
+    // deciding is here, in functions with no DOM. `TrustComponents.tsx` is
+    // deliberately excluded; it only calls these and draws the result.
+    "src/trust/**/*.ts",
+    "!src/trust/**/*.test.ts",
   ],
 };

@@ -71,6 +71,13 @@ import {
 import { AuthProvider, useAuth, tryRefresh } from "./auth";
 import { type DiffEdge, diff } from "./graph/diff";
 import { overflowTitle, summarizeOwners } from "./graph/owners";
+import {
+  CertificationBadge,
+  ConfidenceBadge,
+  DerivationBadge,
+  ProvenanceLabel,
+  userTextDir,
+} from "./trust/TrustComponents";
 import { hierarchy, type TeamNode } from "./admin/hierarchy";
 import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
 import {
@@ -284,9 +291,7 @@ function TrustBar({ asset }: { asset: Asset }) {
           <Text strong>{asset.updatedBy}</Text>
         </Text>
         {asset.deleted && <Tag color="red">deleted</Tag>}
-        <Text type="secondary" style={{ fontSize: 13 }}>
-          <SafetyCertificateOutlined /> uncertified
-        </Text>
+        <CertificationBadge certification={{}} />
         <Text type="secondary" style={{ fontSize: 13 }}>
           <ApartmentOutlined /> lineage not captured
         </Text>
@@ -761,6 +766,12 @@ function GraphCanvas({
             "background-color": colors.primary,
             width: 18,
             height: 18,
+            // Cytoscape has no text-direction style property — it renders
+            // labels straight to canvas via a plain fillText call, with no
+            // bidi option exposed. A right-to-left node caption is a real,
+            // unresolved gap left for Epic 40 (the canvas is that epic's,
+            // Slice E only asserted the rule this file cannot yet satisfy),
+            // not silently worked around with an API that does not exist.
           },
         },
         { selector: "node.seed", style: { width: 26, height: 26, "font-weight": "bold" } },
@@ -1563,6 +1574,7 @@ function DescriptionEditor({
         <Paragraph
           type={asset.description ? undefined : "secondary"}
           italic={!asset.description}
+          dir={userTextDir(asset.description)}
           style={{ marginBottom: 0, flex: 1 }}
         >
           {asset.description ??
@@ -1697,7 +1709,7 @@ function AssetDetail({
       <Breadcrumb items={ancestors.map((a) => ({ title: a.name }))} />
 
       <Flex align="center" gap={12} wrap>
-        <Title level={3} style={{ margin: 0, fontWeight: 600 }}>
+        <Title level={3} dir={userTextDir(asset.name)} style={{ margin: 0, fontWeight: 600 }}>
           {asset.name}
         </Title>
         <Tag color={KIND_COLOR[asset.kind]} icon={KIND_ICON[asset.kind]}>
@@ -2243,7 +2255,7 @@ function ReasoningView({
           <Card key={key} size="small">
             <Flex justify="space-between" align="center" wrap gap={8}>
               <Space size={6} wrap>
-                <Tag color="purple">derived</Tag>
+                <DerivationBadge status="derived" />
                 <Text code style={{ fontSize: 12 }}>
                   {triple(fact)}
                 </Text>
@@ -2252,6 +2264,7 @@ function ReasoningView({
                 {open === key ? "Hide" : "Why?"}
               </Button>
             </Flex>
+            <ProvenanceLabel provenance={{ t: fact.t }} />
             {open === key && (
               <div style={{ marginTop: 10 }}>
                 <DerivationChain fact={fact} colors={colors} />
@@ -2327,10 +2340,10 @@ function DerivationChain({
     <Space direction="vertical" size="small" style={{ width: "100%" }}>
       <Space wrap>
         {explanation.status === "asserted" ? (
-          <Tag color="blue">Asserted</Tag>
+          <DerivationBadge status="asserted" />
         ) : (
           <>
-            <Tag color="purple">Derived</Tag>
+            <DerivationBadge status="derived" />
             {/* Depth is the one number that says whether an inference is a
                 restatement or a genuine conclusion. */}
             <Text type="secondary" style={{ fontSize: 12 }}>
@@ -2369,9 +2382,7 @@ function DerivationChain({
               </Space>
             ) : row.kind === "asserted" ? (
               <Space size={6}>
-                <Tag color="blue" style={{ marginInlineEnd: 0 }}>
-                  asserted
-                </Tag>
+                <DerivationBadge status="asserted" />
                 <Text code style={{ fontSize: 12 }}>
                   {row.fact ? triple(row.fact) : ""}
                 </Text>
@@ -2509,7 +2520,7 @@ function MemoryCard({
     <Card size="small">
       <Space direction="vertical" size={8} style={{ width: "100%" }}>
         <Flex justify="space-between" align="start" wrap gap={8}>
-          <Text>{memory.content}</Text>
+          <Text dir={userTextDir(memory.content)}>{memory.content}</Text>
           <Tag color={staleness.state === "fresh" ? "green" : staleness.state === "possiblyStale" ? "gold" : "red"}>
             {stalenessLabel(staleness)}
           </Tag>
@@ -2518,9 +2529,7 @@ function MemoryCard({
           <Text type="secondary" style={{ fontSize: 12 }}>
             {authorLabel(memory.authorship)}
           </Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            confidence {memory.confidence.toFixed(2)}
-          </Text>
+          <ConfidenceBadge confidence={memory.confidence} />
           <Text type="secondary" style={{ fontSize: 12 }}>
             as of {new Date(memory.asOf).toLocaleDateString()}
           </Text>
@@ -4404,7 +4413,9 @@ function AppShell() {
                           key: "name",
                           width: 220,
                           render: (name: string) => (
-                            <Text style={{ fontWeight: 500 }}>{name}</Text>
+                            <Text dir={userTextDir(name)} style={{ fontWeight: 500 }}>
+                              {name}
+                            </Text>
                           ),
                         },
                         {
