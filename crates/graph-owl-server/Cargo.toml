@@ -20,6 +20,19 @@ utoipa.workspace = true
 base64.workspace = true
 graph-owl-api.workspace = true
 graph-owl-ontology = { path = "../graph-owl-ontology" }
+# Epic 9a's export-authorization gap, closed: `GET /graph/export/{format}`
+# returns `Catalog::export_*`'s output, and the JSON Graph format's schema
+# (`JsonGraphView`) is registered in the OpenAPI contract, both of which need
+# this crate's types named directly rather than only through `graph-owl-api`.
+graph-owl-lpg-io = { path = "../graph-owl-lpg-io" }
+# Bundles bulk-CSV export's multiple files (one per node label plus
+# `relationships.csv`) into one HTTP download — the identical `tar`+`zstd`
+# pairing `graph-owl-api::archive` already uses for the same "one response,
+# many files" need, adopted here directly rather than reached for through
+# that crate's own module, which is Epic 37b's catalog-backup format and a
+# different concern from this export.
+tar.workspace = true
+zstd.workspace = true
 # Epic 7d, decision 3: a second listening port, off unless a deployment asks
 # for it. `optional = true` is what makes `cargo build --no-default-features`
 # actually exclude the crate and everything it pulls in, not just skip

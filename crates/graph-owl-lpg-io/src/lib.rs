@@ -1398,7 +1398,7 @@ impl<R: std::io::BufRead> LpgReader for JsonLinesReader<R> {
 /// interface exactly, checked by reading the file directly rather than
 /// guessed at, since the plan's own criterion is "asserted against that
 /// consumer's fixture."
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JsonGraphNode {
     pub id: String,
@@ -1425,7 +1425,7 @@ pub struct JsonGraphNode {
 }
 
 /// An edge the way `GraphEdge` (`ui/src/api.ts`) consumes it.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JsonGraphEdge {
     pub from: String,
@@ -1441,7 +1441,7 @@ pub struct JsonGraphEdge {
 }
 
 /// The whole document the way `GraphView` (`ui/src/api.ts`) consumes it.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JsonGraphView {
     pub nodes: Vec<JsonGraphNode>,
@@ -1468,7 +1468,16 @@ fn json_graph_node(n: &LpgNode) -> JsonGraphNode {
         Some(PropertyValue::String(s)) => s.clone(),
         _ => n.element_id.as_str().to_string(),
     };
-    let fully_qualified_name = match n.properties.get("fullyQualifiedName") {
+    // `"fqn"` — `graph_owl_core::projection::asset_to_flakes`'s own
+    // property key for an asset's fully-qualified name (`Sid::dsc("fqn")`),
+    // which is what a real node built by `node_from_flakes` actually
+    // carries. Reading `"fullyQualifiedName"` here instead was a real, if
+    // latent, bug: it silently left this field `None` for every real
+    // asset — caught while wiring `GET /graph/export/json-graph` (Epic
+    // 9a's export-authorization gap-closing epic) against real
+    // connector-cataloged data, which no existing unit test for this
+    // writer had exercised.
+    let fully_qualified_name = match n.properties.get("fqn") {
         Some(PropertyValue::String(s)) => Some(s.clone()),
         _ => None,
     };
@@ -2423,9 +2432,14 @@ mod tests {
         a_props
             .insert_user("name", PropertyValue::String("Orders".into()))
             .expect("insert");
+        // `"fqn"`, not `"fullyQualifiedName"` — the property key a real
+        // node built by `graph_owl_lpg::node_from_flakes` actually carries
+        // (`graph_owl_core::projection::asset_to_flakes`'s own
+        // `Sid::dsc("fqn")`), so this exercises the real integration point
+        // rather than a key nothing but this test ever produces.
         a_props
             .insert_user(
-                "fullyQualifiedName",
+                "fqn",
                 PropertyValue::String("warehouse.public.orders".into()),
             )
             .expect("insert");
@@ -2437,26 +2451,6 @@ mod tests {
             .expect("node b");
         writer
             .edge(&edge("r1", "a", "b", "feeds", PropertyMap::new()))
-            .expect("edge");
-        writer.finish().expect("finish");
-
-        // Re-run to get the view (finish() consumes self for the summary
-        // above; build again for the document itself).
-        let mut writer = JsonGraphWriter::new();
-        writer
-            .begin(&ExportMeta {
-                graph_id: "g".to_string(),
-            })
-            .expect("begin");
-        let mut a_props = PropertyMap::new();
-        a_props
-            .insert_user("name", PropertyValue::String("Orders".into()))
-            .expect("insert");
-        writer
-            .node(&node("a", &["Table"], a_props))
-            .expect("node a");
-        writer
-            .edge(&edge("r1", "a", "a", "feeds", PropertyMap::new()))
             .expect("edge");
         let view = writer.into_view();
         let json = serde_json::to_value(&view).expect("serialize");
@@ -2471,6 +2465,16 @@ mod tests {
         assert!(node_json.get("id").is_some());
         assert!(node_json.get("name").is_some());
         assert!(node_json.get("kind").is_some());
+        assert_eq!(
+            node_json["fullyQualifiedName"], "warehouse.public.orders",
+            "{node_json:?}"
+        );
+        let node_b_json = &json["nodes"][1];
+        assert!(
+            node_b_json.get("fullyQualifiedName").is_none()
+                || node_b_json["fullyQualifiedName"].is_null(),
+            "absent, not null, when the source node never had an fqn: {node_b_json:?}"
+        );
         let edge_json = &json["edges"][0];
         assert!(edge_json.get("from").is_some());
         assert!(edge_json.get("to").is_some());

@@ -28,6 +28,7 @@ async-trait.workspace = true
 neo4rs = { version = "0.9.0-rc.10", optional = true }
 serde.workspace = true
 serde_json.workspace = true
+utoipa.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

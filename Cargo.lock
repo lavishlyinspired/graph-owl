@@ -1378,6 +1378,7 @@ dependencies = [
  "testcontainers-modules 0.11.6",
  "thiserror 2.0.19",
  "tokio",
+ "utoipa",
  "uuid",
 ]
 
@@ -1535,6 +1536,7 @@ dependencies = [
  "graph-owl-core",
  "graph-owl-engine",
  "graph-owl-engine-postgres",
+ "graph-owl-lpg-io",
  "graph-owl-mcp",
  "graph-owl-ontology",
  "graph-owl-rdf-io",
@@ -1553,6 +1555,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "tar",
  "testcontainers 0.23.3",
  "testcontainers 0.24.0",
  "testcontainers-modules 0.11.6",
@@ -1566,6 +1569,7 @@ dependencies = [
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

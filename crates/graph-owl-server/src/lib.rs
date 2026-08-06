@@ -76,6 +76,11 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/assets/stats", get(asset_stats))
         .route("/overview", get(overview))
         .route("/graph/reconcile", post(reconcile_projection))
+        .route("/graph/export/graphml", get(export_graphml))
+        .route("/graph/export/bulk-csv", get(export_bulk_csv))
+        .route("/graph/export/cypher", get(export_cypher_script))
+        .route("/graph/export/jsonl", get(export_json_lines))
+        .route("/graph/export/json-graph", get(export_json_graph))
         .route("/sparql", post(sparql))
         .route("/cypher", post(cypher))
         .route("/connectors/postgres/runs", post(run_postgres_connector))
@@ -6661,6 +6666,111 @@ async fn reconcile_projection(
     let drifted = catalog.projection_drift().await?.len();
     let repaired = catalog.reconcile_projection().await?;
     Ok(Json(json!({ "drifted": drifted, "repaired": repaired })))
+}
+
+/// Reads a file `catalog` wrote to a temp path, deletes it, and returns it
+/// as a downloadable response — the same stream-to-temp-file-then-serve
+/// shape [`export_archive`] already established, factored out so the four
+/// file-based `/graph/export/*` formats below share one copy of it rather
+/// than four.
+async fn serve_temp_file(
+    path: &std::path::Path,
+    content_type: &'static str,
+    filename: &'static str,
+) -> Result<axum::response::Response, AppError> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    tokio::fs::remove_file(path).await.ok();
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, content_type)
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// One node/edge query, five wire formats — Epic 9a's export-authorization
+/// gap closed and put on the wire (`plans/09a-lpg-interchange.md`, "Epic-level
+/// gap found late"). Every handler below calls the matching
+/// `Catalog::export_*` wrapper, which is already scoped to what `principal`
+/// may see via [`graph_owl_api::Catalog::authorized_lpg_elements`] — nothing
+/// here re-applies or duplicates that filtering.
+///
+/// **Not admin-gated**, unlike `/admin/export`: that route is a full,
+/// unfiltered backup of the whole estate. These return only what the calling
+/// principal is authorized to see, the same "the predicate already did the
+/// work" reasoning `/cypher` and `/sparql` already rely on to be ordinary
+/// authenticated reads rather than an admin surface.
+async fn export_graphml(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<axum::response::Response, AppError> {
+    let path = std::env::temp_dir().join(format!("graph-owl-export-{}.graphml", Uuid::new_v4()));
+    catalog.export_graphml(&principal, &path).await?;
+    serve_temp_file(&path, "application/xml", "graph.graphml").await
+}
+
+async fn export_cypher_script(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<axum::response::Response, AppError> {
+    let path = std::env::temp_dir().join(format!("graph-owl-export-{}.cypher", Uuid::new_v4()));
+    catalog.export_cypher_script(&principal, &path).await?;
+    serve_temp_file(&path, "text/plain", "graph.cypher").await
+}
+
+async fn export_json_lines(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<axum::response::Response, AppError> {
+    let path = std::env::temp_dir().join(format!("graph-owl-export-{}.jsonl", Uuid::new_v4()));
+    catalog.export_json_lines(&principal, &path).await?;
+    serve_temp_file(&path, "application/x-ndjson", "graph.jsonl").await
+}
+
+/// Bundles the directory [`graph_owl_api::Catalog::export_bulk_csv`] writes
+/// (one file per node label, plus `relationships.csv`) into one `.tar.zst`
+/// for one HTTP response — the identical `tar`+`zstd` pairing
+/// `graph_owl_api::archive` already uses for the same "one response, many
+/// files" need, reached for directly here since bulk CSV's own file set is
+/// dynamic (one entry per label actually present) rather than the fixed
+/// three names that module's own helper assumes.
+async fn export_bulk_csv(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<axum::response::Response, AppError> {
+    let id = Uuid::new_v4();
+    let dir = std::env::temp_dir().join(format!("graph-owl-export-{id}-csv"));
+    catalog.export_bulk_csv(&principal, &dir).await?;
+
+    let archive_path = std::env::temp_dir().join(format!("graph-owl-export-{id}.tar.zst"));
+    let dir_for_blocking = dir.clone();
+    let archive_path_for_blocking = archive_path.clone();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let output = std::fs::File::create(&archive_path_for_blocking)?;
+        let encoder = zstd::Encoder::new(output, 0)?.auto_finish();
+        let mut tar = tar::Builder::new(encoder);
+        tar.append_dir_all(".", &dir_for_blocking)?;
+        tar.finish()
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+    tokio::fs::remove_dir_all(&dir).await.ok();
+
+    serve_temp_file(&archive_path, "application/zstd", "graph-bulk-csv.tar.zst").await
+}
+
+async fn export_json_graph(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<graph_owl_lpg_io::JsonGraphView>, AppError> {
+    Ok(Json(catalog.export_json_graph(&principal).await?))
 }
 
 /// Everything the landing page needs, in one request.

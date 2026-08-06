@@ -1250,6 +1250,115 @@
         ],
         "type": "object"
       },
+      "JsonGraphEdge": {
+        "description": "An edge the way `GraphEdge` (`ui/src/api.ts`) consumes it.",
+        "properties": {
+          "_graph": {
+            "description": "Same reasoning as `JsonGraphNode::graph`/`t`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "_t": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "derived": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "from": {
+            "type": "string"
+          },
+          "relationship": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "relationship"
+        ],
+        "type": "object"
+      },
+      "JsonGraphNode": {
+        "description": "A node the way the Epic 40 explorer's own `GraphNode` (`ui/src/api.ts`)\nconsumes it — not an invented shape. Field names and optionality\n(`fullyQualifiedName` absent rather than empty) are copied from that\ninterface exactly, checked by reading the file directly rather than\nguessed at, since the plan's own criterion is \"asserted against that\nconsumer's fixture.\"",
+        "properties": {
+          "_graph": {
+            "description": "Epic 7c's named-graph and transaction-time markers, additive to\n`ui/src/api.ts`'s own `GraphNode` shape rather than replacing any\nof it — a TypeScript consumer parsing this JSON ignores fields its\nown interface does not declare, so carrying these two costs the\nexplorer nothing while still letting a caller that *does* care\n(Epic 9a's own JSON Lines round trip, a diagnostic tool) tell a\nderived or historical element from a current, directly-asserted\none. Absent, not `null`, when the underlying node never had either\nreserved property set.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "_t": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "fullyQualifiedName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "`null` when the label does not name a real `AssetKind` — the same\n\"stays in the picture as a bare node\" reasoning `ui/src/api.ts`'s\nown doc comment states for a node the reader may not fully resolve.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "JsonGraphView": {
+        "description": "The whole document the way `GraphView` (`ui/src/api.ts`) consumes it.",
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/JsonGraphEdge"
+            },
+            "type": "array"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/JsonGraphNode"
+            },
+            "type": "array"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "nodes",
+          "edges",
+          "truncated"
+        ],
+        "type": "object"
+      },
       "Licence": {
         "description": "How a pack may be used — tracked per pack and surfaced (decision 3).\n\n**No `Default` and no \"unknown\" variant.** A pack whose manifest omits\nthis must refuse import rather than be guessed permissive — see\n[`crate`]'s module doc and Slice B's own acceptance criterion. Making\nthis required at the type level, not merely validated, is what makes\nthat guarantee structural rather than a check someone could forget to\ncall.",
         "oneOf": [
@@ -5729,6 +5838,143 @@
           }
         ],
         "summary": "Attach a term to an asset or column, by FQN"
+      }
+    },
+    "/graph/export/bulk-csv": {
+      "get": {
+        "operationId": "get_graph_export_bulk-csv",
+        "responses": {
+          "200": {
+            "description": "Export the caller's authorized estate as Neo4j bulk-import CSV, bundled as .tar.zst"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Export the caller's authorized estate as Neo4j bulk-import CSV, bundled as .tar.zst"
+      }
+    },
+    "/graph/export/cypher": {
+      "get": {
+        "operationId": "get_graph_export_cypher",
+        "responses": {
+          "200": {
+            "description": "Export the caller's authorized estate as a batched, idempotent Cypher script"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Export the caller's authorized estate as a batched, idempotent Cypher script"
+      }
+    },
+    "/graph/export/graphml": {
+      "get": {
+        "operationId": "get_graph_export_graphml",
+        "responses": {
+          "200": {
+            "description": "Export the caller's authorized estate as GraphML"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Export the caller's authorized estate as GraphML"
+      }
+    },
+    "/graph/export/json-graph": {
+      "get": {
+        "operationId": "get_graph_export_json-graph",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonGraphView"
+                }
+              }
+            },
+            "description": "Export the caller's authorized estate as one JSON graph view"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Export the caller's authorized estate as one JSON graph view"
+      }
+    },
+    "/graph/export/jsonl": {
+      "get": {
+        "operationId": "get_graph_export_jsonl",
+        "responses": {
+          "200": {
+            "description": "Export the caller's authorized estate as JSON Lines"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Export the caller's authorized estate as JSON Lines"
       }
     },
     "/graph/reconcile": {

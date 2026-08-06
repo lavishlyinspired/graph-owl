@@ -12267,6 +12267,128 @@ impl Catalog {
         }
     }
 
+    /// Converts one subject's own flakes into an [`graph_owl_lpg::LpgNode`]
+    /// or [`graph_owl_lpg::LpgEdge`] and pushes it onto the matching
+    /// accumulator — the query-result-to-element conversion step
+    /// [`Self::project_incremental`] and [`Self::authorized_lpg_elements`]
+    /// both need, factored out so it exists exactly once rather than
+    /// twice, silently drifting. Authorization is each caller's own
+    /// responsibility, applied to `subject` before this is reached — this
+    /// function trusts that decision rather than re-checking it.
+    /// The string a [`graph_owl_authz::AccessPredicate`] checks for one
+    /// subject — its own explicit `dsc:fqn` property if it carries one,
+    /// falling back to the subject's own [`Sid::id`] otherwise.
+    ///
+    /// **A real asset's graph identity is its UUID, not its FQN.**
+    /// [`graph_owl_core::projection::asset_sid`] keys every projected asset
+    /// by `asset.id` (a UUID) — checking a prefix-based policy against that
+    /// UUID directly can never match, which does not fail closed, it fails
+    /// **open**: every subject whose id happens not to look like an FQN
+    /// prefix silently passes an "allow everything except this FQN prefix"
+    /// rule, because the FQN prefix never appears in what is being
+    /// compared. Every real asset does carry an explicit `dsc:fqn`
+    /// property (`asset_to_flakes`'s own `fields()`), which is what the
+    /// rest of this crate already checks for asset-level authorization
+    /// (`predicate.admits(&asset.fully_qualified_name)` at every other
+    /// call site) — this brings the graph-flake path in line with that,
+    /// rather than leaving it as the one path checking something else.
+    ///
+    /// Found writing this epic's own HTTP integration test against real,
+    /// connector-cataloged data — every existing unit test for this code
+    /// path (`project_incremental`'s own, and this method's) hand-keys its
+    /// fixture flakes' subject id as the FQN directly via `Sid::dsc(fqn)`,
+    /// which is exactly the fallback case here and is why none of them
+    /// caught this.
+    fn authorization_key(subject: &Sid, subject_flakes: &[Flake]) -> String {
+        subject_flakes
+            .iter()
+            .find(|f| f.p == Sid::dsc("fqn"))
+            .and_then(|f| match &f.o {
+                FlakeValue::String(fqn) => Some(fqn.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| subject.id.clone())
+    }
+
+    fn push_converted_element(
+        subject: &Sid,
+        subject_flakes: &[Flake],
+        nodes: &mut Vec<graph_owl_lpg::LpgNode>,
+        edges: &mut Vec<graph_owl_lpg::LpgEdge>,
+    ) {
+        let is_relationship = subject_flakes.iter().any(|f| {
+            f.p.id == graph_owl_lpg::predicate::FROM_ENTITY
+                || f.p.id == graph_owl_lpg::predicate::REL_TYPE
+        });
+        let mut report = graph_owl_lpg::MappingReport::default();
+        if is_relationship {
+            if let Ok(edge) = graph_owl_lpg::edge_from_reified(subject, subject_flakes, &mut report)
+            {
+                edges.push(edge);
+            }
+        } else if let Ok(node) =
+            graph_owl_lpg::node_from_flakes(subject, subject_flakes, &mut report)
+        {
+            nodes.push(node);
+        }
+    }
+
+    /// Every node and edge `principal` is authorized to see, across the
+    /// whole current estate — Epic 9a's own late-found gap closed:
+    /// [`Self::project_incremental`] applies
+    /// [`graph_owl_authz::AccessPredicate`] before sending anything to an
+    /// external store, but nothing applied it to the five file-export
+    /// writers in `graph_owl_lpg_io` (`GraphMlWriter`, `BulkCsvWriter`,
+    /// `CypherScriptWriter`, `JsonGraphWriter`, `JsonLinesWriter`) —
+    /// confirmed by grep, zero references to any of them outside that
+    /// crate. This is the same query-all/group-by-subject/filter/convert
+    /// shape `project_incremental` already established, without the
+    /// checkpoint narrowing, so every `export_*` method below can build on
+    /// one authorized read rather than reimplementing the filter per
+    /// format.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, or a
+    /// read fails.
+    pub async fn authorized_lpg_elements(
+        &self,
+        principal: &Principal,
+    ) -> Result<(Vec<graph_owl_lpg::LpgNode>, Vec<graph_owl_lpg::LpgEdge>), CatalogError> {
+        use graph_owl_authz::MetadataOperation;
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let all_flakes = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern::default())
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let mut by_subject: std::collections::BTreeMap<&Sid, Vec<Flake>> =
+            std::collections::BTreeMap::new();
+        for flake in &all_flakes {
+            by_subject.entry(&flake.s).or_default().push(flake.clone());
+        }
+
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for (subject, subject_flakes) in &by_subject {
+            if !predicate.admits(&Self::authorization_key(subject, subject_flakes)) {
+                continue;
+            }
+            Self::push_converted_element(subject, subject_flakes, &mut nodes, &mut edges);
+        }
+
+        Ok((nodes, edges))
+    }
+
     /// Projects only what changed since `target`'s own checkpoint, as
     /// `principal` — Epic 9a Slice E. Two criteria in one pass, because
     /// both are the same filter applied at different points: "only
@@ -12346,29 +12468,14 @@ impl Catalog {
         let mut edges = Vec::new();
         let mut max_t = checkpoint.last_projected_t;
         for subject in changed_subjects {
-            if !predicate.admits(&subject.id) {
-                continue;
-            }
             let Some(subject_flakes) = by_subject.get(subject) else {
                 continue;
             };
-            max_t = max_t.max(subject_flakes.iter().map(|f| f.t).max().unwrap_or(max_t));
-            let is_relationship = subject_flakes.iter().any(|f| {
-                f.p.id == graph_owl_lpg::predicate::FROM_ENTITY
-                    || f.p.id == graph_owl_lpg::predicate::REL_TYPE
-            });
-            let mut report = graph_owl_lpg::MappingReport::default();
-            if is_relationship {
-                if let Ok(edge) =
-                    graph_owl_lpg::edge_from_reified(subject, subject_flakes, &mut report)
-                {
-                    edges.push(edge);
-                }
-            } else if let Ok(node) =
-                graph_owl_lpg::node_from_flakes(subject, subject_flakes, &mut report)
-            {
-                nodes.push(node);
+            if !predicate.admits(&Self::authorization_key(subject, subject_flakes)) {
+                continue;
             }
+            max_t = max_t.max(subject_flakes.iter().map(|f| f.t).max().unwrap_or(max_t));
+            Self::push_converted_element(subject, subject_flakes, &mut nodes, &mut edges);
         }
 
         let batch = graph_owl_lpg_io::projection::ElementBatch {
@@ -12391,6 +12498,146 @@ impl Catalog {
         Ok(ack)
     }
     // decision-3-exception: end
+
+    /// What a caller passes to name one export run — reused across every
+    /// format below rather than five copies of the same literal.
+    fn export_meta() -> graph_owl_lpg_io::ExportMeta {
+        graph_owl_lpg_io::ExportMeta {
+            graph_id: "graph-owl".to_string(),
+        }
+    }
+
+    /// Drives any [`graph_owl_lpg_io::LpgWriter`] with an already-authorized
+    /// element set — the thin part every streaming `export_*` wrapper below
+    /// shares, so a sixth format is one `new()` call away rather than a
+    /// sixth copy of `begin`/`node`/`edge`/`finish`.
+    fn drive_lpg_writer<W: graph_owl_lpg_io::LpgWriter>(
+        mut writer: W,
+        nodes: &[graph_owl_lpg::LpgNode],
+        edges: &[graph_owl_lpg::LpgEdge],
+    ) -> Result<graph_owl_lpg_io::ExportSummary, graph_owl_lpg_io::LpgIoError> {
+        writer.begin(&Self::export_meta())?;
+        for node in nodes {
+            writer.node(node)?;
+        }
+        for edge in edges {
+            writer.edge(edge)?;
+        }
+        writer.finish()
+    }
+
+    /// Exports every node and edge `principal` is authorized to see as
+    /// `GraphML` — Epic 9a's export-authorization gap closed for this
+    /// format. Thin by design: [`Self::authorized_lpg_elements`] already
+    /// did the query, filter and conversion; this only drives
+    /// [`graph_owl_lpg_io::GraphMlWriter`] with the result.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, a read
+    /// fails, or writing `output_path` fails.
+    pub async fn export_graphml(
+        &self,
+        principal: &Principal,
+        output_path: impl Into<std::path::PathBuf>,
+    ) -> Result<graph_owl_lpg_io::ExportSummary, CatalogError> {
+        let (nodes, edges) = self.authorized_lpg_elements(principal).await?;
+        let writer = graph_owl_lpg_io::GraphMlWriter::new(output_path)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        Self::drive_lpg_writer(writer, &nodes, &edges)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// Exports every node and edge `principal` is authorized to see as
+    /// Neo4j bulk-import CSV (one file per node label plus
+    /// `relationships.csv`) — same authorization gap, same fix, for this
+    /// format.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, a read
+    /// fails, or `output_dir` cannot be created or written.
+    pub async fn export_bulk_csv(
+        &self,
+        principal: &Principal,
+        output_dir: impl Into<std::path::PathBuf>,
+    ) -> Result<graph_owl_lpg_io::ExportSummary, CatalogError> {
+        let (nodes, edges) = self.authorized_lpg_elements(principal).await?;
+        let writer = graph_owl_lpg_io::BulkCsvWriter::new(output_dir)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        Self::drive_lpg_writer(writer, &nodes, &edges)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// Exports every node and edge `principal` is authorized to see as a
+    /// batched, idempotent (`MERGE`-based) Cypher script.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, a read
+    /// fails, or `output_path` cannot be written.
+    pub async fn export_cypher_script(
+        &self,
+        principal: &Principal,
+        output_path: impl Into<std::path::PathBuf>,
+    ) -> Result<graph_owl_lpg_io::ExportSummary, CatalogError> {
+        let (nodes, edges) = self.authorized_lpg_elements(principal).await?;
+        let writer = graph_owl_lpg_io::CypherScriptWriter::new(output_path)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        Self::drive_lpg_writer(writer, &nodes, &edges)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// Exports every node and edge `principal` is authorized to see as
+    /// JSON Lines — one `{"type":"node"|"edge", ...}` object per line,
+    /// resumable by line number.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, a read
+    /// fails, or `output_path` cannot be written.
+    pub async fn export_json_lines(
+        &self,
+        principal: &Principal,
+        output_path: impl Into<std::path::PathBuf>,
+    ) -> Result<graph_owl_lpg_io::ExportSummary, CatalogError> {
+        let (nodes, edges) = self.authorized_lpg_elements(principal).await?;
+        let writer = graph_owl_lpg_io::JsonLinesWriter::new(output_path);
+        Self::drive_lpg_writer(writer, &nodes, &edges)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// Exports every node and edge `principal` is authorized to see as one
+    /// [`graph_owl_lpg_io::JsonGraphView`] — the Epic 40 explorer's own
+    /// wire shape. **Non-streaming, deliberately**:
+    /// [`graph_owl_lpg_io::JsonGraphWriter`] buffers by construction
+    /// (`GraphView` is one JSON object), so this is meant for what
+    /// [`Self::authorized_lpg_elements`] returns for one principal's
+    /// estate, not an unbounded whole-catalog dump — the same bound Epic
+    /// 40's own neighbourhood requests already assume.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured or a
+    /// read fails.
+    pub async fn export_json_graph(
+        &self,
+        principal: &Principal,
+    ) -> Result<graph_owl_lpg_io::JsonGraphView, CatalogError> {
+        use graph_owl_lpg_io::LpgWriter as _;
+
+        let (nodes, edges) = self.authorized_lpg_elements(principal).await?;
+        let mut writer = graph_owl_lpg_io::JsonGraphWriter::new();
+        writer
+            .begin(&Self::export_meta())
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        for node in &nodes {
+            writer
+                .node(node)
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        }
+        for edge in &edges {
+            writer
+                .edge(edge)
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        }
+        Ok(writer.into_view())
+    }
 
     /// Imports one `OpenLineage` `RunEvent` — Epic 9 Slice D. Idempotent by
     /// event id **through the same uniqueness [`Self::assert_lineage`]
@@ -29460,3 +29707,408 @@ mod incremental_projection_tests {
     }
 }
 // decision-3-exception: end
+
+/// Epic 9a's own late-found gap, closed: `authorized_lpg_elements` and the
+/// five thin `export_*` wrappers built on it. Reuses
+/// `incremental_projection_tests`'s exact fixture shape (`RecordingGraph`,
+/// `InMemoryStorage`, the same two-principal policy pattern) rather than a
+/// second one that could drift — this is the same authorization primitive
+/// applied to a different consumer, not a new concern.
+#[cfg(test)]
+mod export_authorization_tests {
+    use super::*;
+    use incremental_projection_tests_support::{restricted_analyst, type_flake};
+    use projection_isolation_tests::RecordingGraph;
+    use tests::InMemoryStorage;
+
+    #[tokio::test]
+    async fn without_a_graph_engine_the_call_is_refused_not_silently_empty() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let outcome = catalog.authorized_lpg_elements(&Principal::system()).await;
+        assert!(
+            matches!(outcome, Err(CatalogError::Storage(_))),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_subject_is_omitted_but_an_allowed_one_is_present() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let t = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[
+                type_flake("public.orders", "Table", t),
+                type_flake("restricted.salaries", "Table", t),
+            ])
+            .await
+            .expect("assert");
+
+        let restricted = restricted_analyst(&catalog).await;
+
+        let (nodes, _edges) = catalog
+            .authorized_lpg_elements(&restricted)
+            .await
+            .expect("authorized_lpg_elements");
+        let node_ids: Vec<String> = nodes
+            .iter()
+            .map(|n| n.element_id.as_str().to_string())
+            .collect();
+        assert!(
+            node_ids.iter().any(|id| id.contains("public.orders")),
+            "{node_ids:?}"
+        );
+        assert!(
+            !node_ids.iter().any(|id| id.contains("restricted.salaries")),
+            "a denied subject must not appear in an authorized export: {node_ids:?}"
+        );
+    }
+
+    /// **The bug this epic's own HTTP test found**, pinned at the unit
+    /// level: a real asset's graph identity is a UUID
+    /// (`graph_owl_core::projection::asset_sid`), not its FQN, so the
+    /// policy check must resolve the subject's own `dsc:fqn` property
+    /// rather than checking its raw `Sid::id`. This subject's id is
+    /// deliberately UUID-shaped and would fail a `public.`-prefix policy
+    /// checked against it directly — the node must still appear, because
+    /// its `dsc:fqn` property (`public.orders`) is what a real asset's
+    /// authorization is actually decided by.
+    #[tokio::test]
+    async fn authorization_resolves_the_fqn_property_not_the_raw_subject_id() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let t = graph.next_time().await.expect("time");
+        let uuid_like = Sid::dsc("1:1111-not-fqn-shaped");
+        graph
+            .assert_flakes(&[
+                Flake {
+                    s: uuid_like.clone(),
+                    p: Sid::new(namespace::RDF, "type"),
+                    o: FlakeValue::Ref(Sid::dsc("Table")),
+                    cx: None,
+                    t,
+                    op: true,
+                },
+                Flake {
+                    s: uuid_like,
+                    p: Sid::dsc("fqn"),
+                    o: FlakeValue::String("public.orders".to_string()),
+                    cx: None,
+                    t,
+                    op: true,
+                },
+            ])
+            .await
+            .expect("assert");
+
+        let restricted = restricted_analyst(&catalog).await;
+
+        let (nodes, _edges) = catalog
+            .authorized_lpg_elements(&restricted)
+            .await
+            .expect("authorized_lpg_elements");
+        assert_eq!(
+            nodes.len(),
+            1,
+            "the fqn property, not the UUID-shaped subject id, must decide authorization: {nodes:?}"
+        );
+    }
+
+    /// The other real gap `push_converted_element`'s extraction left
+    /// unpinned: a relationship subject (`relType`/`fromEntity`/`toEntity`)
+    /// must be classified as an edge, not silently miscategorized as a
+    /// node or dropped.
+    #[tokio::test]
+    async fn a_reified_relationship_is_returned_as_an_edge_not_a_node() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let t = graph.next_time().await.expect("time");
+        let from = Sid::dsc("public.orders");
+        let to = Sid::dsc("public.shipments");
+        let relationship = Sid::dsc("public.orders-feeds-shipments");
+        graph
+            .assert_flakes(&[
+                type_flake("public.orders", "Table", t),
+                type_flake("public.shipments", "Table", t),
+                Flake {
+                    s: relationship.clone(),
+                    p: Sid::dsc(graph_owl_lpg::predicate::REL_TYPE),
+                    o: FlakeValue::String("feeds".to_string()),
+                    cx: None,
+                    t,
+                    op: true,
+                },
+                Flake {
+                    s: relationship.clone(),
+                    p: Sid::dsc(graph_owl_lpg::predicate::FROM_ENTITY),
+                    o: FlakeValue::Ref(from),
+                    cx: None,
+                    t,
+                    op: true,
+                },
+                Flake {
+                    s: relationship,
+                    p: Sid::dsc(graph_owl_lpg::predicate::TO_ENTITY),
+                    o: FlakeValue::Ref(to),
+                    cx: None,
+                    t,
+                    op: true,
+                },
+            ])
+            .await
+            .expect("assert");
+
+        let restricted = restricted_analyst(&catalog).await;
+
+        let (_nodes, edges) = catalog
+            .authorized_lpg_elements(&restricted)
+            .await
+            .expect("authorized_lpg_elements");
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(edges[0].edge_type, "feeds", "{edges:?}");
+    }
+
+    #[tokio::test]
+    async fn a_principal_denied_everything_gets_an_empty_result_not_an_error() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let t = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[type_flake("orders", "Table", t)])
+            .await
+            .expect("assert");
+
+        let nobody = Principal {
+            id: "outsider".to_string(),
+            name: "Outsider".to_string(),
+            kind: graph_owl_core::PrincipalKind::User,
+            is_admin: false,
+            roles: Vec::new(),
+        };
+        let (nodes, edges) = catalog
+            .authorized_lpg_elements(&nobody)
+            .await
+            .expect("must succeed, not error");
+        assert!(nodes.is_empty(), "{nodes:?}");
+        assert!(edges.is_empty(), "{edges:?}");
+    }
+
+    fn scratch_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "graph-owl-export-authz-test-{name}-{}",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    /// One representative format proven end to end (bytes on disk, not
+    /// just the in-memory element list) — `GraphML`, because it is the
+    /// format with the richest round-trip machinery already in
+    /// `graph-owl-lpg-io` to read the output back with.
+    #[tokio::test]
+    async fn export_graphml_contains_only_what_the_principal_may_see() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let t = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[
+                type_flake("public.orders", "Table", t),
+                type_flake("restricted.salaries", "Table", t),
+            ])
+            .await
+            .expect("assert");
+
+        let restricted = restricted_analyst(&catalog).await;
+        let path = scratch_path("graphml");
+
+        let summary = catalog
+            .export_graphml(&restricted, &path)
+            .await
+            .expect("export_graphml");
+        assert_eq!(summary.nodes, 1, "{summary:?}");
+
+        let bytes = std::fs::read_to_string(&path).expect("read exported file");
+        std::fs::remove_file(&path).ok();
+        assert!(bytes.contains("public.orders"), "{bytes}");
+        assert!(
+            !bytes.contains("restricted.salaries"),
+            "a denied subject must not reach the file at all: {bytes}"
+        );
+    }
+
+    /// The other four formats each get one thin smoke test — the shared
+    /// authorization and conversion logic is already proven above and by
+    /// `authorized_lpg_elements`'s own tests; what is left to check per
+    /// format is only that each wrapper is wired to the right writer and
+    /// returns a summary matching what was authorized.
+    #[tokio::test]
+    async fn export_bulk_csv_writes_one_file_per_authorized_label() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+        let t = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[type_flake("public.orders", "Table", t)])
+            .await
+            .expect("assert");
+        let restricted = restricted_analyst(&catalog).await;
+        let dir = scratch_path("bulk-csv");
+
+        let summary = catalog
+            .export_bulk_csv(&restricted, &dir)
+            .await
+            .expect("export_bulk_csv");
+        assert_eq!(summary.nodes, 1, "{summary:?}");
+        let listed: Vec<_> = std::fs::read_dir(&dir)
+            .expect("scratch dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            listed.iter().any(|name| name.starts_with("nodes-")),
+            "{listed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_cypher_script_names_the_authorized_node() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+        let t = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[
+                type_flake("public.orders", "Table", t),
+                type_flake("restricted.salaries", "Table", t),
+            ])
+            .await
+            .expect("assert");
+        let restricted = restricted_analyst(&catalog).await;
+        let path = scratch_path("cypher");
+
+        catalog
+            .export_cypher_script(&restricted, &path)
+            .await
+            .expect("export_cypher_script");
+        let script = std::fs::read_to_string(&path).expect("read exported file");
+        std::fs::remove_file(&path).ok();
+        assert!(script.contains("public.orders"), "{script}");
+        assert!(!script.contains("restricted.salaries"), "{script}");
+    }
+
+    #[tokio::test]
+    async fn export_json_lines_carries_only_the_authorized_element() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+        let t = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[
+                type_flake("public.orders", "Table", t),
+                type_flake("restricted.salaries", "Table", t),
+            ])
+            .await
+            .expect("assert");
+        let restricted = restricted_analyst(&catalog).await;
+        let path = scratch_path("jsonl");
+
+        let summary = catalog
+            .export_json_lines(&restricted, &path)
+            .await
+            .expect("export_json_lines");
+        assert_eq!(summary.nodes, 1, "{summary:?}");
+        let lines = std::fs::read_to_string(&path).expect("read exported file");
+        std::fs::remove_file(&path).ok();
+        assert!(lines.contains("public.orders"), "{lines}");
+        assert!(!lines.contains("restricted.salaries"), "{lines}");
+    }
+
+    #[tokio::test]
+    async fn export_json_graph_returns_only_the_authorized_node() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+        let t = graph.next_time().await.expect("time");
+        graph
+            .assert_flakes(&[
+                type_flake("public.orders", "Table", t),
+                type_flake("restricted.salaries", "Table", t),
+            ])
+            .await
+            .expect("assert");
+        let restricted = restricted_analyst(&catalog).await;
+
+        let view = catalog
+            .export_json_graph(&restricted)
+            .await
+            .expect("export_json_graph");
+        assert_eq!(view.nodes.len(), 1, "{view:?}");
+        assert!(
+            view.nodes[0].id.contains("public.orders"),
+            "{:?}",
+            view.nodes[0]
+        );
+    }
+}
+
+/// A `restricted_analyst` fixture and `type_flake` helper shared by both
+/// `incremental_projection_tests` and `export_authorization_tests`, so the
+/// "one policy, one restricted principal" shape is defined once rather than
+/// copied per test module.
+#[cfg(test)]
+mod incremental_projection_tests_support {
+    use super::*;
+
+    pub(super) fn type_flake(subject: &str, class: &str, t: i64) -> Flake {
+        Flake {
+            s: Sid::dsc(subject),
+            p: Sid::new(namespace::RDF, "type"),
+            o: FlakeValue::Ref(Sid::dsc(class)),
+            cx: None,
+            t,
+            op: true,
+        }
+    }
+
+    /// A principal allowed to view only the `public.` FQN prefix, with the
+    /// matching policy already saved on `catalog` — the exact fixture
+    /// `incremental_projection_tests::a_denied_subject_is_omitted_from_what_is_sent_to_the_target`
+    /// established, factored out for reuse.
+    pub(super) async fn restricted_analyst(catalog: &Catalog) -> Principal {
+        let restricted = Principal {
+            id: "asha".to_string(),
+            name: "Asha".to_string(),
+            kind: graph_owl_core::PrincipalKind::User,
+            roles: vec!["analyst".to_string()],
+            is_admin: false,
+        };
+        catalog
+            .upsert_policy(
+                &graph_owl_authz::Policy {
+                    name: "public-only".to_string(),
+                    rules: vec![graph_owl_authz::Rule {
+                        name: "read-public".to_string(),
+                        effect: graph_owl_authz::Effect::Allow,
+                        operations: vec![graph_owl_authz::MetadataOperation::ViewBasic],
+                        resources: graph_owl_authz::ResourceMatcher::FqnPrefix(
+                            "public.".to_string(),
+                        ),
+                    }],
+                },
+                &["analyst".to_string()],
+            )
+            .await
+            .expect("save policy");
+        restricted
+    }
+}

@@ -46,7 +46,7 @@ is the condition that index exists to catch.
 | **7d** | 8 | [`07d-engine-bolt.md`](07d-engine-bolt.md) | **Shipped** | 1/1 | Epic 7b (Cypher), Epic 7c (LPG projection), Epic 12 (auth), Epic 13 (authorizat… |
 | **8** | 2 | [`08-engine-search.md`](08-engine-search.md) | In progress | 6/8 | Epic 3 (change events to subscribe to), Epic 2 (FQNs to rank on), Epic 25 (tags… |
 | **9** | 8 | [`09-engine-rdf-io.md`](09-engine-rdf-io.md) | **Shipped** | 1/1 | Epic 4 (triples to serialize) — shipped. ~~Epic 7 (CONSTRUCT produces Turtle)~~… |
-| **9a** | 8 | [`09a-lpg-interchange.md`](09a-lpg-interchange.md) | In progress | 0/1 (+1 partial) | Epic 7c (LPG projection) — shipped, and its `FlakeValue::Ref`-vs-`String` kind… |
+| **9a** | 8 | [`09a-lpg-interchange.md`](09a-lpg-interchange.md) | **Shipped** | 1/1 | Epic 7c (LPG projection) — shipped, and its `FlakeValue::Ref`-vs-`String` kind… |
 | **10** | 2 | [`10-operability.md`](10-operability.md) | **Shipped** | 17/17 | Epic 1 (a server, an error model, and a contract to instrument) |
 | **11** | 2 | [`11-people-and-ownership.md`](11-people-and-ownership.md) | In progress | 11/14 (+1 partial) | Epic 3 (envelope carries `owners`) |
 | **12** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 15/15 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
@@ -226,7 +226,7 @@ is the condition that index exists to catch.
 
 ### Epic 9a — Property-Graph Interchange & External Store Sync *(Demo 8)*
 
-- [~] GraphML, bulk CSV, projection targets — **Slices A–D and F shipped, Slice E partially sh
+- [x] GraphML, bulk CSV, projection targets — **all slices shipped, 5–6 August 2026; the epic-
 
 ### Epic 10 — Operability & Resource Budget ★ *(Demo 2)*
 
