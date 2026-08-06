@@ -85,12 +85,14 @@ impl CatalogQueryEngine {
 }
 
 fn bolt_row_of(row: graph_owl_api::CypherRow) -> BoltRow {
-    BoltRow(
-        row.0
+    BoltRow {
+        values: row
+            .values
             .into_iter()
             .map(|(name, value)| (name, record_value_of(value)))
             .collect(),
-    )
+        lossy: row.lossy,
+    }
 }
 
 fn record_value_of(value: CypherValue) -> RecordValue {

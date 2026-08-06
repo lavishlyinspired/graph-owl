@@ -83,6 +83,28 @@ async fn seed_one_asset(catalog: &Catalog, name: &str) {
         .expect("seed asset");
 }
 
+/// Same, with a JSON `properties` blob — `graph_owl_core::projection` emits
+/// this as a `FlakeValue::Json`-typed flake (`dsc:properties`), which
+/// `graph-owl-lpg`'s node projection can only narrow to a string property.
+/// The one deliberately lossy fixture in this file — Epic 7c decision 2's
+/// `MappingReport` exists for exactly this case.
+async fn seed_one_asset_with_properties(catalog: &Catalog, name: &str) {
+    catalog
+        .upsert_asset(
+            &Principal::system(),
+            UpsertAsset {
+                kind: AssetKind::Service,
+                name: name.to_string(),
+                parent_id: None,
+                description: None,
+                properties: Some(serde_json::json!({ "team": "platform" })),
+                extension: None,
+            },
+        )
+        .await
+        .expect("seed asset");
+}
+
 struct Client {
     stream: TcpStream,
     decoder: chunking::Decoder,
@@ -548,6 +570,83 @@ async fn run_and_pull_stream_a_seeded_node_with_its_label_and_properties() {
 
     drop(db);
     drop(conn);
+}
+
+// ---- Epic 7c: MappingReport surfaces over Bolt, not dropped silently ----
+//
+// `graph-owl-lpg`'s own decision 2 says a lossy RDF-to-LPG mapping must be
+// *reported*, never dropped silently. Before this, `cypher_stream`'s
+// per-row projection built a `MappingReport` and let it fall out of scope
+// unread — real, but only reachable through Bolt's RUN/PULL, since the
+// plain JSON `/cypher` endpoint never touches the typed LPG projection at
+// all (it renders every bound value as a string, the same code path SPARQL
+// uses). These two tests prove the fix at the one place it can actually be
+// observed: a real client, over the real wire.
+
+#[tokio::test]
+async fn a_lossy_projection_is_reported_in_pulls_notifications() {
+    let (catalog, _db, _conn) = common::test_catalog().await;
+    seed_one_asset_with_properties(&catalog, "bolt-lossy-service").await;
+    let addr = spawn_server(catalog).await;
+    let mut client = authed_client(addr, "lossy-user").await;
+
+    // `RETURN n` alone only pulls the flakes the label match itself bounds
+    // (`?n dsc:type "service"`) — pushdown narrows to what the query names,
+    // per `graph_owl_query::pushdown`'s own doc comment. Also naming
+    // `n.properties` adds a second bound pattern (`?n dsc:properties ?x`) to
+    // the same query, which is what actually lands the Json-valued flake in
+    // `facts` for `n`'s own projection to see and report.
+    let run_reply = client
+        .run("MATCH (n:service) RETURN n, n.properties AS props")
+        .await;
+    assert!(is_success(&run_reply), "RUN must succeed: {run_reply:?}");
+    let (records, summary) = client.pull(-1).await;
+    assert!(!records.is_empty(), "the seeded asset must come back");
+
+    let metadata = success_metadata(&summary);
+    let Some(notifications) = metadata
+        .iter()
+        .find(|(k, _)| k == "notifications")
+        .map(|(_, v)| v.clone())
+    else {
+        panic!("expected a notifications entry, got {metadata:?}");
+    };
+    let BoltValue::List(entries) = notifications else {
+        panic!("notifications is not a list");
+    };
+    assert!(!entries.is_empty(), "at least one lossy mapping");
+    let BoltValue::Dictionary(fields) = &entries[0] else {
+        panic!("a notification is not a dictionary: {:?}", entries[0]);
+    };
+    let code = fields
+        .iter()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.clone());
+    assert_eq!(
+        code,
+        Some(BoltValue::String(
+            "GraphOwl.LossyMapping.TypeNarrowed".to_string()
+        )),
+        "{fields:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_lossless_projection_carries_no_notifications_key_at_all() {
+    let (catalog, _db, _conn) = common::test_catalog().await;
+    seed_one_asset(&catalog, "bolt-lossless-service").await;
+    let addr = spawn_server(catalog).await;
+    let mut client = authed_client(addr, "lossless-user").await;
+
+    assert!(is_success(&client.run("MATCH (n:service) RETURN n").await));
+    let (records, summary) = client.pull(-1).await;
+    assert!(!records.is_empty(), "the seeded asset must come back");
+
+    let metadata = success_metadata(&summary);
+    assert!(
+        !metadata.iter().any(|(k, _)| k == "notifications"),
+        "a lossless PULL must not carry the key at all, not an empty list: {metadata:?}"
+    );
 }
 
 #[tokio::test]

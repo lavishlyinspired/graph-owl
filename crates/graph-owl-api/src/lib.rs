@@ -583,8 +583,22 @@ pub enum CypherValue {
 /// [`SparqlOutcome::rows`]'s `BTreeMap`, which alphabetises columns away
 /// before a caller ever sees them. A Bolt client's `RETURN a, r, b` expects
 /// exactly that column order back.
+///
+/// **Carries its own [`graph_owl_lpg::LossyMapping`]s** — Epic 7c decision 2
+/// requires a lossy projection to be *reported*, never dropped silently, and
+/// converting a bound term into a [`CypherValue::Node`]/`Relationship` is
+/// exactly where `graph-owl-lpg` discovers one (a `Ref` in property
+/// position, a type it can only narrow to a string). Attaching the losses to
+/// the row that produced them, rather than accumulating a stream-wide
+/// report nobody would ever read the end of, lets whichever `PULL` actually
+/// drained this row surface them in its own `SUCCESS` summary.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CypherRow(pub Vec<(String, CypherValue)>);
+pub struct CypherRow {
+    /// The bound values, in projection order.
+    pub values: Vec<(String, CypherValue)>,
+    /// What projecting this row's own values could not carry across.
+    pub lossy: Vec<graph_owl_lpg::LossyMapping>,
+}
 
 /// A streamed Cypher result: column names available immediately, rows
 /// arriving as the evaluator produces them rather than after it finishes.
@@ -737,15 +751,17 @@ fn scope_facts(
 /// Convert one bound term into a [`CypherValue`] — Epic 7d Slice D's
 /// counterpart to [`collect`]'s `term.to_string()`, kept separate because it
 /// needs `facts` (to project a reference into a node or relationship) and
-/// can fail (an entity with no `dsc:type` has no label to project).
+/// can fail (an entity with no `dsc:type` has no label to project). `report`
+/// is [`project_entity`]'s own — see its doc comment.
 fn cypher_value_of_term(
     term: &oxrdf::Term,
     facts: &[graph_owl_core::flake::Flake],
+    report: &mut graph_owl_lpg::MappingReport,
 ) -> Result<CypherValue, CatalogError> {
     let value = graph_owl_query::term::from_term(term)
         .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
     match value {
-        FlakeValue::Ref(sid) => project_entity(&sid, facts),
+        FlakeValue::Ref(sid) => project_entity(&sid, facts, report),
         FlakeValue::String(s) | FlakeValue::Json(s) => Ok(CypherValue::String(s)),
         FlakeValue::Boolean(b) => Ok(CypherValue::Boolean(b)),
         FlakeValue::Int(n) => Ok(CypherValue::Integer(n)),
@@ -772,9 +788,15 @@ fn cypher_value_of_term(
 /// A bound reference is either a reified relationship or an ordinary entity
 /// — distinguished the same way `graph-owl-lpg`'s own mapping vocabulary
 /// does, by whether it carries `fromEntity`/`relType`.
+///
+/// `report` accumulates whatever `graph-owl-lpg` could not carry across —
+/// the caller's, not a local, disposable one, so a loss discovered here
+/// survives past this function's return instead of being built only to be
+/// dropped (Epic 7c decision 2).
 fn project_entity(
     sid: &Sid,
     facts: &[graph_owl_core::flake::Flake],
+    report: &mut graph_owl_lpg::MappingReport,
 ) -> Result<CypherValue, CatalogError> {
     let subject_flakes: Vec<graph_owl_core::flake::Flake> = facts
         .iter()
@@ -785,13 +807,12 @@ fn project_entity(
         flake.p.id == graph_owl_lpg::predicate::FROM_ENTITY
             || flake.p.id == graph_owl_lpg::predicate::REL_TYPE
     });
-    let mut report = graph_owl_lpg::MappingReport::default();
     if is_relationship {
-        graph_owl_lpg::edge_from_reified(sid, &subject_flakes, &mut report)
+        graph_owl_lpg::edge_from_reified(sid, &subject_flakes, report)
             .map(CypherValue::Relationship)
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
     } else {
-        graph_owl_lpg::node_from_flakes(sid, &subject_flakes, &mut report)
+        graph_owl_lpg::node_from_flakes(sid, &subject_flakes, report)
             .map(CypherValue::Node)
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
     }
@@ -2410,8 +2431,9 @@ impl Catalog {
             };
             for solution in solutions.flatten() {
                 let mut row = Vec::new();
+                let mut report = graph_owl_lpg::MappingReport::default();
                 for (variable, term) in solution.iter() {
-                    match cypher_value_of_term(term, &facts) {
+                    match cypher_value_of_term(term, &facts, &mut report) {
                         Ok(value) => row.push((variable.as_str().to_string(), value)),
                         // One conversion failure ends the whole stream rather
                         // than skipping a row: it means the fact set backing
@@ -2423,7 +2445,11 @@ impl Catalog {
                         }
                     }
                 }
-                if tx.blocking_send(Ok(CypherRow(row))).is_err() {
+                let sent = tx.blocking_send(Ok(CypherRow {
+                    values: row,
+                    lossy: report.lossy,
+                }));
+                if sent.is_err() {
                     return; // receiver dropped — nobody is pulling any more
                 }
             }
@@ -21161,7 +21187,8 @@ mod projection_isolation_tests {
                 1,
             ),
         ];
-        let value = project_entity(&sid, &facts).expect("projects");
+        let mut report = graph_owl_lpg::MappingReport::default();
+        let value = project_entity(&sid, &facts, &mut report).expect("projects");
         assert!(matches!(value, CypherValue::Node(_)), "{value:?}");
     }
 
@@ -21191,7 +21218,8 @@ mod projection_isolation_tests {
                 1,
             ),
         ];
-        let value = project_entity(&sid, &facts).expect("projects");
+        let mut report = graph_owl_lpg::MappingReport::default();
+        let value = project_entity(&sid, &facts, &mut report).expect("projects");
         assert!(matches!(value, CypherValue::Relationship(_)), "{value:?}");
     }
 
@@ -21231,7 +21259,9 @@ mod projection_isolation_tests {
                 1,
             ),
         ];
-        let CypherValue::Node(node) = project_entity(&sid, &facts).expect("projects") else {
+        let mut report = graph_owl_lpg::MappingReport::default();
+        let CypherValue::Node(node) = project_entity(&sid, &facts, &mut report).expect("projects")
+        else {
             panic!(
                 "must still classify as a node, not borrow the other subject's relationship shape"
             );
@@ -21240,6 +21270,45 @@ mod projection_isolation_tests {
             node.properties.get("name"),
             Some(&graph_owl_lpg::PropertyValue::String("orders".to_string())),
             "{node:?}"
+        );
+    }
+
+    /// Epic 7c decision 2: a lossy mapping is reported, never dropped
+    /// silently. `project_entity` used to build its own `MappingReport` and
+    /// throw it away on return — this asserts the loss now lands in the
+    /// **caller's** report instead, which is what lets `cypher_stream`
+    /// (and, through it, Bolt's `PULL`) surface it at all. Mutator watch: a
+    /// version that still discards the loss internally passes every other
+    /// assertion in this file and only fails here.
+    #[test]
+    fn project_entity_reports_a_type_narrowed_property_to_the_callers_report() {
+        let sid = Sid::dsc("table-1");
+        let facts = vec![
+            Flake::assert(
+                sid.clone(),
+                Sid::dsc("type"),
+                FlakeValue::String("table".to_string()),
+                1,
+            ),
+            Flake::assert(
+                sid.clone(),
+                Sid::dsc("properties"),
+                FlakeValue::Json("{\"team\":\"platform\"}".to_string()),
+                1,
+            ),
+        ];
+        let mut report = graph_owl_lpg::MappingReport::default();
+        project_entity(&sid, &facts, &mut report).expect("projects");
+        assert!(
+            !report.is_lossless(),
+            "a Json-valued property must be reported as type-narrowed: {report:?}"
+        );
+        assert!(
+            report
+                .lossy
+                .iter()
+                .any(|loss| matches!(loss, graph_owl_lpg::LossyMapping::TypeNarrowed { predicate, .. } if predicate == "properties")),
+            "{report:?}"
         );
     }
 
@@ -21296,8 +21365,8 @@ mod projection_isolation_tests {
             .await
             .expect("a row")
             .expect("not an error");
-        assert_eq!(row.0.len(), 1, "{row:?}");
-        assert_eq!(row.0[0].0, "name");
+        assert_eq!(row.values.len(), 1, "{row:?}");
+        assert_eq!(row.values[0].0, "name");
         assert!(
             stream.rows.recv().await.is_none(),
             "exactly one seeded asset"

@@ -10,7 +10,7 @@
 //! designed to catch.
 
 use graph_owl_core::Principal;
-use graph_owl_lpg::{LpgEdge, LpgNode};
+use graph_owl_lpg::{LossyMapping, LpgEdge, LpgNode};
 
 /// One value in a [`BoltRow`].
 ///
@@ -53,8 +53,19 @@ impl RecordValue {
 /// a Bolt client would ever see them. A driver's `RETURN a, r, b` expects
 /// `a`, `r`, `b` back in that order; alphabetising it would silently swap a
 /// client's columns.
+///
+/// **Carries its own `lossy` mappings**, mirroring `graph_owl_api::CypherRow`
+/// one layer down — a `QueryEngine` implementor is expected to forward
+/// whatever its own projection discovered rather than drop it here, so
+/// `PULL`'s `drain` (`crate::server`) has something to accumulate into its
+/// `SUCCESS` summary. See Epic 7c decision 2.
 #[derive(Debug, Clone, PartialEq)]
-pub struct BoltRow(pub Vec<(String, RecordValue)>);
+pub struct BoltRow {
+    /// The bound values, in projection order.
+    pub values: Vec<(String, RecordValue)>,
+    /// What projecting this row's own values could not carry across.
+    pub lossy: Vec<LossyMapping>,
+}
 
 /// What `RUN`'s `SUCCESS` reports before any row has arrived: the column
 /// names, in projection order, so a driver can label rows as they stream in

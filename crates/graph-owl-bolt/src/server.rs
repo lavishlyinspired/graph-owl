@@ -156,10 +156,15 @@ fn failure_for(err: &QueryError) -> ServerMessage {
 }
 
 enum DrainOutcome {
-    /// The receiver is exhausted — nothing left, `has_more: false`.
-    Exhausted,
-    /// The requested count was pulled but the receiver may hold more.
-    HasMore,
+    /// The receiver is exhausted — nothing left, `has_more: false`. Carries
+    /// whatever lossy mappings the drained rows reported (Epic 7c decision
+    /// 2) — possibly empty, which the caller renders as no `notifications`
+    /// field at all rather than an empty list, matching a driver's
+    /// expectation that the key is absent when there is nothing to say.
+    Exhausted(Vec<graph_owl_lpg::LossyMapping>),
+    /// The requested count was pulled but the receiver may hold more. Same
+    /// accumulation as `Exhausted`, scoped to just this call's own rows.
+    HasMore(Vec<graph_owl_lpg::LossyMapping>),
     Failed(QueryError),
 }
 
@@ -173,28 +178,50 @@ async fn drain(
     emit_records: bool,
 ) -> DrainOutcome {
     let mut count = 0usize;
+    let mut lossy = Vec::new();
     loop {
         if limit.is_some_and(|limit| count >= limit) {
-            return DrainOutcome::HasMore;
+            return DrainOutcome::HasMore(lossy);
         }
         match receiver.recv().await {
             Some(Ok(row)) => {
+                lossy.extend(row.lossy);
                 if emit_records {
                     let values = row
-                        .0
+                        .values
                         .into_iter()
                         .map(|(_, value)| value.into_bolt_value())
                         .collect();
                     if send(socket, &ServerMessage::Record(values)).await.is_err() {
-                        return DrainOutcome::Exhausted;
+                        return DrainOutcome::Exhausted(lossy);
                     }
                 }
                 count += 1;
             }
             Some(Err(err)) => return DrainOutcome::Failed(err),
-            None => return DrainOutcome::Exhausted,
+            None => return DrainOutcome::Exhausted(lossy),
         }
     }
+}
+
+/// `has_more` plus, when there is anything to report, a `notifications`
+/// list — one entry per lossy mapping accumulated over the rows this
+/// `PULL`/`DISCARD` actually drained.
+fn pull_summary_metadata(
+    has_more: bool,
+    lossy: Vec<graph_owl_lpg::LossyMapping>,
+) -> Vec<(String, packstream::BoltValue)> {
+    let mut metadata = vec![(
+        "has_more".to_string(),
+        packstream::BoltValue::Boolean(has_more),
+    )];
+    if !lossy.is_empty() {
+        metadata.push((
+            "notifications".to_string(),
+            packstream::BoltValue::List(lossy.iter().map(messages::bolt_notification).collect()),
+        ));
+    }
+    metadata
 }
 
 #[allow(clippy::cast_sign_loss)] // guarded: only called with n >= 0
@@ -339,25 +366,19 @@ async fn handle_connection(mut socket: tokio::net::TcpStream, server: &BoltServe
                     unreachable!("Streaming phase guarantees an active receiver");
                 };
                 match drain(&mut socket, &mut receiver, pull_limit(n), true).await {
-                    DrainOutcome::HasMore => {
+                    DrainOutcome::HasMore(lossy) => {
                         stream = Some(receiver);
                         let _ = send(
                             &mut socket,
-                            &ServerMessage::Success(vec![(
-                                "has_more".to_string(),
-                                packstream::BoltValue::Boolean(true),
-                            )]),
+                            &ServerMessage::Success(pull_summary_metadata(true, lossy)),
                         )
                         .await;
                     }
-                    DrainOutcome::Exhausted => {
+                    DrainOutcome::Exhausted(lossy) => {
                         session.phase = Phase::Authed;
                         let _ = send(
                             &mut socket,
-                            &ServerMessage::Success(vec![(
-                                "has_more".to_string(),
-                                packstream::BoltValue::Boolean(false),
-                            )]),
+                            &ServerMessage::Success(pull_summary_metadata(false, lossy)),
                         )
                         .await;
                     }
@@ -372,25 +393,19 @@ async fn handle_connection(mut socket: tokio::net::TcpStream, server: &BoltServe
                     unreachable!("Streaming phase guarantees an active receiver");
                 };
                 match drain(&mut socket, &mut receiver, pull_limit(n), false).await {
-                    DrainOutcome::HasMore => {
+                    DrainOutcome::HasMore(lossy) => {
                         stream = Some(receiver);
                         let _ = send(
                             &mut socket,
-                            &ServerMessage::Success(vec![(
-                                "has_more".to_string(),
-                                packstream::BoltValue::Boolean(true),
-                            )]),
+                            &ServerMessage::Success(pull_summary_metadata(true, lossy)),
                         )
                         .await;
                     }
-                    DrainOutcome::Exhausted => {
+                    DrainOutcome::Exhausted(lossy) => {
                         session.phase = Phase::Authed;
                         let _ = send(
                             &mut socket,
-                            &ServerMessage::Success(vec![(
-                                "has_more".to_string(),
-                                packstream::BoltValue::Boolean(false),
-                            )]),
+                            &ServerMessage::Success(pull_summary_metadata(false, lossy)),
                         )
                         .await;
                     }
@@ -426,5 +441,79 @@ async fn handle_connection(mut socket: tokio::net::TcpStream, server: &BoltServe
             }
             ClientMessage::Goodbye => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use graph_owl_lpg::LossyMapping;
+
+    fn has_key(metadata: &[(String, packstream::BoltValue)], key: &str) -> bool {
+        metadata.iter().any(|(k, _)| k == key)
+    }
+
+    /// Epic 7c decision 2's "reported, never dropped silently" only matters
+    /// when there is something to report — `pull_summary_metadata` is the
+    /// one place that decides whether `notifications` appears at all, and
+    /// the real Bolt wire tests (`graph-owl-server`'s `tests/bolt.rs`) only
+    /// exercise it through a real socket, which `cargo mutants` cannot run
+    /// against this crate alone. Unit-testing the decision directly here
+    /// closes that gap rather than leaving it to an integration-only proof.
+    #[test]
+    fn an_empty_report_omits_the_notifications_key_entirely() {
+        let metadata = pull_summary_metadata(false, Vec::new());
+        assert!(
+            !has_key(&metadata, "notifications"),
+            "an empty list must be no key at all, not an empty list: {metadata:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_empty_report_adds_a_notifications_list() {
+        let lossy = vec![LossyMapping::TypeNarrowed {
+            subject: "table-1".to_string(),
+            predicate: "properties".to_string(),
+            from: "json",
+        }];
+        let metadata = pull_summary_metadata(false, lossy);
+        let notifications = metadata
+            .iter()
+            .find(|(k, _)| k == "notifications")
+            .map(|(_, v)| v.clone());
+        let Some(packstream::BoltValue::List(entries)) = notifications else {
+            panic!("expected a notifications list: {metadata:?}");
+        };
+        assert_eq!(entries.len(), 1, "{entries:?}");
+    }
+
+    /// `has_more` is threaded through unconditionally, independent of
+    /// whether anything was lossy — the two fields are orthogonal, and a
+    /// mutant that only sets `has_more` when `lossy` is non-empty (or vice
+    /// versa) must fail this.
+    #[test]
+    fn has_more_is_reported_regardless_of_whether_anything_was_lossy() {
+        let with_loss = pull_summary_metadata(
+            true,
+            vec![LossyMapping::RefInProperty {
+                subject: "s".to_string(),
+                predicate: "p".to_string(),
+            }],
+        );
+        let without_loss = pull_summary_metadata(true, Vec::new());
+        assert_eq!(
+            with_loss
+                .iter()
+                .find(|(k, _)| k == "has_more")
+                .map(|(_, v)| v.clone()),
+            Some(packstream::BoltValue::Boolean(true))
+        );
+        assert_eq!(
+            without_loss
+                .iter()
+                .find(|(k, _)| k == "has_more")
+                .map(|(_, v)| v.clone()),
+            Some(packstream::BoltValue::Boolean(true))
+        );
     }
 }

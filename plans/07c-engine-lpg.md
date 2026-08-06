@@ -1,7 +1,7 @@
 # Plan: Labelled Property Graph Projection (Epic 7c) ★
 
 **Branch**: feat/engine-lpg
-**Status**: Slices A–E built in `graph-owl-lpg` — nodes, element ids, edges, the reverse direction with its loss report, and named-graph/time-travel survival. Slice F+ not started
+**Status**: Slices A–E built in `graph-owl-lpg` — nodes, element ids, edges, the reverse direction with its loss report, and named-graph/time-travel survival. Slice F+ not started. **6 August 2026**: found and fixed the `MappingReport` decision's one remaining gap — see the acceptance criteria below.
 **Depends on**: Epic 4 (flakes), Epic 1 (relationship taxonomy)
 **Unblocks**: Epic 7b (Cypher), Epic 7d (Bolt), Epic 9a (LPG interchange), Epic 40 (graph explorer UI)
 **Crates**: **`graph-owl-lpg`** (new — pure model + bidirectional mapping)
@@ -106,7 +106,25 @@ pub struct MappingReport {          // decision 2: losses are reported, never si
 
 - [ ] Every row of the mapping table is implemented and tested in both directions.
 - [ ] RDF → LPG → RDF round-trips losslessly for everything graph-owl stores.
-- [ ] Lossy cases are **reported** in a `MappingReport`, never dropped silently.
+- [x] Lossy cases are **reported** in a `MappingReport`, never dropped silently —
+      **the report itself was already built and total (Slice D); what was
+      missing, found and fixed 6 August 2026, is that its only two call sites
+      built one and then let it fall out of scope unread.** `project_incremental`
+      (Epic 9a's Neo4j push, not reachable from any route) still does; fixing
+      that is a separate, smaller finding, not blocking this criterion. The
+      reachable one — `cypher_stream`, backing Bolt's `RUN`/`PULL` — now
+      threads the report through `CypherRow`/`BoltRow` and surfaces it as a
+      `notifications` list in `PULL`'s `SUCCESS` summary, one entry per lossy
+      mapping accumulated across the rows that `PULL` actually drained, only
+      present when non-empty. The plain JSON `/cypher` endpoint was checked
+      and found not to need this fix at all: it renders every bound value as
+      a string through `execute_algebra`/`collect`, the same code path
+      `/sparql` uses, and never touches `graph-owl-lpg`'s typed node/edge
+      projection in the first place — there is no report to discard there.
+      Proven with two real-wire tests (`crates/graph-owl-server/tests/bolt.rs`):
+      a `Json`-valued property surfaces a `TypeNarrowed` notification, and an
+      ordinary seeded asset carries no `notifications` key at all rather than
+      an empty list.
 - [ ] A reified relationship projects as an edge with properties by default, and as a node on request.
 - [ ] Element ids are derived from `Sid`, stable across restart, and reversible.
 - [ ] Named graphs survive as `_graph`; reserved property names are rejected as user keys.
@@ -156,6 +174,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with `td
 - **Writes through the LPG surface** → Epic 7b decision 3: writes go through the catalog API so validation, versioning, and authorization apply. `flakes_from_*` exists for import (Epic 9a), not for a live write path.
 - **Hypergraph / property-hypergraph models** → the reified-relationship encoding can express n-ary relations already; a distinct hypergraph model needs a use case first.
 - **RDF-star as the reification syntax** → Epic 4's `QuotedTriple` extension point; the LPG mapping would gain a shorter path but no capability.
+- **`project_incremental`'s own discarded `MappingReport`** → found alongside the Bolt fix (6 August 2026) but left as-is: this is Epic 9a's Neo4j push-projection path, and it is not reachable from any HTTP or Bolt route today (confirmed by grep — nothing in `graph-owl-server` calls it), so there is no caller yet who could read a surfaced report. Revisit when Epic 9a's projection-target administration (Epic 42's own backlog item) gives it one.
 
 ## Pre-PR quality gate
 

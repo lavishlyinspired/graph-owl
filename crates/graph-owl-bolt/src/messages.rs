@@ -19,7 +19,7 @@
 //! protocol specification (`00i` rule 2), not from any reference server or
 //! driver implementation.
 
-use graph_owl_lpg::{LpgEdge, LpgNode, PropertyMap, PropertyValue};
+use graph_owl_lpg::{LossyMapping, LpgEdge, LpgNode, PropertyMap, PropertyValue};
 
 use crate::auth::Credentials;
 use crate::packstream::BoltValue;
@@ -359,6 +359,57 @@ pub fn bolt_relationship(edge: &LpgEdge) -> BoltValue {
     }
 }
 
+/// Render one [`LossyMapping`] as a Bolt notification dictionary — the
+/// `SUCCESS`-summary vocabulary the published protocol defines for a
+/// server to warn a driver about something short of a failure, reused here
+/// (not any particular server's own notification codes or wording, which
+/// `00i-licensing.md` rule 3 forbids copying) for Epic 7c decision 2: a
+/// lossy projection is reported, never dropped silently, and `PULL`
+/// (`crate::server::drain`) folds one of these into its own summary per
+/// entry accumulated across the rows it drained.
+#[must_use]
+pub fn bolt_notification(loss: &LossyMapping) -> BoltValue {
+    let (code, description) = match loss {
+        LossyMapping::RefInProperty { subject, predicate } => (
+            "RefInProperty",
+            format!(
+                "`{subject}.{predicate}` is a reference in property position; it survives as \
+                 a handle string, not a typed reference."
+            ),
+        ),
+        LossyMapping::NamedGraphCollapse { subject, graphs } => (
+            "NamedGraphCollapse",
+            format!(
+                "`{subject}` is asserted in {} named graphs ({}); only one survives on `_graph`.",
+                graphs.len(),
+                graphs.join(", ")
+            ),
+        ),
+        LossyMapping::TypeNarrowed {
+            subject,
+            predicate,
+            from,
+        } => (
+            "TypeNarrowed",
+            format!(
+                "`{subject}.{predicate}` was a {from} value; it projects as a string and the \
+                 type tag does not survive a round trip."
+            ),
+        ),
+    };
+    BoltValue::Dictionary(vec![
+        (
+            "code".to_string(),
+            BoltValue::String(format!("GraphOwl.LossyMapping.{code}")),
+        ),
+        ("description".to_string(), BoltValue::String(description)),
+        (
+            "severity".to_string(),
+            BoltValue::String("WARNING".to_string()),
+        ),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,5 +709,77 @@ mod tests {
     #[test]
     fn different_element_ids_produce_different_legacy_ids() {
         assert_ne!(legacy_id("1:table-1"), legacy_id("1:table-2"));
+    }
+
+    fn dict_entries(value: &BoltValue) -> &[(String, BoltValue)] {
+        match value {
+            BoltValue::Dictionary(entries) => entries,
+            other => panic!("expected a dictionary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_notification_names_its_code_description_and_severity() {
+        let loss = LossyMapping::TypeNarrowed {
+            subject: "table-1".to_string(),
+            predicate: "properties".to_string(),
+            from: "json",
+        };
+        let notification = bolt_notification(&loss);
+        let entries = dict_entries(&notification);
+        assert_eq!(
+            entries.iter().find(|(k, _)| k == "code").map(|(_, v)| v),
+            Some(&BoltValue::String(
+                "GraphOwl.LossyMapping.TypeNarrowed".to_string()
+            ))
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .find(|(k, _)| k == "severity")
+                .map(|(_, v)| v),
+            Some(&BoltValue::String("WARNING".to_string()))
+        );
+        let BoltValue::String(description) = entries
+            .iter()
+            .find(|(k, _)| k == "description")
+            .map(|(_, v)| v)
+            .expect("a description")
+        else {
+            panic!("description is not a string");
+        };
+        assert!(description.contains("table-1"), "{description}");
+        assert!(description.contains("properties"), "{description}");
+    }
+
+    /// Each variant gets its **own** code — a mutation collapsing two match
+    /// arms to the same string still produces a dictionary, so only
+    /// distinctness across variants catches it.
+    #[test]
+    fn different_lossy_variants_produce_different_codes() {
+        let code_of = |loss: &LossyMapping| {
+            let notification = bolt_notification(loss);
+            let entries = dict_entries(&notification);
+            entries
+                .iter()
+                .find(|(k, _)| k == "code")
+                .map(|(_, v)| v.clone())
+        };
+        let ref_in_property = code_of(&LossyMapping::RefInProperty {
+            subject: "s".to_string(),
+            predicate: "p".to_string(),
+        });
+        let named_graph_collapse = code_of(&LossyMapping::NamedGraphCollapse {
+            subject: "s".to_string(),
+            graphs: vec!["a".to_string(), "b".to_string()],
+        });
+        let type_narrowed = code_of(&LossyMapping::TypeNarrowed {
+            subject: "s".to_string(),
+            predicate: "p".to_string(),
+            from: "uuid",
+        });
+        assert_ne!(ref_in_property, named_graph_collapse);
+        assert_ne!(named_graph_collapse, type_narrowed);
+        assert_ne!(ref_in_property, type_narrowed);
     }
 }
