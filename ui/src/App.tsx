@@ -1,3 +1,20 @@
+/* eslint-disable local/no-raw-jsx-text -- Epic 39 Slice E decision 7 asked for
+ * every user-visible literal to be externalized from the first commit, but
+ * this file predates the lint rule that enforces it (added Epic 39 Slice F,
+ * 6 August 2026) and carries ~190 pre-existing violations. Retrofitting an
+ * externalized-strings file across a 4500-line, single-file console is a
+ * real, separate, mechanical task — not something to rush inside the slice
+ * that is also standing up CI budgets, Playwright, and axe.
+ *
+ * A per-line disable across 190 sites would not be more honest than this —
+ * it adds noise without extracting a single string — so the file carries one
+ * disable rather than 190. The real cost of that: this file-level disable
+ * also covers *new* code added to App.tsx, not only the pre-existing
+ * literals, because ESLint disables do not have grandfather semantics. Any
+ * new component with user-visible text should go in its own file (the rule
+ * is enforced everywhere else in `src/`) rather than growing App.tsx
+ * further — which is the same direction Epic 42's planned `features/`
+ * structure already pushes toward. */
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import {
   App as AntApp,
@@ -372,7 +389,7 @@ function OverviewPage({
   if (assets.total === 0) {
     return (
       <Flex vertical align="center" justify="center" style={{ height: "100%" }} gap={16}>
-        <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+        <Title level={2} style={{ margin: 0, fontWeight: 600, fontSize: 16 }}>
           Nothing catalogued yet
         </Title>
         <Text type="secondary">
@@ -414,7 +431,7 @@ function OverviewPage({
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <div>
-        <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+        <Title level={2} style={{ margin: 0, fontWeight: 600, fontSize: 16 }}>
           Overview
         </Title>
         <Text type="secondary">
@@ -1262,7 +1279,7 @@ function TimeControl({
         cursor: "pointer",
         background: asOf ? colors.warning : colors.selected,
         borderColor: asOf ? colors.warning : colors.primary,
-        color: asOf ? "#0F172A" : colors.primary,
+        color: asOf ? "#0F172A" : colors.selectedText,
         fontWeight: 500,
       }}
     >
@@ -1709,7 +1726,7 @@ function AssetDetail({
       <Breadcrumb items={ancestors.map((a) => ({ title: a.name }))} />
 
       <Flex align="center" gap={12} wrap>
-        <Title level={3} dir={userTextDir(asset.name)} style={{ margin: 0, fontWeight: 600 }}>
+        <Title level={2} dir={userTextDir(asset.name)} style={{ margin: 0, fontWeight: 600, fontSize: 24 }}>
           {asset.name}
         </Title>
         <Tag color={KIND_COLOR[asset.kind]} icon={KIND_ICON[asset.kind]}>
@@ -3915,6 +3932,10 @@ function AppShell() {
   const [selected, setSelectedRaw] = useState<Asset | null>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Asset[] | null>(null);
+  // A search that failed to load is not a search that found nothing — the
+  // same distinction the tree already makes for `refused`/`denied` below,
+  // applied to the box every evaluator touches first.
+  const [searchFailed, setSearchFailed] = useState(false);
   // Distinct from "no data". A refused request rendered as an empty catalog is
   // the single most misleading thing this console can do: it tells someone
   // their estate is empty when in fact they are simply not signed in.
@@ -4040,6 +4061,7 @@ function AppShell() {
       return;
     }
     const timer = setTimeout(() => {
+      setSearchFailed(false);
       api
         .search(query)
         .then((page) => {
@@ -4054,6 +4076,7 @@ function AppShell() {
         .catch(() => {
           setResults([]);
           setFacets(null);
+          setSearchFailed(true);
         });
     }, 150);
     return () => clearTimeout(timer);
@@ -4171,6 +4194,27 @@ function AppShell() {
                 </g>
                 <text x="302" y="85" fontFamily="Arial,Helvetica,sans-serif" fontSize="60" fontWeight="900" fill="#14C3CF">WL</text>
               </svg>
+              {/* The wordmark is a decorative SVG with no accessible-name
+                  role of its own, so the page has no level-one heading
+                  without this — found by the Epic 39 Slice F first-run axe
+                  check, not written in from a checklist. Visually hidden:
+                  a printed page or a sighted user does not need a second
+                  "graph-owl" beside the logo, but a screen reader does. */}
+              <h1
+                style={{
+                  position: "absolute",
+                  width: 1,
+                  height: 1,
+                  padding: 0,
+                  margin: -1,
+                  overflow: "hidden",
+                  clip: "rect(0,0,0,0)",
+                  whiteSpace: "nowrap",
+                  border: 0,
+                }}
+              >
+                graph-owl
+              </h1>
             </div>
             <Input
               prefix={<SearchOutlined style={{ color: colors.textSubtle }} />}
@@ -4256,6 +4300,7 @@ function AppShell() {
               width={196}
               theme={dark ? "dark" : "light"}
               style={{ borderRight: `1px solid ${colors.border}` }}
+              aria-label="Primary navigation"
             >
               <Menu
                 mode="inline"
@@ -4282,6 +4327,7 @@ function AppShell() {
                 width={288}
                 theme={dark ? "dark" : "light"}
                 style={{ borderRight: `1px solid ${colors.border}`, overflow: "auto" }}
+                aria-label="Asset hierarchy"
               >
                 <div style={{ padding: 14 }}>
                   <Flex gap={8} wrap style={{ marginBottom: 14 }}>
@@ -4389,7 +4435,9 @@ function AppShell() {
                       </>
                     )}
                   </Title>
-                  {visibleResults.length === 0 ? (
+                  {searchFailed ? (
+                    <Alert type="error" showIcon message="Search failed to load — this is not an empty result." />
+                  ) : visibleResults.length === 0 ? (
                     <Empty description="Nothing matched" />
                   ) : (
                     <Table

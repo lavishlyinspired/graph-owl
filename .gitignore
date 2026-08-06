@@ -37,6 +37,10 @@
 /node_modules/
 /ui/dist/
 /ui/.stryker-tmp/
+# Playwright's own trace/screenshot artifacts (Epic 39 Slice F) — regenerated
+# by every run of scripts/verify-first-run-journey.sh, never source.
+/ui/test-results/
+/ui/playwright-report/
 
 # Generated SDK artifacts. The client types are derived from `openapi.json`, and
 # a committed copy is a second thing to keep in step with the first — the same

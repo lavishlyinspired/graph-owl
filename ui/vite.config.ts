@@ -10,4 +10,8 @@ export default defineConfig({
   // Dev-only. In production the SPA is embedded in the binary and served from
   // the same origin, so there is no proxy and no CORS — 00f-ui-architecture.md.
   server: { proxy: { "/api": { target: "http://localhost:8080", rewrite: (p) => p.replace(/^\/api/, "") } } },
+  // `tests/` is Playwright's directory (`*.spec.ts`), which Vitest's default
+  // include glob would otherwise also pick up and run with the wrong test
+  // framework's globals against no real server at all.
+  test: { exclude: ["**/node_modules/**", "**/dist/**", "tests/**"] },
 });

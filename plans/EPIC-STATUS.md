@@ -78,7 +78,7 @@ is the condition that index exists to catch.
 | **37b** | 9 | [`37b-portability.md`](37b-portability.md) | **Shipped** | 1/1 | Epic 3 (history is part of what must survive) — shipped |
 | **37c** | 9 | [`37c-embeddable.md`](37c-embeddable.md) | In progress | 0/1 (+1 partial) | Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate again… |
 | **38** | 9 | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | 0/1 | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
-| **39** | 1 | [`39-ui-foundation.md`](39-ui-foundation.md) | In progress | 24/27 | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
+| **39** | 1 | [`39-ui-foundation.md`](39-ui-foundation.md) | In progress | 24/25 (+1 partial) | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
 | **40** | 3 | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | **Shipped** | 11/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
 | **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | **Shipped** | 12/12 | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
 | **42** | 7 | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | Not started | 0/3 | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
@@ -525,9 +525,7 @@ is the condition that index exists to catch.
 - [x] OIDC/PKCE login
 - [x] Generated API client
 - [x] Slice E — shared trust component set
-- [ ] Slice F — states, budgets, and journeys.
-- [ ] ~~`/assets/{id}` is an API namespace; prefixing the API is the fix
-- [ ] The trust bar showed only version/editor/deletion state until Slice E; certification and
+- [~] Slice F — states, budgets, and journeys
 - [x] Hierarchy tree, asset detail, and the five-level service → column navigation
 - [x] Trust bar: version, last editor, and honest "not captured yet" for certification and lin
 - [x] Version history tab with the diff viewer

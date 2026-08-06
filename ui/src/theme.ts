@@ -30,6 +30,14 @@ export const primary = {
   hover: "#0FAAB5",
   light: "#61DCE5",
   soft: "#D9F9FB",
+  // `base` fails WCAG AA text contrast (2.16:1 on white, 2.15:1 as white
+  // text on it as a button fill — both need 4.5:1) — found by the Epic 39
+  // Slice F first-run axe check flagging a real "Catalogue a source"
+  // button, not a hypothetical. `action` is the same hue, darkened until it
+  // passes: 5.98:1 white-on-it, 5.98:1 on white as text. `base`/`hover`
+  // stay as the icon, border, and chart-series colour — contrast rules
+  // bind text and solid UI fills, not every decorative pixel.
+  action: "#0B6E77",
 } as const;
 
 const FONT = `'Inter Variable', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
@@ -62,6 +70,21 @@ interface Palette {
   textDisabled: string;
   selected: string;
   primary: string;
+  /** Text/icon colour when the surface underneath is `selected` — kept apart
+   *  from `primary` because they are not interchangeable: `primary` is tuned
+   *  to read on `page`, `selected` is a light tint that a teal this light
+   *  fails against. Found by the Epic 39 Slice F first-run axe check, which
+   *  flagged the "Overview" selected menu item at a measured 1.94:1 against
+   *  the WCAG AA 4.5:1 minimum for text — not a hypothetical, an actual
+   *  failing contrast in the shipped theme. */
+  selectedText: string;
+  /** A solid fill meant to carry white text (a primary button) — distinct
+   *  from `selectedText` because the two roles want opposite answers on
+   *  dark: dark's `selected` tint is itself dark, so `primary.base` reads
+   *  fine as text on it, but a *button* fill of `primary.base` still fails
+   *  white text (2.15:1) regardless of theme, because the button's own
+   *  background never changes with the page around it. */
+  actionBg: string;
   primaryHover: string;
   success: string;
   warning: string;
@@ -91,6 +114,13 @@ const LIGHT: Palette = {
   textDisabled: "#94A3B8",
   selected: primary.soft,
   primary: primary.base,
+  // Measured: primary.action on primary.soft (#D9F9FB) is 5.38:1, on white
+  // 5.98:1 — both clear WCAG AA. primary.base itself is 1.94:1 on
+  // primary.soft and 2.16:1 on white — it fails as text in either of its
+  // two most common placements, which is why this is a distinct token
+  // rather than a reuse.
+  selectedText: primary.action,
+  actionBg: primary.action,
   primaryHover: primary.hover,
   success: "#16A34A",
   warning: "#F59E0B",
@@ -125,6 +155,13 @@ const DARK: Palette = {
   textDisabled: "#64748B",
   selected: "#1D3557",
   primary: primary.base,
+  // Dark's `selected` is a dark navy, not a light tint, so primary.base
+  // already clears AA against it (5.73:1) — no separate token needed here.
+  selectedText: primary.base,
+  // A button's own fill does not change with the surrounding page, so this
+  // fails white text at 2.15:1 in dark mode exactly as it does in light —
+  // `primary.action` is theme-invariant for the same reason.
+  actionBg: primary.action,
   primaryHover: primary.hover,
   success: "#22C55E",
   warning: "#FBBF24",
@@ -140,7 +177,21 @@ function build(c: Palette, dark: boolean): ThemeConfig {
     algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
     token: {
       colorPrimary: c.primary,
-      colorLink: c.primary,
+      // Text-role, not fill-role — needs the shade that passes as text on
+      // `page`, which is `selectedText` in light (primary.base fails at
+      // 2.16:1) and `primary` unchanged in dark (primary.base already
+      // passes at 8.05:1 on the dark page).
+      colorLink: c.selectedText,
+      // antd derives these from `colorPrimary` by default, and several
+      // components read them directly for a *selected/active* text state —
+      // `Tabs`' active-tab label is what the Epic 39 Slice F axe check
+      // caught (2.15:1 on white), the same failure as `Menu`'s selected
+      // item before it got its own override below. Setting the semantic
+      // text tokens here catches every such component in one place instead
+      // of chasing each one as axe happens to render it.
+      colorPrimaryText: c.selectedText,
+      colorPrimaryTextHover: c.selectedText,
+      colorPrimaryTextActive: c.selectedText,
       colorBgLayout: c.page,
       colorBgContainer: c.surface,
       colorBgElevated: c.raised,
@@ -183,6 +234,11 @@ function build(c: Palette, dark: boolean): ThemeConfig {
         // controls, and 56px forces all three to sit tight against each other.
         headerHeight: 72,
       },
+      // `Tabs` reads its own component token for the active-tab label rather
+      // than the semantic `colorPrimaryText*` tokens above — found the same
+      // way `Menu.itemSelectedColor` was: axe flagging a real, rendered tab
+      // at 2.15:1, not a token this project decided to override on a guess.
+      Tabs: { itemActiveColor: c.selectedText, itemSelectedColor: c.selectedText },
       // The header takes the *section* tint, so a scrolled table still reads
       // as having a header rather than as starting mid-row.
       Table: {
@@ -202,14 +258,23 @@ function build(c: Palette, dark: boolean): ThemeConfig {
       Tree: { nodeSelectedBg: c.selected, nodeHoverBg: c.rowHover },
       Menu: {
         itemSelectedBg: c.selected,
-        itemSelectedColor: c.primary,
+        itemSelectedColor: c.selectedText,
         itemHeight: 40,
         itemBorderRadius: radius.control,
       },
       Descriptions: { labelBg: c.surface },
       Tag: { defaultBg: c.fill, borderRadiusSM: radius.small },
       Timeline: { dotBg: c.raised },
-      Button: { borderRadius: radius.control, primaryShadow: "none" },
+      Button: {
+        borderRadius: radius.control,
+        primaryShadow: "none",
+        // A primary button's own fill is a solid colour carrying white
+        // text, not a tint the page shows through — `colorPrimary` here
+        // fails that role at 2.15:1 regardless of theme, which is why the
+        // component gets its own override rather than inheriting the
+        // global token.
+        colorPrimary: c.actionBg,
+      },
       Input: { borderRadius: radius.control },
       Statistic: { titleFontSize: 13 },
     },
