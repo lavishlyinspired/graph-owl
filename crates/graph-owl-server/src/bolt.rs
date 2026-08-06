@@ -230,3 +230,57 @@ pub fn build_server(
     ));
     Arc::new(graph_owl_bolt::BoltServer::new(auth, query, limits))
 }
+
+/// The one running [`graph_owl_bolt::BoltServer`], if this process has
+/// bound a Bolt listener — read by `GET /admin/bolt/status`
+/// (`crate::lib::status_router`, wired into `app`/`app_with_admission`
+/// behind the same `bolt` feature this whole module is gated on).
+///
+/// A global, not a parameter threaded through `app`/`app_with_admission`,
+/// because those two functions' signatures are exercised by ~80 existing
+/// test fixtures with a fixed shape — the identical reasoning
+/// `observability::PROMETHEUS` is already a `OnceLock` for. `main.rs` calls
+/// [`register`] once, right after [`build_server`], only when
+/// `BOLT_BIND_ADDR` was actually set; a deployment that compiled the
+/// feature in but never configured a port leaves this empty, and the status
+/// route reports `enabled: false` rather than fabricating a listener that
+/// is not there.
+static REGISTERED_SERVER: std::sync::OnceLock<Arc<graph_owl_bolt::BoltServer>> =
+    std::sync::OnceLock::new();
+
+/// Makes `server` visible to `GET /admin/bolt/status`. A second call is a
+/// no-op — mirrors `observability::metrics_handle`'s own reasoning: a test
+/// that builds more than one app in one process must not panic on the
+/// second registration.
+pub fn register(server: Arc<graph_owl_bolt::BoltServer>) {
+    let _ = REGISTERED_SERVER.set(server);
+}
+
+/// `GET /admin/bolt/status` — Epic 42 Slice F's "Bolt endpoint status and
+/// active sessions... read-only".
+///
+/// **Admin-only**, the same tier as [`crate::export_archive`] and a policy
+/// write — who is connected to a second protocol port is not an ordinary
+/// read. A non-admin gets `404` rather than `403`, the identical reasoning
+/// every other admin-tier route in this crate already uses: an unlisted
+/// admin surface is indistinguishable from one that does not exist.
+pub(crate) async fn bolt_status(
+    crate::Auth(principal): crate::Auth,
+) -> Result<axum::Json<serde_json::Value>, crate::AppError> {
+    if !principal.is_admin {
+        return Err(crate::AppError::NotFound);
+    }
+    let Some(server) = REGISTERED_SERVER.get() else {
+        return Ok(axum::Json(serde_json::json!({ "enabled": false })));
+    };
+    let sessions = server.sessions();
+    Ok(axum::Json(serde_json::json!({
+        "enabled": true,
+        "maxConnections": server.max_connections(),
+        "activeConnections": sessions.len(),
+        "sessions": sessions.iter().map(|session| serde_json::json!({
+            "principal": session.principal,
+            "connectedAt": session.connected_at.to_rfc3339(),
+        })).collect::<Vec<_>>(),
+    })))
+}

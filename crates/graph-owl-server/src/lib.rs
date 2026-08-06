@@ -251,7 +251,16 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         // whole catalog, or replacing entities in bulk with caller-chosen
         // ids, is exactly that class of operation.
         .route("/admin/export", post(export_archive))
-        .route("/admin/restore", post(restore_archive))
+        .route("/admin/restore", post(restore_archive));
+    // Epic 7d / Epic 42 Slice F: Bolt endpoint status and active sessions,
+    // read-only. A separate statement rather than one more link in the
+    // chain above — the route only exists when this crate is built with
+    // the `bolt` feature (decision 3: "compiled out entirely, not merely
+    // inert"), and a `#[cfg]` cannot gate one method call inside a longer
+    // expression.
+    #[cfg(feature = "bolt")]
+    let router = router.route("/admin/bolt/status", get(bolt::bolt_status));
+    let router = router
         .route("/users/{id}/roles", put(set_user_roles))
         .route("/teams", get(list_teams).post(upsert_team))
         .route("/teams/{id}/children", get(list_child_teams))

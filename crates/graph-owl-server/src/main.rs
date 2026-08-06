@@ -184,6 +184,11 @@ async fn main() {
             limits,
             graph_owl_api::SparqlBudget::default(),
         );
+        // Makes this server visible to `GET /admin/bolt/status` — only
+        // reached when a listener was actually bound, so a build with the
+        // feature compiled in but `BOLT_BIND_ADDR` unset reports `enabled:
+        // false` rather than a listener that does not exist.
+        graph_owl_server::bolt::register(server.clone());
         tokio::spawn(async move {
             server
                 .serve(listener, async {

@@ -19,4 +19,4 @@ pub mod state;
 pub use auth::{AuthError, Authenticator, Credentials};
 pub use limits::BoltLimits;
 pub use query::{BoltRow, QueryEngine, QueryError, RecordReceiver, RecordValue, RunOutcome};
-pub use server::BoltServer;
+pub use server::{BoltServer, BoltSession};

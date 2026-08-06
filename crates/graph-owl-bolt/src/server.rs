@@ -6,8 +6,11 @@
 //! (`graph-owl-server`) supplies adapters over `Catalog` and constructs the
 //! one [`BoltServer`] the process runs.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use chrono::{DateTime, Utc};
 use graph_owl_core::Principal;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -22,6 +25,45 @@ use crate::packstream;
 use crate::query::{QueryEngine, QueryError, RecordReceiver};
 use crate::state::{self, Phase, Session};
 
+/// One authenticated Bolt connection, snapshotted for Epic 42 Slice F's
+/// admin page ("Bolt endpoint status and active sessions... read-only").
+///
+/// Recorded from `HELLO` onward, not from the raw TCP accept — an
+/// unauthenticated socket that never completes the handshake is not a
+/// session anyone administering this deployment needs to see, the same
+/// reasoning `graph-owl-server`'s own `RequestPrincipal` waits for a
+/// resolved identity before logging one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoltSession {
+    /// Unique for the life of this process — not stable across a restart,
+    /// and not meant to be; a session that no longer exists has nothing to
+    /// look up it by anyway.
+    pub id: u64,
+    /// The authenticated principal's id.
+    pub principal: String,
+    /// When `HELLO` succeeded.
+    pub connected_at: DateTime<Utc>,
+}
+
+/// Removes its session from the registry on drop — guarantees cleanup on
+/// every one of `handle_connection`'s several return points (EOF, a
+/// protocol violation, `GOODBYE`, a dropped socket) without repeating a
+/// removal call at each one, the identical reasoning `serve`'s own
+/// semaphore permit already relies on `Drop` for.
+struct SessionGuard {
+    sessions: Arc<Mutex<HashMap<u64, BoltSession>>>,
+    id: u64,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.id);
+    }
+}
+
 /// Protocol versions this server negotiates. See `crate::messages`' module
 /// doc for why the supported set is exactly one version today.
 const SUPPORTED_VERSIONS: &[(u8, u8)] = &[(5, 0)];
@@ -30,6 +72,8 @@ pub struct BoltServer {
     auth: Arc<dyn Authenticator>,
     query: Arc<dyn QueryEngine>,
     limits: BoltLimits,
+    sessions: Arc<Mutex<HashMap<u64, BoltSession>>>,
+    next_session_id: AtomicU64,
 }
 
 impl BoltServer {
@@ -43,7 +87,33 @@ impl BoltServer {
             auth,
             query,
             limits,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            next_session_id: AtomicU64::new(0),
         }
+    }
+
+    /// This server's configured connection ceiling — the other half of
+    /// "active out of how many" an admin page needs alongside
+    /// [`Self::sessions`].
+    #[must_use]
+    pub fn max_connections(&self) -> usize {
+        self.limits.max_connections
+    }
+
+    /// Every currently-authenticated connection, oldest first — a
+    /// deterministic order for a page rendering them, not an incidental one
+    /// (`HashMap` iteration order is not).
+    #[must_use]
+    pub fn sessions(&self) -> Vec<BoltSession> {
+        let mut sessions: Vec<BoltSession> = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        sessions.sort_by_key(|session| session.connected_at);
+        sessions
     }
 
     /// Accept connections until `shutdown` resolves, one task per
@@ -209,7 +279,7 @@ async fn drain(
 /// `PULL`/`DISCARD` actually drained.
 fn pull_summary_metadata(
     has_more: bool,
-    lossy: Vec<graph_owl_lpg::LossyMapping>,
+    lossy: &[graph_owl_lpg::LossyMapping],
 ) -> Vec<(String, packstream::BoltValue)> {
     let mut metadata = vec![(
         "has_more".to_string(),
@@ -239,6 +309,11 @@ async fn handle_connection(mut socket: tokio::net::TcpStream, server: &BoltServe
     let mut read_buf = vec![0u8; 4096];
     let mut principal: Option<Principal> = None;
     let mut stream: Option<RecordReceiver> = None;
+    // Dropped at every one of this function's return points — including the
+    // ones below that never explicitly touch it — which is what removes the
+    // session from `server.sessions` on disconnect without repeating that
+    // call at each one.
+    let mut _session_guard: Option<SessionGuard> = None;
 
     loop {
         let Some(raw) = read_message(
@@ -308,6 +383,23 @@ async fn handle_connection(mut socket: tokio::net::TcpStream, server: &BoltServe
             ClientMessage::Hello { credentials, .. } => {
                 match server.auth.authenticate(&credentials).await {
                     Ok(resolved) => {
+                        let id = server.next_session_id.fetch_add(1, Ordering::Relaxed);
+                        server
+                            .sessions
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(
+                                id,
+                                BoltSession {
+                                    id,
+                                    principal: resolved.id.clone(),
+                                    connected_at: Utc::now(),
+                                },
+                            );
+                        _session_guard = Some(SessionGuard {
+                            sessions: Arc::clone(&server.sessions),
+                            id,
+                        });
                         principal = Some(resolved);
                         session.phase = Phase::Authed;
                         let _ = send(&mut socket, &ServerMessage::Success(vec![])).await;
@@ -370,7 +462,7 @@ async fn handle_connection(mut socket: tokio::net::TcpStream, server: &BoltServe
                         stream = Some(receiver);
                         let _ = send(
                             &mut socket,
-                            &ServerMessage::Success(pull_summary_metadata(true, lossy)),
+                            &ServerMessage::Success(pull_summary_metadata(true, &lossy)),
                         )
                         .await;
                     }
@@ -378,7 +470,7 @@ async fn handle_connection(mut socket: tokio::net::TcpStream, server: &BoltServe
                         session.phase = Phase::Authed;
                         let _ = send(
                             &mut socket,
-                            &ServerMessage::Success(pull_summary_metadata(false, lossy)),
+                            &ServerMessage::Success(pull_summary_metadata(false, &lossy)),
                         )
                         .await;
                     }
@@ -397,7 +489,7 @@ async fn handle_connection(mut socket: tokio::net::TcpStream, server: &BoltServe
                         stream = Some(receiver);
                         let _ = send(
                             &mut socket,
-                            &ServerMessage::Success(pull_summary_metadata(true, lossy)),
+                            &ServerMessage::Success(pull_summary_metadata(true, &lossy)),
                         )
                         .await;
                     }
@@ -405,7 +497,7 @@ async fn handle_connection(mut socket: tokio::net::TcpStream, server: &BoltServe
                         session.phase = Phase::Authed;
                         let _ = send(
                             &mut socket,
-                            &ServerMessage::Success(pull_summary_metadata(false, lossy)),
+                            &ServerMessage::Success(pull_summary_metadata(false, &lossy)),
                         )
                         .await;
                     }
@@ -462,7 +554,7 @@ mod tests {
     /// closes that gap rather than leaving it to an integration-only proof.
     #[test]
     fn an_empty_report_omits_the_notifications_key_entirely() {
-        let metadata = pull_summary_metadata(false, Vec::new());
+        let metadata = pull_summary_metadata(false, &[]);
         assert!(
             !has_key(&metadata, "notifications"),
             "an empty list must be no key at all, not an empty list: {metadata:?}"
@@ -476,7 +568,7 @@ mod tests {
             predicate: "properties".to_string(),
             from: "json",
         }];
-        let metadata = pull_summary_metadata(false, lossy);
+        let metadata = pull_summary_metadata(false, &lossy);
         let notifications = metadata
             .iter()
             .find(|(k, _)| k == "notifications")
@@ -495,12 +587,12 @@ mod tests {
     fn has_more_is_reported_regardless_of_whether_anything_was_lossy() {
         let with_loss = pull_summary_metadata(
             true,
-            vec![LossyMapping::RefInProperty {
+            &[LossyMapping::RefInProperty {
                 subject: "s".to_string(),
                 predicate: "p".to_string(),
             }],
         );
-        let without_loss = pull_summary_metadata(true, Vec::new());
+        let without_loss = pull_summary_metadata(true, &[]);
         assert_eq!(
             with_loss
                 .iter()
@@ -515,5 +607,123 @@ mod tests {
                 .map(|(_, v)| v.clone()),
             Some(packstream::BoltValue::Boolean(true))
         );
+    }
+
+    // ---- Epic 7d: session tracking for the admin status page ----
+    //
+    // `HELLO`-triggered insertion and disconnect-triggered removal need a
+    // real socket to drive `handle_connection`, so those are proven in
+    // `graph-owl-server`'s `tests/bolt.rs` against the real wire protocol,
+    // the same split Epic 7c's notification tests use. What is unit-testable
+    // here, cheaply and without a socket, is `BoltServer`'s own construction
+    // and read surface.
+
+    struct NoAuth;
+    #[async_trait::async_trait]
+    impl Authenticator for NoAuth {
+        async fn authenticate(
+            &self,
+            _credentials: &crate::auth::Credentials,
+        ) -> Result<Principal, crate::auth::AuthError> {
+            Err(crate::auth::AuthError::new("not used by this test"))
+        }
+    }
+
+    struct NoQueries;
+    #[async_trait::async_trait]
+    impl QueryEngine for NoQueries {
+        async fn run(
+            &self,
+            _principal: &Principal,
+            _query: &str,
+        ) -> Result<(crate::query::RunOutcome, RecordReceiver), QueryError> {
+            Err(QueryError::Refused("not used by this test".to_string()))
+        }
+    }
+
+    fn test_server(max_connections: usize) -> BoltServer {
+        BoltServer::new(
+            Arc::new(NoAuth),
+            Arc::new(NoQueries),
+            BoltLimits {
+                max_connections,
+                ..BoltLimits::default()
+            },
+        )
+    }
+
+    #[test]
+    fn a_freshly_constructed_server_has_no_sessions() {
+        assert_eq!(test_server(10).sessions(), Vec::new());
+    }
+
+    #[test]
+    fn max_connections_reflects_the_configured_limit() {
+        assert_eq!(test_server(42).max_connections(), 42);
+    }
+
+    /// A guard's removal must name its *own* session, never whichever one
+    /// happens to be last inserted — the bug a copy-pasted `HashMap::remove`
+    /// keyed on the wrong variable would produce, and indistinguishable from
+    /// correct with only one session ever open at a time.
+    #[test]
+    fn dropping_one_sessions_guard_leaves_the_others_registered() {
+        let server = test_server(10);
+        let first = SessionGuard {
+            sessions: Arc::clone(&server.sessions),
+            id: 1,
+        };
+        let _second = SessionGuard {
+            sessions: Arc::clone(&server.sessions),
+            id: 2,
+        };
+        server.sessions.lock().unwrap().insert(
+            1,
+            BoltSession {
+                id: 1,
+                principal: "alice".to_string(),
+                connected_at: Utc::now(),
+            },
+        );
+        server.sessions.lock().unwrap().insert(
+            2,
+            BoltSession {
+                id: 2,
+                principal: "bob".to_string(),
+                connected_at: Utc::now(),
+            },
+        );
+
+        drop(first);
+
+        let remaining = server.sessions();
+        assert_eq!(remaining.len(), 1, "{remaining:?}");
+        assert_eq!(remaining[0].principal, "bob");
+    }
+
+    #[test]
+    fn sessions_are_ordered_oldest_first() {
+        let server = test_server(10);
+        let now = Utc::now();
+        server.sessions.lock().unwrap().insert(
+            1,
+            BoltSession {
+                id: 1,
+                principal: "later".to_string(),
+                connected_at: now + chrono::Duration::seconds(10),
+            },
+        );
+        server.sessions.lock().unwrap().insert(
+            2,
+            BoltSession {
+                id: 2,
+                principal: "earlier".to_string(),
+                connected_at: now,
+            },
+        );
+
+        let sessions = server.sessions();
+        assert_eq!(sessions[0].principal, "earlier", "{sessions:?}");
+        assert_eq!(sessions[1].principal, "later", "{sessions:?}");
     }
 }

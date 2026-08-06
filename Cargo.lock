@@ -1210,6 +1210,7 @@ name = "graph-owl-bolt"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "graph-owl-core",
  "graph-owl-lpg",
  "thiserror 2.0.19",
