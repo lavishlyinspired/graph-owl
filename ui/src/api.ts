@@ -53,6 +53,45 @@ export interface Team {
   parentTeamId: string | null;
 }
 
+/** A glossary, as `GET /glossaries` returns it — Epic 24 Slice A. */
+export interface Glossary {
+  id: string;
+  name: string;
+  description: string | null;
+  fullyQualifiedName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type TermStatus = "draft" | "inReview" | "approved" | "deprecated";
+
+/** A glossary term, as `GET /glossary-terms/{id}` returns it — Epic 24
+ *  Slices A–C. `broader`/`narrower`/etc. are **not** carried here: they are
+ *  a separate `/relations` read (Epic 42's `vocabularyTree` builds the
+ *  hierarchy from that, not from this record). */
+export interface GlossaryTerm {
+  id: string;
+  glossaryId: string;
+  name: string;
+  fullyQualifiedName: string;
+  definition: string;
+  status: TermStatus;
+  synonyms: string[];
+  abbreviations: string[];
+  version: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One SKOS relation on a term, as `GET /glossary-terms/{id}/relations`
+ *  returns it — "every relation visible on this term, derived inverses
+ *  included" (server route table), so a term's own `broader` list already
+ *  reflects a relation another term declared pointing at it. */
+export interface SkosRelation {
+  kind: "broader" | "narrower" | "related" | "exactMatch" | "closeMatch";
+  target: string;
+}
+
 export interface Asset {
   id: string;
   kind: AssetKind;
@@ -565,4 +604,19 @@ export const api = {
     request<Explanation>(
       `/reasoning/explain?s=${encodeURIComponent(s)}&p=${encodeURIComponent(p)}&o=${encodeURIComponent(o)}`,
     ),
+
+  // ---- Epic 42 Slice A: the vocabulary browser (glossary first) ----
+
+  glossaries: () => request<Glossary[]>("/glossaries"),
+  glossary: (id: string) => request<Glossary>(`/glossaries/${id}`),
+  glossaryTerms: (glossaryId: string) =>
+    request<GlossaryTerm[]>(`/glossaries/${glossaryId}/terms`),
+  glossaryTerm: (id: string) => request<GlossaryTerm>(`/glossary-terms/${id}`),
+  /** A term's own relations — asserted and derived-inverse alike. The tree
+   *  (`features/vocabulary/vocabularyTree.ts`) is built entirely from the
+   *  `broader` entries this returns per term. */
+  termRelations: (id: string) => request<SkosRelation[]>(`/glossary-terms/${id}/relations`),
+  /** Every asset or column this term is attached to — the detail pane's
+   *  "assets carrying the term" list. */
+  termUsage: (id: string) => request<Page<string>>(`/glossary-terms/${id}/usage?limit=200`),
 };

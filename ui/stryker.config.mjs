@@ -34,5 +34,12 @@ export default {
     // deliberately excluded; it only calls these and draws the result.
     "src/trust/**/*.ts",
     "!src/trust/**/*.test.ts",
+    // `src/features/` (Epic 42): each vocabulary/queue's config file and its
+    // pure logic (tree-shaping, poly-hierarchy, cycle detection) is exactly
+    // the "decision a screen renders but does not make" this list already
+    // covers. `.tsx` component files stay excluded for the same reason as
+    // everywhere else in this list.
+    "src/features/**/*.ts",
+    "!src/features/**/*.test.ts",
   ],
 };

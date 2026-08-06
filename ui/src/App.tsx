@@ -49,6 +49,7 @@ import { theme as antdTheme } from "antd";
 import type { DataNode } from "antd/es/tree";
 import ApartmentOutlined from "@ant-design/icons/es/icons/ApartmentOutlined";
 import ArrowLeftOutlined from "@ant-design/icons/es/icons/ArrowLeftOutlined";
+import BookOutlined from "@ant-design/icons/es/icons/BookOutlined";
 import BulbOutlined from "@ant-design/icons/es/icons/BulbOutlined";
 import CheckCircleFilled from "@ant-design/icons/es/icons/CheckCircleFilled";
 import ClockCircleOutlined from "@ant-design/icons/es/icons/ClockCircleOutlined";
@@ -95,6 +96,7 @@ import {
   ProvenanceLabel,
   userTextDir,
 } from "./trust/TrustComponents";
+import { VocabularyBrowser } from "./features/vocabulary/VocabularyBrowser";
 import { hierarchy, type TeamNode } from "./admin/hierarchy";
 import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
 import {
@@ -155,7 +157,14 @@ import watermarkImg from "./assets/watermark1.png";
 const { Header, Sider, Content } = Layout;
 const { Text, Title, Paragraph } = Typography;
 
-type Section = "overview" | "explore" | "connectors" | "governance" | "workbench" | "admin";
+type Section =
+  | "overview"
+  | "explore"
+  | "connectors"
+  | "governance"
+  | "workbench"
+  | "vocabulary"
+  | "admin";
 
 const KIND_ICON: Record<AssetKind, React.ReactNode> = {
   service: <CloudServerOutlined />,
@@ -3919,11 +3928,14 @@ function AppShell() {
       named === "explore" ||
       named === "overview" ||
       named === "governance" ||
-      named === "workbench"
+      named === "workbench" ||
+      named === "vocabulary"
     ) {
       return named;
     }
-    return readParam("asset") ? "explore" : "overview";
+    if (readParam("asset")) return "explore";
+    if (readParam("vocabulary") || readParam("term")) return "vocabulary";
+    return "overview";
   });
   const setSection = useCallback((next: Section) => {
     setSectionRaw(next);
@@ -4316,6 +4328,7 @@ function AppShell() {
                     label: "Governance",
                   },
                   { key: "workbench", icon: <ThunderboltOutlined />, label: "Workbench" },
+                  { key: "vocabulary", icon: <BookOutlined />, label: "Vocabulary" },
                   { key: "connectors", icon: <PlusOutlined />, label: "Connectors" },
                   { key: "admin", icon: <TeamOutlined />, label: "Admin" },
                 ]}
@@ -4382,6 +4395,8 @@ function AppShell() {
                 <GovernancePage colors={colors} />
               ) : section === "workbench" ? (
                 <WorkbenchPage colors={colors} />
+              ) : section === "vocabulary" ? (
+                <VocabularyBrowser />
               ) : section === "connectors" ? (
                 <ConnectorsPage onDone={refresh} colors={colors} />
               ) : section === "admin" ? (

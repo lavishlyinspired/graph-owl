@@ -923,7 +923,7 @@ slice.
   slice deciding it as a side effect
 
 ### Epic 42 — Semantic surfaces
-- [ ] One vocabulary browser over glossary, tags, domains, packs
+- [~] One vocabulary browser over glossary, tags, domains, packs — **Slice A shipped, 7 August 2026**: `VocabularyBrowser.tsx` + `vocabularyTree.ts` on the glossary alone (poly-hierarchy, cycle marking, deep-linking, keyboard reachability, zero axe violations — full write-up in `42-ui-semantic-surfaces.md`). Slice B (classifications, domains, ontology packs through config alone, plus the structural no-branching test) is what actually proves this is one parameterized component rather than four bespoke screens; not yet built
 - [ ] One review queue over four proposal sources
 - [ ] Agent activity audit
 
