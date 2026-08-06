@@ -500,6 +500,106 @@ fn pack_override_from_row(
     })
 }
 
+fn thread_from_row(row: PgRow) -> graph_owl_core::collaboration::Thread {
+    graph_owl_core::collaboration::Thread {
+        id: row.get("id"),
+        about: row.get("about"),
+        field: row.get("field"),
+        created_by: row.get("created_by"),
+        created_at: row.get("created_at"),
+        resolved: row.get("resolved"),
+        resolved_by: row.get("resolved_by"),
+        resolved_at: row.get("resolved_at"),
+    }
+}
+
+fn post_from_row(row: PgRow) -> graph_owl_core::collaboration::Post {
+    graph_owl_core::collaboration::Post {
+        id: row.get("id"),
+        thread_id: row.get("thread_id"),
+        author: row.get("author"),
+        message: row.get("message"),
+        created_at: row.get("created_at"),
+        edited_at: row.get("edited_at"),
+        deleted: row.get("deleted"),
+    }
+}
+
+// Named `change_proposal_*` rather than `proposal_*` — Epic 32 already
+// defines `proposal_status_str`/`proposal_status_from_str` for
+// `graph_owl_authz::agent::ProposalStatus` in this same module. Same
+// collision as `Storage::insert_change_proposal` and friends; see that
+// trait method's own comment.
+fn change_proposal_status_str(
+    status: graph_owl_core::collaboration::ProposalStatus,
+) -> &'static str {
+    status.as_str()
+}
+
+fn change_proposal_status_from_str(
+    value: &str,
+) -> Result<graph_owl_core::collaboration::ProposalStatus, StorageError> {
+    use graph_owl_core::collaboration::ProposalStatus;
+    match value {
+        "pending" => Ok(ProposalStatus::Pending),
+        "accepted" => Ok(ProposalStatus::Accepted),
+        "rejected" => Ok(ProposalStatus::Rejected),
+        other => Err(StorageError::Unexpected(format!(
+            "unknown proposal status '{other}' in proposals"
+        ))),
+    }
+}
+
+fn change_proposal_from_row(
+    row: PgRow,
+) -> Result<graph_owl_core::collaboration::Proposal, StorageError> {
+    Ok(graph_owl_core::collaboration::Proposal {
+        id: row.get("id"),
+        about: row.get("about"),
+        field: row.get("field"),
+        current_value: row.get("current_value"),
+        proposed_value: row.get("proposed_value"),
+        rationale: row.get("rationale"),
+        status: change_proposal_status_from_str(row.get::<&str, _>("status"))?,
+        proposed_by: row.get("proposed_by"),
+        decided_by: row.get("decided_by"),
+        decided_at: row.get("decided_at"),
+        decision_reason: row.get("decision_reason"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn announcement_from_row(row: PgRow) -> graph_owl_core::collaboration::Announcement {
+    graph_owl_core::collaboration::Announcement {
+        id: row.get("id"),
+        about: row.get("about"),
+        message: row.get("message"),
+        starts_at: row.get("starts_at"),
+        ends_at: row.get("ends_at"),
+        created_by: row.get("created_by"),
+        created_at: row.get("created_at"),
+    }
+}
+
+fn reaction_kind_str(kind: graph_owl_core::collaboration::ReactionKind) -> &'static str {
+    kind.as_str()
+}
+
+fn reaction_kind_from_str(
+    value: &str,
+) -> Result<graph_owl_core::collaboration::ReactionKind, StorageError> {
+    use graph_owl_core::collaboration::ReactionKind;
+    match value {
+        "helpful" => Ok(ReactionKind::Helpful),
+        "agree" => Ok(ReactionKind::Agree),
+        "disagree" => Ok(ReactionKind::Disagree),
+        "question" => Ok(ReactionKind::Question),
+        other => Err(StorageError::Unexpected(format!(
+            "unknown reaction kind '{other}' in reactions"
+        ))),
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn relationship_from_row(row: PgRow) -> Relationship {
     Relationship {
@@ -9005,6 +9105,632 @@ impl Storage for PostgresStorage {
             .await
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
         Ok(result.rows_affected() > 0)
+    }
+
+    // ---- Epic 35 Slice A: threads and replies ----
+
+    async fn insert_thread(
+        &self,
+        thread: graph_owl_core::collaboration::Thread,
+    ) -> Result<graph_owl_core::collaboration::Thread, StorageError> {
+        let row = sqlx::query(
+            "INSERT INTO threads (id, about, field, created_by, created_at, resolved, resolved_by, resolved_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING *",
+        )
+        .bind(thread.id)
+        .bind(thread.about)
+        .bind(&thread.field)
+        .bind(&thread.created_by)
+        .bind(thread.created_at)
+        .bind(thread.resolved)
+        .bind(&thread.resolved_by)
+        .bind(thread.resolved_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(thread_from_row(row))
+    }
+
+    async fn get_thread(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::collaboration::Thread>, StorageError> {
+        let row = sqlx::query("SELECT * FROM threads WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(thread_from_row))
+    }
+
+    async fn list_threads(
+        &self,
+        about: Uuid,
+        resolved: Option<bool>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Thread>, i64), StorageError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(offset).unwrap_or(0);
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM threads WHERE about = $1 AND ($2::boolean IS NULL OR resolved = $2)",
+        )
+        .bind(about)
+        .bind(resolved)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let rows = sqlx::query(
+            "SELECT * FROM threads
+             WHERE about = $1 AND ($2::boolean IS NULL OR resolved = $2)
+             ORDER BY created_at DESC, id
+             LIMIT $3 OFFSET $4",
+        )
+        .bind(about)
+        .bind(resolved)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok((rows.into_iter().map(thread_from_row).collect(), total))
+    }
+
+    async fn insert_post(
+        &self,
+        post: graph_owl_core::collaboration::Post,
+    ) -> Result<graph_owl_core::collaboration::Post, StorageError> {
+        let row = sqlx::query(
+            "INSERT INTO posts (id, thread_id, author, message, created_at, edited_at, deleted)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING *",
+        )
+        .bind(post.id)
+        .bind(post.thread_id)
+        .bind(&post.author)
+        .bind(&post.message)
+        .bind(post.created_at)
+        .bind(post.edited_at)
+        .bind(post.deleted)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(post_from_row(row))
+    }
+
+    async fn get_post(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::collaboration::Post>, StorageError> {
+        let row = sqlx::query("SELECT * FROM posts WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(post_from_row))
+    }
+
+    async fn list_posts(
+        &self,
+        thread_id: Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Post>, i64), StorageError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(offset).unwrap_or(0);
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM posts WHERE thread_id = $1")
+            .bind(thread_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let rows = sqlx::query(
+            "SELECT * FROM posts WHERE thread_id = $1 ORDER BY created_at, id LIMIT $2 OFFSET $3",
+        )
+        .bind(thread_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok((rows.into_iter().map(post_from_row).collect(), total))
+    }
+
+    async fn update_post(
+        &self,
+        id: Uuid,
+        message: &str,
+        edited_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<graph_owl_core::collaboration::Post>, StorageError> {
+        let row =
+            sqlx::query("UPDATE posts SET message = $2, edited_at = $3 WHERE id = $1 RETURNING *")
+                .bind(id)
+                .bind(message)
+                .bind(edited_at)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(post_from_row))
+    }
+
+    async fn delete_post(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("UPDATE posts SET deleted = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ---- Epic 35 Slice B: threads resolve ----
+
+    async fn resolve_thread(
+        &self,
+        id: Uuid,
+        resolved_by: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<graph_owl_core::collaboration::Thread>, StorageError> {
+        let row = sqlx::query(
+            "UPDATE threads SET resolved = TRUE, resolved_by = $2, resolved_at = $3
+             WHERE id = $1
+             RETURNING *",
+        )
+        .bind(id)
+        .bind(resolved_by)
+        .bind(at)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(thread_from_row))
+    }
+
+    async fn reopen_thread(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::collaboration::Thread>, StorageError> {
+        let row = sqlx::query(
+            "UPDATE threads SET resolved = FALSE, resolved_by = NULL, resolved_at = NULL
+             WHERE id = $1
+             RETURNING *",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.map(thread_from_row))
+    }
+
+    async fn unresolved_thread_count(&self, about: Uuid) -> Result<i64, StorageError> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM threads WHERE about = $1 AND NOT resolved")
+            .bind(about)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    // ---- Epic 35 Slice C: change proposals ----
+
+    async fn insert_change_proposal(
+        &self,
+        proposal: graph_owl_core::collaboration::Proposal,
+    ) -> Result<graph_owl_core::collaboration::Proposal, StorageError> {
+        let row = sqlx::query(
+            "INSERT INTO proposals
+                (id, about, field, current_value, proposed_value, rationale, status,
+                 proposed_by, decided_by, decided_at, decision_reason, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             RETURNING *",
+        )
+        .bind(proposal.id)
+        .bind(proposal.about)
+        .bind(&proposal.field)
+        .bind(&proposal.current_value)
+        .bind(&proposal.proposed_value)
+        .bind(&proposal.rationale)
+        .bind(change_proposal_status_str(proposal.status))
+        .bind(&proposal.proposed_by)
+        .bind(&proposal.decided_by)
+        .bind(proposal.decided_at)
+        .bind(&proposal.decision_reason)
+        .bind(proposal.created_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        change_proposal_from_row(row)
+    }
+
+    async fn get_change_proposal(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::collaboration::Proposal>, StorageError> {
+        let row = sqlx::query("SELECT * FROM proposals WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        row.map(change_proposal_from_row).transpose()
+    }
+
+    async fn list_change_proposals_for_entity(
+        &self,
+        about: Uuid,
+        status: Option<graph_owl_core::collaboration::ProposalStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), StorageError> {
+        let status_str = status.map(change_proposal_status_str);
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(offset).unwrap_or(0);
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM proposals WHERE about = $1 AND ($2::text IS NULL OR status = $2)",
+        )
+        .bind(about)
+        .bind(status_str)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let rows = sqlx::query(
+            "SELECT * FROM proposals
+             WHERE about = $1 AND ($2::text IS NULL OR status = $2)
+             ORDER BY created_at DESC, id
+             LIMIT $3 OFFSET $4",
+        )
+        .bind(about)
+        .bind(status_str)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let proposals = rows
+            .into_iter()
+            .map(change_proposal_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((proposals, total))
+    }
+
+    async fn list_change_proposals_by_user(
+        &self,
+        proposed_by: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), StorageError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(offset).unwrap_or(0);
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM proposals WHERE proposed_by = $1")
+                .bind(proposed_by)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let rows = sqlx::query(
+            "SELECT * FROM proposals WHERE proposed_by = $1 ORDER BY created_at DESC, id LIMIT $2 OFFSET $3",
+        )
+        .bind(proposed_by)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let proposals = rows
+            .into_iter()
+            .map(change_proposal_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((proposals, total))
+    }
+
+    async fn decide_change_proposal(
+        &self,
+        id: Uuid,
+        status: graph_owl_core::collaboration::ProposalStatus,
+        decided_by: &str,
+        decided_at: chrono::DateTime<chrono::Utc>,
+        decision_reason: Option<String>,
+    ) -> Result<Option<graph_owl_core::collaboration::Proposal>, StorageError> {
+        let row = sqlx::query(
+            "UPDATE proposals
+             SET status = $2, decided_by = $3, decided_at = $4, decision_reason = $5
+             WHERE id = $1 AND status = 'pending'
+             RETURNING *",
+        )
+        .bind(id)
+        .bind(change_proposal_status_str(status))
+        .bind(decided_by)
+        .bind(decided_at)
+        .bind(&decision_reason)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        match row {
+            Some(row) => Ok(Some(change_proposal_from_row(row)?)),
+            None => self.get_change_proposal(id).await,
+        }
+    }
+
+    // ---- Epic 35 Slice D: announcements ----
+
+    async fn insert_announcement(
+        &self,
+        announcement: graph_owl_core::collaboration::Announcement,
+    ) -> Result<graph_owl_core::collaboration::Announcement, StorageError> {
+        let row = sqlx::query(
+            "INSERT INTO announcements (id, about, message, starts_at, ends_at, created_by, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING *",
+        )
+        .bind(announcement.id)
+        .bind(announcement.about)
+        .bind(&announcement.message)
+        .bind(announcement.starts_at)
+        .bind(announcement.ends_at)
+        .bind(&announcement.created_by)
+        .bind(announcement.created_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(announcement_from_row(row))
+    }
+
+    async fn active_announcements(
+        &self,
+        about_ids: &[Uuid],
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<graph_owl_core::collaboration::Announcement>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT * FROM announcements
+             WHERE about = ANY($1) AND starts_at <= $2 AND ends_at > $2
+             ORDER BY starts_at DESC",
+        )
+        .bind(about_ids)
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.into_iter().map(announcement_from_row).collect())
+    }
+
+    async fn list_announcements(
+        &self,
+        about: Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Announcement>, i64), StorageError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(offset).unwrap_or(0);
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM announcements WHERE about = $1")
+            .bind(about)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let rows = sqlx::query(
+            "SELECT * FROM announcements WHERE about = $1 ORDER BY starts_at DESC LIMIT $2 OFFSET $3",
+        )
+        .bind(about)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok((rows.into_iter().map(announcement_from_row).collect(), total))
+    }
+
+    // ---- Epic 35 Slice E: reactions ----
+
+    async fn has_reacted(
+        &self,
+        post_id: Uuid,
+        user_id: &str,
+        kind: graph_owl_core::collaboration::ReactionKind,
+    ) -> Result<bool, StorageError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM reactions WHERE post_id = $1 AND user_id = $2 AND kind = $3",
+        )
+        .bind(post_id)
+        .bind(user_id)
+        .bind(reaction_kind_str(kind))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(count > 0)
+    }
+
+    async fn add_reaction(
+        &self,
+        post_id: Uuid,
+        user_id: &str,
+        kind: graph_owl_core::collaboration::ReactionKind,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO reactions (post_id, user_id, kind) VALUES ($1, $2, $3)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(post_id)
+        .bind(user_id)
+        .bind(reaction_kind_str(kind))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn remove_reaction(
+        &self,
+        post_id: Uuid,
+        user_id: &str,
+        kind: graph_owl_core::collaboration::ReactionKind,
+    ) -> Result<bool, StorageError> {
+        let result =
+            sqlx::query("DELETE FROM reactions WHERE post_id = $1 AND user_id = $2 AND kind = $3")
+                .bind(post_id)
+                .bind(user_id)
+                .bind(reaction_kind_str(kind))
+                .execute(&self.pool)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn reaction_counts(
+        &self,
+        post_id: Uuid,
+    ) -> Result<Vec<(graph_owl_core::collaboration::ReactionKind, i64)>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT kind, COUNT(*) AS reaction_count FROM reactions WHERE post_id = $1 GROUP BY kind",
+        )
+        .bind(post_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    reaction_kind_from_str(row.get::<&str, _>("kind"))?,
+                    row.get("reaction_count"),
+                ))
+            })
+            .collect()
+    }
+
+    // ---- Epic 35 Slice F: the activity feed ----
+
+    async fn collaboration_activity_for_entity(
+        &self,
+        about: Uuid,
+        limit: usize,
+    ) -> Result<Vec<graph_owl_storage::ActivityRow>, StorageError> {
+        use graph_owl_core::collaboration::ActivityKind;
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+
+        let mut items = Vec::new();
+
+        let thread_rows = sqlx::query(
+            "SELECT id, created_at, created_by, COALESCE(field, 'general') AS summary
+             FROM threads WHERE about = $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(about)
+        .bind(limit_i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        for row in thread_rows {
+            items.push(graph_owl_storage::ActivityRow {
+                kind: ActivityKind::ThreadStarted,
+                occurred_at: row.get("created_at"),
+                id: row.get("id"),
+                actor: row.get("created_by"),
+                summary: row.get("summary"),
+            });
+        }
+
+        let resolved_rows = sqlx::query(
+            "SELECT id, resolved_at, resolved_by
+             FROM threads WHERE about = $1 AND resolved AND resolved_at IS NOT NULL
+             ORDER BY resolved_at DESC LIMIT $2",
+        )
+        .bind(about)
+        .bind(limit_i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        for row in resolved_rows {
+            items.push(graph_owl_storage::ActivityRow {
+                kind: ActivityKind::ThreadResolved,
+                occurred_at: row.get("resolved_at"),
+                id: row.get("id"),
+                actor: row
+                    .get::<Option<String>, _>("resolved_by")
+                    .unwrap_or_default(),
+                summary: "resolved".to_string(),
+            });
+        }
+
+        let post_rows = sqlx::query(
+            "SELECT p.id AS id, p.created_at AS created_at, p.author AS author, p.message AS message
+             FROM posts p JOIN threads t ON t.id = p.thread_id
+             WHERE t.about = $1 AND NOT p.deleted
+             ORDER BY p.created_at DESC LIMIT $2",
+        )
+        .bind(about)
+        .bind(limit_i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        for row in post_rows {
+            let message: String = row.get("message");
+            items.push(graph_owl_storage::ActivityRow {
+                kind: ActivityKind::PostAdded,
+                occurred_at: row.get("created_at"),
+                id: row.get("id"),
+                actor: row.get("author"),
+                summary: message.chars().take(120).collect(),
+            });
+        }
+
+        let proposal_rows = sqlx::query(
+            "SELECT id, created_at, proposed_by, field FROM proposals
+             WHERE about = $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(about)
+        .bind(limit_i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        for row in proposal_rows {
+            items.push(graph_owl_storage::ActivityRow {
+                kind: ActivityKind::ProposalCreated,
+                occurred_at: row.get("created_at"),
+                id: row.get("id"),
+                actor: row.get("proposed_by"),
+                summary: row.get("field"),
+            });
+        }
+
+        let decided_rows = sqlx::query(
+            "SELECT id, decided_at, decided_by, status FROM proposals
+             WHERE about = $1 AND decided_at IS NOT NULL ORDER BY decided_at DESC LIMIT $2",
+        )
+        .bind(about)
+        .bind(limit_i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        for row in decided_rows {
+            items.push(graph_owl_storage::ActivityRow {
+                kind: ActivityKind::ProposalDecided,
+                occurred_at: row
+                    .get::<Option<chrono::DateTime<chrono::Utc>>, _>("decided_at")
+                    .unwrap_or_default(),
+                id: row.get("id"),
+                actor: row
+                    .get::<Option<String>, _>("decided_by")
+                    .unwrap_or_default(),
+                summary: row.get::<&str, _>("status").to_string(),
+            });
+        }
+
+        let announcement_rows = sqlx::query(
+            "SELECT id, created_at, created_by, message FROM announcements
+             WHERE about = $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(about)
+        .bind(limit_i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        for row in announcement_rows {
+            let message: String = row.get("message");
+            items.push(graph_owl_storage::ActivityRow {
+                kind: ActivityKind::AnnouncementCreated,
+                occurred_at: row.get("created_at"),
+                id: row.get("id"),
+                actor: row.get("created_by"),
+                summary: message.chars().take(120).collect(),
+            });
+        }
+
+        items.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at).then(b.id.cmp(&a.id)));
+        items.truncate(limit);
+        Ok(items)
     }
 
     async fn force_delete_custom_property(

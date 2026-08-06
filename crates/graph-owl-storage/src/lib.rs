@@ -19,6 +19,21 @@ use graph_owl_ontology::pack::{OntologyPack, PackOverride};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// One row of [`Storage::collaboration_activity_for_entity`] — enough for
+/// the facade to build an [`graph_owl_core::collaboration::ActivityKind`]
+/// feed entry without a second read per row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActivityRow {
+    pub kind: graph_owl_core::collaboration::ActivityKind,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+    /// The underlying thread/post/proposal/announcement id.
+    pub id: Uuid,
+    pub actor: String,
+    /// A short human summary — the post's opening words, the proposal's
+    /// field, the announcement's message.
+    pub summary: String,
+}
+
 /// A user as stored. Distinct from `Principal`, which is the request-scoped
 /// view: this is the record, that is the claim about who is asking.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +155,12 @@ pub enum ConflictKind {
     /// of this pack's terms — Epic 33 Slice E. Removing the referenced
     /// pack would leave the other pack's assertion pointing at nothing.
     PackReferencedExternally,
+    /// A thread was already resolved — Epic 35 Slice B. Resolving twice
+    /// would overwrite who resolved it and when.
+    ThreadAlreadyResolved,
+    /// A change proposal was already accepted or rejected — Epic 35 Slice
+    /// C. A second decision must not flip the first one.
+    ChangeProposalAlreadyDecided,
 }
 
 #[derive(Debug, Error)]
@@ -3063,6 +3084,255 @@ pub trait Storage: Send + Sync {
     /// # Errors
     /// [`StorageError::Unexpected`] if the write fails.
     async fn delete_pack_override(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    // ---- Epic 35 Slice A: threads and replies ----
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn insert_thread(
+        &self,
+        thread: graph_owl_core::collaboration::Thread,
+    ) -> Result<graph_owl_core::collaboration::Thread, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_thread(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::collaboration::Thread>, StorageError>;
+
+    /// `resolved` filters when `Some`; `None` returns both.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_threads(
+        &self,
+        about: Uuid,
+        resolved: Option<bool>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Thread>, i64), StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn insert_post(
+        &self,
+        post: graph_owl_core::collaboration::Post,
+    ) -> Result<graph_owl_core::collaboration::Post, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_post(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::collaboration::Post>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_posts(
+        &self,
+        thread_id: Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Post>, i64), StorageError>;
+
+    /// Replaces a post's message and stamps `edited_at`.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn update_post(
+        &self,
+        id: Uuid,
+        message: &str,
+        edited_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<graph_owl_core::collaboration::Post>, StorageError>;
+
+    /// Tombstones a post — `deleted = true`, structure preserved.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn delete_post(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    // ---- Epic 35 Slice B: threads resolve ----
+
+    /// `None` if the thread does not exist. Not itself conditional on
+    /// current state — the facade checks "already resolved" before
+    /// calling this, matching this trait's usual split between authz/state
+    /// checks (facade) and the write itself (storage).
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn resolve_thread(
+        &self,
+        id: Uuid,
+        resolved_by: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<graph_owl_core::collaboration::Thread>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn reopen_thread(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::collaboration::Thread>, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn unresolved_thread_count(&self, about: Uuid) -> Result<i64, StorageError>;
+
+    // ---- Epic 35 Slice C: change proposals ----
+
+    // These are named `*_change_proposal*` rather than the shorter
+    // `*_proposal*` because Epic 32 already put `create_proposal` /
+    // `get_proposal` / `list_proposals` / `decide_proposal` on this same
+    // trait for `graph_owl_authz::agent::Proposal` — a different kind of
+    // proposal (an agent's pending action). The two are unrelated
+    // concepts that happen to share an English word; a genuine naming
+    // collision on the same trait, not a cosmetic one.
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn insert_change_proposal(
+        &self,
+        proposal: graph_owl_core::collaboration::Proposal,
+    ) -> Result<graph_owl_core::collaboration::Proposal, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_change_proposal(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::collaboration::Proposal>, StorageError>;
+
+    /// `status` filters when `Some`; `None` returns every status.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_change_proposals_for_entity(
+        &self,
+        about: Uuid,
+        status: Option<graph_owl_core::collaboration::ProposalStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_change_proposals_by_user(
+        &self,
+        proposed_by: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), StorageError>;
+
+    /// Atomic and one-shot: `WHERE status = 'pending'` in the same
+    /// statement, so a second decide call cannot flip an already-decided
+    /// proposal — the same pattern `decide_review_queue_entry` (Epic 17)
+    /// and `decide_drift` (Epic 20) already use.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn decide_change_proposal(
+        &self,
+        id: Uuid,
+        status: graph_owl_core::collaboration::ProposalStatus,
+        decided_by: &str,
+        decided_at: chrono::DateTime<chrono::Utc>,
+        decision_reason: Option<String>,
+    ) -> Result<Option<graph_owl_core::collaboration::Proposal>, StorageError>;
+
+    // ---- Epic 35 Slice D: announcements ----
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn insert_announcement(
+        &self,
+        announcement: graph_owl_core::collaboration::Announcement,
+    ) -> Result<graph_owl_core::collaboration::Announcement, StorageError>;
+
+    /// Every announcement active at `now` for any of `about_ids` —
+    /// `about_ids` is the entity plus every ancestor
+    /// (`Storage::ancestors_of`), which is what makes a container's
+    /// announcement visible on its descendants without storing it once per
+    /// descendant.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn active_announcements(
+        &self,
+        about_ids: &[Uuid],
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<graph_owl_core::collaboration::Announcement>, StorageError>;
+
+    /// Every announcement ever posted against exactly `about` — retained,
+    /// not filtered by window, for listing/audit.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_announcements(
+        &self,
+        about: Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Announcement>, i64), StorageError>;
+
+    // ---- Epic 35 Slice E: reactions ----
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn has_reacted(
+        &self,
+        post_id: Uuid,
+        user_id: &str,
+        kind: graph_owl_core::collaboration::ReactionKind,
+    ) -> Result<bool, StorageError>;
+
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn add_reaction(
+        &self,
+        post_id: Uuid,
+        user_id: &str,
+        kind: graph_owl_core::collaboration::ReactionKind,
+    ) -> Result<(), StorageError>;
+
+    /// `false` if it did not exist.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn remove_reaction(
+        &self,
+        post_id: Uuid,
+        user_id: &str,
+        kind: graph_owl_core::collaboration::ReactionKind,
+    ) -> Result<bool, StorageError>;
+
+    /// Every reaction kind on a post that has at least one, with its count.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn reaction_counts(
+        &self,
+        post_id: Uuid,
+    ) -> Result<Vec<(graph_owl_core::collaboration::ReactionKind, i64)>, StorageError>;
+
+    // ---- Epic 35 Slice F: the activity feed ----
+
+    /// Every collaboration event — threads started/resolved, posts,
+    /// proposals created/decided, announcements created — for one entity,
+    /// in the window `[since, until)`. **Excludes Epic 3 change events**,
+    /// which the facade merges in separately from
+    /// [`Storage::asset_versions`] — that table already exists and is
+    /// already exposed; duplicating its rows into this method would be a
+    /// second source of truth for the same facts.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn collaboration_activity_for_entity(
+        &self,
+        about: Uuid,
+        limit: usize,
+    ) -> Result<Vec<ActivityRow>, StorageError>;
 
     // ---- Epic 30: quality signals ----
 

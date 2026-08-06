@@ -310,6 +310,47 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             delete(delete_pack_override),
         )
         .route("/ontology-packs/{id}/upgrade", post(upgrade_pack))
+        // Epic 35: collaboration.
+        .route("/assets/{id}/threads", get(list_threads).post(start_thread))
+        .route("/threads/{id}/posts", get(list_posts).post(reply_to_thread))
+        .route("/threads/{id}/resolve", post(resolve_thread))
+        .route("/threads/{id}/reopen", post(reopen_thread))
+        .route("/posts/{id}", patch(edit_post).delete(delete_post))
+        .route(
+            "/posts/{id}/reactions",
+            get(reaction_counts).post(toggle_reaction),
+        )
+        // `/change-proposals`, not `/proposals` — Epic 32 already owns
+        // `/proposals`, `/proposals/{id}/accept` and `/proposals/{id}/reject`
+        // for `graph_owl_authz::agent::Proposal` (an agent's pending
+        // action), and axum panics at startup on an overlapping route
+        // rather than silently shadowing one. Same collision, same fix, as
+        // this slice's storage and facade layers.
+        .route(
+            "/assets/{id}/change-proposals",
+            get(list_change_proposals_for_entity).post(propose_change),
+        )
+        .route(
+            "/users/{id}/change-proposals",
+            get(list_change_proposals_by_user),
+        )
+        .route(
+            "/change-proposals/{id}/accept",
+            post(accept_change_proposal),
+        )
+        .route(
+            "/change-proposals/{id}/reject",
+            post(reject_change_proposal),
+        )
+        .route(
+            "/assets/{id}/announcements",
+            get(list_announcements).post(create_announcement),
+        )
+        .route(
+            "/assets/{id}/announcements/active",
+            get(active_announcements),
+        )
+        .route("/assets/{id}/activity", get(entity_activity))
         // `/business-metrics`, not `/metrics` — that path is already the
         // Prometheus exposition endpoint (Epic 10), and axum panics at
         // startup on a duplicate route rather than silently shadowing one.
@@ -1396,6 +1437,14 @@ impl AppError {
                 kind: ConflictKind::PackReferencedExternally,
                 ..
             } => "pack-referenced-externally",
+            AppError::Conflict {
+                kind: ConflictKind::ThreadAlreadyResolved,
+                ..
+            } => "thread-already-resolved",
+            AppError::Conflict {
+                kind: ConflictKind::ChangeProposalAlreadyDecided,
+                ..
+            } => "change-proposal-already-decided",
         }
     }
 
@@ -1507,6 +1556,14 @@ impl AppError {
                 kind: ConflictKind::PackReferencedExternally,
                 ..
             } => "Another pack references a term in this pack",
+            AppError::Conflict {
+                kind: ConflictKind::ThreadAlreadyResolved,
+                ..
+            } => "This thread has already been resolved",
+            AppError::Conflict {
+                kind: ConflictKind::ChangeProposalAlreadyDecided,
+                ..
+            } => "This proposal has already been decided",
         }
     }
 
@@ -1662,6 +1719,16 @@ impl AppError {
             } => detail.clone(),
             AppError::Conflict {
                 kind: ConflictKind::PackReferencedExternally,
+                detail,
+                ..
+            } => detail.clone(),
+            AppError::Conflict {
+                kind: ConflictKind::ThreadAlreadyResolved,
+                detail,
+                ..
+            } => detail.clone(),
+            AppError::Conflict {
+                kind: ConflictKind::ChangeProposalAlreadyDecided,
                 detail,
                 ..
             } => detail.clone(),
@@ -4494,6 +4561,422 @@ async fn remove_pack(
     }
     let report = catalog.remove_pack(&principal, id, query.force).await?;
     Ok(Json(report))
+}
+
+// ---- Epic 35: collaboration ----
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct StartThreadRequest {
+    #[serde(default)]
+    field: Option<String>,
+    message: String,
+}
+
+impl ValidateBody for StartThreadRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("message"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// `POST /assets/{id}/threads` — Slice A. The opening message is the
+/// thread's first post; both are created together and returned together.
+async fn start_thread(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<StartThreadRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let (thread, post) = catalog
+        .start_thread(&principal, id, payload.field, payload.message)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "thread": thread, "post": post })),
+    ))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListThreadsQuery {
+    resolved: Option<bool>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
+}
+
+async fn list_threads(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<ListThreadsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    let (threads, total) = catalog
+        .list_threads(
+            &principal,
+            id,
+            query.resolved,
+            limit,
+            query.offset.unwrap_or(0),
+        )
+        .await?;
+    Ok(Json(json!({ "data": threads, "total": total })))
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ReplyRequest {
+    message: String,
+}
+
+impl ValidateBody for ReplyRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("message"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+async fn reply_to_thread(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<ReplyRequest>,
+) -> Result<(StatusCode, Json<graph_owl_core::collaboration::Post>), AppError> {
+    let post = catalog
+        .reply_to_thread(&principal, id, payload.message)
+        .await?;
+    Ok((StatusCode::CREATED, Json(post)))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListQueryPage {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
+}
+
+async fn list_posts(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<ListQueryPage>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    let (posts, total) = catalog
+        .list_posts(&principal, id, limit, query.offset.unwrap_or(0))
+        .await?;
+    Ok(Json(json!({ "data": posts, "total": total })))
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct EditPostRequest {
+    message: String,
+}
+
+impl ValidateBody for EditPostRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("message"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+async fn edit_post(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<EditPostRequest>,
+) -> Result<Json<graph_owl_core::collaboration::Post>, AppError> {
+    let post = catalog.edit_post(&principal, id, payload.message).await?;
+    Ok(Json(post))
+}
+
+async fn delete_post(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    catalog.delete_post(&principal, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /threads/{id}/resolve` — Slice B.
+async fn resolve_thread(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_core::collaboration::Thread>, AppError> {
+    let thread = catalog.resolve_thread(&principal, id).await?;
+    Ok(Json(thread))
+}
+
+async fn reopen_thread(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_core::collaboration::Thread>, AppError> {
+    let thread = catalog.reopen_thread(&principal, id).await?;
+    Ok(Json(thread))
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ProposeChangeRequest {
+    field: String,
+    #[serde(default)]
+    current_value: Option<String>,
+    #[serde(default)]
+    proposed_value: Option<String>,
+    rationale: String,
+}
+
+impl ValidateBody for ProposeChangeRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("field"),
+            &mut errors,
+        );
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("rationale"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// `POST /assets/{id}/proposals` — Slice C. No write permission required
+/// to propose; that is the entire point.
+async fn propose_change(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<ProposeChangeRequest>,
+) -> Result<(StatusCode, Json<graph_owl_core::collaboration::Proposal>), AppError> {
+    let proposal = catalog
+        .propose_change(
+            &principal,
+            id,
+            payload.field,
+            payload.current_value,
+            payload.proposed_value,
+            payload.rationale,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(proposal)))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListProposalsQuery {
+    status: Option<graph_owl_core::collaboration::ProposalStatus>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
+}
+
+async fn list_change_proposals_for_entity(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<ListProposalsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    let (proposals, total) = catalog
+        .list_change_proposals_for_entity(id, query.status, limit, query.offset.unwrap_or(0))
+        .await?;
+    Ok(Json(json!({ "data": proposals, "total": total })))
+}
+
+async fn list_change_proposals_by_user(
+    State(catalog): State<Catalog>,
+    Path(user_id): Path<String>,
+    AppQuery(query): AppQuery<ListQueryPage>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    let (proposals, total) = catalog
+        .list_change_proposals_by_user(&user_id, limit, query.offset.unwrap_or(0))
+        .await?;
+    Ok(Json(json!({ "data": proposals, "total": total })))
+}
+
+async fn accept_change_proposal(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_core::collaboration::Proposal>, AppError> {
+    let proposal = catalog.accept_change_proposal(&principal, id).await?;
+    Ok(Json(proposal))
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct RejectProposalRequest {
+    reason: String,
+}
+
+impl ValidateBody for RejectProposalRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("reason"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+async fn reject_change_proposal(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<RejectProposalRequest>,
+) -> Result<Json<graph_owl_core::collaboration::Proposal>, AppError> {
+    let proposal = catalog
+        .reject_change_proposal(&principal, id, payload.reason)
+        .await?;
+    Ok(Json(proposal))
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct CreateAnnouncementRequest {
+    message: String,
+    starts_at: chrono::DateTime<chrono::Utc>,
+    ends_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl ValidateBody for CreateAnnouncementRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("message"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+async fn create_announcement(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<CreateAnnouncementRequest>,
+) -> Result<
+    (
+        StatusCode,
+        Json<graph_owl_core::collaboration::Announcement>,
+    ),
+    AppError,
+> {
+    let announcement = catalog
+        .create_announcement(
+            &principal,
+            id,
+            payload.message,
+            payload.starts_at,
+            payload.ends_at,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(announcement)))
+}
+
+async fn list_announcements(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<ListQueryPage>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    let (announcements, total) = catalog
+        .list_announcements(id, limit, query.offset.unwrap_or(0))
+        .await?;
+    Ok(Json(json!({ "data": announcements, "total": total })))
+}
+
+async fn active_announcements(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<graph_owl_core::collaboration::Announcement>>, AppError> {
+    Ok(Json(catalog.active_announcements(id).await?))
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct ReactionRequest {
+    kind: graph_owl_core::collaboration::ReactionKind,
+}
+
+async fn toggle_reaction(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<ReactionRequest>,
+) -> Result<Json<graph_owl_core::collaboration::ReactionAction>, AppError> {
+    let action = catalog
+        .toggle_reaction(&principal, id, payload.kind)
+        .await?;
+    Ok(Json(action))
+}
+
+async fn reaction_counts(
+    State(catalog): State<Catalog>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let counts = catalog.reaction_counts(id).await?;
+    Ok(Json(json!(
+        counts
+            .into_iter()
+            .map(|(kind, count)| json!({ "kind": kind, "count": count }))
+            .collect::<Vec<_>>()
+    )))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivityQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /assets/{id}/activity` — Slice F.
+async fn entity_activity(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<ActivityQuery>,
+) -> Result<Json<Vec<graph_owl_api::ActivityEntry>>, AppError> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    Ok(Json(catalog.entity_activity(&principal, id, limit).await?))
+}
+
+impl ValidateBody for ReactionRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
 }
 
 // ---- Epic 24 Slice E: Metric as a first-class entity ----

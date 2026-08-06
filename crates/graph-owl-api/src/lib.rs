@@ -119,6 +119,27 @@ pub struct PackRemovalReport {
     pub total_attachments: i64,
 }
 
+/// One entry in an entity's activity feed — Epic 35 Slice F. Merges Epic
+/// 3's own field-level changes with every collaboration event this facade
+/// adds, already in one shape so the HTTP layer does not need to know
+/// which source a row came from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityEntry {
+    /// Which kind of event this is.
+    pub kind: graph_owl_core::collaboration::ActivityKind,
+    /// When it happened.
+    pub occurred_at: DateTime<Utc>,
+    /// The underlying row's own id — a version has none of its own, so one
+    /// is derived deterministically from the asset id and version, stable
+    /// across repeated reads of the same feed.
+    pub id: Uuid,
+    /// Who did it.
+    pub actor: String,
+    /// A short human summary.
+    pub summary: String,
+}
+
 /// The request body for creating a table.
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -9578,6 +9599,686 @@ impl Catalog {
         self.storage.delete_pack(pack_id).await?;
 
         Ok(report)
+    }
+
+    // ---- Epic 35 Slice A: threads and replies ----
+
+    /// Starts a thread with its opening message, in one call — the plan's
+    /// own sketch shows a thread carrying a `message` directly, and this
+    /// is that experience over a normalized `Thread` + `Post` pair: the
+    /// opening message is simply the thread's first post.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if `about` does not exist. `Validation` if `field` is
+    /// given but empty. Deep per-entity-kind field-existence checking
+    /// ("this table has no such column") is not implemented — a scope cut
+    /// recorded in `35-collaboration.md` rather than silently assumed.
+    pub async fn start_thread(
+        &self,
+        principal: &Principal,
+        about: Uuid,
+        field: Option<String>,
+        message: String,
+    ) -> Result<
+        (
+            graph_owl_core::collaboration::Thread,
+            graph_owl_core::collaboration::Post,
+        ),
+        CatalogError,
+    > {
+        if self.storage.get_asset(about).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        if let Some(f) = &field
+            && f.trim().is_empty()
+        {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "field",
+                FieldErrorCode::Empty,
+                "an anchor field must not be empty".to_string(),
+            )]));
+        }
+        let now = Utc::now();
+        let thread = self
+            .storage
+            .insert_thread(graph_owl_core::collaboration::Thread {
+                id: Uuid::new_v4(),
+                about,
+                field,
+                created_by: principal.id.clone(),
+                created_at: now,
+                resolved: false,
+                resolved_by: None,
+                resolved_at: None,
+            })
+            .await?;
+        let post = self
+            .storage
+            .insert_post(graph_owl_core::collaboration::Post {
+                id: Uuid::new_v4(),
+                thread_id: thread.id,
+                author: principal.id.clone(),
+                message,
+                created_at: now,
+                edited_at: None,
+                deleted: false,
+            })
+            .await?;
+        Ok((thread, post))
+    }
+
+    /// # Errors
+    /// `NotFound` if the thread does not exist.
+    pub async fn reply_to_thread(
+        &self,
+        principal: &Principal,
+        thread_id: Uuid,
+        message: String,
+    ) -> Result<graph_owl_core::collaboration::Post, CatalogError> {
+        if self.storage.get_thread(thread_id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self
+            .storage
+            .insert_post(graph_owl_core::collaboration::Post {
+                id: Uuid::new_v4(),
+                thread_id,
+                author: principal.id.clone(),
+                message,
+                created_at: Utc::now(),
+                edited_at: None,
+                deleted: false,
+            })
+            .await?)
+    }
+
+    /// # Errors
+    /// `Storage` if the read fails.
+    pub async fn list_threads(
+        &self,
+        principal: &Principal,
+        about: Uuid,
+        resolved: Option<bool>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Thread>, i64), CatalogError> {
+        let _ = principal;
+        Ok(self
+            .storage
+            .list_threads(about, resolved, limit, offset)
+            .await?)
+    }
+
+    /// # Errors
+    /// `NotFound` if the thread does not exist.
+    pub async fn list_posts(
+        &self,
+        principal: &Principal,
+        thread_id: Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Post>, i64), CatalogError> {
+        let _ = principal;
+        if self.storage.get_thread(thread_id).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self.storage.list_posts(thread_id, limit, offset).await?)
+    }
+
+    /// # Errors
+    /// `NotFound` if the post does not exist. `Forbidden` if `principal`
+    /// is not its author, or the edit window has passed.
+    pub async fn edit_post(
+        &self,
+        principal: &Principal,
+        post_id: Uuid,
+        message: String,
+    ) -> Result<graph_owl_core::collaboration::Post, CatalogError> {
+        let Some(post) = self.storage.get_post(post_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        if !graph_owl_core::collaboration::can_edit_post(
+            &principal.id,
+            &post.author,
+            post.created_at,
+            Utc::now(),
+        ) {
+            return Err(CatalogError::Forbidden);
+        }
+        self.storage
+            .update_post(post_id, &message, Utc::now())
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    /// `NotFound` if the post does not exist. `Forbidden` if `principal`
+    /// is not its author.
+    pub async fn delete_post(
+        &self,
+        principal: &Principal,
+        post_id: Uuid,
+    ) -> Result<(), CatalogError> {
+        let Some(post) = self.storage.get_post(post_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        if post.author != principal.id {
+            return Err(CatalogError::Forbidden);
+        }
+        self.storage.delete_post(post_id).await?;
+        Ok(())
+    }
+
+    // ---- Epic 35 Slice B: threads resolve ----
+
+    /// # Errors
+    /// `NotFound` if the thread does not exist. `Conflict`
+    /// (`kind: ThreadAlreadyResolved`) if it already is. `Forbidden`
+    /// unless `principal` is the thread's author or an entity owner.
+    pub async fn resolve_thread(
+        &self,
+        principal: &Principal,
+        thread_id: Uuid,
+    ) -> Result<graph_owl_core::collaboration::Thread, CatalogError> {
+        let Some(thread) = self.storage.get_thread(thread_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        if thread.resolved {
+            return Err(CatalogError::Conflict {
+                detail: "this thread has already been resolved".to_string(),
+                existing_id: Some(thread_id),
+                kind: ConflictKind::ThreadAlreadyResolved,
+            });
+        }
+        let owners = self.owner_ids(thread.about).await?;
+        if !graph_owl_core::collaboration::can_resolve_thread(
+            &principal.id,
+            &thread.created_by,
+            &owners,
+        ) {
+            return Err(CatalogError::Forbidden);
+        }
+        self.storage
+            .resolve_thread(thread_id, &principal.id, Utc::now())
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    /// `NotFound` if the thread does not exist. `Forbidden` unless
+    /// `principal` is the thread's author or an entity owner.
+    pub async fn reopen_thread(
+        &self,
+        principal: &Principal,
+        thread_id: Uuid,
+    ) -> Result<graph_owl_core::collaboration::Thread, CatalogError> {
+        let Some(thread) = self.storage.get_thread(thread_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        let owners = self.owner_ids(thread.about).await?;
+        if !graph_owl_core::collaboration::can_resolve_thread(
+            &principal.id,
+            &thread.created_by,
+            &owners,
+        ) {
+            return Err(CatalogError::Forbidden);
+        }
+        self.storage
+            .reopen_thread(thread_id)
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    /// `Storage` if the read fails.
+    pub async fn unresolved_thread_count(&self, about: Uuid) -> Result<i64, CatalogError> {
+        Ok(self.storage.unresolved_thread_count(about).await?)
+    }
+
+    async fn owner_ids(&self, about: Uuid) -> Result<Vec<String>, CatalogError> {
+        Ok(self
+            .storage
+            .asset_owners(about)
+            .await?
+            .into_iter()
+            .map(|owner| owner.id)
+            .collect())
+    }
+
+    // ---- Epic 35 Slice C: change proposals ----
+
+    /// A proposer needs no write permission — the entire point (decision
+    /// in Slice C's own acceptance criteria).
+    ///
+    /// # Errors
+    /// `NotFound` if `about` does not exist.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn propose_change(
+        &self,
+        principal: &Principal,
+        about: Uuid,
+        field: String,
+        current_value: Option<String>,
+        proposed_value: Option<String>,
+        rationale: String,
+    ) -> Result<graph_owl_core::collaboration::Proposal, CatalogError> {
+        if self.storage.get_asset(about).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self
+            .storage
+            .insert_change_proposal(graph_owl_core::collaboration::Proposal {
+                id: Uuid::new_v4(),
+                about,
+                field,
+                current_value,
+                proposed_value,
+                rationale,
+                status: graph_owl_core::collaboration::ProposalStatus::Pending,
+                proposed_by: principal.id.clone(),
+                decided_by: None,
+                decided_at: None,
+                decision_reason: None,
+                created_at: Utc::now(),
+            })
+            .await?)
+    }
+
+    /// Applies the proposed value, **attributed to the proposer** —
+    /// decision 3, achieved for free because `Storage::update_asset`
+    /// already takes `updated_by` as its own parameter, separate from
+    /// whichever principal is calling; no attribution-specific plumbing
+    /// was needed beyond passing the right string.
+    ///
+    /// **Only `description` is applicable**, the same honest scope this
+    /// project already gives Epic 33's `apply_drift` — the plan's own
+    /// examples (description, tags, owners, custom properties) are a
+    /// larger surface than one slice justifies building at once.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the proposal does not exist. `Conflict`
+    /// (`kind: ChangeProposalAlreadyDecided`) if it was already decided.
+    /// `Forbidden` unless `principal` is an entity owner or admin.
+    /// `PreconditionFailed` if the field's live value no longer matches
+    /// what the proposal was made against — Epic 3's `If-Match` semantics,
+    /// reused rather than reinvented: applying blind would silently
+    /// discard whatever changed the field in between. `Validation` if the
+    /// field is not one `accept` can apply.
+    ///
+    /// Named `accept_change_proposal` rather than `accept_proposal` — Epic
+    /// 32 already defines `accept_proposal`/`reject_proposal` on `Catalog`
+    /// for `graph_owl_authz::agent::Proposal`, a different kind of
+    /// proposal (an agent's pending action). Same collision, same fix, as
+    /// this slice's storage-trait methods.
+    pub async fn accept_change_proposal(
+        &self,
+        principal: &Principal,
+        proposal_id: Uuid,
+    ) -> Result<graph_owl_core::collaboration::Proposal, CatalogError> {
+        let proposal = self.decidable_proposal(principal, proposal_id).await?;
+
+        if proposal.field == "description" {
+            let asset = self
+                .storage
+                .get_asset(proposal.about)
+                .await?
+                .ok_or(CatalogError::NotFound)?;
+            if asset.description != proposal.current_value {
+                return Err(CatalogError::PreconditionFailed {
+                    current: asset.version,
+                });
+            }
+            self.storage
+                .update_asset(
+                    proposal.about,
+                    &AssetUpdate {
+                        description: Some(proposal.proposed_value.clone()),
+                        extension: None,
+                    },
+                    &proposal.proposed_by,
+                    None,
+                )
+                .await?;
+        } else {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "field",
+                FieldErrorCode::Value,
+                format!("'{}' cannot be applied automatically", proposal.field),
+            )]));
+        }
+
+        self.storage
+            .decide_change_proposal(
+                proposal_id,
+                graph_owl_core::collaboration::ProposalStatus::Accepted,
+                &principal.id,
+                Utc::now(),
+                None,
+            )
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// # Errors
+    /// `NotFound` if the proposal does not exist. `Conflict`
+    /// (`kind: ChangeProposalAlreadyDecided`) if it was already decided.
+    /// `Forbidden` unless `principal` is an entity owner or admin.
+    pub async fn reject_change_proposal(
+        &self,
+        principal: &Principal,
+        proposal_id: Uuid,
+        reason: String,
+    ) -> Result<graph_owl_core::collaboration::Proposal, CatalogError> {
+        self.decidable_proposal(principal, proposal_id).await?;
+        self.storage
+            .decide_change_proposal(
+                proposal_id,
+                graph_owl_core::collaboration::ProposalStatus::Rejected,
+                &principal.id,
+                Utc::now(),
+                Some(reason),
+            )
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// The shared preflight for both `accept_proposal` and
+    /// `reject_proposal`: exists, still pending, and the caller may decide
+    /// it.
+    async fn decidable_proposal(
+        &self,
+        principal: &Principal,
+        proposal_id: Uuid,
+    ) -> Result<graph_owl_core::collaboration::Proposal, CatalogError> {
+        let Some(proposal) = self.storage.get_change_proposal(proposal_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        if !graph_owl_core::collaboration::is_decidable(proposal.status) {
+            return Err(CatalogError::Conflict {
+                detail: "this proposal has already been decided".to_string(),
+                existing_id: Some(proposal_id),
+                kind: ConflictKind::ChangeProposalAlreadyDecided,
+            });
+        }
+        let owners = self.owner_ids(proposal.about).await?;
+        if !(principal.is_admin || owners.iter().any(|owner| owner == &principal.id)) {
+            return Err(CatalogError::Forbidden);
+        }
+        Ok(proposal)
+    }
+
+    /// # Errors
+    /// `NotFound` if the entity does not exist.
+    pub async fn list_change_proposals_for_entity(
+        &self,
+        about: Uuid,
+        status: Option<graph_owl_core::collaboration::ProposalStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), CatalogError> {
+        if self.storage.get_asset(about).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self
+            .storage
+            .list_change_proposals_for_entity(about, status, limit, offset)
+            .await?)
+    }
+
+    /// # Errors
+    /// `Storage` if the read fails.
+    pub async fn list_change_proposals_by_user(
+        &self,
+        proposed_by: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), CatalogError> {
+        Ok(self
+            .storage
+            .list_change_proposals_by_user(proposed_by, limit, offset)
+            .await?)
+    }
+
+    // ---- Epic 35 Slice D: announcements ----
+
+    /// # Errors
+    /// `NotFound` if `about` does not exist. `Validation` if the window is
+    /// empty or inverted. `Forbidden` unless `principal` is an entity
+    /// owner or admin.
+    pub async fn create_announcement(
+        &self,
+        principal: &Principal,
+        about: Uuid,
+        message: String,
+        starts_at: DateTime<Utc>,
+        ends_at: DateTime<Utc>,
+    ) -> Result<graph_owl_core::collaboration::Announcement, CatalogError> {
+        if self.storage.get_asset(about).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        if ends_at <= starts_at {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "endsAt",
+                FieldErrorCode::Value,
+                "must be after startsAt".to_string(),
+            )]));
+        }
+        let owners = self.owner_ids(about).await?;
+        if !(principal.is_admin || owners.iter().any(|owner| owner == &principal.id)) {
+            return Err(CatalogError::Forbidden);
+        }
+        Ok(self
+            .storage
+            .insert_announcement(graph_owl_core::collaboration::Announcement {
+                id: Uuid::new_v4(),
+                about,
+                message,
+                starts_at,
+                ends_at,
+                created_by: principal.id.clone(),
+                created_at: Utc::now(),
+            })
+            .await?)
+    }
+
+    /// Every announcement live right now on `about` **or any ancestor** —
+    /// Slice D's inheritance rule, evaluated by reusing the same
+    /// `ancestors_of` walk ownership inheritance (Epic 11D) already uses,
+    /// rather than storing the announcement once per descendant.
+    ///
+    /// # Errors
+    /// `NotFound` if `about` does not exist.
+    pub async fn active_announcements(
+        &self,
+        about: Uuid,
+    ) -> Result<Vec<graph_owl_core::collaboration::Announcement>, CatalogError> {
+        if self.storage.get_asset(about).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        let mut ids = vec![about];
+        ids.extend(
+            self.storage
+                .ancestors_of(about)
+                .await?
+                .into_iter()
+                .map(|a| a.id),
+        );
+        Ok(self.storage.active_announcements(&ids, Utc::now()).await?)
+    }
+
+    /// # Errors
+    /// `NotFound` if `about` does not exist.
+    pub async fn list_announcements(
+        &self,
+        about: Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Announcement>, i64), CatalogError> {
+        if self.storage.get_asset(about).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+        Ok(self
+            .storage
+            .list_announcements(about, limit, offset)
+            .await?)
+    }
+
+    // ---- Epic 35 Slice E: reactions ----
+
+    /// # Errors
+    /// `NotFound` if the post does not exist. `Validation` if it was
+    /// deleted.
+    pub async fn toggle_reaction(
+        &self,
+        principal: &Principal,
+        post_id: Uuid,
+        kind: graph_owl_core::collaboration::ReactionKind,
+    ) -> Result<graph_owl_core::collaboration::ReactionAction, CatalogError> {
+        let Some(post) = self.storage.get_post(post_id).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        if post.deleted {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "postId",
+                FieldErrorCode::Value,
+                "cannot react to a deleted post".to_string(),
+            )]));
+        }
+        let already = self
+            .storage
+            .has_reacted(post_id, &principal.id, kind)
+            .await?;
+        let action = graph_owl_core::collaboration::toggle_reaction(already);
+        match action {
+            graph_owl_core::collaboration::ReactionAction::Add => {
+                self.storage
+                    .add_reaction(post_id, &principal.id, kind)
+                    .await?;
+            }
+            graph_owl_core::collaboration::ReactionAction::Remove => {
+                self.storage
+                    .remove_reaction(post_id, &principal.id, kind)
+                    .await?;
+            }
+        }
+        Ok(action)
+    }
+
+    /// # Errors
+    /// `Storage` if the read fails.
+    pub async fn reaction_counts(
+        &self,
+        post_id: Uuid,
+    ) -> Result<Vec<(graph_owl_core::collaboration::ReactionKind, i64)>, CatalogError> {
+        Ok(self.storage.reaction_counts(post_id).await?)
+    }
+
+    // ---- Epic 35 Slice F: the activity feed ----
+
+    /// An `AssetVersion` has no id of its own — `(asset_id, version)` is
+    /// its whole identity — so this derives a stable one for the feed
+    /// entry, the same value every time for the same version.
+    ///
+    /// **Not `Uuid::new_v5`.** This workspace's `uuid` dependency enables
+    /// only the `v4` feature; adding `v5` for one derived id would rebuild
+    /// every downstream crate for a feature nothing else needs
+    /// (`CLAUDE.md`'s own note on dependency-feature changes). `DefaultHasher`
+    /// is not randomized per-process the way `HashMap`'s `RandomState` is —
+    /// only the *keys* `RandomState::new()` picks are random; the
+    /// `DefaultHasher` algorithm itself is fixed — so this is deterministic
+    /// across calls and across restarts of the same binary, which is all a
+    /// feed id needs to be.
+    fn activity_version_id(about: Uuid, version: EntityVersion) -> Uuid {
+        use std::hash::{Hash, Hasher};
+        let mut first = std::collections::hash_map::DefaultHasher::new();
+        (about, version.major, version.minor).hash(&mut first);
+        let high = first.finish();
+        let mut second = std::collections::hash_map::DefaultHasher::new();
+        high.hash(&mut second);
+        let low = second.finish();
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&high.to_be_bytes());
+        bytes[8..].copy_from_slice(&low.to_be_bytes());
+        Uuid::from_bytes(bytes)
+    }
+
+    /// One entity's activity: Epic 3's own version history, merged with
+    /// every collaboration event, in one deterministically ordered,
+    /// paginated stream.
+    ///
+    /// **Not fanned out across entities** — every source here is scoped to
+    /// the one `about` id the caller asked for, the same shape a
+    /// single-entity read has always had; what Slice F's acceptance
+    /// criterion warns against is assembling a *multi-entity* feed by
+    /// querying per row of a list, which this does not do.
+    ///
+    /// **The user-scoped feed (`/users/{id}/activity`, "entities they own
+    /// or follow") is not implemented.** "Follow" names a watch mechanism
+    /// this codebase does not have anywhere — it is not in Epic 35's own
+    /// resolved decisions, has no migration, and building one is a
+    /// separate feature. Recorded here rather than silently assumed;
+    /// `35-collaboration.md` carries the same note.
+    ///
+    /// # Errors
+    /// `NotFound` if `about` does not exist.
+    pub async fn entity_activity(
+        &self,
+        principal: &Principal,
+        about: Uuid,
+        limit: usize,
+    ) -> Result<Vec<ActivityEntry>, CatalogError> {
+        let _ = principal;
+        if self.storage.get_asset(about).await?.is_none() {
+            return Err(CatalogError::NotFound);
+        }
+
+        let mut items = Vec::new();
+        for version in self.storage.asset_versions(about).await? {
+            let id = Self::activity_version_id(about, version.version);
+            let summary = version.change_description.as_ref().map_or_else(
+                || "created".to_string(),
+                |d| {
+                    d.fields_added
+                        .iter()
+                        .chain(&d.fields_updated)
+                        .chain(&d.fields_deleted)
+                        .map(|f| f.field.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+            );
+            items.push(ActivityEntry {
+                kind: graph_owl_core::collaboration::ActivityKind::Change,
+                occurred_at: version.updated_at,
+                id,
+                actor: version.updated_by,
+                summary,
+            });
+        }
+
+        for row in self
+            .storage
+            .collaboration_activity_for_entity(about, limit)
+            .await?
+        {
+            items.push(ActivityEntry {
+                kind: row.kind,
+                occurred_at: row.occurred_at,
+                id: row.id,
+                actor: row.actor,
+                summary: row.summary,
+            });
+        }
+
+        items.sort_by(|a, b| {
+            graph_owl_core::collaboration::activity_sort_key(b.occurred_at, b.id).cmp(
+                &graph_owl_core::collaboration::activity_sort_key(a.occurred_at, a.id),
+            )
+        });
+        items.truncate(limit);
+        Ok(items)
     }
 
     // ---- Epic 31: organizational memory ----

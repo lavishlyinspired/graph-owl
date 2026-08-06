@@ -180,6 +180,13 @@ pub struct InMemoryStorage {
     pub pack_overrides: Mutex<Vec<graph_owl_ontology::pack::PackOverride>>,
     /// `(pack_id, turtle bytes)`.
     pack_source_turtle: Mutex<Vec<(Uuid, Vec<u8>)>>,
+    pub threads: Mutex<Vec<graph_owl_core::collaboration::Thread>>,
+    pub posts: Mutex<Vec<graph_owl_core::collaboration::Post>>,
+    pub change_proposals: Mutex<Vec<graph_owl_core::collaboration::Proposal>>,
+    pub announcements: Mutex<Vec<graph_owl_core::collaboration::Announcement>>,
+    /// `(post_id, user_id, kind)`.
+    #[allow(clippy::type_complexity)]
+    reactions: Mutex<Vec<(Uuid, String, graph_owl_core::collaboration::ReactionKind)>>,
     /// `(endpoint, secret)` — the secret kept beside the public record so
     /// a test can prove it is kept and still never returned by the read
     /// path, matching the `connectors` field's own precedent.
@@ -5321,6 +5328,446 @@ impl Storage for InMemoryStorage {
         let before = held.len();
         held.retain(|o| o.id != id);
         Ok(held.len() < before)
+    }
+
+    async fn insert_thread(
+        &self,
+        thread: graph_owl_core::collaboration::Thread,
+    ) -> Result<graph_owl_core::collaboration::Thread, StorageError> {
+        self.threads.lock().unwrap().push(thread.clone());
+        Ok(thread)
+    }
+
+    async fn get_thread(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::collaboration::Thread>, StorageError> {
+        Ok(self
+            .threads
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == id)
+            .cloned())
+    }
+
+    async fn list_threads(
+        &self,
+        about: Uuid,
+        resolved: Option<bool>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Thread>, i64), StorageError> {
+        let mut matching: Vec<_> = self
+            .threads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|t| t.about == about)
+            .filter(|t| resolved.is_none_or(|want| t.resolved == want))
+            .cloned()
+            .collect();
+        matching.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+        let total = i64::try_from(matching.len()).unwrap_or(i64::MAX);
+        let page = matching.into_iter().skip(offset).take(limit).collect();
+        Ok((page, total))
+    }
+
+    async fn insert_post(
+        &self,
+        post: graph_owl_core::collaboration::Post,
+    ) -> Result<graph_owl_core::collaboration::Post, StorageError> {
+        self.posts.lock().unwrap().push(post.clone());
+        Ok(post)
+    }
+
+    async fn get_post(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::collaboration::Post>, StorageError> {
+        Ok(self
+            .posts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.id == id)
+            .cloned())
+    }
+
+    async fn list_posts(
+        &self,
+        thread_id: Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Post>, i64), StorageError> {
+        let mut matching: Vec<_> = self
+            .posts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.thread_id == thread_id)
+            .cloned()
+            .collect();
+        matching.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        let total = i64::try_from(matching.len()).unwrap_or(i64::MAX);
+        let page = matching.into_iter().skip(offset).take(limit).collect();
+        Ok((page, total))
+    }
+
+    async fn update_post(
+        &self,
+        id: Uuid,
+        message: &str,
+        edited_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<graph_owl_core::collaboration::Post>, StorageError> {
+        let mut held = self.posts.lock().unwrap();
+        let Some(post) = held.iter_mut().find(|p| p.id == id) else {
+            return Ok(None);
+        };
+        post.message = message.to_string();
+        post.edited_at = Some(edited_at);
+        Ok(Some(post.clone()))
+    }
+
+    async fn delete_post(&self, id: Uuid) -> Result<bool, StorageError> {
+        let mut held = self.posts.lock().unwrap();
+        let Some(post) = held.iter_mut().find(|p| p.id == id) else {
+            return Ok(false);
+        };
+        post.deleted = true;
+        Ok(true)
+    }
+
+    async fn resolve_thread(
+        &self,
+        id: Uuid,
+        resolved_by: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<graph_owl_core::collaboration::Thread>, StorageError> {
+        let mut held = self.threads.lock().unwrap();
+        let Some(thread) = held.iter_mut().find(|t| t.id == id) else {
+            return Ok(None);
+        };
+        thread.resolved = true;
+        thread.resolved_by = Some(resolved_by.to_string());
+        thread.resolved_at = Some(at);
+        Ok(Some(thread.clone()))
+    }
+
+    async fn reopen_thread(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::collaboration::Thread>, StorageError> {
+        let mut held = self.threads.lock().unwrap();
+        let Some(thread) = held.iter_mut().find(|t| t.id == id) else {
+            return Ok(None);
+        };
+        thread.resolved = false;
+        thread.resolved_by = None;
+        thread.resolved_at = None;
+        Ok(Some(thread.clone()))
+    }
+
+    async fn unresolved_thread_count(&self, about: Uuid) -> Result<i64, StorageError> {
+        let count = self
+            .threads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|t| t.about == about && !t.resolved)
+            .count();
+        Ok(i64::try_from(count).unwrap_or(i64::MAX))
+    }
+
+    async fn insert_change_proposal(
+        &self,
+        proposal: graph_owl_core::collaboration::Proposal,
+    ) -> Result<graph_owl_core::collaboration::Proposal, StorageError> {
+        self.change_proposals.lock().unwrap().push(proposal.clone());
+        Ok(proposal)
+    }
+
+    async fn get_change_proposal(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::collaboration::Proposal>, StorageError> {
+        Ok(self
+            .change_proposals
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.id == id)
+            .cloned())
+    }
+
+    async fn list_change_proposals_for_entity(
+        &self,
+        about: Uuid,
+        status: Option<graph_owl_core::collaboration::ProposalStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), StorageError> {
+        let mut matching: Vec<_> = self
+            .change_proposals
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.about == about)
+            .filter(|p| status.is_none_or(|want| p.status == want))
+            .cloned()
+            .collect();
+        matching.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+        let total = i64::try_from(matching.len()).unwrap_or(i64::MAX);
+        let page = matching.into_iter().skip(offset).take(limit).collect();
+        Ok((page, total))
+    }
+
+    async fn list_change_proposals_by_user(
+        &self,
+        proposed_by: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), StorageError> {
+        let mut matching: Vec<_> = self
+            .change_proposals
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.proposed_by == proposed_by)
+            .cloned()
+            .collect();
+        matching.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+        let total = i64::try_from(matching.len()).unwrap_or(i64::MAX);
+        let page = matching.into_iter().skip(offset).take(limit).collect();
+        Ok((page, total))
+    }
+
+    async fn decide_change_proposal(
+        &self,
+        id: Uuid,
+        status: graph_owl_core::collaboration::ProposalStatus,
+        decided_by: &str,
+        decided_at: chrono::DateTime<chrono::Utc>,
+        decision_reason: Option<String>,
+    ) -> Result<Option<graph_owl_core::collaboration::Proposal>, StorageError> {
+        use graph_owl_core::collaboration::ProposalStatus;
+        let mut held = self.change_proposals.lock().unwrap();
+        let Some(proposal) = held.iter_mut().find(|p| p.id == id) else {
+            return Ok(None);
+        };
+        if proposal.status != ProposalStatus::Pending {
+            return Ok(Some(proposal.clone()));
+        }
+        proposal.status = status;
+        proposal.decided_by = Some(decided_by.to_string());
+        proposal.decided_at = Some(decided_at);
+        proposal.decision_reason = decision_reason;
+        Ok(Some(proposal.clone()))
+    }
+
+    async fn insert_announcement(
+        &self,
+        announcement: graph_owl_core::collaboration::Announcement,
+    ) -> Result<graph_owl_core::collaboration::Announcement, StorageError> {
+        self.announcements
+            .lock()
+            .unwrap()
+            .push(announcement.clone());
+        Ok(announcement)
+    }
+
+    async fn active_announcements(
+        &self,
+        about_ids: &[Uuid],
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<graph_owl_core::collaboration::Announcement>, StorageError> {
+        Ok(self
+            .announcements
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| about_ids.contains(&a.about))
+            .filter(|a| graph_owl_core::collaboration::is_active(now, a.starts_at, a.ends_at))
+            .cloned()
+            .collect())
+    }
+
+    async fn list_announcements(
+        &self,
+        about: Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Announcement>, i64), StorageError> {
+        let mut matching: Vec<_> = self
+            .announcements
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| a.about == about)
+            .cloned()
+            .collect();
+        matching.sort_by(|a, b| b.starts_at.cmp(&a.starts_at));
+        let total = i64::try_from(matching.len()).unwrap_or(i64::MAX);
+        let page = matching.into_iter().skip(offset).take(limit).collect();
+        Ok((page, total))
+    }
+
+    async fn has_reacted(
+        &self,
+        post_id: Uuid,
+        user_id: &str,
+        kind: graph_owl_core::collaboration::ReactionKind,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .reactions
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(p, u, k)| *p == post_id && u == user_id && *k == kind))
+    }
+
+    async fn add_reaction(
+        &self,
+        post_id: Uuid,
+        user_id: &str,
+        kind: graph_owl_core::collaboration::ReactionKind,
+    ) -> Result<(), StorageError> {
+        let mut held = self.reactions.lock().unwrap();
+        if !held
+            .iter()
+            .any(|(p, u, k)| *p == post_id && u == user_id && *k == kind)
+        {
+            held.push((post_id, user_id.to_string(), kind));
+        }
+        Ok(())
+    }
+
+    async fn remove_reaction(
+        &self,
+        post_id: Uuid,
+        user_id: &str,
+        kind: graph_owl_core::collaboration::ReactionKind,
+    ) -> Result<bool, StorageError> {
+        let mut held = self.reactions.lock().unwrap();
+        let before = held.len();
+        held.retain(|(p, u, k)| !(*p == post_id && u == user_id && *k == kind));
+        Ok(held.len() < before)
+    }
+
+    async fn reaction_counts(
+        &self,
+        post_id: Uuid,
+    ) -> Result<Vec<(graph_owl_core::collaboration::ReactionKind, i64)>, StorageError> {
+        use graph_owl_core::collaboration::ReactionKind;
+        let held = self.reactions.lock().unwrap();
+        let mut counts: Vec<(ReactionKind, i64)> = Vec::new();
+        for (_, _, kind) in held.iter().filter(|(p, _, _)| *p == post_id) {
+            if let Some(entry) = counts.iter_mut().find(|(k, _)| k == kind) {
+                entry.1 += 1;
+            } else {
+                counts.push((*kind, 1));
+            }
+        }
+        Ok(counts)
+    }
+
+    async fn collaboration_activity_for_entity(
+        &self,
+        about: Uuid,
+        limit: usize,
+    ) -> Result<Vec<graph_owl_storage::ActivityRow>, StorageError> {
+        use graph_owl_core::collaboration::ActivityKind;
+        let mut items = Vec::new();
+
+        let threads = self.threads.lock().unwrap();
+        for thread in threads.iter().filter(|t| t.about == about) {
+            items.push(graph_owl_storage::ActivityRow {
+                kind: ActivityKind::ThreadStarted,
+                occurred_at: thread.created_at,
+                id: thread.id,
+                actor: thread.created_by.clone(),
+                summary: thread
+                    .field
+                    .clone()
+                    .unwrap_or_else(|| "general".to_string()),
+            });
+            if let (true, Some(resolved_at)) = (thread.resolved, thread.resolved_at) {
+                items.push(graph_owl_storage::ActivityRow {
+                    kind: ActivityKind::ThreadResolved,
+                    occurred_at: resolved_at,
+                    id: thread.id,
+                    actor: thread.resolved_by.clone().unwrap_or_default(),
+                    summary: "resolved".to_string(),
+                });
+            }
+        }
+        let thread_ids: std::collections::HashSet<Uuid> = threads
+            .iter()
+            .filter(|t| t.about == about)
+            .map(|t| t.id)
+            .collect();
+        drop(threads);
+
+        for post in self
+            .posts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| thread_ids.contains(&p.thread_id) && !p.deleted)
+        {
+            items.push(graph_owl_storage::ActivityRow {
+                kind: ActivityKind::PostAdded,
+                occurred_at: post.created_at,
+                id: post.id,
+                actor: post.author.clone(),
+                summary: post.message.chars().take(120).collect(),
+            });
+        }
+
+        for proposal in self
+            .change_proposals
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.about == about)
+        {
+            items.push(graph_owl_storage::ActivityRow {
+                kind: ActivityKind::ProposalCreated,
+                occurred_at: proposal.created_at,
+                id: proposal.id,
+                actor: proposal.proposed_by.clone(),
+                summary: proposal.field.clone(),
+            });
+            if let Some(decided_at) = proposal.decided_at {
+                items.push(graph_owl_storage::ActivityRow {
+                    kind: ActivityKind::ProposalDecided,
+                    occurred_at: decided_at,
+                    id: proposal.id,
+                    actor: proposal.decided_by.clone().unwrap_or_default(),
+                    summary: proposal.status.as_str().to_string(),
+                });
+            }
+        }
+
+        for announcement in self
+            .announcements
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| a.about == about)
+        {
+            items.push(graph_owl_storage::ActivityRow {
+                kind: ActivityKind::AnnouncementCreated,
+                occurred_at: announcement.created_at,
+                id: announcement.id,
+                actor: announcement.created_by.clone(),
+                summary: announcement.message.chars().take(120).collect(),
+            });
+        }
+
+        items.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at).then(b.id.cmp(&a.id)));
+        items.truncate(limit);
+        Ok(items)
     }
 
     async fn update_custom_property(

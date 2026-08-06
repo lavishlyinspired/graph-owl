@@ -1,6 +1,6 @@
 # Plan: Collaboration (Epic 35)
 **Branch**: feat/collaboration
-**Status**: Not started
+**Status**: Backend shipped (Slices A–F), console surface deferred to Epic 42
 **Depends on**: Epic 11 (users), Epic 12 (real identity on posts)
 **Crates**: `graph-owl-core` (Thread, Post, Proposal, Announcement, Reaction) · `graph-owl-storage-postgres` · `graph-owl-api` (attribution split) · `graph-owl-server`
 
@@ -25,13 +25,15 @@ The change-proposal mechanism is the load-bearing part: it converts "this descri
 
 ## Acceptance criteria (feature level)
 
-- [ ] A user can start a thread on an entity or a field, and others can reply.
-- [ ] A thread can be resolved, and resolved threads are filterable.
-- [ ] A user can propose a field change; a steward can accept or reject it.
-- [ ] An accepted proposal applies the change attributed to the proposer.
-- [ ] An announcement displays on an entity for a validity window and then stops.
-- [ ] An activity feed shows discussions and Epic 3 change events together, in order.
-- [ ] Deleting an entity retains its threads for audit; hard delete removes them.
+- [x] A user can start a thread on an entity or a field, and others can reply.
+- [x] A thread can be resolved, and resolved threads are filterable.
+- [x] A user can propose a field change; a steward can accept or reject it.
+- [x] An accepted proposal applies the change attributed to the proposer.
+- [x] An announcement displays on an entity for a validity window and then stops.
+- [x] An activity feed shows discussions and Epic 3 change events together, in order.
+- [x] Deleting an entity retains its threads for audit; hard delete removes them —
+      proven at the schema level (`ON DELETE CASCADE`) since this project's `Storage`
+      trait has no hard-delete for assets at all yet; see "Explicitly deferred" below.
 
 ## Slices
 
@@ -53,6 +55,17 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: entities, anchoring, principal-derived authorship.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Shipped, 6 August 2026.** The trust boundary is structural rather than checked at
+runtime: `StartThreadRequest`/`ReplyRequest` have no `createdBy`/`author` field at all,
+so there is nothing for a client to send that could set one — the same "PATCH
+immutability via DTO shape" pattern Epic 2's `TableUpdate` already uses, proven at the
+wire with a test that sends an extra `createdBy` field and asserts it is silently
+dropped. **Scope cut, recorded rather than silently narrowed**: "a thread anchored to a
+nonexistent field → `400`" is not implemented — `field` is validated non-empty, but
+there is no per-entity-kind schema this project can check a column FQN against (a
+`Table`'s columns are not their own addressable entities today), so a bad field name is
+accepted rather than rejected. Revisit once column-level addressing exists.
+
 ### Slice B: Threads resolve
 
 **Value**: Answered questions stop looking like open ones.
@@ -67,6 +80,14 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: Authorization test asserting an unrelated user cannot resolve. Mutator watch: an unconditional permit must fail it.
 **GREEN**: transitions, authorization, counts.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**Shipped, 6 August 2026.** `unresolved_thread_count` exists on `Storage`/`Catalog` and
+is HTTP-reachable, but only as its own read — **not** folded into a `Table`/`Asset`
+read via field selection, the way the acceptance criterion asks. Epic 2's field
+selection is a fixed, per-endpoint whitelist of columns already on the entity row; a
+computed cross-table count is a different shape of extension than that mechanism was
+built for. Recorded rather than silently dropped — the same cut applies to Slice D's
+`activeAnnouncements`, below.
 
 ### Slice C: Change proposals
 
@@ -86,6 +107,17 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **REFACTOR**: attribution now diverges from "the principal making the request". Assess whether the facade's write path should take an explicit `attribution` distinct from `principal`, rather than special-casing proposals.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Shipped, 6 August 2026.** No refactor was needed for the attribution split:
+`Storage::update_asset` already takes `updated_by` as its own parameter, separate from
+whichever principal is calling, so `accept_change_proposal` passes
+`&proposal.proposed_by` directly — proven at the wire (`accepting_attributes_the_change_to_the_proposer_not_the_accepter`),
+not just in a unit test, since a handler could serialise anything it likes. **Scope
+cut**: only the `description` field can be applied by `accept` — the plan's own examples
+(description, tags, owners, custom properties) are a larger surface than one slice
+justifies, the same honest cut Epic 33's `apply_drift` already made for the same reason.
+Proposing any other field is accepted (the record itself is general); accepting one is
+refused with a named-field `400`.
+
 ### Slice D: Announcements
 
 **Value**: "This table is being deprecated on the 30th" reaches people at the point of use.
@@ -101,6 +133,15 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: entity, window evaluation, inheritance.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Shipped, 6 August 2026.** Inheritance reuses the exact `ancestors_of` walk ownership
+inheritance (Epic 11D) already uses, rather than storing the announcement once per
+descendant — a schema-level announcement is visible on its tables by folding
+`ancestors_of(table)` into the id list `active_announcements` queries, proven at the
+wire with a real service→table hierarchy. The boundary is inclusive-start/exclusive-end
+(`starts_at <= now AND ends_at > now`), proven at exactly both edges. Same field-selection
+cut as Slice B: `GET /assets/{id}/announcements/active` is its own endpoint, not folded
+into the entity read.
+
 ### Slice E: Reactions
 
 **Value**: Cheap signal — "this answer helped" without a reply that adds noise.
@@ -109,6 +150,13 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: Toggle test asserting a repeat removes rather than duplicating. Mutator watch: non-toggling insert must fail it.
 **GREEN**: reaction edges with toggle semantics.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**Shipped, 6 August 2026.** Toggle semantics proven at both the storage layer (direct
+`has_reacted`/`add_reaction`/`remove_reaction` round trip) and the wire (`POST` twice,
+assert `"add"` then `"remove"`, counts go 1 → 0). "Counts returned with posts" is
+narrower than the plan's own wording: counts are their own endpoint
+(`GET /posts/{id}/reactions`), not embedded in the `Post` returned by `list_posts` —
+the same field-selection-shaped gap as Slices B and D, not fixed here either.
 
 ### Slice F: The activity feed
 
@@ -125,6 +173,31 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: merged query, deterministic ordering, authz predicate.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Shipped, 6 August 2026, with three scope cuts recorded rather than assumed away**:
+
+1. **No authorization filtering.** `entity_activity` takes `principal` but does not use
+   it — Epic 13's `AccessPredicate` is not applied to feed rows. Unlike Epic 9a's
+   `project_incremental` (which does apply it), nothing here narrows a merged,
+   multi-source feed by field-level or row-level visibility yet. This is the one gap
+   in this slice that is a real correctness question, not a convenience cut — flagged
+   for whoever picks this back up.
+2. **No user-scoped feed.** `GET /users/{id}/activity` ("entities they own or follow")
+   is not implemented. "Follow" names a watch mechanism this codebase does not have
+   anywhere — not in this epic's own resolved decisions, no migration, no facade
+   method — building one is a separate feature, not a plumbing gap.
+3. **No `?kind=` filter and no real pagination.** The endpoint takes `limit` only; the
+   plan's "filterable by activity type" and "ordering is stable under pagination" both
+   assume query parameters that were not built. The sort key itself
+   (`activity_sort_key`, `(occurred_at, id)` descending) *is* deterministic and unit-
+   mutation-tested, so a paginated version would sort correctly once the offset
+   parameter exists — what is missing is the parameter, not the ordering logic.
+
+What **is** proven: the feed merges three independent sources (Epic 3's own
+`asset_versions` plus five collaboration tables via one `collaboration_activity_for_entity`
+query) for one entity in one call — not fanned out per row of a list — with a real
+HTTP test asserting all four activity kinds (`change`, `threadStarted`,
+`proposalCreated`, `proposalDecided`) appear from one request.
+
 ## Explicitly deferred (with destination)
 
 - **Real-time delivery (WebSockets)** → polling plus events suffice for an hours-scale workflow.
@@ -133,6 +206,25 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 - **Rich text / attachments** → markdown only; attachments need a storage story.
 - **@-mentions with notification** → the parse is easy, the delivery is the deferred part; mentions can be recorded now and delivered when transport exists.
 - **Task assignment / workflow** → proposals cover the catalog-specific case; general task management is another product.
+- **A hard-delete asset endpoint** → the `ON DELETE CASCADE` on every collaboration
+  table's `about`/`thread_id` FK is real schema, and the cascade itself is proven
+  (a raw `DELETE FROM assets` in a repository test removes its threads), but
+  `Storage` has no method that ever issues one — deletion is soft everywhere the API
+  reaches, and `00g-operations.md`'s erasure story is still open. The FK is forward-
+  looking design for when that lands, not dead weight.
+- **Field-level embedding of collaboration data on entity reads** — unresolved-thread
+  count, active announcements, and per-post reaction counts are each their own
+  endpoint rather than riding along on `GET /assets/{id}`/`GET /tables/{id}` via field
+  selection, as three of this plan's own acceptance criteria ask for. Epic 2's field
+  selection mechanism is a fixed whitelist of columns already on the entity row; a
+  computed cross-table value is a different extension shape it was not built for.
+  Revisit as a small, focused slice once a second cross-table computed field wants the
+  same thing (Epic 20's drift count is the other candidate).
+- **Authorization filtering on the activity feed** — Slice F's own acceptance
+  criterion ("respects Epic 13 authorization: activity on unreadable entities is
+  omitted") is unmet; `entity_activity` accepts a `principal` but does not apply
+  `AccessPredicate` to feed rows. Recorded as the one gap in this epic that is a
+  correctness question rather than a convenience cut.
 
 ## Pre-PR quality gate
 

@@ -31,6 +31,7 @@
 pub mod archive;
 pub mod blocking;
 pub mod classification;
+pub mod collaboration;
 pub mod contract;
 pub mod contradiction;
 pub mod custom_property;
