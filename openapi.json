@@ -618,6 +618,162 @@
         ],
         "type": "object"
       },
+      "DriftItem": {
+        "description": "One field on one asset, declared and live disagreeing.",
+        "properties": {
+          "assetId": {
+            "description": "The asset this drift was reported against.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "decidedAt": {
+            "description": "When `status` last changed away from `pending`, if it has.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decidedBy": {
+            "description": "Who decided it, if it has been decided.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "declaredValue": {
+            "description": "The value the declaration file names, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "field": {
+            "description": "Which field disagrees between declared and live state.",
+            "type": "string"
+          },
+          "fullyQualifiedName": {
+            "description": "Denormalized at read time so a reviewer never has to cross-reference\nan id to know what they are looking at.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The drift record's own id — distinct from `asset_id`, since one asset\ncan have several drifted fields, each its own row.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DriftKind",
+            "description": "Which side moved."
+          },
+          "liveValue": {
+            "description": "The value currently in live state, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why, required on `ignored` — see the module doc.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reportedAt": {
+            "description": "When the report that produced this item was pushed.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DriftStatus",
+            "description": "Where this item stands in the review queue."
+          }
+        },
+        "required": [
+          "id",
+          "assetId",
+          "fullyQualifiedName",
+          "field",
+          "kind",
+          "status",
+          "reportedAt"
+        ],
+        "type": "object"
+      },
+      "DriftItem_Array": {
+        "items": {
+          "$ref": "#/components/schemas/DriftItem"
+        },
+        "type": "array"
+      },
+      "DriftKind": {
+        "description": "Which side moved — mirrors `graph_owl_cli::drift::DriftKind` at the wire,\nsince a CLI push and a console read describe the same fact.",
+        "enum": [
+          "liveEdited",
+          "unapplied"
+        ],
+        "type": "string"
+      },
+      "DriftReportItem": {
+        "description": "One item of a pushed report, before the server has resolved an asset id\nor assigned a stable identifier — what a CLI (or anything else that has\ncomputed drift) sends.",
+        "properties": {
+          "declaredValue": {
+            "description": "The value the declaration file names, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "field": {
+            "description": "Which field disagrees between declared and live state.",
+            "type": "string"
+          },
+          "fullyQualifiedName": {
+            "description": "Which asset this item is about — resolved to `asset_id` server-side.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DriftKind",
+            "description": "Which side moved."
+          },
+          "liveValue": {
+            "description": "The value currently in live state, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "fullyQualifiedName",
+          "field",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "DriftReportRequest": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DriftReportItem"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "DriftStatus": {
+        "description": "Where a drift item stands.",
+        "enum": [
+          "pending",
+          "applied",
+          "ignored"
+        ],
+        "type": "string"
+      },
       "EntityReference": {
         "description": "A denormalized pointer to an owning principal.\n\n**Denormalized on purpose.** `00c` requires responses to carry \"name, FQN,\ntype, not bare ids\": a console rendering an owner list should not have to make\nN follow-up requests to turn ids into names, and an agent given bare ids\nreports ids to a human.\n\nThere is no separate `fullyQualifiedName`. For a principal the id **is** the\nqualified name — `users.id` and `teams.id` are globally unique, human-chosen\ntext — and a second field that always equals the first is a field that will\neventually disagree with it.",
         "properties": {
@@ -821,6 +977,17 @@
         },
         "required": [
           "field"
+        ],
+        "type": "object"
+      },
+      "IgnoreDriftRequest": {
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
         ],
         "type": "object"
       },
@@ -3172,6 +3339,213 @@
         },
         "security": [],
         "summary": "Interactive documentation for this contract"
+      }
+    },
+    "/drift": {
+      "get": {
+        "operationId": "get_drift",
+        "responses": {
+          "200": {
+            "description": "Drift items awaiting review, pending first"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Drift items awaiting review, pending first"
+      }
+    },
+    "/drift/reports": {
+      "post": {
+        "operationId": "post_drift_reports",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DriftReportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriftItem_Array"
+                }
+              }
+            },
+            "description": "Push a drift report — one or more items, each naming its own asset"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request body is invalid; every violation is listed"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Push a drift report — one or more items, each naming its own asset"
+      }
+    },
+    "/drift/{id}/apply": {
+      "post": {
+        "operationId": "post_drift__id__apply",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriftItem"
+                }
+              }
+            },
+            "description": "Write a drift item's declared value to live state"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Write a drift item's declared value to live state"
+      }
+    },
+    "/drift/{id}/ignore": {
+      "post": {
+        "operationId": "post_drift__id__ignore",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IgnoreDriftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriftItem"
+                }
+              }
+            },
+            "description": "Review a drift item and deliberately leave it as-is"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request body is invalid; every violation is listed"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Review a drift item and deliberately leave it as-is"
       }
     },
     "/extraction/claims/{id}/decision": {

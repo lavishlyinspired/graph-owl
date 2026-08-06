@@ -16,8 +16,8 @@ use graph_owl_core::{
 };
 use graph_owl_storage::{
     BreachReport, ColumnMapping, ConflictKind, DataProductUpdate, DiscardedClaimRecord,
-    DomainDeletion, DomainHoldings, DomainUpdate, ExtractionRunRecord, FollowOutcome, Holdings,
-    IdempotencyClaim, IssueOutcome, LabelDecision, LabelOutcome, LifecycleOutcome,
+    DomainDeletion, DomainHoldings, DomainUpdate, DriftFilter, ExtractionRunRecord, FollowOutcome,
+    Holdings, IdempotencyClaim, IssueOutcome, LabelDecision, LabelOutcome, LifecycleOutcome,
     LineageReconciliation, MembershipRefusal, MemorySearchFilter, MemoryWrite, OwnersWrite,
     PrincipalDeletion, QueuedClaimRecord, ResultIngest, RetractOutcome, ReviewQueueFilter,
     SplitOutcome, Storage, StorageError, StoredCertification, StoredCertificationType,
@@ -3885,6 +3885,132 @@ impl Storage for PostgresStorage {
             // the current row (or nothing) rather than a write that silently
             // did not happen.
             None => self.get_review_queue_entry(id).await,
+        }
+    }
+
+    #[tracing::instrument(name = "storage.push_drift", skip_all)]
+    async fn push_drift(
+        &self,
+        asset_id: Uuid,
+        item: graph_owl_core::drift::DriftReportItem,
+    ) -> Result<graph_owl_core::drift::DriftItem, StorageError> {
+        // The `ON CONFLICT` target names the partial unique index
+        // (`WHERE status = 'pending'`) from V51, so a repeat push while an
+        // item is still pending returns the existing row unchanged; once it
+        // is applied or ignored, the index no longer covers it and a fresh
+        // pending row is inserted for the next occurrence — a new instance
+        // of the problem, not the same one still open.
+        let row = sqlx::query(
+            "WITH ins AS (
+                 INSERT INTO drift_reports
+                     (id, asset_id, field, kind, live_value, declared_value)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (asset_id, field) WHERE status = 'pending'
+                 DO UPDATE SET asset_id = drift_reports.asset_id
+                 RETURNING *
+             )
+             SELECT ins.*, a.fully_qualified_name
+             FROM ins JOIN assets a ON a.id = ins.asset_id",
+        )
+        .bind(Uuid::new_v4())
+        .bind(asset_id)
+        .bind(&item.field)
+        .bind(drift_kind_str(item.kind))
+        .bind(&item.live_value)
+        .bind(&item.declared_value)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        drift_item_from_row(row)
+    }
+
+    #[tracing::instrument(name = "storage.list_drift", skip_all)]
+    async fn list_drift(
+        &self,
+        filter: &DriftFilter,
+    ) -> Result<(Vec<graph_owl_core::drift::DriftItem>, i64), StorageError> {
+        let status = filter.status.map_or("pending", drift_status_str);
+        let limit = i64::try_from(filter.limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(filter.offset).unwrap_or(0);
+
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drift_reports WHERE status = $1")
+            .bind(status)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let rows = sqlx::query(
+            "SELECT dr.*, a.fully_qualified_name
+             FROM drift_reports dr JOIN assets a ON a.id = dr.asset_id
+             WHERE dr.status = $1
+             ORDER BY dr.reported_at DESC, dr.id
+             LIMIT $2 OFFSET $3",
+        )
+        .bind(status)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        let items = rows
+            .into_iter()
+            .map(drift_item_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((items, total))
+    }
+
+    #[tracing::instrument(name = "storage.get_drift_item", skip_all)]
+    async fn get_drift_item(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::drift::DriftItem>, StorageError> {
+        let row = sqlx::query(
+            "SELECT dr.*, a.fully_qualified_name
+             FROM drift_reports dr JOIN assets a ON a.id = dr.asset_id
+             WHERE dr.id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        row.map(drift_item_from_row).transpose()
+    }
+
+    #[tracing::instrument(name = "storage.decide_drift", skip_all)]
+    async fn decide_drift(
+        &self,
+        id: Uuid,
+        status: graph_owl_core::drift::DriftStatus,
+        decided_by: String,
+        decided_at: chrono::DateTime<chrono::Utc>,
+        reason: Option<String>,
+    ) -> Result<Option<graph_owl_core::drift::DriftItem>, StorageError> {
+        // Same one-shot pattern as `decide_review_queue_entry`: the
+        // `WHERE status = 'pending'` makes the write atomic against a second
+        // decide call, with no read-then-write race window.
+        let row = sqlx::query(
+            "WITH upd AS (
+                 UPDATE drift_reports
+                 SET status = $2, decided_at = $3, decided_by = $4, reason = $5
+                 WHERE id = $1 AND status = 'pending'
+                 RETURNING *
+             )
+             SELECT upd.*, a.fully_qualified_name
+             FROM upd JOIN assets a ON a.id = upd.asset_id",
+        )
+        .bind(id)
+        .bind(drift_status_str(status))
+        .bind(decided_at)
+        .bind(&decided_by)
+        .bind(&reason)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        match row {
+            Some(row) => Ok(Some(drift_item_from_row(row)?)),
+            None => self.get_drift_item(id).await,
         }
     }
 
@@ -9332,6 +9458,68 @@ fn review_status_from_str(
             "unknown review status '{other}' in resolution_queue"
         ))),
     }
+}
+
+/// The wire spelling of a drift kind — matches the `CHECK` on `drift_reports.kind`.
+const fn drift_kind_str(kind: graph_owl_core::drift::DriftKind) -> &'static str {
+    use graph_owl_core::drift::DriftKind;
+    match kind {
+        DriftKind::LiveEdited => "live_edited",
+        DriftKind::Unapplied => "unapplied",
+    }
+}
+
+fn drift_kind_from_str(value: &str) -> Result<graph_owl_core::drift::DriftKind, StorageError> {
+    use graph_owl_core::drift::DriftKind;
+    match value {
+        "live_edited" => Ok(DriftKind::LiveEdited),
+        "unapplied" => Ok(DriftKind::Unapplied),
+        other => Err(StorageError::Unexpected(format!(
+            "unknown drift kind '{other}' in drift_reports"
+        ))),
+    }
+}
+
+/// The wire spelling of a drift status — matches the `CHECK` on `drift_reports.status`.
+const fn drift_status_str(status: graph_owl_core::drift::DriftStatus) -> &'static str {
+    use graph_owl_core::drift::DriftStatus;
+    match status {
+        DriftStatus::Pending => "pending",
+        DriftStatus::Applied => "applied",
+        DriftStatus::Ignored => "ignored",
+    }
+}
+
+fn drift_status_from_str(value: &str) -> Result<graph_owl_core::drift::DriftStatus, StorageError> {
+    use graph_owl_core::drift::DriftStatus;
+    match value {
+        "pending" => Ok(DriftStatus::Pending),
+        "applied" => Ok(DriftStatus::Applied),
+        "ignored" => Ok(DriftStatus::Ignored),
+        other => Err(StorageError::Unexpected(format!(
+            "unknown drift status '{other}' in drift_reports"
+        ))),
+    }
+}
+
+/// Requires the row to carry `fully_qualified_name` alongside `drift_reports`'
+/// own columns — every caller joins `assets` for it, since the name is
+/// denormalized at read time rather than stored redundantly.
+fn drift_item_from_row(row: PgRow) -> Result<graph_owl_core::drift::DriftItem, StorageError> {
+    Ok(graph_owl_core::drift::DriftItem {
+        id: row.get("id"),
+        asset_id: row.get("asset_id"),
+        fully_qualified_name: row.get("fully_qualified_name"),
+        field: row.get("field"),
+        kind: drift_kind_from_str(row.get::<&str, _>("kind"))?,
+        live_value: row.get("live_value"),
+        declared_value: row.get("declared_value"),
+        status: drift_status_from_str(row.get::<&str, _>("status"))?,
+        reported_at: row.get("reported_at"),
+        decided_at: row.get("decided_at"),
+        decided_by: row.get("decided_by"),
+        reason: row.get("reason"),
+    })
 }
 
 /// Splits a `SignatureScheme` into the three columns it is stored across.

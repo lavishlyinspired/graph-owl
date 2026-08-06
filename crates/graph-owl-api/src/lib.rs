@@ -50,7 +50,7 @@ use graph_owl_resolution::bands::{ConfidenceBands, Decision, decide};
 use graph_owl_resolution::normalize::is_deterministic_match;
 use graph_owl_resolution::score::{EntityView, ScoreWeights, evidence, score};
 use graph_owl_storage::{
-    ConflictKind, SplitOutcome, Storage, StorageError, StoredUser, UpdateOutcome,
+    ConflictKind, DriftFilter, SplitOutcome, Storage, StorageError, StoredUser, UpdateOutcome,
 };
 use graph_owl_traversal::{Bounds, Direction, EdgeFilter, Subgraph, TraversalEngine};
 use serde::Deserialize;
@@ -8689,6 +8689,161 @@ impl Catalog {
             )
             .await?;
         Ok(())
+    }
+
+    // ---- Epic 20 x Epic 42 Slice D: drift as an HTTP-queryable queue ----
+
+    /// Pushes a whole drift report — one or more items, each naming its own
+    /// asset by FQN.
+    ///
+    /// **Not atomic across items.** If an item's asset cannot be resolved,
+    /// the push stops there and returns `NotFound`, leaving any
+    /// already-pushed items in place. That is deliberately recoverable
+    /// rather than harmful: [`Storage::push_drift`]'s idempotency (the same
+    /// pattern as [`Storage::queue_for_review`]) means retrying the same
+    /// report after fixing the bad FQN does not duplicate what already
+    /// landed.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if any item names an asset that does not exist. `Storage`
+    /// if a write fails.
+    pub async fn push_drift_report(
+        &self,
+        principal: &Principal,
+        items: Vec<graph_owl_core::drift::DriftReportItem>,
+    ) -> Result<Vec<graph_owl_core::drift::DriftItem>, CatalogError> {
+        let _ = principal;
+        let mut pushed = Vec::with_capacity(items.len());
+        for item in items {
+            let asset = self
+                .storage
+                .get_asset_by_fqn(&item.fully_qualified_name)
+                .await?
+                .ok_or(CatalogError::NotFound)?;
+            pushed.push(self.storage.push_drift(asset.id, item).await?);
+        }
+        Ok(pushed)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the query fails.
+    pub async fn list_drift(
+        &self,
+        principal: &Principal,
+        filter: &DriftFilter,
+    ) -> Result<(Vec<graph_owl_core::drift::DriftItem>, i64), CatalogError> {
+        let _ = principal;
+        Ok(self.storage.list_drift(filter).await?)
+    }
+
+    /// Applies a pending drift item's declared value to live state — the
+    /// only one of Epic 42's three drift actions this server can honestly
+    /// perform. "Update declaration" is deliberately not offered here: see
+    /// `graph_owl_core::drift`'s module doc for why (declarations live
+    /// wherever the CLI ran, never on this server).
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the item does not exist. `Conflict` if it was already
+    /// decided. `Validation` if `apply` does not know how to write this
+    /// field back (see [`graph_owl_core::drift::is_applicable_field`]).
+    pub async fn apply_drift(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<graph_owl_core::drift::DriftItem, CatalogError> {
+        let item = self
+            .storage
+            .get_drift_item(id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        if item.status != graph_owl_core::drift::DriftStatus::Pending {
+            return Err(CatalogError::Conflict {
+                detail: "this drift item has already been decided".to_string(),
+                existing_id: Some(id),
+                kind: ConflictKind::DriftAlreadyDecided,
+            });
+        }
+        if !graph_owl_core::drift::is_applicable_field(&item.field) {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "field",
+                FieldErrorCode::Value,
+                format!("'{}' cannot be applied automatically", item.field),
+            )]));
+        }
+        // Only one field is applicable today (`description`), but the match
+        // keeps the door open without an `if` that would silently no-op a
+        // second field added to `is_applicable_field` later.
+        match item.field.as_str() {
+            "description" => {
+                self.update_asset(
+                    principal,
+                    item.asset_id,
+                    &AssetUpdate {
+                        description: Some(item.declared_value.clone()),
+                        extension: None,
+                    },
+                    None,
+                )
+                .await?;
+            }
+            other => {
+                return Err(CatalogError::Validation(vec![FieldError::new(
+                    "field",
+                    FieldErrorCode::Value,
+                    format!("'{other}' cannot be applied automatically"),
+                )]));
+            }
+        }
+        self.storage
+            .decide_drift(
+                id,
+                graph_owl_core::drift::DriftStatus::Applied,
+                principal.id.clone(),
+                chrono::Utc::now(),
+                None,
+            )
+            .await?
+            .ok_or(CatalogError::NotFound)
+    }
+
+    /// Reviewed and deliberately left as-is. `reason` is required — Epic 42
+    /// decision 3, matching [`Catalog::reject_review`].
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the item does not exist. `Conflict` if it was already
+    /// decided.
+    pub async fn ignore_drift(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        reason: String,
+    ) -> Result<graph_owl_core::drift::DriftItem, CatalogError> {
+        let item = self
+            .storage
+            .get_drift_item(id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
+        if item.status != graph_owl_core::drift::DriftStatus::Pending {
+            return Err(CatalogError::Conflict {
+                detail: "this drift item has already been decided".to_string(),
+                existing_id: Some(id),
+                kind: ConflictKind::DriftAlreadyDecided,
+            });
+        }
+        self.storage
+            .decide_drift(
+                id,
+                graph_owl_core::drift::DriftStatus::Ignored,
+                principal.id.clone(),
+                chrono::Utc::now(),
+                Some(reason),
+            )
+            .await?
+            .ok_or(CatalogError::NotFound)
     }
 
     // ---- Epic 17 Slice G: mention resolution ----

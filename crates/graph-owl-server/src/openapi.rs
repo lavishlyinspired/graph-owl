@@ -895,6 +895,42 @@ pub static ROUTES: &[Route] = &[
         true,
     ),
     route(
+        "post",
+        "/drift/reports",
+        "Push a drift report — one or more items, each naming its own asset",
+        Some("DriftReportRequest"),
+        Some("DriftItem_Array"),
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/drift",
+        "Drift items awaiting review, pending first",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "post",
+        "/drift/{id}/apply",
+        "Write a drift item's declared value to live state",
+        None,
+        Some("DriftItem"),
+        200,
+        true,
+    ),
+    route(
+        "post",
+        "/drift/{id}/ignore",
+        "Review a drift item and deliberately leave it as-is",
+        Some("IgnoreDriftRequest"),
+        Some("DriftItem"),
+        200,
+        true,
+    ),
+    route(
         "get",
         "/assets/{id}/memories",
         "What we know about this asset, best first, each flagged for staleness",
@@ -1379,6 +1415,12 @@ pub static ROUTES: &[Route] = &[
     graph_owl_core::resolution::MergeDecidedBy,
     graph_owl_core::resolution::Resolution,
     graph_owl_core::resolution::Candidate,
+    graph_owl_core::drift::DriftItem,
+    graph_owl_core::drift::DriftKind,
+    graph_owl_core::drift::DriftStatus,
+    graph_owl_core::drift::DriftReportItem,
+    crate::DriftReportRequest,
+    crate::IgnoreDriftRequest,
 )))]
 struct Components;
 
@@ -1488,6 +1530,8 @@ pub fn document() -> Value {
         map.insert("Page_Proposal".to_string(), page_of("Proposal"));
         map.insert("Page_AgentActivity".to_string(), page_of("AgentActivity"));
         map.insert("AgentGrant_Array".to_string(), array_of("AgentGrant"));
+        // Epic 20 x Epic 42 Slice D.
+        map.insert("DriftItem_Array".to_string(), array_of("DriftItem"));
     }
 
     let mut paths = serde_json::Map::new();

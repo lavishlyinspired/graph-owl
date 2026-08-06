@@ -35,6 +35,7 @@ pub mod contract;
 pub mod contradiction;
 pub mod custom_property;
 pub mod domain;
+pub mod drift;
 pub mod entity_families;
 pub mod envelope;
 pub mod extraction;

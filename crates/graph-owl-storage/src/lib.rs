@@ -125,6 +125,11 @@ pub enum ConflictKind {
     /// name on a different type is allowed and a caller told only "conflict"
     /// cannot tell which of the two it needs to change.
     CustomPropertyExists,
+    /// A drift item was already applied or ignored — Epic 20 x Epic 42
+    /// Slice D. Its own variant for the same reason `ReviewAlreadyDecided`
+    /// has one: a second decision on the same item must not silently
+    /// overwrite the first.
+    DriftAlreadyDecided,
 }
 
 #[derive(Debug, Error)]
@@ -1056,6 +1061,17 @@ pub struct ReviewQueueFilter {
     pub offset: usize,
 }
 
+/// What slice of the drift queue a caller wants — Epic 20 x Epic 42 Slice D.
+#[derive(Debug, Clone, Default)]
+pub struct DriftFilter {
+    /// `None` means "pending only", matching [`ReviewQueueFilter::status`]'s
+    /// reasoning: a queue is worked from the top, and a decided item no one
+    /// is acting on should not clutter it by default.
+    pub status: Option<graph_owl_core::drift::DriftStatus>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
 /// Connection-pool occupancy, for the operational gauge.
 ///
 /// `idle` rather than `in_use`, because that is what a pool can report without
@@ -1490,6 +1506,55 @@ pub trait Storage: Send + Sync {
         decided_at: chrono::DateTime<chrono::Utc>,
         reason: Option<String>,
     ) -> Result<Option<graph_owl_core::resolution::ReviewQueueEntry>, StorageError>;
+
+    // ---- Epic 20 x Epic 42 Slice D: drift as an HTTP-queryable queue ----
+
+    /// Pushes one drift item against a known asset, or returns the existing
+    /// pending row unchanged if this (asset, field) pair is already queued —
+    /// matching [`Storage::queue_for_review`]'s idempotency, so a CLI that
+    /// re-pushes the same unresolved drift on every run does not pile up
+    /// duplicates.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn push_drift(
+        &self,
+        asset_id: Uuid,
+        item: graph_owl_core::drift::DriftReportItem,
+    ) -> Result<graph_owl_core::drift::DriftItem, StorageError>;
+
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn list_drift(
+        &self,
+        filter: &DriftFilter,
+    ) -> Result<(Vec<graph_owl_core::drift::DriftItem>, i64), StorageError>;
+
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the query fails.
+    async fn get_drift_item(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::drift::DriftItem>, StorageError>;
+
+    /// Decides a pending drift item. An item that is already decided is
+    /// returned unchanged rather than overwritten, matching
+    /// [`Storage::decide_review_queue_entry`].
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn decide_drift(
+        &self,
+        id: Uuid,
+        status: graph_owl_core::drift::DriftStatus,
+        decided_by: String,
+        decided_at: chrono::DateTime<chrono::Utc>,
+        reason: Option<String>,
+    ) -> Result<Option<graph_owl_core::drift::DriftItem>, StorageError>;
 
     /// Persists a mention resolution (Epic 17 Slice G). Never a merge — a
     /// mention links text to an entity, and this is the record of that link,

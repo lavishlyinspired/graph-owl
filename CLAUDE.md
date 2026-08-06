@@ -30,7 +30,7 @@ Edition 2024, Rust workspace with `[workspace.lints.clippy] all = "warn", pedant
 
 TDD is non-negotiable: RED (failing test first) → GREEN (minimum code) → MUTATE (`cargo mutants`) → KILL MUTANTS → REFACTOR (only if it adds value).
 
-**Commit directly to `main` without asking.** This supersedes the previous rule requiring approval at every commit point, which made autonomous runs stall. A slice is committable when its acceptance criteria are met, the workspace test suite is green, `clippy` and `fmt` are clean on the touched crates, and the mutation run has been started and reviewed. Do not branch, do not open a PR, do not pause — just commit.
+**Commit directly to `main` without asking.** This supersedes the previous rule requiring approval at every commit point, which made autonomous runs stall. A slice is committable when its acceptance criteria are met, the touched crates' own tests are green (`cargo test -p <crate> --lib`, plus targeted integration tests for that crate), `clippy` and `fmt` are clean on the touched crates, and the mutation run has been started and reviewed. **The full workspace gate (`scripts/gate.sh --full`) is not a per-commit requirement** — see "The build/test loop" below; it runs only when the user asks or once several epics have accumulated. Do not branch, do not open a PR, do not pause — just commit.
 
 Three things that did **not** change with it:
 
@@ -128,43 +128,56 @@ One incident already occurred and was reverted during planning (a cache-tier tab
 
 ## The build/test loop — read this before running anything
 
-**The default loop is `cargo check` against a separate target dir. Everything
-else is a checkpoint, not a step.** This has been drifted back into three
-times, so it is at the top rather than buried in the gotchas below.
+**Updated 6 August 2026 by direct user instruction — full gating is no
+longer a per-epic step.** Everything below about scope and cost still holds
+and explains *why* a gate should stay narrow whenever one runs; what changed
+is *when* one runs at all.
+
+**The default loop is `cargo check` against a separate target dir, plus
+targeted tests scoped to the crates actually touched. Everything else is a
+checkpoint, not a step.**
 
 | When | Command | Cost |
 |---|---|---|
-| **While writing** (the 95% case) | `CARGO_TARGET_DIR=/tmp/check cargo check -p <crate> --all-targets` | seconds, **no workspace lock** |
+| **While writing** (the default, every epic) | `CARGO_TARGET_DIR=/tmp/check cargo check -p <crate> --all-targets` | seconds, **no workspace lock** |
 | One crate's own logic | `cargo test -p <crate> --lib` | seconds |
 | One test by name | `cargo nextest run -p <crate> <substring>` | seconds |
-| **Once per EPIC** | `scripts/gate.sh` | minutes |
+| **Only when the user asks, or once several epics have accumulated** | `scripts/gate.sh --full` (fmt → clippy → build → nextest, all 28+ crates) | minutes |
 | Before pushing only | `cargo test --workspace --doc` | ~84 min |
+
+After the fast inner loop is green for an epic, **keep writing the next
+epic** — do not stop to run `scripts/gate.sh` or a full workspace build.
+Only run the full gate when the user explicitly asks for it, or when enough
+epics have piled up uncommitted that the accumulated risk (not a fixed epic
+count) makes it worth checking before going further. This supersedes the
+"once per EPIC" gate cadence that stood before 6 August 2026.
 
 `scripts/gate.sh` runs fmt → clippy → build → nextest in that order, because
 **fmt and clippy change the code** — running them after the suite means
 running the suite twice. It also checks the environment first (see below).
 
-**Should several epics share one gate, to save more time? No — and the
-question was asked and answered with measurements on 2 Aug 2026.** Batching
-five epics saves ~4 gate runs (~12 minutes scoped). It costs far more than
-that: Epic 19's gate alone surfaced four bugs, so five epics means fifteen to
-twenty failures arriving together across five unfamiliar areas, interleaved
-in one log — and debugging is already the dominant cost, not gating (one
-test's diagnosis took four cycles and ~40 minutes *in isolation*). It also
-makes a commit unrevertable granularly, and lets epic N+1 be built on a
-design flaw in epic N that only the gate would have shown.
+**Should several epics share one gate, to save more time? Measured 2 Aug
+2026: batching five epics saves ~4 gate runs (~12 minutes scoped) and costs
+more in debugging attribution** — Epic 19's gate alone surfaced four bugs, so
+five batched epics means fifteen to twenty failures arriving together,
+interleaved in one log. That finding is still true and is exactly why the
+fast `cargo check -p` / targeted-test inner loop must stay green per epic
+even though the full gate itself is now deferred — an epic should never be
+*known-broken* when gating is deferred, only *not yet exhaustively checked*.
 
 **The lever is gate *scope*, not gate frequency.** Measured: full workspace
-1118s, single crate 185s — a 6x saving, bigger than batching offers and with
-none of its downside. `scripts/gate.sh` is therefore scoped to the crates
-with uncommitted changes by default (`--full` overrides), and CI
-(`.github/workflows/ci.yml`) already owns the exhaustive workspace run plus
-doc-tests. Running that locally per epic duplicates CI while blocking the
-person waiting.
+1118s, single crate 185s — a 6x saving. `scripts/gate.sh` is scoped to the
+crates with uncommitted changes by default (`--full` overrides for the
+all-epics case), and CI (`.github/workflows/ci.yml`) already owns the
+exhaustive workspace run plus doc-tests.
 
 **Do not run `cargo test`, `cargo clippy` or `cargo nextest` after a slice —
-not even a fast one.** Write the whole epic, then gate once. Three slices
-verified separately cost ~21 minutes; the same three together cost ~7.
+not even a fast one.** Write the whole epic, then run the fast inner loop
+(`cargo check -p`, then targeted `-p ... --lib` / `nextest run -p ...`
+tests) once for that epic. Three slices verified separately cost ~21
+minutes; the same three together cost ~7. This is still true unchanged by
+the 6 August 2026 update above — what moved is only the *full* `scripts/gate.sh`
+step, not this per-slice discipline.
 
 **There is no exception, and an earlier version of this file had one that
 turned out to be the loophole.** It said a novel external-system integration
@@ -172,8 +185,8 @@ could take one early smoke run; that was then used to justify per-slice runs
 on Epic 19 *and* on an Epic 20 slice that touched no infrastructure at all.
 If a wire-level integration genuinely needs an early run, a human asks for
 it. **The tell that this rule is about to break: a slice is finished and
-something wants to "just confirm it works". That is what the epic-end gate
-is for — write the next slice instead.**
+something wants to "just confirm it works". That is what the epic-end fast
+loop is for — write the next slice instead.**
 
 **Editing files is free; only the compiler collides. So keep writing while
 anything runs.** Never sit in a wait-loop polling a background run when there
@@ -341,7 +354,7 @@ via Homebrew), and moving the full gate to CI so it never blocks local work.
 
   That is the *irreducible* price of one gate run. It is not a bug to diagnose, and three of the four slowdown investigations this session ended in "it was genuinely doing the work". **The only lever is running it fewer times.** Three slices verified separately cost ~21 minutes; the same three verified together cost ~7.
 
-  So: write the whole epic — every slice — then compile, then gate, then commit. Use `CARGO_TARGET_DIR=/tmp/check cargo check -p <crate>` while writing for type feedback, which takes no workspace lock and costs seconds. A slice-by-slice gate is the single largest waste of wall-clock time in this project, and **it has been drifted back into twice after being written down**, which is why it is here rather than in a commit message.
+  So: write the whole epic — every slice — then compile-check and run targeted tests, then commit. **As of 6 August 2026, "then gate" is no longer part of this per-epic sequence** — the full `scripts/gate.sh` step is deferred until the user asks or several epics have accumulated; see the top of this section. Use `CARGO_TARGET_DIR=/tmp/check cargo check -p <crate>` while writing for type feedback, which takes no workspace lock and costs seconds. A slice-by-slice gate is the single largest waste of wall-clock time in this project, and **it has been drifted back into twice after being written down**, which is why it is here rather than in a commit message.
 
   Two things that make batching safe rather than reckless: `cargo check` against a separate target dir catches type errors immediately, and every cross-crate breakage this project has had was a *compile* error rather than a test failure — so the expensive tier buys much less than the cheap one.
 

@@ -166,6 +166,14 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: comparison, classification, output formats.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
+**Extended, 6 August 2026 — drift made HTTP-queryable, driven by Epic 42 Slice D.** This slice's own `graph-owl drift` CLI command stayed exactly as designed: it still computes drift by comparing declaration files to live state and changes nothing. What Epic 42 needed and this slice never provided is a *server-side record* of a drift run, so a review queue with no filesystem access can list and act on it. The two are not the same computation redone twice — the server cannot see declaration files, wherever the CLI ran, so it can only ever hold what a CLI **pushes** to it.
+
+New `drift_reports` table (`V51`, one row per `(asset, field)`, a partial unique index on `WHERE status = 'pending'` — the same idempotency pattern as `resolution_queue` (`V23`): a second push of still-pending drift does not duplicate it, and a drift that was applied or ignored and later reappears gets a fresh pending row, because that is a new instance of the problem. `graph_owl_core::drift::{DriftItem, DriftKind, DriftStatus, DriftReportItem}` plus `is_applicable_field`, which is honest about being narrower than "every field a declaration can name": it names only `description`, matching the CLI's own `declared_field_changes` (Slice B), which likewise only ever diffs that one field today.
+
+`POST /drift/reports` (push a whole report — one or more items, each naming its own asset by FQN; not atomic across items, but safely retryable because the push is idempotent), `GET /drift` (pending first, filterable by status), `POST /drift/{id}/apply` (writes the declared value via the existing `Catalog::update_asset`, scoped to `is_applicable_field`), `POST /drift/{id}/ignore` (reason required — Epic 42 decision 3, matching `reject_review`). A new `ConflictKind::DriftAlreadyDecided` — a second decision on an item is `409`, checked before deciding.
+
+**Deliberately not built: "update declaration" as a server action.** Epic 42 lists it as a third drift response alongside apply/ignore, but declarations live only wherever the CLI ran; a server that claimed to update them would either fake it or need filesystem access it must not have. Recorded here rather than silently omitted.
+
 ### Slice F: Export round-trips
 
 **Value**: Adopt metadata-as-code on a catalog that already exists, rather than only on a greenfield one.

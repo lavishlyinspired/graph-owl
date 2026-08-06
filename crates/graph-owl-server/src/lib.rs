@@ -326,6 +326,11 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/resolution/queue/bulk", post(bulk_decide_review))
         .route("/resolution/queue/{id}/confirm", post(confirm_review))
         .route("/resolution/queue/{id}/reject", post(reject_review))
+        // Epic 20 x Epic 42 Slice D: drift, made HTTP-queryable.
+        .route("/drift/reports", post(push_drift_reports))
+        .route("/drift", get(list_drift))
+        .route("/drift/{id}/apply", post(apply_drift))
+        .route("/drift/{id}/ignore", post(ignore_drift))
         // `PUT`, not `PATCH`: the body is the complete owner list, so the verb
         // that means "make it this" is the honest one. `PATCH` would imply a
         // delta, and a delta cannot express "this asset now has no owner" — which
@@ -1350,6 +1355,10 @@ impl AppError {
                 kind: ConflictKind::CustomPropertyExists,
                 ..
             } => "custom-property-exists",
+            AppError::Conflict {
+                kind: ConflictKind::DriftAlreadyDecided,
+                ..
+            } => "drift-already-decided",
             AppError::Internal(_) => "internal-error",
             AppError::NotFound => "not-found",
             AppError::PreconditionFailed { .. } => "version-conflict",
@@ -1449,6 +1458,10 @@ impl AppError {
                 kind: ConflictKind::CustomPropertyExists,
                 ..
             } => "That custom property is already defined on this entity type",
+            AppError::Conflict {
+                kind: ConflictKind::DriftAlreadyDecided,
+                ..
+            } => "This drift item has already been decided",
             AppError::Internal(_) => "Internal server error",
             AppError::NotFound => "Resource not found",
             AppError::PreconditionFailed { .. } => "Version precondition failed",
@@ -1575,6 +1588,11 @@ impl AppError {
             } => detail.clone(),
             AppError::Conflict {
                 kind: ConflictKind::ReviewAlreadyDecided,
+                detail,
+                ..
+            } => detail.clone(),
+            AppError::Conflict {
+                kind: ConflictKind::DriftAlreadyDecided,
                 detail,
                 ..
             } => detail.clone(),
@@ -4834,6 +4852,110 @@ async fn bulk_decide_review(
         }));
     }
     Ok(Json(json!({ "data": results })))
+}
+
+// ---- Epic 20 x Epic 42 Slice D: drift as an HTTP-queryable queue ----
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct DriftReportRequest {
+    items: Vec<graph_owl_core::drift::DriftReportItem>,
+}
+
+impl ValidateBody for DriftReportRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        if value
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(std::vec::Vec::is_empty)
+        {
+            errors.push(FieldError::new(
+                "items",
+                FieldErrorCode::Required,
+                "at least one item is required".to_string(),
+            ));
+        }
+        errors
+    }
+}
+
+/// `POST /drift/reports` — Epic 20 x Epic 42 Slice D. Pushes a whole drift
+/// report; each item names its own asset by FQN, since a report commonly
+/// spans several assets in one CLI run.
+async fn push_drift_reports(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<DriftReportRequest>,
+) -> Result<Json<Vec<graph_owl_core::drift::DriftItem>>, AppError> {
+    let pushed = catalog.push_drift_report(&principal, payload.items).await?;
+    Ok(Json(pushed))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DriftQuery {
+    status: Option<graph_owl_core::drift::DriftStatus>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+/// `GET /drift` — pending by default, matching `review_queue`'s reasoning: a
+/// queue is worked from the top, so an item nobody has decided should not
+/// have to compete with a large default page of already-resolved ones.
+async fn list_drift(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Query(query): Query<DriftQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    let filter = graph_owl_storage::DriftFilter {
+        status: query.status,
+        limit,
+        offset: query.offset.unwrap_or(0),
+    };
+    let (items, total) = catalog.list_drift(&principal, &filter).await?;
+    Ok(Json(json!({ "data": items, "total": total })))
+}
+
+/// `POST /drift/{id}/apply` — writes the declared value to live state.
+async fn apply_drift(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_core::drift::DriftItem>, AppError> {
+    let item = catalog.apply_drift(&principal, id).await?;
+    Ok(Json(item))
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct IgnoreDriftRequest {
+    reason: String,
+}
+
+impl ValidateBody for IgnoreDriftRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("reason"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// `POST /drift/{id}/ignore` — reason required, matching `reject_review`
+/// (Epic 42 decision 3).
+async fn ignore_drift(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<IgnoreDriftRequest>,
+) -> Result<Json<graph_owl_core::drift::DriftItem>, AppError> {
+    let item = catalog.ignore_drift(&principal, id, payload.reason).await?;
+    Ok(Json(item))
 }
 
 #[derive(Debug, serde::Deserialize)]

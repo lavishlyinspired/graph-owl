@@ -24,7 +24,8 @@ use graph_owl_core::{
     page::{Cursor, Page, PageRequest},
 };
 use graph_owl_storage::{
-    ConflictKind, ReviewQueueFilter, SplitOutcome, Storage, StorageError, StoredUser, UpdateOutcome,
+    ConflictKind, DriftFilter, ReviewQueueFilter, SplitOutcome, Storage, StorageError, StoredUser,
+    UpdateOutcome,
 };
 use uuid::Uuid;
 
@@ -171,6 +172,7 @@ pub struct InMemoryStorage {
     pub merge_records: Mutex<Vec<graph_owl_core::resolution::MergeRecord>>,
     pub resolution_queue: Mutex<Vec<graph_owl_core::resolution::ReviewQueueEntry>>,
     pub mention_resolutions: Mutex<Vec<graph_owl_core::resolution::MentionResolution>>,
+    pub drift_reports: Mutex<Vec<graph_owl_core::drift::DriftItem>>,
     /// `(endpoint, secret)` — the secret kept beside the public record so
     /// a test can prove it is kept and still never returned by the read
     /// path, matching the `connectors` field's own precedent.
@@ -1826,6 +1828,104 @@ impl Storage for InMemoryStorage {
         entry.decided_at = Some(decided_at);
         entry.reason = reason;
         Ok(Some(entry.clone()))
+    }
+
+    async fn push_drift(
+        &self,
+        asset_id: Uuid,
+        item: graph_owl_core::drift::DriftReportItem,
+    ) -> Result<graph_owl_core::drift::DriftItem, StorageError> {
+        use graph_owl_core::drift::DriftStatus;
+        let mut reports = self.drift_reports.lock().unwrap();
+        if let Some(existing) = reports.iter().find(|d| {
+            d.asset_id == asset_id && d.field == item.field && d.status == DriftStatus::Pending
+        }) {
+            return Ok(existing.clone());
+        }
+        let fully_qualified_name = self
+            .assets
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|a| a.id == asset_id)
+            .map(|a| a.fully_qualified_name.clone())
+            .unwrap_or_default();
+        let created = graph_owl_core::drift::DriftItem {
+            id: Uuid::new_v4(),
+            asset_id,
+            fully_qualified_name,
+            field: item.field,
+            kind: item.kind,
+            live_value: item.live_value,
+            declared_value: item.declared_value,
+            status: DriftStatus::Pending,
+            reported_at: chrono::Utc::now(),
+            decided_at: None,
+            decided_by: None,
+            reason: None,
+        };
+        reports.push(created.clone());
+        Ok(created)
+    }
+
+    async fn list_drift(
+        &self,
+        filter: &DriftFilter,
+    ) -> Result<(Vec<graph_owl_core::drift::DriftItem>, i64), StorageError> {
+        use graph_owl_core::drift::DriftStatus;
+        let status = filter.status.unwrap_or(DriftStatus::Pending);
+        let mut matching: Vec<_> = self
+            .drift_reports
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| d.status == status)
+            .cloned()
+            .collect();
+        matching.sort_by(|a, b| b.reported_at.cmp(&a.reported_at).then(a.id.cmp(&b.id)));
+        let total = i64::try_from(matching.len()).unwrap_or(i64::MAX);
+        let page = matching
+            .into_iter()
+            .skip(filter.offset)
+            .take(filter.limit)
+            .collect();
+        Ok((page, total))
+    }
+
+    async fn get_drift_item(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::drift::DriftItem>, StorageError> {
+        Ok(self
+            .drift_reports
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|d| d.id == id)
+            .cloned())
+    }
+
+    async fn decide_drift(
+        &self,
+        id: Uuid,
+        status: graph_owl_core::drift::DriftStatus,
+        decided_by: String,
+        decided_at: chrono::DateTime<chrono::Utc>,
+        reason: Option<String>,
+    ) -> Result<Option<graph_owl_core::drift::DriftItem>, StorageError> {
+        use graph_owl_core::drift::DriftStatus;
+        let mut reports = self.drift_reports.lock().unwrap();
+        let Some(item) = reports.iter_mut().find(|d| d.id == id) else {
+            return Ok(None);
+        };
+        if item.status != DriftStatus::Pending {
+            return Ok(Some(item.clone()));
+        }
+        item.status = status;
+        item.decided_by = Some(decided_by);
+        item.decided_at = Some(decided_at);
+        item.reason = reason;
+        Ok(Some(item.clone()))
     }
 
     async fn record_mention_resolution(
