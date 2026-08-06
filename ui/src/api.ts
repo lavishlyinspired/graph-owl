@@ -92,6 +92,72 @@ export interface SkosRelation {
   target: string;
 }
 
+/** A classification, as `GET /classifications` returns it — Epic 25. */
+export interface Classification {
+  id: string;
+  name: string;
+  description: string | null;
+  mutuallyExclusive: boolean;
+}
+
+/** A label within a classification, as `GET /tags` returns it. */
+export interface Tag {
+  id: string;
+  name: string;
+  classificationId: string;
+  fullyQualifiedName: string;
+  description: string | null;
+}
+
+export interface TagUsage {
+  total: number;
+  byKind: { kind: string; count: number }[];
+}
+
+/** An accountability boundary, as `GET /domains` returns it — Epic 23. */
+export interface Domain {
+  id: string;
+  name: string;
+  fullyQualifiedName: string;
+  parentId: string | null;
+  description: string | null;
+  domainType: string | null;
+  experts: string[];
+}
+
+/** A consumable bundle of assets, spanning technical boundaries. */
+export interface DataProduct {
+  id: string;
+  name: string;
+  fullyQualifiedName: string;
+  description: string | null;
+  purpose: string | null;
+  domainId: string | null;
+}
+
+/** How a pack may be used — Epic 33 decision 3. No "unknown" case: a pack
+ *  the server accepted always has one of these. */
+export type Licence =
+  | { kind: "permissive"; name: string }
+  | { kind: "attributionRequired"; name: string; notice: string }
+  | { kind: "acknowledgementRequired"; name: string; notice: string };
+
+/** An imported vocabulary, as `GET /ontology-packs` returns it — Epic 33. */
+export interface OntologyPack {
+  id: string;
+  packId: string;
+  version: string;
+  licence: Licence;
+  sourceUrl: string;
+  /** The pack-owned glossary its terms landed in — a pack's terms are
+   *  ordinary glossary terms, read through the identical
+   *  `glossaryTerms`/`termRelations`/`termUsage` calls a real glossary
+   *  uses, scoped to this id. No separate pack-term API is needed for
+   *  browsing. */
+  glossaryId: string;
+  termCount: number;
+}
+
 export interface Asset {
   id: string;
   kind: AssetKind;
@@ -619,4 +685,30 @@ export const api = {
   /** Every asset or column this term is attached to — the detail pane's
    *  "assets carrying the term" list. */
   termUsage: (id: string) => request<Page<string>>(`/glossary-terms/${id}/usage?limit=200`),
+
+  // ---- Epic 42 Slice B: three more vocabularies, through the same browser ----
+
+  classifications: () => request<Classification[]>("/classifications"),
+  /** Every tag, or every tag under one classification. Unfiltered — not
+   *  `GET /classifications/{id}/tags`, which only *creates* one — because
+   *  the vocabulary browser renders every classification as a root in one
+   *  tree and needs every tag to place as a child, not one classification's
+   *  worth at a time. */
+  tags: (classificationId?: string) =>
+    request<Tag[]>(
+      `/tags${classificationId ? `?classificationId=${encodeURIComponent(classificationId)}` : ""}`,
+    ),
+  /** Aggregate counts, not a list of FQNs — a tag's usage is reported by
+   *  kind (`{kind, count}`), unlike a glossary term's `termUsage`, which
+   *  the server can name individually because there are far fewer terms
+   *  attached than assets carrying a common tag like `PII.Sensitive`. */
+  tagUsage: (fqn: string) => request<TagUsage>(`/tags/${encodeURIComponent(fqn)}/usage`),
+  domains: () => request<Page<Domain>>("/domains?limit=500"),
+  /** Every data product in the catalog. There is no `GET
+   *  /domains/{id}/data-products` — a product names its own `domainId`
+   *  (or none), so the vocabulary browser's domain detail pane filters
+   *  this client-side rather than the server offering a second index over
+   *  the same relationship. */
+  dataProducts: () => request<Page<DataProduct>>("/data-products?limit=500"),
+  ontologyPacks: () => request<OntologyPack[]>("/ontology-packs"),
 };

@@ -923,7 +923,7 @@ slice.
   slice deciding it as a side effect
 
 ### Epic 42 — Semantic surfaces
-- [~] One vocabulary browser over glossary, tags, domains, packs — **Slice A shipped, 7 August 2026**: `VocabularyBrowser.tsx` + `vocabularyTree.ts` on the glossary alone (poly-hierarchy, cycle marking, deep-linking, keyboard reachability, zero axe violations — full write-up in `42-ui-semantic-surfaces.md`). Slice B (classifications, domains, ontology packs through config alone, plus the structural no-branching test) is what actually proves this is one parameterized component rather than four bespoke screens; not yet built
+- [x] One vocabulary browser over glossary, tags, domains, packs — **Slices A–B shipped, 7 August 2026**: `VocabularyBrowser.tsx` + `vocabularyTree.ts` proved on the glossary alone in Slice A (poly-hierarchy, cycle marking, deep-linking, keyboard reachability, zero axe violations), then Slice B added `vocabularies.ts`'s `VocabularyConfig` (four implementations: glossary, classifications, domains, ontology packs) and rewrote `VocabularyBrowser.tsx` to take one as a prop, dropping every glossary-specific import — a structural test reads the component's own source and asserts none of the four vocabulary keys or a `switch` appear in it. A new `VocabularySection.tsx` holds the vocabulary-*picking* UI (kind + instance), deliberately one layer above the now fully generic component. Full write-up, including two Playwright flakes found and fixed along the way, in `42-ui-semantic-surfaces.md`
 - [ ] One review queue over four proposal sources
 - [ ] Agent activity audit
 
@@ -963,7 +963,7 @@ slice.
 
 
 ### Console half
-- [ ] **33** Vocabulary browser + pack install *(Epic 42)*. A pack annotates **meaning**, never flow — see `33-ontology-packs.md`
+- [~] **33** Vocabulary browser + pack install *(Epic 42)*. A pack annotates **meaning**, never flow — see `33-ontology-packs.md`. **Browsing shipped** (Epic 42 Slice B): an imported pack's terms render read-only, with a notice naming the pack, version and source. **Install (the import UI) not built** — packs so far are imported only via `POST /ontology-packs`
 - [ ] **34** **Nothing, deliberately** — the composable entity page absorbs five new entity families without UI work. If this needed a screen, Epic 39 decision 4 failed
 - [ ] **35** Threads and proposals *(Epic 42)*
 - [ ] **37a** Admin: budget headroom against measured limits *(Epic 41)*

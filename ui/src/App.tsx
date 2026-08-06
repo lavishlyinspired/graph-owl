@@ -96,7 +96,7 @@ import {
   ProvenanceLabel,
   userTextDir,
 } from "./trust/TrustComponents";
-import { VocabularyBrowser } from "./features/vocabulary/VocabularyBrowser";
+import { VocabularySection } from "./features/vocabulary/VocabularySection";
 import { hierarchy, type TeamNode } from "./admin/hierarchy";
 import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
 import {
@@ -4396,7 +4396,7 @@ function AppShell() {
               ) : section === "workbench" ? (
                 <WorkbenchPage colors={colors} />
               ) : section === "vocabulary" ? (
-                <VocabularyBrowser />
+                <VocabularySection />
               ) : section === "connectors" ? (
                 <ConnectorsPage onDone={refresh} colors={colors} />
               ) : section === "admin" ? (

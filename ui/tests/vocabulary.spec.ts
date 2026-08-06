@@ -33,6 +33,66 @@ async function relate(baseURL: string, termId: string, kind: string, target: str
   });
 }
 
+// ---- Epic 42 Slice B: the same "seed through the real endpoint" pattern,
+// for the three vocabularies that prove `VocabularyBrowser.tsx` carries no
+// vocabulary-specific branch. ----
+
+async function createClassification(baseURL: string, name: string, mutuallyExclusive: boolean) {
+  const response = await fetch(`${baseURL}/classifications`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name, mutuallyExclusive }),
+  });
+  return (await response.json()) as { id: string };
+}
+
+async function createTag(baseURL: string, classificationId: string, name: string) {
+  const response = await fetch(`${baseURL}/classifications/${classificationId}/tags`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  return (await response.json()) as { id: string };
+}
+
+async function createDomain(baseURL: string, name: string, parentId?: string) {
+  const response = await fetch(`${baseURL}/domains`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(parentId ? { name, parentId } : { name }),
+  });
+  return (await response.json()) as { id: string };
+}
+
+async function createDataProduct(baseURL: string, name: string, domainId: string) {
+  await fetch(`${baseURL}/data-products`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name, domainId }),
+  });
+}
+
+async function importPack(baseURL: string, packId: string, version: string) {
+  const params = new URLSearchParams({
+    packId,
+    version,
+    sourceUrl: "http://ex.org/source",
+    licenceKind: "permissive",
+    licenceName: "Test",
+    acknowledgeLicence: "true",
+  });
+  const fixture = `
+    @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+    <http://ex.org/fin#Asset> skos:prefLabel "Asset" .
+  `;
+  const response = await fetch(`${baseURL}/ontology-packs?${params}`, {
+    method: "POST",
+    headers: { "content-type": "text/turtle" },
+    body: fixture,
+  });
+  return (await response.json()) as { id: string; packId: string; version: string };
+}
+
 test("the vocabulary browser: poly-hierarchy, keyboard navigation, zero axe violations", async ({
   page,
   baseURL,
@@ -47,7 +107,7 @@ test("the vocabulary browser: poly-hierarchy, keyboard navigation, zero axe viol
 
   await page.goto(`/?section=vocabulary&vocabulary=${glossary.id}`);
 
-  const tree = page.getByRole("tree", { name: "Vocabulary terms" });
+  const tree = page.getByRole("tree", { name: "Glossary terms" });
   await expect(tree).toBeVisible();
   const financeRow = page.getByRole("treeitem", { name: "Finance" });
   const reportingRow = page.getByRole("treeitem", { name: "Reporting" });
@@ -58,8 +118,15 @@ test("the vocabulary browser: poly-hierarchy, keyboard navigation, zero axe viol
   // a row's label selects it, it does not expand it (confirmed by hand
   // against a real server while building this test; the row and the
   // switcher are deliberately different targets in antd's own Tree).
+  // Each expand awaits `aria-expanded` before the next click — antd's Tree
+  // animates the expand, and firing both clicks back to back intermittently
+  // raced React's state update, appearing here as "Revenue" rendered under
+  // only one parent instead of both (found by repeated runs against a fresh
+  // database — an environment-independent flake, not container contention).
   await financeRow.locator(".ant-tree-switcher").click();
+  await expect(financeRow).toHaveAttribute("aria-expanded", "true");
   await reportingRow.locator(".ant-tree-switcher").click();
+  await expect(reportingRow).toHaveAttribute("aria-expanded", "true");
 
   // Both parents expanded: the poly-hierarchy term must appear once under
   // each, not merged into one, not dropped from either.
@@ -117,6 +184,71 @@ test("an empty glossary shows the designed first-run state, not a blank tree", a
 
   await expect(page.getByText(/no terms yet/i)).toBeVisible();
   await expect(page.getByRole("tree")).toHaveCount(0);
+
+  const axeResults = await new AxeBuilder({ page }).analyze();
+  expect(axeResults.violations, JSON.stringify(axeResults.violations, null, 2)).toEqual([]);
+});
+
+test("switching the vocabulary picker renders classifications, domains and ontology packs through the identical component", async ({
+  page,
+  baseURL,
+}) => {
+  const base = baseURL ?? "";
+
+  const sensitivity = await createClassification(base, "Playwright Sensitivity", true);
+  await createTag(base, sensitivity.id, "Public");
+  await createTag(base, sensitivity.id, "Confidential");
+
+  const sales = await createDomain(base, "Playwright Sales");
+  await createDataProduct(base, "Playwright Revenue Dashboard", sales.id);
+
+  const pack = await importPack(base, `playwright-pack-${sales.id}`, "1.0.0");
+
+  await page.goto("/?section=vocabulary");
+
+  // antd's `Segmented` keeps its native radio input visually hidden and
+  // relies on the wrapping `.ant-segmented-item` label for the visible,
+  // clickable surface — the same reason the tree below is expanded via its
+  // `.ant-tree-switcher`, not the row itself. `check()` still targets the
+  // (invisible) input and times out; the label is what a real click lands on.
+  const pickVocabulary = (name: string) =>
+    page.locator(".ant-segmented-item", { hasText: name }).click();
+
+  // Classifications: a mutually exclusive classification names the tag it
+  // conflicts with — Epic 25's own guarantee, surfaced here rather than
+  // only in the tag-assignment flow.
+  await pickVocabulary("Classifications");
+  await expect(page.getByRole("tree", { name: "Classifications and tags" })).toBeVisible();
+  const sensitivityRow = page.getByRole("treeitem", { name: "Playwright Sensitivity" });
+  await sensitivityRow.locator(".ant-tree-switcher").click();
+  await page.getByRole("treeitem", { name: "Public" }).click();
+  await expect(page.getByRole("heading", { name: "Public" })).toBeVisible();
+  // Scoped to the detail pane (the tree's own sibling), not the tree itself —
+  // "Confidential" is also a visible tag row once Sensitivity is expanded.
+  const detailPane = page.locator("aside + div");
+  await expect(detailPane.getByText("Confidential")).toBeVisible();
+
+  // Domains: a domain shows its own data products, not every product in the
+  // catalog.
+  await pickVocabulary("Domains");
+  await expect(page.getByRole("tree", { name: "Domains" })).toBeVisible();
+  await page.getByRole("treeitem", { name: "Playwright Sales" }).click();
+  await expect(page.getByRole("heading", { name: "Playwright Sales" })).toBeVisible();
+  await expect(page.getByText("Playwright Revenue Dashboard")).toBeVisible();
+
+  // Ontology packs: read-mostly, and says so — Epic 33 decision 3 — rather
+  // than rendering write controls that do not exist. Only one pack exists
+  // in this test's data, so `VocabularySection`'s own auto-pick-first
+  // already selects it — asserting the instance picker rendered and the
+  // notice is visible, rather than re-clicking an option already selected,
+  // which raced antd's own dropdown-close animation intermittently.
+  await pickVocabulary("Ontology packs");
+  await expect(page.getByRole("combobox", { name: "Instance" })).toBeVisible();
+  // `exact: true` — the read-only notice below embeds this same "packId
+  // version" pair inside a longer sentence, which a substring match would
+  // also catch, causing a strict-mode ambiguity between the two.
+  await expect(page.getByText(`${pack.packId} ${pack.version}`, { exact: true })).toBeVisible();
+  await expect(page.getByText(/read-only here/i)).toBeVisible();
 
   const axeResults = await new AxeBuilder({ page }).analyze();
   expect(axeResults.violations, JSON.stringify(axeResults.violations, null, 2)).toEqual([]);
