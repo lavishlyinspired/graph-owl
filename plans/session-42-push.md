@@ -76,36 +76,37 @@ Per direct instruction, the full workspace gate (`scripts/gate.sh --full`,
    propagated the same report through Bolt's `RUN`/`PULL` as `notifications`
    metadata (decision 2: reported, never dropped silently).
 
-## In progress — Epic 7d: Bolt status/sessions over HTTP
+## Done and committed this session (continued further)
 
-Implementation is complete and uncommitted. Adds:
+5. **Epic 7d: Bolt status/sessions over HTTP** (commit `46bab46`). Adds:
 
-- `graph_owl_bolt::BoltSession` and session registry inside `BoltServer`,
-  cleaned up via `Drop`-based `SessionGuard` on every disconnect path.
-- `graph_owl_server::bolt::{build_server, register}` plus a `static OnceLock`
-  so `GET /admin/bolt/status` can see the live listener.
-- `GET /admin/bolt/status` (admin-only, `404` for non-admins), returning
-  `enabled`, `maxConnections`, `activeConnections`, and the session list.
-- Bolt listener startup in `main.rs` when `--features bolt` and
-  `BOLT_BIND_ADDR` are both set.
-- Integration test `crates/graph-owl-server/tests/bolt_status.rs` covering
-  live session visibility, non-admin 404, and disabled-when-not-registered.
+   - `graph_owl_bolt::BoltSession` and session registry inside `BoltServer`,
+     cleaned up via `Drop`-based `SessionGuard` on every disconnect path.
+   - `graph_owl_server::bolt::{build_server, register}` plus a `static OnceLock`
+     so `GET /admin/bolt/status` can see the live listener.
+   - `GET /admin/bolt/status` (admin-only, `404` for non-admins), returning
+     `enabled`, `maxConnections`, `activeConnections`, and the session list.
+   - Bolt listener startup in `main.rs` when `--features bolt` and
+     `BOLT_BIND_ADDR` are both set.
+   - Integration test `crates/graph-owl-server/tests/bolt_status.rs` covering
+     live session visibility, non-admin 404, and disabled-when-not-registered.
 
-**Blocker discovered while resuming**: the workspace disk was 100% full
-(`target/` had grown to 510 GB). `cargo clean` freed 769 GB. After that,
-`cargo check`, `cargo fmt`, and `cargo clippy` are clean on the touched
-`graph-owl-bolt` and `graph-owl-server` crates; `graph-owl-bolt` unit tests
-pass. The `bolt_status` integration tests cannot run because Docker Desktop
-is not currently running in this environment (`/var/run/docker.sock` is
-broken and the sandbox cannot launch Docker.app). Tests and commit are
-pending Docker availability.
+   Committed with an honest caveat: Docker was unavailable in that environment,
+   so the integration test was verified compiling but not run live. **Docker
+   became available in a later session**, and the full suite was re-run for
+   real: `graph-owl-bolt --lib` 128/128, and
+   `graph-owl-server --features bolt --test bolt --test bolt_status` 22/22
+   (19 pre-existing Bolt wire tests + the 3 new ones), including the actual
+   claim — a real `HELLO` over a live `TcpListener`, read back as a session
+   over `GET /admin/bolt/status`. `fmt`/`clippy` clean on both touched crates.
+   No code changes were needed; the caveat is now resolved rather than open.
 
 ## Task list — what's left
 
 | # | Task | Status |
 |---|---|---|
 | 44 | Epic 7c: `MappingReport` over HTTP | **committed** (`76dea0db`) |
-| 45 | Epic 7d: Bolt status/sessions over HTTP | **implemented; tests blocked on Docker** |
+| 45 | Epic 7d: Bolt status/sessions over HTTP | **committed** (`46bab46`), integration tests since verified live |
 | 46 | Epic 9/9a: export HTTP routes + authorization | pending |
 | 47 | Epic 42 Slice A: vocabulary browser (glossary) | pending |
 | 48 | Epic 42 Slice B: 3 more vocabularies, config only | pending |
