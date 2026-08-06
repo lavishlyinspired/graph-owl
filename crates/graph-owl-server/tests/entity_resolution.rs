@@ -246,7 +246,7 @@ async fn rejecting_a_review_entry_removes_it_from_the_pending_queue() {
         &app,
         "POST",
         &format!("/resolution/queue/{entry_id}/reject"),
-        None,
+        Some(json!({ "reason": "different tables, coincidental column overlap" })),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -256,8 +256,51 @@ async fn rejecting_a_review_entry_removes_it_from_the_pending_queue() {
     assert_eq!(body["total"], json!(0), "{body}");
 
     // Explicitly asking for rejected entries still finds it — the decision
-    // was recorded, not deleted.
+    // was recorded, not deleted. The reason is recorded alongside it: Epic
+    // 42 decision 3 requires a rejection be auditable, which an evidence
+    // trail with no reason is not.
     let (status, body) = send(&app, "GET", "/resolution/queue?status=rejected", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["total"], json!(1), "{body}");
+    assert_eq!(
+        body["data"][0]["reason"],
+        json!("different tables, coincidental column overlap"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn rejecting_without_a_reason_is_a_400() {
+    let (app, _db, _connection_string) = test_app().await;
+    let (_a, b) = an_ambiguous_pair(&app).await;
+
+    send(&app, "POST", &format!("/assets/{b}/resolve"), None).await;
+    let (_, body) = send(&app, "GET", "/resolution/queue", None).await;
+    let entry_id = body["data"][0]["id"].as_str().expect("an id").to_string();
+
+    // No body at all.
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/resolution/queue/{entry_id}/reject"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // A body with an empty reason is the same refusal, not a different one —
+    // an empty string teaches the matcher nothing, same as no reason at all.
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/resolution/queue/{entry_id}/reject"),
+        Some(json!({ "reason": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Still pending — a refused reject must not have decided the entry.
+    let (status, body) = send(&app, "GET", "/resolution/queue", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["total"], json!(1), "{body}");
 }
@@ -276,7 +319,11 @@ async fn bulk_decide_reports_each_id_independently() {
         &app,
         "POST",
         "/resolution/queue/bulk",
-        Some(json!({ "ids": [entry_id, unknown_id], "decision": "reject" })),
+        Some(json!({
+            "ids": [entry_id, unknown_id],
+            "decision": "reject",
+            "reason": "bulk review: below the confidence bar this batch used",
+        })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -286,6 +333,25 @@ async fn bulk_decide_reports_each_id_independently() {
     assert_eq!(results[0]["ok"], json!(true), "{body}");
     assert_eq!(results[1]["id"], unknown_id);
     assert_eq!(results[1]["ok"], json!(false), "{body}");
+}
+
+#[tokio::test]
+async fn bulk_reject_without_a_reason_is_a_400() {
+    let (app, _db, _connection_string) = test_app().await;
+    let (_a, b) = an_ambiguous_pair(&app).await;
+
+    send(&app, "POST", &format!("/assets/{b}/resolve"), None).await;
+    let (_, body) = send(&app, "GET", "/resolution/queue", None).await;
+    let entry_id = body["data"][0]["id"].as_str().expect("an id").to_string();
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/resolution/queue/bulk",
+        Some(json!({ "ids": [entry_id], "decision": "reject" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
 
 #[tokio::test]

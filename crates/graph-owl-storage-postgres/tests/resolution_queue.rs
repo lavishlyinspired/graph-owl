@@ -60,6 +60,7 @@ fn entry(target: Uuid, candidate: Uuid, score: f64) -> ReviewQueueEntry {
         status: ReviewStatus::Pending,
         decided_by: None,
         decided_at: None,
+        reason: None,
         created_at: Utc::now(),
     }
 }
@@ -132,6 +133,7 @@ async fn a_rejected_entry_is_not_reset_by_a_later_queue_attempt() {
                 user_id: "alice".to_string(),
             },
             Utc::now(),
+            Some("case-only variant, not a duplicate".to_string()),
         )
         .await
         .expect("reject");
@@ -152,6 +154,11 @@ async fn a_rejected_entry_is_not_reset_by_a_later_queue_attempt() {
         fetched.status,
         ReviewStatus::Rejected,
         "a rejection must survive a later re-resolution of the same draft"
+    );
+    assert_eq!(
+        fetched.reason.as_deref(),
+        Some("case-only variant, not a duplicate"),
+        "the reason must persist alongside the decision, not just the status"
     );
 
     let (pending, total) = storage
@@ -181,6 +188,7 @@ async fn deciding_an_already_decided_entry_leaves_it_unchanged() {
             ReviewStatus::Confirmed,
             alice.clone(),
             Utc::now(),
+            None,
         )
         .await
         .expect("first decide");
@@ -189,7 +197,13 @@ async fn deciding_an_already_decided_entry_leaves_it_unchanged() {
         user_id: "bob".to_string(),
     };
     let second = storage
-        .decide_review_queue_entry(written.id, ReviewStatus::Rejected, bob, Utc::now())
+        .decide_review_queue_entry(
+            written.id,
+            ReviewStatus::Rejected,
+            bob,
+            Utc::now(),
+            Some("bob's reason, must not overwrite alice's confirm".to_string()),
+        )
         .await
         .expect("second decide")
         .expect("entry exists");
@@ -211,6 +225,7 @@ async fn deciding_an_unknown_entry_is_none() {
             ReviewStatus::Confirmed,
             MergeDecidedBy::Auto,
             Utc::now(),
+            None,
         )
         .await
         .expect("decide");

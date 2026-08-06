@@ -4725,14 +4725,36 @@ async fn confirm_review(
     Ok(Json(resolution))
 }
 
-/// `POST /resolution/queue/{id}/reject` — Epic 17 Slice F. Records the
-/// decision so the pair is not re-queued by a later re-resolution.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RejectReviewRequest {
+    reason: String,
+}
+
+impl ValidateBody for RejectReviewRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("reason"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// `POST /resolution/queue/{id}/reject` — Epic 17 Slice F, reason required
+/// since Epic 42 decision 3. Records the decision so the pair is not
+/// re-queued by a later re-resolution.
 async fn reject_review(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
     Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<RejectReviewRequest>,
 ) -> Result<StatusCode, AppError> {
-    catalog.reject_review(&principal, id).await?;
+    catalog
+        .reject_review(&principal, id, payload.reason)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -4741,6 +4763,12 @@ async fn reject_review(
 struct BulkReviewDecision {
     ids: Vec<Uuid>,
     decision: BulkDecisionKind,
+    /// One reason applied to every rejected id in the batch — required only
+    /// when `decision` is `reject`, checked in `validate_body` rather than
+    /// with `Option`'s absence alone, since an empty string would otherwise
+    /// slip past a plain "is it present" check.
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 impl ValidateBody for BulkReviewDecision {
@@ -4756,6 +4784,13 @@ impl ValidateBody for BulkReviewDecision {
                 FieldErrorCode::Required,
                 "at least one id is required".to_string(),
             ));
+        }
+        if value.get("decision").and_then(serde_json::Value::as_str) == Some("reject") {
+            require_non_empty_string(
+                value,
+                &graph_owl_api::validation::FieldPath::root().key("reason"),
+                &mut errors,
+            );
         }
         errors
     }
@@ -4783,7 +4818,14 @@ async fn bulk_decide_review(
     for id in payload.ids {
         let outcome = match payload.decision {
             BulkDecisionKind::Confirm => catalog.confirm_review(&principal, id).await.map(|_| ()),
-            BulkDecisionKind::Reject => catalog.reject_review(&principal, id).await,
+            BulkDecisionKind::Reject => {
+                // `validate_body` already required a non-empty reason
+                // whenever `decision` is `reject`, so this clones the same
+                // string into each independent per-id call rather than
+                // re-deciding whether one was supplied.
+                let reason = payload.reason.clone().unwrap_or_default();
+                catalog.reject_review(&principal, id, reason).await
+            }
         };
         results.push(json!({
             "id": id,

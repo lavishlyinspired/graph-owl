@@ -1811,6 +1811,7 @@ impl Storage for InMemoryStorage {
         status: graph_owl_core::resolution::ReviewStatus,
         decided_by: graph_owl_core::resolution::MergeDecidedBy,
         decided_at: chrono::DateTime<chrono::Utc>,
+        reason: Option<String>,
     ) -> Result<Option<graph_owl_core::resolution::ReviewQueueEntry>, StorageError> {
         use graph_owl_core::resolution::ReviewStatus;
         let mut queue = self.resolution_queue.lock().unwrap();
@@ -1823,6 +1824,7 @@ impl Storage for InMemoryStorage {
         entry.status = status;
         entry.decided_by = Some(decided_by);
         entry.decided_at = Some(decided_at);
+        entry.reason = reason;
         Ok(Some(entry.clone()))
     }
 

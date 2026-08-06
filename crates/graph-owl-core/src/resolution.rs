@@ -208,6 +208,11 @@ pub struct ReviewQueueEntry {
     /// When it was decided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decided_at: Option<DateTime<Utc>>,
+    /// Why a rejection was rejected — required on reject (Epic 42 decision
+    /// 3: an accepted merge with no evidence and a rejection with no reason
+    /// teach the matcher nothing), absent on confirm and while pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// When the entry was queued.
     pub created_at: DateTime<Utc>,
 }

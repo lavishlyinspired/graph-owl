@@ -1488,6 +1488,7 @@ pub trait Storage: Send + Sync {
         status: graph_owl_core::resolution::ReviewStatus,
         decided_by: graph_owl_core::resolution::MergeDecidedBy,
         decided_at: chrono::DateTime<chrono::Utc>,
+        reason: Option<String>,
     ) -> Result<Option<graph_owl_core::resolution::ReviewQueueEntry>, StorageError>;
 
     /// Persists a mention resolution (Epic 17 Slice G). Never a merge — a

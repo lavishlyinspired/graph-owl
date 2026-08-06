@@ -3857,6 +3857,7 @@ impl Storage for PostgresStorage {
         status: graph_owl_core::resolution::ReviewStatus,
         decided_by: graph_owl_core::resolution::MergeDecidedBy,
         decided_at: chrono::DateTime<chrono::Utc>,
+        reason: Option<String>,
     ) -> Result<Option<graph_owl_core::resolution::ReviewQueueEntry>, StorageError> {
         let decided_by_json = serde_json::to_value(&decided_by)
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
@@ -3865,7 +3866,7 @@ impl Storage for PostgresStorage {
         // separate read-then-write race window.
         let row = sqlx::query(
             "UPDATE resolution_queue
-             SET status = $2, decided_by = $3, decided_at = $4
+             SET status = $2, decided_by = $3, decided_at = $4, reason = $5
              WHERE id = $1 AND status = 'pending'
              RETURNING *",
         )
@@ -3873,6 +3874,7 @@ impl Storage for PostgresStorage {
         .bind(review_status_str(status))
         .bind(decided_by_json)
         .bind(decided_at)
+        .bind(reason)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
@@ -9532,6 +9534,7 @@ fn review_queue_entry_from_row(
             .transpose()
             .map_err(|e| StorageError::Unexpected(e.to_string()))?,
         decided_at: row.get("decided_at"),
+        reason: row.get("reason"),
         created_at: row.get("created_at"),
     })
 }

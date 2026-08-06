@@ -8378,6 +8378,7 @@ impl Catalog {
                     status: graph_owl_core::resolution::ReviewStatus::Pending,
                     decided_by: None,
                     decided_at: None,
+                    reason: None,
                     created_at: chrono::Utc::now(),
                 })
                 .await?;
@@ -8611,6 +8612,7 @@ impl Catalog {
                 graph_owl_core::resolution::ReviewStatus::Confirmed,
                 decided_by.clone(),
                 chrono::Utc::now(),
+                None,
             )
             .await?;
         self.merge(
@@ -8633,7 +8635,19 @@ impl Catalog {
     /// `NotFound` if the entry does not exist. `Conflict` if it was already
     /// confirmed — a merged pair cannot be un-merged by rejecting the queue
     /// entry; that is what splitting the merge is for.
-    pub async fn reject_review(&self, principal: &Principal, id: Uuid) -> Result<(), CatalogError> {
+    ///
+    /// `reason` is required, not merely accepted — Epic 42 decision 3: a
+    /// rejection with no reason teaches the matcher nothing, and is
+    /// unauditable months later when someone asks why a pair was refused.
+    /// Emptiness is rejected at the HTTP boundary (`ValidateBody`); this
+    /// layer trusts what it is handed rather than re-checking it, matching
+    /// how every other facade method treats its caller's validation.
+    pub async fn reject_review(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        reason: String,
+    ) -> Result<(), CatalogError> {
         let entry = self
             .storage
             .get_review_queue_entry(id)
@@ -8655,6 +8669,7 @@ impl Catalog {
                 graph_owl_core::resolution::ReviewStatus::Rejected,
                 decided_by,
                 chrono::Utc::now(),
+                Some(reason),
             )
             .await?;
         Ok(())
@@ -16395,7 +16410,7 @@ mod resolution_decides_before_it_merges {
         let entry_id = entries[0].id;
 
         catalog
-            .reject_review(&principal, entry_id)
+            .reject_review(&principal, entry_id, "duplicate draft".to_string())
             .await
             .expect("reject");
 
