@@ -98,6 +98,7 @@ graph-owl-lpg = { path = "crates/graph-owl-lpg" }
 graph-owl-engine = { path = "crates/graph-owl-engine" }
 graph-owl-engine-postgres = { path = "crates/graph-owl-engine-postgres" }
 graph-owl-traversal = { path = "crates/graph-owl-traversal" }
+graph-owl-traversal-memory = { path = "crates/graph-owl-traversal-memory" }
 graph-owl-api = { path = "crates/graph-owl-api" }
 graph-owl-bolt = { path = "crates/graph-owl-bolt" }
 graph-owl-ui = { path = "crates/graph-owl-ui" }

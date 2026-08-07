@@ -1,23 +1,26 @@
-//! Epic 7a: the frontier walk.
-//!
-//! The load-bearing test here is the depth one. A relationship is reified as
-//! `entity → relationship → entity`, so a chain of five logical edges is ten
-//! stored hops — and reporting ten is the single most likely way to get this
-//! wrong, because it is what a naive walk over the flakes produces.
+//! Epic 103: the same 26 tests `graph-owl-engine-postgres::tests::traversal`
+//! runs against the CTE adapter, run here against [`InMemoryTraversalEngine`]
+//! instead. Only `store()` differs — an in-memory `TripleStore` instead of a
+//! Postgres container — every fixture and assertion is unchanged, because two
+//! implementations of one trait that are not differentially tested are two
+//! behaviours, not one.
 
 mod common;
 
+use common::InMemoryTripleStore;
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
-use graph_owl_engine::TripleStore;
-use graph_owl_engine_postgres::PostgresTripleStore;
 use graph_owl_traversal::{Bounds, Direction, EdgeFilter, TraversalEngine};
+use graph_owl_traversal_memory::InMemoryTraversalEngine;
+use std::sync::Arc;
 
-async fn store() -> (PostgresTripleStore, common::TestDb) {
-    let (database, connection_string) = common::fresh_database().await;
-    let store = PostgresTripleStore::connect(&connection_string)
-        .await
-        .expect("engine should connect and migrate");
-    (store, database)
+// `async` for parity with the Postgres adapter's own `store()`, which
+// genuinely awaits a connection — every call site in this file is written
+// against that shape so the two differential suites stay line-for-line
+// comparable.
+#[allow(clippy::unused_async)]
+async fn store() -> (InMemoryTraversalEngine, std::sync::Arc<InMemoryTripleStore>) {
+    let triples = Arc::new(InMemoryTripleStore::new());
+    (InMemoryTraversalEngine::new(triples.clone()), triples)
 }
 
 fn node(id: &str) -> Sid {
@@ -68,7 +71,7 @@ fn distance_of(result: &graph_owl_traversal::TraversalResult, id: &str) -> Optio
 /// double.
 #[tokio::test]
 async fn a_chain_of_five_logical_edges_reports_distance_five() {
-    let (store, _container) = store().await;
+    let (store, triples) = store().await;
     let mut flakes = Vec::new();
     for i in 0..5 {
         flakes.extend(edge(
@@ -79,7 +82,7 @@ async fn a_chain_of_five_logical_edges_reports_distance_five() {
             1,
         ));
     }
-    store.assert_flakes(&flakes).await.expect("write");
+    triples.seed(&flakes).await;
 
     let result = store
         .neighbours(
@@ -111,7 +114,7 @@ async fn a_chain_of_five_logical_edges_reports_distance_five() {
 /// answer, not a rounding difference.
 #[tokio::test]
 async fn max_hops_bounds_exactly() {
-    let (store, _container) = store().await;
+    let (store, triples) = store().await;
     let mut flakes = Vec::new();
     for i in 0..5 {
         flakes.extend(edge(
@@ -122,7 +125,7 @@ async fn max_hops_bounds_exactly() {
             1,
         ));
     }
-    store.assert_flakes(&flakes).await.expect("write");
+    triples.seed(&flakes).await;
 
     let result = store
         .neighbours(
@@ -142,10 +145,10 @@ async fn max_hops_bounds_exactly() {
 }
 
 /// A diamond must report its far node once, at the shorter distance. Without
-/// `DISTINCT ON` it appears once per route.
+/// dedup it appears once per route.
 #[tokio::test]
 async fn a_diamond_reports_its_far_node_once_at_the_shorter_distance() {
-    let (store, _container) = store().await;
+    let (store, triples) = store().await;
     let mut flakes = Vec::new();
     flakes.extend(edge("r1", "a", "b", "feeds", 1));
     flakes.extend(edge("r2", "a", "c", "feeds", 1));
@@ -155,7 +158,7 @@ async fn a_diamond_reports_its_far_node_once_at_the_shorter_distance() {
     flakes.extend(edge("r5", "a", "x", "feeds", 1));
     flakes.extend(edge("r6", "x", "y", "feeds", 1));
     flakes.extend(edge("r7", "y", "d", "feeds", 1));
-    store.assert_flakes(&flakes).await.expect("write");
+    triples.seed(&flakes).await;
 
     let result = store
         .neighbours(
@@ -179,12 +182,12 @@ async fn a_diamond_reports_its_far_node_once_at_the_shorter_distance() {
 /// the failure mode without a guard is a hang rather than a wrong answer.
 #[tokio::test]
 async fn a_cycle_terminates() {
-    let (store, _container) = store().await;
+    let (store, triples) = store().await;
     let mut flakes = Vec::new();
     flakes.extend(edge("r1", "a", "b", "feeds", 1));
     flakes.extend(edge("r2", "b", "c", "feeds", 1));
     flakes.extend(edge("r3", "c", "a", "feeds", 1));
-    store.assert_flakes(&flakes).await.expect("write");
+    triples.seed(&flakes).await;
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(20),
@@ -209,15 +212,13 @@ async fn a_cycle_terminates() {
 /// this", and the two are served by different indexes.
 #[tokio::test]
 async fn direction_selects_which_way_the_walk_goes() {
-    let (store, _container) = store().await;
-    store
-        .assert_flakes(&edge("r1", "upstream", "middle", "feeds", 1))
-        .await
-        .expect("write");
-    store
-        .assert_flakes(&edge("r2", "middle", "downstream", "feeds", 1))
-        .await
-        .expect("write");
+    let (store, triples) = store().await;
+    triples
+        .seed(&edge("r1", "upstream", "middle", "feeds", 1))
+        .await;
+    triples
+        .seed(&edge("r2", "middle", "downstream", "feeds", 1))
+        .await;
 
     let bounds = Bounds {
         max_hops: 3,
@@ -269,9 +270,9 @@ async fn direction_selects_which_way_the_walk_goes() {
 /// deployment starts in.
 #[tokio::test]
 async fn direct_references_such_as_the_hierarchy_are_edges_too() {
-    let (store, _container) = store().await;
-    store
-        .assert_flakes(&[
+    let (store, triples) = store().await;
+    triples
+        .seed(&[
             Flake::assert(
                 node("column-1"),
                 Sid::dsc("parentTable"),
@@ -285,8 +286,7 @@ async fn direct_references_such_as_the_hierarchy_are_edges_too() {
                 1,
             ),
         ])
-        .await
-        .expect("write");
+        .await;
 
     let result = store
         .neighbours(
@@ -309,11 +309,11 @@ async fn direct_references_such_as_the_hierarchy_are_edges_too() {
 /// return nodes reached through edges the caller explicitly excluded.
 #[tokio::test]
 async fn an_excluded_relationship_type_is_not_traversed() {
-    let (store, _container) = store().await;
+    let (store, triples) = store().await;
     let mut flakes = Vec::new();
     flakes.extend(edge("r1", "a", "b", "feeds", 1));
     flakes.extend(edge("r2", "a", "c", "sameAs", 1));
-    store.assert_flakes(&flakes).await.expect("write");
+    triples.seed(&flakes).await;
 
     let result = store
         .neighbours(
@@ -340,15 +340,9 @@ async fn an_excluded_relationship_type_is_not_traversed() {
 /// an earlier transaction.
 #[tokio::test]
 async fn as_of_walks_the_graph_as_it_was() {
-    let (store, _container) = store().await;
-    store
-        .assert_flakes(&edge("r1", "a", "b", "feeds", 1))
-        .await
-        .expect("write");
-    store
-        .assert_flakes(&edge("r2", "b", "c", "feeds", 5))
-        .await
-        .expect("write");
+    let (store, triples) = store().await;
+    triples.seed(&edge("r1", "a", "b", "feeds", 1)).await;
+    triples.seed(&edge("r2", "b", "c", "feeds", 5)).await;
 
     let bounds = Bounds {
         max_hops: 3,
@@ -390,13 +384,10 @@ async fn as_of_walks_the_graph_as_it_was() {
 /// relationship leaves it in every traversal.
 #[tokio::test]
 async fn a_retracted_edge_is_not_traversed() {
-    let (store, _container) = store().await;
+    let (store, triples) = store().await;
     let flakes = edge("r1", "a", "b", "feeds", 1);
-    store.assert_flakes(&flakes).await.expect("write");
-    store
-        .retract_flakes(&edge("r1", "a", "b", "feeds", 2))
-        .await
-        .expect("retract");
+    triples.seed(&flakes).await;
+    triples.retract(&edge("r1", "a", "b", "feeds", 2)).await;
 
     let result = store
         .neighbours(
@@ -416,7 +407,7 @@ async fn a_retracted_edge_is_not_traversed() {
 
 #[tokio::test]
 async fn an_isolated_node_returns_itself_and_no_error() {
-    let (store, _container) = store().await;
+    let (store, _triples) = store().await;
     let result = store
         .neighbours(
             &node("alone"),
@@ -436,7 +427,7 @@ async fn an_isolated_node_returns_itself_and_no_error() {
 /// that claims to be the whole story.
 #[tokio::test]
 async fn exceeding_the_node_budget_reports_truncation() {
-    let (store, _container) = store().await;
+    let (store, triples) = store().await;
     let mut flakes = Vec::new();
     for i in 0..20 {
         flakes.extend(edge(
@@ -447,7 +438,7 @@ async fn exceeding_the_node_budget_reports_truncation() {
             1,
         ));
     }
-    store.assert_flakes(&flakes).await.expect("write");
+    triples.seed(&flakes).await;
 
     let result = store
         .neighbours(
@@ -474,11 +465,11 @@ async fn exceeding_the_node_budget_reports_truncation() {
 
 #[tokio::test]
 async fn a_subgraph_returns_nodes_and_the_edges_between_them() {
-    let (store, _container) = store().await;
+    let (store, triples) = store().await;
     let mut flakes = Vec::new();
     flakes.extend(edge("r1", "a", "b", "feeds", 1));
     flakes.extend(edge("r2", "b", "c", "feeds", 1));
-    store.assert_flakes(&flakes).await.expect("write");
+    triples.seed(&flakes).await;
 
     let graph = store
         .subgraph(
@@ -498,39 +489,61 @@ async fn a_subgraph_returns_nodes_and_the_edges_between_them() {
     assert!(graph.edges.iter().all(|e| e.relationship == "feeds"));
 }
 
-/// A reified relationship with no `relType` flake at all still counts as an
-/// edge, defaulting to `"related"` — the `COALESCE` in `push_logical_edges`'s
-/// aggregate, unexercised by every other test here since they all name a
-/// type.
+/// Every edge's endpoints must be in the node set. A dangling edge is drawn
+/// into empty space by a renderer, which is worse than a smaller picture.
 #[tokio::test]
-async fn a_relationship_with_no_rel_type_defaults_to_related() {
-    let (store, _container) = store().await;
-    let subject = node("r1");
-    store
-        .assert_flakes(&[
-            Flake::assert(
-                subject.clone(),
-                Sid::new(namespace::RDF, "type"),
-                FlakeValue::Ref(Sid::dsc("Relationship")),
-                1,
-            ),
-            Flake::assert(
-                subject.clone(),
-                Sid::dsc("fromEntity"),
-                FlakeValue::Ref(node("a")),
-                1,
-            ),
-            Flake::assert(subject, Sid::dsc("toEntity"), FlakeValue::Ref(node("b")), 1),
-        ])
-        .await
-        .expect("write");
+async fn a_truncated_subgraph_has_no_dangling_edges() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    for i in 0..30 {
+        flakes.extend(edge(
+            &format!("r{i}"),
+            "hub",
+            &format!("leaf{i}"),
+            "feeds",
+            1,
+        ));
+    }
+    triples.seed(&flakes).await;
 
     let graph = store
         .subgraph(
-            &[node("a")],
+            &[node("hub")],
             Direction::Outgoing,
             Bounds {
-                max_hops: 1,
+                max_hops: 2,
+                max_nodes: 6,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("subgraph");
+
+    assert!(graph.truncated);
+    for edge in &graph.edges {
+        assert!(
+            graph.nodes.contains(&edge.from) && graph.nodes.contains(&edge.to),
+            "{edge:?} dangles outside the node set"
+        );
+    }
+}
+
+/// Overlapping seeds produce one merged picture. The same node twice is a
+/// rendering bug, not extra information.
+#[tokio::test]
+async fn overlapping_seeds_merge_into_one_subgraph() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "shared", "feeds", 1));
+    flakes.extend(edge("r2", "b", "shared", "feeds", 1));
+    triples.seed(&flakes).await;
+
+    let graph = store
+        .subgraph(
+            &[node("a"), node("b")],
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 2,
                 max_nodes: 200,
             },
             &EdgeFilter::default(),
@@ -538,23 +551,362 @@ async fn a_relationship_with_no_rel_type_defaults_to_related() {
         .await
         .expect("subgraph");
 
-    let edge = graph
-        .edges
-        .iter()
-        .find(|e| e.from.id == "a" && e.to.id == "b")
-        .expect("edge present");
-    assert_eq!(edge.relationship, "related");
+    assert_eq!(
+        graph.nodes.iter().filter(|n| n.id == "shared").count(),
+        1,
+        "the shared node must appear once: {:?}",
+        graph.nodes
+    );
 }
 
-/// `derived` reflects the reified relationship's `fromEntity` flake context —
-/// Epic 6's reasoning-vs-asserted distinction. No other test here reads
-/// `EdgeRef::derived`.
+#[tokio::test]
+async fn an_empty_seed_set_returns_an_empty_subgraph() {
+    let (store, _triples) = store().await;
+    let graph = store
+        .subgraph(
+            &[],
+            Direction::Both,
+            Bounds::default(),
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("empty seeds are not an error");
+
+    assert!(graph.nodes.is_empty() && graph.edges.is_empty() && !graph.truncated);
+}
+
+// ---- shortest_path ----
+
+#[tokio::test]
+async fn shortest_path_returns_the_route_not_just_its_length() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "b", "feeds", 1));
+    flakes.extend(edge("r2", "b", "c", "feeds", 1));
+    triples.seed(&flakes).await;
+
+    let path = store
+        .shortest_path(
+            &node("a"),
+            &node("c"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 5,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk")
+        .expect("c is reachable from a");
+
+    assert_eq!(path.length, 2, "two logical edges");
+    let ids: Vec<&str> = path.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, vec!["a", "b", "c"], "the route itself, in order");
+}
+
+/// Unreachable is an answer, not an error. It is the commonest true result of
+/// asking, and making it exceptional would force every caller to treat the
+/// normal case as a failure.
+#[tokio::test]
+async fn an_unreachable_target_is_none_rather_than_an_error() {
+    let (store, triples) = store().await;
+    triples.seed(&edge("r1", "a", "b", "feeds", 1)).await;
+
+    let path = store
+        .shortest_path(
+            &node("a"),
+            &node("elsewhere"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 5,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("not reaching something is not a failure");
+    assert!(path.is_none());
+}
+
+/// A node reaches itself in zero edges, by definition. Walking for it would
+/// make the answer depend on whether the node happens to sit on a cycle.
+#[tokio::test]
+async fn a_node_reaches_itself_in_zero_edges() {
+    let (store, _triples) = store().await;
+    let path = store
+        .shortest_path(
+            &node("alone"),
+            &node("alone"),
+            Direction::Outgoing,
+            Bounds::default(),
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk")
+        .expect("a node always reaches itself");
+    assert_eq!(path.length, 0);
+    assert_eq!(path.nodes.len(), 1);
+}
+
+/// It must be the *shortest*, not merely a route.
+#[tokio::test]
+async fn shortest_path_prefers_the_shorter_of_two_routes() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "b", "feeds", 1));
+    flakes.extend(edge("r2", "b", "z", "feeds", 1));
+    flakes.extend(edge("r3", "a", "x", "feeds", 1));
+    flakes.extend(edge("r4", "x", "y", "feeds", 1));
+    flakes.extend(edge("r5", "y", "z", "feeds", 1));
+    triples.seed(&flakes).await;
+
+    let path = store
+        .shortest_path(
+            &node("a"),
+            &node("z"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 6,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk")
+        .expect("reachable");
+    assert_eq!(path.length, 2, "the two-hop route, not the three-hop one");
+}
+
+/// Equal-length alternatives must resolve the same way every call. A tiebreak
+/// left to the planner is a result that changes between runs for no reason the
+/// caller can see.
+#[tokio::test]
+async fn equal_length_routes_resolve_deterministically() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "via_m", "feeds", 1));
+    flakes.extend(edge("r2", "a", "via_k", "feeds", 1));
+    flakes.extend(edge("r3", "via_m", "z", "feeds", 1));
+    flakes.extend(edge("r4", "via_k", "z", "feeds", 1));
+    triples.seed(&flakes).await;
+
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let path = store
+            .shortest_path(
+                &node("a"),
+                &node("z"),
+                Direction::Outgoing,
+                Bounds {
+                    max_hops: 4,
+                    max_nodes: 200,
+                },
+                &EdgeFilter::default(),
+            )
+            .await
+            .expect("walk")
+            .expect("reachable");
+        seen.push(path.nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>());
+    }
+    assert!(
+        seen.windows(2).all(|w| w[0] == w[1]),
+        "the same question gave different answers: {seen:?}"
+    );
+}
+
+/// **The filter test.** A short route through an excluded edge must not be
+/// used; the longer permitted one is returned instead. Applying the filter
+/// after selection would hand back a path the caller explicitly ruled out.
+#[tokio::test]
+async fn a_filtered_out_edge_is_not_used_even_when_it_would_be_shorter() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    // Direct, but of a type the caller will exclude.
+    flakes.extend(edge("r1", "a", "z", "sameAs", 1));
+    // Longer, but permitted.
+    flakes.extend(edge("r2", "a", "b", "feeds", 1));
+    flakes.extend(edge("r3", "b", "z", "feeds", 1));
+    triples.seed(&flakes).await;
+
+    let path = store
+        .shortest_path(
+            &node("a"),
+            &node("z"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 5,
+                max_nodes: 200,
+            },
+            &EdgeFilter {
+                relationship_types: Some(vec!["feeds".to_string()]),
+                as_of: None,
+            },
+        )
+        .await
+        .expect("walk")
+        .expect("reachable through the permitted edges");
+
+    assert_eq!(path.length, 2, "the one-hop sameAs route was excluded");
+}
+
+// ---- all_paths ----
+
+#[tokio::test]
+async fn all_paths_enumerates_every_distinct_route() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "b", "feeds", 1));
+    flakes.extend(edge("r2", "a", "c", "feeds", 1));
+    flakes.extend(edge("r3", "b", "z", "feeds", 1));
+    flakes.extend(edge("r4", "c", "z", "feeds", 1));
+    triples.seed(&flakes).await;
+
+    let set = store
+        .all_paths(
+            &node("a"),
+            &node("z"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 5,
+                max_nodes: 200,
+            },
+            100,
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(set.paths.len(), 2, "{:?}", set.paths);
+    assert!(!set.truncated);
+}
+
+/// The cap is a hard stop, not a hint. Path enumeration in a dense graph is
+/// exponential, and the alternative to capping is a query that runs until
+/// something else times out.
+#[tokio::test]
+async fn all_paths_caps_hard_and_reports_it() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    // Six parallel routes a -> via_i -> z.
+    for i in 0..6 {
+        flakes.extend(edge(&format!("r{i}a"), "a", &format!("via{i}"), "feeds", 1));
+        flakes.extend(edge(&format!("r{i}b"), &format!("via{i}"), "z", "feeds", 1));
+    }
+    triples.seed(&flakes).await;
+
+    let set = store
+        .all_paths(
+            &node("a"),
+            &node("z"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 4,
+                max_nodes: 200,
+            },
+            3,
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(set.paths.len(), 3, "the cap is honoured exactly");
+    assert!(set.truncated, "and reported");
+}
+
+// ---- detect_cycles ----
+
+/// One loop is one cycle. Without normalisation a 3-cycle reports three times,
+/// once per starting point, and a reader concludes the graph is three times as
+/// tangled as it is.
+#[tokio::test]
+async fn a_single_loop_is_reported_once() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "b", "feeds", 1));
+    flakes.extend(edge("r2", "b", "c", "feeds", 1));
+    flakes.extend(edge("r3", "c", "a", "feeds", 1));
+    triples.seed(&flakes).await;
+
+    let cycles = store
+        .detect_cycles(
+            &node("a"),
+            Bounds {
+                max_hops: 6,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(cycles.len(), 1, "{cycles:?}");
+    let ids: Vec<&str> = cycles[0].nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, vec!["a", "b", "c"], "normalised so the smallest leads");
+}
+
+#[tokio::test]
+async fn a_dag_has_no_cycles() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "b", "feeds", 1));
+    flakes.extend(edge("r2", "b", "c", "feeds", 1));
+    flakes.extend(edge("r3", "a", "c", "feeds", 1));
+    triples.seed(&flakes).await;
+
+    let cycles = store
+        .detect_cycles(
+            &node("a"),
+            Bounds {
+                max_hops: 6,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+    assert!(cycles.is_empty(), "a diamond is not a cycle: {cycles:?}");
+}
+
+/// A table that feeds itself through a recursive view. Length 1, and real.
+#[tokio::test]
+async fn a_self_loop_is_a_cycle_of_length_one() {
+    let (store, triples) = store().await;
+    triples.seed(&edge("r1", "a", "a", "feeds", 1)).await;
+
+    let cycles = store
+        .detect_cycles(
+            &node("a"),
+            Bounds {
+                max_hops: 4,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(cycles.len(), 1, "{cycles:?}");
+    assert_eq!(cycles[0].nodes.len(), 1);
+}
+
+// ---- additional coverage, beyond the 26 ported from the Postgres suite ----
+//
+// The tests above prove the two adapters agree; these close gaps mutation
+// testing found that the ported suite happens not to exercise — mostly exact
+// boundary values (`>` vs `>=`/`==` is invisible unless something lands
+// exactly on the line) and the `derived` flag, which no ported test reads.
+
+/// A reified relationship's `fromEntity` flake carries the context that
+/// decides `derived` (Epic 6's reasoning-vs-asserted distinction). No ported
+/// test reads `EdgeRef::derived` at all, so a `==`/`!=` swap here survived
+/// mutation testing silently.
 #[tokio::test]
 async fn a_reified_relationship_asserted_in_the_reasoning_context_is_marked_derived() {
-    let (store, _container) = store().await;
+    let (store, triples) = store().await;
     let subject = node("r1");
-    store
-        .assert_flakes(&[
+    triples
+        .seed(&[
             Flake {
                 cx: Some(Sid::dsc("graph:reasoning")),
                 ..Flake::assert(
@@ -592,12 +944,8 @@ async fn a_reified_relationship_asserted_in_the_reasoning_context_is_marked_deri
                 )
             },
         ])
-        .await
-        .expect("write");
-    store
-        .assert_flakes(&edge("r2", "b", "c", "feeds", 1))
-        .await
-        .expect("write");
+        .await;
+    triples.seed(&edge("r2", "b", "c", "feeds", 1)).await;
 
     let graph = store
         .subgraph(
@@ -633,13 +981,53 @@ async fn a_reified_relationship_asserted_in_the_reasoning_context_is_marked_deri
     );
 }
 
-/// Every edge's endpoints must be in the node set. A dangling edge is drawn
-/// into empty space by a renderer, which is worse than a smaller picture.
+/// The same `derived` flag, for the direct-reference edge source (the
+/// hierarchy edges, not a reified relationship) — a separate code path with
+/// its own `==`/`!=` check.
 #[tokio::test]
-async fn a_truncated_subgraph_has_no_dangling_edges() {
-    let (store, _container) = store().await;
+async fn a_direct_reference_asserted_in_the_reasoning_context_is_marked_derived() {
+    let (store, triples) = store().await;
+    triples
+        .seed(&[Flake {
+            cx: Some(Sid::dsc("graph:reasoning")),
+            ..Flake::assert(
+                node("column-1"),
+                Sid::dsc("parentTable"),
+                FlakeValue::Ref(node("table-1")),
+                1,
+            )
+        }])
+        .await;
+
+    let graph = store
+        .subgraph(
+            &[node("column-1")],
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 1,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("subgraph");
+
+    let derived_edge = graph
+        .edges
+        .iter()
+        .find(|e| e.from.id == "column-1" && e.to.id == "table-1")
+        .expect("edge present");
+    assert!(derived_edge.derived);
+}
+
+/// `>` vs `>=` at the node budget is invisible unless something lands
+/// exactly on it — one node short of the budget always exercises the
+/// `false` branch either way, and one node over always exercises `true`.
+#[tokio::test]
+async fn landing_exactly_on_the_node_budget_is_not_truncated() {
+    let (store, triples) = store().await;
     let mut flakes = Vec::new();
-    for i in 0..30 {
+    for i in 0..4 {
         flakes.extend(edge(
             &format!("r{i}"),
             "hub",
@@ -648,7 +1036,44 @@ async fn a_truncated_subgraph_has_no_dangling_edges() {
             1,
         ));
     }
-    store.assert_flakes(&flakes).await.expect("write");
+    triples.seed(&flakes).await;
+
+    // hub + 4 leaves = 5 nodes, exactly the budget.
+    let result = store
+        .neighbours(
+            &node("hub"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 2,
+                max_nodes: 5,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(result.reached.len(), 5);
+    assert!(
+        !result.truncated,
+        "landing exactly on the budget is not truncation"
+    );
+}
+
+/// The same boundary, for `subgraph`'s own, separately-computed budget check.
+#[tokio::test]
+async fn a_subgraph_landing_exactly_on_the_node_budget_is_not_truncated() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    for i in 0..4 {
+        flakes.extend(edge(
+            &format!("r{i}"),
+            "hub",
+            &format!("leaf{i}"),
+            "feeds",
+            1,
+        ));
+    }
+    triples.seed(&flakes).await;
 
     let graph = store
         .subgraph(
@@ -656,35 +1081,32 @@ async fn a_truncated_subgraph_has_no_dangling_edges() {
             Direction::Outgoing,
             Bounds {
                 max_hops: 2,
-                max_nodes: 6,
+                max_nodes: 5,
             },
             &EdgeFilter::default(),
         )
         .await
         .expect("subgraph");
 
-    assert!(graph.truncated);
-    for edge in &graph.edges {
-        assert!(
-            graph.nodes.contains(&edge.from) && graph.nodes.contains(&edge.to),
-            "{edge:?} dangles outside the node set"
-        );
-    }
+    assert_eq!(graph.nodes.len(), 5);
+    assert!(!graph.truncated);
 }
 
-/// Overlapping seeds produce one merged picture. The same node twice is a
-/// rendering bug, not extra information.
+/// `subgraph` has no ported test proving `max_hops` actually excludes
+/// anything — only `neighbours` does. A node one hop beyond the bound must
+/// not appear.
 #[tokio::test]
-async fn overlapping_seeds_merge_into_one_subgraph() {
-    let (store, _container) = store().await;
+async fn a_subgraph_bounds_max_hops_exactly() {
+    let (store, triples) = store().await;
     let mut flakes = Vec::new();
-    flakes.extend(edge("r1", "a", "shared", "feeds", 1));
-    flakes.extend(edge("r2", "b", "shared", "feeds", 1));
-    store.assert_flakes(&flakes).await.expect("write");
+    flakes.extend(edge("r1", "hub", "n1", "feeds", 1));
+    flakes.extend(edge("r2", "n1", "n2", "feeds", 1));
+    flakes.extend(edge("r3", "n2", "n3", "feeds", 1));
+    triples.seed(&flakes).await;
 
     let graph = store
         .subgraph(
-            &[node("a"), node("b")],
+            &[node("hub")],
             Direction::Outgoing,
             Bounds {
                 max_hops: 2,
@@ -695,252 +1117,28 @@ async fn overlapping_seeds_merge_into_one_subgraph() {
         .await
         .expect("subgraph");
 
-    assert_eq!(
-        graph.nodes.iter().filter(|n| n.id == "shared").count(),
-        1,
-        "the shared node must appear once: {:?}",
+    assert!(
+        graph.nodes.iter().any(|n| n.id == "n2"),
+        "two hops is included: {:?}",
+        graph.nodes
+    );
+    assert!(
+        !graph.nodes.iter().any(|n| n.id == "n3"),
+        "three hops is not: {:?}",
         graph.nodes
     );
 }
 
+/// The same budget-boundary class, for `all_paths`'s own cap check.
 #[tokio::test]
-async fn an_empty_seed_set_returns_an_empty_subgraph() {
-    let (store, _container) = store().await;
-    let graph = store
-        .subgraph(
-            &[],
-            Direction::Both,
-            Bounds::default(),
-            &EdgeFilter::default(),
-        )
-        .await
-        .expect("empty seeds are not an error");
-
-    assert!(graph.nodes.is_empty() && graph.edges.is_empty() && !graph.truncated);
-}
-
-// ---- shortest_path ----
-
-#[tokio::test]
-async fn shortest_path_returns_the_route_not_just_its_length() {
-    let (store, _container) = store().await;
+async fn all_paths_landing_exactly_on_the_cap_is_not_truncated() {
+    let (store, triples) = store().await;
     let mut flakes = Vec::new();
-    flakes.extend(edge("r1", "a", "b", "feeds", 1));
-    flakes.extend(edge("r2", "b", "c", "feeds", 1));
-    store.assert_flakes(&flakes).await.expect("write");
-
-    let path = store
-        .shortest_path(
-            &node("a"),
-            &node("c"),
-            Direction::Outgoing,
-            Bounds {
-                max_hops: 5,
-                max_nodes: 200,
-            },
-            &EdgeFilter::default(),
-        )
-        .await
-        .expect("walk")
-        .expect("c is reachable from a");
-
-    assert_eq!(path.length, 2, "two logical edges");
-    let ids: Vec<&str> = path.nodes.iter().map(|n| n.id.as_str()).collect();
-    assert_eq!(ids, vec!["a", "b", "c"], "the route itself, in order");
-}
-
-/// Unreachable is an answer, not an error. It is the commonest true result of
-/// asking, and making it exceptional would force every caller to treat the
-/// normal case as a failure.
-#[tokio::test]
-async fn an_unreachable_target_is_none_rather_than_an_error() {
-    let (store, _container) = store().await;
-    store
-        .assert_flakes(&edge("r1", "a", "b", "feeds", 1))
-        .await
-        .expect("write");
-
-    let path = store
-        .shortest_path(
-            &node("a"),
-            &node("elsewhere"),
-            Direction::Outgoing,
-            Bounds {
-                max_hops: 5,
-                max_nodes: 200,
-            },
-            &EdgeFilter::default(),
-        )
-        .await
-        .expect("not reaching something is not a failure");
-    assert!(path.is_none());
-}
-
-/// A node reaches itself in zero edges, by definition. Walking for it would
-/// make the answer depend on whether the node happens to sit on a cycle.
-#[tokio::test]
-async fn a_node_reaches_itself_in_zero_edges() {
-    let (store, _container) = store().await;
-    let path = store
-        .shortest_path(
-            &node("alone"),
-            &node("alone"),
-            Direction::Outgoing,
-            Bounds::default(),
-            &EdgeFilter::default(),
-        )
-        .await
-        .expect("walk")
-        .expect("a node always reaches itself");
-    assert_eq!(path.length, 0);
-    assert_eq!(path.nodes.len(), 1);
-}
-
-/// It must be the *shortest*, not merely a route.
-#[tokio::test]
-async fn shortest_path_prefers_the_shorter_of_two_routes() {
-    let (store, _container) = store().await;
-    let mut flakes = Vec::new();
-    flakes.extend(edge("r1", "a", "b", "feeds", 1));
-    flakes.extend(edge("r2", "b", "z", "feeds", 1));
-    flakes.extend(edge("r3", "a", "x", "feeds", 1));
-    flakes.extend(edge("r4", "x", "y", "feeds", 1));
-    flakes.extend(edge("r5", "y", "z", "feeds", 1));
-    store.assert_flakes(&flakes).await.expect("write");
-
-    let path = store
-        .shortest_path(
-            &node("a"),
-            &node("z"),
-            Direction::Outgoing,
-            Bounds {
-                max_hops: 6,
-                max_nodes: 200,
-            },
-            &EdgeFilter::default(),
-        )
-        .await
-        .expect("walk")
-        .expect("reachable");
-    assert_eq!(path.length, 2, "the two-hop route, not the three-hop one");
-}
-
-/// Equal-length alternatives must resolve the same way every call. A tiebreak
-/// left to the planner is a result that changes between runs for no reason the
-/// caller can see.
-#[tokio::test]
-async fn equal_length_routes_resolve_deterministically() {
-    let (store, _container) = store().await;
-    let mut flakes = Vec::new();
-    flakes.extend(edge("r1", "a", "via_m", "feeds", 1));
-    flakes.extend(edge("r2", "a", "via_k", "feeds", 1));
-    flakes.extend(edge("r3", "via_m", "z", "feeds", 1));
-    flakes.extend(edge("r4", "via_k", "z", "feeds", 1));
-    store.assert_flakes(&flakes).await.expect("write");
-
-    let mut seen = Vec::new();
-    for _ in 0..4 {
-        let path = store
-            .shortest_path(
-                &node("a"),
-                &node("z"),
-                Direction::Outgoing,
-                Bounds {
-                    max_hops: 4,
-                    max_nodes: 200,
-                },
-                &EdgeFilter::default(),
-            )
-            .await
-            .expect("walk")
-            .expect("reachable");
-        seen.push(path.nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>());
-    }
-    assert!(
-        seen.windows(2).all(|w| w[0] == w[1]),
-        "the same question gave different answers: {seen:?}"
-    );
-}
-
-/// **The filter test.** A short route through an excluded edge must not be
-/// used; the longer permitted one is returned instead. Applying the filter
-/// after selection would hand back a path the caller explicitly ruled out.
-#[tokio::test]
-async fn a_filtered_out_edge_is_not_used_even_when_it_would_be_shorter() {
-    let (store, _container) = store().await;
-    let mut flakes = Vec::new();
-    // Direct, but of a type the caller will exclude.
-    flakes.extend(edge("r1", "a", "z", "sameAs", 1));
-    // Longer, but permitted.
-    flakes.extend(edge("r2", "a", "b", "feeds", 1));
-    flakes.extend(edge("r3", "b", "z", "feeds", 1));
-    store.assert_flakes(&flakes).await.expect("write");
-
-    let path = store
-        .shortest_path(
-            &node("a"),
-            &node("z"),
-            Direction::Outgoing,
-            Bounds {
-                max_hops: 5,
-                max_nodes: 200,
-            },
-            &EdgeFilter {
-                relationship_types: Some(vec!["feeds".to_string()]),
-                as_of: None,
-            },
-        )
-        .await
-        .expect("walk")
-        .expect("reachable through the permitted edges");
-
-    assert_eq!(path.length, 2, "the one-hop sameAs route was excluded");
-}
-
-// ---- all_paths ----
-
-#[tokio::test]
-async fn all_paths_enumerates_every_distinct_route() {
-    let (store, _container) = store().await;
-    let mut flakes = Vec::new();
-    flakes.extend(edge("r1", "a", "b", "feeds", 1));
-    flakes.extend(edge("r2", "a", "c", "feeds", 1));
-    flakes.extend(edge("r3", "b", "z", "feeds", 1));
-    flakes.extend(edge("r4", "c", "z", "feeds", 1));
-    store.assert_flakes(&flakes).await.expect("write");
-
-    let set = store
-        .all_paths(
-            &node("a"),
-            &node("z"),
-            Direction::Outgoing,
-            Bounds {
-                max_hops: 5,
-                max_nodes: 200,
-            },
-            100,
-            &EdgeFilter::default(),
-        )
-        .await
-        .expect("walk");
-
-    assert_eq!(set.paths.len(), 2, "{:?}", set.paths);
-    assert!(!set.truncated);
-}
-
-/// The cap is a hard stop, not a hint. Path enumeration in a dense graph is
-/// exponential, and the alternative to capping is a query that runs until
-/// something else times out.
-#[tokio::test]
-async fn all_paths_caps_hard_and_reports_it() {
-    let (store, _container) = store().await;
-    let mut flakes = Vec::new();
-    // Six parallel routes a -> via_i -> z.
-    for i in 0..6 {
+    for i in 0..3 {
         flakes.extend(edge(&format!("r{i}a"), "a", &format!("via{i}"), "feeds", 1));
         flakes.extend(edge(&format!("r{i}b"), &format!("via{i}"), "z", "feeds", 1));
     }
-    store.assert_flakes(&flakes).await.expect("write");
+    triples.seed(&flakes).await;
 
     let set = store
         .all_paths(
@@ -957,85 +1155,176 @@ async fn all_paths_caps_hard_and_reports_it() {
         .await
         .expect("walk");
 
-    assert_eq!(set.paths.len(), 3, "the cap is honoured exactly");
-    assert!(set.truncated, "and reported");
+    assert_eq!(set.paths.len(), 3, "exactly three routes, exactly the cap");
+    assert!(
+        !set.truncated,
+        "landing exactly on the cap is not truncation"
+    );
 }
 
-// ---- detect_cycles ----
-
-/// One loop is one cycle. Without normalisation a 3-cycle reports three times,
-/// once per starting point, and a reader concludes the graph is three times as
-/// tangled as it is.
+/// A node reaches itself in zero hops for `all_paths` too, matching the
+/// Postgres frontier's own depth-0 base-case row (`shortest_path` already
+/// has this test; `all_paths` did not).
 #[tokio::test]
-async fn a_single_loop_is_reported_once() {
-    let (store, _container) = store().await;
+async fn all_paths_from_a_node_to_itself_is_the_trivial_zero_length_path() {
+    let (store, _triples) = store().await;
+
+    let set = store
+        .all_paths(
+            &node("alone"),
+            &node("alone"),
+            Direction::Outgoing,
+            Bounds::default(),
+            10,
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(set.paths.len(), 1, "{:?}", set.paths);
+    assert_eq!(set.paths[0].length, 0);
+    assert_eq!(set.paths[0].nodes, vec![node("alone")]);
+    assert!(!set.truncated);
+}
+
+/// The ported `all_paths_enumerates_every_distinct_route` only checks the
+/// *count* of routes found, which happens to stay right even under a
+/// `current == target` → `!=` mutation (every intermediate node gets
+/// mis-recorded as a one-hop "route" instead, and a diamond has exactly two
+/// of those too). Checking the actual node sequence and length closes that.
+#[tokio::test]
+async fn all_paths_reports_the_route_nodes_not_just_a_count() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    flakes.extend(edge("r1", "a", "b", "feeds", 1));
+    flakes.extend(edge("r2", "a", "c", "feeds", 1));
+    flakes.extend(edge("r3", "b", "z", "feeds", 1));
+    flakes.extend(edge("r4", "c", "z", "feeds", 1));
+    triples.seed(&flakes).await;
+
+    let set = store
+        .all_paths(
+            &node("a"),
+            &node("z"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 5,
+                max_nodes: 200,
+            },
+            100,
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    let routes: Vec<Vec<&str>> = set
+        .paths
+        .iter()
+        .map(|p| p.nodes.iter().map(|n| n.id.as_str()).collect())
+        .collect();
+    assert!(routes.contains(&vec!["a", "b", "z"]), "{routes:?}");
+    assert!(routes.contains(&vec!["a", "c", "z"]), "{routes:?}");
+    assert!(set.paths.iter().all(|p| p.length == 2), "{:?}", set.paths);
+}
+
+/// `all_paths` has no ported `max_hops`-boundary test (unlike `neighbours`'
+/// `max_hops_bounds_exactly`); a three-hop chain must be found exactly at a
+/// bound of three and not at all at a bound of two.
+#[tokio::test]
+async fn all_paths_bounds_max_hops_exactly() {
+    let (store, triples) = store().await;
+    let mut flakes = Vec::new();
+    for i in 0..3 {
+        flakes.extend(edge(
+            &format!("r{i}"),
+            &format!("t{i}"),
+            &format!("t{}", i + 1),
+            "feeds",
+            1,
+        ));
+    }
+    triples.seed(&flakes).await;
+
+    let within = store
+        .all_paths(
+            &node("t0"),
+            &node("t3"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 3,
+                max_nodes: 200,
+            },
+            10,
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+    assert_eq!(
+        within.paths.len(),
+        1,
+        "three hops is within bounds: {:?}",
+        within.paths
+    );
+
+    let beyond = store
+        .all_paths(
+            &node("t0"),
+            &node("t3"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 2,
+                max_nodes: 200,
+            },
+            10,
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+    assert!(
+        beyond.paths.is_empty(),
+        "three hops exceeds a bound of two: {:?}",
+        beyond.paths
+    );
+}
+
+/// The same boundary class for `detect_cycles`: the closing edge itself
+/// needs one more hop than the cycle's other edges, so a bound one short
+/// must find nothing while the exact bound finds the cycle.
+#[tokio::test]
+async fn detect_cycles_bounds_max_hops_exactly() {
+    let (store, triples) = store().await;
     let mut flakes = Vec::new();
     flakes.extend(edge("r1", "a", "b", "feeds", 1));
     flakes.extend(edge("r2", "b", "c", "feeds", 1));
     flakes.extend(edge("r3", "c", "a", "feeds", 1));
-    store.assert_flakes(&flakes).await.expect("write");
+    triples.seed(&flakes).await;
 
-    let cycles = store
+    let within = store
         .detect_cycles(
             &node("a"),
             Bounds {
-                max_hops: 6,
+                max_hops: 3,
                 max_nodes: 200,
             },
             &EdgeFilter::default(),
         )
         .await
         .expect("walk");
+    assert_eq!(within.len(), 1, "{within:?}");
 
-    assert_eq!(cycles.len(), 1, "{cycles:?}");
-    let ids: Vec<&str> = cycles[0].nodes.iter().map(|n| n.id.as_str()).collect();
-    assert_eq!(ids, vec!["a", "b", "c"], "normalised so the smallest leads");
-}
-
-#[tokio::test]
-async fn a_dag_has_no_cycles() {
-    let (store, _container) = store().await;
-    let mut flakes = Vec::new();
-    flakes.extend(edge("r1", "a", "b", "feeds", 1));
-    flakes.extend(edge("r2", "b", "c", "feeds", 1));
-    flakes.extend(edge("r3", "a", "c", "feeds", 1));
-    store.assert_flakes(&flakes).await.expect("write");
-
-    let cycles = store
+    let beyond = store
         .detect_cycles(
             &node("a"),
             Bounds {
-                max_hops: 6,
+                max_hops: 2,
                 max_nodes: 200,
             },
             &EdgeFilter::default(),
         )
         .await
         .expect("walk");
-    assert!(cycles.is_empty(), "a diamond is not a cycle: {cycles:?}");
-}
-
-/// A table that feeds itself through a recursive view. Length 1, and real.
-#[tokio::test]
-async fn a_self_loop_is_a_cycle_of_length_one() {
-    let (store, _container) = store().await;
-    store
-        .assert_flakes(&edge("r1", "a", "a", "feeds", 1))
-        .await
-        .expect("write");
-
-    let cycles = store
-        .detect_cycles(
-            &node("a"),
-            Bounds {
-                max_hops: 4,
-                max_nodes: 200,
-            },
-            &EdgeFilter::default(),
-        )
-        .await
-        .expect("walk");
-
-    assert_eq!(cycles.len(), 1, "{cycles:?}");
-    assert_eq!(cycles[0].nodes.len(), 1);
+    assert!(
+        beyond.is_empty(),
+        "the closing edge needs a third hop: {beyond:?}"
+    );
 }

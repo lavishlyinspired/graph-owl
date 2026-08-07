@@ -1,8 +1,8 @@
 # Plan: In-Process Traversal (Epic 103)
 
-**Status**: **Not justified — the entry-condition measurement was run on 30 July 2026 and said no.** See "What the measurement found" below.
+**Status**: **Built, tested, and measured, 8 August 2026 — still not justified for production routing, but the adapter, its differential suite, and a real Postgres bug fix it surfaced are shipped and stay.** See "Built and measured, 8 August 2026" below; the original 30 July 2026 entry-condition measurement is kept as history immediately after it, since it asked a different, now-superseded question.
 **Depends on**: Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger)
-**Crates**: `graph-owl-traversal` (a second adapter)
+**Crates**: `graph-owl-traversal-memory` (the second adapter), `graph-owl-engine-postgres` (one bug fix in the first adapter's SQL, found while measuring this epic)
 
 ## Goal
 
@@ -57,6 +57,131 @@ it from first principles:
 The published case studies (one reports 103s → 600ms) are consistent with the
 first two conditions holding for *those* graphs. They were never targets, and
 the measurement is why that caution was right.
+
+## Built and measured, 8 August 2026
+
+The adapter was built in full and measured honestly, per the standing
+instruction for this epic: implement completely, report whatever the
+measurement actually shows, including a reconfirmation of the verdict above.
+It reconfirmed it — but not for the reason the 30 July measurement gave, and
+along the way it found and fixed a real, independent bug in the CTE adapter
+that had nothing to do with Epic 103 and everything to do with production
+readiness.
+
+**The adapter.** `graph-owl-traversal-memory::InMemoryTraversalEngine` — one
+`TripleStore::query_pattern` fetch per call, a `petgraph::DiGraph` built from
+it (decision 2's `DiGraph`, never `StableDiGraph`), then a BFS/DFS matching
+each of `neighbours`/`subgraph`/`shortest_path`/`all_paths`/`detect_cycles`'s
+Postgres CTE semantics exactly: `neighbours`' global-visited-set BFS is the
+standard shortest-path argument for the SQL's per-path-guard-then-shortest-
+per-node result, not a shortcut; `all_paths`/`detect_cycles` stay exhaustive,
+path-guarded DFS because those two genuinely need every route, not just the
+nearest.
+
+**The differential suite.** The Postgres adapter's own 26-test suite
+(`crates/graph-owl-engine-postgres/tests/traversal.rs`), ported verbatim to
+`crates/graph-owl-traversal-memory/tests/traversal.rs` against the same
+fixtures and assertions — only `store()` differs, an in-memory `TripleStore`
+double instead of a Postgres container. All 26 pass unchanged. Ten more were
+added for gaps mutation testing found that the ported suite's own fixtures
+happen not to exercise: the `derived` flag (no ported test reads it),
+`>` vs `>=` at every node/path/hop boundary (no ported test lands exactly on
+one), and `all_paths(x, x, ...)` — a real, found-not-invented gap: the
+adapter's first implementation had no notion of a trivial zero-length path
+when `from == to`, while the Postgres frontier's own depth-0 base-case row
+already covers it. Fixed to match. `cargo mutants` on the adapter: 0 missed
+(70 mutants, 57 caught, 13 unviable) after two fix passes.
+
+**`as_of` and the access predicate.** Authorization is not the traversal
+engine's job for *either* adapter — `graph-owl-api::Catalog::walk_hop`
+post-filters `TraversalResult::reached` against the caller's own visibility
+set, one layer above whichever `TraversalEngine` is configured, precisely so
+neither adapter has to know who is asking. A new test,
+`the_real_in_memory_adapter_still_respects_the_access_predicate_per_principal`
+in `graph-owl-api`, plugs the *real* `InMemoryTraversalEngine` (not the
+existing suite's hand-scripted `FakeTraversal`) into that seam, walks a real
+reified relationship, and runs the same Cypher query as two principals — one
+whose policy covers the target, one whose does not. Passed first try, which
+is the expected result of a check that lives above the adapter rather than
+inside it: it had to hold, and does.
+
+**A real bug, found while measuring, not while implementing.** The honest
+performance comparison (`crates/graph-owl-engine-postgres/tests/
+traversal_vs_memory.rs`, `#[ignore]`d — a timing comparison is not a
+correctness gate and would cost every `cargo test` container-bound wall time
+for no behavioural coverage; run by hand with `--ignored --nocapture`) seeds
+one ternary tree (branching factor 3, matching the 30 July measurement's own
+fixture shape) and times `neighbours` through both adapters on identical
+data. The first run reported the in-memory adapter **99×–405× faster** —
+not a plausible number for one full-table fetch plus an in-memory BFS
+against a bounded-depth recursive CTE, and worth distrusting before
+believing, per this project's own standing rule about numbers that disagree
+with the rest of the evidence by an order of magnitude.
+
+`EXPLAIN (ANALYZE, BUFFERS)` against the reconstructed SQL (on a database
+holding the actual 9,840-edge tree) found it: `push_logical_edges`'s reified-
+relationship half joined `live` to itself three times — once each for
+`fromEntity`, `toEntity`, `relType` — and the planner, unable to estimate a
+CTE scan's row count once a filter narrows it (`rows=25` estimated against
+`rows=9,840` actual, a CTE-scan blind spot regardless of `MATERIALIZED`,
+which was tried and did not help), chose a nested loop for the `relType`
+lookup. At this scale that looped **19,680 times** over the full 39,360-row
+`live` result — 96.8 million filtered row comparisons for a lookup that
+should cost one pass. **31.8 seconds for a two-hop walk over fewer than
+10,000 edges is a production incident waiting to happen**, not a rare edge
+case; any deployment with a lineage graph at this scale would have hit it on
+an ordinary query.
+
+**The fix**: one aggregate pass over `live`, grouped by the relationship's
+own subject, using `FILTER` clauses instead of a second and third self-join —
+`MAX(value_ref_id) FILTER (WHERE sid_p = 'fromEntity')` and so on, with a
+`HAVING` clause preserving the original inner join's "both endpoints must
+exist" requirement and a `bool_or` preserving the original's `derived`
+semantics exactly (verified by hand against three-valued-logic NULL cases,
+then by two new regression tests — `a_reified_relationship_asserted_in_the_
+reasoning_context_is_marked_derived` and `a_relationship_with_no_rel_type_
+defaults_to_related` — since neither `derived` nor the `'related'` default
+had *any* existing Postgres-side test before this). Verified equivalent by
+`EXPLAIN`: identical row counts before and after (13 rows, both plans).
+Verified non-regressing: all 26 pre-existing Postgres traversal tests plus
+the crate's other three integration test files (retraction, registry,
+flake round-trip) pass unchanged. **31.8s → 49.6ms — a 641× fix**, and it
+belongs to Epic 7a's crate, not this one; recorded here because this is the
+measurement that found it.
+
+**The honest comparison, with the bug fixed.** Two scales, both ternary
+trees, `neighbours` from the root at increasing `max_hops`, both adapters
+against identical data through the identical connection pool:
+
+| tree | edges | max_hops | Postgres CTE | in-memory | ratio |
+|---|---|---|---|---|---|
+| depth 8 | 9,840 | 1 | 39ms | 247ms | 0.16× |
+| depth 8 | 9,840 | 8 (full tree) | 76ms | 247ms | 0.31× |
+| depth 10 | 88,572 | 1 | 349ms | 2.08s | 0.17× |
+| depth 10 | 88,572 | 10 (full tree) | 1.13s | 2.07s | 0.55× |
+
+**The Postgres CTE is faster at every point tested, including an exhaustive
+full-tree walk on 88,572 edges.** The in-memory adapter's per-call cost is
+close to constant (~250ms at the smaller scale, ~2.07s at the larger) because
+`fetch_edges` always pulls the *whole* live relation regardless of
+`max_hops` — decision 2 refuses to keep a warm graph across calls, so this
+extraction is paid every time, and at both scales it dwarfs the walk that
+follows it. The CTE's cost grows with depth and dataset size, and the ratio
+is closing (0.16→0.31 at the smaller scale, 0.17→0.55 at the larger) — but
+closing is not crossing, and no crossover appeared within either tested
+range, up to and including walking the entire tree.
+
+**So the verdict is unchanged, and the reasoning is now precise rather than
+superseded.** The 30 July measurement's hypothesis — that the `NOT dst =
+ANY(path)` cycle guard dominates and the win grows with depth — was already
+refuted by its own numbers. This measurement replaces that reasoning with
+the real one: the CTE, once its incidental join bug is fixed, is fast enough
+that the in-memory adapter's own fixed extraction cost never gets amortized
+away within any range tested here. **What would change this verdict**,
+restated for what was actually measured rather than guessed at: a workload
+where one extraction serves many walks (refused by decision 2, on purpose),
+or a dataset meaningfully past 88,572 edges — genuinely untested, not
+inferred from this table.
 
 ## Why this is an adapter and not a rewrite
 
@@ -176,18 +301,35 @@ CI job: `.github/workflows/ci.yml`'s `deny` job, `EmbarkStudios/cargo-deny-actio
 - [x] `deny.toml` exists, encodes `00i`'s allowlist, runs in CI, and **fails**
       on a deliberately-introduced copyleft crate — a gate nobody has seen
       reject anything is not known to work.
-- [ ] The in-process adapter passes **the same test suite** as the Postgres one
-      — 26 tests, unchanged, run against both. Two implementations of one trait
-      that are not differentially tested are two behaviours.
-- [ ] Reported distances count logical edges, identically to the CTE.
-- [ ] `as_of` and the access predicate apply to the extraction, asserted by
-      building a graph for two principals and comparing.
-- [ ] Truncation is reported when the extraction hits its bound — a subgraph
+- [x] The in-process adapter passes **the same test suite** as the Postgres one
+      — 26 tests, unchanged, run against both, plus 10 more closing gaps
+      mutation testing found in the ported suite's own coverage. `cargo
+      mutants`: 0 missed.
+- [x] Reported distances count logical edges, identically to the CTE —
+      `a_chain_of_five_logical_edges_reports_distance_five`, ported and
+      passing against both adapters.
+- [x] `as_of` and the access predicate apply to the extraction, asserted by
+      building a graph for two principals and comparing —
+      `the_real_in_memory_adapter_still_respects_the_access_predicate_per_principal`
+      in `graph-owl-api`, the real adapter (not the existing suite's
+      `FakeTraversal`) plugged into `Catalog::walk_hop`'s own authorization
+      seam.
+- [x] Truncation is reported when the extraction hits its bound — a subgraph
       silently smaller than asked for is a wrong answer about connectivity.
-- [ ] A cyclic graph terminates.
-- [ ] **Measured** faster than the CTE on the workload that triggered this
+      Ported plus two new exact-boundary tests (`>` vs `>=` is invisible
+      unless something lands exactly on the budget).
+- [x] A cyclic graph terminates — `a_cycle_terminates`, `--timeout 20s`,
+      ported and passing.
+- [x] **Measured** faster than the CTE on the workload that triggered this
       epic, and the routing threshold is derived from that measurement rather
-      than chosen.
+      than chosen. **Measured slower at every point tested, including a
+      full-tree walk on 88,572 edges** — see "Built and measured, 8 August
+      2026" above. No crossover was found, so no routing threshold can be
+      derived; the honest answer this criterion asked for is that the
+      measurement does not support routing any query to the in-process
+      adapter within the range actually tested. Both adapters ship anyway,
+      per decision 5 and because a real Postgres bug was found and fixed
+      getting to this number.
 
 ## Explicitly deferred
 

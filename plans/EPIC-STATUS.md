@@ -93,7 +93,7 @@ is the condition that index exists to catch.
 | **100** | 11, 12 | [`100-profile-detection-and-routing.md`](100-profile-detection-and-routing.md) | In progress | 4/6 | Epic 6 (RL engine — shipped), ~~Epic 24 (ontologies as entities)~~ — **phantom*… |
 | **101** | 11 | [`101-sparql-federation.md`](101-sparql-federation.md) | **Shipped** | 5/5 | Epic 7 (algebra and executor), Epic 13 (authorization) |
 | **102** | 11 | [`102-read-write-partitions.md`](102-read-write-partitions.md) | Not started | 0/2 | Epic 4 (the flake table), Epic 37a (the measurement) |
-| **103** | 11 | [`103-in-process-traversal.md`](103-in-process-traversal.md) | Not started | 0/2 | Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger) |
+| **103** | 11 | [`103-in-process-traversal.md`](103-in-process-traversal.md) | In progress | 4/5 | Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger) |
 | **104** | 12 | [`104-ontology-alignment.md`](104-ontology-alignment.md) | In progress | 4/5 | Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detecti… |
 
 ## Tracked items, per epic
@@ -650,7 +650,10 @@ is the condition that index exists to catch.
 
 ### Epic 103 — In-Process Traversal *(Demo 11)*
 
-- [ ] The traversal path
+- [x] The traversal path — `graph-owl-traversal-memory::InMemoryTraversalEngine`, a second `Tr
+- [x] Authorization holds through the real adapter, not just a mock — `graph-owl-api`'s new `t
+- [x] Measured, not assumed
+- [x] A real, independent production bug found and fixed getting to that number
 - [ ] No UI
 
 ### Epic 104 — Ontology Alignment & Curated Mappings *(Demo 12)*

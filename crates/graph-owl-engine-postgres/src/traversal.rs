@@ -21,6 +21,7 @@ use crate::PostgresTripleStore;
 /// or every relationship node would also appear as two edges of its own.
 const FROM_ENTITY: &str = "fromEntity";
 const TO_ENTITY: &str = "toEntity";
+const REL_TYPE: &str = "relType";
 
 /// SQL producing the current, live flakes at an optional `as_of`.
 ///
@@ -63,26 +64,69 @@ fn push_live_flakes(builder: &mut QueryBuilder<'_, sqlx::Postgres>, as_of: Optio
 ///    and so on. The hierarchy *is* graph structure, and a catalogue that has
 ///    not yet had lineage declared would otherwise traverse to nothing at all.
 fn push_logical_edges(builder: &mut QueryBuilder<'_, sqlx::Postgres>, filter: &EdgeFilter) {
+    // Reified relationships: one aggregate pass over `live` grouped by the
+    // relationship's own subject, not a three-way self-join. A self-join here
+    // (`fromEntity` joined to `toEntity` joined to `relType`) reads simply but
+    // the planner has no way to know how many `live` rows carry each
+    // predicate — CTE scans get a flat, filter-blind row estimate — so it
+    // sized the `relType` lookup for a handful of rows and chose a nested
+    // loop, which at real scale (9,840 edges) looped 19,680 times over the
+    // *whole* `live` CTE: 31.8s where the aggregate form takes 50ms, same
+    // rows out. `MATERIALIZED` on `live` does not fix the estimate; only
+    // removing the self-join does. Found via Epic 103's own honest
+    // performance measurement, not this epic's own code — recorded here
+    // because that is where the query lives.
     builder.push(
         ", edges AS (
-            SELECT f.value_ref_id AS from_id, t.value_ref_id AS to_id,
-                   COALESCE(r.value_str, 'related') AS rel_type,
-                   -- **A conclusion is not an assertion**, and `00b` decision 2
-                   -- keeps them in separate graphs precisely so nobody mistakes
-                   -- one for the other. A picture that draws them alike undoes
-                   -- that separation exactly where it matters most.
-                   (f.cx_id = 'graph:reasoning') AS derived
-            FROM live f
-            JOIN live t ON t.sid_s = f.sid_s AND t.sid_p = '",
-    );
-    builder.push(TO_ENTITY);
-    builder.push(
-        "' LEFT JOIN live r ON r.sid_s = f.sid_s AND r.sid_p = 'relType'
-            WHERE f.sid_p = '",
+            SELECT
+                MAX(value_ref_id) FILTER (WHERE sid_p = '",
     );
     builder.push(FROM_ENTITY);
     builder.push(
-        "'
+        "') AS from_id,
+                MAX(value_ref_id) FILTER (WHERE sid_p = '",
+    );
+    builder.push(TO_ENTITY);
+    builder.push(
+        "') AS to_id,
+                COALESCE(MAX(value_str) FILTER (WHERE sid_p = '",
+    );
+    builder.push(REL_TYPE);
+    builder.push(
+        "'), 'related') AS rel_type,
+                -- **A conclusion is not an assertion**, and `00b` decision 2
+                -- keeps them in separate graphs precisely so nobody mistakes
+                -- one for the other. A picture that draws them alike undoes
+                -- that separation exactly where it matters most. Read off the
+                -- `fromEntity` row specifically, matching what the self-join
+                -- version read off `f.cx_id` — the other rows in the group
+                -- contribute a definite `FALSE`, never a competing `TRUE`.
+                bool_or(sid_p = '",
+    );
+    builder.push(FROM_ENTITY);
+    builder.push(
+        "' AND cx_id = 'graph:reasoning') AS derived
+            FROM live
+            WHERE sid_p IN ('",
+    );
+    builder.push(FROM_ENTITY);
+    builder.push("', '");
+    builder.push(TO_ENTITY);
+    builder.push("', '");
+    builder.push(REL_TYPE);
+    builder.push(
+        "')
+            GROUP BY sid_s
+            HAVING MAX(value_ref_id) FILTER (WHERE sid_p = '",
+    );
+    builder.push(FROM_ENTITY);
+    builder.push(
+        "') IS NOT NULL
+               AND MAX(value_ref_id) FILTER (WHERE sid_p = '",
+    );
+    builder.push(TO_ENTITY);
+    builder.push(
+        "') IS NOT NULL
           UNION ALL
             SELECT d.sid_s AS from_id, d.value_ref_id AS to_id, d.sid_p AS rel_type,
                    (d.cx_id = 'graph:reasoning') AS derived

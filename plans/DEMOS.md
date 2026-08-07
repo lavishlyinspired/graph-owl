@@ -1035,8 +1035,11 @@ slice.
 - [ ] The split itself
 - [ ] Partition health and replication lag in admin *(UI → Epic 41 Slice G)*
 
-### Epic 103 — In-process traversal
-- [ ] The traversal path
+### Epic 103 — In-process traversal — **built and measured, 8 August 2026, still not routed in production**
+- [x] The traversal path — `graph-owl-traversal-memory::InMemoryTraversalEngine`, a second `TraversalEngine` implementation over petgraph. Its differential suite (26 tests ported verbatim from the Postgres CTE adapter's own, plus 10 more closing gaps mutation testing found) passes unchanged against both adapters; `cargo mutants` 0 missed. A real gap found and fixed along the way: `all_paths(x, x, ...)` had no trivial zero-length self-path, unlike the Postgres frontier's own depth-0 base case
+- [x] Authorization holds through the real adapter, not just a mock — `graph-owl-api`'s new `the_real_in_memory_adapter_still_respects_the_access_predicate_per_principal` plugs the real `InMemoryTraversalEngine` into `Catalog::walk_hop`'s authorization seam and runs the same query as two principals
+- [x] **Measured, not assumed**: Postgres CTE beats the in-memory adapter at every depth tested, on trees up to 88,572 edges, including full-tree walks — the in-memory adapter's fixed per-call extraction cost (one full-table fetch, since decision 2 refuses a warm graph) never gets amortized away within the tested range. No crossover found, so no routing threshold could be derived — the honest answer, not the wanted one
+- [x] **A real, independent production bug found and fixed getting to that number**: `graph-owl-engine-postgres`'s `push_logical_edges` (Epic 7a) had a three-way self-join whose `relType` lookup the planner mis-costed into a nested loop — 19,680 loops over a 39,360-row CTE, 31.8s for a two-hop walk over under 10,000 edges. Rewritten as one `FILTER`-aggregate pass; 49.6ms for the identical answer, 641× faster, all 28 pre-existing Postgres traversal tests (plus two new ones for `derived` and the `'related'` default, previously untested on the Postgres side) passing unchanged
 - [ ] **No UI** — a performance path with no user-visible behaviour change
 
 ### Epic 104 — Ontology alignment — **backend shipped through Slice D, 7 August 2026**

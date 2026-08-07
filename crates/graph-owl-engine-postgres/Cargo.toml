@@ -26,3 +26,4 @@ serde_json.workspace = true
 testcontainers-modules.workspace = true
 testcontainers.workspace = true
 graph-owl-traversal = { path = "../graph-owl-traversal" }
+graph-owl-traversal-memory.workspace = true

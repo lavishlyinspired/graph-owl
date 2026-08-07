@@ -1177,6 +1177,7 @@ dependencies = [
  "graph-owl-storage-memory",
  "graph-owl-storage-postgres",
  "graph-owl-traversal",
+ "graph-owl-traversal-memory",
  "hmac 0.12.1",
  "oxiri",
  "oxrdf",
@@ -1329,6 +1330,7 @@ dependencies = [
  "graph-owl-core",
  "graph-owl-engine",
  "graph-owl-traversal",
+ "graph-owl-traversal-memory",
  "refinery",
  "serde_json",
  "sqlx",
@@ -1639,6 +1641,19 @@ dependencies = [
  "graph-owl-core",
  "graph-owl-engine",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "graph-owl-traversal-memory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "graph-owl-core",
+ "graph-owl-engine",
+ "graph-owl-traversal",
+ "petgraph 0.8.3",
+ "tokio",
 ]
 
 [[package]]

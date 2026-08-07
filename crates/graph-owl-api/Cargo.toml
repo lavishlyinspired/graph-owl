@@ -49,6 +49,7 @@ rand.workspace = true
 base64.workspace = true
 graph-owl-storage-memory.workspace = true
 graph-owl-storage-postgres.workspace = true
+graph-owl-traversal-memory.workspace = true
 axum.workspace = true
 
 [lints]

@@ -23779,6 +23779,126 @@ mod projection_isolation_tests {
         assert!(outcome.rows.is_empty(), "{:?}", outcome.rows);
     }
 
+    /// **Epic 103's own acceptance criterion**: the access predicate applies
+    /// to the extraction, proven by building one graph and comparing what
+    /// two different principals see through it. Every test above this one
+    /// fakes the traversal engine's *result*; this one plugs in the real
+    /// [`graph_owl_traversal_memory::InMemoryTraversalEngine`], walking real
+    /// relationship flakes, to show the authorization boundary in
+    /// `walk_hop` holds identically for the in-process adapter — it has to,
+    /// since the check lives one layer above whichever `TraversalEngine` is
+    /// configured and never inspects which adapter answered.
+    #[tokio::test]
+    async fn the_real_in_memory_adapter_still_respects_the_access_predicate_per_principal() {
+        use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+        use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+
+        let storage = Arc::new(InMemoryStorage::default());
+        storage
+            .upsert_policy(
+                &Policy {
+                    name: "analyst".to_string(),
+                    rules: vec![Rule {
+                        name: "read-hdfc".to_string(),
+                        effect: Effect::Allow,
+                        operations: vec![MetadataOperation::ViewBasic],
+                        resources: ResourceMatcher::FqnPrefix("hdfc-core".to_string()),
+                    }],
+                },
+                &["analyst".to_string()],
+            )
+            .await
+            .expect("policy");
+        let graph = RecordingGraph::working();
+        let seed = Catalog::new(storage.clone())
+            .with_graph(graph.clone() as Arc<dyn TripleStore>)
+            .upsert_asset(&Principal::system(), service("hdfc-core"))
+            .await
+            .expect("seed asset");
+        // Under a different prefix — visible to `Principal::system()`, not to
+        // the analyst — exactly the "two principals" comparison the AC asks
+        // for.
+        let target = Catalog::new(storage.clone())
+            .with_graph(graph.clone() as Arc<dyn TripleStore>)
+            .upsert_asset(&Principal::system(), service("other-bank"))
+            .await
+            .expect("target asset");
+
+        // A real reified relationship, in the exact shape
+        // `graph-owl-traversal-memory` reads: `fromEntity`/`toEntity`/
+        // `relType`, not a scripted `TraversalResult`.
+        let relationship = Sid::dsc("auth-test-rel");
+        let from_sid = Sid::new(namespace::DSC, seed.id.to_string());
+        let to_sid = Sid::new(namespace::DSC, target.id.to_string());
+        graph
+            .assert_flakes(&[
+                Flake::assert(
+                    relationship.clone(),
+                    Sid::new(namespace::RDF, "type"),
+                    FlakeValue::Ref(Sid::dsc("Relationship")),
+                    1,
+                ),
+                Flake::assert(
+                    relationship.clone(),
+                    Sid::dsc("fromEntity"),
+                    FlakeValue::Ref(from_sid),
+                    1,
+                ),
+                Flake::assert(
+                    relationship.clone(),
+                    Sid::dsc("toEntity"),
+                    FlakeValue::Ref(to_sid),
+                    1,
+                ),
+                Flake::assert(
+                    relationship,
+                    Sid::dsc("relType"),
+                    FlakeValue::String("FEEDS".to_string()),
+                    1,
+                ),
+            ])
+            .await
+            .expect("seed the relationship");
+
+        let traversal: Arc<dyn TraversalEngine> =
+            Arc::new(graph_owl_traversal_memory::InMemoryTraversalEngine::new(
+                graph.clone() as Arc<dyn TripleStore>,
+            ));
+        let catalog = Catalog::new(storage)
+            .with_graph(graph as Arc<dyn TripleStore>)
+            .with_traversal(traversal);
+
+        let query = "MATCH (a)-[:FEEDS*1..3]->(b) WHERE a.name = 'hdfc-core' RETURN b";
+
+        let unrestricted = catalog
+            .cypher(&Principal::system(), query, None, SparqlBudget::default())
+            .await
+            .expect("query");
+        assert_eq!(
+            unrestricted.rows.len(),
+            1,
+            "system sees the real edge the in-memory adapter walked: {:?}",
+            unrestricted.rows
+        );
+
+        let analyst = Principal {
+            id: "asha".to_string(),
+            name: "Asha".to_string(),
+            kind: graph_owl_core::PrincipalKind::User,
+            roles: vec!["analyst".to_string()],
+            is_admin: false,
+        };
+        let restricted = catalog
+            .cypher(&analyst, query, None, SparqlBudget::default())
+            .await
+            .expect("query");
+        assert!(
+            restricted.rows.is_empty(),
+            "the analyst's policy does not cover the target, even though the real adapter reached it: {:?}",
+            restricted.rows
+        );
+    }
+
     /// **A variable-length pattern with nothing binding its start is refused,
     /// not silently answered as "nothing".** The traversal engine walks from
     /// a seed; with no seed to walk from, an empty result would look
