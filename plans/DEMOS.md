@@ -575,11 +575,12 @@ back. Two HTTP tests now do:
 - [x] **31** Memory panel and memory administration *(Epic 41 Slice E, 5 August 2026)*
 - [x] **32** Agent capabilities; **write-back audit** *(Epic 42 Slice F, 7 August 2026)* — `applied` vs `proposed`/`refused` outcomes, filterable by type and entity, real refusal reasons surfaced verbatim
 
-### Epic 43 — Framework integrations
-- [ ] LangChain retriever preserving provenance and confidence
+### Epic 43 — Framework integrations — **in progress, 8 August 2026**
+- [~] LangChain retriever preserving provenance and confidence — the rendering half (`_core/rendering.py`: derived facts labelled in `page_content`, not only metadata; confidence-band filtering; truncation stated in text) is built and mutation-hardened. The `GraphOwlRetriever` class itself (composing `search_assets`+`get_asset_context`+`explain_lineage` per hit) is not yet built. `as_of` cannot be honoured: none of Epic 14's seven MCP read tools accept it — a real finding against Epic 14, not an adapter gap, checked directly against `crates/graph-owl-mcp/src/lib.rs::tools()`
 - [ ] LangGraph toolkit, manifest-parity with MCP
 - [ ] Checkpointer over Epic 31, retraction not deletion
-- [ ] Zero graph-owl crate changes, asserted
+- [x] Zero graph-owl crate changes, asserted — true so far by construction (`integrations/langchain/` only); the structural CI test proving it (Slice F) is not yet written
+- [x] **The core client** (`_core/client.py`) — one JSON-RPC-over-HTTP call per MCP tool, principal required at construction (no default), credentials never appear in `repr`/logs/exceptions, `mutmut` 160/183 killed on `_core` combined with rendering. Found and fixed a real bug before building on it: the client's first version assumed tool failures signal via a top-level JSON-RPC `error`, but `graph_owl_mcp::jsonrpc` deliberately surfaces them via `result.isError` on an otherwise-successful response instead (`NotFound`/`Unauthenticated`/etc. all work this way) — the original code would have silently returned the MCP envelope itself as every tool's answer
 
 ---
 

@@ -1,12 +1,110 @@
 # Plan: Agent Framework Integrations (Epic 43)
 
 **Branch**: feat/framework-integrations
-**Status**: Not started
+**Status**: **In progress, 8 August 2026 — Slice A shipped and hardened; Slice B's rendering half shipped; three real structural findings against Epic 14 recorded below and not yet resolved.** See "Progress and findings, 8 August 2026".
 **Depends on**: Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK), Epic 7 (query)
 **Language**: **Python, out of process.** No graph-owl crate changes — asserted structurally.
 **Package**: `graph-owl-langchain` on PyPI, sources in `integrations/langchain/`
 
 **Read `00j-language-boundaries.md` first.** This epic is the concrete form of its central distinction, and it only makes sense in that light.
+
+## Progress and findings, 8 August 2026
+
+Built with `uv` + `pytest` + `mutmut` + `ruff` + `mypy --strict`, mirroring
+this project's own RED→GREEN→MUTATE→KILL MUTANTS discipline in Python
+tooling. What follows is what actually shipped and what actually got
+found — not a restatement of the plan below, which was written before any
+of this was checked against the real MCP surface.
+
+**Shipped and mutation-hardened**: `graph_owl_langchain/_core/principal.py`
+(`Principal`, decision 2 — no default, empty token rejected, token excluded
+from `repr`/`str` via `field(repr=False)`) and `_core/client.py`
+(`GraphOwlClient`, one JSON-RPC POST per tool call to the same `/mcp`
+endpoint and Bearer auth every other surface uses). `_core/rendering.py`
+(`GraphContext`/`RelatedFact`/`render`/`visible_facts`, decisions 3–4) is
+also shipped — the framework-agnostic half of Slice B, i.e. what turns a
+graph context into `(page_content, metadata)` with derived facts labelled
+in the text itself. 34 tests, `ruff`/`mypy --strict` clean, `mutmut`:
+160/183 mutants killed on `_core`; every survivor individually inspected,
+not waved through — the two recurring classes were (a) provably equivalent
+under `urllib`'s own request defaults (header-key casing collapses to one
+stored key regardless of source spelling; `method="POST"` is redundant
+with `data=body` always being set) and (b) log-message wording, observable
+only by reading log text the credential-leak tests already assert nothing
+sensitive is in.
+
+**A real bug found and fixed before anything was built on top of it.**
+`GraphOwlClient.call_tool`'s first version treated a top-level JSON-RPC
+`"error"` member as the only failure signal — the natural reading of "JSON-
+RPC over HTTP," and wrong for this server. `graph_owl_mcp::jsonrpc`'s own
+module doc is explicit that this is deliberate: *"a tool that ran and
+answered 'no such asset' has succeeded at the protocol level"* — so
+`NotFound`, `Unauthenticated`, `Refused`, and every other tool-level
+outcome surface through `result.isError` on an otherwise-successful
+response, with the actual payload JSON-encoded a **second** time inside
+`result.content[0].text`. The first client version would have silently
+returned the *envelope* (`{"content": [...], "isError": false}`) as if it
+were the tool's answer to every caller, and would never have raised on a
+refusal at all. Found by reading `crates/graph-owl-mcp/src/jsonrpc.rs`
+before writing Slice B against the client rather than after — the same
+"do not build the second thing on the first thing's assumption" discipline
+this session applied to Epic 103's SQL fix. Fixed, and the differential
+shape (`_tool_result()` in `tests/test_client.py`) now matches the real
+wire format exactly; 9 tests added or rewritten to cover both failure
+paths (protocol-level `error`, tool-level `isError`) plus the
+happy path's actual unwrapped return value, which nothing had checked
+before either.
+
+**Three structural findings against Epic 14, not worked around — per this
+epic's own rule that friction here is an MCP defect to log, not an
+adapter's problem to paper over:**
+
+1. **None of the seven MCP read tools accept an `as_of` argument.**
+   Checked directly against `crates/graph-owl-mcp/src/lib.rs::tools()`'s
+   input schemas — `get_asset_context`, `search_assets`, `recall_memory`,
+   `explain_lineage`, `analyze_impact`, `get_governance_context`, and
+   `query_graph` all read current state only. The plan's own example
+   (`as_of=None` on `GraphOwlRetriever`) and this epic's stated
+   differentiator ("an agent that can ask 'what did we believe last
+   quarter' is doing something no vector store can") assume a capability
+   that does not exist on the wire today. `rendering.py`'s `GraphContext`
+   threads an `as_of` field through regardless, so the shape is ready, but
+   nothing in this package can populate it truthfully — inventing a
+   client-side filter would silently disagree with whatever the server
+   actually returned, which is worse than not having the field.
+2. **`AssetContext.related` is `Vec<String>` — FQNs only, no relationship
+   type.** Decision 3's "relationship types" in retrieved context has to
+   come from `explain_lineage`'s `LineageStep.relationship` instead
+   (`crates/graph-owl-mcp/src/lineage.rs`), which means a full retriever
+   needs to compose at least two tool calls per asset (`get_asset_context`
+   *and* `explain_lineage`), not one. Knowable only by reading the actual
+   response structs, which the plan (written before Epic 14 shipped in
+   this shape) does not reference.
+3. **Authorization denial and "does not exist" are the same wire answer,
+   on purpose — `Outcome::NotFound`'s own doc calls this "absent and
+   denied, indistinguishable."** This is the identical non-disclosure
+   principle `graph-owl-api::Catalog::walk_hop` already applies (Epic 103's
+   own two-principal test exercises it there). Slice C's literal wording
+   below — *"a 403 surfaces as a typed permission error, never as an empty
+   result"* — asks for something that contradicts this system's own,
+   already-shipped, deliberately-chosen security posture elsewhere. The
+   adapter can and should still prove "two principals retrieve different
+   documents" (decision 3's actual, checkable property); it should not
+   invent a distinguishable-403 signal the server will never send, since
+   doing so would be the adapter *creating* an information-disclosure path
+   the rest of the system was built to avoid.
+
+**What remains**: `GraphOwlRetriever` (Slice B's `langchain-core`-facing
+half — a `pydantic.BaseModel` subclass over `BaseRetriever`, composing
+`search_assets` + `get_asset_context` + `explain_lineage` +
+`recall_memory` per hit, now that the composition need from finding 2
+above is known) and Slices C–F in full (the two-principal authorization
+proof reframed per finding 3; the MCP-manifest-parity toolkit; the
+retraction-based checkpointer; packaging, live-service CI, and the
+no-crate-change structural test). Each remaining slice should re-check its
+own assumptions against the real MCP/API surface the same way Slices A–B
+just did, rather than trusting the plan text below at face value — every
+divergence found so far was real, not a misreading.
 
 ## What this epic is, and what it emphatically is not
 
@@ -79,31 +177,33 @@ retriever = GraphOwlRetriever(
 
 - [ ] A LangChain chain retrieves graph context with **no graph-owl crate change** — asserted structurally.
 - [ ] A LangGraph agent binds the toolkit and completes a multi-step investigation against a seeded corpus.
-- [ ] Constructing any surface **without a principal raises**, and is tested.
-- [ ] Two principals against one corpus retrieve **different documents** — authorization survives the adapter.
-- [ ] A derived fact is identifiable as derived **in the text the model receives**, not only in metadata.
-- [ ] Confidence bands and `as_of` round-trip into `Document.metadata`.
-- [ ] `as_of` retrieval returns state as of that time, including an entity retracted since.
+- [x] Constructing any surface **without a principal raises**, and is tested — `Principal`/`GraphOwlClient`, `tests/test_principal.py`, `tests/test_client.py`.
+- [ ] Two principals against one corpus retrieve **different documents** — reframed by finding 3 above: achievable and worth proving, but not via a distinguishable-403 signal the server deliberately never sends.
+- [x] A derived fact is identifiable as derived **in the text the model receives**, not only in metadata — `_core/rendering.py::render`, `tests/test_rendering.py`.
+- [~] Confidence bands and `as_of` round-trip into `Document.metadata` — confidence does; `as_of` is threaded through the shape but cannot round-trip truthfully yet (finding 1).
+- [ ] `as_of` retrieval returns state as of that time, including an entity retracted since — **blocked on finding 1**, not yet attempted.
 - [ ] The checkpointer round-trips agent state; a discarded checkpoint is **retracted, not deleted**, and remains in history.
 - [ ] Tools map one-to-one onto Epic 14's MCP tools — asserted against the tool manifest, so a new MCP tool fails this test until exposed.
 - [ ] CI runs the integration against a live service; a contract change that breaks it fails the build.
-- [ ] The package imports without a LangChain install where only the core is used (decision 8).
+- [x] The package imports without a LangChain install where only the core is used (decision 8) — `test_the_core_module_imports_with_no_framework_installed`.
 
 ## Slices
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR. Python mutation testing uses `mutmut`.
 
-### Slice A: The core client and principal handling
+### Slice A: The core client and principal handling — **shipped, 8 August 2026**
 
 **Acceptance criteria**: an MCP client over Epic 14's streamable HTTP transport; a REST fallback via Epic 16's generated SDK; **construction without a principal raises**; credentials never appear in logs, reprs, or exception messages; connection failure is a typed error naming the endpoint; the core imports with no framework installed.
 **RED**: The no-principal test, and a credential-leak test that constructs a client with a token and asserts the token appears in neither `repr()`, nor a captured log, nor the string of any raised exception. Convenience defaults are how an integration ends up running as an admin, and a token in a traceback is how it ends up in a bug report. Mutator watch: a default principal must fail construction; a `__repr__` that formats the credential must fail the leak test.
 **Done when**: criteria met, mutation report reviewed.
+**Shipped as**: a single JSON-RPC-over-HTTP client (`_core/client.py`), stdlib only, matching `graph-owl-sdk`'s own no-dependency choice — not a REST-fallback pair, since every read this epic needs has an MCP tool. The REST SDK stays the documented fallback for what Epic 14 has no equivalent for (bulk export, admin), not yet needed by anything built so far. All criteria met; mutation-hardened (see "Progress and findings" above for the exact score and what the survivors are). The one correction mid-slice: `call_tool`'s error handling initially assumed the wrong wire shape (top-level JSON-RPC `error` only) — found and fixed before Slice B was built on top of it, see above.
 
-### Slice B: Retrieval that preserves what makes the graph worth querying
+### Slice B: Retrieval that preserves what makes the graph worth querying — **rendering half shipped, retriever not yet built**
 
 **Acceptance criteria**: `GraphOwlRetriever` returns `Document`s whose `page_content` is a rendered subgraph and whose `metadata` carries entity ids, relationship types, provenance, confidence, derived flags, and `as_of`; **derived facts are marked in `page_content`**; confidence below the ignore band (<0.5, `00c-domain-model.md`) is excluded by default and includable explicitly; an empty result is an empty list, never an exception; token budget is respected and truncation is stated in the returned text rather than silent.
 **RED**: The derived-labelling test — assert the rendered string identifies an inferred fact as inferred. Metadata alone fails this: the model reads `page_content`, and an LLM handed an inference as an assertion restates it as fact to a user. Second RED: the silent-truncation test, because a budget-truncated context that reads as complete makes the model assert absence it never verified. Mutator watch: rendering derived and asserted identically must fail; dropping the truncation notice must fail.
 **Done when**: criteria met, mutation report reviewed.
+**Shipped so far**: `_core/rendering.py` — `GraphContext`/`RelatedFact` as the framework-agnostic input shape, `render()` producing `(page_content, metadata)` with derived facts and truncation both stated in the text (not only flags), `visible_facts()` applying the confidence-band and derived-inclusion filters. Mutation-hardened along with Slice A (combined 183-mutant run, see above). **Not yet built**: `GraphOwlRetriever` itself — the `langchain-core`-facing `BaseRetriever` subclass that calls `search_assets`, then composes `get_asset_context` + `explain_lineage` (finding 2: relationship types live on the lineage step, not the asset context) into a `GraphContext` per hit. `as_of` cannot be honoured yet (finding 1). Token-budget truncation is already carried by the MCP tools themselves (`budget::fit`, checked in `graph-owl-mcp`'s own tests) and surfaces via `context.truncated` — `render()`'s truncation-notice behaviour is done; wiring a real `truncated` flag through from a live `search_assets`/`get_asset_context` call is not.
 
 ### Slice C: Authorization survives the adapter
 
