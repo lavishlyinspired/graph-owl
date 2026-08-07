@@ -14,7 +14,21 @@ dependencies = []
 [project.optional-dependencies]
 langchain = ["langchain-core>=0.2"]
 langgraph = ["langgraph>=0.2"]
-dev = ["pytest>=8", "pytest-cov>=5", "mutmut>=3", "ruff>=0.6", "mypy>=1.10"]
+# `dev` pulls in both framework extras rather than just the test tooling:
+# the suite exercises GraphOwlRetriever, GraphOwlToolkit and
+# GraphOwlCheckpointer directly (not only `_core`), so a `pip install
+# .[dev]` that could not import langchain_core/langgraph would fail the
+# suite it is meant to run — CI and a contributor's first checkout both
+# install this one extra rather than three.
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "mutmut>=3",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "langchain-core>=0.2",
+    "langgraph>=0.2",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

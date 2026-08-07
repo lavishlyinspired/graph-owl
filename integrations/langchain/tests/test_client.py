@@ -197,17 +197,19 @@ def test_the_first_call_on_a_fresh_client_uses_request_id_one():
     assert json.loads(captured["requests"][0].data)["id"] == 1
 
 
-def test_a_non_2xx_http_response_is_still_read_for_its_jsonrpc_error():
-    """`mcp_endpoint`'s own doc: a JSON-RPC error is HTTP 200. This is the
-    defensive branch for a caller behind a proxy that does not honour that —
-    a real `HTTPError`, wrapping a genuine top-level JSON-RPC ``error``
-    (a malformed request or unknown method — never a tool's own refusal,
-    which surfaces via ``isError`` instead, covered separately below)."""
+def test_a_non_2xx_http_response_is_read_as_an_rfc9457_problem():
+    """A non-2xx response from `/mcp` never reaches `jsonrpc::handle` at
+    all — it comes from axum's own auth middleware or a request rejection,
+    both of which answer with `AppError`'s RFC 9457 problem+json
+    (`{"type", "title", "status", "detail"}`), never a JSON-RPC envelope.
+    Assuming the JSON-RPC shape here was this client's first, wrong guess
+    (see `_as_tool_error`'s own doc) — this test pins the corrected one."""
     import urllib.error
 
     error_body = (
-        b'{"jsonrpc": "2.0", "id": 1, '
-        b'"error": {"code": -32601, "message": "method not found"}}'
+        b'{"type": "https://graph-owl.dev/problems/malformed-body", '
+        b'"title": "Malformed Body", "status": 400, '
+        b'"detail": "the request body was not valid JSON"}'
     )
 
     def raising_opener(request):
@@ -223,7 +225,7 @@ def test_a_non_2xx_http_response_is_still_read_for_its_jsonrpc_error():
 
     with pytest.raises(GraphOwlToolError) as excinfo:
         client.call_tool("search_assets", {"query": "orders"})
-    assert "method not found" in str(excinfo.value)
+    assert "the request body was not valid JSON" in str(excinfo.value)
 
 
 def test_a_tool_that_refused_raises_naming_the_tool_and_the_reason():
@@ -323,17 +325,31 @@ def test_a_connection_error_carries_the_endpoint_as_an_attribute():
     assert excinfo.value.endpoint == "https://unreachable.example"
 
 
-def test_the_core_module_imports_with_no_framework_installed():
+def test_the_core_module_never_imports_a_framework():
     """decision 8: the core has no reason to import LangChain or LangGraph.
 
-    Import failures inside `_core` are the regression this guards — a
-    dependency creeping into the core module would make `pip install
-    graph-owl-langchain` (no extras) unimportable.
+    Static inspection, not a `sys.modules` snapshot: once *any* other test
+    file in the same process imports `langchain_core` (the retriever tests
+    do), a runtime check would see it in `sys.modules` regardless of test
+    order and report a false failure — the exact trap this test almost
+    shipped with. Reading `_core`'s own source for the literal import
+    statement is order-independent and is what actually answers "does this
+    package need the framework to be installed."
     """
-    import sys
+    import ast
+    import pathlib
 
-    for name in list(sys.modules):
-        if name.startswith("langchain") or name.startswith("langgraph"):
-            raise AssertionError(
-                f"{name} was imported — the core must not depend on a framework"
-            )
+    core_dir = pathlib.Path(__file__).parent.parent / "graph_owl_langchain" / "_core"
+    for path in core_dir.glob("*.py"):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            for name in names:
+                assert not name.startswith(("langchain", "langgraph")), (
+                    f"{path.name} imports {name} — the core must not depend on a framework"
+                )

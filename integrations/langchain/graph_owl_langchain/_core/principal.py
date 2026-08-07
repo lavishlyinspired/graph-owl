@@ -8,6 +8,7 @@ construct.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 
@@ -19,9 +20,15 @@ class Principal:
     so a principal can be logged, printed in a traceback, or interpolated into
     an error message without ever putting the credential where a human
     reading it would see it.
+
+    ``refresh``, when given, is called at most once per request on a 401 —
+    Slice C's "an expired token triggers one refresh and does not loop."
+    ``None`` means no refresh is possible, and an expired token then fails
+    the call rather than retrying forever.
     """
 
     token: str = field(repr=False)
+    refresh: Callable[[], str] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.token:

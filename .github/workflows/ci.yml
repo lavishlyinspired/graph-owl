@@ -183,6 +183,25 @@ jobs:
       - name: verify-bolt.sh
         run: bash scripts/verify-bolt.sh
 
+  langchain-integration:
+    name: graph-owl-langchain against a live service (Epic 43 Slice F)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Same reasoning as sdk-roundtrip and bolt-driver: a mocked MCP server
+      # tests this package's own opinion of the contract, not the contract
+      # itself. This is the job that would have caught, in CI rather than by
+      # hand, the isError-shape and RFC 9457-vs-JSON-RPC corrections this
+      # package needed — see plans/43-framework-integrations.md.
+      - name: verify-langchain.sh
+        run: bash scripts/verify-langchain.sh
+
   ui:
     name: console typecheck and tests
     runs-on: ubuntu-latest

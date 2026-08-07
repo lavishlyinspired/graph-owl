@@ -81,19 +81,39 @@ class GraphOwlClient:
           parse — deliberately, so a client cannot mistake a *string* the
           tool legitimately returned for the envelope around it.
         """
-        self._next_id += 1
-        payload = {
-            "jsonrpc": "2.0",
-            "id": self._next_id,
-            "method": "tools/call",
-            "params": {"name": name, "arguments": arguments},
-        }
-        logger.debug("calling graph-owl tool %s", name)
-        response = self._send(payload)
+        response = self._call_method("tools/call", {"name": name, "arguments": arguments})
         if "error" in response:
             error = response["error"]
             raise GraphOwlToolError(name, error.get("message", "unknown error"))
         return self._unwrap(name, response.get("result") or {})
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        """The live ``tools/list`` manifest — Slice D builds every exposed
+        tool from this, never from a hardcoded name list, so a new MCP tool
+        appears here without a release of this package.
+
+        **Not the same unwrapping as ``call_tool``**: ``tools/list``'s own
+        handler returns ``{"tools": [...]}`` directly as the JSON-RPC
+        ``result`` — no ``content[0].text`` double-encoding, which is
+        specific to ``tools/call``'s response construction
+        (``graph_owl_mcp::jsonrpc::tool_response``). Reusing ``_unwrap``
+        here would silently look for a shape this method never has.
+        """
+        response = self._call_method("tools/list", None)
+        if "error" in response:
+            error = response["error"]
+            raise GraphOwlToolError("tools/list", error.get("message", "unknown error"))
+        result = response.get("result") or {}
+        tools: list[dict[str, Any]] = result.get("tools") or []
+        return tools
+
+    def _call_method(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        self._next_id += 1
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "id": self._next_id, "method": method}
+        if params is not None:
+            payload["params"] = params
+        logger.debug("calling graph-owl method %s", method)
+        return self._send(payload)
 
     def _unwrap(self, name: str, result: dict[str, Any]) -> dict[str, Any]:
         content = result.get("content") or []
@@ -104,6 +124,9 @@ class GraphOwlClient:
         return inner
 
     def _send(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._attempt(payload, allow_refresh=True)
+
+    def _attempt(self, payload: dict[str, Any], *, allow_refresh: bool) -> dict[str, Any]:
         url = f"{self._endpoint}/mcp"
         body = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
@@ -119,15 +142,35 @@ class GraphOwlClient:
             with self._open(request) as response:
                 raw = response.read()
         except urllib.error.HTTPError as error:
-            # A JSON-RPC error still arrives with an HTTP body worth reading —
-            # `mcp_endpoint`'s own doc explains why a protocol-level error is
-            # still HTTP 200, but a caller reusing this client against a
-            # differently-configured proxy should not lose the body just
-            # because *something* answered non-2xx.
-            raw = error.read()
-            parsed: dict[str, Any] = json.loads(raw) if raw else {}
-            return parsed
+            # 401 covers `Unauthenticated`/`TokenExpired`/`TokenInvalid`
+            # alike (`AppError::status`) — a client cannot tell which from
+            # the status code, so it always tries the refresh once; if the
+            # token was invalid rather than merely expired, the retry 401s
+            # again and `allow_refresh=False` stops it there rather than
+            # looping.
+            if error.code == 401 and allow_refresh and self._principal.refresh is not None:
+                self._principal = Principal(
+                    token=self._principal.refresh(), refresh=self._principal.refresh
+                )
+                return self._attempt(payload, allow_refresh=False)
+            raise self._as_tool_error(error) from None
         except (OSError, urllib.error.URLError) as error:
             raise GraphOwlConnectionError(self._endpoint, str(error)) from None
-        parsed = json.loads(raw)
+        parsed: dict[str, Any] = json.loads(raw)
         return parsed
+
+    def _as_tool_error(self, error: urllib.error.HTTPError) -> GraphOwlToolError:
+        """A non-2xx response from `/mcp` — reached before `jsonrpc::handle`
+        ever runs (an unauthenticated request, a body axum itself rejects),
+        never a JSON-RPC envelope. This server's own error responses are
+        RFC 9457 problem+json (`AppError::into_response`), so ``detail`` is
+        read from *that* shape, not from a JSON-RPC ``error`` member — the
+        two are never the same response.
+        """
+        raw = error.read()
+        try:
+            problem = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            problem = {}
+        detail = problem.get("detail") or problem.get("title") or f"HTTP {error.code}"
+        return GraphOwlToolError("<transport>", str(detail))

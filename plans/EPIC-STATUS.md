@@ -82,7 +82,7 @@ is the condition that index exists to catch.
 | **40** | 3 | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | **Shipped** | 11/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
 | **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | **Shipped** | 12/12 | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
 | **42** | 7 | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | In progress | 2/4 (+2 partial) | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
-| **43** | 5 | [`43-framework-integrations.md`](43-framework-integrations.md) | In progress | 2/5 (+1 partial) | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
+| **43** | 5 | [`43-framework-integrations.md`](43-framework-integrations.md) | **Shipped** | 6/6 | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
 | **93** | 3 | [`93-console-overview.md`](93-console-overview.md) | **Shipped** | 2/2 | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
 | **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | In progress | 5/7 (+1 partial) | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
 | **95** | 10 | [`95-owl-rl-completion.md`](95-owl-rl-completion.md) | **Shipped** | 2/2 | Epic 6 (the eight rules and the fixpoint that runs them) |
@@ -580,11 +580,12 @@ is the condition that index exists to catch.
 
 ### Epic 43 — Agent Framework Integrations *(Demo 5)*
 
-- [~] LangChain retriever preserving provenance and confidence — the rendering half (`_core/re
-- [ ] LangGraph toolkit, manifest-parity with MCP
-- [ ] Checkpointer over Epic 31, retraction not deletion
-- [x] Zero graph-owl crate changes, asserted — true so far by construction (`integrations/lang
+- [x] LangChain retriever preserving provenance and confidence — `_core/rendering
+- [x] LangGraph toolkit, manifest-parity with MCP — `tools
+- [x] Checkpointer over Epic 31, retraction not deletion — `memory
+- [x] Zero graph-owl crate changes, asserted structurally — `tests/test_no_crate_change
 - [x] The core client
+- [x] Live-service CI (`langchain-integration` job, `scripts/verify-langchain
 
 ### Epic 93 — Console Overview *(Demo 3)*
 
