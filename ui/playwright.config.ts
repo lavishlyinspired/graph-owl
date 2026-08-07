@@ -21,6 +21,18 @@ export default defineConfig({
   // makes the whole suite sequential, which `fullyParallel: false` reads
   // as though it already guaranteed.
   workers: 1,
+  // **`first-run.spec.ts` must run first, and that is an ordering
+  // convention this config does not enforce — it relies on every spec
+  // file sorting after it alphabetically.** `workers: 1` makes files run
+  // sequentially in discovery order (alphabetical here), and
+  // `first-run.spec.ts`'s own test asserts the *empty*-database state; any
+  // spec that runs before it and creates real data breaks that assertion
+  // with a state-dependent axe violation, not an obvious "wrong data"
+  // failure. Found with Epic 42 Slice F's own spec file, originally named
+  // `agent-activity.spec.ts` (sorts before "first-run" — 'a' < 'f') and
+  // renamed to `governance-agent-activity.spec.ts` to fix it. Name a new
+  // spec file so it sorts after "first-run" — anything starting with a
+  // letter from 'g' onward is safe, matching every other file here.
   retries: 0,
   reporter: "list",
   use: {

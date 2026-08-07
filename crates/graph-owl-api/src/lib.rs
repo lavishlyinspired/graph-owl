@@ -23626,7 +23626,7 @@ mod projection_isolation_tests {
                 .await;
 
             let history = catalog
-                .agent_activity("agent-alpha", &page())
+                .agent_activity(&steward(), "agent-alpha", &page())
                 .await
                 .expect("history");
             assert_eq!(history.data.len(), 1, "{history:?}");
@@ -24066,7 +24066,7 @@ mod projection_isolation_tests {
                 .await;
 
             let history = catalog
-                .agent_activity("agent-alpha", &page())
+                .agent_activity(&steward(), "agent-alpha", &page())
                 .await
                 .expect("history");
 
@@ -24092,11 +24092,91 @@ mod projection_isolation_tests {
                 .expect("recorded");
 
             let alpha = catalog
-                .agent_activity("agent-alpha", &page())
+                .agent_activity(&steward(), "agent-alpha", &page())
                 .await
                 .expect("history");
 
             assert!(alpha.data.is_empty(), "{alpha:?}");
+        }
+
+        /// **The security-critical test — Epic 42 Slice F's own named RED
+        /// test.** `target_fqn` names an entity; an activity feed that hands
+        /// back every entity an agent has ever touched, regardless of
+        /// whether the viewer could read that entity directly, leaks its
+        /// existence through the back door of an audit feature. A viewer
+        /// scoped to `warehouse` must see that the agent wrote to
+        /// `warehouse` and must not learn that it also wrote to `vault`.
+        #[tokio::test]
+        async fn agent_activity_is_filtered_by_the_viewers_own_policy() {
+            let (catalog, storage) = catalog_with(None).await;
+            catalog
+                .upsert_asset(&Principal::system(), service("vault"))
+                .await
+                .expect("create vault");
+
+            catalog
+                .record_agent_write(
+                    "agent-alpha",
+                    AgentCapability::ApplyDescription,
+                    "warehouse",
+                    ActivityOutcome::Applied,
+                )
+                .await
+                .expect("recorded warehouse write");
+            catalog
+                .record_agent_write(
+                    "agent-alpha",
+                    AgentCapability::ApplyDescription,
+                    "vault",
+                    ActivityOutcome::Applied,
+                )
+                .await
+                .expect("recorded vault write");
+
+            storage
+                .upsert_policy(
+                    &graph_owl_authz::Policy {
+                        name: "warehouse-only".to_string(),
+                        rules: vec![graph_owl_authz::Rule {
+                            name: "warehouse-only-read".to_string(),
+                            effect: graph_owl_authz::Effect::Allow,
+                            operations: vec![graph_owl_authz::MetadataOperation::ViewBasic],
+                            resources: graph_owl_authz::ResourceMatcher::FqnPrefix(
+                                "warehouse".to_string(),
+                            ),
+                        }],
+                    },
+                    &["warehouse-viewer".to_string()],
+                )
+                .await
+                .expect("policy");
+            let scoped_viewer = Principal {
+                id: "priya".to_string(),
+                name: "Priya".to_string(),
+                kind: graph_owl_core::PrincipalKind::User,
+                roles: vec!["warehouse-viewer".to_string()],
+                is_admin: false,
+            };
+
+            let scoped = catalog
+                .agent_activity(&scoped_viewer, "agent-alpha", &page())
+                .await
+                .expect("scoped history");
+            assert_eq!(
+                scoped
+                    .data
+                    .iter()
+                    .map(|a| a.target_fqn.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["warehouse"],
+                "a viewer who cannot see vault must not learn an agent wrote to it: {scoped:?}"
+            );
+
+            let admin = catalog
+                .agent_activity(&steward(), "agent-alpha", &page())
+                .await
+                .expect("admin history");
+            assert_eq!(admin.data.len(), 2, "an admin sees both: {admin:?}");
         }
 
         /// A grant round-trips through storage with its scope and limits intact
@@ -25230,16 +25310,39 @@ impl Catalog {
         Ok(self.storage.revoke_agent_grant(agent_id).await?)
     }
 
-    /// One agent's history, newest first — applied, proposed **and refused**.
+    /// One agent's history, newest first — applied, proposed **and
+    /// refused** — filtered to what `principal` may see.
+    ///
+    /// **Epic 42 Slice F's own named RED test.** `target_fqn` names an
+    /// entity, so an unfiltered activity log leaks the existence of
+    /// entities the caller cannot otherwise read, through the back door of
+    /// an audit feature — the same class of leak this crate has already
+    /// found once in the graph-flake authorization path
+    /// ([`Self::authorized_lpg_elements`]'s own history). Filtered
+    /// after the storage page is fetched, the same trade-off
+    /// [`Self::authorized_lpg_elements`] already makes: a restricted
+    /// principal's page may come back with fewer than `limit` rows even
+    /// though more exist, which is a pagination shortfall, not a security
+    /// one — nothing denied is ever included to pad the page back out.
     ///
     /// # Errors
     /// `Storage` if the read fails.
     pub async fn agent_activity(
         &self,
+        principal: &Principal,
         agent_id: &str,
         page: &PageRequest,
     ) -> Result<Page<graph_owl_authz::agent::AgentActivity>, CatalogError> {
-        Ok(self.storage.agent_activity(agent_id, page).await?)
+        use graph_owl_authz::MetadataOperation;
+
+        let mut history = self.storage.agent_activity(agent_id, page).await?;
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+        history
+            .data
+            .retain(|activity| predicate.admits(&activity.target_fqn));
+        Ok(history)
     }
 }
 

@@ -368,6 +368,67 @@ export interface LpgNodeView {
   report: MappingReport;
 }
 
+/** Epic 32's closed capability set — see `AgentCapability::ALL`'s own doc
+ *  comment for why nothing wider (delete, grants, policy, roles, certify)
+ *  will ever be added. `apply*` writes directly; everything else proposes
+ *  or records, never applying without a human. */
+export type AgentCapability =
+  | "proposeDescription"
+  | "proposeTags"
+  | "proposeOwner"
+  | "applyDescription"
+  | "applyTags"
+  | "recordMemory"
+  | "recordInvestigation"
+  | "createGlossaryTerm"
+  | "createQualityTest"
+  | "linkLineage";
+
+export interface EntityReference {
+  id: string;
+  kind: "user" | "team";
+  displayName: string;
+  inherited: boolean;
+}
+
+export interface AgentGrant {
+  id: string;
+  agent: EntityReference;
+  capabilities: AgentCapability[];
+  scope?: { fqnPrefix: string };
+  rateLimit: { maxWrites: number; windowSeconds: number };
+  expiresAt?: string;
+  grantedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One line in an agent's history — **the outcome is what distinguishes a
+ *  write-back from everything else**: `applied` changed the catalog
+ *  directly, `proposed` only suggested a change a human has not yet
+ *  decided, `refused` never took effect at all. Filtered server-side to
+ *  what the caller may see (Epic 42 Slice F's own named RED test — an
+ *  unfiltered activity log would leak `targetFqn`s the viewer cannot
+ *  otherwise read). */
+export interface AgentActivity {
+  id: string;
+  agentId: string;
+  capability: AgentCapability;
+  targetFqn: string;
+  outcome: "applied" | "proposed" | "refused";
+  refusal?: string;
+  at: string;
+}
+
+export interface BoltSession {
+  principal: string;
+  connectedAt: string;
+}
+
+export type BoltStatus =
+  | { enabled: false }
+  | { enabled: true; maxConnections: number; activeConnections: number; sessions: BoltSession[] };
+
 /** The stored violations queue, and the instant it reflects. */
 export interface ValidationReport {
   readonly data: readonly import("./governance/queue").Finding[];
@@ -685,6 +746,20 @@ export const api = {
    *  resolved. Not registered in the OpenAPI schema (a real, recorded
    *  gap — see the handler's own doc comment). */
   lpgNode: (assetId: string) => request<LpgNodeView>(`/assets/${assetId}/lpg-node`),
+  /** Every agent with a grant — admin-only server-side (`404` for anyone
+   *  else, same tier as `/admin/bolt/status`), since a grant's own scope
+   *  and rate limit are operational configuration, not a filtered read. */
+  agentGrants: () => request<AgentGrant[]>("/agents/grants"),
+  /** One agent's history, newest first. Server-filtered to what the caller
+   *  may see — see `AgentActivity`'s own doc comment. */
+  agentActivity: (agentId: string, after?: string) =>
+    request<Page<AgentActivity>>(
+      `/agents/${agentId}/activity${after ? `?after=${encodeURIComponent(after)}` : ""}`,
+    ),
+  /** Admin-only. `{enabled: false}` when the off-by-default `bolt` Cargo
+   *  feature was not compiled in, or compiled in but never bound — a real,
+   *  legitimate state, not an error. */
+  boltStatus: () => request<BoltStatus>("/admin/bolt/status"),
   /** What the reasoner concluded about one subject, as the last run stored it.
    *  Not a fresh pass — an asset page opens with this. */
   derivedAbout: (subject: string) =>

@@ -204,6 +204,14 @@ function build(c: Palette, dark: boolean): ThemeConfig {
       colorTextDescription: c.textMuted,
       colorTextTertiary: c.textSubtle,
       colorTextQuaternary: c.textDisabled,
+      // Found by a real axe scan (Epic 42 Slice F): antd derives an input's
+      // placeholder colour from `colorTextQuaternary` (`textDisabled`) by
+      // default, which is right for an actually-disabled control but fails
+      // WCAG AA (2.45:1, needs 4.5:1) on a placeholder — a fully
+      // interactive, non-disabled state. `textMuted` is the same weight
+      // already used for secondary/description text above and measures
+      // 9.9:1 against this theme's page background, comfortably compliant.
+      colorTextPlaceholder: c.textMuted,
       colorTextHeading: c.text,
       // Semantic colours are theme-aware. Status is the one thing a reader
       // must never have to squint at, and the same green cannot serve a white

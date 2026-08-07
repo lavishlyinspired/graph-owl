@@ -10402,15 +10402,18 @@ async fn revoke_agent_grant(
     }
 }
 
-/// An agent's writes — applied, proposed **and refused**.
+/// An agent's writes — applied, proposed **and refused** — filtered to
+/// what the caller may see (Epic 42 Slice F).
 async fn get_agent_activity(
     State(catalog): State<Catalog>,
-    Auth(_principal): Auth,
+    Auth(principal): Auth,
     Path(agent_id): Path<String>,
     AppQuery(query): AppQuery<ListQuery>,
 ) -> Result<Json<Page<graph_owl_authz::agent::AgentActivity>>, AppError> {
     let page = PageRequest::new(query.limit, query.after.as_deref())?;
-    Ok(Json(catalog.agent_activity(&agent_id, &page).await?))
+    Ok(Json(
+        catalog.agent_activity(&principal, &agent_id, &page).await?,
+    ))
 }
 
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]

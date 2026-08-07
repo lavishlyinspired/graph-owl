@@ -572,9 +572,9 @@ back. Two HTTP tests now do:
 - [~] Investigation and remediation proposals — `record_investigation` refuses a finding with no evidence, and every write tool is declared; **only description proposals apply automatically**, the rest are accepted by making the change directly
 
 ### Console half
-- [ ] **14** **Agent activity — sessions, reads, writes, webhooks** *(Epic 42)*. An agent writing to the catalog with no visible audit is the single scariest thing in this demo
+- [~] **14** **Agent activity — sessions, reads, writes, webhooks** *(Epic 42 Slice F, 7 August 2026)*. An agent writing to the catalog with no visible audit is the single scariest thing in this demo. **Write-backs shipped**: Admin → Agent activity lists real grants and, per agent, its filterable history — `applied` (a genuine write-back) visually distinguished from `proposed`/`refused`. **Sessions, reads, and webhooks are not shipped**: Epic 32's `AgentActivity` has no "read" outcome at all (MCP's own query tools carry no persisted audit log), and there is no catalog-wide webhook-delivery listing endpoint — recorded as real backend gaps in `42-ui-semantic-surfaces.md`, not silently assumed covered. A real, unpatched authorization leak was found and fixed while building this: the activity endpoint was unfiltered by policy, letting any authenticated caller see every entity any agent had touched
 - [x] **31** Memory panel and memory administration *(Epic 41 Slice E, 5 August 2026)*
-- [ ] **32** Agent capabilities; **write-back audit** *(Epic 42)*
+- [x] **32** Agent capabilities; **write-back audit** *(Epic 42 Slice F, 7 August 2026)* — `applied` vs `proposed`/`refused` outcomes, filterable by type and entity, real refusal reasons surfaced verbatim
 
 ### Epic 43 — Framework integrations
 - [ ] LangChain retriever preserving provenance and confidence
@@ -944,7 +944,7 @@ slice.
 ### Console half
 - [ ] **7b** Cypher in the workbench as a second language, same result surface *(Epic 41)*
 - [x] **7c** **Triple ⇄ property-graph toggle** on the Knowledge tab *(Epic 42 Slice E, 7 August 2026)* — the same facts in both shapes, because "is it RDF or a property graph" is the question this epic answers and a toggle answers it faster than prose. `GET /assets/{id}/lpg-node` (new) resolves one asset's own facts through `graph_owl_lpg::node_from_flakes`, the same conversion Epic 7c's Bolt work already built, now reachable over HTTP for the first time. Lossy mappings from Epic 7c's `MappingReport` render as named sentences on screen (`describeLoss`, 100% mutation score), proven end-to-end: a real `service`→`database` asset's `parentService` reference renders `The reference in "parentService" was flattened to plain text — it no longer traverses as an edge.`, not silently dropped.
-- [ ] **7d** Admin: Bolt endpoint status, active sessions *(Epic 42)*
+- [x] **7d** Admin: Bolt endpoint status, active sessions *(Epic 42 Slice F, 7 August 2026)* — `GET /admin/bolt/status` was already shipped; this slice adds the console tab. The route only exists `#[cfg(feature = "bolt")]` (decision 3: "compiled out entirely, not merely inert"), so a build without that feature falls through to the SPA's own static-file fallback rather than 404ing — found by a real axe scan against the default build (`Unexpected token '<'`, not JSON); the panel now treats that specific failure the same as the documented `{enabled: false}` state, since both mean the same thing to an admin reading the screen
 - [ ] **9** **Export dialog** — format, scope, and a preview before download *(Epic 42)*. RDF 1.2 output lands here (Epic 94). **Not shipped with Slice E** (7 August 2026): scoped and explicitly deferred — no `/graph/export/*` route accepts scope/as-of/preview filtering, and no RDF-format export exists over HTTP at all (only the five LPG-side formats), so the dialog's own acceptance criteria have no backend to sit on yet
 - [ ] **9a** Same dialog; projection-target administration *(Epic 42)*
 ---

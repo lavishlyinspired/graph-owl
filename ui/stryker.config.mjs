@@ -41,5 +41,12 @@ export default {
     // everywhere else in this list.
     "src/features/**/*.ts",
     "!src/features/**/*.test.ts",
+    // `src/routes.ts` (Epic 42 Slice F): the route-budget check itself. Its
+    // own RED test is "the check must fail the build when a fixture
+    // exceeds 30" — a mutant that silently makes `checkRouteBudget` always
+    // report `ok: true` is exactly the failure mode that test exists to
+    // catch, so the check needs the same regression guard as everything
+    // else in this list.
+    "src/routes.ts",
   ],
 };

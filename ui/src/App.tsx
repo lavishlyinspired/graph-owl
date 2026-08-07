@@ -101,6 +101,8 @@ import {
 import { VocabularySection } from "./features/vocabulary/VocabularySection";
 import { ReviewSection } from "./features/review/ReviewSection";
 import { KnowledgeGraphToggle } from "./features/knowledge/KnowledgeGraphToggle";
+import { AgentActivityPanel } from "./features/agents/AgentActivityPanel";
+import { BoltSessionsPanel } from "./features/agents/BoltSessionsPanel";
 import { hierarchy, type TeamNode } from "./admin/hierarchy";
 import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
 import {
@@ -3584,7 +3586,11 @@ function AdminPage({ colors }: { colors: (typeof palette)["light"] }) {
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <div>
-        <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+        {/* level 2, not 4: directly under the chrome's own h1, and this is
+         *  the first spec to ever axe-scan the Admin section — found via a
+         *  real axe run while adding Epic 42 Slice F's own tabs, the same
+         *  heading-order class of bug Slice C already fixed elsewhere. */}
+        <Title level={2} style={{ margin: 0, fontWeight: 600, fontSize: 16 }}>
           Admin
         </Title>
         <Text type="secondary">Principals, teams, and connector configuration.</Text>
@@ -3598,6 +3604,8 @@ function AdminPage({ colors }: { colors: (typeof palette)["light"] }) {
           { key: "policies", label: "Policies", children: <PolicyPanel /> },
           { key: "memories", label: "Memories", children: <MemoryAdminPanel colors={colors} /> },
           { key: "federation", label: "Federation", children: <FederationPanel /> },
+          { key: "agents", label: "Agent activity", children: <AgentActivityPanel /> },
+          { key: "bolt", label: "Bolt sessions", children: <BoltSessionsPanel /> },
         ]}
       />
     </Space>
