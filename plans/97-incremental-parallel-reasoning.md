@@ -1,6 +1,6 @@
 # Plan: Incremental & Parallel Reasoning (Epic 97)
 
-**Status**: Both techniques shipped, 7 August 2026 — DRed (Slice A) and parallel derivation (Slice B), see write-ups below. Entry condition met 28 Jul 2026: a stated requirement of 10⁸–10⁹ triples makes `06`'s wholesale-replacement-per-run arithmetically unviable, so incremental maintenance moved from optional to prerequisite. See `00n-large-ontology-reality.md` §2.4. **Not yet wired into `Catalog::run_reasoning`** — both slices are the pure `graph-owl-reasoning` algorithms only, matching this plan's stated crate scope; see the "Open: incremental maintenance meets time travel" section below for what the cross-crate wiring still owes (`maintained_to`, the freshness-stamp signal, refusing reasoning on historical queries).
+**Status**: Both techniques shipped, 7 August 2026 — DRed (Slice A) and parallel derivation (Slice B), see write-ups below. Entry condition met 28 Jul 2026: a stated requirement of 10⁸–10⁹ triples makes `06`'s wholesale-replacement-per-run arithmetically unviable, so incremental maintenance moved from optional to prerequisite. See `00n-large-ontology-reality.md` §2.4. **Wired into `Catalog::run_reasoning`/`run_reasoning_incremental`, 8 August 2026** (`graph-owl-api`) — see "Slice C: wiring into the invocation path" below. The two obligations that wiring does *not* attempt — automatic retraction-event subscription and the `maintained_to` freshness-stamp — remain open; see "Open: incremental maintenance meets time travel" below.
 **Depends on**: Epic 6 (semi-naive fixpoint), Epic 37a (the measurement)
 **Crates**: `graph-owl-reasoning`
 
@@ -134,14 +134,10 @@ class-hierarchy nodes, proven with two subjects sharing the same
 budgets are respected under adversarial conditions, not merely under
 realistic ones (`a_low_iteration_cap_still_terminates_and_reports_that_it_was_capped`).
 
-**Not yet wired into `Catalog::run_reasoning`.** This slice is the pure
-algorithm only — `graph-owl-api`'s reasoning pass still replaces
-`graph:reasoning` wholesale on every run, matching this plan's own
-"Crates: `graph-owl-reasoning`" scope. Wiring incremental maintenance into
-the actual invocation lifecycle (subscribing to retraction events, deciding
-when a full run is still cheaper than tracking `previous` across many small
-retractions, and the `maintained_to` freshness-stamp obligation below) is
-separate, larger, cross-crate work not undertaken in this pass.
+**Wired into `Catalog::run_reasoning`, 8 August 2026** — see "Slice C" below.
+This slice itself remains the pure algorithm only; the wiring is a separate
+slice in a different crate, exactly as this plan's own "Crates:
+`graph-owl-reasoning`" scope implied it would need to be.
 
 ## Parallel derivation
 
@@ -208,6 +204,73 @@ test cannot pass vacuously over a single-rule result.
 `a_capped_run_caps_the_same_way_under_both_dispatch_strategies` covers this
 epic's shared budget criterion for the parallel path specifically. Mutation
 report: 5/5 viable mutants caught, 5 unviable.
+
+### Slice C: wiring into the invocation path — **shipped, 8 August 2026**
+
+**The gap this closes.** Slices A and B shipped both algorithms as pure,
+mutation-tested library functions with nothing in `graph-owl-api` calling
+them — `Catalog::run_reasoning` still called `derive_within` sequentially
+and replaced the overlay wholesale every time. Found and named honestly in
+`plans/DEMOS.md` rather than checked off early.
+
+**`Catalog::run_reasoning_incremental(retracted: &[Flake], budget)`**
+(`graph-owl-api`) is the new entry point. It reads an in-memory
+`reasoning_cache: Arc<Mutex<Option<reasoning::Reasoning>>>` — the
+*structured* previous result, not the flat overlay flakes already
+persisted, because `derive_incremental` needs derivation routes as its
+starting point and the persisted overlay does not carry them. When a
+cached previous run exists *and* `retracted` is non-empty, it calls
+`derive_incremental(&previous, retracted, budget)`. Otherwise — nothing
+cached yet (first call, or after a process restart, since the cache is
+in-memory only), or `retracted` is empty (nothing to maintain against) — it
+falls back to a full run. Both fallback conditions are real and principled,
+not an invented threshold: an *automatic* choice between "incremental is
+cheaper" and "full is cheaper" is exactly the entry-condition-as-measurement
+this epic's own table ties to an Epic 37a scale measurement that does not
+exist yet, and this wiring does not attempt that choice — only the
+mechanical one of "is there something to maintain at all".
+
+**`derive_within_parallel` replaces `derive_within` everywhere a full run
+happens** — `run_reasoning`'s own path, and `run_reasoning_incremental`'s
+fallback. Byte-identical per Slice B's own proof, so a wholesale
+re-derivation has no reason left to run single-threaded. This also matches
+the plan's own stated relationship between the two techniques: DRed is
+preferred when it applies, and a full re-derivation that must happen anyway
+should at least not run sequentially.
+
+**`ReasoningReport` gained a `technique: Full | Incremental` field**, so
+which strategy ran is observable to a caller rather than an internal
+implementation detail masquerading as uniform behaviour — the same
+"structural, not advisory" instinct the "Open" section below already
+applies to the freshness-stamp obligation.
+
+**A shared `finish_reasoning_run` helper** now owns the withdraw-then-assert
+persistence both entry points need (previously only `run_reasoning` had
+it), refactored out rather than duplicated — the same reason Slice B's own
+`run_round`/`RoundDispatch` extraction exists in `graph-owl-reasoning`. It
+also updates `reasoning_cache` after every successful run, full or
+incremental, so any run leaves a valid starting point for the next
+incremental call.
+
+**Acceptance criteria, verified**: a first call with nothing cached falls
+back to a full run
+(`a_first_call_with_no_cache_falls_back_to_a_full_run`); a cached run with
+nothing retracted also falls back, rather than running DRed as a no-op
+(`a_cached_run_with_nothing_retracted_still_falls_back_to_full`); a
+retraction after a cached run takes the incremental path
+(`a_retraction_after_a_cached_run_uses_the_incremental_path`); and, the one
+that actually proves correctness rather than just dispatch, retracting the
+*outer* link of a two-hop `subClassOf` chain prunes exactly the two-hop
+conclusion via the incremental path while the still-supported one-hop
+conclusion survives
+(`the_incremental_path_prunes_exactly_what_lost_its_premise`). 4 new tests,
+524 total in the crate, 0 missed mutants on the diff (3 caught, 3 unviable).
+
+**Scope, stated rather than assumed away — again, because it bears
+repeating.** This slice wires the invocation path; it does not attempt
+automatic retraction-event subscription (the caller still supplies
+`retracted` explicitly) or the `maintained_to` freshness stamp below. Both
+remain open, named there, not silently dropped by this slice shipping.
 
 ## Open: incremental maintenance meets time travel
 

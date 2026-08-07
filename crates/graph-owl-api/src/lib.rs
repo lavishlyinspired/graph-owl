@@ -1120,6 +1120,14 @@ pub struct Catalog {
             )>,
         >,
     >,
+    /// The last successful reasoning run's full result — Epic 97's own
+    /// missing half. `derive_incremental` needs the *structured* previous
+    /// `Reasoning` (routes, not just flakes) as its starting point, and the
+    /// persisted overlay only ever holds the flat conclusions, so this is
+    /// not redundant with what is already written to the graph. `Arc` for
+    /// the same reason `shape_cache`/`el_cache` are: axum clones `Catalog`
+    /// per request.
+    reasoning_cache: Arc<Mutex<Option<reasoning::Reasoning>>>,
 }
 
 impl Catalog {
@@ -1151,6 +1159,7 @@ impl Catalog {
             http_client: reqwest::Client::new(),
             el_sidecar: None,
             el_cache: Arc::new(Mutex::new(None)),
+            reasoning_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -11595,8 +11604,92 @@ impl Catalog {
         })?;
 
         let base = Self::reasoning_base(graph.as_ref(), budget).await?;
-        let concluded = reasoning::derive_within(&base, budget);
+        // Parallel, not sequential: `derive_within_parallel` is byte-identical
+        // to `derive_within` (Epic 97 Slice B), so a wholesale re-derivation
+        // has no reason to run single-threaded.
+        let concluded = reasoning::derive_within_parallel(&base, budget);
+        self.finish_reasoning_run(graph.as_ref(), concluded, ReasoningTechnique::Full)
+            .await
+    }
 
+    /// DRed maintenance instead of wholesale re-derivation, when there is a
+    /// cached previous run to maintain — Epic 97's own missing half, closed
+    /// here. `derive_incremental` and `derive_within_parallel` shipped in
+    /// `graph-owl-reasoning` with nothing in this crate calling them; this
+    /// is what makes them reachable.
+    ///
+    /// **Scope, stated rather than assumed away.** This wires the two
+    /// already-verified algorithms into the invocation path; it does not
+    /// attempt the two obligations `97-incremental-parallel-reasoning.md`'s
+    /// own "Open" section names as separate, larger work: subscribing to
+    /// retraction events automatically (the caller still supplies
+    /// `retracted` explicitly, exactly matching `derive_incremental`'s own
+    /// signature), and the `maintained_to` freshness-stamp that would let a
+    /// reader see how far behind the base an incrementally-maintained
+    /// overlay has fallen. Both remain open, named there, not silently
+    /// dropped by this being merged.
+    ///
+    /// **Falls back to a full run** when there is nothing cached yet (the
+    /// first call ever, or after a process restart — the cache is
+    /// in-memory, not persisted) or when `retracted` is empty (nothing to
+    /// maintain against, so a full run is not merely cheaper, it is the
+    /// only correct thing to compute). This is a real, principled fallback
+    /// condition rather than a threshold invented without a measurement —
+    /// `97`'s own entry-conditions table ties an *automatic* full-vs-
+    /// incremental choice to an Epic 37a measurement that does not exist
+    /// yet; this method does not attempt that choice, only the mechanical
+    /// one of "is there something to maintain".
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured or a read/write fails.
+    ///
+    /// # Panics
+    ///
+    /// If the internal reasoning cache's lock is poisoned by another thread
+    /// panicking while holding it.
+    #[tracing::instrument(name = "catalog.run_reasoning_incremental", skip_all)]
+    pub async fn run_reasoning_incremental(
+        &self,
+        retracted: &[Flake],
+        budget: &reasoning::Budget,
+    ) -> Result<ReasoningReport, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let previous = self.reasoning_cache.lock().expect("lock").clone();
+        let (concluded, technique) = match previous {
+            Some(previous) if !retracted.is_empty() => (
+                reasoning::derive_incremental(&previous, retracted, budget),
+                ReasoningTechnique::Incremental,
+            ),
+            _ => {
+                let base = Self::reasoning_base(graph.as_ref(), budget).await?;
+                (
+                    reasoning::derive_within_parallel(&base, budget),
+                    ReasoningTechnique::Full,
+                )
+            }
+        };
+        self.finish_reasoning_run(graph.as_ref(), concluded, technique)
+            .await
+    }
+
+    /// The withdraw-then-assert persistence both reasoning entry points
+    /// share, plus updating [`Self::reasoning_cache`] so a later
+    /// [`Self::run_reasoning_incremental`] call has a structured previous
+    /// result to maintain — extracted rather than duplicated, the same
+    /// reason `97`'s own `run_round`/`RoundDispatch` refactor exists in
+    /// `graph-owl-reasoning`.
+    async fn finish_reasoning_run(
+        &self,
+        graph: &dyn TripleStore,
+        concluded: reasoning::Reasoning,
+        technique: ReasoningTechnique,
+    ) -> Result<ReasoningReport, CatalogError> {
         // Withdraw the previous run's overlay before writing this one.
         // Retracting what is *there* rather than re-deriving what was there
         // last time: a rule change between runs would otherwise strand every
@@ -11651,13 +11744,18 @@ impl Catalog {
                 .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
         }
 
-        Ok(ReasoningReport {
+        let report = ReasoningReport {
             derived: concluded.facts.len(),
             replaced: previous.len(),
             iterations: concluded.iterations,
             capped: concluded.capped,
             duration_ms: u64::try_from(concluded.duration.as_millis()).unwrap_or(u64::MAX),
-        })
+            technique,
+        };
+
+        *self.reasoning_cache.lock().expect("lock") = Some(concluded);
+
+        Ok(report)
     }
 
     /// The conclusions the last run drew about one subject.
@@ -14666,6 +14764,21 @@ pub struct ValidationRun {
     pub computed_at_t: i64,
 }
 
+/// Which strategy a reasoning run actually used — Epic 97's own missing
+/// half. The algorithms shipped invisibly (pure library functions); this is
+/// what makes the choice observable to a caller rather than an internal
+/// detail that happens to be faster sometimes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReasoningTechnique {
+    /// Full re-derivation over every base fact — [`reasoning::derive_within`].
+    Full,
+    /// DRed maintenance over a cached previous run plus what was retracted
+    /// since — [`reasoning::derive_incremental`]. Only reachable via
+    /// [`Catalog::run_reasoning_incremental`].
+    Incremental,
+}
+
 /// What one reasoning run did.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -14683,6 +14796,8 @@ pub struct ReasoningReport {
     pub capped: Option<reasoning::CappedReason>,
     /// How long the run took, in milliseconds.
     pub duration_ms: u64,
+    /// Which strategy actually ran — see [`ReasoningTechnique`].
+    pub technique: ReasoningTechnique,
 }
 
 /// What [`Catalog::upsert_alignment`] did with one alignment.
@@ -21091,6 +21206,145 @@ mod reasoning_decides_before_it_writes {
                 .await
                 .is_err()
         );
+    }
+
+    /// **Epic 97's own missing half, closed here.** `derive_incremental` and
+    /// `derive_within_parallel` shipped in `graph-owl-reasoning`, mutation-
+    /// tested, with nothing in this crate calling them. These four tests pin
+    /// that `run_reasoning_incremental` actually reaches them — proving the
+    /// wiring, not re-proving the algorithms `graph-owl-reasoning`'s own
+    /// suite already covers.
+    mod incremental_reasoning_is_wired_in {
+        use super::*;
+
+        /// With nothing cached — the first call ever — there is nothing to
+        /// maintain, so the only correct answer is a full run. This is the
+        /// "no previous state" fallback, distinct from the "nothing was
+        /// retracted" one below.
+        #[tokio::test]
+        async fn a_first_call_with_no_cache_falls_back_to_a_full_run() {
+            let (catalog, _graph) = seeded().await;
+
+            let report = catalog
+                .run_reasoning_incremental(&[], &Budget::default())
+                .await
+                .expect("a first call must succeed even with nothing cached");
+
+            assert_eq!(report.technique, ReasoningTechnique::Full);
+            assert!(
+                report.derived > 0,
+                "the hierarchy must still derive something"
+            );
+        }
+
+        /// A cached previous run with nothing retracted is also a full run —
+        /// there is nothing for `derive_incremental` to prune, so running it
+        /// anyway would be a no-op wearing the wrong name.
+        #[tokio::test]
+        async fn a_cached_run_with_nothing_retracted_still_falls_back_to_full() {
+            let (catalog, _graph) = seeded().await;
+            catalog
+                .run_reasoning(&Budget::default())
+                .await
+                .expect("first, full run populates the cache");
+
+            let report = catalog
+                .run_reasoning_incremental(&[], &Budget::default())
+                .await
+                .expect("second call must succeed");
+
+            assert_eq!(report.technique, ReasoningTechnique::Full);
+        }
+
+        /// The real case: a previous run cached, then a retraction. This
+        /// must take the DRed path, not silently fall back to a full one.
+        #[tokio::test]
+        async fn a_retraction_after_a_cached_run_uses_the_incremental_path() {
+            let (catalog, graph) = seeded().await;
+            catalog
+                .run_reasoning(&Budget::default())
+                .await
+                .expect("first, full run populates the cache");
+
+            // Retract "SensitiveTable subClassOf GovernedTable" — the outer
+            // link, so only the two-hop conclusion is affected and the
+            // one-hop one survives (see the next test for why that split
+            // matters).
+            let stale = hierarchy()[2].clone();
+            let retracted = vec![Flake {
+                op: false,
+                t: 2,
+                ..stale
+            }];
+            graph
+                .retract_flakes(&retracted)
+                .await
+                .expect("retract in the graph too, so a fallback full run would agree");
+
+            let report = catalog
+                .run_reasoning_incremental(&retracted, &Budget::default())
+                .await
+                .expect("incremental run must succeed");
+
+            assert_eq!(report.technique, ReasoningTechnique::Incremental);
+        }
+
+        /// Not just that the incremental path *ran* — that it produced the
+        /// **correct** result: the two-hop conclusion that depended on the
+        /// retracted link must be gone, and the still-supported one-hop
+        /// conclusion must survive.
+        #[tokio::test]
+        async fn the_incremental_path_prunes_exactly_what_lost_its_premise() {
+            let (catalog, graph) = seeded().await;
+            catalog
+                .run_reasoning(&Budget::default())
+                .await
+                .expect("first, full run");
+
+            let before = catalog
+                .derived_about(&dsc("payments"))
+                .await
+                .expect("read conclusions before the retraction");
+            assert!(
+                before
+                    .iter()
+                    .any(|f| f.o == FlakeValue::Ref(dsc("GovernedTable"))),
+                "the two-hop conclusion must exist before the retraction: {before:?}"
+            );
+
+            let stale = hierarchy()[2].clone();
+            let retracted = vec![Flake {
+                op: false,
+                t: 2,
+                ..stale
+            }];
+            graph
+                .retract_flakes(&retracted)
+                .await
+                .expect("retract the outer link");
+
+            catalog
+                .run_reasoning_incremental(&retracted, &Budget::default())
+                .await
+                .expect("incremental run");
+
+            let after = catalog
+                .derived_about(&dsc("payments"))
+                .await
+                .expect("read conclusions after the retraction");
+            assert!(
+                !after
+                    .iter()
+                    .any(|f| f.o == FlakeValue::Ref(dsc("GovernedTable"))),
+                "the two-hop conclusion lost its only premise and must be pruned: {after:?}"
+            );
+            assert!(
+                after
+                    .iter()
+                    .any(|f| f.o == FlakeValue::Ref(dsc("SensitiveTable"))),
+                "the one-hop conclusion still has both its premises and must survive: {after:?}"
+            );
+        }
     }
 }
 
