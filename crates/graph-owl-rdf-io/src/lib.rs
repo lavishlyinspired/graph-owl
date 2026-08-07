@@ -307,19 +307,19 @@ fn serialize_turtle(flakes: &[Flake]) -> Result<Vec<u8>, RdfError> {
     // times over.
     let mut reifier_written: std::collections::HashSet<Sid> = std::collections::HashSet::new();
     for flake in flakes {
-        if is_relationship_predicate(&flake.p) {
-            if let Some((from, rel_type, to)) = reifier_endpoints(&flake.s, flakes) {
-                if reifier_written.insert(flake.s.clone()) {
-                    let triple = reifying_triple(&flake.s, &from, &rel_type, &to)?;
-                    writer
-                        .serialize_triple(&triple)
-                        .map_err(|e| RdfError::Io(e.to_string()))?;
-                }
-                // Whether this is the first or a later of the three
-                // defining flakes, it is folded into the reifying triple
-                // above and must not also appear as a plain triple.
-                continue;
+        if is_relationship_predicate(&flake.p)
+            && let Some((from, rel_type, to)) = reifier_endpoints(&flake.s, flakes)
+        {
+            if reifier_written.insert(flake.s.clone()) {
+                let triple = reifying_triple(&flake.s, &from, &rel_type, &to)?;
+                writer
+                    .serialize_triple(&triple)
+                    .map_err(|e| RdfError::Io(e.to_string()))?;
             }
+            // Whether this is the first or a later of the three defining
+            // flakes, it is folded into the reifying triple above and must
+            // not also appear as a plain triple.
+            continue;
         }
         let triple = flake_triple(flake)?;
         writer
@@ -1145,12 +1145,11 @@ fn reifying_flakes(
 fn triple_to_flakes(triple: &Triple, blanks: &mut BlankNodeMap) -> Result<Vec<Flake>, RdfError> {
     let is_reifies =
         Sid::from_iri(triple.predicate.as_str()) == Some(Sid::new(namespace::RDF, "reifies"));
-    if is_reifies {
-        if let Term::Triple(inner) = &triple.object {
-            if let Some(flakes) = reifying_flakes(&triple.subject, inner, blanks)? {
-                return Ok(flakes);
-            }
-        }
+    if is_reifies
+        && let Term::Triple(inner) = &triple.object
+        && let Some(flakes) = reifying_flakes(&triple.subject, inner, blanks)?
+    {
+        return Ok(flakes);
     }
     let s = resolve_subject(&triple.subject, blanks)?;
     let p = Sid::from_iri(triple.predicate.as_str())
