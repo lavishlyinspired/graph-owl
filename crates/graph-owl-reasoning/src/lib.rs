@@ -874,8 +874,108 @@ pub fn derive(facts: &[Flake]) -> Reasoning {
 /// everything already known is what makes it **terminate** — a symmetric
 /// property otherwise re-derives its own reverse forever.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn derive_within(facts: &[Flake], budget: &Budget) -> Reasoning {
+    run_fixpoint(facts, budget, RoundDispatch::Sequential)
+}
+
+/// Identical to [`derive_within`] — same rules, same budget, same fixpoint —
+/// except each round's rules run across scoped threads instead of one after
+/// another. `97-incremental-parallel-reasoning.md`'s "Parallel derivation".
+///
+/// **Determinism, not just speed, is the point.** The plan's own constraint
+/// is that a round must finish before the next begins, or a rule reads a
+/// partially-populated set and derivation becomes non-deterministic — so
+/// parallelism is confined to *within* one round, and every round's
+/// per-rule outputs are merged back in `budget.rules`' fixed order
+/// regardless of which thread's rule happened to finish first. That is what
+/// makes `derive_within_parallel(facts, budget) == derive_within(facts,
+/// budget)` (ignoring `duration`, a clock reading) hold as an equality, not
+/// merely as "the same set of facts" — the `derivations` list inside every
+/// `DerivedFact` ends up in the identical order either way, which is what a
+/// reproducible explanation depends on.
+#[must_use]
+pub fn derive_within_parallel(facts: &[Flake], budget: &Budget) -> Reasoning {
+    run_fixpoint(facts, budget, RoundDispatch::Parallel)
+}
+
+/// How one round's rules are run. A private enum rather than a `bool`
+/// parameter on [`run_fixpoint`] — `run_fixpoint(facts, budget, true)` at a
+/// call site says nothing a reader can check against the two public
+/// functions above without opening this file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoundDispatch {
+    Sequential,
+    Parallel,
+}
+
+/// One round: every rule in `budget.rules` against the same `(all, delta,
+/// naive)` snapshot, returning what each rule concluded.
+///
+/// [`RoundDispatch::Sequential`] runs each rule directly into one shared
+/// [`Pass`], exactly as this crate always has. [`RoundDispatch::Parallel`]
+/// gives each rule its **own** `Pass` on a scoped thread — `all`/`delta` are
+/// read-only for the duration, so nothing here needs a lock — then joins
+/// every thread and concatenates their `out` vectors **in `rules`' order**,
+/// not join order, before returning. That ordering is the entire
+/// determinism guarantee: everything downstream of this function (the
+/// dedup-and-merge loop in [`run_fixpoint`]) is untouched by which
+/// `RoundDispatch` produced its input, so identical merge order is
+/// sufficient for identical output.
+fn run_round(
+    all: &[Flake],
+    delta: &[Flake],
+    naive: bool,
+    rules: &[RuleName],
+    dispatch: RoundDispatch,
+    joins: &mut u64,
+) -> Vec<(Flake, RuleName, Vec<Flake>)> {
+    match dispatch {
+        RoundDispatch::Sequential => {
+            let mut pass = Pass {
+                all,
+                new: delta,
+                naive,
+                joins: 0,
+                out: Vec::new(),
+            };
+            for rule in rules {
+                run(*rule)(&mut pass);
+            }
+            *joins += pass.joins;
+            pass.out
+        }
+        RoundDispatch::Parallel => std::thread::scope(|scope| {
+            let handles: Vec<_> = rules
+                .iter()
+                .map(|rule| {
+                    let rule = *rule;
+                    scope.spawn(move || {
+                        let mut pass = Pass {
+                            all,
+                            new: delta,
+                            naive,
+                            joins: 0,
+                            out: Vec::new(),
+                        };
+                        run(rule)(&mut pass);
+                        (pass.joins, pass.out)
+                    })
+                })
+                .collect();
+            let mut out = Vec::new();
+            for handle in handles {
+                let (rule_joins, rule_out) =
+                    handle.join().expect("a reasoning rule thread panicked");
+                *joins += rule_joins;
+                out.extend(rule_out);
+            }
+            out
+        }),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_fixpoint(facts: &[Flake], budget: &Budget, dispatch: RoundDispatch) -> Reasoning {
     let started = Instant::now();
 
     // Only the default graph and the graphs this run was told to include.
@@ -924,21 +1024,11 @@ pub fn derive_within(facts: &[Flake], budget: &Budget) -> Reasoning {
         }
         iterations += 1;
 
-        let mut pass = Pass {
-            all: &all,
-            new: &delta,
-            naive,
-            joins: 0,
-            out: Vec::new(),
-        };
-        for rule in &budget.rules {
-            run(*rule)(&mut pass);
-        }
-        joins += pass.joins;
+        let round_out = run_round(&all, &delta, naive, &budget.rules, dispatch, &mut joins);
 
         let mut fresh: Vec<Flake> = Vec::new();
         let mut over_budget = false;
-        for (fact, rule, premises) in pass.out {
+        for (fact, rule, premises) in round_out {
             let k = key(&fact);
             // A route to a fact already concluded is not a new fact, but it is
             // a new explanation — and an explanation dropped because of arrival
@@ -2213,6 +2303,96 @@ mod tests {
                 after.iterations >= 1,
                 "at least one pass must run: {after:#?}"
             );
+        }
+    }
+
+    /// # Epic 97 Slice B — parallel derivation within a round
+    mod parallel_derivation {
+        use super::*;
+
+        /// A fixture that exercises several *different* rules in the same
+        /// run — subclass membership, a symmetric property, a transitive
+        /// property, and `sameAs` propagation — so a parallel run genuinely
+        /// dispatches more than one rule concurrently, not one rule running
+        /// alone on a background thread.
+        fn mixed_fixture() -> Vec<Flake> {
+            vec![
+                f(a("thing"), rdf_type(), a("C1")),
+                f(a("C1"), sub_class_of(), a("C2")),
+                f(a("C2"), sub_class_of(), a("C3")),
+                f(a("marriedTo"), rdf_type(), symmetric()),
+                f(a("x"), a("marriedTo"), a("y")),
+                f(a("ancestorOf"), rdf_type(), transitive()),
+                f(a("p1"), a("ancestorOf"), a("p2")),
+                f(a("p2"), a("ancestorOf"), a("p3")),
+                f(a("alice"), same_as(), a("alicia")),
+                f(a("alice"), a("knows"), a("bob")),
+            ]
+        }
+
+        /// **The acceptance criterion, verbatim.** Not merely the same set
+        /// of facts — full equality, including each `DerivedFact`'s own
+        /// `derivations` order and `confidence`, since `run_round`'s
+        /// contract is to merge every rule's output in `budget.rules`'
+        /// fixed order regardless of which thread finished first. Run
+        /// repeatedly because a race, if one existed, would not show on
+        /// every call.
+        #[test]
+        fn a_parallel_run_derives_identical_facts_and_chains_as_a_single_threaded_run() {
+            let facts = mixed_fixture();
+            let budget = Budget::default();
+
+            for attempt in 0..8 {
+                let sequential = derive_within(&facts, &budget);
+                let parallel = derive_within_parallel(&facts, &budget);
+
+                assert_eq!(
+                    sequential.facts, parallel.facts,
+                    "attempt {attempt}: same facts, same derivation chains, same order"
+                );
+                assert_eq!(
+                    sequential.iterations, parallel.iterations,
+                    "attempt {attempt}"
+                );
+                assert_eq!(sequential.joins, parallel.joins, "attempt {attempt}");
+                assert_eq!(sequential.capped, parallel.capped, "attempt {attempt}");
+            }
+        }
+
+        /// The fixture must not be trivial: prove it actually derives
+        /// something from more than one rule, or the equality above would
+        /// hold vacuously over an empty or single-rule result.
+        #[test]
+        fn the_mixed_fixture_exercises_several_rules_at_once() {
+            let out = derive(&mixed_fixture());
+            let rules_used: std::collections::HashSet<RuleName> = out
+                .facts
+                .iter()
+                .flat_map(|d| d.derivations.iter().map(|r| r.rule))
+                .collect();
+            assert!(
+                rules_used.len() >= 3,
+                "fixture only exercised {rules_used:?}, need several rules \
+                 concurrent for the determinism test to mean anything"
+            );
+        }
+
+        /// A budget cap must behave identically under both dispatch
+        /// strategies — parallel derivation is not exempt from the same
+        /// resource limits the plan's own acceptance criteria demand.
+        #[test]
+        fn a_capped_run_caps_the_same_way_under_both_dispatch_strategies() {
+            let facts = mixed_fixture();
+            let budget = Budget {
+                max_iterations: 1,
+                ..Budget::default()
+            };
+
+            let sequential = derive_within(&facts, &budget);
+            let parallel = derive_within_parallel(&facts, &budget);
+
+            assert_eq!(sequential.capped, parallel.capped);
+            assert_eq!(sequential.facts, parallel.facts);
         }
     }
 

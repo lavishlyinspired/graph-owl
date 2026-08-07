@@ -1,6 +1,6 @@
 # Plan: Incremental & Parallel Reasoning (Epic 97)
 
-**Status**: Incremental (DRed) shipped, 7 August 2026 — see Slice A write-up below. Parallel derivation not yet started. Entry condition met 28 Jul 2026: a stated requirement of 10⁸–10⁹ triples makes `06`'s wholesale-replacement-per-run arithmetically unviable, so incremental maintenance moved from optional to prerequisite. See `00n-large-ontology-reality.md` §2.4
+**Status**: Both techniques shipped, 7 August 2026 — DRed (Slice A) and parallel derivation (Slice B), see write-ups below. Entry condition met 28 Jul 2026: a stated requirement of 10⁸–10⁹ triples makes `06`'s wholesale-replacement-per-run arithmetically unviable, so incremental maintenance moved from optional to prerequisite. See `00n-large-ontology-reality.md` §2.4. **Not yet wired into `Catalog::run_reasoning`** — both slices are the pure `graph-owl-reasoning` algorithms only, matching this plan's stated crate scope; see the "Open: incremental maintenance meets time travel" section below for what the cross-crate wiring still owes (`maintained_to`, the freshness-stamp signal, refusing reasoning on historical queries).
 **Depends on**: Epic 6 (semi-naive fixpoint), Epic 37a (the measurement)
 **Crates**: `graph-owl-reasoning`
 
@@ -156,6 +156,59 @@ explainability is the feature. Parallelise *within* a round, synchronise
 *between* rounds, and assert that a parallel run derives exactly what a
 single-threaded run does — same facts, same chains.
 
+### Shipped, 7 August 2026
+
+`graph_owl_reasoning::derive_within_parallel(facts, budget) -> Reasoning` —
+identical signature to `derive_within`, and (ignoring `duration`, a clock
+reading) identical output, not merely an equal set.
+
+**No crate adopted.** Checked against this project's own build-vs-adopt
+discipline before writing anything: `rayon` is MIT/Apache-2.0 and would
+qualify on licence, but the actual parallel unit here is `budget.rules` —
+at most 13 items, dispatched once per fixpoint round. That is exactly the
+shape `std::thread::scope` (stable, zero dependency) is for; `rayon`'s
+work-stealing scheduler earns its keep over much larger, finer-grained
+collections than "spawn ≤13 threads, join, concatenate", and pulling it in
+for this would be the dependency-for-its-own-sake this project's `00l`
+warns against.
+
+**The refactor, not just the new function.** `derive_within`'s existing
+per-round dispatch (`for rule in &budget.rules { run(*rule)(&mut pass) }`,
+one shared `Pass`) was extracted into `run_round`, parameterised by a
+`RoundDispatch` enum rather than duplicating the ~90-line fixpoint loop
+(iteration/duration/memory caps, the dedup-and-merge pass, the
+naive/delta bookkeeping) a second time with only the dispatch step
+changed — a duplicate copy is exactly the kind of drift risk this
+project's own `06`/`97` planning explicitly wants to avoid. `derive_within`
+and `derive_within_parallel` are now both thin callers of one shared
+`run_fixpoint`.
+
+**Why the result is byte-identical, not just set-equal.** `RoundDispatch::
+Parallel` gives each rule its own `Pass` on a `std::thread::scope` scoped
+thread — `all`/`delta` are read-only for the round's duration, so no lock is
+needed and no rule can observe another rule's output, which is what rules
+out the exact non-determinism the plan's own "a rule reads a
+partially-populated set" warns about. After joining every thread, the
+per-rule outputs are concatenated **in `budget.rules`' fixed order**, not
+thread-completion order — so the merge step downstream (dedup, `derivations
+.push`, confidence `max`, all unchanged from before this slice) receives an
+input in the identical order it would have received from the sequential
+path, and produces an identical result. Determinism here is a property of
+the *merge order*, proven by construction rather than by hoping thread
+scheduling happens to cooperate.
+
+**Acceptance criteria, verified**:
+`a_parallel_run_derives_identical_facts_and_chains_as_a_single_threaded_run`
+asserts full `Reasoning.facts` equality (not a normalised comparison)
+against `derive_within` over 8 repeated calls, on a fixture built to
+exercise several different rules at once (`subClassOf`, a symmetric
+property, a transitive property, `sameAs`) — checked separately by
+`the_mixed_fixture_exercises_several_rules_at_once`, so the determinism
+test cannot pass vacuously over a single-rule result.
+`a_capped_run_caps_the_same_way_under_both_dispatch_strategies` covers this
+epic's shared budget criterion for the parallel path specifically. Mutation
+report: 5/5 viable mutants caught, 5 unviable.
+
 ## Open: incremental maintenance meets time travel
 
 **Raised 28 July 2026 and not yet resolved.** This epic and Epic 4 are each
@@ -247,12 +300,15 @@ order is not interchangeable.
       Asserted by running both and comparing, on a graph with multiply-supported
       facts — the case that catches an over-delete without a re-derive. (Slice A)
 - [x] A fact with two independent derivations survives the retraction of one. (Slice A)
-- [ ] A parallel run derives the identical fact set *and* identical derivation
-      chains as a single-threaded run, over repeated runs.
-- [x] DRed remains inside Epic 6's budgets, which do not relax because the
+- [x] A parallel run derives the identical fact set *and* identical derivation
+      chains as a single-threaded run, over repeated runs. (Slice B —
+      `derive_within_parallel`, asserted as full struct equality, not a
+      normalised comparison, across 8 repeated calls)
+- [x] Both remain inside Epic 6's budgets, which do not relax because the
       implementation got cleverer — `max_iterations` enforced independently of
-      the loop's own correctness argument, proven under an adversarially low
-      cap. (Slice A; parallel derivation's own budget behaviour still open)
+      the loop's own correctness argument for DRed (Slice A, proven under an
+      adversarially low cap), and `derive_within_parallel` proven to cap
+      identically to `derive_within` (Slice B).
 
 ## Explicitly deferred
 
