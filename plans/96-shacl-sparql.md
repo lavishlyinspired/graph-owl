@@ -1,6 +1,12 @@
 # Plan: SHACL-SPARQL (Epic 96)
 
-**Status**: Not started — **blocked on the specification stabilising**
+**Status**: Slice A (SPARQL constraints) is decided and ready in principle —
+**planned but deliberately not scheduled** while SHACL 1.2 SPARQL Extensions is
+a Working Draft (see "Status of the specification" below; re-checked 7 August
+2026, still Working Draft). Slice B (SHACL Rules) stays blocked for a second,
+independent reason: the OWL-fixpoint composition question, resolved by
+deferral rather than by decision — see "Open: do SHACL-derived facts feed the
+OWL fixpoint?" below.
 **Depends on**: Epic 5 (SHACL Core), Epic 7 (SPARQL)
 **Crates**: `graph-owl-constraint`, `graph-owl-query`
 
@@ -68,6 +74,14 @@ to know which system to look at.
 
 ## Acceptance criteria
 
+Split by slice, because the two have different blockers. Slice A's is purely
+the spec's own maturity — nothing here is architecturally undecided, since a
+constraint validates and writes nothing to the overlay. Slice B carries that
+same maturity blocker *and* the unresolved composition question below, so it
+stays blocked even once the spec moves.
+
+### Slice A — SPARQL constraints (decided, not yet scheduled)
+
 - [ ] A `sh:SPARQLConstraint` returning solutions produces one violation per
       solution, with the focus node named.
 - [ ] A constraint component is definable once and used with different
@@ -76,6 +90,9 @@ to know which system to look at.
       truncated*, never reported as "no violations found".
 - [ ] A constraint cannot read what its author cannot — asserted with two
       principals, as Epic 13 does for search.
+
+### Slice B — SHACL Rules (blocked)
+
 - [ ] A SHACL rule's derived facts record that SHACL derived them.
 
 ## Open: do SHACL-derived facts feed the OWL fixpoint?

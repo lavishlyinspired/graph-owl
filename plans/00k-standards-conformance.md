@@ -33,8 +33,8 @@ that is wrong, and the failure mode is confident and silent.
 | SPARQL 1.2 Federated Query | Candidate Recommendation | 7 Apr 2026 |
 | SPARQL 1.2 Query Language | Working Draft | 2026 |
 | SPARQL 1.2 Protocol · Service Description · Entailment | Working Draft | 2026 |
-| SHACL 1.2 Core | Working Draft | 2026 |
-| SHACL 1.2 SPARQL Extensions | Working Draft | 24 Jul 2026 |
+| SHACL 1.2 Core | Working Draft | 3 Aug 2026 |
+| SHACL 1.2 SPARQL Extensions | Working Draft | 6 Aug 2026 |
 | OWL 2 RL (profile) | Recommendation | 2012, unchanged |
 
 **Read this before treating any of it as a deadline.** RDF 1.2 and SPARQL 1.2
@@ -114,6 +114,13 @@ validator plus a separate rule language. It also overlaps Epic 6, and the
 overlap needs deciding rather than discovering — see decision 4.
 
 **Both are Working Draft.** Implementing against them is accepting churn.
+Epic 96 splits on this: constraints and constraint components *validate* —
+they write nothing to the reasoning overlay, so there is no composition
+question to get wrong even if the spec still moves under them, and the
+plan records that split as decided (Slice A), just deliberately not
+scheduled. Inference rules (Slice B) carry that same maturity risk *and*
+an unresolved question of their own — see decision 4 — so they stay
+blocked on both counts.
 
 ### 4. SHACL rules and OWL 2 RL overlap, and that is a decision not an accident
 
@@ -143,7 +150,7 @@ that was never read.
 | Complete OWL 2 RL | Epic 95, scoped: facts here, contradictions in Epic 5 |
 | Incremental reasoning (DRed) | Epic 97, with a measured entry condition |
 | Parallel reasoning | Epic 97, same |
-| SHACL-SPARQL + rules | Epic 96, blocked on the spec leaving Working Draft |
+| SHACL-SPARQL + rules | Epic 96 — constraints (Slice A) decided, not scheduled while Working Draft; rules (Slice B) additionally blocked on composition with Epic 6's OWL fixpoint |
 | Authorization-aware reasoning | `06` — derived facts inherit their least-visible premise |
 | Six index permutations | `04` finding 7 — decided *against* for now, with a trigger |
 | JSON-LD native vs compatible | `09` decision 5 — compatible, with the three failure modes named |
