@@ -1260,6 +1260,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "graph-owl-core",
+ "graph-owl-ontology",
  "graph-owl-storage",
  "hmac 0.12.1",
  "libc",

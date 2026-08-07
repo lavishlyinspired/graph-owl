@@ -81,6 +81,7 @@ oxjsonld = "0.2"
 # round trip is exactly where such output silently corrupts.
 quick-xml = "0.41"
 graph-owl-core = { path = "crates/graph-owl-core" }
+graph-owl-ontology = { path = "crates/graph-owl-ontology" }
 graph-owl-events = { path = "crates/graph-owl-events" }
 graph-owl-storage = { path = "crates/graph-owl-storage" }
 graph-owl-storage-postgres = { path = "crates/graph-owl-storage-postgres" }

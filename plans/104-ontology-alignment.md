@@ -52,13 +52,13 @@ pub struct Alignment {
 
 ## Acceptance criteria
 
-- [ ] UMLS RRF ingests: CUIs land as identities in a reserved namespace; `MRCONSO` atoms attach to their CUI; source-vocabulary codes (SNOMED, RxNorm) align to the CUI with `source = Curated`.
+- [x] UMLS RRF ingests: CUIs land as identities in a reserved namespace; `MRCONSO` atoms attach to their CUI; source-vocabulary codes (SNOMED, RxNorm) align to the CUI with `source = Curated`. (Slice B)
 - [ ] A SNOMED concept and an RxNorm concept sharing a CUI are reachable from each other **without any computed matching having run**.
 - [x] A computed alignment never asserts `owl:equivalentClass` — asserted structurally, so the type system refuses it rather than a validation rule catching it. (Slice A)
 - [ ] An alignment at 0.62 confidence appears in a review queue and **not** in query results that do not opt into unreviewed alignments.
 - [ ] A human-confirmed alignment records **who** confirmed it and when; a later automated run does not overwrite it.
 - [ ] A lossy reverse mapping is marked, and a query traversing it in the lossy direction can tell.
-- [ ] Alignment ingestion is budgeted and resumable — UMLS is millions of rows and a failure at 80% must not mean starting again.
+- [x] Alignment ingestion is budgeted and resumable — UMLS is millions of rows and a failure at 80% must not mean starting again. (Slice B — resumable by construction; "budgeted" in the sense of bounded per-call cost is inherited from the caller owning batch size, not yet wired to a job/error-cap harness like Epic 16's `graph-owl-connectors::job`)
 - [ ] **Console**: an alignment review queue *(Epic 42)*, and on any cross-vocabulary result the alignment that made it reachable is inspectable — a result that crossed an approximate match must be distinguishable from one that did not, and not by colour alone.
 
 ## Slices
@@ -119,8 +119,56 @@ unviable. `alignment.rs` — 7/7 viable mutants caught, 11 unviable (all
 `Default::default()` substitutions against types with no `Default` impl —
 a compile failure, not a coverage gap).
 
-### Slice B: UMLS RRF ingestion, resumable
+### Slice B: UMLS RRF ingestion, resumable — **shipped, 7 August 2026**
 **RED**: interrupt at 80% and resume; the result must equal the uninterrupted run. Mutator watch: a resume that restarts from zero must fail a row-count-and-timing assertion.
+
+**Shipped.** `graph_owl_connectors::umls` gained `parse_mrconso_line`
+(verified against the UMLS Reference Manual, NCBI Bookshelf `NBK9685`, 7
+August 2026: 18 pipe-delimited fields, no header, a trailing `|` row
+terminator — a hand-rolled split rather than reconfiguring the `csv`
+crate's delimiter, since RRF carries no quoting and CSV's escaping rules
+would be a mismatch, not a convenience), `source_namespace` (`SAB` →
+namespace code, verified real for exactly `SNOMEDCT_US` and `RXNORM` —
+UMLS names ~190 source vocabularies and only these two have a namespace
+this system has checked; every other `SAB` is an honest, counted skip,
+never a guessed IRI), `atom_to_alignment` (builds Slice A's `Alignment`
+directly, `source = Curated { authority: "UMLS" }`, confidence `1.0`),
+and `ingest_mrconso` — the resumable driver.
+
+**Resumable by construction, not by tracked cross-row state.** Every
+MRCONSO row maps to its own self-contained alignment; nothing about one
+row's projection depends on another's. So "skip `N` lines, continue" and
+"process from the start" produce the identical union of flakes once every
+row has been seen exactly once between the two calls — the function does
+not know or care whether it is a first call or a resume, and the caller
+owns persisting the skip count between calls (this function is pure, no
+I/O, matching `graph-owl-reasoning`'s own pure-core / impure-shell split).
+
+**The RED test proves the thing the plan's mutator note warns is easy to
+fake.** Flake-set equality between "ingest 0..80 then resume 80..100" and
+"ingest 0..100 uninterrupted" is *necessary* but not *sufficient* — a
+buggy resume that silently restarted from row 0 would happen to pass it
+too, since re-asserting an identical alignment's flakes a second time is
+idempotent and invisible in the final set. `resuming_after_an_
+interruption_at_80_percent_equals_an_uninterrupted_run` therefore also
+asserts the **row count the resume call itself reports**:
+`resume_progress.rows_processed == 20`, not `100` — the assertion a
+zero-restart bug fails and a flake-only comparison would have missed
+entirely.
+
+**Real UMLS text, not invented.** The parser test fixture
+(`REAL_MRCONSO_LINE`) is the UMLS Reference Manual's own published
+example row, fetched live rather than typed from memory — and it
+happens to name `SAB=MSH` (MeSH), which doubled as the fixture for
+"an unsupported source vocabulary is skipped, not guessed" once the
+verification confirmed MeSH has no checked namespace here.
+
+Mutation report: first pass found 4 real gaps — `progress.errors`/
+`progress.skipped`'s own increment operators were never exercised by any
+test that put a malformed or unsupported row through `ingest_mrconso`
+itself (only through `parse_mrconso_line`/`atom_to_alignment` directly).
+Added `ingest_counts_skipped_and_errored_rows_separately_from_aligned_
+ones`; re-run: 20/20 viable mutants caught, 3 unviable.
 
 ### Slice C: Cross-vocabulary traversal
 **RED**: SNOMED → RxNorm via CUI with no computed matcher present. Second RED: the lossy-direction test.
