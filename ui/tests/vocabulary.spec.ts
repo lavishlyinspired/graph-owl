@@ -25,6 +25,27 @@ async function createTerm(baseURL: string, glossaryId: string, name: string, def
   return (await response.json()) as { id: string };
 }
 
+/** Click a tree row's switcher and confirm it actually expanded, re-clicking
+ *  if not — rather than one click plus one long wait. Found under the
+ *  combined suite (Epic 42 Slice E added a fifth spec file): a single click
+ *  occasionally never registers at all within a 20s window (every poll
+ *  during that window reads `aria-expanded="false"`, not a late flip to
+ *  `"true"`), which a longer timeout cannot fix because there is nothing to
+ *  wait out — the click needs to be retried, not waited on longer. */
+async function expandTreeRow(row: import("@playwright/test").Locator) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if ((await row.getAttribute("aria-expanded")) === "true") return;
+    await row.locator(".ant-tree-switcher").click();
+    try {
+      await expect(row).toHaveAttribute("aria-expanded", "true", { timeout: 3000 });
+      return;
+    } catch {
+      // Not yet — loop back and click again.
+    }
+  }
+  await expect(row).toHaveAttribute("aria-expanded", "true");
+}
+
 async function relate(baseURL: string, termId: string, kind: string, target: string) {
   await fetch(`${baseURL}/glossary-terms/${termId}/relations`, {
     method: "POST",
@@ -123,18 +144,19 @@ test("the vocabulary browser: poly-hierarchy, keyboard navigation, zero axe viol
   // raced React's state update, appearing here as "Revenue" rendered under
   // only one parent instead of both.
   //
-  // **The explicit 15s timeout is load-sensitive, not arbitrary.** Epic 42
-  // Slice D added a third and fourth spec file to this directory; this
-  // assertion is 100% reliable run alone (3/3) and intermittently timed
-  // out (3/4) only once folded into the full, now-longer suite — genuine
-  // CPU/GC pressure from a longer-running Chromium session, not a broken
-  // interaction (a mis-click would not become correct by waiting longer;
-  // this does). The default 5s budget was tuned against a shorter suite
-  // that no longer reflects this directory's real size.
-  await financeRow.locator(".ant-tree-switcher").click();
-  await expect(financeRow).toHaveAttribute("aria-expanded", "true", { timeout: 15000 });
-  await reportingRow.locator(".ant-tree-switcher").click();
-  await expect(reportingRow).toHaveAttribute("aria-expanded", "true", { timeout: 15000 });
+  // **Load-sensitive, not arbitrary — and no longer just a longer wait.**
+  // Epic 42 Slice D added a third and fourth spec file to this directory;
+  // this assertion, reliable run alone, started intermittently timing out
+  // once folded into the full suite. A single-click-then-wait fix (5s, then
+  // 15s, then 20s as Slice E added a fifth file) kept buying only one more
+  // file's worth of headroom before failing again — and at 20s the failure
+  // was every poll reading `aria-expanded="false"` for the full window, a
+  // click that never registered, not one that was merely slow. That cannot
+  // be fixed by waiting longer. `expandTreeRow` retries the click itself
+  // instead, which is robust to however many more spec files this
+  // directory grows to.
+  await expandTreeRow(financeRow);
+  await expandTreeRow(reportingRow);
 
   // Both parents expanded: the poly-hierarchy term must appear once under
   // each, not merged into one, not dropped from either.

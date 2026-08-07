@@ -943,9 +943,9 @@ slice.
 
 ### Console half
 - [ ] **7b** Cypher in the workbench as a second language, same result surface *(Epic 41)*
-- [ ] **7c** **Triple ⇄ property-graph toggle** on the Knowledge tab *(Epic 42)* — the same facts in both shapes, because "is it RDF or a property graph" is the question this epic answers and a toggle answers it faster than prose
+- [x] **7c** **Triple ⇄ property-graph toggle** on the Knowledge tab *(Epic 42 Slice E, 7 August 2026)* — the same facts in both shapes, because "is it RDF or a property graph" is the question this epic answers and a toggle answers it faster than prose. `GET /assets/{id}/lpg-node` (new) resolves one asset's own facts through `graph_owl_lpg::node_from_flakes`, the same conversion Epic 7c's Bolt work already built, now reachable over HTTP for the first time. Lossy mappings from Epic 7c's `MappingReport` render as named sentences on screen (`describeLoss`, 100% mutation score), proven end-to-end: a real `service`→`database` asset's `parentService` reference renders `The reference in "parentService" was flattened to plain text — it no longer traverses as an edge.`, not silently dropped.
 - [ ] **7d** Admin: Bolt endpoint status, active sessions *(Epic 42)*
-- [ ] **9** **Export dialog** — format, scope, and a preview before download *(Epic 42)*. RDF 1.2 output lands here (Epic 94)
+- [ ] **9** **Export dialog** — format, scope, and a preview before download *(Epic 42)*. RDF 1.2 output lands here (Epic 94). **Not shipped with Slice E** (7 August 2026): scoped and explicitly deferred — no `/graph/export/*` route accepts scope/as-of/preview filtering, and no RDF-format export exists over HTTP at all (only the five LPG-side formats), so the dialog's own acceptance criteria have no backend to sit on yet
 - [ ] **9a** Same dialog; projection-target administration *(Epic 42)*
 ---
 

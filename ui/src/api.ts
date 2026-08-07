@@ -335,6 +335,39 @@ export interface SparqlResult {
   readonly silencedFailures: readonly string[];
 }
 
+// ---- Epic 42 Slice E: one asset as a property-graph node ----
+
+export type PropertyValue =
+  | { type: "boolean"; value: boolean }
+  | { type: "integer"; value: number }
+  | { type: "float"; value: number }
+  | { type: "string"; value: string }
+  | { type: "bytes"; value: number[] }
+  | { type: "dateTime"; value: string }
+  | { type: "duration"; value: number }
+  | { type: "list"; value: PropertyValue[] }
+  | { type: "elementRef"; value: string };
+
+export interface LpgNode {
+  elementId: string;
+  labels: string[];
+  properties: Record<string, PropertyValue>;
+}
+
+export type LossyMapping =
+  | { kind: "refInProperty"; subject: string; predicate: string }
+  | { kind: "namedGraphCollapse"; subject: string; graphs: string[] }
+  | { kind: "typeNarrowed"; subject: string; predicate: string; from: "uuid" | "json" };
+
+export interface MappingReport {
+  lossy: LossyMapping[];
+}
+
+export interface LpgNodeView {
+  node: LpgNode;
+  report: MappingReport;
+}
+
 /** The stored violations queue, and the instant it reflects. */
 export interface ValidationReport {
   readonly data: readonly import("./governance/queue").Finding[];
@@ -645,6 +678,13 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ query }),
     }),
+  /** One asset as a property-graph node — the other half of the Knowledge
+   *  tab's toggle. `404` both when the asset does not exist and when it
+   *  has not been graph-projected yet; there is nothing left to
+   *  distinguish once the server's own authorization question is
+   *  resolved. Not registered in the OpenAPI schema (a real, recorded
+   *  gap — see the handler's own doc comment). */
+  lpgNode: (assetId: string) => request<LpgNodeView>(`/assets/${assetId}/lpg-node`),
   /** What the reasoner concluded about one subject, as the last run stored it.
    *  Not a fresh pass — an asset page opens with this. */
   derivedAbout: (subject: string) =>

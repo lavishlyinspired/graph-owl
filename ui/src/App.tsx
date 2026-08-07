@@ -25,6 +25,7 @@ import {
   Col,
   ConfigProvider,
   Descriptions,
+  Divider,
   Empty,
   Flex,
   Form,
@@ -99,6 +100,7 @@ import {
 } from "./trust/TrustComponents";
 import { VocabularySection } from "./features/vocabulary/VocabularySection";
 import { ReviewSection } from "./features/review/ReviewSection";
+import { KnowledgeGraphToggle } from "./features/knowledge/KnowledgeGraphToggle";
 import { hierarchy, type TeamNode } from "./admin/hierarchy";
 import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
 import {
@@ -2480,6 +2482,10 @@ function KnowledgeView({
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <KnowledgeGraphToggle assetId={assetId} />
+
+      <Divider />
+
       <Flex justify="space-between" align="center">
         <Text type="secondary" style={{ fontSize: 13 }}>
           What people and agents have recorded about this asset.

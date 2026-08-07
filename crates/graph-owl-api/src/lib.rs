@@ -213,6 +213,17 @@ impl ValidateBody for UpsertAsset {
     }
 }
 
+/// One asset's own facts, projected as a property-graph node — Epic 42
+/// Slice E. See [`Catalog::lpg_node_for`].
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LpgNodeView {
+    /// The node itself: element id, labels, and properties.
+    pub node: graph_owl_lpg::LpgNode,
+    /// What the conversion from flakes could not carry across, if anything.
+    pub report: graph_owl_lpg::MappingReport,
+}
+
 /// Validates the closed-enum fields Epic 34's new asset families carry inside
 /// [`UpsertAsset::properties`].
 ///
@@ -12387,6 +12398,59 @@ impl Catalog {
         }
 
         Ok((nodes, edges))
+    }
+
+    /// One asset's own facts as a property-graph node — Epic 42 Slice E's
+    /// Knowledge tab toggle. Authorization matches [`Self::get_asset_for`]
+    /// exactly: existence and denial both surface as
+    /// [`CatalogError::NotFound`] ("denied and absent are one answer",
+    /// Epic 14 decision), checked against the real
+    /// [`Asset::fully_qualified_name`] field rather than resolved through
+    /// graph flakes — which is what keeps this method immune to the
+    /// FQN-vs-UUID authorization bug [`Self::authorized_lpg_elements`] had
+    /// (see [`Self::authorization_key`]'s own doc comment), rather than
+    /// merely lucky.
+    ///
+    /// `Ok(None)` means the asset exists and is authorized but has never
+    /// been graph-projected — no flakes to convert, a real and legitimate
+    /// state distinct from both "denied" and "does not exist".
+    ///
+    /// # Errors
+    /// [`CatalogError::NotFound`] if the asset does not exist or
+    /// `principal` may not see it; [`CatalogError::Storage`] if no graph
+    /// engine is configured, a read fails, or the flakes present do not
+    /// convert to a node (e.g. nothing asserts a type).
+    pub async fn lpg_node_for(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+    ) -> Result<Option<LpgNodeView>, CatalogError> {
+        let asset = self.get_asset_for(principal, id).await?;
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let subject = graph_owl_core::projection::entity_sid(asset.id);
+        let flakes = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                s: Some(subject.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        if flakes.is_empty() {
+            return Ok(None);
+        }
+
+        let mut report = graph_owl_lpg::MappingReport::default();
+        let node = graph_owl_lpg::node_from_flakes(&subject, &flakes, &mut report)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        Ok(Some(LpgNodeView { node, report }))
     }
 
     /// Projects only what changed since `target`'s own checkpoint, as
@@ -29899,6 +29963,154 @@ mod export_authorization_tests {
             .expect("must succeed, not error");
         assert!(nodes.is_empty(), "{nodes:?}");
         assert!(edges.is_empty(), "{edges:?}");
+    }
+
+    /// Epic 42 Slice E: one asset's own facts as a property-graph node,
+    /// for the Knowledge tab's triples ⇄ property-graph toggle.
+    /// Deliberately routed through a real `catalog.upsert_asset` and the
+    /// asset's own real `id`/`fully_qualified_name` — never a hand-picked
+    /// `Sid` — for the same reason `authorization_resolves_the_fqn_property_not_the_raw_subject_id`
+    /// above exists: authorization here goes through `get_asset_for`,
+    /// checking the real `Asset` struct's own field, which is what keeps
+    /// this method immune to that bug class rather than merely lucky.
+    mod lpg_node_for_tests {
+        use super::*;
+
+        /// A two-level hierarchy — `{namespace}.{name}`, e.g.
+        /// `public.orders-service` — since `UpsertAsset::name` is one path
+        /// segment and cannot itself contain a `.`; `restricted_analyst`'s
+        /// own policy matches on the resulting *fully-qualified* name's
+        /// prefix, which only a real parent chain produces.
+        async fn a_real_asset(catalog: &Catalog, namespace: &str, name: &str) -> Asset {
+            let parent = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    UpsertAsset {
+                        kind: AssetKind::Service,
+                        name: namespace.to_string(),
+                        parent_id: None,
+                        description: None,
+                        properties: None,
+                        extension: None,
+                    },
+                )
+                .await
+                .expect("upsert_asset (namespace)");
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    UpsertAsset {
+                        kind: AssetKind::Database,
+                        name: name.to_string(),
+                        parent_id: Some(parent.id),
+                        description: None,
+                        properties: None,
+                        extension: None,
+                    },
+                )
+                .await
+                .expect("upsert_asset")
+        }
+
+        /// `Catalog::upsert_asset` projects synchronously (`self.project(...)`,
+        /// called unconditionally whenever a graph engine is configured) —
+        /// found writing this test: no manual `graph.assert_flakes` is
+        /// needed, or even correct, since one already exists by the time
+        /// `a_real_asset` returns. A hierarchical asset's own parent
+        /// reference (`parentService`) is real, expected lossy data for
+        /// this conversion, not a fixture artifact — proving `MappingReport`
+        /// has something genuine to name for Slice E's own screen, not
+        /// just a hypothetical.
+        #[tokio::test]
+        async fn returns_the_authorized_asset_as_a_node() {
+            let graph = RecordingGraph::working();
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+                .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+            let asset = a_real_asset(&catalog, "public", "orders-service").await;
+
+            let restricted = restricted_analyst(&catalog).await;
+            let view = catalog
+                .lpg_node_for(&restricted, asset.id)
+                .await
+                .expect("lpg_node_for")
+                .expect("upsert_asset projects synchronously and must be found");
+
+            assert_eq!(
+                view.node.labels,
+                vec!["database".to_string()],
+                "{:?}",
+                view.node
+            );
+            assert!(!view.report.is_lossless(), "{:?}", view.report);
+            assert!(
+                matches!(
+                    view.report.lossy.as_slice(),
+                    [graph_owl_lpg::LossyMapping::RefInProperty { predicate, .. }]
+                        if predicate == "parentService"
+                ),
+                "{:?}",
+                view.report
+            );
+        }
+
+        #[tokio::test]
+        async fn a_denied_asset_is_not_found_not_forbidden() {
+            let graph = RecordingGraph::working();
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+                .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+            let asset = a_real_asset(&catalog, "restricted", "salaries-service").await;
+
+            let restricted = restricted_analyst(&catalog).await;
+            let outcome = catalog.lpg_node_for(&restricted, asset.id).await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::NotFound)),
+                "denied must read as absent, not a distinct error: {outcome:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_nonexistent_asset_is_not_found() {
+            let graph = RecordingGraph::working();
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+                .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+            let outcome = catalog
+                .lpg_node_for(&Principal::system(), Uuid::new_v4())
+                .await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::NotFound)),
+                "{outcome:?}"
+            );
+        }
+
+        /// An asset can exist in the catalog without a graph projection —
+        /// not from ordinary use (`upsert_asset` projects synchronously,
+        /// confirmed above), but genuinely from a graph engine configured
+        /// *after* assets already existed, before `reconcile_projection`
+        /// has caught them up. Reconstructed here by upserting through a
+        /// `Catalog` with no graph at all, then reading the identical
+        /// storage through a second `Catalog` that has one — the same
+        /// storage, a graph engine that was simply not there yet.
+        #[tokio::test]
+        async fn an_asset_predating_the_graph_engine_is_none_not_an_error() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let ungraphed = Catalog::new(storage.clone());
+            let asset = a_real_asset(&ungraphed, "public", "predates-the-graph").await;
+
+            let graph = RecordingGraph::working();
+            let now_graphed = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+            let outcome = now_graphed
+                .lpg_node_for(&Principal::system(), asset.id)
+                .await
+                .expect("must succeed, not error");
+
+            assert!(outcome.is_none(), "{outcome:?}");
+        }
     }
 
     fn scratch_path(name: &str) -> std::path::PathBuf {

@@ -518,6 +518,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/assets/{id}/children", get(list_asset_children))
         .route("/assets/{id}/graph", get(asset_graph))
         .route("/assets/{id}/ancestors", get(asset_ancestors))
+        .route("/assets/{id}/lpg-node", get(asset_lpg_node))
         .with_state(catalog);
 
     // OIDC JWKS client — inserted early so the `Auth` extractor can find it in
@@ -2378,6 +2379,31 @@ async fn asset_graph(
         })).collect::<Vec<_>>(),
         "truncated": graph.truncated,
     })))
+}
+
+/// One asset's own facts as a property-graph node — Epic 42 Slice E's
+/// Knowledge tab toggle (`plans/42-ui-semantic-surfaces.md` decision 6:
+/// a toggle on the existing tab, not a new screen). `None` from
+/// [`Catalog::lpg_node_for`] (the asset exists and is authorized, but has
+/// no graph projection yet) and denial/absence both read as `404` here —
+/// there is nothing left to distinguish once the auth question is
+/// resolved by the catalog call itself.
+///
+/// **Not registered in the OpenAPI schema** — `LpgNode`'s `ElementId`
+/// carries a hand-written `Serialize` (not derived), and giving it a
+/// matching `utoipa::ToSchema` is real, separable work this route does
+/// not need to ship. Recorded rather than silently done: this repo
+/// already has one undocumented-but-functional route family (Epic 25/23,
+/// found and left as-is earlier this epic).
+async fn asset_lpg_node(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<graph_owl_api::LpgNodeView>, AppError> {
+    match catalog.lpg_node_for(&principal, id).await? {
+        Some(view) => Ok(Json(view)),
+        None => Err(AppError::NotFound),
+    }
 }
 
 async fn list_roots(
