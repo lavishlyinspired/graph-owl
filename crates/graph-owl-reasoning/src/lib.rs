@@ -1002,6 +1002,144 @@ pub fn derive_within(facts: &[Flake], budget: &Budget) -> Reasoning {
     }
 }
 
+/// Maintains a materialised fixpoint under retraction — **`DRed`** (Delete/
+/// Rederive), `97-incremental-parallel-reasoning.md`.
+///
+/// **Why checking already-recorded routes is complete, not an approximation.**
+/// [`derive_within`]'s own loop records *every* distinct `(rule, premises)`
+/// route to a fact, not a first-found sample — see its `!existing.derivations
+/// .contains(&route)` check. This reasoner is a positive, monotonic
+/// Horn-like fixpoint: no rule ever fires *because* a fact is absent, so
+/// removing facts can only remove derivability, never grant it. A route
+/// recorded when the input was fuller is therefore still exactly as valid
+/// against any subset that still contains its premises. Checking which
+/// already-recorded routes survive a retraction is consequently **exact**,
+/// not a heuristic — it reproduces precisely what a full re-derivation over
+/// the surviving asserted facts would conclude, without re-running a single
+/// rule join.
+///
+/// **Over-delete, following the derivation graph rather than the data
+/// graph.** A fact is removed once every one of its routes has lost at
+/// least one premise — checked against literal premise identity
+/// (`(s, p, o)`), never against "shares a node with something retracted".
+/// Two facts sharing a class-hierarchy edge but citing different premises
+/// in their own derivations are unrelated here, exactly as they are to a
+/// full re-derivation. Removing a fact can itself break routes that cited
+/// *it* as a premise (a derived fact is as valid a premise as an asserted
+/// one), so this iterates to a fixpoint rather than stopping after one pass
+/// over the directly retracted flakes — stopping early is the trap
+/// `97-incremental-parallel-reasoning.md` names explicitly.
+///
+/// Confidence is recomputed alongside removal, not left stale: a fact
+/// surviving on a weaker route is only as certain as that route, and a
+/// route's own premises may themselves be derived facts whose confidence
+/// changed this same pass — so confidence and removal converge together.
+/// `budget` is read for exactly one field, `named_graph_confidence` — the
+/// same one [`derive_within`] used to seed the confidence an asserted
+/// premise from a named graph carries, needed here because an asserted
+/// premise's own confidence is not stored on the `Flake` itself and must be
+/// derived from its `cx` the same way on both paths, or a surviving route
+/// through a named-graph premise would silently look more certain than the
+/// run that first derived it.
+#[must_use]
+pub fn derive_incremental(previous: &Reasoning, retracted: &[Flake], budget: &Budget) -> Reasoning {
+    let started = Instant::now();
+    let mut removed: HashSet<Key> = retracted.iter().map(key).collect();
+    let mut confidence: HashMap<Key, f64> = previous
+        .facts
+        .iter()
+        .map(|d| (key(&d.fact), d.confidence))
+        .collect();
+    let mut facts = previous.facts.clone();
+    let mut iterations = 0_usize;
+
+    let premise_confidence = |p: &Flake, confidence: &HashMap<Key, f64>| -> f64 {
+        confidence.get(&key(p)).copied().unwrap_or_else(|| {
+            if p.cx.is_none() {
+                1.0
+            } else {
+                budget.named_graph_confidence
+            }
+        })
+    };
+
+    // **Bounded independently of correctness.** The removal-and-confidence
+    // fixpoint below is monotonic — each pass only ever shrinks the fact set
+    // or lowers a route count, so it must converge within
+    // `previous.facts.len()` passes at the absolute worst. Trusting that
+    // proof alone is exactly the mistake this project's own CLAUDE.md
+    // records twice already (Epic 19's consume loop, Epic 20's YAML
+    // decoder): a `for`/`while` that reacts to "did anything change" needs
+    // its own cap stated explicitly, not inherited from an argument about
+    // why it shouldn't need one. `max_iterations` is `derive_within`'s own
+    // budget field, reused rather than duplicated.
+    // **The loop continues on exactly one signal: did `removed` grow this
+    // pass.** Not a general "did anything change" flag — a narrower one,
+    // arrived at by elimination. A route surviving with fewer derivations
+    // than before does not need another pass to be correct: `next` already
+    // carries the pruned `surviving` list this same pass, and pruning a
+    // route can only ever shrink support, never invalidate a premise
+    // `removed` does not already contain. And confidence needs no separate
+    // trigger either — `previous.facts` is topologically ordered (a premise
+    // always appears before anything citing it, and `next` stays a
+    // subsequence of `facts` every pass), so a premise's confidence is
+    // already current by the time a dependent reads it *within this same
+    // pass*, and confidence has exactly one source of change — a route
+    // disappearing — which is precisely what growing `removed` already
+    // tracks. Only a fact joining `removed` can invalidate something else's
+    // premise in a *later* pass, so only that needs to keep the loop going.
+    let mut newly_capped = None;
+    loop {
+        if iterations >= budget.max_iterations {
+            newly_capped = Some(CappedReason::Iterations);
+            break;
+        }
+        iterations += 1;
+        let removed_before = removed.len();
+        let mut next = Vec::with_capacity(facts.len());
+        for entry in facts {
+            let surviving: Vec<Derivation> = entry
+                .derivations
+                .into_iter()
+                .filter(|d| d.premises.iter().all(|p| !removed.contains(&key(p))))
+                .collect();
+            if surviving.is_empty() {
+                removed.insert(key(&entry.fact));
+                continue;
+            }
+            let strength = surviving
+                .iter()
+                .map(|d| {
+                    d.premises
+                        .iter()
+                        .map(|p| premise_confidence(p, &confidence))
+                        .fold(1.0_f64, f64::min)
+                })
+                .fold(0.0_f64, f64::max);
+            confidence.insert(key(&entry.fact), strength);
+            next.push(DerivedFact {
+                fact: entry.fact,
+                derivations: surviving,
+                confidence: strength,
+            });
+        }
+        facts = next;
+        if removed.len() == removed_before {
+            break;
+        }
+    }
+
+    let accounted = facts.iter().map(footprint).sum();
+    Reasoning {
+        facts,
+        capped: previous.capped.or(newly_capped),
+        iterations,
+        duration: started.elapsed(),
+        joins: 0,
+        accounted_bytes: accounted,
+    }
+}
+
 /// The least certain premise.
 ///
 /// **Minimum, not product.** Reasoning does not compound uncertainty the way
@@ -1767,6 +1905,314 @@ mod tests {
             ];
 
             assert_eq!(derive(&facts).facts.len(), 1);
+        }
+    }
+
+    /// # Epic 97 Slice A — `DRed`: incremental maintenance under retraction
+    mod incremental_maintenance {
+        use super::*;
+
+        /// Sorted and normalised so two computations that reach the same
+        /// conclusion by different internal orderings compare equal —
+        /// `HashMap`/`HashSet` iteration order is not part of what `DRed`
+        /// promises to reproduce.
+        fn normalize(mut facts: Vec<DerivedFact>) -> Vec<String> {
+            for entry in &mut facts {
+                entry.derivations.sort_by_key(|d| format!("{d:?}"));
+            }
+            facts.sort_by_key(|d| key(&d.fact));
+            facts.iter().map(|d| format!("{d:?}")).collect()
+        }
+
+        fn holds(facts: &[DerivedFact], s: &Sid, p: &Sid, o: &Sid) -> bool {
+            facts
+                .iter()
+                .any(|d| &d.fact.s == s && &d.fact.p == p && d.fact.o == FlakeValue::Ref(o.clone()))
+        }
+
+        /// **The trap the plan names by name**: over-deletion must follow the
+        /// derivation graph, not merely "what got shorter by one hop should
+        /// disappear". A 2-hop chain's *far* end has no direct route of its
+        /// own — its only support is the fact one hop closer, which is itself
+        /// removed first. Missing that transitivity would leave a fact
+        /// standing on a premise that no longer exists.
+        #[test]
+        fn retracting_a_premise_removes_everything_that_only_it_supported() {
+            let facts = vec![
+                f(a("x"), rdf_type(), a("A")),
+                f(a("A"), sub_class_of(), a("B")),
+                f(a("B"), sub_class_of(), a("C")),
+            ];
+            let before = derive(&facts);
+            assert!(holds(&before.facts, &a("x"), &rdf_type(), &a("B")));
+            assert!(holds(&before.facts, &a("x"), &rdf_type(), &a("C")));
+
+            let retracted = [f(a("A"), sub_class_of(), a("B"))];
+            let after = derive_incremental(&before, &retracted, &Budget::default());
+
+            assert!(
+                !holds(&after.facts, &a("x"), &rdf_type(), &a("B")),
+                "lost its only premise directly: {:#?}",
+                after.facts
+            );
+            assert!(
+                !holds(&after.facts, &a("x"), &rdf_type(), &a("C")),
+                "depended on `x type B`, itself just removed — a bug here is \
+                 invisible except as a fact standing on nothing: {:#?}",
+                after.facts
+            );
+        }
+
+        /// The acceptance criterion, verbatim: a fact reachable two
+        /// independent ways survives the retraction of one of them.
+        #[test]
+        fn a_fact_with_two_independent_derivations_survives_the_retraction_of_one() {
+            let facts = vec![
+                f(a("x"), rdf_type(), a("A1")),
+                f(a("A1"), sub_class_of(), a("D")),
+                f(a("x"), rdf_type(), a("A2")),
+                f(a("A2"), sub_class_of(), a("D")),
+            ];
+            let before = derive(&facts);
+            let target = before
+                .facts
+                .iter()
+                .find(|d| d.fact.s == a("x") && d.fact.o == FlakeValue::Ref(a("D")))
+                .expect("x type D is derived two independent ways");
+            assert_eq!(
+                target.derivations.len(),
+                2,
+                "the fixture must set up genuinely independent routes: {target:#?}"
+            );
+
+            let retracted = [f(a("A1"), sub_class_of(), a("D"))];
+            let after = derive_incremental(&before, &retracted, &Budget::default());
+
+            let surviving = after
+                .facts
+                .iter()
+                .find(|d| d.fact.s == a("x") && d.fact.o == FlakeValue::Ref(a("D")))
+                .expect("the other route must still hold `x type D`");
+            assert_eq!(
+                surviving.derivations.len(),
+                1,
+                "exactly the broken route should be gone, not the fact: {surviving:#?}"
+            );
+        }
+
+        /// Two subjects sharing a class-hierarchy edge are not entangled —
+        /// each has its own premise for its own membership, and retracting
+        /// one subject's assertion must not touch the other's, even though
+        /// both derivations pass through the very same `subClassOf` axioms.
+        /// A walk that followed shared *nodes* rather than each fact's own
+        /// recorded premises would over-delete here.
+        #[test]
+        fn over_deletion_follows_the_derivation_graph_not_shared_hierarchy_nodes() {
+            let facts = vec![
+                f(a("x"), rdf_type(), a("A")),
+                f(a("y"), rdf_type(), a("A")),
+                f(a("A"), sub_class_of(), a("B")),
+                f(a("B"), sub_class_of(), a("C")),
+            ];
+            let before = derive(&facts);
+            assert!(holds(&before.facts, &a("y"), &rdf_type(), &a("C")));
+
+            let retracted = [f(a("x"), rdf_type(), a("A"))];
+            let after = derive_incremental(&before, &retracted, &Budget::default());
+
+            assert!(
+                !holds(&after.facts, &a("x"), &rdf_type(), &a("B")),
+                "{:#?}",
+                after.facts
+            );
+            assert!(
+                !holds(&after.facts, &a("x"), &rdf_type(), &a("C")),
+                "{:#?}",
+                after.facts
+            );
+            assert!(
+                holds(&after.facts, &a("y"), &rdf_type(), &a("B")),
+                "y's own membership does not depend on x's assertion: {:#?}",
+                after.facts
+            );
+            assert!(
+                holds(&after.facts, &a("y"), &rdf_type(), &a("C")),
+                "y's own membership does not depend on x's assertion: {:#?}",
+                after.facts
+            );
+        }
+
+        /// **The acceptance criterion.** `DRed` and a full re-derivation over
+        /// the surviving asserted facts must reach identical conclusions —
+        /// same facts, same derivation routes — on a graph built specifically
+        /// so more than one fact has more than one supporting route.
+        #[test]
+        fn dred_matches_a_full_rederivation_on_a_graph_with_multiply_supported_facts() {
+            let retracted_fact = f(a("A1"), sub_class_of(), a("D"));
+            let facts = vec![
+                f(a("x"), rdf_type(), a("A1")),
+                retracted_fact.clone(),
+                f(a("x"), rdf_type(), a("A2")),
+                f(a("A2"), sub_class_of(), a("D")),
+                f(a("D"), sub_class_of(), a("E")),
+                f(a("y"), rdf_type(), a("A2")),
+            ];
+            let before = derive(&facts);
+
+            let incremental = derive_incremental(
+                &before,
+                std::slice::from_ref(&retracted_fact),
+                &Budget::default(),
+            );
+
+            let remaining: Vec<Flake> = facts
+                .into_iter()
+                .filter(|flake| *flake != retracted_fact)
+                .collect();
+            let full = derive(&remaining);
+
+            assert_eq!(
+                normalize(incremental.facts),
+                normalize(full.facts),
+                "DRed must reach exactly what a full re-derivation reaches"
+            );
+        }
+
+        /// Retracting a fact that supports nothing must not perturb anything
+        /// — the honest baseline a "did I break something unrelated" bug
+        /// would fail.
+        #[test]
+        fn retracting_an_unrelated_fact_leaves_reasoning_unchanged() {
+            let facts = vec![
+                f(a("x"), rdf_type(), a("A")),
+                f(a("A"), sub_class_of(), a("B")),
+                f(a("unrelated"), a("marriedTo"), a("nobody")),
+            ];
+            let before = derive(&facts);
+
+            let retracted = [f(a("unrelated"), a("marriedTo"), a("nobody"))];
+            let after = derive_incremental(&before, &retracted, &Budget::default());
+
+            assert_eq!(normalize(after.facts), normalize(before.facts));
+        }
+
+        /// A fact's confidence must reflect only its *surviving* routes, not
+        /// a stale maximum computed back when a stronger route still held —
+        /// otherwise `DRed` quietly overstates certainty.
+        #[test]
+        fn confidence_is_recomputed_from_surviving_routes_not_left_stale() {
+            let extraction_graph = Sid::dsc("graph:extraction");
+            let weak_axiom = Flake {
+                cx: Some(extraction_graph.clone()),
+                ..f(a("A1"), sub_class_of(), a("D"))
+            };
+            let facts = vec![
+                f(a("x"), rdf_type(), a("A1")),
+                weak_axiom.clone(),
+                f(a("x"), rdf_type(), a("A2")),
+                f(a("A2"), sub_class_of(), a("D")),
+            ];
+            let budget = Budget {
+                include_graphs: vec![extraction_graph],
+                named_graph_confidence: 0.4,
+                ..Budget::default()
+            };
+            let before = derive_within(&facts, &budget);
+            let target = before
+                .facts
+                .iter()
+                .find(|d| d.fact.s == a("x") && d.fact.o == FlakeValue::Ref(a("D")))
+                .expect("derived via both routes");
+            assert!(
+                (target.confidence - 1.0).abs() < f64::EPSILON,
+                "the strong route (A2, default graph) must set confidence: {target:#?}"
+            );
+
+            // Retract the *strong* route, leaving only the weak one.
+            let retracted = [f(a("x"), rdf_type(), a("A2"))];
+            let after = derive_incremental(&before, &retracted, &budget);
+            let surviving = after
+                .facts
+                .iter()
+                .find(|d| d.fact.s == a("x") && d.fact.o == FlakeValue::Ref(a("D")))
+                .expect("the weak route still holds it");
+            assert!(
+                (surviving.confidence - 0.4).abs() < f64::EPSILON,
+                "confidence must drop to the surviving route's own strength, \
+                 not stay at the retracted route's 1.0: {surviving:#?}"
+            );
+        }
+
+        /// **The loop's own termination bound, exercised directly.** The
+        /// removal-and-confidence fixpoint is provably bounded by
+        /// `previous.facts.len()` under correct logic — but this project's
+        /// own CLAUDE.md records two prior epics that shipped an infinite
+        /// loop a correctness argument alone did not prevent. An
+        /// artificially low `max_iterations` must still return, and must
+        /// say honestly that it stopped early rather than claim a finished
+        /// fixpoint.
+        #[test]
+        fn a_low_iteration_cap_still_terminates_and_reports_that_it_was_capped() {
+            let facts = vec![
+                f(a("x"), rdf_type(), a("A")),
+                f(a("A"), sub_class_of(), a("B")),
+                f(a("B"), sub_class_of(), a("C")),
+                f(a("C"), sub_class_of(), a("D")),
+                f(a("D"), sub_class_of(), a("E")),
+            ];
+            let before = derive(&facts);
+            assert!(holds(&before.facts, &a("x"), &rdf_type(), &a("E")));
+
+            let retracted = [f(a("A"), sub_class_of(), a("B"))];
+            let budget = Budget {
+                max_iterations: 1,
+                ..Budget::default()
+            };
+            let after = derive_incremental(&before, &retracted, &budget);
+
+            assert_eq!(
+                after.capped,
+                Some(CappedReason::Iterations),
+                "a cap this low cannot have reached a genuine fixpoint: {after:#?}"
+            );
+            assert_eq!(after.iterations, 1);
+        }
+
+        /// A `previous.capped` reason must survive an incremental call even
+        /// when this call's own pass count stays well inside budget — the
+        /// input was already an incomplete fixpoint, and silently reporting
+        /// `capped: None` would claim a completeness the previous run never
+        /// reached.
+        #[test]
+        fn a_capped_previous_run_stays_capped() {
+            let facts = vec![f(a("x"), rdf_type(), a("A"))];
+            let mut before = derive(&facts);
+            before.capped = Some(CappedReason::Facts);
+
+            let after = derive_incremental(&before, &[], &Budget::default());
+
+            assert_eq!(after.capped, Some(CappedReason::Facts), "{after:#?}");
+        }
+
+        /// Kills a mutant on the increment itself: a counter that never
+        /// advances would still terminate correctly here (the `changed`
+        /// flag alone drives the loop), so only reading the reported count
+        /// back catches it.
+        #[test]
+        fn iterations_counts_the_passes_actually_run() {
+            let facts = vec![
+                f(a("x"), rdf_type(), a("A")),
+                f(a("A"), sub_class_of(), a("B")),
+                f(a("B"), sub_class_of(), a("C")),
+            ];
+            let before = derive(&facts);
+            let retracted = [f(a("A"), sub_class_of(), a("B"))];
+            let after = derive_incremental(&before, &retracted, &Budget::default());
+
+            assert!(
+                after.iterations >= 1,
+                "at least one pass must run: {after:#?}"
+            );
         }
     }
 

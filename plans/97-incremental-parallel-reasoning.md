@@ -1,6 +1,6 @@
 # Plan: Incremental & Parallel Reasoning (Epic 97)
 
-**Status**: Not started — **the measurement now demands it (28 Jul 2026)**. A stated requirement of 10⁸–10⁹ triples makes `06`'s wholesale-replacement-per-run arithmetically unviable, so incremental maintenance moves from optional to prerequisite. See `00n-large-ontology-reality.md` §2.4
+**Status**: Incremental (DRed) shipped, 7 August 2026 — see Slice A write-up below. Parallel derivation not yet started. Entry condition met 28 Jul 2026: a stated requirement of 10⁸–10⁹ triples makes `06`'s wholesale-replacement-per-run arithmetically unviable, so incremental maintenance moved from optional to prerequisite. See `00n-large-ontology-reality.md` §2.4
 **Depends on**: Epic 6 (semi-naive fixpoint), Epic 37a (the measurement)
 **Crates**: `graph-owl-reasoning`
 
@@ -53,6 +53,95 @@ Two things make it fit here rather than fighting the existing design:
 graph. Following data edges deletes facts that were never derived from the
 retracted one, and the re-derive pass restores them — so the bug is invisible
 except as inexplicable slowness.
+
+### Slice A — **shipped, 7 August 2026**
+
+`graph_owl_reasoning::derive_incremental(previous: &Reasoning, retracted:
+&[Flake], budget: &Budget) -> Reasoning`.
+
+**Why this is not a re-derivation wearing a different name.**
+[`derive_within`]'s own semi-naive loop already records *every* distinct
+`(rule, premises)` route to a fact, not a first-found sample — its
+`!existing.derivations.contains(&route)` check is exhaustive over the input
+it ran against. This reasoner is a positive, monotonic Horn-like fixpoint:
+no rule ever fires *because* a fact is absent, so a retraction can only ever
+remove derivability, never grant it. A route recorded against the fuller
+input is therefore still exactly as valid against any subset that still
+contains its premises. Checking which already-recorded routes survive a
+retraction is consequently **exact**, not an approximation — it reproduces
+precisely what a full re-derivation over the surviving asserted facts would
+conclude, without re-running a single rule join. This is also why the
+"re-derive" phase classical DRed describes for logics with negation does not
+apply here at all: retraction cannot make a *new* derivation possible in a
+purely positive, monotonic rule set, so there is nothing to search for
+beyond checking existing routes.
+
+**Over-delete, following the derivation graph rather than the data graph.**
+A fact is removed once every one of its routes has lost at least one
+premise, checked against literal premise identity — never against "shares a
+node with something retracted". Removing a fact can itself invalidate
+routes that cited *it* as a premise, so the pass iterates to a fixpoint
+rather than stopping after the directly retracted flakes — the plan's own
+named trap. The loop's *only* continuation signal, after two rounds of
+mutation testing narrowed it down by elimination, is whether the `removed`
+set grew this pass: a route surviving with fewer derivations than before
+needs no extra pass (the pruned list is already in `next` this same pass),
+and confidence needs no separate trigger either, because `previous.facts`
+is topologically ordered (a premise always appears before anything citing
+it, and that order survives every pass) and confidence has exactly one
+source of change — a route disappearing — which growing `removed` already
+tracks.
+
+**Bounded independently of the correctness argument.** The fixpoint is
+provably bounded by `previous.facts.len()` passes under correct logic, but
+trusting that proof alone is exactly the mistake this project's CLAUDE.md
+already records twice (Epic 19's consume loop, Epic 20's YAML decoder) — so
+the loop is also capped by `budget.max_iterations`, `derive_within`'s own
+field reused rather than duplicated, and reports `CappedReason::Iterations`
+honestly if hit. **Mutation testing found this the hard way**: the first
+version had no independent cap, and inverting the loop's own termination
+check (`delete !`) produced five mutants that hung for the full 20s
+cargo-mutants timeout rather than failing fast — a live demonstration of
+the exact failure mode the cap exists to prevent, not merely a hypothetical
+one. Two further rounds of mutation testing against `derive_incremental`'s
+diff eliminated two more findings by *removing* code rather than adding
+tests: a `changed` flag driven by derivation-count and confidence deltas
+independently of `removed` growth turned out to be provably redundant given
+the topological-order and monotonicity arguments above — a mutant surviving
+because the mutated branch could be proven unreachable, not because a test
+was missing. Final mutation report: 5/5 viable mutants caught, 1 unviable
+(2 unbounded-loop rounds and a redundant-branch round preceded it).
+
+**Confidence is recomputed alongside removal, not left stale.** A fact
+surviving on a weaker route is only as certain as that route; `budget` is
+read for exactly one field, `named_graph_confidence`, needed because an
+asserted premise's own confidence is not stored on the `Flake` and must be
+derived from its `cx` the same way `derive_within` does, or a surviving
+route through a named-graph premise would silently look more certain than
+the run that first derived it.
+
+**Acceptance criteria, verified**: DRed matches a full re-derivation over
+the surviving asserted facts, asserted on a graph built specifically so more
+than one fact has more than one supporting route
+(`dred_matches_a_full_rederivation_on_a_graph_with_multiply_supported_facts`);
+a fact with two independent derivations survives the retraction of one,
+losing exactly the broken route and no more
+(`a_fact_with_two_independent_derivations_survives_the_retraction_of_one`);
+over-deletion follows the derivation graph rather than shared
+class-hierarchy nodes, proven with two subjects sharing the same
+`subClassOf` axioms but independent premises
+(`over_deletion_follows_the_derivation_graph_not_shared_hierarchy_nodes`);
+budgets are respected under adversarial conditions, not merely under
+realistic ones (`a_low_iteration_cap_still_terminates_and_reports_that_it_was_capped`).
+
+**Not yet wired into `Catalog::run_reasoning`.** This slice is the pure
+algorithm only — `graph-owl-api`'s reasoning pass still replaces
+`graph:reasoning` wholesale on every run, matching this plan's own
+"Crates: `graph-owl-reasoning`" scope. Wiring incremental maintenance into
+the actual invocation lifecycle (subscribing to retraction events, deciding
+when a full run is still cheaper than tracking `previous` across many small
+retractions, and the `maintained_to` freshness-stamp obligation below) is
+separate, larger, cross-crate work not undertaken in this pass.
 
 ## Parallel derivation
 
@@ -154,14 +243,16 @@ order is not interchangeable.
 
 ## Acceptance criteria
 
-- [ ] DRed under retraction produces the same fixpoint as full re-derivation.
+- [x] DRed under retraction produces the same fixpoint as full re-derivation.
       Asserted by running both and comparing, on a graph with multiply-supported
-      facts — the case that catches an over-delete without a re-derive.
-- [ ] A fact with two independent derivations survives the retraction of one.
+      facts — the case that catches an over-delete without a re-derive. (Slice A)
+- [x] A fact with two independent derivations survives the retraction of one. (Slice A)
 - [ ] A parallel run derives the identical fact set *and* identical derivation
       chains as a single-threaded run, over repeated runs.
-- [ ] Both remain inside Epic 6's budgets, which do not relax because the
-      implementation got cleverer.
+- [x] DRed remains inside Epic 6's budgets, which do not relax because the
+      implementation got cleverer — `max_iterations` enforced independently of
+      the loop's own correctness argument, proven under an adversarially low
+      cap. (Slice A; parallel derivation's own budget behaviour still open)
 
 ## Explicitly deferred
 
