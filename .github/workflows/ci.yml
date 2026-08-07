@@ -75,6 +75,20 @@ jobs:
       - name: doc-tests
         run: cargo test --workspace --doc
 
+  deny:
+    name: dependency licences, advisories and sources
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `00i-licensing.md`'s allowlist (MIT, Apache-2.0, BSD, ISC, Unicode,
+      # Zlib) made structural — see `deny.toml` for the two documented,
+      # narrow exceptions and why each exists. Its own header explains why
+      # this was owed rather than optional: `00i` described the gate before
+      # `deny.toml` or this job existed to run it.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   contract:
     name: the committed contract matches the code
     runs-on: ubuntu-latest

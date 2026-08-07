@@ -149,9 +149,31 @@ whatever licence it has.
 allowlist, wired into CI, is a prerequisite of this epic's first commit — a
 small piece of work that has been owed since `00i` was written.
 
+### Shipped, 8 August 2026 — and it was overdue, not a formality
+
+**`petgraph` had already been added by then, for Epic 38, before this
+prerequisite was satisfied.** Wiring the gate up immediately after found
+four real findings on already-shipped code, none of which had ever been
+audited: `option-ext` (MPL-2.0, via `rust-embed`), `webpki-roots`
+(CDLA-Permissive-2.0, via `reqwest`), and two live security advisories
+(RUSTSEC-2026-0194/0195, `quick-xml`, reachable via SPARQL federation's
+`SERVICE` clause) plus two lower-severity dev-only ones. Full accounting
+in `00i-licensing.md` §7 and `deny.toml` itself — not repeated here.
+
+**Proven to actually reject something**, per this epic's own acceptance
+criterion: `rust-igraph` (GPL-2.0-or-later, already named in
+`00l-build-vs-adopt.md` as the clearest rejected case) added to an
+isolated scratch project sharing this repo's own `deny.toml`, confirmed
+`cargo deny check licenses` fails with `error[rejected]: failed to
+satisfy license requirements`. Not tested by editing this repository's
+own `Cargo.toml`, which would have meant committing (or carefully
+reverting) a deliberately-broken dependency tree.
+
+CI job: `.github/workflows/ci.yml`'s `deny` job, `EmbarkStudios/cargo-deny-action@v2`.
+
 ## Acceptance criteria
 
-- [ ] `deny.toml` exists, encodes `00i`'s allowlist, runs in CI, and **fails**
+- [x] `deny.toml` exists, encodes `00i`'s allowlist, runs in CI, and **fails**
       on a deliberately-introduced copyleft crate — a gate nobody has seen
       reject anything is not known to work.
 - [ ] The in-process adapter passes **the same test suite** as the Postgres one

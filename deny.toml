@@ -1,0 +1,95 @@
+# cargo-deny gate — Epic 103's own stated prerequisite, owed since
+# `00i-licensing.md` was written: "dependencies are gated by cargo deny
+# with a permissive-only allowlist" was a document, not a control, until
+# this file and the CI step that runs it exist.
+#
+# Allowlist matches `00i` exactly: MIT, Apache-2.0, BSD, ISC, Unicode,
+# Zlib. Copyleft and source-available crates are rejected by default —
+# nothing here should ever need a per-crate exception; if one seems
+# necessary, the answer per `00i` is to find a permissive alternative
+# first, and only add an exception here with a stated reason after that
+# search comes up empty.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+ignore = [
+    # tokio-tar's PAX-header file-smuggling bug, reached only through
+    # `testcontainers` — every path to it in this workspace is `(dev)`,
+    # used to pull/extract Docker images for integration tests, never
+    # compiled into the production binary. No safe upgrade exists (the
+    # crate is archived); the advisory's own suggested replacement
+    # (`astral-tokio-tar`) is not what `testcontainers` depends on, so
+    # fixing this needs an upstream `testcontainers` release, not a change
+    # graph-owl can make directly. Revisit when `testcontainers` updates.
+    { id = "RUSTSEC-2025-0111", reason = "dev-only via testcontainers; no upstream fix available yet" },
+    # quick-xml quadratic-attribute-parsing DoS. NOT dev-only: reachable
+    # via sparesults/spareval, which this project's SPARQL federation
+    # SERVICE clause uses to parse XML results returned by a remote
+    # endpoint (Epic 101) — the same reachability shape the advisory
+    # itself cites as exploited in the wild (a crafted XML response from
+    # a server this process trusts). A fix exists (quick-xml >= 0.41,
+    # already the version everything else in this workspace resolves to)
+    # but `sparesults` 0.3.3 — the latest release — pins `quick-xml =
+    # "^0.37"`, a hard ceiling `[patch.crates-io]` cannot override without
+    # forking sparesults. This is accepted, not solved: flagged
+    # prominently rather than silently ignored, since it is a real,
+    # currently-open gap. Revisit the moment sparesults ships a release
+    # requiring quick-xml >= 0.41, and until then treat any SERVICE
+    # federation to an untrusted endpoint as carrying this risk.
+    { id = "RUSTSEC-2026-0194", reason = "reachable via SPARQL federation's SERVICE clause; blocked on an upstream sparesults release, not a graph-owl fix" },
+    # Same root cause, same sparesults@0.3.3 -> quick-xml@0.37.5 chain as
+    # RUSTSEC-2026-0194 immediately above: unbounded namespace-declaration
+    # allocation in NsReader (memory-exhaustion DoS), fixed in the same
+    # quick-xml >= 0.41 release. Same reasoning, same revisit trigger.
+    { id = "RUSTSEC-2026-0195", reason = "reachable via SPARQL federation's SERVICE clause; blocked on an upstream sparesults release, not a graph-owl fix" },
+    # Unmaintained notice, not a vulnerability — rustls-pemfile is archived
+    # upstream but has no known exploit. Dev-only via bollard/testcontainers,
+    # same shape as the tokio-tar entry above.
+    { id = "RUSTSEC-2025-0134", reason = "dev-only via testcontainers/bollard; unmaintained notice, no known exploit" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    # Not on `00i`'s original enumerated list because root-cert *data*
+    # never came up before this gate actually ran. CDLA-Permissive-2.0 is
+    # the Linux Foundation's permissive data licence — attribution only,
+    # no copyleft trigger under any circumstance, unlike the MPL-2.0
+    # exception below. Carried by `webpki-roots`, the de facto standard
+    # root-cert bundle for the entire rustls ecosystem (650M downloads).
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+# Per-crate, not general — see `00i-licensing.md`'s incident log for the
+# reasoning and its open status. Do not add a bare "MPL-2.0" to the `allow`
+# list above on the strength of this entry: this project already rejected
+# EPL-2.0 (the same class of licence) for `elkjs`, and this exception is
+# provisional pending that same review, not a decision that weak copyleft
+# is broadly acceptable here.
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "option-ext" },
+]
+
+[licenses.private]
+ignore = false
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+allow-workspace = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
