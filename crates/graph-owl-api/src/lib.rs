@@ -12005,6 +12005,184 @@ impl Catalog {
         let base = Self::asserted_base(graph.as_ref()).await?;
         let report = graph_owl_constraint::validate(&compiled, &base);
 
+        self.finish_validation_run(graph.as_ref(), report, compiled.len(), refused, false)
+            .await
+    }
+
+    /// [`Self::run_validation`], plus evaluating every `sh:sparql` constraint
+    /// as `principal` — Epic 96 Slice A. The escape hatch the SHACL-SPARQL
+    /// vocabulary exists for is only safe if the same rules that gate an
+    /// ordinary query gate this one: **decision 2**, the same
+    /// [`SparqlBudget`] as every other query; **decision 3**, the same
+    /// authorization pushdown [`Self::sparql`] applies, so a constraint
+    /// cannot read what `principal` cannot.
+    ///
+    /// **Scope, stated rather than assumed away.** This ships the bare
+    /// constraint (`sh:sparql`/`sh:SPARQLConstraint`) — reusable,
+    /// parameterised constraint *components* (`sh:SPARQLConstraintComponent`,
+    /// `sh:parameter`, `sh:labelTemplate`) are not attempted in this pass,
+    /// which is a real scope cut against `96-shacl-sparql.md`'s own second
+    /// acceptance criterion, recorded there rather than silently dropped.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured, or if a read or the
+    /// result write fails. `Validation` if a constraint's own query text
+    /// fails to parse, or is not a `SELECT`.
+    #[tracing::instrument(name = "catalog.run_validation_as", skip_all)]
+    pub async fn run_validation_as(
+        &self,
+        principal: &Principal,
+        budget: SparqlBudget,
+    ) -> Result<ValidationRun, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let shape_facts = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(shapes_graph())),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let (compiled, refused) = self.compiled_shapes(&shape_facts);
+        let base = Self::asserted_base(graph.as_ref()).await?;
+        let mut report = graph_owl_constraint::validate(&compiled, &base);
+
+        // **`$this` is pre-bound via VALUES (see `run_sparql_constraint`),
+        // which is exactly why the ordinary pushdown/authorization scan
+        // cannot gate it.** Pushdown narrows what a query's *own* triple
+        // patterns may scan; a VALUES-bound term never asks the graph
+        // anything, so a query built entirely from `FILTER NOT EXISTS`
+        // clauses on `$this` would answer identically for a node
+        // `principal` cannot see as for one it can — found by this slice's
+        // own two-principal RED test, which is exactly the class of gap
+        // this project's CLAUDE.md already warns is easy to miss. Checked
+        // explicitly, the same way `Self::authorization_key` is already
+        // checked for the graph-flake path: a focus node the principal
+        // cannot see is skipped before its constraint ever runs, not
+        // merely before its result is trusted.
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+        let mut truncated = false;
+        for check in graph_owl_constraint::pending_sparql_checks(&compiled, &base) {
+            let subject_flakes: Vec<Flake> = base
+                .iter()
+                .filter(|f| f.s == check.focus_node)
+                .cloned()
+                .collect();
+            if !predicate.admits(&Self::authorization_key(&check.focus_node, &subject_flakes)) {
+                continue;
+            }
+            let outcome = self
+                .run_sparql_constraint(principal, &check, budget)
+                .await?;
+            truncated |= outcome.truncated;
+            report
+                .violations
+                .extend(
+                    outcome
+                        .rows
+                        .into_iter()
+                        .map(|row| graph_owl_constraint::Violation {
+                            focus_node: check.focus_node.clone(),
+                            path: None,
+                            constraint: "sparql".to_string(),
+                            shape: check.shape.clone(),
+                            severity: check.severity,
+                            message: check.message.clone().unwrap_or_else(|| {
+                                format!(
+                                    "{}: a SPARQL constraint produced a solution: {row:?}",
+                                    check.shape
+                                )
+                            }),
+                            actual: None,
+                            suggestion: None,
+                        }),
+                );
+        }
+        report.conforms = !report
+            .violations
+            .iter()
+            .any(|v| v.severity == graph_owl_ontology::Severity::Violation);
+
+        self.finish_validation_run(graph.as_ref(), report, compiled.len(), refused, truncated)
+            .await
+    }
+
+    /// One `sh:sparql` constraint, evaluated for real: `$this` bound to the
+    /// focus node via a joined `VALUES` clause — the standard SPARQL
+    /// technique for pre-binding a variable, chosen over string
+    /// substitution because it cannot corrupt an identifier that happens to
+    /// contain `this` as a substring — then run through
+    /// [`Self::execute_algebra`], the exact function [`Self::sparql`] itself
+    /// calls, so a SHACL-SPARQL constraint is authorized and budgeted
+    /// identically to a query `principal` typed by hand.
+    async fn run_sparql_constraint(
+        &self,
+        principal: &Principal,
+        check: &graph_owl_constraint::PendingSparqlCheck,
+        budget: SparqlBudget,
+    ) -> Result<SparqlOutcome, CatalogError> {
+        let query_error = |detail: String| {
+            CatalogError::Validation(vec![FieldError::new(
+                "sparql",
+                FieldErrorCode::Type,
+                detail,
+            )])
+        };
+
+        let parsed = spargebra::SparqlParser::new()
+            .parse_query(&check.query)
+            .map_err(|e| query_error(e.to_string()))?;
+        let spargebra::Query::Select {
+            pattern,
+            dataset,
+            base_iri,
+        } = parsed
+        else {
+            return Err(query_error(
+                "a sh:sparql constraint must be a SELECT query".to_string(),
+            ));
+        };
+
+        let this = graph_owl_query::term::to_named_node(&check.focus_node)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        let bound = spargebra::algebra::GraphPattern::Join {
+            left: Box::new(spargebra::algebra::GraphPattern::Values {
+                variables: vec![
+                    oxrdf::Variable::new("this")
+                        .expect("\"this\" is a valid SPARQL variable identifier"),
+                ],
+                bindings: vec![vec![Some(spargebra::term::GroundTerm::NamedNode(this))]],
+            }),
+            right: Box::new(pattern),
+        };
+        let query = spargebra::Query::Select {
+            pattern: bound,
+            dataset,
+            base_iri,
+        };
+
+        self.execute_algebra(principal, &query, None, budget).await
+    }
+
+    /// The read-report-persist tail both validation entry points share —
+    /// extracted rather than duplicated, the same reason
+    /// [`Self::finish_reasoning_run`] exists.
+    async fn finish_validation_run(
+        &self,
+        graph: &dyn TripleStore,
+        report: graph_owl_constraint::ValidationReport,
+        shapes: usize,
+        refused_shapes: usize,
+        sparql_truncated: bool,
+    ) -> Result<ValidationRun, CatalogError> {
         // The instant this pass reflects. Read *after* the facts, so a report
         // can only ever claim to be older than the graph it read — the safe
         // direction to be wrong in, since it makes a fresh report look stale
@@ -12039,9 +12217,10 @@ impl Catalog {
             violations: report.count_of(graph_owl_ontology::Severity::Violation),
             warnings: report.count_of(graph_owl_ontology::Severity::Warning),
             info: report.count_of(graph_owl_ontology::Severity::Info),
-            shapes: compiled.len(),
-            refused_shapes: refused,
+            shapes,
+            refused_shapes,
             computed_at_t,
+            sparql_truncated,
         })
     }
 
@@ -14762,6 +14941,14 @@ pub struct ValidationRun {
     pub refused_shapes: usize,
     /// The graph instant this reflects, so staleness is visible.
     pub computed_at_t: i64,
+    /// A `sh:sparql` constraint's query hit its [`SparqlBudget`] and was cut
+    /// short — Epic 96 Slice A. **Always reported, the same discipline
+    /// `SparqlOutcome::truncated` already applies to an ordinary query**: a
+    /// truncated constraint that reads as "no violations found" is a
+    /// governance report a reader trusts for the wrong reason. Always
+    /// `false` from [`Catalog::run_validation`], which evaluates no SPARQL
+    /// constraints at all.
+    pub sparql_truncated: bool,
 }
 
 /// Which strategy a reasoning run actually used — Epic 97's own missing
@@ -18376,6 +18563,347 @@ mod validation_decides_before_it_stores {
 
         assert_eq!(mine.2, 1);
         assert_eq!(theirs.2, 0);
+    }
+
+    /// Epic 96 Slice A: `sh:sparql`, evaluated for real through
+    /// `run_validation_as` — the escape hatch the SHACL-SPARQL vocabulary
+    /// exists for is only trustworthy if it actually runs, is gated by the
+    /// same authorization every other query is, and is honest about a
+    /// truncated answer.
+    mod sparql_constraint_validation {
+        use super::*;
+
+        /// `NoOwnerShape`: a SPARQL constraint standing in for `sh:not`
+        /// wrapping `sh:minCount 1` — the escape-hatch case, checking
+        /// something a hand-written constraint could *also* express, so the
+        /// test proves the mechanism rather than needing an inexpressible
+        /// rule to justify itself.
+        fn sparql_shape_facts(t: i64, query: &str) -> Vec<Flake> {
+            let in_shapes = |s: Sid, p: Sid, o: FlakeValue| Flake {
+                s,
+                p,
+                o,
+                cx: Some(shapes_graph()),
+                t,
+                op: true,
+            };
+            vec![
+                in_shapes(
+                    a("NoOwnerShape"),
+                    rdf_type(),
+                    FlakeValue::Ref(sh("NodeShape")),
+                ),
+                in_shapes(
+                    a("NoOwnerShape"),
+                    sh("targetClass"),
+                    FlakeValue::Ref(a("Regulatory")),
+                ),
+                in_shapes(
+                    a("NoOwnerShape"),
+                    sh("sparql"),
+                    FlakeValue::Ref(a("NoOwnerShape/constraint")),
+                ),
+                in_shapes(
+                    a("NoOwnerShape/constraint"),
+                    sh("select"),
+                    FlakeValue::String(query.to_string()),
+                ),
+            ]
+        }
+
+        const NO_OWNER_QUERY: &str = "SELECT $this WHERE { \
+            FILTER NOT EXISTS { $this <https://graph-owl.dev/ns/catalog#owner> ?o } }";
+
+        #[tokio::test]
+        async fn run_validation_as_evaluates_the_query_and_reports_one_violation_per_solution() {
+            let graph = RecordingGraph::working();
+            graph
+                .assert_flakes(&sparql_shape_facts(1, NO_OWNER_QUERY))
+                .await
+                .expect("seed the shape");
+            graph
+                .assert_flakes(&[offender()])
+                .await
+                .expect("seed the estate — payments has no owner");
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+                .with_graph(graph as Arc<dyn TripleStore>);
+
+            let run = catalog
+                .run_validation_as(&Principal::system(), SparqlBudget::default())
+                .await
+                .expect("a pass");
+
+            assert!(!run.conforms, "{run:?}");
+            assert_eq!(run.violations, 1, "{run:?}");
+            assert!(!run.sparql_truncated);
+
+            let (findings, _, total) = catalog.validation_report(&all()).await.expect("queue");
+            assert_eq!(total, 1);
+            assert_eq!(findings[0].finding.focus_node, a("payments").to_string());
+            assert_eq!(findings[0].finding.constraint_kind, "sparql");
+        }
+
+        /// The shape-facts fetch must narrow to the shapes graph — on a
+        /// fresh `RecordingGraph` with no other named graph present, an
+        /// unnarrowed scan returns the identical rows, so only the pattern
+        /// actually sent distinguishes narrowed from lucky. Same idiom
+        /// `shapes_and_estate_are_read_from_different_graphs` already
+        /// established for `run_validation`, extended to `run_validation_as`.
+        #[tokio::test]
+        async fn run_validation_as_narrows_its_shape_fetch_to_the_shapes_graph() {
+            let graph = RecordingGraph::working();
+            graph
+                .assert_flakes(&sparql_shape_facts(1, NO_OWNER_QUERY))
+                .await
+                .expect("seed the shape");
+            graph
+                .assert_flakes(&[offender()])
+                .await
+                .expect("seed the estate");
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+                .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+            catalog
+                .run_validation_as(&Principal::system(), SparqlBudget::default())
+                .await
+                .expect("a pass");
+
+            assert!(
+                graph
+                    .patterns()
+                    .iter()
+                    .any(|p| p.cx == Some(Some(shapes_graph()))),
+                "no query narrowed to the shapes graph: {:#?}",
+                graph.patterns()
+            );
+        }
+
+        /// The pure, no-principal `run_validation` must leave the SPARQL
+        /// constraint unevaluated — the safe direction to be wrong in for a
+        /// constraint kind it cannot check at all, pinned end to end rather
+        /// than only at `graph-owl-constraint`'s own unit level.
+        #[tokio::test]
+        async fn plain_run_validation_evaluates_no_sparql_constraints() {
+            let graph = RecordingGraph::working();
+            graph
+                .assert_flakes(&sparql_shape_facts(1, NO_OWNER_QUERY))
+                .await
+                .expect("seed the shape");
+            graph
+                .assert_flakes(&[offender()])
+                .await
+                .expect("seed the estate");
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+                .with_graph(graph as Arc<dyn TripleStore>);
+
+            let run = catalog.run_validation().await.expect("a pass");
+
+            assert!(
+                run.conforms,
+                "a SPARQL constraint checked by the pure pass would be a false negative \
+                 dressed as a real check: {run:?}"
+            );
+            assert_eq!(run.violations, 0, "{run:?}");
+        }
+
+        /// **Decision 3, the load-bearing one**: two principals against one
+        /// SPARQL constraint see different results, the same idiom Epic 13
+        /// already established for search. The constraint's own query would
+        /// find *both* assets missing an owner; the restricted principal
+        /// must see only the one it is allowed to read at all.
+        #[tokio::test]
+        async fn a_sparql_constraint_cannot_read_what_its_caller_cannot() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+            let public = catalog
+                .upsert_asset(&Principal::system(), service("public"))
+                .await
+                .expect("create the public namespace");
+            let visible = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    UpsertAsset {
+                        kind: AssetKind::Database,
+                        name: "orders".to_string(),
+                        parent_id: Some(public.id),
+                        description: None,
+                        properties: None,
+                        extension: None,
+                    },
+                )
+                .await
+                .expect("create the visible asset");
+            let hidden = catalog
+                .upsert_asset(&Principal::system(), service("secret"))
+                .await
+                .expect("create the hidden asset");
+
+            let visible_sid = graph_owl_core::projection::entity_sid(visible.id);
+            let hidden_sid = graph_owl_core::projection::entity_sid(hidden.id);
+
+            let shape_facts = {
+                let in_shapes = |s: Sid, p: Sid, o: FlakeValue| Flake {
+                    s,
+                    p,
+                    o,
+                    cx: Some(shapes_graph()),
+                    t: 1,
+                    op: true,
+                };
+                vec![
+                    in_shapes(a("BothShape"), rdf_type(), FlakeValue::Ref(sh("NodeShape"))),
+                    in_shapes(
+                        a("BothShape"),
+                        sh("targetNode"),
+                        FlakeValue::Ref(visible_sid.clone()),
+                    ),
+                    in_shapes(
+                        a("BothShape"),
+                        sh("targetNode"),
+                        FlakeValue::Ref(hidden_sid.clone()),
+                    ),
+                    in_shapes(
+                        a("BothShape"),
+                        sh("sparql"),
+                        FlakeValue::Ref(a("BothShape/constraint")),
+                    ),
+                    in_shapes(
+                        a("BothShape/constraint"),
+                        sh("select"),
+                        FlakeValue::String(NO_OWNER_QUERY.to_string()),
+                    ),
+                ]
+            };
+            graph
+                .assert_flakes(&shape_facts)
+                .await
+                .expect("seed the shape");
+
+            let restricted =
+                incremental_projection_tests_support::restricted_analyst(&catalog).await;
+
+            let as_system = catalog
+                .run_validation_as(&Principal::system(), SparqlBudget::default())
+                .await
+                .expect("system's pass");
+            let as_restricted = catalog
+                .run_validation_as(&restricted, SparqlBudget::default())
+                .await
+                .expect("restricted's pass");
+
+            assert_eq!(
+                as_system.violations, 2,
+                "the admin sees both — neither asset has an owner: {as_system:?}"
+            );
+            assert_eq!(
+                as_restricted.violations, 1,
+                "the restricted principal must see only the visible asset's violation, \
+                 not zero (which would read as \"everything has an owner\") and not two: \
+                 {as_restricted:?}"
+            );
+
+            let (findings, _, _) = catalog.validation_report(&all()).await.expect("queue");
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].finding.focus_node, visible_sid.to_string());
+            let _ = hidden_sid;
+        }
+
+        /// A budget too small to let the constraint's own query run to
+        /// completion must be **reported** truncated, not silently answered
+        /// as "no violations found" — the same discipline every other
+        /// query in this project already carries.
+        ///
+        /// **Needs a real, catalogued asset.** `scope_facts`' visibility
+        /// model only admits a subject that is a real asset, a relationship
+        /// endpoint, or a vocabulary namespace (`00c`'s own rule, extended
+        /// through Epic 104) — a hand-seeded `Sid::dsc("payments")` like the
+        /// other tests in this module use is none of those, so its
+        /// properties are invisible to *any* top-level scan regardless of
+        /// budget, which reads as "nothing to truncate" for the wrong
+        /// reason. A wildcard pattern also needs something to scan in the
+        /// first place: `NO_OWNER_QUERY`'s only pattern lives inside
+        /// `FILTER NOT EXISTS`, which is not pushed down the same way a
+        /// top-level pattern is.
+        #[tokio::test]
+        async fn a_sparql_constraint_exceeding_its_budget_is_reported_truncated() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+            let asset = catalog
+                .upsert_asset(&Principal::system(), service("orders"))
+                .await
+                .expect("create a real asset");
+            let subject = graph_owl_core::projection::entity_sid(asset.id);
+
+            let extra_props: Vec<Flake> = (0..10)
+                .map(|i| {
+                    Flake::assert(
+                        subject.clone(),
+                        Sid::dsc(format!("prop{i}")),
+                        FlakeValue::Int(i),
+                        1,
+                    )
+                })
+                .collect();
+            graph
+                .assert_flakes(&extra_props)
+                .await
+                .expect("seed extra properties to scan");
+
+            let shape_facts = {
+                let in_shapes = |s: Sid, p: Sid, o: FlakeValue| Flake {
+                    s,
+                    p,
+                    o,
+                    cx: Some(shapes_graph()),
+                    t: 1,
+                    op: true,
+                };
+                vec![
+                    in_shapes(
+                        a("WildcardShape"),
+                        rdf_type(),
+                        FlakeValue::Ref(sh("NodeShape")),
+                    ),
+                    in_shapes(
+                        a("WildcardShape"),
+                        sh("targetNode"),
+                        FlakeValue::Ref(subject),
+                    ),
+                    in_shapes(
+                        a("WildcardShape"),
+                        sh("sparql"),
+                        FlakeValue::Ref(a("WildcardShape/constraint")),
+                    ),
+                    in_shapes(
+                        a("WildcardShape/constraint"),
+                        sh("select"),
+                        FlakeValue::String("SELECT $this WHERE { $this ?p ?o }".to_string()),
+                    ),
+                ]
+            };
+            graph
+                .assert_flakes(&shape_facts)
+                .await
+                .expect("seed the shape");
+
+            let starved = SparqlBudget {
+                max_facts: 2,
+                ..SparqlBudget::default()
+            };
+            let run = catalog
+                .run_validation_as(&Principal::system(), starved)
+                .await
+                .expect("a pass, even a starved one");
+
+            assert!(
+                run.sparql_truncated,
+                "a starved budget must be reported, not answered as if nothing was wrong: {run:?}"
+            );
+        }
     }
 }
 

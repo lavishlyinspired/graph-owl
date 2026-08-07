@@ -164,6 +164,22 @@ pub enum Constraint {
     Not(Box<Constraint>),
     And(Vec<Constraint>),
     Or(Vec<Constraint>),
+    /// `sh:sparql` (2017 SHACL Recommendation §5) — an arbitrary SPARQL
+    /// SELECT, evaluated with `$this` bound to the focus node. Every
+    /// returned solution is a violation. Not path-scoped, like the
+    /// combinators: the query decides what it is about.
+    ///
+    /// Pathless deliberately, and the same reason as the combinators: it
+    /// cannot be evaluated by [`graph_owl_constraint`]'s pure `evaluate`
+    /// dispatch, which only ever reads `facts` already in memory — running
+    /// this query needs the query engine, budget and authorization
+    /// pushdown that live in `graph-owl-api`. The pure pass reports this
+    /// constraint as satisfied (the safe direction to be wrong in for a
+    /// constraint kind it cannot check at all); `Catalog::run_validation_as`
+    /// evaluates it for real, over the same facts, as a second pass.
+    Sparql {
+        query: String,
+    },
 }
 
 impl Constraint {
@@ -187,7 +203,7 @@ impl Constraint {
             | Self::MaxLength { path, .. }
             | Self::Class { path, .. }
             | Self::HasValue { path, .. } => Some(path),
-            Self::Not(_) | Self::And(_) | Self::Or(_) => None,
+            Self::Not(_) | Self::And(_) | Self::Or(_) | Self::Sparql { .. } => None,
         }
     }
 
@@ -213,6 +229,7 @@ impl Constraint {
             Self::Not(_) => "not",
             Self::And(_) => "and",
             Self::Or(_) => "or",
+            Self::Sparql { .. } => "sparql",
         }
     }
 }
@@ -347,9 +364,23 @@ mod tests {
             Constraint::Not(Box::new(inner.clone())),
             Constraint::And(vec![inner.clone()]),
             Constraint::Or(vec![inner]),
+            Constraint::Sparql {
+                query: "SELECT $this WHERE { $this a <urn:x> }".to_string(),
+            },
         ] {
             assert_eq!(combinator.path(), None, "{}", combinator.kind());
         }
+    }
+
+    /// A SPARQL constraint reports its own token, distinct from the
+    /// combinators it shares pathlessness with.
+    #[test]
+    fn a_sparql_constraint_is_pathless_and_has_its_own_token() {
+        let sparql = Constraint::Sparql {
+            query: "SELECT $this WHERE { $this a <urn:x> }".to_string(),
+        };
+        assert_eq!(sparql.path(), None);
+        assert_eq!(sparql.kind(), "sparql");
     }
 
     /// Every kind is distinct. Two constraints sharing a token would make a
@@ -361,6 +392,9 @@ mod tests {
         all.push(Constraint::Not(Box::new(Constraint::And(vec![]))));
         all.push(Constraint::And(vec![]));
         all.push(Constraint::Or(vec![]));
+        all.push(Constraint::Sparql {
+            query: "SELECT $this WHERE { $this a <urn:x> }".to_string(),
+        });
 
         let tokens: std::collections::HashSet<&str> = all.iter().map(Constraint::kind).collect();
         assert_eq!(tokens.len(), all.len(), "{tokens:?}");

@@ -54,6 +54,8 @@ pub enum ShapeError {
     CircularShape { shape: String, property: String },
     #[error("shape `{shape}`: property shape `{property}` states no constraint")]
     EmptyBranch { shape: String, property: String },
+    #[error("shape `{shape}` has a `sh:sparql` constraint with no `sh:select`")]
+    NoSparqlSelect { shape: String },
     #[error(transparent)]
     Compile(#[from] CompileError),
 }
@@ -490,6 +492,24 @@ pub fn read_shape(id: &Sid, facts: &[Flake]) -> Result<CompiledShape, ShapeError
         // property shape. Two readers would be two vocabularies.
         let mut open = Vec::new();
         constraints.push(read_branch(id, property, facts, &mut open)?);
+    }
+
+    // `sh:sparql` (2017 REC §5), not path-scoped like the loop above: it
+    // names a node — `sh:SPARQLConstraint`, though this reader does not
+    // require the type triple, matching how no other constraint reader here
+    // checks `rdf:type` either — whose `sh:select` carries the query text.
+    // A shape may carry more than one.
+    for constraint_node in values(facts, id, &sh("sparql"))
+        .into_iter()
+        .filter_map(as_ref_sid)
+    {
+        let query = first(facts, constraint_node, &sh("select"))
+            .and_then(as_text)
+            .ok_or_else(|| ShapeError::NoSparqlSelect {
+                shape: id.to_string(),
+            })?
+            .to_string();
+        constraints.push(Constraint::Sparql { query });
     }
 
     Ok(compile(&Shape {
@@ -1931,6 +1951,113 @@ mod tests {
             let report = validate(&read_all(&facts).0, &facts);
 
             assert_eq!(report.violations[0].constraint, "minCount");
+        }
+    }
+
+    /// Epic 96 Slice A: `sh:sparql`, stated as triples exactly the way
+    /// `table_shape` above states `sh:property`/`sh:minCount` — the round
+    /// trip that matters is triples in, a real [`Constraint::Sparql`] out.
+    mod sparql_constraint {
+        use super::*;
+
+        fn table_shape_with_sparql_constraint(query: &str) -> Vec<Flake> {
+            vec![
+                node_shape("HasOwnerShape"),
+                f(
+                    a("HasOwnerShape"),
+                    sh("targetClass"),
+                    FlakeValue::Ref(a("Table")),
+                ),
+                f(
+                    a("HasOwnerShape"),
+                    sh("sparql"),
+                    FlakeValue::Ref(a("HasOwnerShape/constraint")),
+                ),
+                f(
+                    a("HasOwnerShape/constraint"),
+                    sh("select"),
+                    FlakeValue::String(query.to_string()),
+                ),
+            ]
+        }
+
+        #[test]
+        fn a_shape_stated_as_triples_yields_a_real_sparql_constraint() {
+            let facts =
+                table_shape_with_sparql_constraint("SELECT $this WHERE { $this a <urn:x> }");
+
+            let (shapes, failures) = read_all(&facts);
+
+            assert!(failures.is_empty(), "{failures:#?}");
+            assert_eq!(shapes.len(), 1);
+            let pending = crate::pending_sparql_checks(&shapes, &[typed("orders", "Table")]);
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].focus_node, a("orders"));
+            assert_eq!(pending[0].query, "SELECT $this WHERE { $this a <urn:x> }");
+        }
+
+        /// `sh:sparql` pointing at a node with no `sh:select` is a malformed
+        /// shape, refused the same way every other malformed shape is — not
+        /// a query that silently checks nothing.
+        #[test]
+        fn a_sparql_constraint_with_no_select_is_refused() {
+            let facts = vec![
+                node_shape("BrokenShape"),
+                f(
+                    a("BrokenShape"),
+                    sh("targetClass"),
+                    FlakeValue::Ref(a("Table")),
+                ),
+                f(
+                    a("BrokenShape"),
+                    sh("sparql"),
+                    FlakeValue::Ref(a("BrokenShape/constraint")),
+                ),
+                // No `sh:select` on `BrokenShape/constraint`.
+            ];
+
+            let (shapes, failures) = read_all(&facts);
+
+            assert!(shapes.is_empty(), "{shapes:#?}");
+            assert_eq!(failures.len(), 1);
+            assert!(
+                matches!(&failures[0], ShapeError::NoSparqlSelect { .. }),
+                "{failures:#?}"
+            );
+        }
+
+        /// A shape can carry an ordinary constraint *and* a SPARQL one at
+        /// once — the two are additive, exactly like any other pair of
+        /// terms on the same shape.
+        #[test]
+        fn a_sparql_constraint_coexists_with_an_ordinary_one() {
+            let mut facts =
+                table_shape_with_sparql_constraint("SELECT $this WHERE { $this a <urn:x> }");
+            facts.extend(vec![
+                f(
+                    a("HasOwnerShape"),
+                    sh("property"),
+                    FlakeValue::Ref(a("HasOwnerShape/name")),
+                ),
+                f(
+                    a("HasOwnerShape/name"),
+                    sh("path"),
+                    FlakeValue::Ref(a("name")),
+                ),
+                f(a("HasOwnerShape/name"), sh("minCount"), FlakeValue::Int(1)),
+            ]);
+            facts.push(typed("orders", "Table"));
+
+            let (shapes, failures) = read_all(&facts);
+
+            assert!(failures.is_empty(), "{failures:#?}");
+            // The ordinary constraint still fires through the pure pass.
+            let report = validate(&shapes, &facts);
+            assert!(!report.conforms);
+            assert_eq!(report.violations[0].constraint, "minCount");
+            // And the SPARQL one is still resolved for a caller to run.
+            let pending = crate::pending_sparql_checks(&shapes, &facts);
+            assert_eq!(pending.len(), 1);
         }
     }
 }

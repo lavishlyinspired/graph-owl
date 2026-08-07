@@ -474,6 +474,61 @@ pub fn validate(shapes: &[CompiledShape], facts: &[Flake]) -> ValidationReport {
     }
 }
 
+/// One `sh:sparql` constraint, resolved to a shape and a focus node, still
+/// waiting for its query to actually run — Epic 96 Slice A.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSparqlCheck {
+    pub shape: Sid,
+    pub focus_node: Sid,
+    pub severity: Severity,
+    pub message: Option<String>,
+    pub query: String,
+}
+
+/// Every `sh:sparql` constraint across `shapes`, resolved to the focus nodes
+/// its shape targets — still pure, still no I/O, and deliberately not
+/// merged into [`validate`]'s own loop.
+///
+/// **Why this is a separate function rather than a branch inside
+/// `validate`.** A SPARQL constraint cannot be *checked* here: checking it
+/// means running the query, and running a query needs the executor, the
+/// budget and the authorization pushdown that live in `graph-owl-api`, not
+/// in a crate whose own doc comment says "pure, no I/O". Everything this
+/// function *can* do without I/O — finding which shapes carry a SPARQL
+/// constraint and which nodes they target — it does, so the caller's job is
+/// only to execute `query` per entry and turn each returned solution into a
+/// violation, not to re-derive targeting.
+#[must_use]
+pub fn pending_sparql_checks(shapes: &[CompiledShape], facts: &[Flake]) -> Vec<PendingSparqlCheck> {
+    let mut pending = Vec::new();
+    for compiled in shapes {
+        let queries: Vec<&str> = compiled
+            .shape
+            .constraints
+            .iter()
+            .filter_map(|c| match c {
+                Constraint::Sparql { query } => Some(query.as_str()),
+                _ => None,
+            })
+            .collect();
+        if queries.is_empty() {
+            continue;
+        }
+        for subject in focus_nodes(&compiled.shape.target, facts, &compiled.shape.id) {
+            for query in &queries {
+                pending.push(PendingSparqlCheck {
+                    shape: compiled.shape.id.clone(),
+                    focus_node: subject.clone(),
+                    severity: compiled.shape.severity,
+                    message: compiled.shape.message.clone(),
+                    query: (*query).to_string(),
+                });
+            }
+        }
+    }
+    pending
+}
+
 fn describe(token: &str, path: Option<&Sid>, actual: Option<&FlakeValue>, shape: &Sid) -> String {
     match (path, actual) {
         (Some(path), Some(actual)) => format!("{shape}: {path} fails {token} ({actual:?})"),
@@ -1667,6 +1722,88 @@ mod tests {
                 "{}",
                 missing.violations[0].message
             );
+        }
+    }
+
+    /// Epic 96 Slice A: `sh:sparql`. `validate` itself cannot check this
+    /// constraint kind (no I/O in this crate), so these pin the two halves
+    /// separately: `validate` reports it as satisfied (never a false
+    /// violation from a pure pass that cannot actually check anything), and
+    /// `pending_sparql_checks` resolves it to real work for a caller who can
+    /// execute a query.
+    mod sparql_constraint {
+        use super::*;
+
+        fn sparql_shape(query: &str) -> CompiledShape {
+            compile(&Shape {
+                id: a("HasOwnerShape"),
+                target: Target::Class(a("Table")),
+                constraints: vec![Constraint::Sparql {
+                    query: query.to_string(),
+                }],
+                severity: Severity::Violation,
+                message: Some("every table needs an owner".to_string()),
+            })
+            .expect("a shape with one sparql constraint compiles")
+        }
+
+        /// A shape with only a SPARQL constraint is not empty — a pure-pass
+        /// blind spot must not be indistinguishable from a shape with
+        /// nothing stated at all, which `compile` already refuses.
+        #[test]
+        fn a_shape_with_only_a_sparql_constraint_compiles() {
+            let shape = sparql_shape("SELECT $this WHERE { $this a <urn:x> }");
+            assert_eq!(shape.severity(), Severity::Violation);
+        }
+
+        /// The pure `validate` pass cannot run the query, so it must never
+        /// report a violation for this constraint kind — reporting one
+        /// would be inventing a finding nobody checked.
+        #[test]
+        fn validate_reports_a_sparql_constraint_as_satisfied() {
+            let shape = sparql_shape("SELECT $this WHERE { $this a <urn:x> }");
+            let facts = vec![typed("t", "Table")];
+            let report = validate(std::slice::from_ref(&shape), &facts);
+            assert!(report.conforms, "{:?}", report.violations);
+            assert!(report.violations.is_empty(), "{:?}", report.violations);
+        }
+
+        /// `pending_sparql_checks` finds the constraint and resolves it to
+        /// every node the shape targets — the part it *can* do without I/O.
+        #[test]
+        fn pending_sparql_checks_resolves_the_query_to_every_target_node() {
+            let shape = sparql_shape("SELECT $this WHERE { $this a <urn:x> }");
+            let facts = vec![typed("a", "Table"), typed("b", "Table"), typed("c", "View")];
+
+            let pending = pending_sparql_checks(std::slice::from_ref(&shape), &facts);
+
+            let nodes: std::collections::HashSet<&Sid> =
+                pending.iter().map(|p| &p.focus_node).collect();
+            assert_eq!(nodes, std::collections::HashSet::from([&a("a"), &a("b")]));
+            assert!(pending.iter().all(|p| p.shape == a("HasOwnerShape")));
+            assert!(
+                pending
+                    .iter()
+                    .all(|p| p.query == "SELECT $this WHERE { $this a <urn:x> }")
+            );
+            assert!(
+                pending
+                    .iter()
+                    .all(|p| p.message.as_deref() == Some("every table needs an owner"))
+            );
+        }
+
+        /// A shape with no SPARQL constraint contributes nothing — this is
+        /// what keeps `pending_sparql_checks` cheap to call on every
+        /// validation pass rather than only when SPARQL constraints exist.
+        #[test]
+        fn a_shape_with_no_sparql_constraint_contributes_nothing() {
+            let ordinary = shape_of(Constraint::MinCount {
+                path: a("name"),
+                n: 1,
+            });
+            let pending = pending_sparql_checks(&[ordinary], &[typed("t", "Table")]);
+            assert!(pending.is_empty(), "{pending:?}");
         }
     }
 }

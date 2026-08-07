@@ -86,7 +86,7 @@ is the condition that index exists to catch.
 | **93** | 3 | [`93-console-overview.md`](93-console-overview.md) | **Shipped** | 2/2 | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
 | **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | In progress | 5/7 (+1 partial) | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
 | **95** | 10 | [`95-owl-rl-completion.md`](95-owl-rl-completion.md) | **Shipped** | 2/2 | Epic 6 (the eight rules and the fixpoint that runs them) |
-| **96** | 10 | [`96-shacl-sparql.md`](96-shacl-sparql.md) | Not started | 0/2 | Epic 5 (SHACL Core), Epic 7 (SPARQL) |
+| **96** | 10 | [`96-shacl-sparql.md`](96-shacl-sparql.md) | In progress | 1/3 | Epic 5 (SHACL Core), Epic 7 (SPARQL) |
 | **97** | 10, 12 | [`97-incremental-parallel-reasoning.md`](97-incremental-parallel-reasoning.md) | In progress | 1/2 | Epic 6 (semi-naive fixpoint), Epic 37a (the measurement) |
 | **98** | 11, 12 | [`98-owl-el-reasoning.md`](98-owl-el-reasoning.md) | In progress | 1/2 | Epic 6 (overlay, budgets, explainability), Epic 24 (ontologies as entities) |
 | **99** | 11, 12 | [`99-owl-ql-reasoning.md`](99-owl-ql-reasoning.md) | In progress | 1/2 | Epic 7 (query algebra to rewrite), Epic 6 (explanation contract) |
@@ -607,7 +607,8 @@ is the condition that index exists to catch.
 
 ### Epic 96 — SHACL-SPARQL *(Demo 10)*
 
-- [ ] SPARQL-based constraint components
+- [x] `sh:sparql`/`sh:SPARQLConstraint`, the bare constraint — shipped 8 August 2026
+- [ ] SPARQL-based constraint components (`sh:SPARQLConstraintComponent`, `sh:parameter`, `sh:
 - [ ] The violations workflow is unchanged; **authoring gains a second language**, so the cons
 
 ### Epic 97 — Incremental & Parallel Reasoning *(Demo 10, 12)*

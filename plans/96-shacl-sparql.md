@@ -1,19 +1,19 @@
 # Plan: SHACL-SPARQL (Epic 96)
 
-**Status**: **Slice A is ready.** Corrected 7 August 2026 — the previous
-"blocked, full stop" status mis-cited which document gates it. Every term
-Slice A's acceptance criteria need (`sh:SPARQLConstraint`,
-`sh:SPARQLConstraintComponent`, `sh:SPARQLSelectValidator`,
-`sh:SPARQLAskValidator`, `sh:sparql`, `sh:select`, `sh:ask`, `sh:parameter`,
-`sh:labelTemplate`) is defined in **the 2017 SHACL Recommendation**
-(`https://www.w3.org/TR/shacl/`, §5 "SPARQL-based Constraints" and §6
-"SPARQL-based Constraint Components") — a W3C Recommendation, the highest
-maturity tier, still the current in-force text and not superseded by
-anything at Recommendation status. SHACL 1.2 SPARQL Extensions carries the
-*same* vocabulary forward into a reorganised document, but that document is
-a Working Draft and adds nothing this slice's acceptance criteria require —
-so it is not what Slice A depends on. See "Status of the specification"
-below for the verification.
+**Status**: **Slice A's bare constraint (`sh:sparql`/`sh:SPARQLConstraint`)
+shipped 8 August 2026** — `Constraint::Sparql`, shape parsing, and
+`Catalog::run_validation_as` (budget + authorization, matching decisions 2
+and 3), all against **the 2017 SHACL Recommendation**
+(`https://www.w3.org/TR/shacl/`, §5 "SPARQL-based Constraints") — a W3C
+Recommendation, the highest maturity tier, still the current in-force text
+and not superseded by anything at Recommendation status. Reusable
+constraint *components* (§6, `sh:SPARQLConstraintComponent`) are **not
+attempted** — a stated scope cut, not a silent one; see Slice A's own
+write-up below for why and what a follow-up slice needs. SHACL 1.2 SPARQL
+Extensions carries the *same* vocabulary forward into a reorganised
+document, but that document is a Working Draft and adds nothing Slice A's
+acceptance criteria require — so it was never what Slice A depended on.
+See "Status of the specification" below for the verification.
 
 Slice B (SHACL Rules) stays blocked, but not because a draft is immature —
 verified directly against the 2017 REC's own scope statement, it defines
@@ -117,16 +117,63 @@ constraint validates and writes nothing to the overlay. Slice B has no
 Recommendation-track spec to build against at all, plus the unresolved
 composition question below once one exists.
 
-### Slice A — SPARQL constraints (ready)
+### Slice A — SPARQL constraints — **bare constraint shipped, 8 August 2026; components not attempted**
 
-- [ ] A `sh:SPARQLConstraint` returning solutions produces one violation per
+- [x] A `sh:SPARQLConstraint` returning solutions produces one violation per
       solution, with the focus node named.
 - [ ] A constraint component is definable once and used with different
-      parameters.
-- [ ] A constraint query exceeding the budget is truncated and *reported as
+      parameters. **Not attempted this pass** — see the write-up below.
+- [x] A constraint query exceeding the budget is truncated and *reported as
       truncated*, never reported as "no violations found".
-- [ ] A constraint cannot read what its author cannot — asserted with two
+- [x] A constraint cannot read what its author cannot — asserted with two
       principals, as Epic 13 does for search.
+
+**What shipped.** `Constraint::Sparql { query }` (`graph-owl-ontology`),
+parsed from `sh:sparql`/`sh:select` triples (`graph-owl-constraint::shapes`,
+per the 2017 REC vocabulary verified earlier in this plan). The pure
+`graph-owl-constraint::validate` pass cannot evaluate this constraint kind
+(it needs the query engine, not just flakes in memory) and reports it as
+satisfied — the safe direction to be wrong in — while a new
+`pending_sparql_checks` function resolves the constraint to every focus node
+its shape targets, still without I/O. `Catalog::run_validation_as`
+(`graph-owl-api`) is the stateful half: `$this` is pre-bound via a joined
+`VALUES` clause (the standard SPARQL technique — chosen over string
+substitution, which risks corrupting an identifier that happens to contain
+`this` as a substring), then run through the exact `execute_algebra`
+function `Catalog::sparql` itself calls, so decision 2 (budget) and decision
+3 (authorization) apply identically to a hand-typed query.
+
+**A real authorization gap, found by this slice's own two-principal RED
+test, not assumed correct.** Pre-binding `$this` via `VALUES` means it never
+appears in the query's own triple patterns, so the ordinary pushdown/
+authorization scan — which narrows based on what a query's patterns
+*reference* — has nothing to gate on for a query built entirely from
+`FILTER NOT EXISTS` clauses. The restricted principal in the first version
+of the test saw both assets' violations, not just the one it was allowed to
+read. Fixed by an explicit check before a constraint is even attempted:
+`Self::authorization_key(focus_node, ...)` (already used for the
+graph-flake authorization path — `dsc:fqn` first, `Sid::id` fallback)
+against `predicate_for(principal, ViewBasic)`, skipping any focus node the
+principal cannot see. A `$this`-pre-bound query genuinely does need its own
+gate; reusing `scoped_facts`' pattern-based one silently does not cover it.
+
+**Constraint components — `sh:SPARQLConstraintComponent`,
+`sh:parameter`, `sh:labelTemplate` — explicitly not attempted this pass**,
+a real scope cut against this criterion, not a silent drop. Reusable,
+parameterised validators are a second, materially more complex mechanism
+(a component registry, parameter substitution into query text, template
+rendering) roughly comparable in size to the bare constraint above, and
+this session's time went to shipping the bare constraint correctly —
+including the authorization gap above — rather than half-shipping both.
+Revisit as its own slice.
+
+**Mutation testing**: `graph-owl-ontology` 3/3 viable caught (1 unviable),
+`graph-owl-constraint` 2/2 + 0 viable across `lib.rs`/`shapes.rs` (2
+unviable), `graph-owl-api` first pass found one real MISSED mutant (the
+shape-facts fetch's `cx` field, the same "unnarrowed query is invisible on
+a fresh double" class this project has hit before) — fixed with a
+`RecordingGraph::patterns()` assertion, re-run: 6 caught, 4 unviable, 0
+missed.
 
 ### Slice B — SHACL Rules (blocked)
 
