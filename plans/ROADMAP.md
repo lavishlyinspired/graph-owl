@@ -435,7 +435,7 @@ decision to accept churn and should be made knowingly.
 | 100 | `100-profile-detection-and-routing.md` | **DONE** — none of the profiles is a subset of another and W3C provides no detector, so this is real work and a prerequisite |
 | 101 | `101-sparql-federation.md` | **DONE** — the language work is free; the epic is the three dangers, and the test that matters captures the outbound request |
 | 102 | `102-read-write-partitions.md` | **DONE** — planned with an honest note that the problem has not been observed here |
-| 103 | `103-in-process-traversal.md` | **DONE** — petgraph as the algorithm engine and never the model; `DiGraph` not `StableDiGraph`, because a long-lived in-memory graph would break `as_of` and authorization at once |
+| 103 | `103-in-process-traversal.md` | **Planned, not built** — corrected 7 Aug 2026, this row previously read "DONE" but no code exists: `graph-owl-traversal` has no petgraph dependency and `TraversalEngine` has one implementor (the Postgres CTE adapter). The entry-condition measurement (30 Jul 2026) found the win does not grow with depth as hypothesized — a flat ~1.5× constant factor, not worth the extraction cost, `deny.toml`, and a second adapter. Revisit only if the plan's own named conditions change the verdict (paths past 11 hops, a genuinely cyclic graph, or Epic 37a's corpus past 10M flakes) |
 | — | **Sequencing note** | **Epic 37a comes before 102, 103 and the SOP/OSP indexes.** All three have entry conditions that are measurements, and without the measurement they are all guesses with plans attached |
 | — | `00j-language-boundaries.md` | **DONE** — the process boundary is the language boundary. Reverses the Rust-connector decision; keeps MCP in Rust |
 
