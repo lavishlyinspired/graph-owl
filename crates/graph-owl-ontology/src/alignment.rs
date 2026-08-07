@@ -210,15 +210,20 @@ impl Alignment {
     /// duplicate, and a later run updating this alignment's source or
     /// confidence retracts and re-asserts the same node rather than
     /// leaving the old one stranded.
+    ///
+    /// **`Sid`'s own compact `Display` form (`namespace_code:id`), not
+    /// [`Sid::to_iri`].** A real IRI carries its own `#` (every namespace
+    /// this crate uses is a `#`-delimited vocabulary), and concatenating
+    /// three of them into one `dsc:`-namespaced local name produces a
+    /// string with more than one fragment delimiter — syntactically
+    /// invalid as an IRI, which surfaces only once something actually
+    /// tries to convert this subject to an RDF term (a real end-to-end
+    /// query, not `alignment_to_flakes`'s own unit tests, is what caught
+    /// this).
     #[must_use]
     pub fn subject(&self) -> Sid {
         let (left, right, predicate, ..) = self.parts();
-        Sid::dsc(format!(
-            "alignment:{}:{}:{}",
-            left.to_iri().unwrap_or_else(|| left.to_string()),
-            predicate.to_iri().unwrap_or_else(|| predicate.to_string()),
-            right.to_iri().unwrap_or_else(|| right.to_string()),
-        ))
+        Sid::dsc(format!("alignment:{left}:{predicate}:{right}"))
     }
 }
 
@@ -445,6 +450,37 @@ mod tests {
             lossy_reverse: false,
         };
         assert_eq!(computed.subject(), curated.subject());
+    }
+
+    /// **Regression, found only by a real end-to-end query, not by any
+    /// test in this file.** An earlier version built `subject()` from
+    /// `Sid::to_iri()` — each of `left`/`predicate`/`right` is already a
+    /// real, `#`-delimited IRI, so concatenating three of them into one
+    /// `dsc:`-namespaced local name produced a string with more than one
+    /// fragment delimiter: syntactically invalid as an IRI. Every
+    /// alignment's reified subject must itself be convertible to a real
+    /// IRI, not just constructible as a `Sid` — this is exactly the
+    /// distinction the earlier bug fell through, since `Sid` construction
+    /// never validates its own local name against the namespace's syntax.
+    #[test]
+    fn the_reified_subject_is_itself_a_valid_iri() {
+        let alignment = Alignment::Match {
+            left: cui("C0009044"),
+            right: snomed("22298006"),
+            predicate: MatchPredicate::ExactMatch,
+            source: AlignmentSource::Curated {
+                authority: "UMLS".to_string(),
+            },
+            confidence: 1.0,
+            lossy_reverse: false,
+        };
+        let subject = alignment.subject();
+        let iri = subject.to_iri().expect("has an IRI at all");
+        assert_eq!(
+            iri.matches('#').count(),
+            1,
+            "more than one fragment delimiter is not a valid IRI: {iri}"
+        );
     }
 
     /// And the inverse: a genuinely different alignment must not collide.

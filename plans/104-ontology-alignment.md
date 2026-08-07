@@ -53,11 +53,11 @@ pub struct Alignment {
 ## Acceptance criteria
 
 - [x] UMLS RRF ingests: CUIs land as identities in a reserved namespace; `MRCONSO` atoms attach to their CUI; source-vocabulary codes (SNOMED, RxNorm) align to the CUI with `source = Curated`. (Slice B)
-- [ ] A SNOMED concept and an RxNorm concept sharing a CUI are reachable from each other **without any computed matching having run**.
+- [x] A SNOMED concept and an RxNorm concept sharing a CUI are reachable from each other **without any computed matching having run**. (Slice C — found and fixed three real bugs to make this true: `scope_facts` had no notion of vocabulary content, `Alignment::subject()` produced an invalid IRI, and `scoped_facts`'s own flake dedup missed a real duplication class)
 - [x] A computed alignment never asserts `owl:equivalentClass` — asserted structurally, so the type system refuses it rather than a validation rule catching it. (Slice A)
 - [ ] An alignment at 0.62 confidence appears in a review queue and **not** in query results that do not opt into unreviewed alignments.
 - [ ] A human-confirmed alignment records **who** confirmed it and when; a later automated run does not overwrite it.
-- [ ] A lossy reverse mapping is marked, and a query traversing it in the lossy direction can tell.
+- [x] A lossy reverse mapping is marked, and a query traversing it in the lossy direction can tell. (Slice C)
 - [x] Alignment ingestion is budgeted and resumable — UMLS is millions of rows and a failure at 80% must not mean starting again. (Slice B — resumable by construction; "budgeted" in the sense of bounded per-call cost is inherited from the caller owning batch size, not yet wired to a job/error-cap harness like Epic 16's `graph-owl-connectors::job`)
 - [ ] **Console**: an alignment review queue *(Epic 42)*, and on any cross-vocabulary result the alignment that made it reachable is inspectable — a result that crossed an approximate match must be distinguishable from one that did not, and not by colour alone.
 
@@ -170,8 +170,79 @@ itself (only through `parse_mrconso_line`/`atom_to_alignment` directly).
 Added `ingest_counts_skipped_and_errored_rows_separately_from_aligned_
 ones`; re-run: 20/20 viable mutants caught, 3 unviable.
 
-### Slice C: Cross-vocabulary traversal
+### Slice C: Cross-vocabulary traversal — **shipped, 7 August 2026**
 **RED**: SNOMED → RxNorm via CUI with no computed matcher present. Second RED: the lossy-direction test.
+
+**No new query-layer code, by design** — decision 2's whole point is that
+an alignment stored as `left {predicate} right` is an ordinary flake a
+plain SPARQL query already traverses, unlike Epic 94's `rdf:reifies`
+(synthesized, never stored). This slice is almost entirely the two RED
+tests plus fixing what they found — and they found real bugs in three
+different places, none of them in `graph_owl_ontology::alignment` itself:
+
+**1. `scope_facts` had no notion of vocabulary content.** The very first
+run of the traversal test returned zero rows. `scope_facts`'s asset
+visibility check requires every flake's subject to be either a real
+catalog asset (`list_assets_under_fqn`) or a `fromEntity`/`toEntity`
+relationship endpoint — a CUI or a SNOMED/`RxNorm` code is neither, and
+can never appear in `visible` no matter how permissive the policy is.
+Fixed by adding `is_vocabulary_namespace` (true for `CUI`/`SNOMED_CT`/
+`RXNORM`) as a third admission path, and extending the existing
+`fromEntity`/`toEntity` endpoint-tracking loop to also recognise
+`alignmentLeft`/`alignmentRight` — the alignment analogue, with an
+endpoint counting as "permitted" when it is a visible asset *or* a
+vocabulary identifier. Four new `scope_facts_tests` pin this, including
+the negative: an alignment endpoint naming a real, hidden catalog asset
+is still dropped — the carve-out is for vocabulary namespaces specifically,
+not a blanket bypass for the predicate shape.
+
+**2. `Alignment::subject()` produced an invalid IRI.** Once (1) was fixed,
+a *different* test (querying the reified metadata directly) failed with
+`namespace 1 has no IRI` — a genuinely confusing error for a namespace
+(`DSC`) that plainly has one. The real cause: `subject()` built its local
+name from `left.to_iri()`/`predicate.to_iri()`/`right.to_iri()` — each
+already a real IRI carrying its own `#` — concatenated inside another
+`dsc:`-namespaced IRI. Two-plus fragment delimiters is not valid IRI
+syntax, and this surfaces only when something actually tries to convert
+the subject to an RDF term, which no `alignment_to_flakes` unit test ever
+does. Fixed by using `Sid`'s own compact `Display` (`namespace_code:id`)
+instead of `to_iri()` for all three components — pinned both by a
+regression unit test in `graph-owl-ontology`
+(`the_reified_subject_is_itself_a_valid_iri`) and by the fact that the
+end-to-end query now succeeds.
+
+**3. `scoped_facts`'s own flake dedup missed a real duplication class.**
+With (1) and (2) fixed, the traversal test *still* failed — not with zero
+rows this time, but with the same correct row duplicated. Traced to
+`scoped_facts`'s sort-then-`Vec::dedup()` step: the sort key was `(s.id,
+p.id, t)`, omitting the object and both namespace codes. Two flakes
+sharing a subject and predicate but differing only in object — exactly
+what two *overlapping* pushdown scans on the same predicate produce, one
+bound to a specific object and one unbound — sort as equal, so a third
+flake with the identical key can land between two copies of the same
+duplicate after a stable sort. `Vec::dedup` only removes *adjacent*
+repeats, so the duplicate survived untouched, and the evaluator faithfully
+emitted the surviving row twice. This is not alignment-specific — it is a
+latent bug in the shared query path any two overlapping scans on one
+predicate could have triggered — found here because this slice's own
+traversal query is exactly `?cui p <bound> . ?cui p ?free`, the shape that
+exposes it. Fixed by extracting the sort/dedup into its own function,
+`dedup_flakes`, with a key that includes the object (rendered via `Debug`,
+the same reason `graph-owl-reasoning`'s own dedup key does — `FlakeValue`
+has no `Ord`, a `Float` NaN is not `Eq`) and both full `Sid`s rather than
+their local names alone. Four new `dedup_flakes_tests` pin it directly,
+including the exact non-adjacent shape that exposed the bug.
+
+**Acceptance criteria, verified**:
+`a_snomed_concept_reaches_its_rxnorm_counterpart_via_the_shared_cui`
+constructs only `Curated` alignments (no `Computed` value appears
+anywhere in the test) and reaches RxNorm from SNOMED through their shared
+CUI via a real two-hop `Catalog::sparql()` join.
+`a_lossy_reverse_alignment_is_distinguishable_by_a_query` reads
+`lossyReverse` for two alignments straight off the reified metadata via
+an ordinary SPARQL pattern (`?alignment dsc:alignmentLeft ?left ;
+dsc:alignmentRight ?right ; dsc:lossyReverse ?lossy`), no query-layer
+support needed.
 
 ### Slice D: Computed alignment, confirmation, and the review queue
 **RED**: a 0.62 match is invisible to default queries and present in review. Mutator watch: a threshold comparison flipped to `>=` on the wrong bound must fail a boundary test at exactly 0.5 and 0.8.

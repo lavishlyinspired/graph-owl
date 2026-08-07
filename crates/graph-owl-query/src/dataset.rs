@@ -240,6 +240,43 @@ mod tests {
         assert_eq!(d.len(), 2);
     }
 
+    /// **Diagnostic scratch test, not a permanent fixture.** A self-join
+    /// BGP (`?cui p o1 . ?cui p ?x . FILTER(?x != o1)`) against a plain
+    /// `oxrdf::Dataset` correctly returns one row for this exact fact
+    /// shape (verified separately in a scratch reproduction outside this
+    /// crate). This test checks whether `FlakeDataset` reproduces that or
+    /// diverges — isolating whether a real end-to-end bug (Epic 104 Slice
+    /// C) lives in `FlakeDataset`'s own `QueryableDataset` impl or
+    /// upstream of it (pushdown, `scope_facts`, `execute_algebra`).
+    #[test]
+    fn self_join_with_inequality_filter_returns_one_row_not_two() {
+        let d = dataset(&[
+            flake("cui1", "exactMatch", FlakeValue::Ref(Sid::dsc("snomed1"))),
+            flake("cui1", "exactMatch", FlakeValue::Ref(Sid::dsc("rxnorm1"))),
+        ]);
+        let query = spargebra::SparqlParser::new()
+            .parse_query(&format!(
+                "SELECT ?rxnorm WHERE {{ \
+                    ?cui <{DSC}exactMatch> <{DSC}snomed1> . \
+                    ?cui <{DSC}exactMatch> ?rxnorm . \
+                    FILTER(?rxnorm != <{DSC}snomed1>) \
+                 }}",
+                DSC = "https://graph-owl.dev/ns/catalog#"
+            ))
+            .expect("parses");
+        let results = spareval::QueryEvaluator::new()
+            .prepare(&query)
+            .execute(&d)
+            .expect("evaluates");
+        let rows = match results {
+            spareval::QueryResults::Solutions(solutions) => {
+                solutions.collect::<Result<Vec<_>, _>>().expect("solutions")
+            }
+            _ => panic!("expected solutions"),
+        };
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+    }
+
     /// **The RED test, Epic 94 decision 7 / Slice D's own stated criterion**:
     /// a query using the standard `rdf:reifies` vocabulary against an
     /// estate that plainly contains a reified relationship must not return

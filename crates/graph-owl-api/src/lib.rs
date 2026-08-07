@@ -698,12 +698,64 @@ fn describe_scan(pattern: &graph_owl_core::flake::TriplePattern) -> String {
     )
 }
 
+/// Reduce overlapping pushdown scans to a true set of flakes, in place.
+///
+/// **The sort key must fully discriminate, not just the common case.** An
+/// earlier version sorted by `(s.id, p.id, t)` alone — omitting `o` and
+/// both namespace codes. Two flakes sharing a subject and predicate but
+/// differing only in object (exactly what two *overlapping* scans on the
+/// same predicate produce — one bound to a specific object, one unbound)
+/// then sort as *equal*, so a third flake with the identical key can land
+/// between two copies of the same duplicate after a stable sort.
+/// `Vec::dedup` only removes *adjacent* repeats, so the duplicate survives
+/// untouched. **Found by a real Epic 104 query**
+/// (`?cui skos:exactMatch <bound> . ?cui skos:exactMatch ?free`), where
+/// the bound-object scan's one flake reappeared inside the unbound scan's
+/// two results, non-adjacently, and silently doubled a row the evaluator
+/// returned — not a hypothetical, since the query's own two triple
+/// patterns pushed down into exactly this overlapping shape.
+///
+/// `FlakeValue` itself has no `Ord` (a `Float` NaN is not `Eq`, the same
+/// reason `graph-owl-reasoning`'s own dedup key renders via `Debug`
+/// instead of comparing directly) — rendering `o` the same way here is
+/// what makes this key total.
+fn dedup_flakes(flakes: &mut Vec<graph_owl_core::flake::Flake>) {
+    flakes.sort_by(|a, b| {
+        (&a.s, &a.p, format!("{:?}", a.o), a.t).cmp(&(&b.s, &b.p, format!("{:?}", b.o), b.t))
+    });
+    flakes.dedup();
+}
+
+/// Whether `namespace_code` names external vocabulary/ontology content —
+/// a UMLS CUI, a SNOMED CT or `RxNorm` code (Epic 104) — rather than a
+/// catalog asset.
+///
+/// The asset access-predicate policy exists to control which *catalog
+/// assets* a principal may see, checked against `visible`
+/// (`list_assets_under_fqn`). A vocabulary identifier is never a catalog
+/// asset and can never appear in `visible` no matter how permissive the
+/// policy is, so treating it as gated by that policy would not make it
+/// more secure — it would make every alignment invisible to every
+/// principal, including `Principal::system()`.
+fn is_vocabulary_namespace(namespace_code: u16) -> bool {
+    matches!(
+        namespace_code,
+        graph_owl_core::flake::namespace::CUI
+            | graph_owl_core::flake::namespace::SNOMED_CT
+            | graph_owl_core::flake::namespace::RXNORM
+    )
+}
+
 /// Keep only the facts this principal may see, up to the budget.
 ///
 /// A flake is visible when its subject is a visible asset. A **relationship**
 /// node is not an asset, so it is visible only when *both* endpoints are —
 /// otherwise the existence of an edge would disclose the existence of the
-/// asset at its far end, which is precisely what the policy hid.
+/// asset at its far end, which is precisely what the policy hid. An
+/// **alignment**'s reified metadata node (`alignmentLeft`/`alignmentRight`,
+/// Epic 104) is checked the identical way, except an endpoint counts as
+/// permitted when it is *either* a visible asset *or* a vocabulary
+/// identifier — see [`is_vocabulary_namespace`].
 fn scope_facts(
     all: &[graph_owl_core::flake::Flake],
     visible: &std::collections::HashSet<String>,
@@ -711,9 +763,10 @@ fn scope_facts(
 ) -> (Vec<graph_owl_core::flake::Flake>, bool) {
     use graph_owl_core::flake::FlakeValue;
 
-    // Which relationship nodes have both endpoints visible. Computed first,
-    // because a relationship's own flakes are spread across several rows and a
-    // single pass would have to decide before seeing them all.
+    // Which relationship/alignment nodes have both endpoints visible.
+    // Computed first, because a reified subject's own flakes are spread
+    // across several rows and a single pass would have to decide before
+    // seeing them all.
     //
     // Tracked as (endpoints seen, endpoints permitted) rather than a
     // from/to pair. The first version kept the two positions apart and then
@@ -724,7 +777,10 @@ fn scope_facts(
     let mut endpoints: std::collections::HashMap<&str, (usize, usize)> =
         std::collections::HashMap::new();
     for flake in all {
-        if flake.p.id != "fromEntity" && flake.p.id != "toEntity" {
+        if !matches!(
+            flake.p.id.as_str(),
+            "fromEntity" | "toEntity" | "alignmentLeft" | "alignmentRight"
+        ) {
             continue;
         }
         let FlakeValue::Ref(target) = &flake.o else {
@@ -732,7 +788,7 @@ fn scope_facts(
         };
         let entry = endpoints.entry(flake.s.id.as_str()).or_insert((0, 0));
         entry.0 += 1;
-        if visible.contains(&target.id) {
+        if visible.contains(&target.id) || is_vocabulary_namespace(target.namespace_code) {
             entry.1 += 1;
         }
     }
@@ -748,7 +804,9 @@ fn scope_facts(
     let permitted: Vec<_> = all
         .iter()
         .filter(|flake| {
-            visible.contains(&flake.s.id) || visible_edges.contains(flake.s.id.as_str())
+            visible.contains(&flake.s.id)
+                || visible_edges.contains(flake.s.id.as_str())
+                || is_vocabulary_namespace(flake.s.namespace_code)
         })
         .cloned()
         .collect();
@@ -2649,8 +2707,7 @@ impl Catalog {
         // Patterns overlap — `?s dsc:name ?n` and `?s ?p ?o` both return the
         // name flakes. A duplicate quad would make the evaluator emit a
         // solution twice, so the union has to be a set.
-        all.sort_by(|a, b| (&a.s.id, &a.p.id, a.t).cmp(&(&b.s.id, &b.p.id, b.t)));
-        all.dedup();
+        dedup_flakes(&mut all);
 
         let (facts, truncated) = scope_facts(&all, &visible, budget.max_facts);
         let fact_count = facts.len();
@@ -16645,9 +16702,80 @@ mod tests {
 }
 
 #[cfg(test)]
+mod dedup_flakes_tests {
+    use super::dedup_flakes;
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+
+    fn about(subject: &str, predicate: &str, value: FlakeValue) -> Flake {
+        Flake::assert(Sid::dsc(subject), Sid::dsc(predicate), value, 1)
+    }
+
+    #[test]
+    fn a_flake_appearing_in_two_overlapping_scans_is_kept_once() {
+        let f = about("a", "name", FlakeValue::String("x".into()));
+        let mut flakes = vec![f.clone(), f.clone()];
+        dedup_flakes(&mut flakes);
+        assert_eq!(flakes.len(), 1);
+    }
+
+    /// **The regression, found by a real Epic 104 query.** Two *different*
+    /// flakes sharing a subject and predicate but differing only in
+    /// object sort as equal under a key that omits `o` — so a duplicate of
+    /// the first can land on the far side of the second after a stable
+    /// sort, non-adjacent to its own copy. `dedup_flakes`'s key must
+    /// include `o`, or `Vec::dedup`'s adjacent-only removal misses this
+    /// exact shape.
+    #[test]
+    fn a_duplicate_separated_by_a_same_key_different_object_flake_is_still_removed() {
+        let bound = about("cui", "exactMatch", FlakeValue::Ref(Sid::dsc("snomed")));
+        let other = about("cui", "exactMatch", FlakeValue::Ref(Sid::dsc("rxnorm")));
+        // The exact non-adjacent shape two overlapping pushdown scans
+        // produce: [bound-object scan's one result, unbound scan's two
+        // results] = [bound, other, bound].
+        let mut flakes = vec![bound.clone(), other.clone(), bound];
+        dedup_flakes(&mut flakes);
+        assert_eq!(flakes.len(), 2, "{flakes:?}");
+        assert!(flakes.contains(&other));
+    }
+
+    /// Two subjects with identical `(s.id, p.id, t)` but *different
+    /// namespace codes* must never collapse into one — the identity is
+    /// the whole `Sid`, not its local name.
+    #[test]
+    fn two_flakes_differing_only_by_namespace_code_are_not_deduped_together() {
+        let dsc_subject = Flake::assert(
+            Sid::dsc("x"),
+            Sid::dsc("p"),
+            FlakeValue::String("v".into()),
+            1,
+        );
+        let other_namespace_subject = Flake::assert(
+            Sid::new(999, "x"),
+            Sid::dsc("p"),
+            FlakeValue::String("v".into()),
+            1,
+        );
+        let mut flakes = vec![dsc_subject.clone(), other_namespace_subject.clone()];
+        dedup_flakes(&mut flakes);
+        assert_eq!(flakes.len(), 2, "{flakes:?}");
+    }
+
+    #[test]
+    fn distinct_flakes_are_all_kept() {
+        let mut flakes = vec![
+            about("a", "name", FlakeValue::String("x".into())),
+            about("a", "type", FlakeValue::String("y".into())),
+            about("b", "name", FlakeValue::String("z".into())),
+        ];
+        dedup_flakes(&mut flakes);
+        assert_eq!(flakes.len(), 3);
+    }
+}
+
+#[cfg(test)]
 mod scope_facts_tests {
     use super::{SparqlBudget, scope_facts};
-    use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
     use std::collections::HashSet;
 
     fn visible(ids: &[&str]) -> HashSet<String> {
@@ -16729,6 +16857,73 @@ mod scope_facts_tests {
         let orphan = vec![about("r1", "relType", FlakeValue::String("feeds".into()))];
         let (kept, _) = scope_facts(&orphan, &visible(&["a", "b"]), 100);
         assert!(kept.is_empty());
+    }
+
+    /// **Epic 104's own gap, found by a real end-to-end test, not by this
+    /// unit suite.** A CUI or a SNOMED/RxNorm code is not a catalog asset —
+    /// `visible` is built from real relational assets
+    /// (`list_assets_under_fqn`) and would never contain one, so the
+    /// asset access-predicate policy was never meant to gate vocabulary
+    /// content. The alignment's own *direct* semantic triple
+    /// (`left skos:exactMatch right`, no reification) must survive even
+    /// though neither `visible` set contains either side.
+    #[test]
+    fn an_alignments_direct_triple_is_kept_though_neither_side_is_a_catalog_asset() {
+        let direct = Flake::assert(
+            Sid::new(namespace::CUI, "C1"),
+            Sid::new(namespace::SKOS, "exactMatch"),
+            FlakeValue::Ref(Sid::new(namespace::SNOMED_CT, "1")),
+            1,
+        );
+        let (kept, _) = scope_facts(&[direct], &visible(&[]), 100);
+        assert_eq!(kept.len(), 1, "{kept:?}");
+    }
+
+    /// The reified metadata node (`alignmentLeft`/`alignmentRight`) is the
+    /// alignment analogue of `fromEntity`/`toEntity` — recognised the same
+    /// way, but "permitted" is automatic once an endpoint's own namespace
+    /// names external vocabulary content rather than a catalog asset.
+    #[test]
+    fn an_alignments_reified_metadata_is_kept_when_both_ends_are_vocabulary_subjects() {
+        let flakes = vec![
+            about(
+                "align:1",
+                "alignmentLeft",
+                FlakeValue::Ref(Sid::new(namespace::CUI, "C1")),
+            ),
+            about(
+                "align:1",
+                "alignmentRight",
+                FlakeValue::Ref(Sid::new(namespace::SNOMED_CT, "1")),
+            ),
+            about("align:1", "confidence", FlakeValue::Float(1.0)),
+        ];
+        let (kept, _) = scope_facts(&flakes, &visible(&[]), 100);
+        assert_eq!(kept.len(), 3, "every flake of the alignment: {kept:?}");
+    }
+
+    /// The carve-out is for *vocabulary* namespaces specifically, not a
+    /// blanket bypass for anything shaped like `alignmentLeft`/
+    /// `alignmentRight` — an alignment endpoint that names a real,
+    /// hidden catalog asset must still be dropped, the same property
+    /// `an_edge_to_a_hidden_asset_is_dropped_entirely` pins for
+    /// `fromEntity`/`toEntity`.
+    #[test]
+    fn an_alignment_pointing_at_a_hidden_catalog_asset_is_still_dropped() {
+        let flakes = vec![
+            about(
+                "align:1",
+                "alignmentLeft",
+                FlakeValue::Ref(Sid::new(namespace::CUI, "C1")),
+            ),
+            about(
+                "align:1",
+                "alignmentRight",
+                FlakeValue::Ref(Sid::dsc("secret")),
+            ),
+        ];
+        let (kept, _) = scope_facts(&flakes, &visible(&[]), 100);
+        assert!(kept.is_empty(), "{kept:?}");
     }
 
     #[test]
@@ -31435,5 +31630,161 @@ mod incremental_projection_tests_support {
             .await
             .expect("save policy");
         restricted
+    }
+}
+
+/// Epic 104 Slice C: cross-vocabulary traversal.
+///
+/// **No new query-layer code, deliberately** — the whole point of storing
+/// an alignment as an ordinary flake (Epic 104 decision 2: `left
+/// {predicate} right`, not a synthesized construct like `rdf:reifies`) is
+/// that a plain SPARQL query already traverses it. These tests exist to
+/// *prove* that composition holds end to end through `Catalog::sparql`,
+/// not through `graph_owl_ontology::alignment`'s own unit tests — the
+/// same discipline Epic 94 Slice D's zero-rows test established, after a
+/// unit-level pass alone missed a real pushdown gap there.
+#[cfg(test)]
+mod cross_vocabulary_alignment_tests {
+    use super::*;
+    use graph_owl_ontology::alignment::{
+        Alignment, AlignmentSource, MatchPredicate, alignment_to_flakes,
+    };
+    use projection_isolation_tests::RecordingGraph;
+    use tests::InMemoryStorage;
+
+    fn snomed_alignment(cui: &str, code: &str) -> Alignment {
+        Alignment::Match {
+            left: Sid::new(namespace::CUI, cui),
+            right: Sid::new(namespace::SNOMED_CT, code),
+            predicate: MatchPredicate::ExactMatch,
+            source: AlignmentSource::Curated {
+                authority: "UMLS".to_string(),
+            },
+            confidence: 1.0,
+            lossy_reverse: false,
+        }
+    }
+
+    fn rxnorm_alignment(cui: &str, code: &str) -> Alignment {
+        Alignment::Match {
+            left: Sid::new(namespace::CUI, cui),
+            right: Sid::new(namespace::RXNORM, code),
+            predicate: MatchPredicate::ExactMatch,
+            source: AlignmentSource::Curated {
+                authority: "UMLS".to_string(),
+            },
+            confidence: 1.0,
+            lossy_reverse: false,
+        }
+    }
+
+    /// **The acceptance criterion, verbatim.** A SNOMED concept and an
+    /// `RxNorm` concept sharing a CUI are reachable from each other without
+    /// any computed matching having run — this test never constructs an
+    /// `AlignmentSource::Computed` value at all, only the two `Curated`
+    /// alignments Slice B's real UMLS ingestion would have produced.
+    #[tokio::test]
+    async fn a_snomed_concept_reaches_its_rxnorm_counterpart_via_the_shared_cui() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let mut flakes = alignment_to_flakes(&snomed_alignment("C0004057", "387458008"), 1);
+        flakes.extend(alignment_to_flakes(
+            &rxnorm_alignment("C0004057", "1191"),
+            1,
+        ));
+        graph
+            .assert_flakes(&flakes)
+            .await
+            .expect("seed both curated alignments");
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?rxnorm WHERE { \
+                    ?cui <http://www.w3.org/2004/02/skos/core#exactMatch> \
+                         <http://snomed.info/id/387458008> . \
+                    ?cui <http://www.w3.org/2004/02/skos/core#exactMatch> ?rxnorm . \
+                    FILTER(?rxnorm != <http://snomed.info/id/387458008>) \
+                 }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("a two-hop join through a shared CUI must parse and evaluate");
+
+        assert_eq!(
+            outcome.rows.len(),
+            1,
+            "the SNOMED concept must reach its RxNorm counterpart through the \
+             CUI they share, with no computed matcher involved: {:?}",
+            outcome.rows
+        );
+        assert!(
+            outcome.rows[0]["rxnorm"].contains("1191"),
+            "{:?}",
+            outcome.rows
+        );
+    }
+
+    /// **The lossy-direction acceptance criterion.** A cross-vocabulary
+    /// mapping the source declared asymmetric must let a query traversing
+    /// it in the lossy direction tell — read directly off the reified
+    /// metadata node via the ordinary `alignmentLeft`/`alignmentRight`
+    /// flakes Slice A writes, no special query-layer support needed.
+    #[tokio::test]
+    async fn a_lossy_reverse_alignment_is_distinguishable_by_a_query() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        // A many-to-one style cross-map within SNOMED itself: broader on
+        // the specific-finding side, so walking from the general category
+        // back to this specific code loses information — decision 6's own
+        // worked example, kept to verified namespaces rather than an
+        // invented ICD-10 identifier this session never checked.
+        let lossy = Alignment::Match {
+            left: Sid::new(namespace::SNOMED_CT, "22298006"),
+            right: Sid::new(namespace::SNOMED_CT, "64572001"),
+            predicate: MatchPredicate::BroadMatch,
+            source: AlignmentSource::Curated {
+                authority: "cross-map".to_string(),
+            },
+            confidence: 1.0,
+            lossy_reverse: true,
+        };
+        let exact = snomed_alignment("C0004057", "387458008");
+
+        let mut flakes = alignment_to_flakes(&lossy, 1);
+        flakes.extend(alignment_to_flakes(&exact, 1));
+        graph.assert_flakes(&flakes).await.expect("seed both");
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?left ?right ?lossy WHERE { \
+                    ?alignment <https://graph-owl.dev/ns/catalog#alignmentLeft> ?left ; \
+                               <https://graph-owl.dev/ns/catalog#alignmentRight> ?right ; \
+                               <https://graph-owl.dev/ns/catalog#lossyReverse> ?lossy . \
+                 } ORDER BY ?lossy",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("the reified metadata must be a plain queryable pattern");
+
+        assert_eq!(outcome.rows.len(), 2, "{:?}", outcome.rows);
+        assert!(
+            outcome.rows[0]["lossy"].contains("false"),
+            "the exact CUI-to-atom alignment is not lossy: {:?}",
+            outcome.rows
+        );
+        assert!(
+            outcome.rows[1]["lossy"].contains("true"),
+            "the SNOMED broad match must be marked lossy and a query must \
+             be able to tell: {:?}",
+            outcome.rows
+        );
     }
 }
