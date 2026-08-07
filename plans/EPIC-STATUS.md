@@ -81,7 +81,7 @@ is the condition that index exists to catch.
 | **39** | 1 | [`39-ui-foundation.md`](39-ui-foundation.md) | In progress | 24/25 (+1 partial) | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
 | **40** | 3 | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | **Shipped** | 11/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
 | **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | **Shipped** | 12/12 | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
-| **42** | 7 | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | In progress | 1/3 | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
+| **42** | 7 | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | In progress | 1/3 (+1 partial) | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
 | **43** | 5 | [`43-framework-integrations.md`](43-framework-integrations.md) | Not started | 0/4 | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
 | **93** | 3 | [`93-console-overview.md`](93-console-overview.md) | **Shipped** | 2/2 | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
 | **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | Not started | 0/7 | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
@@ -576,7 +576,7 @@ is the condition that index exists to catch.
 ### Epic 42 — Semantic Browse, Review Queues & Agent Activity *(Demo 7)*
 
 - [x] One vocabulary browser over glossary, tags, domains, packs — **Slices A–B shipped, 7 Aug
-- [ ] One review queue over four proposal sources
+- [~] One review queue over four proposal sources — **Slice C shipped, 7 August 2026**: `Revie
 - [ ] Agent activity audit
 
 ### Epic 43 — Agent Framework Integrations *(Demo 5)*

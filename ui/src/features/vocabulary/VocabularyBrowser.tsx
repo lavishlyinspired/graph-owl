@@ -17,7 +17,7 @@ import type { DataNode } from "antd/es/tree";
 import type { Key } from "react";
 import { buildVocabularyTree, type VocabularyTreeNode } from "./vocabularyTree";
 import type { VocabularyConfig, VocabularyData, VocabularyDetail } from "./vocabularies";
-import { readParam, writeParam } from "./deepLink";
+import { readParam, writeParam } from "../deepLink";
 
 const { Sider } = Layout;
 const { Text, Title, Paragraph } = Typography;
@@ -185,7 +185,15 @@ export function VocabularyBrowser({ config }: VocabularyBrowserProps) {
       <div style={{ flex: "auto", paddingLeft: 24 }}>
         {detail ? (
           <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-            <Title level={4}>{detail.title}</Title>
+            {/* `level={2}`, not the visually-matching `4` — the chrome's own
+                `<h1>graph-owl</h1>` is the only heading above this one on
+                the page, and axe's `heading-order` rule flags any jump
+                that skips a level. `fontSize` pins the pre-existing visual
+                size explicitly, the same way `App.tsx`'s own `level={2}`
+                titles already decouple semantic level from appearance. */}
+            <Title level={2} style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>
+              {detail.title}
+            </Title>
             {byRenderKey.get(selectedKeys[0] ?? "")?.isCyclic && (
               <Alert type="warning" showIcon message={COPY.cyclicNotice} />
             )}

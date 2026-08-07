@@ -158,6 +158,70 @@ export interface OntologyPack {
   termCount: number;
 }
 
+// ---- Epic 42 Slice C: merge adjudication (Epic 17's resolution queue) ----
+
+export type ReviewStatus = "pending" | "confirmed" | "rejected";
+
+export type Evidence =
+  | { kind: "exactFqn" }
+  | { kind: "normalizedFqn" }
+  | { kind: "exactName"; scope: string }
+  | { kind: "nameSimilarity"; metric: string; value: number }
+  | { kind: "structuralOverlap"; sharedColumns: number; total: number }
+  | { kind: "sameParent" }
+  | { kind: "sameSourceSystem" };
+
+export type MergeDecidedBy =
+  | { kind: "auto" }
+  | { kind: "human"; userId: string }
+  | { kind: "agent"; agentId: string; model: string };
+
+export interface ResolutionCandidate {
+  entity: string;
+  fqn: string;
+  score: number;
+  evidence: Evidence[];
+}
+
+export type Resolution =
+  | { kind: "new" }
+  | { kind: "existing"; entity: string; confidence: number }
+  | { kind: "ambiguous"; candidates: ResolutionCandidate[] };
+
+export interface ReviewQueueEntry {
+  id: string;
+  target: string;
+  candidate: string;
+  score: number;
+  evidence: Evidence[];
+  status: ReviewStatus;
+  /** Absent while `pending` — the server omits these fields entirely
+   *  rather than sending `null`. */
+  decidedBy?: MergeDecidedBy;
+  decidedAt?: string;
+  /** Present only once `rejected`. */
+  reason?: string;
+  createdAt: string;
+}
+
+export interface MergeRecord {
+  id: string;
+  canonical: string;
+  merged: string;
+  evidence: Evidence[];
+  confidence: number;
+  decidedBy: MergeDecidedBy;
+  decidedAt: string;
+  mergedAtT: number;
+  splitAt?: string;
+}
+
+export interface BulkReviewOutcome {
+  id: string;
+  ok: boolean;
+  problem: string | null;
+}
+
 export interface Asset {
   id: string;
   kind: AssetKind;
@@ -711,4 +775,39 @@ export const api = {
    *  the same relationship. */
   dataProducts: () => request<Page<DataProduct>>("/data-products?limit=500"),
   ontologyPacks: () => request<OntologyPack[]>("/ontology-packs"),
+  /** `{data, total}` with `limit`/`offset` — not `Page<T>`'s cursor shape,
+   *  which this endpoint does not use. Omitting `status` returns pending
+   *  entries only, never "every status" — the server's own default. */
+  reviewQueue: (params: {
+    status?: ReviewStatus;
+    kind?: AssetKind;
+    minScore?: number;
+    maxScore?: number;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const query = new URLSearchParams();
+    if (params.status) query.set("status", params.status);
+    if (params.kind) query.set("kind", params.kind);
+    if (params.minScore !== undefined) query.set("minScore", String(params.minScore));
+    if (params.maxScore !== undefined) query.set("maxScore", String(params.maxScore));
+    query.set("limit", String(params.limit ?? 50));
+    query.set("offset", String(params.offset ?? 0));
+    return request<{ data: ReviewQueueEntry[]; total: number }>(`/resolution/queue?${query}`);
+  },
+  confirmReview: (id: string) =>
+    request<Resolution>(`/resolution/queue/${id}/confirm`, { method: "POST" }),
+  /** `204 No Content` on success — the server does not echo the decided
+   *  entry back, so a caller wanting `decidedAt`/`decidedBy` refetches. */
+  rejectReview: (id: string, reason: string) =>
+    request<void>(`/resolution/queue/${id}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
+  bulkDecideReview: (body: { ids: string[]; decision: "confirm" | "reject"; reason?: string }) =>
+    request<{ data: BulkReviewOutcome[] }>("/resolution/queue/bulk", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  splitMerge: (id: string) => request<MergeRecord>(`/merges/${id}/split`, { method: "POST" }),
 };

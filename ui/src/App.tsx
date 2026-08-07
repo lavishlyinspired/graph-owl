@@ -66,6 +66,7 @@ import TagOutlined from "@ant-design/icons/es/icons/TagOutlined";
 import ThunderboltOutlined from "@ant-design/icons/es/icons/ThunderboltOutlined";
 import EditOutlined from "@ant-design/icons/es/icons/EditOutlined";
 import HistoryOutlined from "@ant-design/icons/es/icons/HistoryOutlined";
+import MergeOutlined from "@ant-design/icons/es/icons/MergeOutlined";
 import TeamOutlined from "@ant-design/icons/es/icons/TeamOutlined";
 import UserOutlined from "@ant-design/icons/es/icons/UserOutlined";
 import {
@@ -97,6 +98,7 @@ import {
   userTextDir,
 } from "./trust/TrustComponents";
 import { VocabularySection } from "./features/vocabulary/VocabularySection";
+import { ReviewQueue } from "./features/review/ReviewQueue";
 import { hierarchy, type TeamNode } from "./admin/hierarchy";
 import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
 import {
@@ -164,6 +166,7 @@ type Section =
   | "governance"
   | "workbench"
   | "vocabulary"
+  | "review"
   | "admin";
 
 const KIND_ICON: Record<AssetKind, React.ReactNode> = {
@@ -3929,7 +3932,8 @@ function AppShell() {
       named === "overview" ||
       named === "governance" ||
       named === "workbench" ||
-      named === "vocabulary"
+      named === "vocabulary" ||
+      named === "review"
     ) {
       return named;
     }
@@ -4329,6 +4333,7 @@ function AppShell() {
                   },
                   { key: "workbench", icon: <ThunderboltOutlined />, label: "Workbench" },
                   { key: "vocabulary", icon: <BookOutlined />, label: "Vocabulary" },
+                  { key: "review", icon: <MergeOutlined />, label: "Review" },
                   { key: "connectors", icon: <PlusOutlined />, label: "Connectors" },
                   { key: "admin", icon: <TeamOutlined />, label: "Admin" },
                 ]}
@@ -4397,6 +4402,8 @@ function AppShell() {
                 <WorkbenchPage colors={colors} />
               ) : section === "vocabulary" ? (
                 <VocabularySection />
+              ) : section === "review" ? (
+                <ReviewQueue />
               ) : section === "connectors" ? (
                 <ConnectorsPage onDone={refresh} colors={colors} />
               ) : section === "admin" ? (

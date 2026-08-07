@@ -173,6 +173,27 @@ test("the vocabulary browser: poly-hierarchy, keyboard navigation, zero axe viol
   expect(axeResults.violations, JSON.stringify(axeResults.violations, null, 2)).toEqual([]);
 });
 
+test("a selected term's detail heading does not skip a level, zero axe violations", async ({
+  page,
+  baseURL,
+}) => {
+  // Found while building Epic 42 Slice C: the keyboard-reachability test
+  // above navigates a second time with no `&term=`, so its own axe scan
+  // never actually renders the detail pane's heading — "zero violations"
+  // there proved less than it looked like it proved. This deep-links
+  // straight to a selected term so the heading axe is meant to catch is
+  // actually on screen when it runs.
+  const base = baseURL ?? "";
+  const glossary = await createGlossary(base, "Heading Order Glossary");
+  const term = await createTerm(base, glossary.id, "PII", "Personally identifiable information.");
+
+  await page.goto(`/?section=vocabulary&vocabulary=${glossary.id}&term=${term.id}`);
+  await expect(page.getByRole("heading", { name: "PII" })).toBeVisible();
+
+  const axeResults = await new AxeBuilder({ page }).analyze();
+  expect(axeResults.violations, JSON.stringify(axeResults.violations, null, 2)).toEqual([]);
+});
+
 test("an empty glossary shows the designed first-run state, not a blank tree", async ({
   page,
   baseURL,

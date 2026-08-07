@@ -20,7 +20,7 @@ import {
   ontologyPackVocabulary,
   type VocabularyConfig,
 } from "./vocabularies";
-import { readParam, writeParam } from "./deepLink";
+import { readParam, writeParam } from "../deepLink";
 
 const { Text } = Typography;
 

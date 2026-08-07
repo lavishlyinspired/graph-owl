@@ -693,7 +693,7 @@ back. Two HTTP tests now do:
 
 ### Console half
 - [ ] **16** Admin: ingestion tokens, batch job status *(Epic 41)*
-- [ ] **17** **Merge adjudication queue** *(Epic 42)* — a resolution decision made by a machine and never reviewed is a merge nobody can undo
+- [x] **17** **Merge adjudication queue** *(Epic 42 Slice C, 7 August 2026)* — a resolution decision made by a machine and never reviewed is a merge nobody can undo
 - [ ] **18, 19** Admin: webhook registry with deliveries; consumer lag and throughput *(Epic 41)*
 - [ ] **20** **Drift view — declared vs actual** *(Epic 42)*. Metadata-as-code without a drift screen means the repo and the catalog disagree silently, which is the failure the epic exists to prevent
 - [ ] **21** **Extraction review queue** *(Epic 42)* — extracted claims carry confidence, and a claim below the assert band that lands unreviewed is a guess wearing a fact's clothes
@@ -924,7 +924,7 @@ slice.
 
 ### Epic 42 — Semantic surfaces
 - [x] One vocabulary browser over glossary, tags, domains, packs — **Slices A–B shipped, 7 August 2026**: `VocabularyBrowser.tsx` + `vocabularyTree.ts` proved on the glossary alone in Slice A (poly-hierarchy, cycle marking, deep-linking, keyboard reachability, zero axe violations), then Slice B added `vocabularies.ts`'s `VocabularyConfig` (four implementations: glossary, classifications, domains, ontology packs) and rewrote `VocabularyBrowser.tsx` to take one as a prop, dropping every glossary-specific import — a structural test reads the component's own source and asserts none of the four vocabulary keys or a `switch` appear in it. A new `VocabularySection.tsx` holds the vocabulary-*picking* UI (kind + instance), deliberately one layer above the now fully generic component. Full write-up, including two Playwright flakes found and fixed along the way, in `42-ui-semantic-surfaces.md`
-- [ ] One review queue over four proposal sources
+- [~] One review queue over four proposal sources — **Slice C shipped, 7 August 2026**: `ReviewQueue.tsx` proved on merge adjudication alone (Epic 17's already-shipped resolution queue), same as vocabulary's own Slice A → Slice B path — score, evidence, a pure `compareAssets` side-by-side diff, merge/reject/defer, reject requiring a reason, a second reviewer's `409` turned into "someone else already decided" rather than an error toast, all against a real server. Defer is deliberately client-only (Epic 17 has no such status, so leaving an entry untouched *is* correct). Live merge-splitting was not wired — no endpoint maps a queue entry to its `merge_records` row yet, Epic 17's own test reads it directly from Postgres. **Found and fixed doing this slice's own axe check**: a `heading-order` violation that turned out to already exist, uncaught, in Slice A/B's own vocabulary detail title — both moved to a correct heading level. Extraction/drift/proposals (Slice D) generalize this the same way Slice B generalized the vocabulary browser; not yet built
 - [ ] Agent activity audit
 
 ---
