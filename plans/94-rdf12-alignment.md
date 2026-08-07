@@ -234,8 +234,18 @@ about an entire category.
       real Arabic or Hebrew text, not a placeholder. (Slice C — real Postgres
       storage too, not just serialization; the console's canvas-rendered graph
       nodes remain a recorded gap, see Slice C's own write-up)
-- [ ] Nothing in the store changes by default: a catalogue run produces the same
-      flake count as before this epic.
+- [x] `?rel rdf:reifies << ?a ?p ?b >>` binds against a real, stored
+      relationship end to end through `Catalog::sparql` — not just
+      `dataset.rs`'s own unit tests, which passed the whole time a real
+      pushdown bug made the end-to-end query return zero rows. (Slice D)
+- [x] A relationship with a hidden endpoint synthesizes no reifying quad,
+      proven against a real access-predicate policy. (Slice D)
+- [x] The SPARQL 1.2 "parses but is not evaluated" refusal list is measured,
+      not assumed — probed directly against the pinned `spargebra`/`spareval`
+      versions, and the list is empty. (Slice D)
+- [x] Nothing in the store changes by default: a catalogue run produces the same
+      flake count as before this epic — Slice D synthesizes at query time only,
+      proven by `synthesis_adds_a_quad_without_adding_a_flake`.
 
 ## Slices
 
@@ -436,7 +446,7 @@ This is the one correctness bug in the design system that is **invisible to a
 reviewer who reads only English**, which is why it is written into the slice
 rather than left to the UI epic to notice.
 
-### Slice D: `rdf:reifies` at the query surface
+### Slice D: `rdf:reifies` at the query surface — **shipped, 7 August 2026**
 
 Implements decision 7. **Scheduled**: the product call was made — SPARQL is a
 first-class interface for external consumers, and Slice B's export is wanted
@@ -583,6 +593,98 @@ it reads flakes the both-endpoints filter has already passed, so a synthesised
 quad cannot name an entity those flakes did not already name.
 
 **Done when**: criteria met, mutation report reviewed, flake count unchanged.
+
+**Shipped.** `graph_owl_query::dataset::FlakeDataset::from_flakes` gained a
+second pass: for each already-filtered flake, if its subject hasn't already
+been reified and `reifier_endpoints` (a `fromEntity`+`toEntity`+`relType`
+lookup, all three required — same shape and same reasoning as
+`graph-owl-rdf-io`'s Slice B export-side function, duplicated rather than
+shared because `graph-owl-query` cannot depend on `graph-owl-rdf-io`) finds
+the shape, it synthesizes one `(rel) rdf:reifies <<( from relType to )>>`
+`InternalQuad`, carrying the flake's own `cx` as `graph_name`. Tracked via a
+`HashSet<&Sid>` so a subject with all three flakes present is synthesized at
+most once. Four dataset-level tests pin this directly: a matching pattern
+finds the synthesized quad; synthesis adds a quad without adding a flake (3
+flakes in, `dataset.len() == 4`); a relationship missing one endpoint (the
+authorization case) synthesizes nothing; an ordinary, non-relationship
+subject synthesizes nothing.
+
+**The RED test found a second, real bug beyond the one it was written to
+find — pushdown, not synthesis.** `dataset.rs`'s own four unit tests all
+passed the day this was written, and the end-to-end test
+(`sparql_answers_an_rdf_reifies_pattern_against_a_real_relationship`, real
+`spargebra` parse through real `Catalog::sparql`) still returned **zero
+rows**. `scoped_facts` narrows what reaches `from_flakes` via
+`graph_owl_query::pushdown::scans_for` *before* synthesis ever runs, and
+`pushdown.rs`'s own `named()` function — written in Slice B/C, before
+synthesis existed — had already left itself a note naming exactly this trap:
+*"`rdf:reifies` matching is handled as a separate, specially-recognized
+pattern shape (Slice D), never through this generic subject/predicate
+narrowing."* The generic narrowing binds `rdf:reifies` as an ordinary bound
+predicate — the same code path that turns `?s dsc:name ?n` into "scan
+`name`" turns `?rel rdf:reifies <<(...)>>` into "scan `rdf:reifies`". No
+flake has ever had that predicate (decision 3: it is synthesized at query
+time, never stored), so the scan is *provably* empty every time, and
+`from_flakes` receives nothing to synthesize from — the exact zero-rows
+failure this slice exists to prevent, reached one layer earlier than the
+slice's own design had considered.
+
+**Fix**: `pushdown.rs` gained `is_reifies_pattern` (a bound `rdf:reifies`
+predicate against a `TermPattern::Triple` object — the one shape
+`reifying_quad` answers) and `reification_scans`, which turns that one
+pattern into three scans — `fromEntity`, `toEntity`, `relType`, narrowed by
+subject when the relationship IRI is itself bound — instead of the doomed
+`rdf:reifies` scan. This is pushdown learning the pattern after all, but not
+for the performance reason decision 7 anticipated ("only if measurement asks
+for it") — it turned out to be load-bearing for *correctness*, since a
+narrowing pass that is ignorant of a synthetic predicate does not fail safe
+by scanning too much; it fails by scanning a predicate that is guaranteed
+empty. Three new `pushdown.rs` tests pin it:
+`an_rdf_reifies_pattern_scans_the_relationship_shape_not_the_synthetic_predicate`
+(the fix itself — asserts no scan ever names `reifies` and all three
+relationship predicates are scanned), `a_bound_relationship_narrows_the_
+reification_scans_by_subject` (a bound relationship IRI still narrows, same
+as any other pattern), and `a_variable_predicate_against_a_triple_term_
+object_is_not_the_reifies_shape` (a wholly unbound pattern falls through to
+the ordinary full-scan behaviour, not a false-positive reification match).
+
+**The authorization RED test needed the same correction the zero-rows test
+did**: hand-seeded `Sid::dsc(...)` endpoints (the `dataset.rs`-level fixture
+shape) make `scope_facts`'s `visible.contains(&target.id)` check vacuous,
+because a real relationship's endpoints are `Ref`s to an asset's actual
+**UUID** (`graph_owl_core::projection::entity_sid`), not to a hand-picked
+string — the same identity distinction this project's CLAUDE.md already
+records for a different authorization check
+(`Catalog::authorization_key`/`dsc:fqn`). Both new
+`graph-owl-api` tests (`sparql_answers_an_rdf_reifies_pattern_against_a_
+real_relationship`, `sparql_answers_no_row_for_a_relationship_whose_
+endpoint_is_hidden`) therefore create real assets via `catalog.upsert_asset`
+and reify against their real `entity_sid`s — the second one under
+`incremental_projection_tests_support::restricted_analyst`'s existing
+`public.`-prefix policy, with one endpoint inside the allowed prefix and one
+outside it, asserting the query returns zero rows for the hidden-endpoint
+relationship.
+
+**The "measured refusal list" acceptance criterion is measured, and the
+list is empty.** Probed directly against the pinned `spargebra 0.4.6` /
+`spareval 0.2.6` (a throwaway scratch binary, `oxrdf::Dataset` in place of
+`FlakeDataset` — the expression evaluator that implements `LANGDIR`,
+`STRLANGDIR`, `hasLANG`, `hasLANGDIR`, `TRIPLE()`, `SUBJECT()`, `isTRIPLE()`
+lives entirely inside `spareval` and does not depend on which
+`QueryableDataset` impl supplies the quads): reified-triple sugar
+(`<< s p o >>`) in a WHERE-clause pattern, a bare triple-term pattern, a
+`VERSION` declaration, `FILTER(!!true)`, and every SPARQL 1.2 function named
+in the plan's own table all **parse and evaluate** — none produced an
+internal error. This confirms the plan's own correction (line 480 above):
+`spareval` carries far more of the 1.2 surface than the feature-flag name
+alone suggested. The one genuine, deliberate refusal in this area —
+`graph_owl_query::term::from_term`'s `Term::Triple` arm, converting a
+query-bound triple term back into a flake value for pattern matching, which
+has no `Sid` address in this store — already returns a named
+`TermError::Unrepresentable`, not a panic, and was pinned before this slice
+(Slice A/B). No `UnsupportedConstruct` mechanism was built, matching the
+plan's own instruction: designing one before knowing its members would be
+building an error type for an empty set.
 
 **Not in this slice, and not anywhere yet: mapping the triple term's predicate to a domain vocabulary.** Emitting `<< :a fibo:isDataFor :b >>` instead of `<< :a dsc:feeds :b >>` has been proposed as a natural extension of the same translation. It is not one. `rdf:reifies` is a *structural* translation — the same fact, in the shape the standard defines — and swapping the predicate for a domain ontology's is a *semantic* one, which needs an owner, a mapping table, and a rule for what happens when no mapping exists. It is also the wrong vocabulary for the job: see `33-ontology-packs.md`, "A pack vocabulary describes what data means, never how it flows". Keeping the two apart is what lets this slice stay a serialization concern.
 

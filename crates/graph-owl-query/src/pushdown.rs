@@ -11,12 +11,22 @@
 //! Slice B), and keeping that split is what stops query planning leaking into
 //! the caller.
 
-use graph_owl_core::flake::{Sid, TriplePattern as FlakePattern};
+use graph_owl_core::flake::{Sid, TriplePattern as FlakePattern, namespace};
 use spargebra::Query;
 use spargebra::algebra::GraphPattern;
 use spargebra::term::{TermPattern, TriplePattern};
 
 use crate::term::from_term;
+
+/// The DSC namespace's own relationship-shape predicates — duplicated from
+/// `graph-owl-query::dataset`'s identical constants rather than shared,
+/// for the same reason `dataset.rs` gives for not sharing with
+/// `graph-owl-rdf-io`: three string literals are cheaper than a crate to
+/// host them, and the two copies are pinned together by
+/// `an_rdf_reifies_pattern_scans_the_relationship_shape_not_the_synthetic_predicate`.
+const REL_FROM_ENTITY: &str = "fromEntity";
+const REL_TO_ENTITY: &str = "toEntity";
+const REL_TYPE: &str = "relType";
 
 /// The scans that together cover everything a query could match.
 ///
@@ -59,7 +69,7 @@ pub fn scans_for(query: &Query) -> Option<Vec<FlakePattern>> {
 fn collect(pattern: &GraphPattern, out: &mut Vec<FlakePattern>) -> bool {
     match pattern {
         GraphPattern::Bgp { patterns } => {
-            out.extend(patterns.iter().map(flake_pattern));
+            out.extend(patterns.iter().flat_map(flake_patterns_for));
             true
         }
         // Every binary combinator: both sides contribute patterns, and both
@@ -96,6 +106,56 @@ fn collect(pattern: &GraphPattern, out: &mut Vec<FlakePattern>) -> bool {
         // was a claim no test could ever check.
         _ => false,
     }
+}
+
+/// One BGP triple pattern normally becomes one scan. `(?rel) rdf:reifies
+/// <<( ... )>>` is the exception: `rdf:reifies` is never a stored predicate
+/// (Epic 94 decision 3 — a triple term is synthesized at query time), so
+/// narrowing to it the way `flake_pattern` narrows any other bound
+/// predicate would scan for flakes that provably do not exist and hand
+/// `dataset.rs`'s synthesis pass nothing to work with — the exact zero-rows
+/// failure Epic 94 Slice D exists to prevent, reached through pushdown
+/// instead of through synthesis itself. The fix is to scan for the shape
+/// synthesis actually reads: the reified relationship's own
+/// `fromEntity`/`toEntity`/`relType` flakes.
+fn flake_patterns_for(pattern: &TriplePattern) -> Vec<FlakePattern> {
+    if is_reifies_pattern(pattern) {
+        return reification_scans(named(&pattern.subject).as_ref());
+    }
+    vec![flake_pattern(pattern)]
+}
+
+/// `true` for exactly the shape `dataset.rs::reifying_quad` answers: a
+/// bound `rdf:reifies` predicate against a triple-term object. A variable
+/// predicate (`?p rdf:reifies ...` never happens in practice, but `?rel ?p
+/// <<(...)>>` does) or a non-triple-term object is an ordinary pattern and
+/// falls through to the generic narrowing instead.
+fn is_reifies_pattern(pattern: &TriplePattern) -> bool {
+    let is_reifies_predicate = pattern
+        .predicate
+        .clone()
+        .into_term_pattern_named()
+        .and_then(|node| Sid::from_iri(node.as_str()))
+        == Some(Sid::new(namespace::RDF, "reifies"));
+    is_reifies_predicate && matches!(pattern.object, TermPattern::Triple(_))
+}
+
+/// The three scans that together cover every reified relationship in the
+/// estate — a superset, same as every other pushdown scan (see the module
+/// doc): narrowing further would mean resolving which relationship the
+/// triple-term's own variables could match, which is the evaluator's join
+/// to do, not pushdown's.
+fn reification_scans(subject: Option<&Sid>) -> Vec<FlakePattern> {
+    [REL_FROM_ENTITY, REL_TO_ENTITY, REL_TYPE]
+        .into_iter()
+        .map(|id| FlakePattern {
+            s: subject.cloned(),
+            p: Some(Sid::new(namespace::DSC, id)),
+            o: None,
+            cx: None,
+            as_of: None,
+        })
+        .collect()
 }
 
 fn flake_pattern(pattern: &TriplePattern) -> FlakePattern {
@@ -337,5 +397,79 @@ mod tests {
         let scans = scans_for(&parse(&format!("SELECT ?n WHERE {{ ?s <{DSC}name> ?n }}")))
             .expect("pushdown");
         assert!(scans.iter().all(|s| s.as_of.is_none()));
+    }
+
+    /// **Epic 94 Slice D's own RED test, at the pushdown layer.** `rdf:reifies`
+    /// is never a stored predicate (decision 3), so narrowing to it the way
+    /// every other bound predicate narrows would scan for flakes that
+    /// provably do not exist — zero facts reach `dataset.rs`'s synthesis
+    /// pass, and a query against a real relationship returns zero rows. The
+    /// fix scans for the relationship shape synthesis actually reads instead.
+    #[test]
+    fn an_rdf_reifies_pattern_scans_the_relationship_shape_not_the_synthetic_predicate() {
+        let scans = scans_for(&parse(
+            "SELECT ?from ?to WHERE { \
+                ?rel <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+                     <<( ?from <https://graph-owl.dev/ns/catalog#feeds> ?to )>> . \
+             }",
+        ))
+        .expect("pushdown");
+
+        assert!(
+            scans
+                .iter()
+                .all(|s| s.p.as_ref().is_some_and(|p| p.id.as_str() != "reifies")),
+            "must never scan for the synthetic predicate itself, which no flake has: {scans:?}"
+        );
+
+        let mut predicates: Vec<&str> = scans
+            .iter()
+            .filter_map(|s| s.p.as_ref().map(|p| p.id.as_str()))
+            .collect();
+        predicates.sort_unstable();
+        assert_eq!(
+            predicates,
+            vec!["fromEntity", "relType", "toEntity"],
+            "must scan the relationship shape dataset.rs::reifier_endpoints reads: {scans:?}"
+        );
+    }
+
+    /// A bound relationship IRI narrows the reification scans by subject too,
+    /// same as any other pattern — the object being a triple term changes
+    /// *which* predicates are scanned, not whether a bound subject narrows.
+    #[test]
+    fn a_bound_relationship_narrows_the_reification_scans_by_subject() {
+        let scans = scans_for(&parse(&format!(
+            "SELECT ?from ?to WHERE {{ \
+                <{DSC}edge-orders-feeds-reports> \
+                     <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+                     <<( ?from <{DSC}feeds> ?to )>> . \
+             }}"
+        )))
+        .expect("pushdown");
+
+        assert!(
+            scans
+                .iter()
+                .all(|s| s.s.as_ref().map(|s| s.id.as_str()) == Some("edge-orders-feeds-reports")),
+            "{scans:?}"
+        );
+    }
+
+    /// A variable predicate against a triple-term object is an ordinary,
+    /// wholly unbound pattern, not the `rdf:reifies` shape — same
+    /// fall-to-full-scan behaviour as any other pattern where subject,
+    /// predicate and object all constrain nothing
+    /// (`a_completely_open_query_does_not_push_down`), not the reification
+    /// scans.
+    #[test]
+    fn a_variable_predicate_against_a_triple_term_object_is_not_the_reifies_shape() {
+        let scans = scans_for(&parse(&format!(
+            "SELECT ?p WHERE {{ ?rel ?p <<( ?from <{DSC}feeds> ?to )>> }}"
+        )));
+        assert!(
+            scans.is_none(),
+            "wholly unbound must force a full scan: {scans:?}"
+        );
     }
 }

@@ -21202,6 +21202,176 @@ mod projection_isolation_tests {
         let _ = created;
     }
 
+    /// **The RED test, Epic 94 Slice D / decision 7's own stated
+    /// criterion**: a query using the standard `rdf:reifies` vocabulary
+    /// against an estate that plainly contains a reified relationship must
+    /// not return an empty result — end to end, through a real
+    /// `spargebra`-parsed SPARQL 1.2 query and `Catalog::sparql`, not just
+    /// `graph_owl_query::dataset`'s own narrower unit test.
+    #[tokio::test]
+    async fn sparql_answers_an_rdf_reifies_pattern_against_a_real_relationship() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        // Real assets, not synthetic Sids: `scoped_facts`' visibility check
+        // (`graph-owl-api/src/lib.rs::scope_facts`) only ever admits a
+        // relationship whose endpoints are real, catalogued assets — see
+        // this crate's own `an_edge_with_no_endpoints_is_not_assumed_visible`
+        // and the projection-identity gotcha in this project's CLAUDE.md
+        // ("a real asset's graph identity is a UUID, not its FQN").
+        let orders = catalog
+            .upsert_asset(&Principal::system(), service("orders"))
+            .await
+            .expect("create orders");
+        let reports = catalog
+            .upsert_asset(&Principal::system(), service("reports"))
+            .await
+            .expect("create reports");
+
+        graph
+            .assert_flakes(&[
+                Flake::assert(
+                    Sid::dsc("edge-orders-feeds-reports"),
+                    Sid::dsc("fromEntity"),
+                    FlakeValue::Ref(graph_owl_core::projection::entity_sid(orders.id)),
+                    1,
+                ),
+                Flake::assert(
+                    Sid::dsc("edge-orders-feeds-reports"),
+                    Sid::dsc("toEntity"),
+                    FlakeValue::Ref(graph_owl_core::projection::entity_sid(reports.id)),
+                    1,
+                ),
+                Flake::assert(
+                    Sid::dsc("edge-orders-feeds-reports"),
+                    Sid::dsc("relType"),
+                    FlakeValue::String("feeds".to_string()),
+                    1,
+                ),
+            ])
+            .await
+            .expect("seed the relationship");
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?rel ?from ?to WHERE { \
+                    ?rel <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+                         <<( ?from <https://graph-owl.dev/ns/catalog#feeds> ?to )>> . \
+                 }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("a standard rdf:reifies pattern must parse and evaluate");
+
+        assert_eq!(
+            outcome.rows.len(),
+            1,
+            "a reified relationship must answer its own rdf:reifies pattern, not return \
+             zero rows indistinguishable from an empty graph: {:?}",
+            outcome.rows
+        );
+        assert!(
+            outcome.rows[0]["from"].contains(&orders.id.to_string()),
+            "{:?}",
+            outcome.rows
+        );
+        assert!(
+            outcome.rows[0]["to"].contains(&reports.id.to_string()),
+            "{:?}",
+            outcome.rows
+        );
+    }
+
+    /// **The second RED test the plan calls for**: a synthesised quad is new
+    /// surface area, and a fact assembled *after* filtering could
+    /// reintroduce an endpoint the filter removed. Proven end to end,
+    /// through `Catalog::sparql`, not only at `dataset.rs`'s own
+    /// `a_relationship_missing_an_endpoint_synthesizes_nothing` unit level —
+    /// the zero-rows test above found a real gap that unit-level dataset
+    /// tests alone did not catch, so the same rigor applies here.
+    #[tokio::test]
+    async fn sparql_answers_no_row_for_a_relationship_whose_endpoint_is_hidden() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        // `orders` is visible to `restricted_analyst` (FQN `public.orders`);
+        // `secret` is not (FQN `secret`, outside the `public.` prefix the
+        // policy allows).
+        let public = catalog
+            .upsert_asset(&Principal::system(), service("public"))
+            .await
+            .expect("create the public namespace");
+        let orders = catalog
+            .upsert_asset(
+                &Principal::system(),
+                UpsertAsset {
+                    kind: AssetKind::Database,
+                    name: "orders".to_string(),
+                    parent_id: Some(public.id),
+                    description: None,
+                    properties: None,
+                    extension: None,
+                },
+            )
+            .await
+            .expect("create orders");
+        let secret = catalog
+            .upsert_asset(&Principal::system(), service("secret"))
+            .await
+            .expect("create secret");
+
+        graph
+            .assert_flakes(&[
+                Flake::assert(
+                    Sid::dsc("edge-orders-feeds-secret"),
+                    Sid::dsc("fromEntity"),
+                    FlakeValue::Ref(graph_owl_core::projection::entity_sid(orders.id)),
+                    1,
+                ),
+                Flake::assert(
+                    Sid::dsc("edge-orders-feeds-secret"),
+                    Sid::dsc("toEntity"),
+                    FlakeValue::Ref(graph_owl_core::projection::entity_sid(secret.id)),
+                    1,
+                ),
+                Flake::assert(
+                    Sid::dsc("edge-orders-feeds-secret"),
+                    Sid::dsc("relType"),
+                    FlakeValue::String("feeds".to_string()),
+                    1,
+                ),
+            ])
+            .await
+            .expect("seed the relationship");
+
+        let restricted = incremental_projection_tests_support::restricted_analyst(&catalog).await;
+
+        let outcome = catalog
+            .sparql(
+                &restricted,
+                "SELECT ?from ?to WHERE { \
+                    ?rel <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+                         <<( ?from <https://graph-owl.dev/ns/catalog#feeds> ?to )>> . \
+                 }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("a standard rdf:reifies pattern must parse and evaluate");
+
+        assert!(
+            outcome.rows.is_empty(),
+            "a relationship with a hidden endpoint must not be synthesised into a \
+             visible rdf:reifies quad — the endpoint filter must run before \
+             synthesis sees the flakes, not after: {:?}",
+            outcome.rows
+        );
+    }
+
     /// **The plan is what the engine decided to read**, and it is the single
     /// number that explains a slow query. A bounded query names the predicate
     /// it will scan.

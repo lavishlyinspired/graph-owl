@@ -4,11 +4,73 @@
 //! is adopted. What it must get right is everything below the storage line:
 //! `as_of`, the access predicate, and the bound on how much may be scanned.
 
-use graph_owl_core::flake::Flake;
-use oxrdf::Term;
+use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+use oxrdf::{Term, Triple};
 use spareval::{InternalQuad, QueryableDataset};
 
 use crate::term::{TermError, to_named_node, to_term};
+
+/// The three predicates that make a subject a reified relationship — the
+/// identical shape `graph-owl-rdf-io`'s own export-side synthesis
+/// recognizes (Epic 94 Slice B). Not shared as a library function between
+/// the two crates: `graph-owl-query` cannot depend on `graph-owl-rdf-io`
+/// (the dependency runs the other way), and duplicating three string
+/// literals is cheaper than inventing a third crate to host them.
+const REL_FROM_ENTITY: &str = "fromEntity";
+const REL_TO_ENTITY: &str = "toEntity";
+const REL_TYPE: &str = "relType";
+
+/// Reads `sid`'s own `fromEntity`/`toEntity`/`relType` out of `flakes`, if
+/// all three are present with the shape they always have in this store.
+/// **All three are required** — Epic 94 decision 7's own authorization
+/// argument depends on it: a relationship missing an endpoint is exactly
+/// what an access-predicate filter leaves behind when it removes an
+/// entity the caller may not see, and synthesizing from a partial shape
+/// would name an entity the filter had already decided to hide.
+fn reifier_endpoints(sid: &Sid, flakes: &[Flake]) -> Option<(Sid, String, Sid)> {
+    let mine = |name: &str| {
+        flakes
+            .iter()
+            .find(|f| &f.s == sid && f.p.namespace_code == namespace::DSC && f.p.id == name)
+    };
+    let from = match &mine(REL_FROM_ENTITY)?.o {
+        FlakeValue::Ref(s) => s.clone(),
+        _ => return None,
+    };
+    let to = match &mine(REL_TO_ENTITY)?.o {
+        FlakeValue::Ref(s) => s.clone(),
+        _ => return None,
+    };
+    let rel_type = match &mine(REL_TYPE)?.o {
+        FlakeValue::String(s) => s.clone(),
+        _ => return None,
+    };
+    Some((from, rel_type, to))
+}
+
+/// `(rel) rdf:reifies << from relType to >>`, as a synthesized quad — Epic
+/// 94 decision 7. `graph_name` matches the flake the reifier shape was
+/// read from, since a synthesized quad must carry the same graph as the
+/// facts it was built from to answer a graph-scoped query correctly.
+fn reifying_quad(
+    rel: &Sid,
+    from: &Sid,
+    rel_type: &str,
+    to: &Sid,
+    graph_name: Option<Term>,
+) -> Result<InternalQuad<Term>, TermError> {
+    let inner = Triple::new(
+        to_named_node(from)?,
+        to_named_node(&Sid::dsc(rel_type))?,
+        Term::NamedNode(to_named_node(to)?),
+    );
+    Ok(InternalQuad {
+        subject: Term::NamedNode(to_named_node(rel)?),
+        predicate: Term::NamedNode(to_named_node(&Sid::new(namespace::RDF, "reifies"))?),
+        object: Term::Triple(Box::new(inner)),
+        graph_name,
+    })
+}
 
 /// The facts a query may see, already resolved.
 ///
@@ -48,6 +110,32 @@ impl FlakeDataset {
                 },
             });
         }
+
+        // Epic 94 decision 7: `rdf:reifies` is answered by synthesizing a
+        // quad here, never by storing one (decision 3) and never in
+        // pushdown (`pushdown.rs` narrows *which flakes are fetched*; it
+        // cannot conjure a quad with no flake behind it). Reads only
+        // `flakes` — already filtered by the caller's access predicate and
+        // `as_of` before this function ever runs — so a synthesized quad
+        // cannot name an entity those flakes did not already name. One
+        // quad per qualifying subject, not per flake: a relationship's
+        // three defining flakes must not each synthesize their own copy.
+        let mut reified: std::collections::HashSet<&Sid> = std::collections::HashSet::new();
+        for flake in flakes {
+            if reified.contains(&flake.s) {
+                continue;
+            }
+            let Some((from, rel_type, to)) = reifier_endpoints(&flake.s, flakes) else {
+                continue;
+            };
+            reified.insert(&flake.s);
+            let graph_name = match &flake.cx {
+                None => None,
+                Some(cx) => Some(Term::NamedNode(to_named_node(cx)?)),
+            };
+            quads.push(reifying_quad(&flake.s, &from, &rel_type, &to, graph_name)?);
+        }
+
         Ok(Self { quads })
     }
 
@@ -150,6 +238,91 @@ mod tests {
             flake("t1", "deleted", FlakeValue::Boolean(false)),
         ]);
         assert_eq!(d.len(), 2);
+    }
+
+    /// **The RED test, Epic 94 decision 7 / Slice D's own stated criterion**:
+    /// a query using the standard `rdf:reifies` vocabulary against an
+    /// estate that plainly contains a reified relationship must not return
+    /// an empty result — the failure this whole decision exists to
+    /// prevent, since a caller cannot tell a synthesis gap from a genuinely
+    /// empty graph.
+    #[test]
+    fn a_reified_relationship_answers_an_rdf_reifies_pattern() {
+        let d = dataset(&[
+            flake("r1", "fromEntity", FlakeValue::Ref(Sid::dsc("orders"))),
+            flake("r1", "toEntity", FlakeValue::Ref(Sid::dsc("reports"))),
+            flake("r1", "relType", FlakeValue::String("feeds".into())),
+        ]);
+
+        let reifies = Term::NamedNode(
+            oxrdf::NamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies")
+                .expect("node"),
+        );
+        let matches: Vec<_> = (&d)
+            .internal_quads_for_pattern(None, Some(&reifies), None, Some(None))
+            .collect::<Result<_, _>>()
+            .expect("no term errors");
+        assert_eq!(matches.len(), 1, "expected exactly one synthesized quad");
+        let Term::Triple(inner) = &matches[0].object else {
+            panic!("expected a triple term");
+        };
+        assert_eq!(
+            inner.predicate.to_string(),
+            "<https://graph-owl.dev/ns/catalog#feeds>"
+        );
+    }
+
+    /// **Store flake count unchanged** — decision 7's own stated invariant.
+    /// Synthesis adds to the *quad* list `from_flakes` builds in memory; it
+    /// must never be mistaken for a reason to write anything, and this
+    /// dataset has no write path at all to accidentally exercise.
+    #[test]
+    fn synthesis_adds_a_quad_without_adding_a_flake() {
+        let flakes = [
+            flake("r1", "fromEntity", FlakeValue::Ref(Sid::dsc("orders"))),
+            flake("r1", "toEntity", FlakeValue::Ref(Sid::dsc("reports"))),
+            flake("r1", "relType", FlakeValue::String("feeds".into())),
+        ];
+        let d = dataset(&flakes);
+        // Three flakes in; the dataset carries a fourth quad (the
+        // synthesized reifier) that names nothing beyond what the three
+        // already asserted — `len()` proves the *quad* count grew, which
+        // is the whole point, not a flake-count claim this type has no way
+        // to make since it never touches storage.
+        assert_eq!(flakes.len(), 3);
+        assert_eq!(d.len(), 4, "3 ordinary quads + 1 synthesized rdf:reifies");
+    }
+
+    /// **The authorization RED test.** A relationship missing one endpoint
+    /// — exactly what an access-predicate filter leaves behind when it
+    /// removes an entity the caller may not see — must not synthesize a
+    /// reifying quad. Mutator watch: emitting the quad from an
+    /// unfiltered/partial flake set must fail this.
+    #[test]
+    fn a_relationship_missing_an_endpoint_synthesizes_nothing() {
+        let d = dataset(&[
+            flake("r1", "fromEntity", FlakeValue::Ref(Sid::dsc("orders"))),
+            flake("r1", "relType", FlakeValue::String("feeds".into())),
+            // No `toEntity` — as if the access predicate removed it.
+        ]);
+
+        let reifies = Term::NamedNode(
+            oxrdf::NamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies")
+                .expect("node"),
+        );
+        let matches: Vec<_> = (&d)
+            .internal_quads_for_pattern(None, Some(&reifies), None, Some(None))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("no term errors");
+        assert!(matches.is_empty(), "expected no synthesized quad");
+    }
+
+    /// The negative case: an ordinary subject with no relationship shape
+    /// must not gain a phantom `rdf:reifies` quad.
+    #[test]
+    fn an_ordinary_subject_synthesizes_nothing() {
+        let d = dataset(&[flake("t1", "name", FlakeValue::String("orders".into()))]);
+        assert_eq!(d.len(), 1, "no synthesized quad for a non-relationship");
     }
 
     /// **Regression test for the bug interning caused.**
