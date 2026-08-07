@@ -9,6 +9,18 @@ import { defineConfig, devices } from "@playwright/test";
 export default defineConfig({
   testDir: "./tests",
   fullyParallel: false,
+  // `fullyParallel: false` only orders tests *within* a file — Playwright
+  // still schedules different files onto separate worker processes by
+  // default (here, up to ~9 on an 18-core machine), and every file in
+  // this directory drives the identical shared server and database. Found
+  // running all four spec files together for the first time (Epic 42
+  // Slice D, the fourth file): `first-run.spec.ts` and `review-queue.spec.ts`
+  // failed intermittently only in that combination, never alone — two
+  // files creating and reading state concurrently against one backend
+  // that assumes it is the only writer. `workers: 1` is what actually
+  // makes the whole suite sequential, which `fullyParallel: false` reads
+  // as though it already guaranteed.
+  workers: 1,
   retries: 0,
   reporter: "list",
   use: {

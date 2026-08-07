@@ -1,126 +1,78 @@
-/** Epic 42 Slice C: merge adjudication — the first review queue instance.
- *  Deliberately built directly against Epic 17's resolution queue for now,
- *  the same way `VocabularyBrowser.tsx` started glossary-only in Slice A;
- *  Slice D's job is to generalize this into a config-driven
- *  `ReviewQueue.tsx` the way Slice B generalized the vocabulary browser,
- *  proven by adding the other three queues without touching this file's
- *  structure. */
+/** The list + detail pane shell — Epic 42 decision 2. Every difference
+ *  between merge candidates, extraction claims, drift and proposals lives
+ *  in a `QueueConfig` (`queues.ts`); this file names none of them. If a
+ *  queue-specific `if`/`switch` ever appears here, the pattern has failed
+ *  — `ReviewQueue.structural.test.ts` asserts exactly that, the same way
+ *  `VocabularyBrowser.structural.test.ts` does for the vocabulary
+ *  browser. */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Button, Empty, Flex, Input, List, Modal, Segmented, Space, Spin, Tag, Typography } from "antd";
-import CheckCircleOutlined from "@ant-design/icons/es/icons/CheckCircleOutlined";
-import WarningOutlined from "@ant-design/icons/es/icons/WarningOutlined";
-import { api, ApiError, type Asset, type Evidence, type ReviewQueueEntry, type ReviewStatus } from "../../api";
-import { compareAssets } from "./reviewDiff";
+import type { QueueAction, QueueConfig, QueueEntry } from "./queues";
 import { readParam, writeParam } from "../deepLink";
 
 const { Text, Title, Paragraph } = Typography;
 
 const COPY = {
-  title: "Merge review",
-  subtitle: "Ambiguous entity matches the resolver could not decide on its own.",
   loading: "Loading the review queue…",
   loadError: "The review queue could not be loaded.",
-  emptyPendingTitle: "Nothing to review",
-  emptyPendingDescription: "No ambiguous matches are waiting for a decision.",
-  emptyConfirmedTitle: "No merges yet",
-  emptyConfirmedDescription: "No candidate has been confirmed as a merge yet.",
-  emptyRejectedTitle: "No rejections yet",
-  emptyRejectedDescription: "No candidate has been rejected yet.",
-  detailPlaceholder: "Select a candidate to compare it against its match.",
-  confirmTitle: "Merge these two entities?",
-  confirmBody:
-    "This can be undone later by splitting the merge — it is not a silent, permanent change.",
-  confirmOk: "Merge",
-  rejectTitle: "Reject this match",
-  rejectHint:
-    "A rejection has to say why — without a reason, nobody reviewing this later can tell why the resolver's suggestion was wrong.",
-  rejectPlaceholder: "Why is this not a match?",
-  rejectOk: "Reject",
-  deferHint:
-    "Deferred candidates stay pending on the server. They are hidden here only until this page reloads.",
-  alreadyDecided: "Someone else already decided this candidate.",
-  targetColumn: "Target",
-  candidateColumn: "Candidate",
-  matchSuffix: "% match",
+  detailLoadError: "This entry could not be loaded.",
+  detailPlaceholder: "Select an entry to see it in full.",
+  alreadyDecided: "Someone else already decided this.",
+  deferHint: "Deferred entries stay pending on the server. They are hidden here only until this page reloads.",
   reasonPrefix: "Reason: ",
-  mergeAction: "Merge",
-  rejectAction: "Reject",
-  deferAction: "Defer",
 };
 
-const STATUS_OPTIONS: { label: string; value: ReviewStatus }[] = [
-  { label: "Pending", value: "pending" },
-  { label: "Confirmed", value: "confirmed" },
-  { label: "Rejected", value: "rejected" },
-];
-
-function evidenceLabel(evidence: Evidence): string {
-  switch (evidence.kind) {
-    case "exactFqn":
-      return "exact fully-qualified name";
-    case "normalizedFqn":
-      return "normalized fully-qualified name";
-    case "exactName":
-      return `exact name within ${evidence.scope}`;
-    case "nameSimilarity":
-      return `name similarity (${evidence.metric} ${evidence.value.toFixed(2)})`;
-    case "structuralOverlap":
-      return `${evidence.sharedColumns}/${evidence.total} shared columns`;
-    case "sameParent":
-      return "same parent";
-    case "sameSourceSystem":
-      return "same source system";
-  }
+// A config's `fetchEntries`/`fetchDetail` may still throw (only
+// `performAction`'s conflict case is a return value, not a throw) — this
+// reads whatever message the thrown value carries without needing to
+// know it came from `ApiError` specifically, which is what keeps this
+// file out of the structural test's `../../api` ban.
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message ? err.message : fallback;
 }
 
-function deciderLabel(entry: ReviewQueueEntry): string {
-  if (!entry.decidedBy) return "";
-  if (entry.decidedBy.kind === "human") return `by ${entry.decidedBy.userId}`;
-  if (entry.decidedBy.kind === "agent") return `by agent ${entry.decidedBy.agentId}`;
-  return "automatically";
+export interface ReviewQueueProps {
+  readonly config: QueueConfig;
 }
 
-function isConflict(status: ApiError): boolean {
-  return status.problem.status === 409;
-}
-
-export function ReviewQueue() {
-  const [status, setStatusRaw] = useState<ReviewStatus>(() => {
+export function ReviewQueue({ config }: ReviewQueueProps) {
+  const [status, setStatusRaw] = useState<string>(() => {
     const named = readParam("status");
-    return named === "confirmed" || named === "rejected" ? named : "pending";
+    return named && config.statuses.some((s) => s.key === named) ? named : config.openStatus;
   });
-  const [entries, setEntries] = useState<ReviewQueueEntry[] | null>(null);
+  const [entries, setEntries] = useState<readonly QueueEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deferredIds, setDeferredIds] = useState<ReadonlySet<string>>(new Set());
   const [selectedId, setSelectedIdRaw] = useState<string | null>(() => readParam("entry"));
-  const [targetAsset, setTargetAsset] = useState<Asset | null>(null);
-  const [candidateAsset, setCandidateAsset] = useState<Asset | null>(null);
+  const [detail, setDetail] = useState<React.ReactNode>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [rejectOpen, setRejectOpen] = useState(false);
-  const [rejectReason, setRejectReason] = useState("");
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<QueueAction | null>(null);
+  const [textAction, setTextAction] = useState<QueueAction | null>(null);
+  const [textValue, setTextValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setError(null);
-    api.reviewQueue({ status }).then(
-      (page) => setEntries(page.data),
+    config.fetchEntries(status).then(
+      (fetched) => setEntries(fetched),
       (err) => {
-        setError(err instanceof ApiError ? err.problem.title : COPY.loadError);
+        setError(errorMessage(err, COPY.loadError));
         setEntries([]);
       },
     );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `config` is stable for the component's lifetime (the consumer remounts on queue switch); only `status` should retrigger this
   }, [status]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const setStatusTab = (next: ReviewStatus) => {
+  const setStatusTab = (next: string) => {
     setStatusRaw(next);
-    writeParam("status", next === "pending" ? null : next);
+    writeParam("status", next === config.openStatus ? null : next);
     setSelectedIdRaw(null);
     writeParam("entry", null);
   };
@@ -130,14 +82,12 @@ export function ReviewQueue() {
     writeParam("entry", id);
   };
 
-  // Deferring is client-only: no backend action names "defer" (Epic 17
-  // only knows pending/confirmed/rejected), and a deferred candidate is by
-  // definition one nobody decided, so leaving it untouched server-side
-  // *is* the correct behavior — it stays pending for the next reviewer or
-  // the next visit here.
+  // Deferring is client-only: no queue built so far has a "deferred"
+  // status, and an entry nobody decided is, by definition, correctly
+  // represented by leaving it untouched server-side.
   const visibleEntries = useMemo(
-    () => (entries ?? []).filter((entry) => status !== "pending" || !deferredIds.has(entry.id)),
-    [entries, status, deferredIds],
+    () => (entries ?? []).filter((entry) => status !== config.openStatus || !deferredIds.has(entry.id)),
+    [entries, status, deferredIds, config.openStatus],
   );
 
   const selectedEntry = useMemo(
@@ -147,40 +97,35 @@ export function ReviewQueue() {
 
   useEffect(() => {
     if (!selectedEntry) {
-      setTargetAsset(null);
-      setCandidateAsset(null);
+      setDetail(null);
       return;
     }
     let cancelled = false;
     setDetailError(null);
-    Promise.all([api.asset(selectedEntry.target), api.asset(selectedEntry.candidate)]).then(
-      ([target, candidate]) => {
+    setLoadingDetail(true);
+    config.fetchDetail(selectedEntry).then(
+      (fetched) => {
         if (cancelled) return;
-        setTargetAsset(target);
-        setCandidateAsset(candidate);
+        setDetail(fetched);
+        setLoadingDetail(false);
       },
       (err) => {
         if (cancelled) return;
-        setDetailError(
-          err instanceof ApiError ? err.problem.title : "the two entities could not be loaded",
-        );
+        setDetailError(errorMessage(err, COPY.detailLoadError));
+        setLoadingDetail(false);
       },
     );
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `config` is stable for the component's lifetime
   }, [selectedEntry]);
-
-  const comparison = useMemo(
-    () => (targetAsset && candidateAsset ? compareAssets(targetAsset, candidateAsset) : []),
-    [targetAsset, candidateAsset],
-  );
 
   const afterDecision = useCallback(
     (message: string) => {
-      setConfirmOpen(false);
-      setRejectOpen(false);
-      setRejectReason("");
+      setConfirmAction(null);
+      setTextAction(null);
+      setTextValue("");
       setSelectedId(null);
       setNotice(message);
       load();
@@ -188,99 +133,69 @@ export function ReviewQueue() {
     [load],
   );
 
-  // Epic 42 decision — "two reviewers acting on the same candidate: the
-  // second sees the resolution, not a conflict error." The server's own
-  // 409 is correct (a second decision on a decided entry is genuinely a
-  // conflict); the requirement is what the *reviewer* sees, so this turns
-  // that 409 into a plain refresh rather than an error toast.
-  const handleConflict = useCallback(
-    (err: unknown) => {
-      if (err instanceof ApiError && isConflict(err)) {
-        afterDecision(COPY.alreadyDecided);
-        return true;
-      }
-      return false;
-    },
-    [afterDecision],
-  );
-
-  const confirmMerge = () => {
+  const runAction = (action: QueueAction, text: string | undefined) => {
     if (!selectedEntry) return;
     setBusy(true);
-    api
-      .confirmReview(selectedEntry.id)
-      .then(() => afterDecision("Merged."))
+    config
+      .performAction(selectedEntry, action.key, text)
+      .then((result) => {
+        // Epic 42 decision — "two reviewers acting on the same entry: the
+        // second sees the resolution, not a conflict error." The config's
+        // own `performAction` already turned the server's 409 into this
+        // return value rather than a throw; what a reviewer sees here is
+        // a plain refresh, not an error.
+        afterDecision(result.conflict ? COPY.alreadyDecided : (action.doneMessage ?? `${action.label} done.`));
+      })
       .catch((err) => {
-        if (!handleConflict(err)) {
-          setDetailError(
-            err instanceof ApiError ? (err.problem.detail ?? err.problem.title) : "the merge was refused",
-          );
-          setConfirmOpen(false);
-        }
+        setDetailError(errorMessage(err, `${action.label} was refused`));
+        setConfirmAction(null);
+        setTextAction(null);
       })
       .finally(() => setBusy(false));
   };
 
-  const rejectMatch = () => {
+  const clickAction = (action: QueueAction) => {
     if (!selectedEntry) return;
-    setBusy(true);
-    api
-      .rejectReview(selectedEntry.id, rejectReason.trim())
-      .then(() => afterDecision("Rejected."))
-      .catch((err) => {
-        if (!handleConflict(err)) {
-          setDetailError(
-            err instanceof ApiError
-              ? (err.problem.detail ?? err.problem.title)
-              : "the rejection was refused",
-          );
-          setRejectOpen(false);
-        }
-      })
-      .finally(() => setBusy(false));
-  };
-
-  const deferCandidate = () => {
-    if (!selectedEntry) return;
-    setDeferredIds((prev) => new Set(prev).add(selectedEntry.id));
-    setSelectedId(null);
+    if (action.kind === "clientOnly") {
+      setDeferredIds((prev) => new Set(prev).add(selectedEntry.id));
+      setSelectedId(null);
+      return;
+    }
+    if (action.kind === "withText") {
+      setTextAction(action);
+      return;
+    }
+    if (action.confirmTitle) {
+      setConfirmAction(action);
+      return;
+    }
+    runAction(action, undefined);
   };
 
   if (error) return <Alert type="error" showIcon message={error} />;
-
-  const emptyTitle =
-    status === "pending"
-      ? COPY.emptyPendingTitle
-      : status === "confirmed"
-        ? COPY.emptyConfirmedTitle
-        : COPY.emptyRejectedTitle;
-  const emptyDescription =
-    status === "pending"
-      ? COPY.emptyPendingDescription
-      : status === "confirmed"
-        ? COPY.emptyConfirmedDescription
-        : COPY.emptyRejectedDescription;
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <div>
         {/* `level={2}`, not `4` — the chrome's own `<h1>graph-owl</h1>` is
-            the only heading above this one, and `level={4}` here jumped
-            straight from 1 to 4, an axe `heading-order` violation found
-            testing this page (and, it turned out, already present and
-            uncaught in the vocabulary browser's own per-term title —
-            fixed there too). `fontSize` pins the previous visual size. */}
+            the only heading above this one; a jump straight to `4` is an
+            axe `heading-order` violation, found and fixed in Epic 42
+            Slice C. `fontSize` pins the intended visual size. */}
         <Title level={2} style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>
-          {COPY.title}
+          {config.label}
         </Title>
         <Paragraph type="secondary" style={{ margin: "4px 0 0", fontSize: 13 }}>
-          {COPY.subtitle}
+          {config.subtitle}
         </Paragraph>
       </div>
 
       {notice && <Alert type="success" showIcon closable message={notice} onClose={() => setNotice(null)} />}
 
-      <Segmented value={status} onChange={(value) => setStatusTab(value as ReviewStatus)} options={STATUS_OPTIONS} />
+      <Segmented
+        value={status}
+        onChange={(value) => setStatusTab(value as string)}
+        options={config.statuses.map((s) => ({ label: s.label, value: s.key }))}
+      />
 
       {entries === null ? (
         <Space direction="vertical" align="center" style={{ width: "100%", padding: 48 }}>
@@ -288,7 +203,7 @@ export function ReviewQueue() {
           <Text>{COPY.loading}</Text>
         </Space>
       ) : visibleEntries.length === 0 ? (
-        <Empty description={<Text>{emptyDescription}</Text>}>{emptyTitle}</Empty>
+        <Empty description={<Text>{config.emptyDescription(status)}</Text>}>{config.emptyTitle(status)}</Empty>
       ) : (
         <Flex gap={24} align="flex-start">
           <List
@@ -306,18 +221,11 @@ export function ReviewQueue() {
               >
                 <Space direction="vertical" size={4} style={{ width: "100%" }}>
                   <Space>
-                    <Tag color="blue">
-                      {Math.round(entry.score * 100)}
-                      {COPY.matchSuffix}
-                    </Tag>
-                    {entry.status !== "pending" && (
-                      <Tag color={entry.status === "confirmed" ? "success" : "default"}>
-                        {entry.status} {deciderLabel(entry)}
-                      </Tag>
-                    )}
+                    <Tag color="blue">{entry.summary}</Tag>
+                    {entry.decidedSummary && <Tag>{entry.decidedSummary}</Tag>}
                   </Space>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    {entry.evidence.map(evidenceLabel).join(", ")}
+                    {entry.detail}
                   </Text>
                   {entry.reason && (
                     <Text type="secondary" style={{ fontSize: 12 }}>
@@ -335,50 +243,27 @@ export function ReviewQueue() {
               <Empty description={<Text>{COPY.detailPlaceholder}</Text>} />
             ) : detailError ? (
               <Alert type="error" showIcon message={detailError} />
-            ) : !targetAsset || !candidateAsset ? (
+            ) : loadingDetail ? (
               <Spin />
             ) : (
               <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead>
-                    <tr>
-                      <th style={{ textAlign: "left", padding: 8 }} />
-                      <th style={{ textAlign: "left", padding: 8 }}>{COPY.targetColumn}</th>
-                      <th style={{ textAlign: "left", padding: 8 }}>{COPY.candidateColumn}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {comparison.map((field) => (
-                      <tr key={field.field} style={{ borderTop: "1px solid rgba(0,0,0,0.06)" }}>
-                        <td style={{ padding: 8 }}>
-                          <Space size={4}>
-                            {field.matches ? (
-                              <CheckCircleOutlined style={{ color: "#52c41a" }} />
-                            ) : (
-                              <WarningOutlined style={{ color: "#faad14" }} />
-                            )}
-                            <Text strong>{field.label}</Text>
-                          </Space>
-                        </td>
-                        <td style={{ padding: 8 }}>{field.targetValue}</td>
-                        <td style={{ padding: 8 }}>{field.candidateValue}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                {detail}
 
-                {selectedEntry.status === "pending" && (
+                {selectedEntry.status === config.openStatus && (
                   <Space>
-                    <Button type="primary" onClick={() => setConfirmOpen(true)}>
-                      {COPY.mergeAction}
-                    </Button>
-                    <Button danger onClick={() => setRejectOpen(true)}>
-                      {COPY.rejectAction}
-                    </Button>
-                    <Button onClick={deferCandidate}>{COPY.deferAction}</Button>
+                    {config.actions.map((action) => (
+                      <Button
+                        key={action.key}
+                        type={action.key === config.actions[0]?.key ? "primary" : "default"}
+                        danger={action.danger}
+                        onClick={() => clickAction(action)}
+                      >
+                        {action.label}
+                      </Button>
+                    ))}
                   </Space>
                 )}
-                {selectedEntry.status === "pending" && (
+                {selectedEntry.status === config.openStatus && config.actions.some((a) => a.kind === "clientOnly") && (
                   <Text type="secondary" style={{ fontSize: 11 }}>
                     {COPY.deferHint}
                   </Text>
@@ -390,39 +275,39 @@ export function ReviewQueue() {
       )}
 
       <Modal
-        open={confirmOpen}
-        title={COPY.confirmTitle}
-        okText={COPY.confirmOk}
+        open={confirmAction !== null}
+        title={confirmAction?.confirmTitle}
+        okText={confirmAction?.label}
         confirmLoading={busy}
-        onCancel={() => setConfirmOpen(false)}
-        onOk={confirmMerge}
+        onCancel={() => setConfirmAction(null)}
+        onOk={() => confirmAction && runAction(confirmAction, undefined)}
       >
         <Paragraph type="secondary" style={{ fontSize: 13 }}>
-          {COPY.confirmBody}
+          {confirmAction?.confirmBody}
         </Paragraph>
       </Modal>
 
       <Modal
-        open={rejectOpen}
-        title={COPY.rejectTitle}
-        okText={COPY.rejectOk}
-        okButtonProps={{ disabled: rejectReason.trim().length === 0, danger: true }}
+        open={textAction !== null}
+        title={textAction?.textModalTitle}
+        okText={textAction?.label}
+        okButtonProps={{ disabled: textValue.trim().length === 0, danger: textAction?.danger }}
         confirmLoading={busy}
         onCancel={() => {
-          setRejectOpen(false);
-          setRejectReason("");
+          setTextAction(null);
+          setTextValue("");
         }}
-        onOk={rejectMatch}
+        onOk={() => textAction && runAction(textAction, textValue.trim())}
       >
         <Paragraph type="secondary" style={{ fontSize: 13 }}>
-          {COPY.rejectHint}
+          {textAction?.textModalHint}
         </Paragraph>
         <Input.TextArea
           autoFocus
           rows={3}
-          value={rejectReason}
-          placeholder={COPY.rejectPlaceholder}
-          onChange={(event) => setRejectReason(event.target.value)}
+          value={textValue}
+          placeholder={textAction?.textPlaceholder}
+          onChange={(event) => setTextValue(event.target.value)}
         />
       </Modal>
     </Space>

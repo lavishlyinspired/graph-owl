@@ -70,6 +70,11 @@ test("the review queue: side-by-side comparison, reject requires a reason, zero 
   await rejectOk.click();
 
   await expect(page.getByText("Rejected.")).toBeVisible();
+  // The reject Modal's own close animation — its `role="dialog"` element
+  // is still in the DOM mid-fade (`ant-zoom-leave-active`), and antd
+  // detaches its `aria-labelledby` wiring before that animation finishes,
+  // which axe's `aria-dialog-name` rule correctly flags if scanned then.
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 
   const axeResults = await new AxeBuilder({ page }).analyze();
   expect(axeResults.violations, JSON.stringify(axeResults.violations, null, 2)).toEqual([]);
@@ -121,5 +126,8 @@ test("two reviewers on the same candidate: the second sees the resolution, not a
   await page.getByPlaceholder("Why is this not a match?").fill("too late, but trying anyway");
   await page.getByRole("dialog").getByRole("button", { name: "Reject" }).click();
 
-  await expect(page.getByText("Someone else already decided this candidate.")).toBeVisible();
+  // Epic 42 Slice D generalized `ReviewQueue.tsx` to every queue kind, and
+  // this notice's copy moved with it — "candidate" was resolution-specific
+  // wording a generic component can no longer own.
+  await expect(page.getByText("Someone else already decided this.")).toBeVisible();
 });

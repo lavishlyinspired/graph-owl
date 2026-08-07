@@ -222,6 +222,47 @@ export interface BulkReviewOutcome {
   problem: string | null;
 }
 
+// ---- Epic 42 Slice D: extraction claims (Epic 21) and drift (Epic 20) ----
+
+export interface PendingClaim {
+  id: string;
+  runId: string;
+  subject: string;
+  predicate: string;
+  object: string;
+  confidence: number;
+  /** The sentence the claim's raw evidence span was widened to — already
+   *  server-side (`windowed_passage`). */
+  passage: string;
+  /** Offsets into `passage` itself, not into the original document. */
+  span: [number, number];
+}
+
+export type ClaimDecision =
+  | { outcome: "accept" }
+  | { outcome: "edit"; subject: string; predicate: string; object: string }
+  | { outcome: "reject"; reason: string };
+
+export type DriftKind = "liveEdited" | "unapplied";
+export type DriftStatus = "pending" | "applied" | "ignored";
+
+export interface DriftItem {
+  id: string;
+  assetId: string;
+  fullyQualifiedName: string;
+  field: string;
+  kind: DriftKind;
+  liveValue: string | null;
+  declaredValue: string | null;
+  status: DriftStatus;
+  reportedAt: string;
+  /** Absent (the server omits the field, not `null`) until decided. */
+  decidedAt?: string;
+  decidedBy?: string;
+  /** Present only once `ignored`. */
+  reason?: string;
+}
+
 export interface Asset {
   id: string;
   kind: AssetKind;
@@ -810,4 +851,28 @@ export const api = {
       body: JSON.stringify(body),
     }),
   splitMerge: (id: string) => request<MergeRecord>(`/merges/${id}/split`, { method: "POST" }),
+  /** A bare array, unlike every other queue here — no envelope, no
+   *  pagination, no status filter. Always the pending-equivalent set;
+   *  there is no way to ask this route for decided history. */
+  extractionQueue: () => request<PendingClaim[]>("/extraction/queue"),
+  /** `204 No Content` — unlike drift/proposal decisions, the server does
+   *  not echo the decided claim back. */
+  decideExtractionClaim: (id: string, decision: ClaimDecision) =>
+    request<void>(`/extraction/claims/${id}/decision`, {
+      method: "POST",
+      body: JSON.stringify(decision),
+    }),
+  driftQueue: (params: { status?: DriftStatus; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.status) query.set("status", params.status);
+    query.set("limit", String(params.limit ?? 50));
+    query.set("offset", String(params.offset ?? 0));
+    return request<{ data: DriftItem[]; total: number }>(`/drift?${query}`);
+  },
+  applyDrift: (id: string) => request<DriftItem>(`/drift/${id}/apply`, { method: "POST" }),
+  ignoreDrift: (id: string, reason: string) =>
+    request<DriftItem>(`/drift/${id}/ignore`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
 };

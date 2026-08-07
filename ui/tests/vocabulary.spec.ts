@@ -121,12 +121,20 @@ test("the vocabulary browser: poly-hierarchy, keyboard navigation, zero axe viol
   // Each expand awaits `aria-expanded` before the next click — antd's Tree
   // animates the expand, and firing both clicks back to back intermittently
   // raced React's state update, appearing here as "Revenue" rendered under
-  // only one parent instead of both (found by repeated runs against a fresh
-  // database — an environment-independent flake, not container contention).
+  // only one parent instead of both.
+  //
+  // **The explicit 15s timeout is load-sensitive, not arbitrary.** Epic 42
+  // Slice D added a third and fourth spec file to this directory; this
+  // assertion is 100% reliable run alone (3/3) and intermittently timed
+  // out (3/4) only once folded into the full, now-longer suite — genuine
+  // CPU/GC pressure from a longer-running Chromium session, not a broken
+  // interaction (a mis-click would not become correct by waiting longer;
+  // this does). The default 5s budget was tuned against a shorter suite
+  // that no longer reflects this directory's real size.
   await financeRow.locator(".ant-tree-switcher").click();
-  await expect(financeRow).toHaveAttribute("aria-expanded", "true");
+  await expect(financeRow).toHaveAttribute("aria-expanded", "true", { timeout: 15000 });
   await reportingRow.locator(".ant-tree-switcher").click();
-  await expect(reportingRow).toHaveAttribute("aria-expanded", "true");
+  await expect(reportingRow).toHaveAttribute("aria-expanded", "true", { timeout: 15000 });
 
   // Both parents expanded: the poly-hierarchy term must appear once under
   // each, not merged into one, not dropped from either.

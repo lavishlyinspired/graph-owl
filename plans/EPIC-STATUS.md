@@ -576,7 +576,7 @@ is the condition that index exists to catch.
 ### Epic 42 — Semantic Browse, Review Queues & Agent Activity *(Demo 7)*
 
 - [x] One vocabulary browser over glossary, tags, domains, packs — **Slices A–B shipped, 7 Aug
-- [~] One review queue over four proposal sources — **Slice C shipped, 7 August 2026**: `Revie
+- [~] One review queue over four proposal sources — **Slices C–D shipped, 7 August 2026, 3 of 
 - [ ] Agent activity audit
 
 ### Epic 43 — Agent Framework Integrations *(Demo 5)*

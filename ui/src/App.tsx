@@ -98,7 +98,7 @@ import {
   userTextDir,
 } from "./trust/TrustComponents";
 import { VocabularySection } from "./features/vocabulary/VocabularySection";
-import { ReviewQueue } from "./features/review/ReviewQueue";
+import { ReviewSection } from "./features/review/ReviewSection";
 import { hierarchy, type TeamNode } from "./admin/hierarchy";
 import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
 import {
@@ -4403,7 +4403,7 @@ function AppShell() {
               ) : section === "vocabulary" ? (
                 <VocabularySection />
               ) : section === "review" ? (
-                <ReviewQueue />
+                <ReviewSection />
               ) : section === "connectors" ? (
                 <ConnectorsPage onDone={refresh} colors={colors} />
               ) : section === "admin" ? (
