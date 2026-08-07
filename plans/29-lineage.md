@@ -1,7 +1,6 @@
 # Plan: Lineage (Epic 29)
 **Branch**: feat/lineage
-**Status**: **Slices A–F shipped.** A, B and C on 29 Jul 2026; D, E and F on 3 Aug 2026
-not started
+**Status**: **Slices A–F shipped** — A, B and most of C on 29 Jul 2026; D, E and F on 3 Aug 2026; **the remaining piece of Slice C (the node budget and `truncated` flag its own acceptance criteria specify) shipped 8 August 2026**, found missing and fixed by Epic 37a Slice C's real-scale measurement, not by re-reading this plan. See Slice C's own account below for what that measurement found and why it was recorded as a correction rather than an update.
 **Depends on**: Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage), **Epic 7a** (bounded, cycle-safe traversal — lineage does not implement its own walk)
 **Unblocks**: impact analysis workflows
 **Crates**: `graph-owl-core` (LineageDetails, ColumnMapping) · `graph-owl-query` (shared bounded traversal) · `graph-owl-engine` (edge patterns) · `graph-owl-storage-postgres` · `graph-owl-api` · `graph-owl-server`
@@ -26,7 +25,7 @@ Answer the two highest-stakes questions in data engineering: *what breaks if I c
 - [ ] Column-level mappings are recorded and returned, including many-to-one.
 - [ ] A connector re-run replaces only the edges it previously asserted.
 - [ ] Deleting an entity leaves its lineage edges intact for restore.
-- [ ] A 1,000-node graph traverses within a bounded latency budget.
+- [x] A 1,000-node graph traverses within a bounded latency budget — see Slice C's account below; not met until 8 August 2026, and not by construction of a fast query but by a node-count cap that stops the walk before it grows unbounded.
 
 ## Slices
 
@@ -64,7 +63,7 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **REFACTOR**: assess whether traversal belongs in the adapter (one recursive CTE, fast) or the facade (portable, testable). Adapter-side with the port expressing "traverse", noting it as a Postgres-shaped method, relevant when a second backend is ever considered.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice C: Cycles terminate
+### Slice C: Cycles terminate — **the cycle-safety half shipped 29 Jul 2026; the node budget did not ship until 8 August 2026**
 
 **Value**: A production lineage graph with a feedback loop does not hang the API.
 **Path**: visited-set enforcement plus a hard node budget.
@@ -76,6 +75,14 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: Cycle tests at depth 1, 2, and 3, each asserting termination *and* correct node counts. A budget test asserting `truncated: true`. Mutator watch: a removed visited-set must hang or overflow — assert with a timeout so the test fails rather than wedging CI.
 **GREEN**: visited set, node budget, truncation flag.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**The honest record, corrected 8 August 2026**: cycle termination (the visited set) shipped on schedule and was never in question. **The node budget and `truncated` flag — this slice's own stated acceptance criteria, not an inference — were never built.** The status line at the top of this plan said "Slices A–F shipped" the whole time regardless; Slices D, E, and F each carry their own `— shipped` marker in this file, A, B, and C never did, and nothing before now noticed the gap that absence was pointing at.
+
+**Found not by re-reading this plan, but by Epic 37a Slice C measuring the real endpoint at real scale**: `GET /lineage/asset/{id}` took **25.2 seconds** and returned 51,230 of 60,246 assets — 85% of a real corpus — from one well-connected node, three hops in, because `MAX_LINEAGE_DEPTH` (`crates/graph-owl-server/src/lib.rs`) bounds walk *depth* but nothing bounded node *count*. This is the exact failure this slice's own "Value" line named in 2026: "a production lineage graph... does not hang the API" — it did, for 25 seconds, against any principal who could name a well-connected asset, which is every authenticated caller, not a hypothetical adversary.
+
+**Fixed 8 August 2026**, in the same session that measured it: `Storage::lineage_edges_touching` gained an optional `limit` (bounding the fetch itself, not only the walk's stopping condition — the measured cost was one hop's unbounded fetch, not hop count), `Catalog::lineage_graph` gained `max_nodes` and returns `truncated`, and `GET /lineage/asset/{id}` gained a `maxNodes` query parameter (default 200, matching `graph_owl_traversal::Bounds::default()`'s own reasoning for the same number). TDD'd: `tests/lineage.rs` gained `a_high_fan_out_walk_stops_at_the_node_budget_and_says_so`, `a_walk_within_the_node_budget_is_not_marked_truncated`, and `max_nodes_defaults_without_being_given`; all pre-existing lineage, field-selection, and MCP HTTP tests (32 tests across three files) pass unchanged. Re-measured at the identical 60,246-asset scale after the fix — see below.
+
+**What is still out of scope, named rather than silently left**: `graph-owl-mcp`'s own `explain_lineage` tool (`crates/graph-owl-mcp/src/catalog.rs::subgraph`) calls the same now-bounded `Catalog::lineage_graph`, so the cost fix applies there too — but the `truncated` flag is discarded at that call site rather than threaded into the MCP tool's own response shape, which is separate, unstarted follow-up work, not an oversight in this fix.
 
 ### Slice D: Lineage reaches column level — **shipped**
 

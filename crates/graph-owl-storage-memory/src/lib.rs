@@ -2165,8 +2165,9 @@ impl Storage for InMemoryStorage {
     async fn lineage_edges_touching(
         &self,
         asset_ids: &[Uuid],
+        limit: Option<i64>,
     ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError> {
-        Ok(self
+        let matched = self
             .lineage
             .lock()
             .unwrap()
@@ -2175,7 +2176,14 @@ impl Storage for InMemoryStorage {
                 asset_ids.contains(&edge.from_asset_id) || asset_ids.contains(&edge.to_asset_id)
             })
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+        Ok(match limit {
+            Some(limit) => {
+                let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+                matched.into_iter().take(limit).collect()
+            }
+            None => matched,
+        })
     }
 
     async fn lineage_edges_by_pipeline(

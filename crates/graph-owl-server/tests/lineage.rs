@@ -352,6 +352,77 @@ async fn a_walk_deeper_than_the_maximum_is_refused() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+/// Epic 37a Slice C found this the hard way: at real scale, a well-connected
+/// node's downstream reached 85% of a 60,246-table corpus in 3 hops — 25.2s
+/// against an 800ms budget, because `MAX_LINEAGE_DEPTH` bounds walk *depth*
+/// but nothing bounded node *count*. The handler's own pre-existing doc
+/// comment had already named the risk ("an unbounded walk turns one click
+/// into a full-table read"); this is the mechanism that was missing.
+#[tokio::test]
+async fn a_high_fan_out_walk_stops_at_the_node_budget_and_says_so() {
+    let (app, _db, _) = test_app().await;
+    let ids = tables(&app, 60).await;
+    // One root feeding 59 downstream tables directly — the exact shape the
+    // real corpus's busiest node produced, just smaller.
+    for id in &ids[1..] {
+        feeds(&app, &ids[0], id).await;
+    }
+
+    let (status, graph) = send(
+        &app,
+        "GET",
+        &format!("/lineage/asset/{}?downstream=1&maxNodes=10", ids[0]),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{graph}");
+    // The root plus at most 10 more — never all 59 reachable neighbours.
+    assert!(graph["nodes"].as_array().unwrap().len() <= 11, "{graph}");
+    assert_eq!(
+        graph["truncated"], true,
+        "a walk that hit the node budget must say so: {graph}"
+    );
+}
+
+#[tokio::test]
+async fn a_walk_within_the_node_budget_is_not_marked_truncated() {
+    let (app, _db, _) = test_app().await;
+    let ids = tables(&app, 3).await;
+    feeds(&app, &ids[0], &ids[1]).await;
+    feeds(&app, &ids[1], &ids[2]).await;
+
+    let (status, graph) = send(
+        &app,
+        "GET",
+        &format!("/lineage/asset/{}?downstream=2&maxNodes=200", ids[0]),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{graph}");
+    assert_eq!(graph["nodes"].as_array().unwrap().len(), 3, "{graph}");
+    assert_eq!(graph["truncated"], false, "{graph}");
+}
+
+#[tokio::test]
+async fn max_nodes_defaults_without_being_given() {
+    let (app, _db, _) = test_app().await;
+    let ids = tables(&app, 2).await;
+    feeds(&app, &ids[0], &ids[1]).await;
+
+    let (status, graph) = send(
+        &app,
+        "GET",
+        &format!("/lineage/asset/{}?downstream=1", ids[0]),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{graph}");
+    assert_eq!(graph["truncated"], false, "{graph}");
+}
+
 /// "Nothing downstream" and "the downstream was deleted" are opposite
 /// conclusions, so a tombstoned node stays in the graph and is flagged.
 #[tokio::test]

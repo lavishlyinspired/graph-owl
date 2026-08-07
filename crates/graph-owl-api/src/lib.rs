@@ -3534,7 +3534,7 @@ impl Catalog {
             // **One query per level, not per node.** `lineage_edges_touching`
             // exists for exactly this shape — a walk that asked per node would
             // turn a five-deep graph into hundreds of round trips.
-            let edges = self.storage.lineage_edges_touching(&frontier).await?;
+            let edges = self.storage.lineage_edges_touching(&frontier, None).await?;
             let mut next = Vec::new();
             for edge in edges {
                 // Upstream only: an edge is `from → to`, so the frontier being
@@ -8232,16 +8232,33 @@ impl Catalog {
     /// # Errors
     /// Returns an error if the underlying storage fails.
     #[tracing::instrument(name = "catalog.lineage_graph", skip_all)]
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage fails.
+    ///
+    /// **`max_nodes` bounds this walk's cost, not only its output size** —
+    /// Epic 37a Slice C measured a real, unbounded version of this method
+    /// take 25.2s and touch 51,230 of 60,246 assets from one well-connected
+    /// node, three hops in. `MAX_LINEAGE_DEPTH` (the HTTP layer) already
+    /// bounds *depth*; nothing bounded *node count*, and the handler's own
+    /// pre-existing doc comment had already named the risk this reproduced:
+    /// "an unbounded walk turns one click into a full-table read." Each
+    /// hop's fetch is itself bounded (via `lineage_edges_touching`'s
+    /// `limit`), not only the walk's stopping condition — the measured cost
+    /// was in one hop's unbounded fetch from a high-fan-out node, not in
+    /// how many hops ran.
     pub async fn lineage_graph(
         &self,
         root: Uuid,
         upstream: usize,
         downstream: usize,
-    ) -> Result<(Vec<Asset>, Vec<graph_owl_core::lineage::LineageEdge>), CatalogError> {
+        max_nodes: usize,
+    ) -> Result<(Vec<Asset>, Vec<graph_owl_core::lineage::LineageEdge>, bool), CatalogError> {
         let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
         seen.insert(root);
         let mut edges: std::collections::HashMap<Uuid, graph_owl_core::lineage::LineageEdge> =
             std::collections::HashMap::new();
+        let mut truncated = false;
 
         // One frontier per direction, walked to its own depth. Walking a merged
         // frontier would let an upstream hop spend the downstream budget, so
@@ -8252,7 +8269,28 @@ impl Catalog {
                 if frontier.is_empty() {
                     break;
                 }
-                let touching = self.storage.lineage_edges_touching(&frontier).await?;
+                if seen.len() >= max_nodes {
+                    truncated = true;
+                    break;
+                }
+                // A loose margin over the strict remaining count, not a
+                // precision guarantee: several edges can share one `far`
+                // node (two relationship kinds between the same pair), so
+                // fetching exactly the remaining budget would under-fetch
+                // and wrongly report truncation. Bounding cost is the goal;
+                // `truncated` is reported conservatively below regardless —
+                // a false "truncated" is safe, a false "complete" is not.
+                let remaining = max_nodes.saturating_sub(seen.len()).max(1);
+                let fetch_limit = i64::try_from(remaining.saturating_mul(4)).unwrap_or(i64::MAX);
+                let touching = self
+                    .storage
+                    .lineage_edges_touching(&frontier, Some(fetch_limit))
+                    .await?;
+                if touching.len() as i64 >= fetch_limit {
+                    // The fetch itself hit its cap — there may be real edges
+                    // this hop never saw at all.
+                    truncated = true;
+                }
                 let mut next = Vec::new();
                 for edge in touching {
                     let (near, far) = if forward {
@@ -8265,6 +8303,10 @@ impl Catalog {
                     // one query serving both walks is cheaper than two.
                     if !frontier.contains(&near) {
                         continue;
+                    }
+                    if seen.len() >= max_nodes {
+                        truncated = true;
+                        break;
                     }
                     edges.insert(edge.id, edge);
                     if seen.insert(far) {
@@ -8285,7 +8327,7 @@ impl Catalog {
                 nodes.push(asset);
             }
         }
-        Ok((nodes, edges.into_values().collect()))
+        Ok((nodes, edges.into_values().collect(), truncated))
     }
 
     /// Open a run row before the work starts.
@@ -12792,7 +12834,10 @@ impl Catalog {
                     }
                 }
 
-                let touching = self.storage.lineage_edges_touching(&[from.id]).await?;
+                let touching = self
+                    .storage
+                    .lineage_edges_touching(&[from.id], None)
+                    .await?;
                 for edge in touching.iter().filter(|e| {
                     e.from_asset_id == from.id && e.relationship == RelationshipType::Feeds
                 }) {
@@ -12824,7 +12869,10 @@ impl Catalog {
         let mut fields = serde_json::Map::new();
         let to_columns = self.storage.list_children(Some(to.id)).await?;
         for to_column in to_columns.iter().filter(|a| a.kind == AssetKind::Column) {
-            let touching = self.storage.lineage_edges_touching(&[to_column.id]).await?;
+            let touching = self
+                .storage
+                .lineage_edges_touching(&[to_column.id], None)
+                .await?;
             let mut input_fields = Vec::new();
             for column_edge in touching.iter().filter(|e| {
                 e.to_asset_id == to_column.id
@@ -24551,7 +24599,10 @@ mod projection_isolation_tests {
             let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
             let ids = chain(&catalog, 3).await;
 
-            let (nodes, edges) = catalog.lineage_graph(ids[0], 0, 2).await.expect("walk");
+            let (nodes, edges, _truncated) = catalog
+                .lineage_graph(ids[0], 0, 2, 1000)
+                .await
+                .expect("walk");
 
             assert_eq!(nodes.len(), 3, "the root and two downstream");
             assert_eq!(edges.len(), 2);
@@ -24567,7 +24618,10 @@ mod projection_isolation_tests {
             let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
             let ids = chain(&catalog, 3).await;
 
-            let (nodes, _) = catalog.lineage_graph(ids[1], 0, 1).await.expect("walk");
+            let (nodes, _, _truncated) = catalog
+                .lineage_graph(ids[1], 0, 1, 1000)
+                .await
+                .expect("walk");
             let found: std::collections::HashSet<Uuid> =
                 nodes.iter().map(|asset| asset.id).collect();
 
@@ -24580,7 +24634,10 @@ mod projection_isolation_tests {
             let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
             let ids = chain(&catalog, 3).await;
 
-            let (nodes, _) = catalog.lineage_graph(ids[1], 1, 0).await.expect("walk");
+            let (nodes, _, _truncated) = catalog
+                .lineage_graph(ids[1], 1, 0, 1000)
+                .await
+                .expect("walk");
             let found: std::collections::HashSet<Uuid> =
                 nodes.iter().map(|asset| asset.id).collect();
 
@@ -27334,8 +27391,8 @@ mod entity_expansion_tests {
                 .await
                 .expect("a table may feed a dashboard");
 
-            let (from_table, _) = catalog
-                .lineage_graph(table, 0, 1)
+            let (from_table, _, _truncated) = catalog
+                .lineage_graph(table, 0, 1, 1000)
                 .await
                 .expect("downstream of the table");
             assert!(
@@ -27343,8 +27400,8 @@ mod entity_expansion_tests {
                 "the dashboard must be reachable downstream of the table"
             );
 
-            let (from_dashboard, _) = catalog
-                .lineage_graph(dashboard, 1, 0)
+            let (from_dashboard, _, _truncated) = catalog
+                .lineage_graph(dashboard, 1, 0, 1000)
                 .await
                 .expect("upstream of the dashboard");
             assert!(
@@ -27937,8 +27994,8 @@ mod entity_expansion_tests {
                 .await
                 .expect("feature");
 
-            let (downstream_of_table, _) = catalog
-                .lineage_graph(table_id, 0, 1)
+            let (downstream_of_table, _, _truncated) = catalog
+                .lineage_graph(table_id, 0, 1, 1000)
                 .await
                 .expect("downstream of the source table");
             assert!(
@@ -27947,8 +28004,8 @@ mod entity_expansion_tests {
                  derived rather than separately asserted"
             );
 
-            let (upstream_of_model, _) = catalog
-                .lineage_graph(model, 1, 0)
+            let (upstream_of_model, _, _truncated) = catalog
+                .lineage_graph(model, 1, 0, 1000)
                 .await
                 .expect("upstream of the model");
             assert!(
@@ -27973,8 +28030,8 @@ mod entity_expansion_tests {
                 .await
                 .expect("feature");
 
-            let (upstream_of_model, _) = catalog
-                .lineage_graph(model, 1, 0)
+            let (upstream_of_model, _, _truncated) = catalog
+                .lineage_graph(model, 1, 0, 1000)
                 .await
                 .expect("upstream of the model");
             // `lineage_graph` always includes the root itself (it seeds the
@@ -28439,8 +28496,8 @@ mod entity_expansion_tests {
                 .await
                 .expect("the curated table feeds the dashboard");
 
-            let (downstream, _) = catalog
-                .lineage_graph(container.id, 0, 3)
+            let (downstream, _, _truncated) = catalog
+                .lineage_graph(container.id, 0, 3, 1000)
                 .await
                 .expect("three hops downstream of the container");
             assert!(
@@ -28449,8 +28506,8 @@ mod entity_expansion_tests {
                  crossing storage, table and dashboard families: {downstream:?}"
             );
 
-            let (upstream, _) = catalog
-                .lineage_graph(dashboard.id, 3, 0)
+            let (upstream, _, _truncated) = catalog
+                .lineage_graph(dashboard.id, 3, 0, 1000)
                 .await
                 .expect("three hops upstream of the dashboard");
             assert!(
@@ -31023,7 +31080,7 @@ mod openlineage_tests {
             .expect("stub created");
         let edges = catalog
             .storage
-            .lineage_edges_touching(&[from.id, to.id])
+            .lineage_edges_touching(&[from.id, to.id], None)
             .await
             .expect("lineage_edges_touching");
         assert_eq!(edges.len(), 1, "{edges:#?}");
@@ -31066,7 +31123,7 @@ mod openlineage_tests {
             .expect("exists");
         let edges = catalog
             .storage
-            .lineage_edges_touching(&[from.id])
+            .lineage_edges_touching(&[from.id], None)
             .await
             .expect("lineage_edges_touching");
         assert_eq!(edges.len(), 1, "re-import must not duplicate: {edges:#?}");

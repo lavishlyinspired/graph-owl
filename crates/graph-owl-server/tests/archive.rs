@@ -126,3 +126,37 @@ async fn an_admin_exports_and_restores_over_real_http() {
         "every already-live entity should be reported skipped: {outcome:?}"
     );
 }
+
+/// Epic 37a: found generating a real scale corpus, not designed in
+/// advance. axum's default body limit is 2 MiB; a 60,000-table corpus
+/// (well short of the plan's 100,000-entity target) compresses to ~10 MiB
+/// and was rejected outright with `413` before this route's limit was
+/// raised — a backup/restore feature that cannot hold a real backup.
+#[tokio::test]
+async fn a_restore_body_over_two_megabytes_is_not_rejected_for_size() {
+    let (app, _container, _catalog) = fixture().await;
+
+    // Junk, not a real archive: this test is only about the body-size
+    // gate, which runs before the archive is ever parsed. 3 MiB clears
+    // axum's default 2 MiB limit and stays well under the raised one.
+    let oversized_junk = vec![0u8; 3 * 1024 * 1024];
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/restore")
+                .header("authorization", format!("Bearer {}", token("root")))
+                .body(Body::from(oversized_junk))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should be handled");
+
+    assert_ne!(
+        response.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "a 3 MiB body must not be rejected on size alone; it should fail \
+         later, on being an invalid archive"
+    );
+}

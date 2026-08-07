@@ -574,10 +574,25 @@ impl CatalogContext {
             crate::Direction::Upstream => (depth, 0),
             crate::Direction::Downstream => (0, depth),
         };
-        self.catalog
-            .lineage_graph(root, up, down)
+        // Epic 37a Slice C: `Catalog::lineage_graph` gained a node budget
+        // after being measured, uncapped, taking 25.2s from one
+        // well-connected asset at real scale — this MCP-facing walk hits
+        // the identical code path and is bounded the same way, at the same
+        // default (`graph-owl-server`'s `DEFAULT_LINEAGE_MAX_NODES`; not
+        // shared as a constant across the two crates, since neither
+        // depends on the other, but the number and its reasoning are one
+        // and the same). Discarding `truncated` here rather than wiring it
+        // into this adapter's own return shape is a deliberate, narrower
+        // scope than the HTTP fix — this call is what stops an agent
+        // tying up a request for tens of seconds; surfacing the flag
+        // itself through `explain_lineage`'s response is separate,
+        // unstarted follow-up work.
+        let (nodes, edges, _truncated) = self
+            .catalog
+            .lineage_graph(root, up, down, 200)
             .await
-            .map_err(|e| unavailable(&e))
+            .map_err(|e| unavailable(&e))?;
+        Ok((nodes, edges))
     }
 
     fn name_index(

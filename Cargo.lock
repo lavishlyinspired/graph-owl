@@ -1540,6 +1540,7 @@ dependencies = [
  "graph-owl-api",
  "graph-owl-authz",
  "graph-owl-bolt",
+ "graph-owl-cli",
  "graph-owl-connectors",
  "graph-owl-core",
  "graph-owl-engine",

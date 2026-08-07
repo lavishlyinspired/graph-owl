@@ -1696,9 +1696,19 @@ pub trait Storage: Send + Sync {
     /// A walk asks for one level at a time and would otherwise make one query
     /// per node per level — the shape that turns a five-deep lineage graph into
     /// hundreds of queries.
+    ///
+    /// `limit`, when given, bounds the **rows fetched**, not nodes reached —
+    /// Epic 37a Slice C found the real cost is here, not in how many hops run:
+    /// a single highly-connected asset can touch tens of thousands of edges in
+    /// one hop, and every existing caller before this one fetched all of them
+    /// unconditionally. `None` preserves that exhaustive behaviour for callers
+    /// that need it (a cascade-delete guard must see every edge, not a
+    /// truncated sample) — only `Catalog::lineage_graph`'s node-budgeted walk
+    /// passes `Some`.
     async fn lineage_edges_touching(
         &self,
         asset_ids: &[Uuid],
+        limit: Option<i64>,
     ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError>;
 
     /// Every edge naming this asset as the pipeline that moved the data —

@@ -74,6 +74,13 @@ utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
 [dev-dependencies]
 chrono.workspace = true
 graph-owl-engine.workspace = true
+# Epic 37a: the scale-budget tests reuse Slice A's real corpus generator
+# rather than inventing a second one. A dev-dependency cycle with
+# graph-owl-cli (whose own tests already depend back on this crate to get a
+# real server to restore into) is fine — dev-dependencies are per-package
+# test-only edges, not part of the linked graph, so Cargo does not treat
+# this as circular.
+graph-owl-cli = { path = "../graph-owl-cli" }
 jsonwebtoken = "9"
 sqlx.workspace = true
 tower.workspace = true

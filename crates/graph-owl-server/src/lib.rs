@@ -11,7 +11,8 @@ pub mod streaming;
 use axum::{
     Json, Router,
     extract::{
-        FromRequest, FromRequestParts, Path, Query, Request, State, rejection::JsonRejection,
+        DefaultBodyLimit, FromRequest, FromRequestParts, Path, Query, Request, State,
+        rejection::JsonRejection,
     },
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -265,7 +266,17 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         // whole catalog, or replacing entities in bulk with caller-chosen
         // ids, is exactly that class of operation.
         .route("/admin/export", post(export_archive))
-        .route("/admin/restore", post(restore_archive));
+        // Epic 37a: axum's default body limit (2 MiB) rejected a real
+        // scale corpus outright — a 60,000-table archive compresses to
+        // ~10 MiB, well short of the plan's 100,000-entity target. A
+        // backup/restore feature that cannot hold a real backup is a
+        // defect, not a benchmark obstacle, so this route alone (not the
+        // whole server) gets a raised, still-bounded limit.
+        .merge(
+            Router::new()
+                .route("/admin/restore", post(restore_archive))
+                .layer(DefaultBodyLimit::max(RESTORE_MAX_BODY_BYTES)),
+        );
     // Epic 7d / Epic 42 Slice F: Bolt endpoint status and active sessions,
     // read-only. A separate statement rather than one more link in the
     // chain above — the route only exists when this crate is built with
@@ -2259,6 +2270,17 @@ async fn search_assets(
 struct AsOfQuery {
     /// RFC 3339. Absent means now.
     as_of: Option<String>,
+    /// `00d-api-conventions.md`'s field selection: a comma-separated opt-in
+    /// list (`owners,tags,lineage,columns`) for the related data a plain
+    /// `GET` never fetches. `owners` is accepted but always a no-op — it is
+    /// already unconditionally on `Asset` (never omitted, so an unowned
+    /// asset stays distinguishable from an unfetched one) — the point of
+    /// this param is the three that are real joins: `tags` (`labels_on`),
+    /// `lineage` (one hop each way via `lineage_graph`), and `columns`
+    /// (`list_children`). Composing them here, rather than three requests
+    /// a caller assembles by hand, is what makes an asset detail page one
+    /// request instead of four.
+    fields: Option<String>,
 }
 
 async fn get_asset(
@@ -2266,30 +2288,72 @@ async fn get_asset(
     Auth(principal): Auth,
     Path(id): Path<Uuid>,
     AppQuery(query): AppQuery<AsOfQuery>,
-) -> Result<Json<Asset>, AppError> {
-    let Some(raw) = query.as_of else {
-        return Ok(Json(catalog.get_asset_for(&principal, id).await?));
+) -> Result<Response, AppError> {
+    let asset = match &query.as_of {
+        None => catalog.get_asset_for(&principal, id).await?,
+        Some(raw) => {
+            let at = chrono::DateTime::parse_from_rfc3339(raw)
+                .map_err(|e| {
+                    AppError::Validation(vec![FieldError::new(
+                        "asOf",
+                        FieldErrorCode::Type,
+                        format!("`{raw}` is not an RFC 3339 timestamp: {e}"),
+                    )])
+                })?
+                .with_timezone(&chrono::Utc);
+
+            // Authorization is resolved against the *current* relational
+            // state, never against the projection (`04-engine-triples.md`
+            // decision 7). Flakes lag by design, so a permission revoked in
+            // that window would still be honoured if the check read from
+            // them. Establishing visibility first and only then reading
+            // history is what keeps time-travel from becoming a way to read
+            // what you are no longer allowed to see.
+            catalog.get_asset_for(&principal, id).await?;
+            catalog.get_asset_as_of(id, at).await?
+        }
     };
 
-    let at = chrono::DateTime::parse_from_rfc3339(&raw)
-        .map_err(|e| {
-            AppError::Validation(vec![FieldError::new(
-                "asOf",
-                FieldErrorCode::Type,
-                format!("`{raw}` is not an RFC 3339 timestamp: {e}"),
-            )])
-        })?
-        .with_timezone(&chrono::Utc);
+    let Some(fields) = query.fields.as_deref() else {
+        return Ok(Json(asset).into_response());
+    };
 
-    // Authorization is resolved against the *current* relational state, never
-    // against the projection (`04-engine-triples.md` decision 7). Flakes lag
-    // by design, so a permission revoked in that window would still be honoured
-    // if the check read from them. Establishing visibility first and only then
-    // reading history is what keeps time-travel from becoming a way to read
-    // what you are no longer allowed to see.
-    catalog.get_asset_for(&principal, id).await?;
-
-    Ok(Json(catalog.get_asset_as_of(id, at).await?))
+    let mut value = serde_json::to_value(&asset).map_err(|e| AppError::Internal(e.to_string()))?;
+    let map = value
+        .as_object_mut()
+        .expect("Asset always serializes to a JSON object");
+    for raw_field in fields.split(',') {
+        match raw_field.trim() {
+            "" | "owners" => {}
+            "tags" => {
+                let tags = catalog.labels_on(&asset.fully_qualified_name).await?;
+                map.insert("tags".to_string(), json!(tags));
+            }
+            "lineage" => {
+                let (nodes, edges, truncated) = catalog
+                    .lineage_graph(id, 1, 1, DEFAULT_LINEAGE_MAX_NODES)
+                    .await?;
+                map.insert(
+                    "lineage".to_string(),
+                    json!({ "nodes": nodes, "edges": edges, "truncated": truncated }),
+                );
+            }
+            "columns" => {
+                let columns = catalog.list_children(Some(id)).await?;
+                map.insert("columns".to_string(), json!(columns));
+            }
+            other => {
+                return Err(AppError::Validation(vec![FieldError::new(
+                    "fields",
+                    FieldErrorCode::Value,
+                    format!(
+                        "`{other}` is not a supported field — use owners, tags, lineage, or columns"
+                    ),
+                )]));
+            }
+        }
+    }
+    Ok(Json(value).into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -2655,6 +2719,14 @@ struct RestoreQuery {
     #[serde(default)]
     regenerate_ids: Option<bool>,
 }
+
+/// Epic 37a: a 60,000-table corpus (already short of the plan's own
+/// 100,000-entity target) compresses to ~10 MiB. 256 MiB gives that more
+/// than 10x headroom for the full target corpus and real-world backups
+/// while staying bounded — this handler still buffers the whole body into
+/// memory (`axum::body::Bytes`) before writing it to disk, so the limit is
+/// not free to raise arbitrarily.
+const RESTORE_MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 /// Restores a `.tar.zst` archive built by [`export_archive`] — Epic 37b
 /// Slices B and C. The archive's raw bytes are the whole request body —
@@ -9654,6 +9726,7 @@ async fn remove_lineage(
 struct LineageQuery {
     upstream: Option<usize>,
     downstream: Option<usize>,
+    max_nodes: Option<usize>,
 }
 
 /// How far a single request may walk.
@@ -9662,6 +9735,19 @@ struct LineageQuery {
 /// with a hundred views over one table produces a fan-out nobody predicted, and
 /// an unbounded walk turns one click into a full-table read.
 const MAX_LINEAGE_DEPTH: usize = 10;
+
+/// How many nodes a single request may return before it stops and says so.
+///
+/// **Not a hypothetical** — Epic 37a Slice C measured this endpoint,
+/// uncapped, take 25.2s and return 51,230 of 60,246 assets in a real
+/// 60k-table corpus, three hops from the busiest node. `MAX_LINEAGE_DEPTH`
+/// alone did not stop that, because depth and node count are different
+/// axes: a node can have a fan-out in the thousands at depth one. Matches
+/// `graph_owl_traversal::Bounds::default()`'s own `max_nodes` (200) for
+/// the same reason that one gives — a force-directed layout, which is
+/// what most callers of a graph endpoint render this into, stops being
+/// readable well before 200 nodes regardless of what a query could fetch.
+const DEFAULT_LINEAGE_MAX_NODES: usize = 200;
 
 async fn lineage_graph(
     State(catalog): State<Catalog>,
@@ -9672,6 +9758,7 @@ async fn lineage_graph(
     let _ = principal;
     let upstream = query.upstream.unwrap_or(1);
     let downstream = query.downstream.unwrap_or(1);
+    let max_nodes = query.max_nodes.unwrap_or(DEFAULT_LINEAGE_MAX_NODES);
     if upstream > MAX_LINEAGE_DEPTH || downstream > MAX_LINEAGE_DEPTH {
         return Err(AppError::Validation(vec![FieldError::new(
             "upstream",
@@ -9687,7 +9774,9 @@ async fn lineage_graph(
         return Err(AppError::NotFound);
     }
 
-    let (nodes, edges) = catalog.lineage_graph(id, upstream, downstream).await?;
+    let (nodes, edges, truncated) = catalog
+        .lineage_graph(id, upstream, downstream, max_nodes)
+        .await?;
     Ok(Json(json!({
         "rootId": id,
         "nodes": nodes.iter().map(|asset| json!({
@@ -9701,6 +9790,7 @@ async fn lineage_graph(
             "deleted": asset.deleted,
         })).collect::<Vec<_>>(),
         "edges": edges,
+        "truncated": truncated,
     })))
 }
 

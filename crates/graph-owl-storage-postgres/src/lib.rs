@@ -1023,15 +1023,22 @@ impl Storage for PostgresStorage {
     async fn lineage_edges_touching(
         &self,
         asset_ids: &[Uuid],
+        limit: Option<i64>,
     ) -> Result<Vec<graph_owl_core::lineage::LineageEdge>, StorageError> {
+        // Always bound, never a conditional `LIMIT` clause — `i64::MAX` for
+        // `None` keeps the query text and bind-parameter shape identical
+        // for every caller, which is what lets sqlx check it at one place
+        // rather than two.
         let rows = sqlx::query(
             "SELECT id, from_asset_id, to_asset_id, relationship, source, query,
                     description, created_at, created_by, pipeline_asset_id,
                     openlineage_event_id
                FROM lineage_edges
-              WHERE from_asset_id = ANY($1) OR to_asset_id = ANY($1)",
+              WHERE from_asset_id = ANY($1) OR to_asset_id = ANY($1)
+              LIMIT $2",
         )
         .bind(asset_ids)
+        .bind(limit.unwrap_or(i64::MAX))
         .fetch_all(&self.pool)
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
@@ -4644,21 +4651,33 @@ impl Storage for PostgresStorage {
         // match-nothing; without it, adding this parameter would have emptied
         // every existing list endpoint.
         //
-        // It recomputes the walk per candidate row. Slice E says query-time until
-        // measurement says otherwise: a maintained effective-owner projection buys
-        // speed and owes an invalidation problem, and containment is at most five
-        // levels deep (service → database → schema → table → column).
+        // **Computed once per row via `LEFT JOIN LATERAL`, not three times
+        // textually** — Epic 37a Slice B's own measurement found the earlier,
+        // textually-repeated form (once in the SELECT list, once inside the
+        // `owner` filter's `EXISTS`, once inside `unowned`'s length check) at
+        // 416ms p99 with `owner` filtering 60,246 rows, 2.8x over the 150ms
+        // budget: Postgres does not recognize three copies of one recursive
+        // CTE as the same computation, so it ran the five-level ancestry walk
+        // up to three times per row. A `LATERAL` join runs it once and every
+        // reference below reads the same result. This still walks every
+        // non-deleted row once — the row-count-linear cost the code's own
+        // prior comment already named as query-time's ceiling — that
+        // ceiling is unchanged; only the constant factor is. If a future
+        // measurement still misses budget at a larger target, the escape
+        // hatch is the maintained effective-owner projection this comment
+        // already flagged, not another constant-factor pass here.
         let extension = extension_clauses(filter.extension, 11);
         let sql = format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners FROM assets
+            "SELECT {ASSET_COLUMNS}, effective_owners.owners FROM assets
+             LEFT JOIN LATERAL (SELECT {OWNERS_EXPR} AS owners) effective_owners ON true
              WHERE NOT deleted
                AND ($1::text IS NULL OR kind = $1)
                AND ($2::text IS NULL OR (fully_qualified_name, id) > ($2, $3))
                {VISIBILITY}
                AND ($7::text IS NULL OR EXISTS (
-                     SELECT 1 FROM json_array_elements({OWNERS_EXPR}) AS effective
+                     SELECT 1 FROM json_array_elements(effective_owners.owners) AS effective
                       WHERE effective->>'id' = $7))
-               AND ($8::bool IS NOT TRUE OR json_array_length({OWNERS_EXPR}) = 0)
+               AND ($8::bool IS NOT TRUE OR json_array_length(effective_owners.owners) = 0)
                AND ($9::uuid IS NULL OR {DOMAIN_ID_EXPR} = $9)
                AND ($10::uuid IS NULL OR EXISTS (
                      SELECT 1 FROM data_product_assets m
