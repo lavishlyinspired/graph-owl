@@ -11,8 +11,13 @@ so an unusual rule stops being a feature request against Epic 5.
 
 ## Status of the specification, and what it means
 
-**SHACL 1.2 SPARQL Extensions is a W3C Working Draft, 24 July 2026.** SHACL 1.2
-Core is also a Working Draft.
+**SHACL 1.2 SPARQL Extensions is a W3C Working Draft.** Re-checked 7 August
+2026 against `https://www.w3.org/TR/shacl12-sparql/`: still Working Draft,
+now dated 6 August 2026 (was 24 July 2026 at the previous check — the
+document has republished as a Working Draft again, not advanced track
+stage). SHACL 1.2 Core is also a Working Draft, re-checked the same day
+against `https://www.w3.org/TR/shacl12-core/`: Working Draft, dated 3
+August 2026.
 
 A Working Draft may change in ways that break an implementation. This epic is
 therefore *planned but not scheduled*: the design below is stable enough to
