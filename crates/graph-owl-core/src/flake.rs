@@ -98,6 +98,30 @@ pub mod namespace {
     /// shapes Epic 9 Slice C validates export against (`foaf:page`,
     /// `foaf:homepage`), not otherwise emitted by this store.
     pub const FOAF: u16 = 0x010A;
+    /// `http://www.w3.org/2004/02/skos/core#` — Epic 104's own
+    /// `skos:exactMatch`/`closeMatch`/`broadMatch`/`narrowMatch` mapping
+    /// properties, verified against the W3C SKOS Reference (§10) 7 August
+    /// 2026. Not previously registered as a `Sid` namespace: prior SKOS use
+    /// (`graph-owl-rdf-io::skos`) worked at the RDF-term level directly and
+    /// never needed one.
+    pub const SKOS: u16 = 0x010B;
+
+    /// UMLS Concept Unique Identifier — Epic 104 decision 5. Not a
+    /// standards vocabulary (no W3C spec), so it lives in the "vocabularies
+    /// this project introduces later" range rather than beside RDF/OWL/SKOS.
+    /// NLM is the CUI issuing authority; its own concept browser is the
+    /// canonical resolver, verified live 7 August 2026:
+    /// `https://uts.nlm.nih.gov/uts/umls/concept/{CUI}`.
+    pub const CUI: u16 = 0x0200;
+    /// SNOMED CT — SNOMED International's own URI standard, verified 7
+    /// August 2026 against `docs.snomed.org/snomed-ct-specifications/
+    /// snomed-ct-uri-standard`: `http://snomed.info/id/{SCTID}` resolves a
+    /// concept; `http://snomed.info/sct/{SCTID}` (no `id`) names a whole
+    /// edition instead and is a different thing.
+    pub const SNOMED_CT: u16 = 0x0201;
+    /// `RxNorm` — NLM's own `RxNav` REST resolver, verified 7 August 2026:
+    /// `https://rxnav.nlm.nih.gov/REST/rxcui/{RXCUI}`.
+    pub const RXNORM: u16 = 0x0202;
 
     /// First code the predicate registry may hand out at runtime.
     pub const RUNTIME_START: u16 = 1024;
@@ -131,6 +155,10 @@ pub fn namespace_iri(code: u16) -> Option<&'static str> {
         namespace::DCAT => "http://www.w3.org/ns/dcat#",
         namespace::PROV => "http://www.w3.org/ns/prov#",
         namespace::FOAF => "http://xmlns.com/foaf/0.1/",
+        namespace::SKOS => "http://www.w3.org/2004/02/skos/core#",
+        namespace::CUI => "https://uts.nlm.nih.gov/uts/umls/concept/",
+        namespace::SNOMED_CT => "http://snomed.info/id/",
+        namespace::RXNORM => "https://rxnav.nlm.nih.gov/REST/rxcui/",
         _ => return None,
     })
 }
@@ -165,6 +193,10 @@ impl Sid {
             namespace::DCAT,
             namespace::PROV,
             namespace::FOAF,
+            namespace::SKOS,
+            namespace::CUI,
+            namespace::SNOMED_CT,
+            namespace::RXNORM,
         ]
         .into_iter()
         .filter_map(|code| {
@@ -691,10 +723,51 @@ mod iri_tests {
             Sid::dsc("parentTable"),
             Sid::new(namespace::RDF, "type"),
             Sid::new(namespace::XSD, "dateTime"),
+            Sid::new(namespace::SKOS, "exactMatch"),
+            Sid::new(namespace::CUI, "C0009044"),
+            Sid::new(namespace::SNOMED_CT, "22298006"),
+            Sid::new(namespace::RXNORM, "9801"),
         ] {
             let iri = sid.to_iri().expect("has an IRI");
             assert_eq!(Sid::from_iri(&iri), Some(sid.clone()), "{iri}");
         }
+    }
+
+    /// Epic 104 decision 5: a CUI is a first-class identifier with a real
+    /// namespace, not a string in a custom property. NLM is the issuing
+    /// authority for CUIs, so its own concept browser is the canonical
+    /// resolver — verified 7 August 2026 against a live fetch of
+    /// `https://uts.nlm.nih.gov/uts/umls/concept/C0009044`, which resolves
+    /// (login-gated content, but the identifier itself is real and stable).
+    #[test]
+    fn the_cui_namespace_has_the_iri_nlm_issues_it_under() {
+        assert_eq!(
+            Sid::new(namespace::CUI, "C0009044").to_iri().as_deref(),
+            Some("https://uts.nlm.nih.gov/uts/umls/concept/C0009044")
+        );
+    }
+
+    /// SNOMED International's own URI standard, verified 7 August 2026
+    /// against `docs.snomed.org/snomed-ct-specifications/snomed-ct-uri-standard`:
+    /// `http://snomed.info/id/{SCTID}` resolves concepts, not
+    /// `http://snomed.info/sct/{SCTID}`, which names a whole edition.
+    #[test]
+    fn the_snomed_ct_namespace_has_the_iri_snomed_international_publishes() {
+        assert_eq!(
+            Sid::new(namespace::SNOMED_CT, "22298006")
+                .to_iri()
+                .as_deref(),
+            Some("http://snomed.info/id/22298006")
+        );
+    }
+
+    /// NLM's own `RxNav` REST resolver, verified 7 August 2026.
+    #[test]
+    fn the_rxnorm_namespace_has_the_iri_nlm_rxnav_publishes() {
+        assert_eq!(
+            Sid::new(namespace::RXNORM, "9801").to_iri().as_deref(),
+            Some("https://rxnav.nlm.nih.gov/REST/rxcui/9801")
+        );
     }
 
     #[test]

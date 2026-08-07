@@ -11,6 +11,7 @@
 
 use graph_owl_core::flake::{FlakeValue, Sid};
 
+pub mod alignment;
 pub mod pack;
 pub mod profile;
 

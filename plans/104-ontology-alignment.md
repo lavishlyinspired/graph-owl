@@ -54,7 +54,7 @@ pub struct Alignment {
 
 - [ ] UMLS RRF ingests: CUIs land as identities in a reserved namespace; `MRCONSO` atoms attach to their CUI; source-vocabulary codes (SNOMED, RxNorm) align to the CUI with `source = Curated`.
 - [ ] A SNOMED concept and an RxNorm concept sharing a CUI are reachable from each other **without any computed matching having run**.
-- [ ] A computed alignment never asserts `owl:equivalentClass` — asserted structurally, so the type system refuses it rather than a validation rule catching it.
+- [x] A computed alignment never asserts `owl:equivalentClass` — asserted structurally, so the type system refuses it rather than a validation rule catching it. (Slice A)
 - [ ] An alignment at 0.62 confidence appears in a review queue and **not** in query results that do not opt into unreviewed alignments.
 - [ ] A human-confirmed alignment records **who** confirmed it and when; a later automated run does not overwrite it.
 - [ ] A lossy reverse mapping is marked, and a query traversing it in the lossy direction can tell.
@@ -63,8 +63,61 @@ pub struct Alignment {
 
 ## Slices
 
-### Slice A: The alignment fact and its store
+### Slice A: The alignment fact and its store — **shipped, 7 August 2026**
 **RED**: the `equivalentClass`-from-computed test — asserting the type system refuses it, not that a validator rejects it. Mutator watch: widening `MatchPredicate` to permit it must fail to compile or fail the test.
+
+**Shipped.** `graph_owl_ontology::alignment` gained `MatchPredicate`
+(`ExactMatch`/`CloseMatch`/`BroadMatch`/`NarrowMatch` — no `EquivalentClass`
+variant at all), `AlignmentSource` (`Curated`/`Computed`/`Human`), a
+*narrower* `AssertableSource` (`Curated`/`Human` — no `Computed`), and
+`Alignment` as an enum of `Match { predicate: MatchPredicate, source:
+AlignmentSource, .. }` / `EquivalentClass { source: AssertableSource, .. }`.
+The refusal is structural exactly as the RED test demands: there is no
+value of `AssertableSource` that represents "computed", so
+`Alignment::EquivalentClass { source: AssertableSource::Computed { .. },
+.. }` does not typecheck — pinned by a `compile_fail` doctest on
+`Alignment` itself (the actual mechanical proof; a `#[test]` cannot assert
+a compile failure) plus a positive `#[test]` proving `Curated`/`Human`
+*do* construct one, so the doctest is shown to be testing the refusal and
+not a typo.
+
+**Real namespace verification, not assumed IRIs.** `graph_owl_core::flake
+::namespace` gained `SKOS`, `CUI`, `SNOMED_CT`, and `RXNORM` — each
+checked against a live source before being hardcoded: the W3C SKOS
+Reference §10 for the four mapping properties (confirming `exactMatch` is
+a sub-property of `closeMatch`, not a sibling — irrelevant to storage but
+wrong to assert blind), NLM's own UMLS concept browser
+(`https://uts.nlm.nih.gov/uts/umls/concept/{CUI}`, fetched live and
+confirmed to resolve) as the CUI namespace since NLM is the issuing
+authority, SNOMED International's own URI standard
+(`http://snomed.info/id/{SCTID}`, and specifically *not*
+`.../sct/{SCTID}`, which names a whole edition), and NLM's `RxNav` REST
+resolver for `RxNorm`. `CUI`/`SNOMED_CT`/`RXNORM` sit in the
+"vocabularies this project introduces later" range (512+), not beside
+RDF/OWL, since none has a W3C spec.
+
+**Flake shape**: `alignment_to_flakes` writes the *direct* semantic triple
+(`left {predicate} right`, e.g. `left skos:exactMatch right` — an ordinary
+flake a plain SPARQL query traverses with no special handling) plus a
+reified metadata node (`Alignment::subject()`) carrying source, confidence
+and `lossyReverse`. The reified subject is **deterministic** — derived
+from `(left, predicate, right)` alone, never the source — which is what
+makes re-ingesting an identical row idempotent (Slice B's resumability
+needs this) and lets a later curated ingestion find and supersede an
+earlier computed guess of the *same* alignment (decision 1), rather than
+the two coexisting as unrelated facts. Pinned directly:
+`the_same_left_predicate_right_always_names_the_same_subject_regardless_of_source`
+and `ingesting_the_same_alignment_twice_produces_identical_flakes`.
+
+**Confidence-band gating (decision 4) is explicitly not this slice's
+concern** — `alignment_to_flakes` always emits both the direct triple and
+the metadata node; Slice D decides whether to call it at all for a
+sub-0.8 computed match.
+
+Mutation report: `flake.rs`'s diff — 8/8 viable mutants caught, 1
+unviable. `alignment.rs` — 7/7 viable mutants caught, 11 unviable (all
+`Default::default()` substitutions against types with no `Default` impl —
+a compile failure, not a coverage gap).
 
 ### Slice B: UMLS RRF ingestion, resumable
 **RED**: interrupt at 80% and resume; the result must equal the uninterrupted run. Mutator watch: a resume that restarts from zero must fail a row-count-and-timing assertion.
