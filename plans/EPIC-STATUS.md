@@ -94,7 +94,7 @@ is the condition that index exists to catch.
 | **101** | 11 | [`101-sparql-federation.md`](101-sparql-federation.md) | **Shipped** | 5/5 | Epic 7 (algebra and executor), Epic 13 (authorization) |
 | **102** | 11 | [`102-read-write-partitions.md`](102-read-write-partitions.md) | Not started | 0/2 | Epic 4 (the flake table), Epic 37a (the measurement) |
 | **103** | 11 | [`103-in-process-traversal.md`](103-in-process-traversal.md) | Not started | 0/2 | Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger) |
-| **104** | 12 | [`104-ontology-alignment.md`](104-ontology-alignment.md) | In progress | 3/5 | Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detecti… |
+| **104** | 12 | [`104-ontology-alignment.md`](104-ontology-alignment.md) | In progress | 4/5 | Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detecti… |
 
 ## Tracked items, per epic
 
@@ -659,7 +659,7 @@ is the condition that index exists to catch.
 - [x] The alignment fact and its store — `Alignment::Match`/`EquivalentClass`, stored as flake
 - [x] UMLS RRF ingestion, resumable — `graph_owl_connectors::umls` parses real `MRCONSO.RRF` t
 - [x] Cross-vocabulary traversal — SNOMED reaches its `RxNorm` counterpart through a shared CU
-- [ ] Computed alignment, confirmation, and the review queue
+- [x] Computed alignment, confirmation, and the review queue — `graph_owl_core::extraction::Di
 - [ ] Console
 
 ## Epics with slice marks and no plan file
