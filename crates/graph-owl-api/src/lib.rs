@@ -11937,6 +11937,160 @@ impl Catalog {
         Ok(count)
     }
 
+    /// A dry run of an ontology-editor edit against Epic 5's shapes and
+    /// Epic 6's reasoner, before it is saved — Epic 42 Slice G's own named
+    /// acceptance criterion, following the explicit-button (never
+    /// debounced) pattern [`Self::dry_run_policy`] already established.
+    ///
+    /// **Deliberately does not reuse [`Self::import_rdf`]'s own `dry_run`
+    /// flag.** That flag also checks per-subject dedup against a
+    /// *previous save* under the same source — right for "does this batch
+    /// duplicate an external source", wrong for "would editing this
+    /// document's own declarations be accepted": a second dry run of an
+    /// already-saved edit would report every unchanged subject as
+    /// `skipped`, not accepted, which is not what an author checking their
+    /// own in-progress edit is asking. See
+    /// `ontology_editor_tests::dry_run_after_a_real_save_still_reports_accepted_not_skipped`.
+    ///
+    /// A syntax error is a normal, successful outcome of dry-running, not
+    /// a system failure — it comes back as `Ok(RdfEditDryRun::SyntaxError)`
+    /// with the line an editor's gutter can point at, never an `Err`.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, or a
+    /// read fails.
+    pub async fn dry_run_rdf_edit(
+        &self,
+        fmt: graph_owl_rdf_io::RdfFormat,
+        document: &str,
+    ) -> Result<RdfEditDryRun, CatalogError> {
+        let parsed = match graph_owl_rdf_io::parse_with_location(document.as_bytes(), fmt, None) {
+            Ok(flakes) => flakes,
+            Err(e) => {
+                return Ok(RdfEditDryRun::SyntaxError {
+                    message: e.message,
+                    line: e.line,
+                    column: e.column,
+                });
+            }
+        };
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let mut by_subject: std::collections::BTreeMap<Sid, Vec<Flake>> =
+            std::collections::BTreeMap::new();
+        for flake in &parsed {
+            by_subject
+                .entry(flake.s.clone())
+                .or_default()
+                .push(flake.clone());
+        }
+
+        // Same "validate the whole batch, not per-subject slices" reasoning
+        // as `import_rdf` — a shape may need to see more than one subject's
+        // own facts.
+        let shape_facts = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(shapes_graph())),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        let (compiled, _refused) = self.compiled_shapes(&shape_facts);
+        let report = graph_owl_constraint::validate(&compiled, &parsed);
+
+        let mut rejected_subjects: std::collections::BTreeMap<Sid, String> =
+            std::collections::BTreeMap::new();
+        for violation in &report.violations {
+            if violation.severity == graph_owl_ontology::Severity::Violation {
+                rejected_subjects
+                    .entry(violation.focus_node.clone())
+                    .or_insert_with(|| violation.message.clone());
+            }
+        }
+
+        let mut accepted = Vec::new();
+        let mut rejected = Vec::new();
+        for subject in by_subject.keys() {
+            let iri = subject.to_iri().unwrap_or_else(|| subject.to_string());
+            if let Some(reason) = rejected_subjects.get(subject) {
+                rejected.push((iri, reason.clone()));
+            } else {
+                accepted.push(iri);
+            }
+        }
+
+        // Whether this edit would newly become reachable from the
+        // reasoner — the acceptance criterion's "produce no inference".
+        // One `derive_within` call against the estate plus the edit,
+        // filtered to conclusions touching one of the edit's own
+        // subjects, rather than two calls (with and without the edit) to
+        // diff — half the reasoning cost for the same signal, since a
+        // conclusion this edit did not touch was never the question.
+        let budget = reasoning::Budget::default();
+        let base = Self::reasoning_base(graph.as_ref(), &budget).await?;
+        let mut combined = base;
+        combined.extend(parsed.iter().cloned());
+        let derived = reasoning::derive_within(&combined, &budget);
+        let touched: std::collections::BTreeSet<&Sid> = by_subject.keys().collect();
+        let new_inferences = derived
+            .facts
+            .iter()
+            .filter(|d| {
+                touched.contains(&d.fact.s)
+                    || matches!(&d.fact.o, FlakeValue::Ref(o) if touched.contains(o))
+            })
+            .count();
+
+        Ok(RdfEditDryRun::Checked {
+            accepted,
+            rejected,
+            new_inferences,
+        })
+    }
+
+    /// Saves an ontology-editor document as `source`'s current declared
+    /// state — Epic 42 Slice G, composing two already-shipped methods
+    /// (the plan's own instruction: "the existing import path... not a
+    /// second write path") rather than adding one.
+    ///
+    /// **Retracts `source`'s previous declarations before re-importing.**
+    /// Without that, [`Self::import_rdf`]'s own dedup — correct for "do
+    /// not reimport the same external batch twice" — means an author
+    /// re-saving the same class definition a second time lands nothing at
+    /// all (`rdf_import_tests::reimporting_the_same_subject_is_skipped_not_duplicated`
+    /// is that exact behaviour, proven for the import case it is right
+    /// for). The document is parsed first, before any retraction: a
+    /// syntax error must leave the last good save untouched, not destroy
+    /// it on the way to failing to replace it.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, or a
+    /// read or write fails.
+    pub async fn save_rdf_edit(
+        &self,
+        source: &str,
+        fmt: graph_owl_rdf_io::RdfFormat,
+        document: &str,
+    ) -> Result<RdfEditSave, CatalogError> {
+        if let Err(e) = graph_owl_rdf_io::parse_with_location(document.as_bytes(), fmt, None) {
+            return Ok(RdfEditSave::SyntaxError {
+                message: e.message,
+                line: e.line,
+                column: e.column,
+            });
+        }
+        self.delete_import(source).await?;
+        let outcome = self
+            .import_rdf(source, document.as_bytes(), fmt, None, false)
+            .await?;
+        Ok(RdfEditSave::Saved(outcome))
+    }
+
     /// One asserted flake about `s`, at time `t` — the small repeated shape
     /// [`Self::export_dcat`]'s projection is built from.
     fn stated(s: &Sid, p: Sid, o: FlakeValue, t: i64) -> Flake {
@@ -13430,6 +13584,121 @@ pub fn shapes_graph() -> graph_owl_core::flake::Sid {
     graph_owl_core::flake::Sid::dsc("graph:shapes")
 }
 
+/// One triple, as [`preview_rdf_edit`] returns it for display — IRIs
+/// rather than `Sid`'s internal `{namespace_code}:{id}` form, since this
+/// is read by a text editor's own reader, not by another `Sid::from_iri`
+/// call.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewTriple {
+    /// Subject IRI.
+    pub s: String,
+    /// Predicate IRI.
+    pub p: String,
+    /// Object — an IRI when `o_is_ref`, a display-formatted literal
+    /// otherwise.
+    pub o: String,
+    /// Whether `o` is another subject's IRI (an edge — subsumption, a
+    /// property linking two declared or referenced terms) or a literal
+    /// value. The graph pane needs this to know which triples are edges
+    /// at all; a `String`/`Int`/… object never becomes one.
+    pub o_is_ref: bool,
+}
+
+/// A syntax error, as [`preview_rdf_edit`] returns it — 1-based `line`/
+/// `column` to match a text editor's own gutter, `None` when the
+/// underlying parser reported no location. `Catalog::dry_run_rdf_edit` and
+/// `Catalog::save_rdf_edit` report the identical three fields inline on
+/// their own result enums rather than embedding this type, since each
+/// needs to sit beside a sibling success variant with a different shape —
+/// same wire fields, kept as one hand-serialised convention rather than
+/// one shared struct.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdfEditSyntaxError {
+    /// What the parser reported.
+    pub message: String,
+    /// 1-based. `None` when the underlying parser reported no location.
+    pub line: Option<u64>,
+    /// 1-based, same caveat as `line`.
+    pub column: Option<u64>,
+}
+
+impl From<graph_owl_rdf_io::LocatedParseError> for RdfEditSyntaxError {
+    fn from(e: graph_owl_rdf_io::LocatedParseError) -> Self {
+        Self {
+            message: e.message,
+            line: e.line,
+            column: e.column,
+        }
+    }
+}
+
+/// A parsed ontology-editor document, ready to render as a graph — Epic 42
+/// Slice G's own acceptance criterion: "distinguishes terms this ontology
+/// declares from terms it merely references."
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RdfEditPreview {
+    /// Every triple the document parsed to, in document order.
+    pub triples: Vec<PreviewTriple>,
+    /// Subject IRIs — every term the document itself asserts something
+    /// *about*. A term named only as an object or predicate, and never as
+    /// a subject, is not in this list: it is referenced, not declared,
+    /// and the caller distinguishes the two by set membership, not by a
+    /// second parse.
+    pub declared: Vec<String>,
+}
+
+fn display_flake_value(value: &graph_owl_core::flake::FlakeValue) -> String {
+    use graph_owl_core::flake::FlakeValue;
+    match value {
+        FlakeValue::Ref(sid) => sid.to_iri().unwrap_or_else(|| sid.to_string()),
+        FlakeValue::String(s) | FlakeValue::Json(s) => s.clone(),
+        FlakeValue::Boolean(b) => b.to_string(),
+        FlakeValue::Int(i) => i.to_string(),
+        FlakeValue::Float(f) => f.to_string(),
+        FlakeValue::Instant(t) => t.to_rfc3339(),
+        FlakeValue::Bytes(bytes) => format!("{} bytes", bytes.len()),
+        FlakeValue::Uuid(u) => u.to_string(),
+        FlakeValue::Duration(seconds) => format!("{seconds}s"),
+    }
+}
+
+/// Parses an ontology-editor document into triples a graph pane can
+/// render, without touching storage at all — the fast, as-the-author-types
+/// path Epic 42 Slice G's own acceptance criterion asks for ("the text is
+/// parsed as the author types"). [`Catalog::dry_run_rdf_edit`] is the
+/// slower, explicit-button sibling that also checks shapes and reasoning;
+/// this function only parses.
+///
+/// # Errors
+/// [`RdfEditSyntaxError`] if `document` does not parse as `fmt`.
+pub fn preview_rdf_edit(
+    fmt: graph_owl_rdf_io::RdfFormat,
+    document: &str,
+) -> Result<RdfEditPreview, RdfEditSyntaxError> {
+    let flakes = graph_owl_rdf_io::parse_with_location(document.as_bytes(), fmt, None)?;
+    let mut declared: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut triples = Vec::with_capacity(flakes.len());
+    for flake in &flakes {
+        let s = flake.s.to_iri().unwrap_or_else(|| flake.s.to_string());
+        declared.insert(s.clone());
+        let p = flake.p.to_iri().unwrap_or_else(|| flake.p.to_string());
+        let (o, o_is_ref) = match &flake.o {
+            graph_owl_core::flake::FlakeValue::Ref(sid) => {
+                (sid.to_iri().unwrap_or_else(|| sid.to_string()), true)
+            }
+            other => (display_flake_value(other), false),
+        };
+        triples.push(PreviewTriple { s, p, o, o_is_ref });
+    }
+    Ok(RdfEditPreview {
+        triples,
+        declared: declared.into_iter().collect(),
+    })
+}
+
 /// A repair, as the API returns it.
 fn describe_repair(repair: &graph_owl_constraint::Repair) -> serde_json::Value {
     use graph_owl_constraint::Repair;
@@ -14008,6 +14277,83 @@ pub struct ImportOutcome {
     pub skipped: Vec<String>,
     /// Subjects that failed shape validation, or a write, each with why.
     pub rejected: Vec<(String, String)>,
+}
+
+/// What [`Catalog::dry_run_rdf_edit`] found — Epic 42 Slice G.
+///
+/// **`rename_all_fields` is safe here specifically because this type has no
+/// `utoipa::ToSchema`.** `graph-owl-core`'s `lifecycle.rs` and `resolution.rs`
+/// record why that combination is normally wrong: utoipa 5's schema derive
+/// does not read `rename_all_fields`, so a `ToSchema` type using it ships a
+/// generated `OpenAPI` schema that still says `new_inferences` while the wire
+/// says `newInferences` — correct JSON, wrong contract, every generated
+/// client built against the wrong one. Neither this type nor `RdfEditSave`
+/// is registered in `openapi.rs`, so there is no schema to drift from. If
+/// either ever gains `ToSchema`, this attribute must become a per-field
+/// `#[serde(rename = "newInferences")]` instead, matching
+/// `CertificationStatus`'s fix.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum RdfEditDryRun {
+    /// A bad document is a normal outcome of dry-running, not a system
+    /// failure.
+    SyntaxError {
+        /// What the parser reported.
+        message: String,
+        /// 1-based, matching a text editor's own gutter. `None` when the
+        /// underlying parser reported no location (an unrecognised
+        /// namespace after an otherwise-valid parse, for instance, which
+        /// is not a position in the text at all).
+        line: Option<u64>,
+        /// 1-based, same caveat as `line`.
+        column: Option<u64>,
+    },
+    /// The document parsed; here is what would happen.
+    Checked {
+        /// Subject IRIs that would be accepted — `to_iri()`, matching
+        /// [`preview_rdf_edit`]'s own subjects, since both feed the same
+        /// editor and a reader who wrote `ex:Widget` must not see `1:Widget`
+        /// back.
+        accepted: Vec<String>,
+        /// Subject IRIs that would be refused by Epic 5's shapes, each
+        /// with why — the same `(String, String)` shape
+        /// [`ImportOutcome::rejected`] uses, but IRI-valued rather than
+        /// `Sid`-form, for the reason `accepted` is.
+        rejected: Vec<(String, String)>,
+        /// How many conclusions the reasoner would newly derive that
+        /// touch one of this edit's own subjects — the acceptance
+        /// criterion's "produce no inference", made concrete as a count
+        /// rather than a bare yes/no.
+        new_inferences: usize,
+    },
+}
+
+/// What [`Catalog::save_rdf_edit`] did — Epic 42 Slice G.
+///
+/// No `rename_all_fields` here, deliberately: every field on `SyntaxError`
+/// (`message`, `line`, `column`) is already one word, so `snake_case` and
+/// camelCase coincide and the attribute would do nothing — see
+/// `RdfEditDryRun`'s own doc comment for why it is not free to add anyway.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum RdfEditSave {
+    /// The document did not parse, so nothing was retracted or written —
+    /// see [`Catalog::save_rdf_edit`]'s own doc comment on why parsing
+    /// happens before any retraction.
+    SyntaxError {
+        /// What the parser reported.
+        message: String,
+        /// 1-based, matching a text editor's own gutter.
+        line: Option<u64>,
+        /// 1-based, same caveat as `line`.
+        column: Option<u64>,
+    },
+    /// The document parsed and was saved as `source`'s current state.
+    Saved(ImportOutcome),
 }
 
 /// Narrows [`Catalog::export_dcat`] to part of the catalog — Epic 9 Slice C.
@@ -29874,6 +30220,441 @@ mod incremental_projection_tests {
     }
 }
 // decision-3-exception: end
+
+/// Epic 42 Slice G: the text-first ontology editor's dry-run and save.
+///
+/// **`dry_run_rdf_edit` deliberately does not reuse `import_rdf`'s own
+/// `dry_run` flag.** `reimporting_the_same_subject_is_skipped_not_duplicated`
+/// above is the reason: that flag reports an already-imported subject as
+/// `skipped`, which is the right answer to "does this batch duplicate a
+/// previous import" and the wrong one to "would editing this document be
+/// accepted" — a second dry-run of the same in-progress edit would
+/// misreport every unchanged, still-valid subject as `skipped` rather than
+/// accepted. `save_rdf_edit` composes `delete_import` + `import_rdf` for
+/// the identical reason on the write side: without retracting the source's
+/// previous declarations first, a second save of the same subject would
+/// silently do nothing at all.
+#[cfg(test)]
+mod ontology_editor_tests {
+    use super::*;
+    use graph_owl_rdf_io::RdfFormat;
+    use projection_isolation_tests::RecordingGraph;
+    use tests::InMemoryStorage;
+
+    fn a(id: &str) -> Sid {
+        Sid::dsc(id)
+    }
+    fn sh(term: &str) -> Sid {
+        Sid::new(namespace::SHACL, term)
+    }
+    fn rdf_type() -> Sid {
+        Sid::new(namespace::RDF, "type")
+    }
+
+    /// Same shape `rdf_import_tests::name_required_shape` builds — every
+    /// target subject needs a non-empty `dsc:name`.
+    fn name_required_shape(t: i64, targets: &[&str]) -> Vec<Flake> {
+        let in_shapes = |s: Sid, p: Sid, o: FlakeValue| Flake {
+            s,
+            p,
+            o,
+            cx: Some(shapes_graph()),
+            t,
+            op: true,
+        };
+        let mut flakes = vec![
+            in_shapes(
+                a("NameRequired"),
+                rdf_type(),
+                FlakeValue::Ref(sh("NodeShape")),
+            ),
+            in_shapes(
+                a("NameRequired"),
+                sh("property"),
+                FlakeValue::Ref(a("NameRequired/name")),
+            ),
+            in_shapes(
+                a("NameRequired/name"),
+                sh("path"),
+                FlakeValue::Ref(a("name")),
+            ),
+            in_shapes(a("NameRequired/name"), sh("minCount"), FlakeValue::Int(1)),
+        ];
+        for target in targets {
+            flakes.push(in_shapes(
+                a("NameRequired"),
+                sh("targetNode"),
+                FlakeValue::Ref(a(target)),
+            ));
+        }
+        flakes
+    }
+
+    fn turtle_naming(subject: &str, value: &str) -> String {
+        format!(
+            "<https://graph-owl.dev/ns/catalog#{subject}> \
+             <https://graph-owl.dev/ns/catalog#name> \"{value}\" .\n"
+        )
+    }
+
+    async fn catalog_with_name_required_shape(targets: &[&str]) -> (Catalog, Arc<RecordingGraph>) {
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&name_required_shape(0, targets))
+            .await
+            .expect("seed shape");
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+        (catalog, graph)
+    }
+
+    // ---- dry_run_rdf_edit ----
+
+    /// **The RED test.** A malformed document reports its own line, not a
+    /// pre-formatted sentence with nowhere for a text editor to point.
+    #[tokio::test]
+    async fn dry_run_reports_a_syntax_error_with_its_own_line() {
+        let (catalog, _graph) = catalog_with_name_required_shape(&[]).await;
+        let document = "<https://graph-owl.dev/ns/catalog#a> <https://graph-owl.dev/ns/catalog#b> \"unterminated\n";
+
+        let result = catalog
+            .dry_run_rdf_edit(RdfFormat::Turtle, document)
+            .await
+            .expect("must succeed, not error — a bad document is a normal outcome");
+
+        match result {
+            RdfEditDryRun::SyntaxError { line, .. } => assert_eq!(line, Some(1)),
+            RdfEditDryRun::Checked { .. } => panic!("an unterminated literal must not parse"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_accepts_a_conforming_document_without_writing_anything() {
+        let (catalog, graph) = catalog_with_name_required_shape(&["orders"]).await;
+
+        let result = catalog
+            .dry_run_rdf_edit(RdfFormat::Turtle, &turtle_naming("orders", "Orders"))
+            .await
+            .expect("dry run");
+
+        match result {
+            RdfEditDryRun::Checked {
+                accepted, rejected, ..
+            } => {
+                assert_eq!(accepted.len(), 1, "{accepted:?}");
+                assert!(rejected.is_empty(), "{rejected:?}");
+            }
+            err @ RdfEditDryRun::SyntaxError { .. } => panic!("{err:?}"),
+        }
+
+        let landed = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(Catalog::import_graph("anything"))),
+                ..Default::default()
+            })
+            .await
+            .expect("query");
+        assert!(landed.is_empty(), "a dry run must never write: {landed:?}");
+    }
+
+    /// Mirrors `rdf_import_tests::a_violating_subject_is_rejected_and_named_without_failing_the_rest`.
+    #[tokio::test]
+    async fn dry_run_rejects_a_violating_subject_and_names_why() {
+        let (catalog, _graph) = catalog_with_name_required_shape(&["orders", "empty"]).await;
+        let document = format!(
+            "{}<https://graph-owl.dev/ns/catalog#empty> \
+             <https://graph-owl.dev/ns/catalog#description> \"no name here\" .\n",
+            turtle_naming("orders", "Orders")
+        );
+
+        let result = catalog
+            .dry_run_rdf_edit(RdfFormat::Turtle, &document)
+            .await
+            .expect("dry run");
+
+        match result {
+            RdfEditDryRun::Checked {
+                accepted, rejected, ..
+            } => {
+                assert_eq!(
+                    accepted,
+                    vec![a("orders").to_iri().expect("dsc: is a known namespace")],
+                    "{accepted:?}"
+                );
+                assert_eq!(rejected.len(), 1, "{rejected:?}");
+                assert!(rejected[0].0.contains("empty"), "{rejected:?}");
+            }
+            err @ RdfEditDryRun::SyntaxError { .. } => panic!("{err:?}"),
+        }
+    }
+
+    /// **The RED test for a real bug found in the browser, not in a test
+    /// run**: `accepted` must be an IRI a reader who wrote `ex:Widget`
+    /// recognises, never `Sid`'s own internal `1:Widget` form — and
+    /// `new_inferences` must actually reach the wire as `newInferences`.
+    /// `#[serde(rename_all = "camelCase")]` on an enum renames variant
+    /// *tags*, not the fields inside each variant; without
+    /// `rename_all_fields` too, `new_inferences` serializes `snake_case`
+    /// while every sibling field on the same struct is camelCase — a gap
+    /// no round-trip test catches, since Rust deserializes `new_inferences`
+    /// right back whichever way it went out.
+    #[tokio::test]
+    async fn dry_run_checked_serializes_iris_and_camel_case_field_names() {
+        let (catalog, _graph) = catalog_with_name_required_shape(&["orders"]).await;
+
+        let result = catalog
+            .dry_run_rdf_edit(RdfFormat::Turtle, &turtle_naming("orders", "Orders"))
+            .await
+            .expect("dry run");
+
+        let json = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(json["kind"], "checked", "{json}");
+        assert_eq!(
+            json["accepted"][0], "https://graph-owl.dev/ns/catalog#orders",
+            "must be the IRI a Turtle author wrote against, not Sid's internal form: {json}"
+        );
+        assert!(
+            json.get("newInferences")
+                .is_some_and(serde_json::Value::is_number),
+            "new_inferences must reach the wire as newInferences, camelCase like every \
+             sibling field on this struct: {json}"
+        );
+        assert!(json.get("new_inferences").is_none(), "{json}");
+    }
+
+    /// **A second, independent RED test — re-running `dry_run_rdf_edit`
+    /// on the very edit that was already saved must still report it as
+    /// accepted, never as "skipped".** This is the exact case
+    /// `import_rdf`'s own dedup would get wrong if reused directly here.
+    #[tokio::test]
+    async fn dry_run_after_a_real_save_still_reports_accepted_not_skipped() {
+        let (catalog, _graph) = catalog_with_name_required_shape(&["orders"]).await;
+        let document = turtle_naming("orders", "Orders");
+        catalog
+            .save_rdf_edit("ontology-editor", RdfFormat::Turtle, &document)
+            .await
+            .expect("save");
+
+        let result = catalog
+            .dry_run_rdf_edit(RdfFormat::Turtle, &document)
+            .await
+            .expect("dry run");
+
+        match result {
+            RdfEditDryRun::Checked { accepted, .. } => {
+                assert_eq!(accepted.len(), 1, "{accepted:?}");
+            }
+            err @ RdfEditDryRun::SyntaxError { .. } => panic!("{err:?}"),
+        }
+    }
+
+    // ---- save_rdf_edit ----
+
+    #[tokio::test]
+    async fn save_writes_the_document_as_the_sources_current_state() {
+        let (catalog, graph) = catalog_with_name_required_shape(&["orders"]).await;
+
+        let result = catalog
+            .save_rdf_edit(
+                "ontology-editor",
+                RdfFormat::Turtle,
+                &turtle_naming("orders", "Orders"),
+            )
+            .await
+            .expect("save");
+
+        match result {
+            RdfEditSave::Saved(outcome) => assert_eq!(outcome.landed.len(), 1, "{outcome:?}"),
+            err @ RdfEditSave::SyntaxError { .. } => panic!("{err:?}"),
+        }
+
+        let landed = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(Catalog::import_graph("ontology-editor"))),
+                ..Default::default()
+            })
+            .await
+            .expect("query");
+        assert_eq!(landed.len(), 1, "{landed:?}");
+    }
+
+    /// **The RED test this method exists for.** `import_rdf` alone would
+    /// silently skip an unchanged subject on a second save
+    /// (`reimporting_the_same_subject_is_skipped_not_duplicated`); an
+    /// author re-saving the *same* class definition a second time must see
+    /// it land again, not vanish from the outcome.
+    #[tokio::test]
+    async fn saving_the_same_source_twice_lands_both_times_not_skipped_the_second() {
+        let (catalog, _graph) = catalog_with_name_required_shape(&["orders"]).await;
+        let document = turtle_naming("orders", "Orders");
+
+        let first = catalog
+            .save_rdf_edit("ontology-editor", RdfFormat::Turtle, &document)
+            .await
+            .expect("first save");
+        let second = catalog
+            .save_rdf_edit("ontology-editor", RdfFormat::Turtle, &document)
+            .await
+            .expect("second save");
+
+        match (first, second) {
+            (RdfEditSave::Saved(first), RdfEditSave::Saved(second)) => {
+                assert_eq!(first.landed.len(), 1, "{first:?}");
+                assert_eq!(
+                    second.landed.len(),
+                    1,
+                    "a second save of the same source must land again, not be skipped: {second:?}"
+                );
+            }
+            (err, _) => panic!("{err:?}"),
+        }
+    }
+
+    /// A changed value on the second save must be what a reader gets back
+    /// — not the first save's stale content sitting underneath a "skipped"
+    /// no-op.
+    #[tokio::test]
+    async fn saving_changed_content_replaces_the_previous_value_not_just_the_count() {
+        let (catalog, graph) = catalog_with_name_required_shape(&["orders"]).await;
+
+        catalog
+            .save_rdf_edit(
+                "ontology-editor",
+                RdfFormat::Turtle,
+                &turtle_naming("orders", "Original"),
+            )
+            .await
+            .expect("first save");
+        catalog
+            .save_rdf_edit(
+                "ontology-editor",
+                RdfFormat::Turtle,
+                &turtle_naming("orders", "Renamed"),
+            )
+            .await
+            .expect("second save");
+
+        let landed = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(Catalog::import_graph("ontology-editor"))),
+                ..Default::default()
+            })
+            .await
+            .expect("query");
+        assert_eq!(landed.len(), 1, "{landed:?}");
+        assert_eq!(
+            landed[0].o,
+            FlakeValue::String("Renamed".to_string()),
+            "the second save's value must be what is stored, not the first's: {landed:?}"
+        );
+    }
+
+    /// A syntax error on save must not touch whatever the previous good
+    /// save already landed — parsing happens before any retraction.
+    #[tokio::test]
+    async fn a_syntax_error_on_save_leaves_the_previous_good_save_untouched() {
+        let (catalog, graph) = catalog_with_name_required_shape(&["orders"]).await;
+        catalog
+            .save_rdf_edit(
+                "ontology-editor",
+                RdfFormat::Turtle,
+                &turtle_naming("orders", "Orders"),
+            )
+            .await
+            .expect("first save");
+
+        let result = catalog
+            .save_rdf_edit(
+                "ontology-editor",
+                RdfFormat::Turtle,
+                "<https://graph-owl.dev/ns/catalog#orders> <https://graph-owl.dev/ns/catalog#name> \"unterminated\n",
+            )
+            .await
+            .expect("must succeed, not error");
+        assert!(
+            matches!(result, RdfEditSave::SyntaxError { .. }),
+            "{result:?}"
+        );
+
+        let landed = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                cx: Some(Some(Catalog::import_graph("ontology-editor"))),
+                ..Default::default()
+            })
+            .await
+            .expect("query");
+        assert_eq!(
+            landed.len(),
+            1,
+            "a rejected edit must not retract the last good save: {landed:?}"
+        );
+    }
+
+    // ---- preview_rdf_edit ----
+    //
+    // No `Catalog`/storage/graph engine at all — this is the fast,
+    // as-the-author-types path, called far more often than the explicit
+    // dry-run button, so it touches nothing but the parsed text itself.
+
+    #[tokio::test]
+    async fn preview_lists_every_triple_and_which_subjects_are_declared() {
+        let document = format!(
+            "{}<https://graph-owl.dev/ns/catalog#orders> \
+             <https://graph-owl.dev/ns/catalog#parentService> \
+             <https://graph-owl.dev/ns/catalog#warehouse> .\n",
+            turtle_naming("orders", "Orders")
+        );
+
+        let preview = preview_rdf_edit(RdfFormat::Turtle, &document).expect("must parse");
+
+        assert_eq!(preview.triples.len(), 2, "{preview:?}");
+        // "orders" is asserted about (a subject); "warehouse" is only ever
+        // named as an object — referenced, never declared. `declared` is
+        // real IRIs, not `Sid`'s internal `{namespace_code}:{id}` form —
+        // this is read by the editor's own display, not `Sid::from_iri`.
+        assert_eq!(
+            preview.declared,
+            vec!["https://graph-owl.dev/ns/catalog#orders".to_string()],
+            "{preview:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_marks_a_reference_object_as_a_ref_and_a_literal_as_not() {
+        let document = format!(
+            "{}<https://graph-owl.dev/ns/catalog#orders> \
+             <https://graph-owl.dev/ns/catalog#parentService> \
+             <https://graph-owl.dev/ns/catalog#warehouse> .\n",
+            turtle_naming("orders", "Orders")
+        );
+
+        let preview = preview_rdf_edit(RdfFormat::Turtle, &document).expect("must parse");
+
+        let name_triple = preview
+            .triples
+            .iter()
+            .find(|t| t.p == "https://graph-owl.dev/ns/catalog#name")
+            .expect("the name triple");
+        assert!(!name_triple.o_is_ref, "{name_triple:?}");
+
+        let parent_triple = preview
+            .triples
+            .iter()
+            .find(|t| t.p == "https://graph-owl.dev/ns/catalog#parentService")
+            .expect("the parentService triple");
+        assert!(parent_triple.o_is_ref, "{parent_triple:?}");
+    }
+
+    #[tokio::test]
+    async fn preview_reports_a_syntax_error_with_its_own_line_too() {
+        let err = preview_rdf_edit(
+            RdfFormat::Turtle,
+            "<https://graph-owl.dev/ns/catalog#a> <https://graph-owl.dev/ns/catalog#b> \"unterminated\n",
+        )
+        .expect_err("an unterminated literal must not parse");
+        assert_eq!(err.line, Some(1), "{err:?}");
+    }
+}
 
 /// Epic 9a's own late-found gap, closed: `authorized_lpg_elements` and the
 /// five thin `export_*` wrappers built on it. Reuses

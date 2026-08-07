@@ -81,6 +81,15 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/graph/export/cypher", get(export_cypher_script))
         .route("/graph/export/jsonl", get(export_json_lines))
         .route("/graph/export/json-graph", get(export_json_graph))
+        // Epic 42 Slice G: the text-first ontology editor. `preview` is the
+        // fast, as-the-author-types path (parse only); `dry-run` is the
+        // explicit "Check" button (shapes + reasoning, matching the policy
+        // editor's own non-debounced dry-run); `save` writes through the
+        // existing import path. All three admin-only, matching every other
+        // governance-adjacent surface (`/policies/dry-run`, `/ontology-packs`).
+        .route("/ontology-editor/preview", post(ontology_editor_preview))
+        .route("/ontology-editor/dry-run", post(ontology_editor_dry_run))
+        .route("/ontology-editor/save", post(ontology_editor_save))
         .route("/sparql", post(sparql))
         .route("/cypher", post(cypher))
         .route("/connectors/postgres/runs", post(run_postgres_connector))
@@ -6797,6 +6806,110 @@ async fn export_json_graph(
     Auth(principal): Auth,
 ) -> Result<Json<graph_owl_lpg_io::JsonGraphView>, AppError> {
     Ok(Json(catalog.export_json_graph(&principal).await?))
+}
+
+/// Every document the ontology editor writes lands under one fixed source
+/// — the editor's text buffer *is* this named graph's whole declared
+/// state, the same "the file's full content is what's on disk after a
+/// save" model any text editor already gives an author. Not
+/// client-suppliable: a caller choosing an arbitrary `source` could target
+/// any other connector's own `graph:import:{source}` context.
+const ONTOLOGY_EDITOR_SOURCE: &str = "ontology-editor";
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RdfEditRequest {
+    format: String,
+    document: String,
+}
+
+impl ValidateBody for RdfEditRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        // `format` is checked downstream by `parse_rdf_edit_format`, which
+        // already gives a clearer message naming the accepted values than
+        // a bare "must not be empty" would; `document` is deliberately not
+        // required-non-empty here — an empty ontology is a real, valid,
+        // zero-triple document to preview or save, not a client error.
+        Vec::new()
+    }
+}
+
+fn parse_rdf_edit_format(format: &str) -> Result<graph_owl_rdf_io::RdfFormat, AppError> {
+    match format {
+        "turtle" => Ok(graph_owl_rdf_io::RdfFormat::Turtle),
+        "ntriples" => Ok(graph_owl_rdf_io::RdfFormat::NTriples),
+        "jsonld" => Ok(graph_owl_rdf_io::RdfFormat::JsonLd),
+        other => Err(AppError::Validation(vec![FieldError::new(
+            "format",
+            FieldErrorCode::Type,
+            format!(
+                "unrecognised format `{other}` — the ontology editor accepts \
+                 turtle, ntriples, or jsonld"
+            ),
+        )])),
+    }
+}
+
+/// The fast, as-the-author-types path — parse only, no shapes or
+/// reasoning, no `State<Catalog>` needed since nothing touches storage.
+/// Epic 42 Slice G. Takes `State<Catalog>` only so this handler's type
+/// resolves against the router's own state — parsing touches no storage.
+async fn ontology_editor_preview(
+    State(_catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<RdfEditRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let fmt = parse_rdf_edit_format(&payload.format)?;
+    // Always 200 — a bad document is a normal outcome of previewing, not a
+    // system failure, the same reasoning `RdfEditDryRun`/`RdfEditSave`
+    // already use. Tagged the same way (`kind`) so the frontend's own
+    // reader handles all three ontology-editor responses identically.
+    let body = match graph_owl_api::preview_rdf_edit(fmt, &payload.document) {
+        Ok(preview) => {
+            json!({ "kind": "preview", "triples": preview.triples, "declared": preview.declared })
+        }
+        Err(e) => {
+            json!({ "kind": "syntaxError", "message": e.message, "line": e.line, "column": e.column })
+        }
+    };
+    Ok(Json(body))
+}
+
+/// The explicit "Check" button — shapes and reasoning, matching the
+/// policy editor's own non-debounced dry run. Epic 42 Slice G.
+async fn ontology_editor_dry_run(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<RdfEditRequest>,
+) -> Result<Json<graph_owl_api::RdfEditDryRun>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let fmt = parse_rdf_edit_format(&payload.format)?;
+    Ok(Json(
+        catalog.dry_run_rdf_edit(fmt, &payload.document).await?,
+    ))
+}
+
+/// Saves the editor's current document as `ONTOLOGY_EDITOR_SOURCE`'s
+/// current state, through the existing import path. Epic 42 Slice G.
+async fn ontology_editor_save(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<RdfEditRequest>,
+) -> Result<Json<graph_owl_api::RdfEditSave>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let fmt = parse_rdf_edit_format(&payload.format)?;
+    Ok(Json(
+        catalog
+            .save_rdf_edit(ONTOLOGY_EDITOR_SOURCE, fmt, &payload.document)
+            .await?,
+    ))
 }
 
 /// Everything the landing page needs, in one request.

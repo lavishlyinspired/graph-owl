@@ -368,6 +368,36 @@ export interface LpgNodeView {
   report: MappingReport;
 }
 
+/** Epic 42 Slice G: the ontology editor's own request/response wire
+ *  shapes. All three endpoints (`preview`/`dry-run`/`save`) always
+ *  respond `200` — a bad document is a normal outcome, never an error,
+ *  the same reasoning `AgentActivity`'s outcome field already carries. */
+export type OntologyEditFormat = "turtle" | "ntriples" | "jsonld";
+
+export interface OntologyPreviewTriple {
+  s: string;
+  p: string;
+  o: string;
+  oIsRef: boolean;
+}
+
+export type OntologyPreviewResult =
+  | { kind: "syntaxError"; message: string; line: number | null; column: number | null }
+  | { kind: "preview"; triples: OntologyPreviewTriple[]; declared: string[] };
+
+export type OntologyDryRunResult =
+  | { kind: "syntaxError"; message: string; line: number | null; column: number | null }
+  | {
+      kind: "checked";
+      accepted: string[];
+      rejected: [string, string][];
+      newInferences: number;
+    };
+
+export type OntologySaveResult =
+  | { kind: "syntaxError"; message: string; line: number | null; column: number | null }
+  | { kind: "saved"; landed: string[]; skipped: string[]; rejected: [string, string][] };
+
 /** Epic 32's closed capability set — see `AgentCapability::ALL`'s own doc
  *  comment for why nothing wider (delete, grants, policy, roles, certify)
  *  will ever be added. `apply*` writes directly; everything else proposes
@@ -746,6 +776,26 @@ export const api = {
    *  resolved. Not registered in the OpenAPI schema (a real, recorded
    *  gap — see the handler's own doc comment). */
   lpgNode: (assetId: string) => request<LpgNodeView>(`/assets/${assetId}/lpg-node`),
+  /** The fast, as-the-author-types path — parse only. */
+  ontologyEditorPreview: (format: OntologyEditFormat, document: string) =>
+    request<OntologyPreviewResult>("/ontology-editor/preview", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ format, document }),
+    }),
+  /** The explicit "Check" button — shapes and reasoning. */
+  ontologyEditorDryRun: (format: OntologyEditFormat, document: string) =>
+    request<OntologyDryRunResult>("/ontology-editor/dry-run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ format, document }),
+    }),
+  ontologyEditorSave: (format: OntologyEditFormat, document: string) =>
+    request<OntologySaveResult>("/ontology-editor/save", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ format, document }),
+    }),
   /** Every agent with a grant — admin-only server-side (`404` for anyone
    *  else, same tier as `/admin/bolt/status`), since a grant's own scope
    *  and rate limit are operational configuration, not a filtered read. */

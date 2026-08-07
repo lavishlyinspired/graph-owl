@@ -34,6 +34,7 @@ import {
   Menu,
   Popover,
   Row,
+  Segmented,
   Space,
   Modal,
   Spin,
@@ -103,6 +104,7 @@ import { ReviewSection } from "./features/review/ReviewSection";
 import { KnowledgeGraphToggle } from "./features/knowledge/KnowledgeGraphToggle";
 import { AgentActivityPanel } from "./features/agents/AgentActivityPanel";
 import { BoltSessionsPanel } from "./features/agents/BoltSessionsPanel";
+import { OntologyEditor } from "./features/ontology/OntologyEditor";
 import { hierarchy, type TeamNode } from "./admin/hierarchy";
 import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
 import {
@@ -2023,6 +2025,9 @@ function RunHistory({ colors }: { colors: (typeof palette)["light"] }) {
  *  expensive from one that is a single triple pattern away from being cheap.
  */
 function WorkbenchPage({ colors }: { colors: (typeof palette)["light"] }) {
+  const [view, setView] = useState<"query" | "ontology">(
+    () => (readParam("workbenchView") === "ontology" ? "ontology" : "query"),
+  );
   const [query, setQuery] = useState(
     "SELECT ?s ?p ?o WHERE { ?s ?p ?o }\nLIMIT 50",
   );
@@ -2063,16 +2068,40 @@ function WorkbenchPage({ colors }: { colors: (typeof palette)["light"] }) {
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      <div>
-        <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
-          Workbench
-        </Title>
-        <Paragraph type="secondary" style={{ margin: "4px 0 0", fontSize: 13 }}>
-          SPARQL over the catalog graph, filtered to what you may see. The plan
-          shows what the engine read to answer you.
-        </Paragraph>
+      <Space align="center" wrap>
+        <div>
+          {/* level 2, matching Overview's own top-level heading — this page
+              sits directly under the app's h1, and level 4 here (found by
+              this slice's own axe check, the first to run against this
+              route) skipped two levels with nothing at 2 or 3 in between. */}
+          <Title level={2} style={{ margin: 0, fontWeight: 600, fontSize: 16 }}>
+            Workbench
+          </Title>
+          <Paragraph type="secondary" style={{ margin: "4px 0 0", fontSize: 13 }}>
+            SPARQL over the catalog graph, filtered to what you may see. The plan
+            shows what the engine read to answer you.
+          </Paragraph>
+        </div>
+        <Segmented
+          value={view}
+          onChange={(value) => {
+            const next = value as "query" | "ontology";
+            setView(next);
+            writeParam("workbenchView", next === "ontology" ? "ontology" : null);
+          }}
+          options={[
+            { label: "Query", value: "query" },
+            { label: "Ontology editor", value: "ontology" },
+          ]}
+        />
+      </Space>
+
+      <div style={{ display: view === "ontology" ? "block" : "none" }}>
+        <OntologyEditor colors={colors} />
       </div>
 
+      <div style={{ display: view === "query" ? "block" : "none" }}>
+      <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Input.TextArea
         value={query}
         onChange={(e) => setQuery(e.target.value)}
@@ -2221,6 +2250,8 @@ function WorkbenchPage({ colors }: { colors: (typeof palette)["light"] }) {
           </Paragraph>
         </Card>
       )}
+      </Space>
+      </div>
     </Space>
   );
 }

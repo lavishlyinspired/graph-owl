@@ -655,6 +655,173 @@ fn quads_to_flakes(
     Ok(flakes)
 }
 
+/// A syntax error with where it is in the source text — Epic 42 Slice G's
+/// ontology editor needs to mark a line in a text editor, which
+/// [`RdfError::Parse`]'s pre-formatted `String` cannot do.
+///
+/// Kept as a separate type rather than widening `RdfError` with a new
+/// variant: every existing `match` on `RdfError` across this crate and its
+/// callers stays exhaustive with no new arm to add, and this error is
+/// reachable only through [`parse_with_location`], which nothing but the
+/// new editor calls.
+///
+/// 1-based `line`/`column` — `oxttl`/`oxjsonld` report 0-based internally
+/// (confirmed by reading `TextPosition`'s own doc comment in both crates),
+/// converted here so a caller can put it next to a text editor's own
+/// gutter numbering without an off-by-one. `None` means a real location
+/// was not available — either the underlying parser didn't report one
+/// (`oxjsonld`'s `location()` is itself `Option`), or the failure happened
+/// one layer up, converting an already-parsed term into a [`Flake`] (an
+/// unrecognised namespace, for instance), which is not a *position* in the
+/// text at all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocatedParseError {
+    pub message: String,
+    pub line: Option<u64>,
+    pub column: Option<u64>,
+}
+
+impl LocatedParseError {
+    fn without_location(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            line: None,
+            column: None,
+        }
+    }
+}
+
+/// [`StandardRdfIo::parse`], but a syntax error carries its own line and
+/// column instead of a pre-formatted sentence. Turtle, N-Triples and
+/// JSON-LD only — the three formats Slice G's editor actually offers (the
+/// plan's own words: "Turtle ships first... the editor is a text surface
+/// over a parser that already handles N-Triples and JSON-LD"). N-Quads,
+/// RDF/XML and `TriG` report [`LocatedParseError::without_location`] naming
+/// the format, not a panic.
+///
+/// # Errors
+/// [`LocatedParseError`] on a syntax error (with a location, where the
+/// underlying parser reports one) or an unsupported format (without one).
+pub fn parse_with_location(
+    bytes: &[u8],
+    fmt: RdfFormat,
+    base: Option<&str>,
+) -> Result<Vec<Flake>, LocatedParseError> {
+    match fmt {
+        RdfFormat::Turtle => parse_turtle_with_location(bytes, base),
+        RdfFormat::NTriples => parse_ntriples_with_location(bytes),
+        RdfFormat::JsonLd => parse_json_ld_with_location(bytes, base),
+        other => Err(LocatedParseError::without_location(format!(
+            "{other:?} is not supported by the ontology editor"
+        ))),
+    }
+}
+
+fn parse_turtle_with_location(
+    bytes: &[u8],
+    base: Option<&str>,
+) -> Result<Vec<Flake>, LocatedParseError> {
+    let mut parser = oxttl::TurtleParser::new();
+    if let Some(base) = base {
+        parser = parser
+            .with_base_iri(base)
+            .map_err(|e| LocatedParseError::without_location(e.to_string()))?;
+    }
+    let mut blanks = BlankNodeMap::new();
+    let mut flakes = Vec::new();
+    for result in parser.for_slice(bytes) {
+        let triple = result.map_err(|e| {
+            let location = e.location();
+            LocatedParseError {
+                message: e.message().to_string(),
+                line: Some(location.start.line + 1),
+                column: Some(location.start.column + 1),
+            }
+        })?;
+        flakes.push(
+            triple_to_flake(&triple, &mut blanks)
+                .map_err(|e| LocatedParseError::without_location(e.to_string()))?,
+        );
+    }
+    Ok(flakes)
+}
+
+fn parse_ntriples_with_location(bytes: &[u8]) -> Result<Vec<Flake>, LocatedParseError> {
+    let mut blanks = BlankNodeMap::new();
+    let mut flakes = Vec::new();
+    for result in oxttl::NTriplesParser::new().for_slice(bytes) {
+        let triple = result.map_err(|e| {
+            let location = e.location();
+            LocatedParseError {
+                message: e.message().to_string(),
+                line: Some(location.start.line + 1),
+                column: Some(location.start.column + 1),
+            }
+        })?;
+        flakes.push(
+            triple_to_flake(&triple, &mut blanks)
+                .map_err(|e| LocatedParseError::without_location(e.to_string()))?,
+        );
+    }
+    Ok(flakes)
+}
+
+fn parse_json_ld_with_location(
+    bytes: &[u8],
+    base: Option<&str>,
+) -> Result<Vec<Flake>, LocatedParseError> {
+    let mut parser = oxjsonld::JsonLdParser::new();
+    if let Some(base) = base {
+        parser = parser
+            .with_base_iri(base)
+            .map_err(|e| LocatedParseError::without_location(e.to_string()))?;
+    }
+    let mut blanks = BlankNodeMap::new();
+    let mut flakes = Vec::new();
+    for result in parser.for_slice(bytes) {
+        let quad = result.map_err(|e| {
+            let message = e.to_string();
+            match e.location() {
+                Some(location) => LocatedParseError {
+                    message,
+                    line: Some(location.start.line + 1),
+                    column: Some(location.start.column + 1),
+                },
+                None => LocatedParseError::without_location(message),
+            }
+        })?;
+        let s = resolve_subject(&quad.subject, &mut blanks)
+            .map_err(|e| LocatedParseError::without_location(e.to_string()))?;
+        let p = Sid::from_iri(quad.predicate.as_str()).ok_or_else(|| {
+            LocatedParseError::without_location(format!(
+                "unrecognised namespace: {}",
+                quad.predicate.as_str()
+            ))
+        })?;
+        let o = resolve_object(&quad.object, &mut blanks)
+            .map_err(|e| LocatedParseError::without_location(e.to_string()))?;
+        let cx = match &quad.graph_name {
+            GraphName::NamedNode(n) => Some(Sid::from_iri(n.as_str()).ok_or_else(|| {
+                LocatedParseError::without_location(format!(
+                    "unrecognised namespace: {}",
+                    n.as_str()
+                ))
+            })?),
+            GraphName::BlankNode(b) => Some(skolemize(b.as_str(), &mut blanks)),
+            GraphName::DefaultGraph => None,
+        };
+        flakes.push(Flake {
+            s,
+            p,
+            o,
+            cx,
+            t: 0,
+            op: true,
+        });
+    }
+    Ok(flakes)
+}
+
 /// One flake's-worth of `rdf:type` used for frame matching — kept as a
 /// function rather than a constant so it shares `Sid::new`'s own
 /// namespace-code convention instead of a second, hand-written one.
@@ -1240,5 +1407,68 @@ mod tests {
         // completes rather than hanging. A shallow shape check besides.
         let graph = value["@graph"].as_array().expect("@graph array");
         assert_eq!(graph.len(), 2, "{value}");
+    }
+
+    // ---- Epic 42 Slice G: location-aware parsing for the ontology editor ----
+    //
+    // `RdfError::Parse(String)` throws away the `TextPosition` that
+    // `oxttl`/`oxjsonld` already compute internally (confirmed by reading
+    // both crates' source directly, per 00i rule 2/4 — they are Apache-2.0
+    // permissively-licensed dependencies already adopted into this
+    // workspace, not the reference implementations that rule restricts).
+    // A live text editor needs the line the author should look at, not a
+    // pre-formatted sentence — these tests are the RED for that.
+
+    mod parse_with_location {
+        use super::*;
+
+        #[test]
+        fn a_valid_document_parses_the_same_as_the_untimed_path() {
+            let bytes = b"<https://graph-owl.dev/ns/catalog#a> <https://graph-owl.dev/ns/catalog#b> \"c\" .";
+            let expected = StandardRdfIo
+                .parse(bytes, RdfFormat::Turtle, None)
+                .expect("baseline parse");
+            let located =
+                parse_with_location(bytes, RdfFormat::Turtle, None).expect("located parse");
+            assert_eq!(located, expected);
+        }
+
+        /// **The RED test.** A malformed line partway through a real
+        /// document must report *that* line, 1-based to match what a text
+        /// editor's own gutter shows an author — not line 0, not the
+        /// generic pre-formatted `oxttl` sentence with no structured field
+        /// a caller could put next to a gutter marker.
+        #[test]
+        fn a_turtle_syntax_error_reports_its_own_line_not_the_first() {
+            let document = b"@prefix ex: <https://graph-owl.dev/ns/catalog#> .\nex:a ex:b \"ok\" .\nex:c ex:d \"unterminated\n";
+            let err = parse_with_location(document, RdfFormat::Turtle, None)
+                .expect_err("an unterminated string literal must not parse");
+            assert_eq!(err.line, Some(3), "{err:?}");
+            assert!(err.column.is_some(), "{err:?}");
+            assert!(!err.message.is_empty(), "{err:?}");
+        }
+
+        #[test]
+        fn an_ntriples_syntax_error_reports_a_location_too() {
+            let document = b"<https://graph-owl.dev/ns/catalog#a> <https://graph-owl.dev/ns/catalog#b> \"ok\" .\nnot-a-valid-triple\n";
+            let err = parse_with_location(document, RdfFormat::NTriples, None)
+                .expect_err("a malformed second line must not parse");
+            assert_eq!(err.line, Some(2), "{err:?}");
+        }
+
+        #[test]
+        fn a_json_ld_syntax_error_is_reported_not_panicked() {
+            let document = b"{ not valid json";
+            let err = parse_with_location(document, RdfFormat::JsonLd, None)
+                .expect_err("malformed JSON must not parse");
+            assert!(!err.message.is_empty(), "{err:?}");
+        }
+
+        #[test]
+        fn a_format_this_function_does_not_support_is_a_named_error_not_a_panic() {
+            let err = parse_with_location(b"", RdfFormat::RdfXml, None)
+                .expect_err("RDF/XML has no location-aware parser yet");
+            assert!(err.message.contains("RdfXml"), "{err:?}");
+        }
     }
 }
