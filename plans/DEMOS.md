@@ -1041,12 +1041,12 @@ slice.
 - [ ] The traversal path
 - [ ] **No UI** — a performance path with no user-visible behaviour change
 
-### Epic 104 — Ontology alignment — **backend shipped through Slice C, 7 August 2026**
+### Epic 104 — Ontology alignment — **backend shipped through Slice D, 7 August 2026**
 - [x] **A** The alignment fact and its store — `Alignment::Match`/`EquivalentClass`, stored as flakes carrying the real `skos:`/`owl:` predicate plus a reified metadata node. Decision 3's refusal (a computed source can never assert `owl:equivalentClass`) is structural: `AssertableSource` has no `Computed` variant, pinned by a `compile_fail` doctest
 - [x] **B** UMLS RRF ingestion, resumable — `graph_owl_connectors::umls` parses real `MRCONSO.RRF` text (verified against the UMLS Reference Manual). Resumable by construction: every row maps to its own self-contained alignment, so "skip N, continue" and "process from the start" produce the identical union once every row has been seen once
 - [x] **C** Cross-vocabulary traversal — SNOMED reaches its `RxNorm` counterpart through a shared CUI via a real `Catalog::sparql` join, no computed matcher involved; a lossy-reverse mapping is distinguishable by an ordinary query reading `dsc:lossyReverse` off the reified node. **Found and fixed three real bugs to get here**: `scope_facts` had no notion of vocabulary content (a CUI is not a catalog asset, so it was silently filtered out of every query); `Alignment::subject()` produced a syntactically invalid IRI (embedding real IRIs, each with their own `#`, inside another IRI); and `scoped_facts`'s own flake dedup — a latent bug in the shared query path, not alignment-specific — missed duplicates separated by a different flake with the same sort key, which two overlapping pushdown scans on one predicate produce routinely
-- [ ] **D** Computed alignment, confirmation, and the review queue
-- [ ] **Console**: alignment review queue *(Epic 42)*, and the alignment that made a cross-vocabulary result reachable is inspectable *(Epic 41)*
+- [x] **D** Computed alignment, confirmation, and the review queue — `graph_owl_core::extraction::Disposition` reused directly for decision 4's confidence bands (`00c`'s generic `0.8`/`0.5`, not Epic 17's own `0.9`/`0.6` `graph_owl_resolution::bands`, which looked like the obvious fit by name and was checked and rejected). `Catalog::upsert_alignment` retracts-then-asserts (mirroring `run_reasoning`'s own pattern) and refuses to let an automated run overwrite a human-confirmed alignment, while still allowing a second human call through. `Catalog::pending_alignment_review` lists the `Surface`-band entries a review-queue UI would read
+- [ ] **Console**: alignment review queue *(Epic 42)*, and the alignment that made a cross-vocabulary result reachable is inspectable *(Epic 41)*. Honestly deferred, matching this criterion's own wording — `pending_alignment_review`'s raw-flake return type is a minimal backend contract, not a finished API; a console consumer should drive its final shape
 
 ---
 

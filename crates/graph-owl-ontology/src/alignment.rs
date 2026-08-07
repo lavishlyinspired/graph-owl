@@ -200,6 +200,36 @@ impl Alignment {
         }
     }
 
+    /// This alignment's own confidence — decision 4's gating input.
+    #[must_use]
+    pub fn confidence(&self) -> f64 {
+        match self {
+            Self::Match { confidence, .. } | Self::EquivalentClass { confidence, .. } => {
+                *confidence
+            }
+        }
+    }
+
+    /// Whether a human directly confirmed this alignment — decision:
+    /// "a later automated run does not overwrite it". Only
+    /// [`AlignmentSource::Human`] and [`AssertableSource::Human`] count;
+    /// `Curated` is trustworthy (decision 1) but is not the same claim as
+    /// "a person looked at this specific alignment and confirmed it".
+    #[must_use]
+    pub fn is_human_confirmed(&self) -> bool {
+        match self {
+            Self::Match {
+                source: AlignmentSource::Human { .. },
+                ..
+            }
+            | Self::EquivalentClass {
+                source: AssertableSource::Human { .. },
+                ..
+            } => true,
+            Self::Match { .. } | Self::EquivalentClass { .. } => false,
+        }
+    }
+
     /// The reified node this alignment's own metadata (source, confidence,
     /// directionality) attaches to.
     ///
@@ -227,23 +257,16 @@ impl Alignment {
     }
 }
 
-/// This alignment as flakes, at transaction time `t`.
-///
-/// Two things are written: the **direct semantic triple** (`left
-/// {predicate} right`, e.g. `left skos:exactMatch right`) — the "graph
-/// edge" a plain SPARQL query traverses with no special handling — and a
-/// **reified metadata node**, [`Alignment::subject`], carrying everything
-/// a triple alone cannot: source, confidence, and directionality. Decision
-/// 4's confidence-band gating (whether a computed alignment's direct
-/// triple should be withheld pending review) is not this function's
-/// concern — it always emits both; the caller decides whether to call it.
-#[must_use]
-pub fn alignment_to_flakes(alignment: &Alignment, t: i64) -> Vec<Flake> {
-    let (left, right, predicate, source, confidence, lossy_reverse) = alignment.parts();
+/// The **reified metadata node**'s own flakes — source, confidence and
+/// directionality — never the direct semantic triple. Split out from
+/// [`alignment_to_flakes`] so [`alignment_to_flakes_gated`] can write
+/// metadata for a `Surface`-disposition alignment (what a review queue
+/// reads) while withholding the direct triple.
+fn metadata_flakes(alignment: &Alignment, t: i64) -> Vec<Flake> {
+    let (left, right, _predicate, source, confidence, lossy_reverse) = alignment.parts();
     let subject = alignment.subject();
 
     vec![
-        Flake::assert(left.clone(), predicate, FlakeValue::Ref(right.clone()), t),
         Flake::assert(
             subject.clone(),
             Sid::new(namespace::RDF, "type"),
@@ -287,6 +310,58 @@ pub fn alignment_to_flakes(alignment: &Alignment, t: i64) -> Vec<Flake> {
             t,
         ),
     ]
+}
+
+/// The **direct semantic triple** alone (`left {predicate} right`, e.g.
+/// `left skos:exactMatch right`) — the "graph edge" a plain SPARQL query
+/// traverses with no special handling.
+///
+/// **Public**, unlike [`metadata_flakes`]: a caller upserting this
+/// alignment needs to know this triple's exact `(s, p, o)` to find and
+/// retract a *stale* one — e.g. a previous run wrote it at `Assert`
+/// disposition and this run's confidence dropped into `Surface` — and
+/// `(left, predicate, right)` alone, not this function, is what a
+/// `TriplePattern` query needs.
+#[must_use]
+pub fn direct_triple(alignment: &Alignment, t: i64) -> Flake {
+    let (left, right, predicate, ..) = alignment.parts();
+    Flake::assert(left.clone(), predicate, FlakeValue::Ref(right.clone()), t)
+}
+
+/// This alignment as flakes, at transaction time `t`, **ungated**.
+///
+/// Writes both the direct triple and the reified metadata node
+/// unconditionally. Decision 4's confidence-band gating (whether a
+/// computed alignment's direct triple should be withheld pending review)
+/// is not this function's concern — see [`alignment_to_flakes_gated`] for
+/// that. Kept as the simple, always-both primitive because Slice B's
+/// curated UMLS ingestion has nothing to gate: `AlignmentSource::Curated`
+/// is definitionally trustworthy (decision 1), and gating it against a
+/// numeric threshold would be gating a decision already made.
+#[must_use]
+pub fn alignment_to_flakes(alignment: &Alignment, t: i64) -> Vec<Flake> {
+    let mut flakes = metadata_flakes(alignment, t);
+    flakes.push(direct_triple(alignment, t));
+    flakes
+}
+
+/// This alignment as flakes, respecting decision 4's confidence bands —
+/// `graph_owl_core::extraction::Disposition`, `00c-domain-model.md`'s
+/// generic bands reused rather than re-derived: `≥0.8` writes everything
+/// (the direct triple included), `0.5..0.8` writes only the metadata (so
+/// a review-queue listing can find it, but the direct triple never
+/// "quietly becomes a graph edge" — the plan's own words), and `<0.5`
+/// writes nothing at all.
+#[must_use]
+pub fn alignment_to_flakes_gated(alignment: &Alignment, t: i64) -> Vec<Flake> {
+    use graph_owl_core::extraction::Disposition;
+
+    let confidence = alignment.confidence();
+    match Disposition::for_confidence(confidence) {
+        Disposition::Assert => alignment_to_flakes(alignment, t),
+        Disposition::Surface => metadata_flakes(alignment, t),
+        Disposition::Ignore => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -528,6 +603,126 @@ mod tests {
         assert_eq!(
             alignment_to_flakes(&build(), 1),
             alignment_to_flakes(&build(), 1)
+        );
+    }
+
+    fn computed(confidence: f64) -> Alignment {
+        Alignment::Match {
+            left: cui("C0009044"),
+            right: snomed("22298006"),
+            predicate: MatchPredicate::CloseMatch,
+            source: AlignmentSource::Computed {
+                method: "embedding".to_string(),
+            },
+            confidence,
+            lossy_reverse: false,
+        }
+    }
+
+    /// Decision 4, `>= 0.8`: a confident computed alignment is written in
+    /// full — the direct triple *and* the metadata — indistinguishable
+    /// from a curated one at query time.
+    #[test]
+    fn a_confident_alignment_writes_the_direct_triple() {
+        let alignment = computed(0.9);
+        let gated = alignment_to_flakes_gated(&alignment, 1);
+        assert_eq!(gated, alignment_to_flakes(&alignment, 1));
+        assert!(
+            gated
+                .iter()
+                .any(|f| f.s == cui("C0009044") && f.p == MatchPredicate::CloseMatch.sid()),
+            "{gated:#?}"
+        );
+    }
+
+    /// **The acceptance criterion, verbatim.** "A computed alignment at
+    /// 0.62 goes to a review queue; it does not quietly become a graph
+    /// edge" — the direct triple must be absent, while the metadata (which
+    /// a review-queue listing reads) must still be written.
+    #[test]
+    fn a_review_band_alignment_withholds_the_direct_triple_but_keeps_metadata() {
+        let alignment = computed(0.62);
+        let gated = alignment_to_flakes_gated(&alignment, 1);
+
+        assert!(
+            !gated
+                .iter()
+                .any(|f| f.s == cui("C0009044") && f.p == MatchPredicate::CloseMatch.sid()),
+            "the direct triple must not quietly become a graph edge: {gated:#?}"
+        );
+        let subject = alignment.subject();
+        assert!(
+            gated
+                .iter()
+                .any(|f| f.s == subject && f.p == Sid::dsc("confidence")),
+            "the review queue must still be able to find it: {gated:#?}"
+        );
+    }
+
+    /// Decision 4, `< 0.5`: not recorded at all — no direct triple, no
+    /// metadata, nothing for a review queue to even list.
+    #[test]
+    fn a_low_confidence_alignment_writes_nothing() {
+        let gated = alignment_to_flakes_gated(&computed(0.3), 1);
+        assert!(gated.is_empty(), "{gated:#?}");
+    }
+
+    /// The exact boundaries decision 4 states, both inclusive on their
+    /// upper side — matching `graph_owl_core::extraction::Disposition`'s
+    /// own documented boundary semantics, which this reuses rather than
+    /// re-deriving a second copy of `00c`'s bands.
+    #[test]
+    fn the_boundaries_are_inclusive_on_their_upper_side() {
+        assert!(!alignment_to_flakes_gated(&computed(0.8), 1).is_empty());
+        assert!(
+            alignment_to_flakes_gated(&computed(0.8), 1)
+                .iter()
+                .any(|f| f.p == MatchPredicate::CloseMatch.sid()),
+            "0.8 must assert, not merely surface"
+        );
+        assert!(!alignment_to_flakes_gated(&computed(0.5), 1).is_empty());
+        assert!(alignment_to_flakes_gated(&computed(0.499_999), 1).is_empty());
+    }
+
+    #[test]
+    fn only_a_human_source_is_human_confirmed() {
+        let human_match = Alignment::Match {
+            left: cui("C1"),
+            right: snomed("1"),
+            predicate: MatchPredicate::ExactMatch,
+            source: AlignmentSource::Human {
+                principal: "asha".to_string(),
+            },
+            confidence: 1.0,
+            lossy_reverse: false,
+        };
+        assert!(human_match.is_human_confirmed());
+
+        let human_equiv = Alignment::EquivalentClass {
+            left: cui("C1"),
+            right: snomed("1"),
+            source: AssertableSource::Human {
+                principal: "asha".to_string(),
+            },
+            confidence: 1.0,
+            lossy_reverse: false,
+        };
+        assert!(human_equiv.is_human_confirmed());
+
+        assert!(!computed(0.9).is_human_confirmed());
+        assert!(
+            !Alignment::Match {
+                left: cui("C1"),
+                right: snomed("1"),
+                predicate: MatchPredicate::ExactMatch,
+                source: AlignmentSource::Curated {
+                    authority: "UMLS".to_string()
+                },
+                confidence: 1.0,
+                lossy_reverse: false,
+            }
+            .is_human_confirmed(),
+            "curated is trustworthy but is not the same claim as a human confirming *this* alignment"
         );
     }
 }

@@ -11736,6 +11736,142 @@ impl Catalog {
         }
     }
 
+    // ----- Ontology alignment (Epic 104 Slice D) -----
+
+    /// Ingest one alignment, honouring decision 4's confidence-band
+    /// gating and refusing to let an automated run overwrite a human
+    /// confirmation.
+    ///
+    /// **Retract-then-assert, mirroring [`Self::run_reasoning`]'s own
+    /// withdraw-before-write pattern.** `Alignment::subject()` is
+    /// deterministic per `(left, predicate, right)`, so a later call
+    /// updating this alignment's source or confidence must withdraw the
+    /// old metadata *and* the old direct triple before writing the new —
+    /// otherwise a confidence drop from `0.9` to `0.62` would leave the
+    /// stale direct triple standing even though [`alignment_to_flakes_gated`]
+    /// no longer writes one for it.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured or a read/write fails.
+    #[tracing::instrument(name = "catalog.upsert_alignment", skip_all)]
+    pub async fn upsert_alignment(
+        &self,
+        alignment: &graph_owl_ontology::alignment::Alignment,
+    ) -> Result<UpsertAlignmentOutcome, CatalogError> {
+        use graph_owl_core::flake::TriplePattern;
+        use graph_owl_ontology::alignment::{alignment_to_flakes_gated, direct_triple};
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+        let storage_error = |e: graph_owl_engine::EngineError| {
+            CatalogError::Storage(StorageError::Unexpected(e.to_string()))
+        };
+
+        let subject = alignment.subject();
+        let existing_metadata = graph
+            .query_pattern(&TriplePattern {
+                s: Some(subject.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(storage_error)?;
+
+        // A human confirmed *this* alignment iff its own reified node says
+        // so — checked against what is actually stored, not re-derived
+        // from some other signal, since that is the one fact an automated
+        // run must never be allowed to overwrite.
+        let existing_is_human_confirmed = existing_metadata.iter().any(|f| {
+            f.p == Sid::dsc("alignmentSourceKind") && f.o == FlakeValue::String("human".to_string())
+        });
+        if existing_is_human_confirmed && !alignment.is_human_confirmed() {
+            return Ok(UpsertAlignmentOutcome::RefusedHumanConfirmed);
+        }
+
+        // The direct triple's subject is `left`, not the reified node, so
+        // it cannot be found by the query above — its own (s, p, o)
+        // identifies it uniquely regardless of which run wrote it.
+        let candidate_direct = direct_triple(alignment, 0);
+        let existing_direct = graph
+            .query_pattern(&TriplePattern {
+                s: Some(candidate_direct.s.clone()),
+                p: Some(candidate_direct.p.clone()),
+                o: Some(candidate_direct.o.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(storage_error)?;
+
+        let mut stale = existing_metadata;
+        stale.extend(existing_direct);
+        if !stale.is_empty() {
+            let withdrawn = graph.next_time().await.map_err(storage_error)?;
+            let withdrawals: Vec<Flake> = stale
+                .iter()
+                .map(|f| Flake {
+                    t: withdrawn,
+                    ..f.clone()
+                })
+                .collect();
+            graph
+                .retract_flakes(&withdrawals)
+                .await
+                .map_err(storage_error)?;
+        }
+
+        let t = graph.next_time().await.map_err(storage_error)?;
+        let flakes = alignment_to_flakes_gated(alignment, t);
+        if !flakes.is_empty() {
+            graph.assert_flakes(&flakes).await.map_err(storage_error)?;
+        }
+
+        Ok(UpsertAlignmentOutcome::Written)
+    }
+
+    /// Alignments in decision 4's review band (`0.5..0.8`) — a computed
+    /// match confident enough to record, not confident enough to become a
+    /// graph edge on its own.
+    ///
+    /// Returns the raw `confidence` flakes rather than a richer DTO: this
+    /// is the backend surface a review-queue UI would read
+    /// (`alignmentLeft`/`alignmentRight`/`alignmentSourceDetail` are
+    /// reachable from each entry's own subject via an ordinary query),
+    /// not the UI itself — Epic 42 owns rendering it, not built here.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured or the read fails.
+    #[tracing::instrument(name = "catalog.pending_alignment_review", skip_all)]
+    pub async fn pending_alignment_review(&self) -> Result<Vec<Flake>, CatalogError> {
+        use graph_owl_core::extraction::Disposition;
+        use graph_owl_core::flake::TriplePattern;
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let confidence_flakes = graph
+            .query_pattern(&TriplePattern {
+                p: Some(Sid::dsc("confidence")),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        Ok(confidence_flakes
+            .into_iter()
+            .filter(|f| match f.o {
+                FlakeValue::Float(c) => Disposition::for_confidence(c) == Disposition::Surface,
+                _ => false,
+            })
+            .collect())
+    }
+
     // ----- Constraint validation (Epic 5, slices C, D and E) -----
 
     /// Validate the estate against every shape stated in the graph.
@@ -14547,6 +14683,19 @@ pub struct ReasoningReport {
     pub capped: Option<reasoning::CappedReason>,
     /// How long the run took, in milliseconds.
     pub duration_ms: u64,
+}
+
+/// What [`Catalog::upsert_alignment`] did with one alignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UpsertAlignmentOutcome {
+    /// Written — gated by decision 4's confidence bands, which may mean
+    /// only the metadata landed, or (below `0.5`) nothing at all.
+    Written,
+    /// A human had already confirmed this exact `(left, predicate,
+    /// right)`, and this call's own source was not also human — the one
+    /// case an automated run must never win.
+    RefusedHumanConfirmed,
 }
 
 #[cfg(test)]
@@ -31785,6 +31934,327 @@ mod cross_vocabulary_alignment_tests {
             "the SNOMED broad match must be marked lossy and a query must \
              be able to tell: {:?}",
             outcome.rows
+        );
+    }
+}
+
+/// Epic 104 Slice D: confidence-band gating through `upsert_alignment`,
+/// and the human-confirmation guarantee — proven through `Catalog`, not
+/// only through `graph_owl_ontology::alignment`'s own pure-function
+/// tests, matching this epic's own established rigor (Slice C found three
+/// real bugs precisely by insisting on this level).
+#[cfg(test)]
+mod alignment_confidence_and_confirmation_tests {
+    use super::*;
+    use graph_owl_ontology::alignment::{Alignment, AlignmentSource, MatchPredicate};
+    use projection_isolation_tests::RecordingGraph;
+    use tests::InMemoryStorage;
+
+    fn computed(confidence: f64) -> Alignment {
+        Alignment::Match {
+            left: Sid::new(namespace::CUI, "C0009044"),
+            right: Sid::new(namespace::SNOMED_CT, "22298006"),
+            predicate: MatchPredicate::CloseMatch,
+            source: AlignmentSource::Computed {
+                method: "embedding".to_string(),
+            },
+            confidence,
+            lossy_reverse: false,
+        }
+    }
+
+    fn human_confirmed() -> Alignment {
+        Alignment::Match {
+            left: Sid::new(namespace::CUI, "C0009044"),
+            right: Sid::new(namespace::SNOMED_CT, "22298006"),
+            predicate: MatchPredicate::CloseMatch,
+            source: AlignmentSource::Human {
+                principal: "asha".to_string(),
+            },
+            confidence: 1.0,
+            lossy_reverse: false,
+        }
+    }
+
+    /// **The acceptance criterion, verbatim.** "An alignment at 0.62
+    /// confidence appears in a review queue and not in query results that
+    /// do not opt into unreviewed alignments."
+    #[tokio::test]
+    async fn a_review_band_alignment_is_absent_from_a_plain_query_but_present_in_review() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        let outcome = catalog
+            .upsert_alignment(&computed(0.62))
+            .await
+            .expect("upsert must succeed");
+        assert_eq!(outcome, UpsertAlignmentOutcome::Written);
+
+        let query = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?o WHERE { \
+                    <https://uts.nlm.nih.gov/uts/umls/concept/C0009044> \
+                    <http://www.w3.org/2004/02/skos/core#closeMatch> ?o . \
+                 }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query must parse and evaluate");
+        assert!(
+            query.rows.is_empty(),
+            "a 0.62 match must not quietly become a graph edge: {:?}",
+            query.rows
+        );
+
+        let pending = catalog
+            .pending_alignment_review()
+            .await
+            .expect("review listing must succeed");
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert_eq!(pending[0].o, FlakeValue::Float(0.62));
+    }
+
+    /// A confident (`>= 0.8`) alignment is the mirror case: present in the
+    /// plain query, absent from the review queue.
+    #[tokio::test]
+    async fn a_confident_alignment_is_in_the_plain_query_not_the_review_queue() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        catalog
+            .upsert_alignment(&computed(0.95))
+            .await
+            .expect("upsert must succeed");
+
+        let query = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?o WHERE { \
+                    <https://uts.nlm.nih.gov/uts/umls/concept/C0009044> \
+                    <http://www.w3.org/2004/02/skos/core#closeMatch> ?o . \
+                 }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query must parse and evaluate");
+        assert_eq!(query.rows.len(), 1, "{:?}", query.rows);
+
+        let pending = catalog
+            .pending_alignment_review()
+            .await
+            .expect("review listing must succeed");
+        assert!(pending.is_empty(), "{pending:?}");
+    }
+
+    /// **The other acceptance criterion, verbatim.** "A human-confirmed
+    /// alignment records who confirmed it and when; a later automated run
+    /// does not overwrite it."
+    #[tokio::test]
+    async fn a_human_confirmed_alignment_is_not_overwritten_by_a_later_automated_run() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        catalog
+            .upsert_alignment(&human_confirmed())
+            .await
+            .expect("the human confirmation must be written");
+
+        let outcome = catalog
+            .upsert_alignment(&computed(0.4))
+            .await
+            .expect("upsert must not error, only refuse");
+        assert_eq!(outcome, UpsertAlignmentOutcome::RefusedHumanConfirmed);
+
+        // Still there, still human, still confident — untouched by the
+        // automated run's own confidence and source.
+        let query = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?o WHERE { \
+                    <https://uts.nlm.nih.gov/uts/umls/concept/C0009044> \
+                    <http://www.w3.org/2004/02/skos/core#closeMatch> ?o . \
+                 }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query must parse and evaluate");
+        assert_eq!(
+            query.rows.len(),
+            1,
+            "the human-confirmed direct triple must survive: {:?}",
+            query.rows
+        );
+    }
+
+    /// A human confirming again — correcting or re-affirming — is not
+    /// "an automated run"; the refusal is specifically about automation
+    /// overriding a person, not about a second write ever being possible.
+    #[tokio::test]
+    async fn a_second_human_confirmation_is_written_not_refused() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        catalog
+            .upsert_alignment(&human_confirmed())
+            .await
+            .expect("first human confirmation");
+
+        let outcome = catalog
+            .upsert_alignment(&human_confirmed())
+            .await
+            .expect("second upsert must not error");
+        assert_eq!(outcome, UpsertAlignmentOutcome::Written);
+    }
+
+    /// Re-upserting must not accumulate stale metadata alongside the new
+    /// — the retract-then-assert must actually retract.
+    #[tokio::test]
+    async fn upserting_a_lower_confidence_retracts_the_stale_direct_triple() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+        catalog
+            .upsert_alignment(&computed(0.95))
+            .await
+            .expect("first, confident write");
+        catalog
+            .upsert_alignment(&computed(0.62))
+            .await
+            .expect("second, downgraded write");
+
+        let query = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?o WHERE { \
+                    <https://uts.nlm.nih.gov/uts/umls/concept/C0009044> \
+                    <http://www.w3.org/2004/02/skos/core#closeMatch> ?o . \
+                 }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query must parse and evaluate");
+        assert!(
+            query.rows.is_empty(),
+            "the stale direct triple from the confident write must be retracted, \
+             not just superseded by a new metadata write: {:?}",
+            query.rows
+        );
+    }
+
+    /// The metadata lookup and the direct-triple lookup must each narrow to
+    /// their own subject (and, for the direct triple, its full `s`/`p`/`o`)
+    /// — not scan every flake in the graph. An empty `RecordingGraph` cannot
+    /// tell an unnarrowed query from a narrowed one by its *rows*, since
+    /// there is nothing else present to wrongly sweep in; the pattern
+    /// actually sent is the only place this is observable, which is what
+    /// `RecordingGraph::patterns()` exists to expose.
+    #[tokio::test]
+    async fn upsert_alignment_narrows_both_lookups_to_their_own_identity() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let alignment = computed(0.95);
+        catalog
+            .upsert_alignment(&alignment)
+            .await
+            .expect("upsert must succeed");
+
+        let patterns = graph.patterns();
+        let subject = alignment.subject();
+        assert!(
+            patterns.iter().any(|p| p.s == Some(subject.clone())),
+            "no query narrowed to the reified subject: {patterns:#?}"
+        );
+
+        let direct = graph_owl_ontology::alignment::direct_triple(&alignment, 0);
+        assert!(
+            patterns.iter().any(|p| p.s == Some(direct.s.clone())
+                && p.p == Some(direct.p.clone())
+                && p.o == Some(direct.o.clone())),
+            "no query narrowed to the direct triple's own (s, p, o): {patterns:#?}"
+        );
+    }
+
+    /// A withdrawal must be written at a *new* transaction time, not the
+    /// original flake's own `t` — reusing it would make the retraction and
+    /// the assertion it is meant to supersede simultaneous, which
+    /// `RecordingGraph::resolve`'s own tie-break (and real Postgres) treats
+    /// as ambiguous rather than as "correctly withdrawn".
+    #[tokio::test]
+    async fn withdrawing_a_stale_alignment_uses_a_time_after_the_original_assertion() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        catalog
+            .upsert_alignment(&computed(0.95))
+            .await
+            .expect("first, confident write");
+        let latest_t_after_first_write = graph
+            .asserted_flakes()
+            .iter()
+            .map(|f| f.t)
+            .max()
+            .expect("the first write asserted at least one flake");
+
+        catalog
+            .upsert_alignment(&computed(0.62))
+            .await
+            .expect("second, downgraded write");
+
+        let retracted = graph.retracted_flakes();
+        assert!(
+            !retracted.is_empty(),
+            "the downgrade must retract something"
+        );
+        assert!(
+            retracted.iter().all(|f| f.t > latest_t_after_first_write),
+            "a withdrawal reused the original assertion's own `t` instead of \
+             a strictly later one: {retracted:#?}"
+        );
+    }
+
+    /// `pending_alignment_review` must narrow its scan to the `confidence`
+    /// predicate specifically — not every predicate a flake could carry.
+    /// Every other alignment predicate written alongside it (`alignmentLeft`,
+    /// `alignmentSourceKind`, ...) stores a non-`Float` value, so an
+    /// unnarrowed scan happens to filter down to the same rows on *this*
+    /// alignment's own metadata; only the query shape itself distinguishes
+    /// "asked for confidence" from "asked for everything and got lucky".
+    #[tokio::test]
+    async fn pending_alignment_review_narrows_its_query_to_the_confidence_predicate() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        catalog
+            .upsert_alignment(&computed(0.62))
+            .await
+            .expect("upsert must succeed");
+        catalog
+            .pending_alignment_review()
+            .await
+            .expect("review listing must succeed");
+
+        let confidence_predicate = Sid::dsc("confidence");
+        assert!(
+            graph
+                .patterns()
+                .iter()
+                .any(|p| p.p == Some(confidence_predicate.clone())),
+            "no query narrowed to the confidence predicate: {:#?}",
+            graph.patterns()
         );
     }
 }

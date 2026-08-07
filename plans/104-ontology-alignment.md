@@ -55,8 +55,8 @@ pub struct Alignment {
 - [x] UMLS RRF ingests: CUIs land as identities in a reserved namespace; `MRCONSO` atoms attach to their CUI; source-vocabulary codes (SNOMED, RxNorm) align to the CUI with `source = Curated`. (Slice B)
 - [x] A SNOMED concept and an RxNorm concept sharing a CUI are reachable from each other **without any computed matching having run**. (Slice C — found and fixed three real bugs to make this true: `scope_facts` had no notion of vocabulary content, `Alignment::subject()` produced an invalid IRI, and `scoped_facts`'s own flake dedup missed a real duplication class)
 - [x] A computed alignment never asserts `owl:equivalentClass` — asserted structurally, so the type system refuses it rather than a validation rule catching it. (Slice A)
-- [ ] An alignment at 0.62 confidence appears in a review queue and **not** in query results that do not opt into unreviewed alignments.
-- [ ] A human-confirmed alignment records **who** confirmed it and when; a later automated run does not overwrite it.
+- [x] An alignment at 0.62 confidence appears in a review queue and **not** in query results that do not opt into unreviewed alignments. (Slice D)
+- [x] A human-confirmed alignment records **who** confirmed it and when; a later automated run does not overwrite it. (Slice D — "when" is the flake's own transaction time `t`, not a separate timestamp field)
 - [x] A lossy reverse mapping is marked, and a query traversing it in the lossy direction can tell. (Slice C)
 - [x] Alignment ingestion is budgeted and resumable — UMLS is millions of rows and a failure at 80% must not mean starting again. (Slice B — resumable by construction; "budgeted" in the sense of bounded per-call cost is inherited from the caller owning batch size, not yet wired to a job/error-cap harness like Epic 16's `graph-owl-connectors::job`)
 - [ ] **Console**: an alignment review queue *(Epic 42)*, and on any cross-vocabulary result the alignment that made it reachable is inspectable — a result that crossed an approximate match must be distinguishable from one that did not, and not by colour alone.
@@ -244,8 +244,91 @@ an ordinary SPARQL pattern (`?alignment dsc:alignmentLeft ?left ;
 dsc:alignmentRight ?right ; dsc:lossyReverse ?lossy`), no query-layer
 support needed.
 
-### Slice D: Computed alignment, confirmation, and the review queue
+### Slice D: Computed alignment, confirmation, and the review queue — **backend shipped, 7 August 2026**
 **RED**: a 0.62 match is invisible to default queries and present in review. Mutator watch: a threshold comparison flipped to `>=` on the wrong bound must fail a boundary test at exactly 0.5 and 0.8.
+
+**No new thresholds invented.** `graph_owl_core::extraction::Disposition`
+already implements `00c-domain-model.md`'s exact generic confidence bands
+(`ASSERT_THRESHOLD = 0.8`, `SURFACE_THRESHOLD = 0.5`, both boundaries
+inclusive on their upper side, a `NaN` input treated as `Ignore` rather
+than silently passing `>=`) — built for Epic 21's extraction claims and
+reused directly rather than re-derived, matching decision 4's own framing
+("the thresholds are not new"). Checked before reuse: `graph_owl_
+resolution::bands::ConfidenceBands` looked like the obvious fit by name
+but uses Epic 17's own `0.9`/`0.6` entity-resolution bands — a different,
+wrong pair of numbers for this decision specifically.
+
+**`alignment_to_flakes` split into `metadata_flakes` + `direct_triple`**,
+composed by a new `alignment_to_flakes_gated`: `Disposition::Assert`
+writes both (current behaviour, unchanged for Slice B's curated
+ingestion — `AlignmentSource::Curated` is definitionally trustworthy per
+decision 1, so nothing about it is gated against a numeric threshold),
+`Disposition::Surface` writes only the metadata (so a review-queue
+listing can find it, but the direct triple never "quietly becomes a
+graph edge" — the plan's own words), `Disposition::Ignore` writes
+nothing.
+
+**`Catalog::upsert_alignment`** (`graph-owl-api`) is the stateful half:
+retract-then-assert of `Alignment::subject()`'s reified node, mirroring
+`run_reasoning`'s own withdraw-before-write pattern — necessary because a
+later call updating this alignment's confidence must also retract the
+*old* direct triple, whose subject is `left`, not the reified node, so a
+confidence drop from `0.95` to `0.62` doesn't leave a stale graph edge
+standing (pinned directly:
+`upserting_a_lower_confidence_retracts_the_stale_direct_triple`). Before
+writing, it checks whether the *existing* stored alignment at that
+subject was human-confirmed (`alignmentSourceKind = "human"`, read from
+what is actually stored, not re-derived) and refuses an automated
+overwrite — `UpsertAlignmentOutcome::RefusedHumanConfirmed` — while
+still allowing a second human call through (a person correcting or
+re-affirming is not "an automated run").
+
+**`Catalog::pending_alignment_review`** returns the raw `confidence`
+flakes in the `Surface` band — the backend surface a review-queue UI
+would read (every other field of a pending alignment is reachable from
+its own subject via an ordinary query), not the UI itself.
+
+**Honestly deferred, not silently dropped**: the **console** half
+(review queue UI, and making the alignment behind a cross-vocabulary
+result inspectable) is Epic 41/42 territory and is not attempted here —
+matching this epic's own acceptance criterion wording, which names those
+epics explicitly. `pending_alignment_review`'s raw-flake return type is a
+deliberately minimal backend contract, not a finished API — a richer DTO
+is exactly the kind of thing a real console consumer should drive the
+shape of, not a guess made without one.
+
+**Mutation testing on the `graph-owl-api` diff (`upsert_alignment` +
+`pending_alignment_review`) first surfaced 6 real MISSED mutants**, all
+"delete a field from a `TriplePattern`/`Flake` expression" — a class this
+project's own `RecordingGraph` double calls out by name
+(`queried: Mutex<Vec<TriplePattern>>` — "some obligations narrow the
+scan...and are unobservable from the result alone"), and the same reason
+the double exists as it does. On a fresh, empty `RecordingGraph` dropping
+an `s`/`p`/`o` narrowing constraint returns the *same rows* — nothing else
+is present to wrongly sweep in — so the gap was invisible to every
+result-shaped assertion already written; only the *pattern actually sent*
+distinguishes a narrowed query from an unnarrowed one that got lucky.
+Fixed with 4 new tests reading `RecordingGraph::patterns()` and
+`::retracted_flakes()` directly (the idiom this crate's own
+`shapes_and_estate_are_read_from_different_graphs` test already
+established): `upsert_alignment_narrows_both_lookups_to_their_own_identity`
+pins both the metadata query's `s` and the direct-triple query's full
+`(s, p, o)`; `withdrawing_a_stale_alignment_uses_a_time_after_the_original_
+assertion` pins that a retraction's `t` is strictly later than the flake it
+supersedes, not reused from `f.clone()` (which would make the withdrawal
+and the assertion it withdraws simultaneous — ambiguous under
+`RecordingGraph`'s own documented tie-break, and under real Postgres);
+`pending_alignment_review_narrows_its_query_to_the_confidence_predicate`
+pins its `p` filter, using `.patterns()` rather than a crafted Float-valued
+decoy under a different predicate. Re-run: 16 caught, 2 unviable, 0
+missed.
+
+**Acceptance criteria, verified**: `a_review_band_alignment_is_absent_
+from_a_plain_query_but_present_in_review` and its mirror-case sibling for
+a confident alignment; `a_human_confirmed_alignment_is_not_overwritten_
+by_a_later_automated_run` and `a_second_human_confirmation_is_written_
+not_refused` (the boundary the refusal is actually about — automation
+overriding a person, not a second write ever being possible).
 
 ## Explicitly deferred (with destination)
 
