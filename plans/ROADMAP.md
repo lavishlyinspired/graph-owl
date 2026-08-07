@@ -428,7 +428,7 @@ decision to accept churn and should be made knowingly.
 | 93 | `93-console-overview.md` | **DONE and shipped** — the landing page, with the constraint that a tile which cannot be computed from real data does not ship |
 | 94 | `94-rdf12-alignment.md` | **DONE** — emit `rdf:reifies` and triple terms; `rdf:dirLangString` closes the language-tag hole with three components rather than two |
 | 95 | `95-owl-rl-completion.md` | **DONE** — property chains, IFP, `hasKey`; the rules Epics 17 and 29 would hand-code. Scoped by one line: facts here, contradictions in Epic 5 |
-| 96 | `96-shacl-sparql.md` | **DONE** — planned, explicitly *not scheduled* while the spec is Working Draft |
+| 96 | `96-shacl-sparql.md` | **DONE** — Slice A (SPARQL constraints) ready, against the 2017 SHACL Recommendation, not the 1.2 Working Draft; Slice B (rules) stays blocked, correctly this time on spec existence rather than spec maturity |
 | 97 | `97-incremental-parallel-reasoning.md` | **DONE** — DRed and parallel derivation, with entry conditions that are measurements rather than dates |
 | 98 | `98-owl-el-reasoning.md` | **DONE** — consequence-based classification, new crate. Scheduled by the medical-ontology requirement, which the earlier deferral had not accounted for |
 | 99 | `99-owl-ql-reasoning.md` | **DONE** — query rewriting, and two corrections stated up front: QL forbids the constructs Epics 17/29 need, and its explanation is the rewritten query rather than a chain |

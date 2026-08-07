@@ -33,15 +33,24 @@ that is wrong, and the failure mode is confident and silent.
 | SPARQL 1.2 Federated Query | Candidate Recommendation | 7 Apr 2026 |
 | SPARQL 1.2 Query Language | Working Draft | 2026 |
 | SPARQL 1.2 Protocol · Service Description · Entailment | Working Draft | 2026 |
+| SHACL (Core + SPARQL constraints, §1–6) | **Recommendation** | 20 Jul 2017, unchanged |
 | SHACL 1.2 Core | Working Draft | 3 Aug 2026 |
 | SHACL 1.2 SPARQL Extensions | Working Draft | 6 Aug 2026 |
 | OWL 2 RL (profile) | Recommendation | 2012, unchanged |
 
 **Read this before treating any of it as a deadline.** RDF 1.2 and SPARQL 1.2
-Federated Query are the only two at CR; CR exit requires two independent
-implementations passing each test in the suite. Everything else is Working
-Draft and may change. Building against a Working Draft is a decision to accept
-churn, not a decision to be early.
+Federated Query are the only two 2026-track specs at CR; CR exit requires two
+independent implementations passing each test in the suite. Everything else
+in the 2026 track is Working Draft and may change — except the 2017 SHACL
+row, which predates the 2026 track entirely and is already a Recommendation,
+the tier *past* CR. Corrected 7 August 2026: SHACL 1.2's Working Draft
+status does not mean "SHACL is unavailable" — §1–6 of the original SHACL
+Recommendation (Core plus SPARQL-based constraints and constraint
+components) are already stable and unaffected by 1.2 not yet existing.
+Only what is genuinely new to 1.2 (SHACL Rules, node expressions, and the
+rest of Advanced Features) is Working-Draft-gated. Building against a
+Working Draft is a decision to accept churn, not a decision to be early —
+building against a document already at Recommendation is neither.
 
 **RDF 1.2 Concepts did not advance on schedule, and that is the useful fact.**
 Its CR snapshot stated it would not become a Recommendation earlier than
@@ -98,28 +107,35 @@ OpenLineage are all published as JSON-LD, so JSON-LD is an ingestion capability
 and Turtle is an export convenience. Expand and compaction first; framing later,
 where it can replace per-endpoint DTOs.
 
-### 3. SHACL means Core **and** SPARQL Extensions
+### 3. SHACL means Core **and** SPARQL constraints — and those are one Recommendation, not two drafts
 
-Epic 5 previously scoped SHACL Core only. SHACL 1.2 SPARQL Extensions adds
-three things this project specifically wants:
+Epic 5 previously scoped SHACL Core only. This project wants three more
+things, and **corrected 7 August 2026**, they are not all gated the same
+way:
 
 - `sh:SPARQLConstraint` — arbitrary SPARQL as a constraint, which is the escape
   hatch that stops every unusual rule becoming a feature request;
 - SPARQL-based constraint *components*, parameterised and reusable;
 - SPARQL-based **inference rules** — shapes-driven derivation.
 
-The third matters more than it looks: one shapes graph then serves as both the
-data-quality gate and a derivation engine, which is a smaller system than a
-validator plus a separate rule language. It also overlaps Epic 6, and the
-overlap needs deciding rather than discovering — see decision 4.
+The first two are already in the **2017 SHACL Recommendation** (§5–6),
+verified directly against both the prose and the canonical vocabulary
+(`w3.org/ns/shacl.ttl`) — not new to SHACL 1.2, just carried forward by it.
+Only the third — inference rules — has no Recommendation-track text at any
+point; it is defined solely in the SHACL 1.2 SPARQL Extensions Working
+Draft. Rules matters more than it looks: one shapes graph then serves as
+both the data-quality gate and a derivation engine, which is a smaller
+system than a validator plus a separate rule language. It also overlaps
+Epic 6, and the overlap needs deciding rather than discovering — see
+decision 4.
 
-**Both are Working Draft.** Implementing against them is accepting churn.
-Epic 96 splits on this: constraints and constraint components *validate* —
-they write nothing to the reasoning overlay, so there is no composition
-question to get wrong even if the spec still moves under them, and the
-plan records that split as decided (Slice A), just deliberately not
-scheduled. Inference rules (Slice B) carry that same maturity risk *and*
-an unresolved question of their own — see decision 4 — so they stay
+Epic 96 splits on exactly this line: constraints and constraint
+components (Slice A) build against the 2017 REC — a Recommendation, not a
+draft — and additionally *validate* rather than derive, writing nothing to
+the reasoning overlay, so there is no composition question to get wrong
+either way. The plan records Slice A as ready. Inference rules (Slice B)
+have no stable specification to build against *and* an unresolved
+composition question of their own — see decision 4 — so they stay
 blocked on both counts.
 
 ### 4. SHACL rules and OWL 2 RL overlap, and that is a decision not an accident
@@ -150,7 +166,7 @@ that was never read.
 | Complete OWL 2 RL | Epic 95, scoped: facts here, contradictions in Epic 5 |
 | Incremental reasoning (DRed) | Epic 97, with a measured entry condition |
 | Parallel reasoning | Epic 97, same |
-| SHACL-SPARQL + rules | Epic 96 — constraints (Slice A) decided, not scheduled while Working Draft; rules (Slice B) additionally blocked on composition with Epic 6's OWL fixpoint |
+| SHACL-SPARQL + rules | Epic 96 — constraints (Slice A) ready, against the 2017 SHACL Recommendation §5–6; rules (Slice B) blocked on both a Working-Draft-only spec and composition with Epic 6's OWL fixpoint |
 | Authorization-aware reasoning | `06` — derived facts inherit their least-visible premise |
 | Six index permutations | `04` finding 7 — decided *against* for now, with a trigger |
 | JSON-LD native vs compatible | `09` decision 5 — compatible, with the three failure modes named |
@@ -241,5 +257,8 @@ Recorded so nobody re-proposes them as oversights.
   optional to expected, and makes the export decision in Epic 9 urgent.
 - **A user asking to point Protégé or a SPARQL client at graph-owl** — that is
   the concrete trigger for full SPARQL 1.1, and it has not happened.
-- **SHACL 1.2 reaching CR** — reduces the churn cost of building against it.
+- **SHACL 1.2 reaching CR** — no longer gates constraints (Slice A builds
+  against the 2017 REC); reduces the churn cost of building SHACL Rules
+  (Slice B), which still needs SHACL 1.2 specifically since no earlier
+  document defines rules at all.
 - **An ontology of more than ~50k classes** — the first real argument for EL.
