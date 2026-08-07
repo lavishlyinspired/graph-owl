@@ -4,8 +4,8 @@
 //! the store and another to a query is the class of bug that produces answers
 //! nobody can reproduce.
 
-use graph_owl_core::flake::{FlakeValue, Sid};
-use oxrdf::{Literal, NamedNode, Term, vocab::xsd};
+use graph_owl_core::flake::{Direction, FlakeValue, LangString, Sid};
+use oxrdf::{BaseDirection, Literal, NamedNode, Term, Triple, vocab::xsd};
 
 /// Why a term could not cross the boundary.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -62,17 +62,49 @@ pub fn to_term(value: &FlakeValue) -> Result<Term, TermError> {
         FlakeValue::Duration(seconds) => {
             Literal::new_typed_literal(seconds.to_string(), xsd::INTEGER).into()
         }
-        // `Term::Triple` exists only under `oxrdf`'s `rdf-12` feature,
-        // which this crate does not yet enable (Epic 94 Slice D — the
-        // gate is taken once, for the whole `rdf:reifies` query-surface
-        // slice, not piecemeal). Until then a stored triple term has no
-        // term to become, so this is `Unrepresentable` rather than a type
-        // this function cannot construct — the same shape `from_term`'s
-        // own doc comment already anticipates for the reverse direction.
-        FlakeValue::TripleTerm(_) => {
-            return Err(TermError::Unrepresentable("a triple term".to_string()));
-        }
+        // `oxrdf`'s `rdf-12` feature landed in Epic 94 Slice B (forced on
+        // by the dependency graph, not chosen here — see this crate's own
+        // `Cargo.toml`), so `Term::Triple` is real and this is a genuine
+        // construction, not a refusal. Recurses through `to_term` for the
+        // inner object — a triple term may itself nest one.
+        FlakeValue::TripleTerm(term) => Term::Triple(Box::new(Triple::new(
+            to_named_node(&term.s)?,
+            to_named_node(&term.p)?,
+            to_term(&term.o)?,
+        ))),
+        FlakeValue::LangString(ls) => match ls.direction {
+            None => Literal::new_language_tagged_literal(&ls.text, &ls.language)
+                .map_err(|e| invalid_language_tag(&ls.language, &e))?
+                .into(),
+            Some(direction) => Literal::new_directional_language_tagged_literal(
+                &ls.text,
+                &ls.language,
+                to_base_direction(direction),
+            )
+            .map_err(|e| invalid_language_tag(&ls.language, &e))?
+            .into(),
+        },
     })
+}
+
+fn to_base_direction(direction: Direction) -> BaseDirection {
+    match direction {
+        Direction::Ltr => BaseDirection::Ltr,
+        Direction::Rtl => BaseDirection::Rtl,
+    }
+}
+
+fn from_base_direction(direction: BaseDirection) -> Direction {
+    match direction {
+        BaseDirection::Ltr => Direction::Ltr,
+        BaseDirection::Rtl => Direction::Rtl,
+    }
+}
+
+fn invalid_language_tag(language: &str, error: &oxrdf::LanguageTagParseError) -> TermError {
+    TermError::Unrepresentable(format!(
+        "{language:?} is not a valid BCP 47 language tag: {error}"
+    ))
 }
 
 /// A `Sid` as an IRI node.
@@ -126,6 +158,20 @@ pub fn from_term(term: &Term) -> Result<FlakeValue, TermError> {
 }
 
 fn from_literal(literal: &Literal) -> FlakeValue {
+    // A language-tagged literal's own `datatype()` is `rdf:langString` /
+    // `rdf:dirLangString`, never one of the `xsd:` datatypes matched
+    // below — checked first, and exclusively, because RDF's own model
+    // never lets a value carry both a language tag and an `xsd:` datatype
+    // at once. Before Epic 94 Slice C this fell through to the generic
+    // `_ => String` arm below, silently dropping the language tag on
+    // every import — the plan's own stated RED test.
+    if let Some(language) = literal.language() {
+        return FlakeValue::LangString(LangString {
+            text: literal.value().to_string(),
+            language: language.to_string(),
+            direction: literal.direction().map(from_base_direction),
+        });
+    }
     let lexical = literal.value();
     match literal.datatype().as_str() {
         d if d == xsd::BOOLEAN.as_str() => lexical.parse().map_or_else(
@@ -219,10 +265,63 @@ mod tests {
             FlakeValue::Boolean(false),
             FlakeValue::Int(-7),
             FlakeValue::Instant(Utc.timestamp_opt(1_700_000_000, 0).unwrap()),
+            FlakeValue::LangString(LangString {
+                text: "hello".into(),
+                language: "en".into(),
+                direction: None,
+            }),
         ] {
             let term = to_term(&value).expect("term");
             assert_eq!(from_term(&term), Ok(value.clone()), "{value:?}");
         }
+    }
+
+    /// **The RED test, Epic 94 Slice C's own stated acceptance criterion**:
+    /// an `rtl` literal survives storage and serialization with its
+    /// direction intact — asserted with real Arabic and Hebrew text, not a
+    /// placeholder, because a direction-handling bug could easily pass on
+    /// ASCII input (which has no strong direction of its own to get wrong).
+    #[test]
+    fn an_rtl_literal_keeps_its_direction_through_the_crossing() {
+        for (text, language) in [("مرحبا", "ar"), ("שלום", "he")] {
+            let value = FlakeValue::LangString(LangString {
+                text: text.into(),
+                language: language.into(),
+                direction: Some(Direction::Rtl),
+            });
+            let term = to_term(&value).expect("term");
+            assert!(
+                term.to_string().contains("--rtl"),
+                "{text}: {term} does not carry its direction in the lexical form"
+            );
+            assert_eq!(from_term(&term), Ok(value), "{text} did not round-trip");
+        }
+    }
+
+    /// The negative case matters as much: a plain string must not acquire
+    /// a direction on the way through, or every literal in the catalog
+    /// would gain a meaningless `ltr`.
+    #[test]
+    fn a_plain_string_does_not_acquire_a_language_or_direction() {
+        let term = to_term(&FlakeValue::String("hello".into())).expect("term");
+        assert_eq!(from_term(&term), Ok(FlakeValue::String("hello".into())));
+    }
+
+    /// A language-tagged literal with **no** direction is `rdf:langString`,
+    /// not `rdf:dirLangString` — it must not silently acquire one either.
+    #[test]
+    fn a_language_tagged_literal_without_direction_stays_without_one() {
+        let value = FlakeValue::LangString(LangString {
+            text: "hello".into(),
+            language: "en".into(),
+            direction: None,
+        });
+        let term = to_term(&value).expect("term");
+        assert!(
+            !term.to_string().contains("--"),
+            "a plain rdf:langString must not gain a direction suffix: {term}"
+        );
+        assert_eq!(from_term(&term), Ok(value));
     }
 
     /// `Int` and `Duration` share a lexical form and a datatype. The inverse
@@ -291,16 +390,27 @@ mod tests {
     /// to become — refused by name, not coerced into a string that would
     /// make a query silently match on the wrong thing.
     #[test]
-    fn a_triple_term_has_no_term_to_become_yet() {
+    fn a_triple_term_becomes_a_real_term_triple() {
         let value = FlakeValue::TripleTerm(graph_owl_core::flake::TripleTerm {
             s: Sid::dsc("a"),
             p: Sid::dsc("b"),
             o: Box::new(FlakeValue::Ref(Sid::dsc("c"))),
         });
-        assert!(matches!(
-            to_term(&value),
-            Err(TermError::Unrepresentable(_))
-        ));
+        let Term::Triple(inner) = to_term(&value).expect("term") else {
+            panic!("expected Term::Triple");
+        };
+        assert_eq!(
+            inner.subject.to_string(),
+            "<https://graph-owl.dev/ns/catalog#a>"
+        );
+        assert_eq!(
+            inner.predicate.to_string(),
+            "<https://graph-owl.dev/ns/catalog#b>"
+        );
+        assert_eq!(
+            inner.object.to_string(),
+            "<https://graph-owl.dev/ns/catalog#c>"
+        );
     }
 
     #[test]

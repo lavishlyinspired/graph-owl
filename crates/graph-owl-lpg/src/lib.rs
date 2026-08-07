@@ -123,6 +123,14 @@ impl PropertyValue {
             // this look like a supported conversion rather than a
             // decision-3 violation made visible.
             FlakeValue::TripleTerm(_) => PropertyValue::String(format!("{value:?}")),
+            // The lexical form survives; the language tag and direction do
+            // not — LPG has no language-tagged-string concept at all.
+            // Reported as `LossyMapping::TypeNarrowed` at the call site,
+            // the same treatment `Uuid`/`Json` already get for the
+            // identical reason: real, reachable data collapsing to a
+            // plain string is a loss worth naming, not a decision-3-style
+            // "should never happen".
+            FlakeValue::LangString(ls) => PropertyValue::String(ls.text.clone()),
         }
     }
 }
@@ -249,7 +257,7 @@ pub enum LossyMapping {
     TypeNarrowed {
         subject: String,
         predicate: String,
-        /// `uuid` or `json`.
+        /// `uuid`, `json`, or `langString`.
         from: &'static str,
     },
 }
@@ -375,14 +383,19 @@ pub fn node_from_flakes(
                 predicate: flake.p.id.clone(),
             }),
             // The value survives; the type tag does not. See `TypeNarrowed`.
-            FlakeValue::Uuid(_) | FlakeValue::Json(_) => {
+            // `LangString` loses more than a tag — the language and
+            // direction themselves — but the LPG side has only one
+            // "narrowed to a plain string" category, and inventing a
+            // second one this early would be a distinction nothing reads
+            // yet.
+            FlakeValue::Uuid(_) | FlakeValue::Json(_) | FlakeValue::LangString(_) => {
                 report.lossy.push(LossyMapping::TypeNarrowed {
                     subject: subject.id.clone(),
                     predicate: flake.p.id.clone(),
-                    from: if matches!(&flake.o, FlakeValue::Uuid(_)) {
-                        "uuid"
-                    } else {
-                        "json"
+                    from: match &flake.o {
+                        FlakeValue::Uuid(_) => "uuid",
+                        FlakeValue::Json(_) => "json",
+                        _ => "langString",
                     },
                 });
             }

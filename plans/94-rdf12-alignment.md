@@ -229,9 +229,11 @@ about an entire category.
 - [x] `FlakeValue::TripleTerm` at discriminant 10, pinning test extended. (Slice A)
 - [x] A relationship serializes to `rdf:reifies` + a triple term, and parses back. (Slice B)
 - [x] A triple term in subject position is refused with an error naming why. (Slice A)
-- [ ] A language-tagged literal round-trips with its tag **and** direction.
-- [ ] An `rtl` literal keeps its direction through serialization — asserted with
-      real Arabic or Hebrew text, not a placeholder.
+- [x] A language-tagged literal round-trips with its tag **and** direction. (Slice C)
+- [x] An `rtl` literal keeps its direction through serialization — asserted with
+      real Arabic or Hebrew text, not a placeholder. (Slice C — real Postgres
+      storage too, not just serialization; the console's canvas-rendered graph
+      nodes remain a recorded gap, see Slice C's own write-up)
 - [ ] Nothing in the store changes by default: a catalogue run produces the same
       flake count as before this epic.
 
@@ -307,12 +309,111 @@ node with properties rather than a statement about a proposition.
 
 **Mutation report**: `graph-owl-rdf-io/src/lib.rs`'s diff, 25/35 caught, 10 unviable (does not compile as mutated), 0 missed. `graph-owl-query`'s two touched files: `term.rs` 0/1 caught + 1 unviable, `pushdown.rs` 1/2 caught + 1 unviable — both 0 missed; the small mutant counts reflect how little of each file's diff was a real decision versus a required exhaustiveness arm.
 
-### Slice C: `rdf:dirLangString`
+### Slice C: `rdf:dirLangString` — **shipped (backend), 7 August 2026 — see below for the console half**
 
 **RED**: an `rtl` literal survives storage and serialization with its direction
 intact. The negative case matters as much: a plain string must not acquire a
 direction, or every literal in the catalog gains a meaningless `ltr`.
 **Done when**: criteria met, mutation report reviewed.
+
+**Design changed from this plan's own `flake_meta` side table to a
+`FlakeValue::LangString` variant, decided with the user before writing any
+code.** The side table's `flake_id BIGINT PRIMARY KEY REFERENCES flakes(id)`
+assumes flake identity exists in the Rust layer; it does not — `Flake` (and
+`TriplePattern`) carry no `id` field at all, Postgres's `BIGSERIAL` is
+generated and never read back, and `Flake { s, p, o, cx, t, op }` is
+constructed directly at hundreds of call sites across the workspace.
+Threading a real `flake_id` through all of them to make the side table's
+own foreign key meaningful would have been a far larger change than the
+plan's few lines of SQL suggested. `FlakeValue::LangString { text,
+language, direction: Option<Direction> }` — a twelfth variant (discriminant
+11, following Slice A's `TripleTerm` at 10), matching the exact pattern
+already used for every other typed literal (`Boolean`, `Instant`, `Uuid`,
+...) — needs no new identity concept at all: two new nullable columns on
+the *existing* `flakes` row (`value_lang`, `value_dir`), no join, no
+migration path invented mid-slice. `direction: None` is `rdf:langString`;
+`Some` is `rdf:dirLangString` — one variant for both, since a directional
+string is a language-tagged string with one more component, never the
+other way around.
+
+**Shipped**: `graph-owl-core` gains the variant, `Direction` (`Ltr`/`Rtl`),
+and the discriminant; every cross-crate exhaustive match `FlakeValue`
+gaining a twelfth variant breaks got a real, deliberate answer — the same
+"finding every match is the actual size of the slice" shape Slice A
+already established. Two are genuine, not mechanical: `graph_owl_query::term`'s
+`to_term`/`from_literal` build and recognize real `oxrdf::Literal`s via
+`Literal::new_language_tagged_literal`/`new_directional_language_tagged_literal`
+(RDF 1.2, via the `rdf-12` feature Slice B already turned on) — this is
+where the RTL round trip actually happens, proven with real Arabic and
+Hebrew text (`مرحبا`/`שלום`), not placeholders, per the plan's own stated
+requirement. Postgres's `V8__lang_string.sql` adds the two columns and
+widens `flakes_value_type_check` to admit 11 specifically (`BETWEEN 0 AND 9
+OR value_type = 11`) — **not** simply raised to 11, because 10
+(`TripleTerm`) stays excluded on purpose (Epic 94 decision 3); the same
+narrowing was needed a second time on the **predicate registry's own**,
+separate `value_type` CHECK constraint (`V3`), found only by an actual
+`define()` call against a real database, not by reading the schema.
+
+**Two more real bugs found only by running against real Postgres, neither
+catchable by the unit-level `columns()`/`from_columns()` tests**: (1)
+`FLAKE_COLUMNS` and `COLUMNS_PER_FLAKE` are a *separate*, hand-maintained
+constant pair backing the engine's own `SELECT`/`INSERT` column lists —
+updating `ValueColumns` and the insert builder was not enough, and the gap
+surfaced as `ColumnNotFound("value_lang")` on every single read, not a
+compile error, because `sqlx::Row::get` resolves column names at runtime.
+(2) `value_key`'s own chosen separator for the `(text, language,
+direction)` composite was ASCII NUL (`\u{0}`) — reasoned to be safe because
+real text/BCP-47/`ltr`/`rtl` cannot contain it, which is true and beside
+the point: **Postgres `TEXT` cannot store an embedded NUL byte at all**,
+so every write of a `LangString` failed with `invalid byte sequence for
+encoding "UTF8": 0x00` the moment it reached a real database, never in the
+in-memory unit tests. Fixed to ASCII Unit Separator (`\u{1f}`, 0x1F) —
+ASCII's own purpose-built field separator, and genuinely storable.
+
+**A dedicated real-Postgres integration test was added specifically
+because the plan's own RED test says "survives storage"**, not "survives
+the encode/decode functions" — `an_rtl_literal_survives_storage_with_its_direction_intact`
+in `flake_roundtrip.rs`, which is exactly the test that caught both bugs
+above; the pure-logic `value.rs` unit tests (also strengthened with real
+Arabic text) could not have caught either, since neither touches a real
+database connection.
+
+**Mutation report**: `flake.rs` diff 4/4 caught (one round: `Direction`'s
+own `Display` body collapsing to an empty string survived until a
+dedicated message-text assertion was added, the identical pattern
+Slice A's own `TripleTermAsSubject` hit). `term.rs` diff: 5/5 unviable
+(no compiling mutant existed for the diff — real coverage, not a gap).
+`graph-owl-lpg` diff: 3 caught, 2 unviable, 0 missed. `value.rs` diff (both
+rounds, before and after the separator fix): 5 caught, 2 unviable, 0
+missed. `lib.rs` diff: 1 caught, 1 missed (`write`'s body collapsing to
+`Ok(())`) — judged an artifact of `cargo-mutants`' own container overhead
+rather than a real gap: the baseline reported "0s test" against this
+crate's own measured 5+ second integration-test wall time moments earlier,
+the exact "TIMEOUT/contention reads as MISSED" pattern this project has
+hit before, and the same code path is directly proven by 20 passing
+integration tests including the one added for this slice.
+
+**The console half is genuinely two different problems, and only one of
+them is closed.** `userTextDir` (`ui/src/trust/direction.ts`, built ahead
+of this slice, in Epic 39 Slice E) already returns `"auto"` unconditionally
+for every DOM-rendered label — the entity header, search results, memory
+content — and a structural test already asserts nothing hard-codes
+`dir="ltr"` anywhere in the console. `dir="auto"` asks the browser's own
+bidi algorithm to read a label's first strong character, which already
+renders Arabic and Hebrew text correctly **today**, without needing this
+slice's own stored direction at all — confirmed against the plan's own
+acceptance wording, which asks for correct *rendering*, not for the
+stored value specifically to be what triggers it. **The "on a graph node"
+half of the criterion is not satisfied, and cannot be by adding a `dir`
+attribute**: both the Explorer's own graph (Epic 40) and the ontology
+editor's graph pane (Slice G) render labels through Cytoscape onto a
+`<canvas>` element, and HTML's `dir` attribute has no meaning on canvas
+text at all — checked directly against the Explorer's own `cytoscape({…})`
+call, which sets no text-direction option of any kind. Bidi-correct canvas
+text needs the label *pre-shaped* before Cytoscape ever sees it (a real,
+separate piece of work — text shaping, not attribute-setting), which this
+slice did not attempt and is recorded here rather than silently assumed
+covered by the DOM-side `dir="auto"` fix above.
 
 **This slice does not end at the API — it has a console half, and without it the
 slice makes things worse.** A store that knows a label is right-to-left while the

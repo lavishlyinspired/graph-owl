@@ -32,7 +32,7 @@ const MIGRATION_TABLE: &str = "refinery_schema_history_engine";
 /// the decoder cannot drift apart.
 const FLAKE_COLUMNS: &str = "namespace_s, sid_s, namespace_p, sid_p, \
      value_type, value_ref_ns, value_ref_id, value_str, value_bool, value_int, \
-     value_float, value_inst, value_json, value_bytes, value_uuid, \
+     value_float, value_inst, value_json, value_bytes, value_uuid, value_lang, value_dir, \
      cx_namespace, cx_id, t, op";
 
 /// The fact identity: everything except `t` and `op`.
@@ -44,7 +44,7 @@ const FACT_IDENTITY: &str =
 
 /// Columns bound per flake by the insert. Counted from the `INSERT` column
 /// list below; the two must move together.
-const COLUMNS_PER_FLAKE: usize = 20;
+const COLUMNS_PER_FLAKE: usize = 22;
 
 /// Postgres carries the parameter count in the wire protocol as an `int16`, so
 /// a single statement can bind at most 65535 values. Not a tuning knob — it is
@@ -312,8 +312,8 @@ impl PostgresTripleStore {
             let mut builder = QueryBuilder::new(
                 "INSERT INTO flakes (namespace_s, sid_s, namespace_p, sid_p, value_type, \
                  value_key, value_ref_ns, value_ref_id, value_str, value_bool, value_int, \
-                 value_float, value_inst, value_json, value_bytes, value_uuid, cx_namespace, \
-                 cx_id, t, op) ",
+                 value_float, value_inst, value_json, value_bytes, value_uuid, value_lang, \
+                 value_dir, cx_namespace, cx_id, t, op) ",
             );
             builder.push_values(chunk, |mut row, (flake, columns)| {
                 row.push_bind(i32::from(flake.s.namespace_code))
@@ -332,6 +332,8 @@ impl PostgresTripleStore {
                     .push_bind(columns.json_value.clone())
                     .push_bind(columns.bytes_value)
                     .push_bind(columns.uuid_value)
+                    .push_bind(columns.lang_language)
+                    .push_bind(columns.lang_direction)
                     .push_bind(flake.cx.as_ref().map(|cx| i32::from(cx.namespace_code)))
                     .push_bind(flake.cx.as_ref().map(|cx| cx.id.clone()))
                     .push_bind(flake.t)
@@ -369,6 +371,8 @@ fn flake_from_row(row: &PgRow) -> Result<Flake, EngineError> {
         row.get("value_json"),
         row.get("value_bytes"),
         row.get("value_uuid"),
+        row.get("value_lang"),
+        row.get("value_dir"),
     )
     .map_err(EngineError::Backend)?;
 

@@ -793,16 +793,20 @@ fn cypher_value_of_term(
                 acc
             },
         ))),
-        // `from_term` cannot produce this today — `Term::Triple` exists
-        // only under `oxrdf`'s `rdf-12` feature, which `graph-owl-query`
-        // does not enable (Epic 94 Slice D is what would turn it on). Kept
-        // as a named refusal rather than `unreachable!()`: Cypher has no
-        // triple-term concept at all, so even once Slice D teaches
-        // `from_term` about one, this arm should still refuse — the
-        // reachability changes, the right answer does not.
+        // `from_term`'s own `Term::Triple` arm still refuses (query-pattern
+        // matching has no `Sid` for a triple term to bind against — Epic 94
+        // decision 2), so this stays unreachable in practice even though
+        // `oxrdf`'s `rdf-12` is now enabled (Slice B). Kept as a named
+        // refusal rather than `unreachable!()` regardless: Cypher has no
+        // triple-term concept at all, so the right answer here does not
+        // depend on `from_term`'s own reachability.
         FlakeValue::TripleTerm(_) => Err(CatalogError::Storage(StorageError::Unexpected(
             "a triple term has no Cypher representation".to_string(),
         ))),
+        // openCypher has no language-tagged-string concept either — the
+        // lexical text represents it, the same "structure drops, text
+        // survives" treatment `Bytes` gets just above.
+        FlakeValue::LangString(ls) => Ok(CypherValue::String(ls.text)),
     }
 }
 
@@ -13679,6 +13683,16 @@ fn display_flake_value(value: &graph_owl_core::flake::FlakeValue) -> String {
         // parses today reaches here. A short, honest placeholder rather
         // than a panic if that ever changes.
         FlakeValue::TripleTerm(_) => "<< triple term >>".to_string(),
+        // Matches Turtle's own lexical form for the two literal kinds
+        // (`"text"@en`, `"text"@ar--rtl`) — unlike `TripleTerm` above,
+        // this genuinely is reachable: `"text"@en` is ordinary RDF 1.1
+        // syntax this project's parser has always accepted, language tag
+        // included since Epic 94 Slice C stopped it being silently
+        // dropped on the way in.
+        FlakeValue::LangString(ls) => match ls.direction {
+            None => format!("{}@{}", ls.text, ls.language),
+            Some(direction) => format!("{}@{}--{direction}", ls.text, ls.language),
+        },
     }
 }
 
@@ -30660,6 +30674,34 @@ mod ontology_editor_tests {
             .find(|t| t.p == "https://graph-owl.dev/ns/catalog#parentService")
             .expect("the parentService triple");
         assert!(parent_triple.o_is_ref, "{parent_triple:?}");
+    }
+
+    /// A language-tagged literal displays as Turtle's own lexical form
+    /// (`text@tag`, `text@tag--direction`) — Epic 94 Slice C's own console
+    /// half, checked at the boundary the ontology editor's graph pane
+    /// actually reads from.
+    #[test]
+    fn preview_displays_a_language_tagged_literal_in_turtle_lexical_form() {
+        let document = "<https://graph-owl.dev/ns/catalog#orders> \
+             <https://graph-owl.dev/ns/catalog#label> \"Widget\"@en .\n\
+             <https://graph-owl.dev/ns/catalog#orders> \
+             <https://graph-owl.dev/ns/catalog#labelAr> \"ويدجيت\"@ar--rtl .\n";
+
+        let preview = preview_rdf_edit(RdfFormat::Turtle, document).expect("must parse");
+
+        let plain = preview
+            .triples
+            .iter()
+            .find(|t| t.p == "https://graph-owl.dev/ns/catalog#label")
+            .expect("the label triple");
+        assert_eq!(plain.o, "Widget@en", "{plain:?}");
+
+        let directional = preview
+            .triples
+            .iter()
+            .find(|t| t.p == "https://graph-owl.dev/ns/catalog#labelAr")
+            .expect("the labelAr triple");
+        assert_eq!(directional.o, "ويدجيت@ar--rtl", "{directional:?}");
     }
 
     #[tokio::test]

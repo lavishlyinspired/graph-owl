@@ -1170,7 +1170,7 @@ fn triple_to_flakes(triple: &Triple, blanks: &mut BlankNodeMap) -> Result<Vec<Fl
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use graph_owl_core::flake::namespace;
+    use graph_owl_core::flake::{LangString, namespace};
 
     fn flake(s: &str, p: &str, o: FlakeValue) -> Flake {
         Flake {
@@ -1197,6 +1197,15 @@ mod tests {
                 "a",
                 "instant",
                 FlakeValue::Instant(chrono::Utc.timestamp_opt(1_700_000_000, 0).unwrap()),
+            ),
+            flake(
+                "a",
+                "label",
+                FlakeValue::LangString(LangString {
+                    text: "hello".into(),
+                    language: "en".into(),
+                    direction: None,
+                }),
             ),
         ];
         for input in cases {
@@ -1385,6 +1394,53 @@ mod tests {
         let bytes = StandardRdfIo
             .serialize(std::slice::from_ref(&input), RdfFormat::Turtle)
             .expect("serialize");
+        let parsed = StandardRdfIo
+            .parse(&bytes, RdfFormat::Turtle, None)
+            .expect("parse");
+        assert_eq!(parsed, vec![input]);
+    }
+
+    /// **The RED test, Epic 94 Slice C's own stated acceptance criterion**:
+    /// an `rtl` literal survives storage and serialization with its
+    /// direction intact — real Arabic and Hebrew text through the full
+    /// Turtle serialize/parse path this crate's callers actually use, not
+    /// just `graph_owl_query::term`'s own narrower unit test.
+    #[test]
+    fn an_rtl_literal_survives_a_real_turtle_round_trip() {
+        for (text, language) in [("مرحبا", "ar"), ("שלום", "he")] {
+            let input = flake(
+                "a",
+                "label",
+                FlakeValue::LangString(LangString {
+                    text: text.into(),
+                    language: language.into(),
+                    direction: Some(graph_owl_core::flake::Direction::Rtl),
+                }),
+            );
+            let bytes = StandardRdfIo
+                .serialize(std::slice::from_ref(&input), RdfFormat::Turtle)
+                .expect("serialize");
+            assert!(
+                String::from_utf8_lossy(&bytes).contains("--rtl"),
+                "{text}: direction did not reach the wire"
+            );
+            let parsed = StandardRdfIo
+                .parse(&bytes, RdfFormat::Turtle, None)
+                .expect("parse");
+            assert_eq!(parsed, vec![input], "{text} did not round-trip");
+        }
+    }
+
+    /// The negative case matters as much: a plain string must not acquire
+    /// a direction, or every literal in the catalog gains a meaningless
+    /// `ltr`.
+    #[test]
+    fn a_plain_string_does_not_acquire_a_direction_through_turtle() {
+        let input = flake("a", "name", FlakeValue::String("Orders".into()));
+        let bytes = StandardRdfIo
+            .serialize(std::slice::from_ref(&input), RdfFormat::Turtle)
+            .expect("serialize");
+        assert!(!String::from_utf8_lossy(&bytes).contains("--"));
         let parsed = StandardRdfIo
             .parse(&bytes, RdfFormat::Turtle, None)
             .expect("parse");

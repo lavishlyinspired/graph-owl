@@ -86,6 +86,59 @@ async fn an_asserted_flake_comes_back_exactly_as_written() {
     assert_eq!(read, vec![written], "a flake must survive its own storage");
 }
 
+/// **The RED test, Epic 94 Slice C's own stated acceptance criterion**: an
+/// `rtl` literal survives *storage* — a real Postgres round trip, not just
+/// the encode/decode functions `src/value.rs` already covers in isolation
+/// — with its direction intact. Real Arabic and Hebrew text, not a
+/// placeholder, because a byte-level direction bug could pass on ASCII
+/// input that has no strong direction of its own to lose.
+#[tokio::test]
+async fn an_rtl_literal_survives_storage_with_its_direction_intact() {
+    let (store, _container) = store().await;
+    let cases: Vec<(&str, FlakeValue)> = vec![
+        (
+            "labelAr",
+            FlakeValue::LangString(graph_owl_core::flake::LangString {
+                text: "مرحبا".into(),
+                language: "ar".into(),
+                direction: Some(graph_owl_core::flake::Direction::Rtl),
+            }),
+        ),
+        (
+            "labelHe",
+            FlakeValue::LangString(graph_owl_core::flake::LangString {
+                text: "שלום".into(),
+                language: "he".into(),
+                direction: Some(graph_owl_core::flake::Direction::Rtl),
+            }),
+        ),
+        // The negative case in the same run: a plain string beside the two
+        // RTL literals must not acquire a direction of its own.
+        ("name", FlakeValue::String("Orders".into())),
+    ];
+    define_test_vocabulary(&store, &cases).await;
+    let flakes: Vec<Flake> = cases
+        .iter()
+        .enumerate()
+        .map(|(i, (predicate, value))| {
+            let t = i64::try_from(i).expect("index fits") + 1;
+            runtime_flake(predicate, value.clone(), t)
+        })
+        .collect();
+
+    store.assert_flakes(&flakes).await.expect("write");
+    let read = all_for_subject(&store).await;
+
+    for (predicate, expected) in &cases {
+        let actual = &read
+            .iter()
+            .find(|f| f.p.id == *predicate)
+            .unwrap_or_else(|| panic!("{predicate} missing from {read:?}"))
+            .o;
+        assert_eq!(actual, expected, "{predicate} did not survive storage");
+    }
+}
+
 /// One test per variant would pass with a discriminant that collapsed two of
 /// them, as long as each was checked in isolation. Writing all ten at once and
 /// matching them back by predicate is what catches the collapse.

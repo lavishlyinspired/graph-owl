@@ -4,7 +4,7 @@
 //! storage contract that outlives any particular query, and it is the one part
 //! of the adapter that can be tested exhaustively without a database.
 
-use graph_owl_core::flake::{FlakeValue, Sid, value_type};
+use graph_owl_core::flake::{Direction, FlakeValue, LangString, Sid, value_type};
 
 /// A deterministic text encoding of a value, used by the identity index and by
 /// the POST ordering.
@@ -44,6 +44,22 @@ pub fn value_key(value: &FlakeValue) -> String {
         // sees an obviously-not-a-real-key string instead of one that
         // silently sorts and dedups as if it meant something.
         FlakeValue::TripleTerm(_) => format!("{value:?}"),
+        // Separated by ASCII Unit Separator (0x1F) — not NUL: Postgres
+        // `TEXT` cannot store an embedded NUL byte at all (found by
+        // actually writing one — `columns`' own `key` becomes a real
+        // `TEXT` column value, so this string has to be storable, not
+        // merely distinguishable in memory). 0x1F is ASCII's own
+        // purpose-built field separator, guaranteed absent from real
+        // text, language tags, or `ltr`/`rtl`, so two distinct `(text,
+        // language, direction)` triples can never collide onto one key —
+        // unlike a human-readable separator (`@`, `--`) that real
+        // IRI-like or BCP-47-like text could itself contain.
+        FlakeValue::LangString(ls) => format!(
+            "{}\u{1f}{}\u{1f}{}",
+            ls.text,
+            ls.language,
+            ls.direction.map(|d| d.to_string()).unwrap_or_default()
+        ),
     }
 }
 
@@ -63,6 +79,13 @@ pub struct ValueColumns<'a> {
     pub json_value: Option<serde_json::Value>,
     pub bytes_value: Option<&'a [u8]>,
     pub uuid_value: Option<uuid::Uuid>,
+    /// `rdf:langString` / `rdf:dirLangString`'s BCP 47 language tag. The
+    /// lexical form itself reuses `str_value` — the discriminant already
+    /// tells a `String` row and a `LangString` row apart on read, so a
+    /// second text column would duplicate what `value_type` already says.
+    pub lang_language: Option<&'a str>,
+    /// `None` for `rdf:langString`; `"ltr"`/`"rtl"` for `rdf:dirLangString`.
+    pub lang_direction: Option<&'static str>,
 }
 
 /// Spreads a value across its columns.
@@ -99,6 +122,8 @@ pub fn columns(value: &FlakeValue) -> Result<ValueColumns<'_>, String> {
         json_value: None,
         bytes_value: None,
         uuid_value: None,
+        lang_language: None,
+        lang_direction: None,
     };
 
     Ok(match value {
@@ -152,6 +177,15 @@ pub fn columns(value: &FlakeValue) -> Result<ValueColumns<'_>, String> {
         // returned for this variant — provably unreachable, not a
         // shortcut around exhaustiveness.
         FlakeValue::TripleTerm(_) => unreachable!("refused above"),
+        FlakeValue::LangString(ls) => ValueColumns {
+            str_value: Some(ls.text.as_str()),
+            lang_language: Some(ls.language.as_str()),
+            lang_direction: ls.direction.map(|d| match d {
+                Direction::Ltr => "ltr",
+                Direction::Rtl => "rtl",
+            }),
+            ..base
+        },
     })
 }
 
@@ -175,6 +209,8 @@ pub fn from_columns(
     json_value: Option<serde_json::Value>,
     bytes_value: Option<Vec<u8>>,
     uuid_value: Option<uuid::Uuid>,
+    lang_language: Option<String>,
+    lang_direction: Option<String>,
 ) -> Result<FlakeValue, String> {
     fn required<T>(value: Option<T>, column: &str) -> Result<T, String> {
         value.ok_or_else(|| format!("flake row has NULL in {column} for its value_type"))
@@ -198,6 +234,21 @@ pub fn from_columns(
         value_type::BYTES => Ok(FlakeValue::Bytes(required(bytes_value, "value_bytes")?)),
         value_type::UUID => Ok(FlakeValue::Uuid(required(uuid_value, "value_uuid")?)),
         value_type::DURATION => Ok(FlakeValue::Duration(required(int_value, "value_int")?)),
+        value_type::LANG_STRING => {
+            let direction = match lang_direction.as_deref() {
+                None => None,
+                Some("ltr") => Some(Direction::Ltr),
+                Some("rtl") => Some(Direction::Rtl),
+                Some(other) => {
+                    return Err(format!("value_dir {other:?} is neither ltr nor rtl"));
+                }
+            };
+            Ok(FlakeValue::LangString(LangString {
+                text: required(str_value, "value_str")?,
+                language: required(lang_language, "value_lang")?,
+                direction,
+            }))
+        }
         unknown => Err(format!(
             "value_type {unknown} is not in this build's vocabulary — the row \
              was written by a newer version"
@@ -333,6 +384,16 @@ mod column_tests {
             FlakeValue::Bytes(vec![0, 1, 255]),
             FlakeValue::Uuid(Uuid::from_u128(7)),
             FlakeValue::Duration(3600),
+            FlakeValue::LangString(LangString {
+                text: "hello".into(),
+                language: "en".into(),
+                direction: None,
+            }),
+            FlakeValue::LangString(LangString {
+                text: "مرحبا".into(),
+                language: "ar".into(),
+                direction: Some(Direction::Rtl),
+            }),
         ];
 
         for value in values {
@@ -349,6 +410,8 @@ mod column_tests {
                 c.json_value,
                 c.bytes_value.map(<[u8]>::to_vec),
                 c.uuid_value,
+                c.lang_language.map(ToString::to_string),
+                c.lang_direction.map(ToString::to_string),
             )
             .expect("round trip");
             assert_eq!(back, value, "{value:?} did not survive its columns");
@@ -372,6 +435,8 @@ mod column_tests {
             None,
             None,
             duration.int_value,
+            None,
+            None,
             None,
             None,
             None,
@@ -426,6 +491,34 @@ mod column_tests {
         }
     }
 
+    /// `LangString` is deliberately not in the case above: it is the one
+    /// variant that populates *two* columns on purpose (`str_value` for
+    /// the text, `lang_language` for the tag) — a real exception to "one
+    /// value, one column", not a bug the shared assertion should catch.
+    #[test]
+    fn a_lang_string_populates_text_and_language_but_direction_only_when_present() {
+        let plain_value = FlakeValue::LangString(LangString {
+            text: "hello".into(),
+            language: "en".into(),
+            direction: None,
+        });
+        let plain = columns(&plain_value).expect("columns");
+        assert_eq!(plain.str_value, Some("hello"));
+        assert_eq!(plain.lang_language, Some("en"));
+        assert_eq!(
+            plain.lang_direction, None,
+            "rdf:langString has no direction"
+        );
+
+        let directional_value = FlakeValue::LangString(LangString {
+            text: "مرحبا".into(),
+            language: "ar".into(),
+            direction: Some(Direction::Rtl),
+        });
+        let directional = columns(&directional_value).expect("columns");
+        assert_eq!(directional.lang_direction, Some("rtl"));
+    }
+
     /// A reference fills both of its columns and none of the literal ones —
     /// the OPST index reads exactly this pair.
     #[test]
@@ -448,7 +541,7 @@ mod column_tests {
     #[test]
     fn an_unknown_discriminant_is_refused() {
         let error = from_columns(
-            99, None, None, None, None, None, None, None, None, None, None,
+            99, None, None, None, None, None, None, None, None, None, None, None, None,
         )
         .expect_err("must refuse");
         assert!(
@@ -472,15 +565,62 @@ mod column_tests {
             value_type::BYTES,
             value_type::UUID,
             value_type::DURATION,
+            value_type::LANG_STRING,
         ] {
             assert!(
                 from_columns(
-                    code, None, None, None, None, None, None, None, None, None, None
+                    code, None, None, None, None, None, None, None, None, None, None, None, None
                 )
                 .is_err(),
                 "value_type {code} accepted an all-NULL row"
             );
         }
+    }
+
+    /// `LangString` needs two non-NULL columns, not one — a row with the
+    /// text but no language tag is just as corrupt as one with neither.
+    #[test]
+    fn a_lang_string_with_text_but_no_language_is_refused() {
+        let error = from_columns(
+            value_type::LANG_STRING,
+            None,
+            None,
+            Some("hello".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("must refuse");
+        assert!(error.contains("value_lang"), "{error}");
+    }
+
+    /// A direction outside `ltr`/`rtl` is a corrupt row, not a value to
+    /// guess a default for.
+    #[test]
+    fn a_lang_string_with_an_unrecognised_direction_is_refused() {
+        let error = from_columns(
+            value_type::LANG_STRING,
+            None,
+            None,
+            Some("hello".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("en".to_string()),
+            Some("sideways".to_string()),
+        )
+        .expect_err("must refuse");
+        assert!(error.contains("sideways"), "{error}");
     }
 
     /// Namespaces are stored as INTEGER because u16 does not fit SMALLINT. A
@@ -491,6 +631,8 @@ mod column_tests {
             value_type::REF,
             Some(70_000),
             Some("x".into()),
+            None,
+            None,
             None,
             None,
             None,

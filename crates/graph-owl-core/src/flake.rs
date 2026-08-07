@@ -216,6 +216,47 @@ pub enum FlakeValue {
     /// flake ever written. Object-position only — Epic 94 decision 2 and
     /// [`TripleTerm::refuse_if_subject_position`].
     TripleTerm(TripleTerm),
+    /// RDF's `rdf:langString` (a text value with a BCP 47 language tag) and
+    /// RDF 1.2's `rdf:dirLangString` (the same, plus a base reading
+    /// direction) — one variant for both, since a directional string is a
+    /// language-tagged string with one more component, never the other way
+    /// around. `direction: None` is `rdf:langString`; `Some` is
+    /// `rdf:dirLangString`. Discriminant 11, appended per the same rule as
+    /// [`Self::TripleTerm`] (Epic 94 decision 1).
+    LangString(LangString),
+}
+
+/// A text value carrying a BCP 47 language tag and, for RDF 1.2, a base
+/// reading direction. Epic 94 decision 4: all three components arrive
+/// together — sizing storage for the language alone and adding direction
+/// later would migrate every multilingual label ever written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LangString {
+    /// The lexical form.
+    pub text: String,
+    /// BCP 47, lowercased — matching `oxrdf::Literal`'s own normalization,
+    /// so a value built here and one parsed from real RDF compare equal.
+    pub language: String,
+    /// `None` for `rdf:langString`; `Some` for `rdf:dirLangString`.
+    pub direction: Option<Direction>,
+}
+
+/// RDF 1.2's base direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Left-to-right.
+    Ltr,
+    /// Right-to-left.
+    Rtl,
+}
+
+impl fmt::Display for Direction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Direction::Ltr => "ltr",
+            Direction::Rtl => "rtl",
+        })
+    }
 }
 
 /// A triple used as a value — RDF 1.2's triple term. Boxed `o` because a
@@ -296,6 +337,9 @@ pub mod value_type {
     /// [`super::FlakeValue::TripleTerm`]. Appended, never inserted — Epic 94
     /// decision 1.
     pub const TRIPLE_TERM: i16 = 10;
+    /// [`super::FlakeValue::LangString`]. Appended, never inserted — Epic 94
+    /// decision 1.
+    pub const LANG_STRING: i16 = 11;
 }
 
 impl FlakeValue {
@@ -314,6 +358,7 @@ impl FlakeValue {
             FlakeValue::Uuid(_) => value_type::UUID,
             FlakeValue::Duration(_) => value_type::DURATION,
             FlakeValue::TripleTerm(_) => value_type::TRIPLE_TERM,
+            FlakeValue::LangString(_) => value_type::LANG_STRING,
         }
     }
 
@@ -425,6 +470,14 @@ mod flake_value_tests {
                 }),
                 10,
             ),
+            (
+                FlakeValue::LangString(LangString {
+                    text: "hello".into(),
+                    language: "en".into(),
+                    direction: None,
+                }),
+                11,
+            ),
         ] {
             assert_eq!(
                 value.value_type(),
@@ -454,6 +507,11 @@ mod flake_value_tests {
                 s: Sid::dsc("a"),
                 p: Sid::dsc("b"),
                 o: Box::new(FlakeValue::Ref(Sid::dsc("c"))),
+            }),
+            FlakeValue::LangString(LangString {
+                text: "hello".into(),
+                language: "en".into(),
+                direction: None,
             }),
         ];
         let mut seen: Vec<i16> = all.iter().map(FlakeValue::value_type).collect();
@@ -489,6 +547,16 @@ mod flake_value_tests {
         let message = TripleTermAsSubject.to_string();
         assert!(message.contains("subject"), "{message}");
         assert!(message.contains("object position"), "{message}");
+    }
+
+    /// `Direction`'s `Display` feeds real serialized bytes (Turtle's
+    /// `--ltr`/`--rtl` suffix and Postgres's `value_dir` column) — a
+    /// mutant collapsing it to an empty string would silently drop the
+    /// direction everywhere it is written, not just fail a comparison.
+    #[test]
+    fn direction_displays_as_the_lowercase_bcp47_token() {
+        assert_eq!(Direction::Ltr.to_string(), "ltr");
+        assert_eq!(Direction::Rtl.to_string(), "rtl");
     }
 
     /// The negative case matters as much: an ordinary reference must not
