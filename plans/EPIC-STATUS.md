@@ -150,8 +150,11 @@ is the condition that index exists to catch.
 - [x] As-of query API
 - [x] Reconciliation and drift metric — drift computed by comparison rather than from a queue 
 - [~] Runtime predicate registry — define/lookup/list, duplicate refused, core vocabulary seed
-- [ ] `rdf:reifies` + triple terms → **Epic 94**
-- [ ] Language-tag side table → **Epic 94**, and it needs three components not two: `rdf:dirLa
+- [x] `rdf:reifies` + triple terms → **Epic 94**, shipped (Slices A, B, D)
+- [x] Language-tag side table → **Epic 94**, shipped — not a side table but a
+      new `FlakeValue::LangString` variant (Slice C), a deliberate deviation
+      from the plan's original `flake_meta` design, recorded in Epic 94's own
+      decision log
 
 ### Epic 5 — Constraint Validation *(Demo 4)*
 
@@ -592,30 +595,46 @@ is the condition that index exists to catch.
 - [x] `GET /overview` — one request for the whole landing page, authorization-filtered through
 - [x] Graph tile reports `nodes`/`edges`, not only a flake total
 
-### Epic 94 — RDF 1.2 Alignment *(Demo 10)*
+### Epic 94 — RDF 1.2 Alignment *(Demo 10)* — **shipped, 7 August 2026**
 
-- [ ] `FlakeValue::TripleTerm` at discriminant 10, pinning test extended
-- [ ] `rdf:reifies` + triple term on export; store flake count unchanged
-- [ ] `rdf:dirLangString` — lexical form, language tag, base direction in `flake_meta`
-- [ ] C (console)
-- [ ] `rdf:reifies` synthesised at the query surface, so the standard vocabulary returns rows 
-- [ ] Slices B, C and D share one `oxrdf/rdf-12` feature gate — one decision, taken once for t
-- [ ] Export dialog offers RDF 1
+- [x] `FlakeValue::TripleTerm` at discriminant 10, pinning test extended (Slice A)
+- [x] `rdf:reifies` + triple term on export; store flake count unchanged (Slice B)
+- [x] `rdf:dirLangString` — shipped as a new `FlakeValue::LangString` variant, not a
+      `flake_meta` side table; a deliberate deviation from the plan's original
+      design, recorded in the decision log (Slice C)
+- [~] C (console) — DOM cases covered via `userTextDir`; canvas-rendered graph
+      nodes remain a recorded, unfixed gap (Slice C write-up)
+- [x] `rdf:reifies` synthesised at the query surface, so the standard vocabulary
+      returns rows against a real relationship end to end through
+      `Catalog::sparql` — the zero-rows test found a real pushdown bug unit
+      tests alone did not catch (Slice D)
+- [x] Slices B, C and D share one `oxrdf/rdf-12` feature gate — one decision,
+      taken once for the workspace
+- [ ] Export dialog offers RDF 1.2 syntax — not attempted this epic; console
+      export work lives in Epic 42's own slices
 
 ### Epic 95 — OWL 2 RL Completion *(Demo 10)*
 
 - [x] The four RL axioms in scope beyond Epic 6's eight
 - [x] Explanation panel extends to the new axioms — same surface, more rules *(UI → Epic 41, c
 
-### Epic 96 — SHACL-SPARQL *(Demo 10)*
+### Epic 96 — SHACL-SPARQL *(Demo 10)* — **confirmed blocked, re-verified 7 August 2026**
 
-- [ ] SPARQL-based constraint components
+- [ ] SPARQL-based constraint components — blocked on spec maturity, re-checked
+      against live w3.org pages this session; no change since the last check
 - [ ] The violations workflow is unchanged; **authoring gains a second language**, so the cons
 
-### Epic 97 — Incremental & Parallel Reasoning *(Demo 10, 12)*
+### Epic 97 — Incremental & Parallel Reasoning *(Demo 10, 12)* — **algorithms shipped, 7 August 2026**
 
-- [ ] Incremental maintenance rather than full recomputation
-- [ ] Overlay staleness is visible
+- [x] Incremental maintenance rather than full recomputation — `derive_incremental`
+      (DRed), matches full re-derivation exactly, 5/5 viable mutants caught
+- [x] Parallel derivation within a fixpoint round — `derive_within_parallel`,
+      byte-identical output to `derive_within` proven over repeated runs, 5/5
+      viable mutants caught
+- [ ] Overlay staleness is visible — the `maintained_to` freshness-stamp
+      obligation the plan itself calls out is cross-crate wiring into
+      `Catalog::run_reasoning`, not yet undertaken; both algorithms above are
+      pure `graph-owl-reasoning` functions not yet invoked by the catalog
 
 ### Epic 98 — OWL 2 EL Reasoning *(Demo 11, 12)*
 
