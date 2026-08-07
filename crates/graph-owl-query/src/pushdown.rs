@@ -125,7 +125,16 @@ fn named(pattern: &TermPattern) -> Option<Sid> {
         TermPattern::NamedNode(node) => Sid::from_iri(node.as_str()),
         // Anything else constrains nothing. Binding a variable subject would
         // return one subject's facts for a question about all of them.
-        TermPattern::Variable(_) | TermPattern::BlankNode(_) | TermPattern::Literal(_) => None,
+        // A triple term belongs here too, not as an oversight: this store
+        // has no `Sid` for one (Epic 94 decision 2, object position only),
+        // so a triple-term-shaped pattern narrows a scan exactly as much
+        // as a variable does — nothing. `rdf:reifies` matching is handled
+        // as a separate, specially-recognized pattern shape (Slice D),
+        // never through this generic subject/predicate narrowing.
+        TermPattern::Variable(_)
+        | TermPattern::BlankNode(_)
+        | TermPattern::Literal(_)
+        | TermPattern::Triple(_) => None,
     }
 }
 

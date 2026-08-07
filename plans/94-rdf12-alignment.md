@@ -169,7 +169,7 @@ namespace_s | sid_s      | sid_p          | value_type | value
 The export after:
 
 ```turtle
-:rel_abc123 rdf:reifies << :table_customers dsc:feeds :table_orders >> ;
+:rel_abc123 rdf:reifies <<( :table_customers dsc:feeds :table_orders )>> ;
             dsc:confidence 0.95 .
 ```
 
@@ -179,6 +179,19 @@ the identity rather than to either endpoint. What Slice B adds is a serializer
 that recognises the shape and names it. That is why the acceptance criteria
 below include an unchanged flake count: if the number moves, this epic has
 quietly become a model epic and decision 3 has been broken.
+
+**Corrected during Slice B, 7 August 2026 — the triple-term literal is
+`<<( s p o )>>`, with the parentheses, not `<< s p o >>`.** The version
+without parentheses is RDF 1.2 Turtle's *reification-as-sugar* syntax — a
+different construct that asserts an implicit blank-node reifier of its own,
+which is exactly wrong here: this store already names the reifier explicitly
+(`:rel_abc123`), so using the sugar form doubles up and produces a synthetic
+extra blank node standing in for it. Confirmed empirically, not assumed:
+writing a `Term::Triple` through `oxttl`'s own `TurtleSerializer` and reading
+back what it actually emits, the same "verify external formats via real
+research, not recall" discipline this project applies everywhere else. Filed
+here rather than only in the code because the wrong form is exactly as
+readable as the right one — nothing about `<< s p o >>` looks incomplete.
 
 ## A correction worth keeping: `rdf:langString`, not `xsd:langString`
 
@@ -214,7 +227,7 @@ about an entire category.
 ## Acceptance criteria
 
 - [x] `FlakeValue::TripleTerm` at discriminant 10, pinning test extended. (Slice A)
-- [ ] A relationship serializes to `rdf:reifies` + a triple term, and parses back.
+- [x] A relationship serializes to `rdf:reifies` + a triple term, and parses back. (Slice B)
 - [x] A triple term in subject position is refused with an error naming why. (Slice A)
 - [ ] A language-tagged literal round-trips with its tag **and** direction.
 - [ ] An `rtl` literal keeps its direction through serialization — asserted with
@@ -278,13 +291,21 @@ position". `graph-owl-engine-postgres/src/value.rs`'s diff: 2 caught, 1
 unviable (mutating `columns`'s return type to `Ok(Default::default())`
 does not compile, since `ValueColumns` holds borrowed fields) — 0 missed.
 
-### Slice B: `rdf:reifies` on export
+### Slice B: `rdf:reifies` on export — **shipped, 7 August 2026**
 
 **RED**: a reified relationship serializes to a reifier and a triple term, and
 a round trip reconstructs the same edge. Mutator watch: emitting the endpoints
 without `rdf:reifies` must fail the round trip, because the result is then a
 node with properties rather than a statement about a proposition.
 **Done when**: criteria met, store flake count unchanged.
+
+**Shipped.** `crates/graph-owl-rdf-io/src/lib.rs` gained `is_relationship_predicate`/`reifier_endpoints`/`reifying_triple` (serialize) and `reifying_flakes`/`triple_to_flakes` (parse). Serialize: a subject carrying `fromEntity`+`toEntity`+`relType` — all three required, a partial shape is left alone rather than inventing a missing endpoint — emits one `(rel) rdf:reifies <<( from dsc:relType_value to )>>` triple in place of the three plain ones; every other property of that subject (`dsc:confidence`, in the plan's own worked example) still serializes normally. Parse is the true inverse: `rdf:reifies` + a triple term whose inner subject/object are both named nodes and whose inner predicate is in the `dsc:` namespace expands back to the three flakes; anything else that is still a genuine RDF 1.2 reification (a literal object, a non-`dsc:` predicate, a blank-node endpoint) — real content this store simply has no *relationship* model for — becomes one flake carrying the triple term itself via Slice A's `FlakeValue::TripleTerm`, rather than being refused. **Store flake count unchanged**, proven directly: the round-trip test compares the *exact* flake set before and after, not just a count.
+
+**The gate came on one slice early, and it moved a decision this plan had assigned to Slice D.** `graph-owl-rdf-io` needs `oxrdf`'s `rdf-12` for `Term::Triple`, and depends on `graph-owl-query` — Cargo unifies features for one crate+version across a build graph, so `spargebra`'s and `spareval`'s own `sparql-12` (not just raw `oxrdf/rdf-12`) had to come on in the same commit, or their own internal `Term`/`TermRef` matches — `sparesults`, `oxttl`'s N3/TriG modules, `spargebra::term` — failed to compile (measured: enabling only `oxrdf/rdf-12` directly does not work, each dependent needs its own same-named feature or its `#[cfg(feature = "...")]` conversions stay compiled out). This is the compile-time surface `07-engine-query.md` decision 7 and `00k-standards-conformance.md` already anticipated for Slice D, landing here instead — `graph_owl_query::term::from_term` and `pushdown::named` both gained a named `Term::Triple`/`TermPattern::Triple` arm (refused, resp. non-narrowing) as a direct, required consequence. **Slice D's own remaining scope is unchanged**: the "measured refusal list" of what SPARQL 1.2 constructs now parse-then-fail, `dataset.rs`'s query-surface `rdf:reifies` synthesis, and the zero-rows/authorization RED tests are still unbuilt.
+
+**A real syntax bug found only by asking the library, not by reading about RDF-star.** The worked example above originally read `<< s p o >>`, without the parentheses — RDF 1.2 Turtle's *reification-as-sugar* syntax, a different construct that asserts an implicit blank-node reifier of its own. Writing `X rdf:reifies << s p o >>` therefore reifies twice: once explicitly, once by the sugar, producing a real, confusing wire shape (`X rdf:reifies _:b1 . _:b1 rdf:reifies <<( s p o )>> .`) that surfaced as a failing hand-written parser test before it was traced to the missing parens. Confirmed the correct form (`<<( s p o )>>`) by writing a `Term::Triple` through `oxttl`'s own `TurtleSerializer` directly and reading back what it emits — not by consulting the RDF-star literature, which this project's own licensing rules already keep at arm's length. Corrected in this plan's own worked example above and in the code's test comments, so the wrong-but-equally-readable form does not get copied from here into a future slice.
+
+**Mutation report**: `graph-owl-rdf-io/src/lib.rs`'s diff, 25/35 caught, 10 unviable (does not compile as mutated), 0 missed. `graph-owl-query`'s two touched files: `term.rs` 0/1 caught + 1 unviable, `pushdown.rs` 1/2 caught + 1 unviable — both 0 missed; the small mutant counts reflect how little of each file's diff was a real decision versus a required exhaustiveness arm.
 
 ### Slice C: `rdf:dirLangString`
 

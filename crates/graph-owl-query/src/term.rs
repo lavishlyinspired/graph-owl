@@ -113,6 +113,15 @@ pub fn from_term(term: &Term) -> Result<FlakeValue, TermError> {
         // arrive (Epic 94) this becomes a compile error rather than silently
         // taking the "unrepresentable" path they may not belong on.
         Term::BlankNode(node) => Err(TermError::Unrepresentable(node.to_string())),
+        // This is the general "an ordinary bound term happens to be a
+        // triple term" case — a real one, once `rdf-12` is enabled, is
+        // *never* addressable through this function: this store has no
+        // `Sid` for a triple term, so there is nothing for the caller to
+        // filter or bind against. `rdf:reifies` matching is a special
+        // pattern the query surface recognizes and synthesizes separately
+        // (Epic 94 Slice D, `dataset.rs`) — it never reaches an ordinary
+        // term conversion like this one.
+        Term::Triple(triple) => Err(TermError::Unrepresentable(format!("triple term {triple}"))),
     }
 }
 

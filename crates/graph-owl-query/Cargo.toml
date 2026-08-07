@@ -10,9 +10,23 @@ workspace = true
 [dependencies]
 graph-owl-core = { path = "../graph-owl-core" }
 graph-owl-engine = { path = "../graph-owl-engine" }
-oxrdf = "0.3.3"
-spareval = "0.2"
-spargebra = "0.4"
+# `rdf-12`/`sparql-12` — Epic 94 Slices B/C force this on: `graph-owl-rdf-io`
+# depends on this crate, and Cargo unifies features for one crate+version
+# across the whole build graph, so `oxrdf`'s `rdf-12` (turned on in
+# `graph-owl-rdf-io` for Turtle export) is on here too whether or not this
+# crate's own `Cargo.toml` asks for it — the type gains `Term::Triple`
+# either way. Each dependent's own feature still has to be requested
+# explicitly, or *that* crate's own `#[cfg(feature = "...")]` conversions
+# stay compiled out against a type that now has one more variant than they
+# were told to expect (measured: `spargebra`'s and `sparesults`' own
+# internal matches on `Term`/`TermRef` go non-exhaustive without this).
+# **This is Epic 7's SPARQL 1.1 → 1.2 syntax-surface decision** (`00k`),
+# forced here by the dependency graph rather than chosen independently —
+# `07-engine-query.md` and `00k-standards-conformance.md` both need
+# updating to say so.
+oxrdf = { version = "0.3.3", features = ["rdf-12"] }
+spareval = { version = "0.2", features = ["sparql-12"] }
+spargebra = { version = "0.4", features = ["sparql-12"] }
 # Epic 7b: the Cypher front end. Chosen by the spike recorded in
 # `plans/00l-build-vs-adopt.md` — the only candidate that parses the declared
 # subset including relationship properties and float literals. Alpha, and

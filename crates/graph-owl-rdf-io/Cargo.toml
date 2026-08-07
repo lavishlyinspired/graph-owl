@@ -17,9 +17,20 @@ graph-owl-engine = { path = "../graph-owl-engine" }
 graph-owl-query = { path = "../graph-owl-query" }
 thiserror.workspace = true
 serde.workspace = true
-oxrdf = "0.3.3"
-oxttl.workspace = true
-oxjsonld.workspace = true
+# `rdf-12` — Epic 94 Slice B/C, needed for `Term::Triple` (the `<< s p o >>`
+# literal a reified relationship serializes to) and `BaseDirection`
+# (`rdf:dirLangString`). **Enabling `oxrdf/rdf-12` directly is not enough**:
+# `oxrdf`'s own feature only makes the variant *exist*; `oxttl`'s internal
+# conversions are behind their own `#[cfg(feature = "rdf-12")]`, gated by
+# `oxttl`'s *own* feature of the same name (which happens to also pull
+# `oxrdf/rdf-12` in — redundant with the line below, kept anyway as the
+# explicit statement of what this crate itself needs). Measured 7 August
+# 2026: with only `oxrdf/rdf-12` set, `oxttl` itself fails to compile
+# (`n3.rs`/`trig.rs` internal matches go non-exhaustive against a `Term`
+# variant their own `#[cfg]`-gated arms were never told to expect).
+oxrdf = { version = "0.3.3", features = ["rdf-12"] }
+oxttl = { workspace = true, features = ["rdf-12"] }
+oxjsonld = { workspace = true, features = ["rdf-12"] }
 chrono.workspace = true
 uuid.workspace = true
 tracing.workspace = true

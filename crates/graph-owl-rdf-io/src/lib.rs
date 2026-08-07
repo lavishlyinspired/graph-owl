@@ -64,7 +64,7 @@ use std::collections::HashMap;
 
 pub mod skos;
 
-use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+use graph_owl_core::flake::{Flake, FlakeValue, Sid, TripleTerm, namespace};
 use graph_owl_query::term::{TermError, from_term, to_named_node, to_term};
 use oxrdf::{GraphName, NamedOrBlankNode, Quad, Term, Triple};
 
@@ -235,9 +235,92 @@ fn flake_graph_name(flake: &Flake) -> Result<GraphName, RdfError> {
     })
 }
 
+/// The three predicates that make a subject a reified relationship —
+/// `graph-owl-lpg`'s own mapping vocabulary already recognizes the
+/// identical shape (`graph_owl_lpg::predicate::{FROM_ENTITY,TO_ENTITY,
+/// REL_TYPE}`). Not imported from there: `graph-owl-rdf-io` would gain a
+/// dependency on the property-graph interop crate just to read three
+/// string literals, and every other place in this workspace that already
+/// knows this shape (`graph-owl-core`'s own `projection.rs`,
+/// `graph-owl-api`'s tests) writes the same three literals directly rather
+/// than sharing a constant — this file follows that existing convention.
+const REL_FROM_ENTITY: &str = "fromEntity";
+const REL_TO_ENTITY: &str = "toEntity";
+const REL_TYPE: &str = "relType";
+
+fn is_relationship_predicate(p: &Sid) -> bool {
+    p.namespace_code == namespace::DSC
+        && matches!(p.id.as_str(), REL_FROM_ENTITY | REL_TO_ENTITY | REL_TYPE)
+}
+
+/// Reads `sid`'s own `fromEntity`/`toEntity`/`relType` out of `flakes`, if
+/// all three are present with the shape they always have in this store —
+/// `fromEntity`/`toEntity` a `Ref`, `relType` a `String`. **All three are
+/// required.** A subject with only some of them is not synthesized into a
+/// reification with a missing endpoint invented — Epic 94 Slice B's own
+/// negative case.
+fn reifier_endpoints(sid: &Sid, flakes: &[Flake]) -> Option<(Sid, String, Sid)> {
+    let mine = |name: &str| {
+        flakes
+            .iter()
+            .find(|f| &f.s == sid && f.p.namespace_code == namespace::DSC && f.p.id == name)
+    };
+    let from = match &mine(REL_FROM_ENTITY)?.o {
+        FlakeValue::Ref(s) => s.clone(),
+        _ => return None,
+    };
+    let to = match &mine(REL_TO_ENTITY)?.o {
+        FlakeValue::Ref(s) => s.clone(),
+        _ => return None,
+    };
+    let rel_type = match &mine(REL_TYPE)?.o {
+        FlakeValue::String(s) => s.clone(),
+        _ => return None,
+    };
+    Some((from, rel_type, to))
+}
+
+/// `(rel) rdf:reifies << from relType to >>` — RDF 1.2's own vocabulary for
+/// exactly what a reified relationship already is: a reifier standing for
+/// a proposition (Epic 94's whole premise — "a vocabulary epic, not a
+/// model epic"). `relType`'s string value becomes the inner triple's own
+/// predicate, in this store's `dsc:` namespace — `"feeds"` becomes
+/// `dsc:feeds`, matching the plan's own worked example exactly.
+fn reifying_triple(rel: &Sid, from: &Sid, rel_type: &str, to: &Sid) -> Result<Triple, RdfError> {
+    let inner = Triple::new(
+        to_named_node(from)?,
+        to_named_node(&Sid::dsc(rel_type))?,
+        Term::NamedNode(to_named_node(to)?),
+    );
+    Ok(Triple::new(
+        to_named_node(rel)?,
+        to_named_node(&Sid::new(namespace::RDF, "reifies"))?,
+        Term::Triple(Box::new(inner)),
+    ))
+}
+
 fn serialize_turtle(flakes: &[Flake]) -> Result<Vec<u8>, RdfError> {
     let mut writer = oxttl::TurtleSerializer::new().for_writer(Vec::new());
+    // One `rdf:reifies` triple per relationship subject, written the first
+    // time one of its three defining predicates is reached — not per
+    // flake, or a relationship with all three would emit the reifier three
+    // times over.
+    let mut reifier_written: std::collections::HashSet<Sid> = std::collections::HashSet::new();
     for flake in flakes {
+        if is_relationship_predicate(&flake.p) {
+            if let Some((from, rel_type, to)) = reifier_endpoints(&flake.s, flakes) {
+                if reifier_written.insert(flake.s.clone()) {
+                    let triple = reifying_triple(&flake.s, &from, &rel_type, &to)?;
+                    writer
+                        .serialize_triple(&triple)
+                        .map_err(|e| RdfError::Io(e.to_string()))?;
+                }
+                // Whether this is the first or a later of the three
+                // defining flakes, it is folded into the reifying triple
+                // above and must not also appear as a plain triple.
+                continue;
+            }
+        }
         let triple = flake_triple(flake)?;
         writer
             .serialize_triple(&triple)
@@ -314,6 +397,20 @@ fn skolemize(label: &str, blanks: &mut BlankNodeMap) -> Sid {
 fn resolve_object(term: &Term, blanks: &mut BlankNodeMap) -> Result<FlakeValue, RdfError> {
     match term {
         Term::BlankNode(b) => Ok(FlakeValue::Ref(skolemize(b.as_str(), blanks))),
+        // `from_term` (`graph_owl_query::term`) refuses a triple term by
+        // design — it feeds SPARQL query-pattern matching, where a stored
+        // triple term has no `Sid` to bind against (Epic 94 decision 2).
+        // Parsing a *document* is a different boundary: a general RDF 1.2
+        // reification this store has no relationship model for is real
+        // and must parse, not fail, so it becomes a `TripleTerm`-valued
+        // flake directly. Recurses through `resolve_object` for the inner
+        // object — a triple term may itself nest one.
+        Term::Triple(inner) => Ok(FlakeValue::TripleTerm(TripleTerm {
+            s: resolve_subject(&inner.subject, blanks)?,
+            p: Sid::from_iri(inner.predicate.as_str())
+                .ok_or_else(|| RdfError::UnrecognisedIri(inner.predicate.as_str().to_string()))?,
+            o: Box::new(resolve_object(&inner.object, blanks)?),
+        })),
         other => Ok(from_term(other)?),
     }
 }
@@ -329,7 +426,7 @@ fn parse_turtle(bytes: &[u8], base: Option<&str>) -> Result<Vec<Flake>, RdfError
     let mut flakes = Vec::new();
     for result in parser.for_slice(bytes) {
         let triple = result.map_err(|e| RdfError::Parse(e.to_string()))?;
-        flakes.push(triple_to_flake(&triple, &mut blanks)?);
+        flakes.extend(triple_to_flakes(&triple, &mut blanks)?);
     }
     Ok(flakes)
 }
@@ -339,7 +436,7 @@ fn parse_ntriples(bytes: &[u8]) -> Result<Vec<Flake>, RdfError> {
     let mut flakes = Vec::new();
     for result in oxttl::NTriplesParser::new().for_slice(bytes) {
         let triple = result.map_err(|e| RdfError::Parse(e.to_string()))?;
-        flakes.push(triple_to_flake(&triple, &mut blanks)?);
+        flakes.extend(triple_to_flakes(&triple, &mut blanks)?);
     }
     Ok(flakes)
 }
@@ -738,8 +835,8 @@ fn parse_turtle_with_location(
                 column: Some(location.start.column + 1),
             }
         })?;
-        flakes.push(
-            triple_to_flake(&triple, &mut blanks)
+        flakes.extend(
+            triple_to_flakes(&triple, &mut blanks)
                 .map_err(|e| LocatedParseError::without_location(e.to_string()))?,
         );
     }
@@ -758,8 +855,8 @@ fn parse_ntriples_with_location(bytes: &[u8]) -> Result<Vec<Flake>, LocatedParse
                 column: Some(location.start.column + 1),
             }
         })?;
-        flakes.push(
-            triple_to_flake(&triple, &mut blanks)
+        flakes.extend(
+            triple_to_flakes(&triple, &mut blanks)
                 .map_err(|e| LocatedParseError::without_location(e.to_string()))?,
         );
     }
@@ -989,19 +1086,84 @@ fn flake_value_to_json(value: &FlakeValue) -> Result<serde_json::Value, RdfError
     Ok(object.into())
 }
 
-fn triple_to_flake(triple: &Triple, blanks: &mut BlankNodeMap) -> Result<Flake, RdfError> {
+/// The inverse of [`reifying_triple`] — recognizes exactly the shape this
+/// crate's own serializer produces (inner subject and object both named
+/// nodes, inner predicate in the `dsc:` namespace) and expands it back to
+/// the three `fromEntity`/`toEntity`/`relType` flakes that produced it.
+///
+/// `None` for anything else — a general RDF 1.2 reification with a literal
+/// object, a non-`dsc:` predicate, or a blank-node endpoint is real and
+/// parses (see [`triple_to_flakes`]'s own fallback to a single
+/// `FlakeValue::TripleTerm`-valued flake), but it is not *this store's*
+/// relationship model, and forcing it into one would invent an endpoint
+/// the document never named.
+fn reifying_flakes(
+    rel: &NamedOrBlankNode,
+    inner: &Triple,
+    blanks: &mut BlankNodeMap,
+) -> Result<Option<Vec<Flake>>, RdfError> {
+    let NamedOrBlankNode::NamedNode(from_node) = &inner.subject else {
+        return Ok(None);
+    };
+    let Term::NamedNode(to_node) = &inner.object else {
+        return Ok(None);
+    };
+    let (Some(from), Some(to), Some(rel_type)) = (
+        Sid::from_iri(from_node.as_str()),
+        Sid::from_iri(to_node.as_str()),
+        Sid::from_iri(inner.predicate.as_str()),
+    ) else {
+        return Ok(None);
+    };
+    if rel_type.namespace_code != namespace::DSC {
+        return Ok(None);
+    }
+    let rel = resolve_subject(rel, blanks)?;
+    let mk = |p: &str, o: FlakeValue| Flake {
+        s: rel.clone(),
+        p: Sid::dsc(p),
+        o,
+        cx: None,
+        t: 0,
+        op: true,
+    };
+    Ok(Some(vec![
+        mk(REL_FROM_ENTITY, FlakeValue::Ref(from)),
+        mk(REL_TO_ENTITY, FlakeValue::Ref(to)),
+        mk(REL_TYPE, FlakeValue::String(rel_type.id)),
+    ]))
+}
+
+/// One triple usually becomes one flake — but `rdf:reifies << s p o >>`
+/// either expands to the three flakes that produced it
+/// ([`reifying_flakes`]) or, for a general reification this store has no
+/// relationship model for, becomes one flake carrying the triple term
+/// itself (Epic 94 Slice A's `FlakeValue::TripleTerm`) rather than being
+/// refused — a document using RDF 1.2's own vocabulary correctly must not
+/// fail to parse just because this store's *relationship* shape does not
+/// apply to it.
+fn triple_to_flakes(triple: &Triple, blanks: &mut BlankNodeMap) -> Result<Vec<Flake>, RdfError> {
+    let is_reifies =
+        Sid::from_iri(triple.predicate.as_str()) == Some(Sid::new(namespace::RDF, "reifies"));
+    if is_reifies {
+        if let Term::Triple(inner) = &triple.object {
+            if let Some(flakes) = reifying_flakes(&triple.subject, inner, blanks)? {
+                return Ok(flakes);
+            }
+        }
+    }
     let s = resolve_subject(&triple.subject, blanks)?;
     let p = Sid::from_iri(triple.predicate.as_str())
         .ok_or_else(|| RdfError::UnrecognisedIri(triple.predicate.as_str().to_string()))?;
     let o = resolve_object(&triple.object, blanks)?;
-    Ok(Flake {
+    Ok(vec![Flake {
         s,
         p,
         o,
         cx: None,
         t: 0,
         op: true,
-    })
+    }])
 }
 
 #[cfg(test)]
@@ -1051,6 +1213,151 @@ mod tests {
                 String::from_utf8_lossy(&bytes)
             );
         }
+    }
+
+    /// A subject carrying `fromEntity`/`toEntity`/`relType` — the reified
+    /// relationship shape `graph-owl-lpg`'s own mapping vocabulary already
+    /// recognizes — is graph-owl's own model of exactly what RDF 1.2 names
+    /// `rdf:reifies`: a reifier standing for a proposition. Epic 94 Slice B's
+    /// own acceptance criterion.
+    fn relationship_flakes(rel: &str, from: &str, rel_type: &str, to: &str) -> Vec<Flake> {
+        vec![
+            flake(rel, "fromEntity", FlakeValue::Ref(Sid::dsc(from))),
+            flake(rel, "toEntity", FlakeValue::Ref(Sid::dsc(to))),
+            flake(rel, "relType", FlakeValue::String(rel_type.into())),
+        ]
+    }
+
+    /// **The RED test.** `fromEntity`/`toEntity`/`relType` must not survive
+    /// as plain triples in the export — the whole point of this slice is
+    /// naming the shape, not adding `rdf:reifies` beside the old triples.
+    #[test]
+    fn a_reified_relationship_serializes_as_rdf_reifies_not_the_bare_endpoints() {
+        let bytes = StandardRdfIo
+            .serialize(
+                &relationship_flakes("r1", "orders", "feeds", "reports"),
+                RdfFormat::Turtle,
+            )
+            .expect("serialize");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("reifies"), "{text}");
+        assert!(
+            text.contains("feeds"),
+            "the relType must survive, as a predicate IRI: {text}"
+        );
+        assert!(
+            !text.contains("fromEntity") && !text.contains("toEntity") && !text.contains("relType"),
+            "the endpoints must not also appear as plain triples: {text}"
+        );
+    }
+
+    /// **The round-trip criterion**, Slice B's own stated acceptance test.
+    /// Mutator watch: emitting the endpoints without `rdf:reifies` (i.e.
+    /// reverting to the old 1:1 serialization) fails this — the parser
+    /// would then see three ordinary triples with no reifying shape to
+    /// recognize, and the comparison below would still happen to pass by
+    /// accident (three flakes go in, three come out) — which is exactly
+    /// why the *previous* test asserts on the wire text, not just this one
+    /// on the round trip.
+    #[test]
+    fn a_reified_relationship_round_trips_through_turtle() {
+        let input = relationship_flakes("r1", "orders", "feeds", "reports");
+        let bytes = StandardRdfIo
+            .serialize(&input, RdfFormat::Turtle)
+            .expect("serialize");
+        let mut parsed = StandardRdfIo
+            .parse(&bytes, RdfFormat::Turtle, None)
+            .expect("parse");
+        let mut expected = input;
+        parsed.sort_by_key(|f| f.p.id.clone());
+        expected.sort_by_key(|f| f.p.id.clone());
+        assert_eq!(parsed, expected, "{}", String::from_utf8_lossy(&bytes));
+    }
+
+    /// A relationship's own other properties (confidence, in this example)
+    /// are not folded into the reifying triple term — they are ordinary
+    /// properties *of the reifier*, exactly as the plan's own worked
+    /// example shows: `:rel_abc123 rdf:reifies << ... >> ; dsc:confidence
+    /// 0.95 .`
+    #[test]
+    fn a_relationships_own_properties_survive_alongside_the_reifying_triple() {
+        let mut input = relationship_flakes("r1", "orders", "feeds", "reports");
+        input.push(flake("r1", "confidence", FlakeValue::Float(0.95)));
+
+        let bytes = StandardRdfIo
+            .serialize(&input, RdfFormat::Turtle)
+            .expect("serialize");
+        let mut parsed = StandardRdfIo
+            .parse(&bytes, RdfFormat::Turtle, None)
+            .expect("parse");
+        let mut expected = input;
+        parsed.sort_by_key(|f| f.p.id.clone());
+        expected.sort_by_key(|f| f.p.id.clone());
+        assert_eq!(parsed, expected, "{}", String::from_utf8_lossy(&bytes));
+    }
+
+    /// The negative case matters as much: an ordinary subject with no
+    /// `fromEntity`/`toEntity`/`relType` triple must serialize exactly as
+    /// before this slice — `rdf:reifies` must never appear for data this
+    /// slice was not about.
+    #[test]
+    fn an_ordinary_subject_is_unaffected_by_reification() {
+        let input = flake("orders", "name", FlakeValue::String("Orders".into()));
+        let bytes = StandardRdfIo
+            .serialize(std::slice::from_ref(&input), RdfFormat::Turtle)
+            .expect("serialize");
+        assert!(!String::from_utf8_lossy(&bytes).contains("reifies"));
+    }
+
+    /// A subject with only *some* of the three relationship predicates
+    /// (missing `toEntity`) is not a relationship — the recognizer must
+    /// require all three, not synthesize a reification from a partial
+    /// shape that would silently invent a missing endpoint.
+    #[test]
+    fn a_partial_relationship_shape_is_not_reified() {
+        let input = vec![
+            flake("r1", "fromEntity", FlakeValue::Ref(Sid::dsc("orders"))),
+            flake("r1", "relType", FlakeValue::String("feeds".into())),
+        ];
+        let bytes = StandardRdfIo
+            .serialize(&input, RdfFormat::Turtle)
+            .expect("serialize");
+        assert!(!String::from_utf8_lossy(&bytes).contains("reifies"));
+    }
+
+    /// **A general RDF 1.2 reification, not this store's relationship
+    /// shape.** A document authored elsewhere may reify a triple whose
+    /// object is a literal — no `toEntity` this store could invent one
+    /// for. Hand-written rather than round-tripped through this crate's
+    /// own serializer, since the serializer only ever produces the
+    /// relationship shape — this is exactly the case a real external
+    /// document could present that our own output never does.
+    ///
+    /// `<<( s p o )>>`, with the parentheses — RDF 1.2 Turtle's **triple
+    /// term** literal, a bare value. `<< s p o >>` without them is a
+    /// *different* construct — reification-as-sugar, which asserts an
+    /// implicit blank-node reifier of its own — confirmed by writing a
+    /// `Term::Triple` through `oxttl`'s own serializer directly and
+    /// reading back what it emits, not assumed from the RDF-star literature
+    /// this project's own reference-repo licensing rules already forbid
+    /// consulting. Getting this wrong produced a real, confusing failure
+    /// during this slice's own development: two flakes instead of one, a
+    /// synthetic blank node standing in for `dsc:claim1`.
+    #[test]
+    fn a_reification_that_is_not_a_relationship_becomes_a_triple_term_flake() {
+        let document = b"@prefix dsc: <https://graph-owl.dev/ns/catalog#> .\n\
+             @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+             dsc:claim1 rdf:reifies <<( dsc:orders dsc:status \"delayed\" )>> .\n";
+        let parsed = StandardRdfIo
+            .parse(document, RdfFormat::Turtle, None)
+            .expect("parse");
+        assert_eq!(parsed.len(), 1, "{parsed:?}");
+        let FlakeValue::TripleTerm(term) = &parsed[0].o else {
+            panic!("{:?}", parsed[0]);
+        };
+        assert_eq!(term.s, Sid::dsc("orders"));
+        assert_eq!(term.p, Sid::dsc("status"));
+        assert_eq!(*term.o, FlakeValue::String("delayed".to_string()));
     }
 
     #[test]

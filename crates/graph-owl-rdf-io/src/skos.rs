@@ -157,7 +157,12 @@ fn literal_value(term: &Term) -> String {
     match term {
         Term::Literal(literal) => literal.value().to_string(),
         Term::NamedNode(node) => node.as_str().to_string(),
-        Term::BlankNode(_) => String::new(),
+        // A triple term is never produced here: this crate's Turtle parser
+        // does not read the `<< s p o >>` literal (RDF 1.2 Turtle syntax is
+        // Working Draft — explicitly deferred, `94-rdf12-alignment.md`), so
+        // nothing a SKOS document parses can reach this arm. Treated the
+        // same as `BlankNode` — not a literal — should that ever change.
+        Term::BlankNode(_) | Term::Triple(_) => String::new(),
     }
 }
 
@@ -167,7 +172,10 @@ fn literal_value(term: &Term) -> String {
 fn node_iri(term: &Term) -> String {
     match term {
         Term::NamedNode(node) => node.as_str().to_string(),
-        Term::Literal(_) | Term::BlankNode(_) => String::new(),
+        // Same "cannot reach this parsing SKOS Turtle today" reasoning as
+        // `literal_value` above — a triple term is not a named node either
+        // way, so it belongs beside `Literal`/`BlankNode` regardless.
+        Term::Literal(_) | Term::BlankNode(_) | Term::Triple(_) => String::new(),
     }
 }
 
