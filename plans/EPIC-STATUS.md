@@ -84,7 +84,7 @@ is the condition that index exists to catch.
 | **42** | 7 | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | In progress | 2/4 (+2 partial) | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
 | **43** | 5 | [`43-framework-integrations.md`](43-framework-integrations.md) | Not started | 0/4 | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
 | **93** | 3 | [`93-console-overview.md`](93-console-overview.md) | **Shipped** | 2/2 | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
-| **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | Not started | 0/7 | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
+| **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | In progress | 5/7 (+1 partial) | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
 | **95** | 10 | [`95-owl-rl-completion.md`](95-owl-rl-completion.md) | **Shipped** | 2/2 | Epic 6 (the eight rules and the fixpoint that runs them) |
 | **96** | 10 | [`96-shacl-sparql.md`](96-shacl-sparql.md) | Not started | 0/2 | Epic 5 (SHACL Core), Epic 7 (SPARQL) |
 | **97** | 10, 12 | [`97-incremental-parallel-reasoning.md`](97-incremental-parallel-reasoning.md) | Not started | 0/2 | Epic 6 (semi-naive fixpoint), Epic 37a (the measurement) |
@@ -94,7 +94,7 @@ is the condition that index exists to catch.
 | **101** | 11 | [`101-sparql-federation.md`](101-sparql-federation.md) | **Shipped** | 5/5 | Epic 7 (algebra and executor), Epic 13 (authorization) |
 | **102** | 11 | [`102-read-write-partitions.md`](102-read-write-partitions.md) | Not started | 0/2 | Epic 4 (the flake table), Epic 37a (the measurement) |
 | **103** | 11 | [`103-in-process-traversal.md`](103-in-process-traversal.md) | Not started | 0/2 | Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger) |
-| **104** | 12 | [`104-ontology-alignment.md`](104-ontology-alignment.md) | Not started | — | Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detecti… |
+| **104** | 12 | [`104-ontology-alignment.md`](104-ontology-alignment.md) | In progress | 3/5 | Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detecti… |
 
 ## Tracked items, per epic
 
@@ -150,11 +150,8 @@ is the condition that index exists to catch.
 - [x] As-of query API
 - [x] Reconciliation and drift metric — drift computed by comparison rather than from a queue 
 - [~] Runtime predicate registry — define/lookup/list, duplicate refused, core vocabulary seed
-- [x] `rdf:reifies` + triple terms → **Epic 94**, shipped (Slices A, B, D)
-- [x] Language-tag side table → **Epic 94**, shipped — not a side table but a
-      new `FlakeValue::LangString` variant (Slice C), a deliberate deviation
-      from the plan's original `flake_meta` design, recorded in Epic 94's own
-      decision log
+- [ ] `rdf:reifies` + triple terms → **Epic 94**
+- [ ] Language-tag side table → **Epic 94**, and it needs three components not two: `rdf:dirLa
 
 ### Epic 5 — Constraint Validation *(Demo 4)*
 
@@ -595,46 +592,30 @@ is the condition that index exists to catch.
 - [x] `GET /overview` — one request for the whole landing page, authorization-filtered through
 - [x] Graph tile reports `nodes`/`edges`, not only a flake total
 
-### Epic 94 — RDF 1.2 Alignment *(Demo 10)* — **shipped, 7 August 2026**
+### Epic 94 — RDF 1.2 Alignment *(Demo 10)*
 
-- [x] `FlakeValue::TripleTerm` at discriminant 10, pinning test extended (Slice A)
-- [x] `rdf:reifies` + triple term on export; store flake count unchanged (Slice B)
-- [x] `rdf:dirLangString` — shipped as a new `FlakeValue::LangString` variant, not a
-      `flake_meta` side table; a deliberate deviation from the plan's original
-      design, recorded in the decision log (Slice C)
-- [~] C (console) — DOM cases covered via `userTextDir`; canvas-rendered graph
-      nodes remain a recorded, unfixed gap (Slice C write-up)
-- [x] `rdf:reifies` synthesised at the query surface, so the standard vocabulary
-      returns rows against a real relationship end to end through
-      `Catalog::sparql` — the zero-rows test found a real pushdown bug unit
-      tests alone did not catch (Slice D)
-- [x] Slices B, C and D share one `oxrdf/rdf-12` feature gate — one decision,
-      taken once for the workspace
-- [ ] Export dialog offers RDF 1.2 syntax — not attempted this epic; console
-      export work lives in Epic 42's own slices
+- [x] `FlakeValue::TripleTerm` at discriminant 10, pinning test extended
+- [x] `rdf:reifies` + triple term on export; store flake count unchanged
+- [x] `rdf:dirLangString` — shipped as a new `FlakeValue::LangString` variant, a deliberate de
+- [~] C (console)
+- [x] `rdf:reifies` synthesised at the query surface, so the standard vocabulary returns rows 
+- [x] Slices B, C and D share one `oxrdf/rdf-12` feature gate — one decision, taken once for t
+- [ ] Export dialog offers RDF 1
 
 ### Epic 95 — OWL 2 RL Completion *(Demo 10)*
 
 - [x] The four RL axioms in scope beyond Epic 6's eight
 - [x] Explanation panel extends to the new axioms — same surface, more rules *(UI → Epic 41, c
 
-### Epic 96 — SHACL-SPARQL *(Demo 10)* — **confirmed blocked, re-verified 7 August 2026**
+### Epic 96 — SHACL-SPARQL *(Demo 10)*
 
-- [ ] SPARQL-based constraint components — blocked on spec maturity, re-checked
-      against live w3.org pages this session; no change since the last check
+- [ ] SPARQL-based constraint components
 - [ ] The violations workflow is unchanged; **authoring gains a second language**, so the cons
 
-### Epic 97 — Incremental & Parallel Reasoning *(Demo 10, 12)* — **algorithms shipped, 7 August 2026**
+### Epic 97 — Incremental & Parallel Reasoning *(Demo 10, 12)*
 
-- [x] Incremental maintenance rather than full recomputation — `derive_incremental`
-      (DRed), matches full re-derivation exactly, 5/5 viable mutants caught
-- [x] Parallel derivation within a fixpoint round — `derive_within_parallel`,
-      byte-identical output to `derive_within` proven over repeated runs, 5/5
-      viable mutants caught
-- [ ] Overlay staleness is visible — the `maintained_to` freshness-stamp
-      obligation the plan itself calls out is cross-crate wiring into
-      `Catalog::run_reasoning`, not yet undertaken; both algorithms above are
-      pure `graph-owl-reasoning` functions not yet invoked by the catalog
+- [ ] Incremental maintenance rather than full recomputation
+- [ ] Overlay staleness is visible
 
 ### Epic 98 — OWL 2 EL Reasoning *(Demo 11, 12)*
 
@@ -672,6 +653,14 @@ is the condition that index exists to catch.
 
 - [ ] The traversal path
 - [ ] No UI
+
+### Epic 104 — Ontology Alignment & Curated Mappings *(Demo 12)*
+
+- [x] The alignment fact and its store — `Alignment::Match`/`EquivalentClass`, stored as flake
+- [x] UMLS RRF ingestion, resumable — `graph_owl_connectors::umls` parses real `MRCONSO.RRF` t
+- [x] Cross-vocabulary traversal — SNOMED reaches its `RxNorm` counterpart through a shared CU
+- [ ] Computed alignment, confirmation, and the review queue
+- [ ] Console
 
 ## Epics with slice marks and no plan file
 

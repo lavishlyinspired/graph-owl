@@ -58,8 +58,8 @@ vector embeddings → out of process per `00j`.
 - [ ] **97** Incremental maintenance — reclassifying SNOMED per write is a non-starter, which is why this trigger fired
 - [ ] **97** The overlay carries `maintained_to` — with incremental maintenance it **lags the base even at "now"**, so "current inferences" means current as of that watermark. A third time coordinate beside `as_of` and the projection lag, and it arrives with this epic
 - [ ] **99** QL query rewriting for a DBpedia-shaped ABox: vast instances, thin TBox, **do not materialise**
-- [ ] **104** UMLS RRF ingestion; CUI as a first-class identifier; SNOMED → RxNorm with **no computed matching**
-- [ ] **104** A computed alignment cannot assert `owl:equivalentClass` — refused by the type system, not by a validator
+- [x] **104** UMLS RRF ingestion; CUI as a first-class identifier; SNOMED → RxNorm with **no computed matching** *(7 August 2026 — `graph_owl_connectors::umls` parses real MRCONSO.RRF text, verified against the UMLS Reference Manual; proven end to end through `Catalog::sparql` with only `Curated` alignments seeded, no `Computed` value constructed anywhere in the test. No console UI yet — Epics 41/42*
+- [x] **104** A computed alignment cannot assert `owl:equivalentClass` — refused by the type system, not by a validator *(7 August 2026 — `AssertableSource` has no `Computed` variant; pinned by a `compile_fail` doctest, the actual mechanical proof of the claim)*
 - [ ] **6** Reasoning budgets re-derived for this scale — 100k facts and 512MB were calibrated for a 1M-flake catalog
 - [ ] **4 / 37a** Partitioning trigger and write-path latency measured at 10M+ flakes
 - [ ] **Console**: profile badge, reasoner attribution on every derivation, alignment review queue *(Epics 41, 42)*
@@ -979,13 +979,13 @@ slice.
 
 **What you can show**: export a lineage edge and point at `rdf:reifies << … >>` in the Turtle — then run the *same* query with the standard vocabulary in the workbench and get rows back, not zero. Add an Arabic-labelled term and watch it render right-to-left in the entity header, the search results and the graph node. Author a constraint in SPARQL rather than in the shape language and see it land in the same violations queue.
 
-### Epic 94 — RDF 1.2 alignment
-- [ ] **A** `FlakeValue::TripleTerm` at discriminant 10, pinning test extended
-- [ ] **B** `rdf:reifies` + triple term on export; store flake count unchanged
-- [ ] **C** `rdf:dirLangString` — lexical form, language tag, base direction in `flake_meta`
-- [ ] **C (console)** — every user-supplied label renders with `dir` from the data; asserted with real Arabic or Hebrew, not a placeholder. **Without this half, the slice makes the product worse**: the store would know a label is right-to-left while the screen renders it left-to-right
-- [ ] **D** `rdf:reifies` synthesised at the query surface, so the standard vocabulary returns rows rather than zero — store and flake count untouched
-- [ ] Slices B, C and D share one `oxrdf/rdf-12` feature gate — one decision, taken once for the workspace
+### Epic 94 — RDF 1.2 alignment — **shipped, 7 August 2026 (backend; console half partial, see C below)**
+- [x] **A** `FlakeValue::TripleTerm` at discriminant 10, pinning test extended
+- [x] **B** `rdf:reifies` + triple term on export; store flake count unchanged
+- [x] **C** `rdf:dirLangString` — shipped as a new `FlakeValue::LangString` variant, a deliberate deviation from the plan's original `flake_meta` side-table design (recorded in the plan's own decision log)
+- [~] **C (console)** — DOM cases (entity header, description, search results, memory content) render `dir` correctly via `userTextDir`; canvas-rendered graph-node captions do not, a named gap for Epic 40, not a silent one
+- [x] **D** `rdf:reifies` synthesised at the query surface, so the standard vocabulary returns rows rather than zero — store and flake count untouched. **Found and fixed a real pushdown bug via the end-to-end RED test**: pushdown narrowed a `rdf:reifies` pattern to the synthetic predicate itself, which no flake ever has, so the query returned zero rows before synthesis ever ran — a gap four passing dataset-level unit tests did not catch
+- [x] Slices B, C and D share one `oxrdf/rdf-12` feature gate — one decision, taken once for the workspace
 - [ ] Export dialog offers RDF 1.2 output and previews it *(UI → Epic 42)*
 
 ### Epic 95 — OWL 2 RL completion
@@ -997,8 +997,8 @@ slice.
 - [ ] The violations workflow is unchanged; **authoring gains a second language**, so the constraint editor gains a second mode *(UI → Epic 41 Slice G)*
 
 ### Epic 97 — Incremental & parallel reasoning
-- [ ] Incremental maintenance rather than full recomputation
-- [ ] **Overlay staleness is visible** — a derived fact whose age is invisible is a derived fact nobody can weigh *(UI → Epic 41 Slice G)*
+- [ ] Incremental maintenance rather than full recomputation. **Both algorithms shipped 7 August 2026** — `graph_owl_reasoning::derive_incremental` (DRed, matches full re-derivation exactly, mutation-tested) and `derive_within_parallel` (byte-identical to sequential, mutation-tested) — but **neither is wired into `Catalog::run_reasoning`**, which still replaces `graph:reasoning` wholesale on every run. Left unchecked because nothing here is reachable from a live demo yet, not because the algorithms are unproven
+- [ ] **Overlay staleness is visible** — a derived fact whose age is invisible is a derived fact nobody can weigh *(UI → Epic 41 Slice G)*. The `maintained_to` freshness-stamp obligation this needs is not yet implemented
 
 ---
 
@@ -1040,6 +1040,13 @@ slice.
 ### Epic 103 — In-process traversal
 - [ ] The traversal path
 - [ ] **No UI** — a performance path with no user-visible behaviour change
+
+### Epic 104 — Ontology alignment — **backend shipped through Slice C, 7 August 2026**
+- [x] **A** The alignment fact and its store — `Alignment::Match`/`EquivalentClass`, stored as flakes carrying the real `skos:`/`owl:` predicate plus a reified metadata node. Decision 3's refusal (a computed source can never assert `owl:equivalentClass`) is structural: `AssertableSource` has no `Computed` variant, pinned by a `compile_fail` doctest
+- [x] **B** UMLS RRF ingestion, resumable — `graph_owl_connectors::umls` parses real `MRCONSO.RRF` text (verified against the UMLS Reference Manual). Resumable by construction: every row maps to its own self-contained alignment, so "skip N, continue" and "process from the start" produce the identical union once every row has been seen once
+- [x] **C** Cross-vocabulary traversal — SNOMED reaches its `RxNorm` counterpart through a shared CUI via a real `Catalog::sparql` join, no computed matcher involved; a lossy-reverse mapping is distinguishable by an ordinary query reading `dsc:lossyReverse` off the reified node. **Found and fixed three real bugs to get here**: `scope_facts` had no notion of vocabulary content (a CUI is not a catalog asset, so it was silently filtered out of every query); `Alignment::subject()` produced a syntactically invalid IRI (embedding real IRIs, each with their own `#`, inside another IRI); and `scoped_facts`'s own flake dedup — a latent bug in the shared query path, not alignment-specific — missed duplicates separated by a different flake with the same sort key, which two overlapping pushdown scans on one predicate produce routinely
+- [ ] **D** Computed alignment, confirmation, and the review queue
+- [ ] **Console**: alignment review queue *(Epic 42)*, and the alignment that made a cross-vocabulary result reachable is inspectable *(Epic 41)*
 
 ---
 
