@@ -77,7 +77,7 @@ is the condition that index exists to catch.
 | **37a** | 9 | [`37a-scale.md`](37a-scale.md) | In progress | 0/1 (+1 partial) | Epic 34 (a realistic entity mix to generate) — shipped |
 | **37b** | 9 | [`37b-portability.md`](37b-portability.md) | **Shipped** | 1/1 | Epic 3 (history is part of what must survive) — shipped |
 | **37c** | 9 | [`37c-embeddable.md`](37c-embeddable.md) | In progress | 0/1 (+1 partial) | Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate again… |
-| **38** | 9 | [`38-graph-analytics.md`](38-graph-analytics.md) | Not started | 0/1 | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
+| **38** | 9 | [`38-graph-analytics.md`](38-graph-analytics.md) | In progress | 0/1 (+1 partial) | Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison) |
 | **39** | 1 | [`39-ui-foundation.md`](39-ui-foundation.md) | In progress | 24/25 (+1 partial) | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
 | **40** | 3 | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | **Shipped** | 11/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
 | **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | **Shipped** | 12/12 | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
@@ -512,7 +512,7 @@ is the condition that index exists to catch.
 
 ### Epic 38 — Graph Analytics *(Demo 9)*
 
-- [ ] Analytics: degree, components, orphans, silos
+- [~] Analytics: degree, components, orphans, silos — **Slices A–D shipped, 8 August 2026**: `
 
 ### Epic 39 — Console Foundation, Discovery & Entity Pages *(Demo 1)*
 

@@ -8,3 +8,6 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+graph-owl-core = { path = "../graph-owl-core" }
+petgraph.workspace = true
+thiserror.workspace = true

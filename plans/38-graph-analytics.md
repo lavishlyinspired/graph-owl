@@ -1,7 +1,12 @@
 # Plan: Graph Analytics (Epic 38)
 
 **Branch**: feat/analytics
-**Status**: Not started — **narrow scope, and a deliberate reversal**
+**Status**: **Slices A–D shipped, 8 August 2026** — projection/budget, degree
+centrality, connected components, `PageRank` with honest convergence.
+Slice E (the `PageRank`-vs-usage-signals bake-off) and Slice F (scheduling,
+caching, HTTP surfacing) are **not attempted this pass** — a stated scope
+cut, not a silent one; see the write-up below for why. Narrow scope, and a
+deliberate reversal, both still true of the whole epic.
 **Depends on**: Epic 7a (traversal), Epic 4 (flakes), Epic 28 (usage signals, for comparison)
 **Crates**: **`graph-owl-analytics`** (new — pure algorithms over a caller-supplied projection)
 
@@ -71,14 +76,77 @@ pub struct AnalyticsResult<T> {
 
 ## Acceptance criteria
 
-- [ ] All four algorithms implemented as pure functions over `GraphProjection`.
-- [ ] Every result carries `computed_at_t` and is served with it.
-- [ ] A graph exceeding the budget → `BudgetExceeded`, never silent sampling or swapping.
-- [ ] PageRank reports whether it converged; hitting `max_iterations` is not silently a success.
-- [ ] Results are materialized on a schedule, not computed per request.
-- [ ] Analytics never trigger an automatic action (decision 5) — asserted structurally.
-- [ ] `graph-owl-analytics` performs **zero I/O**.
-- [ ] The PageRank bake-off (Slice E) is run and its result recorded in this file.
+- [x] All four algorithms implemented as pure functions over `GraphProjection`.
+- [ ] Every result carries `computed_at_t` and is served with it. **Slice F, not attempted** — this is a scheduling/serving concern, not something the pure algorithms carry themselves.
+- [x] A graph exceeding the budget → refused (`ProjectionError::TooManyNodes`/`TooManyEdges`), never silent sampling or swapping.
+- [x] `PageRank` reports whether it converged; hitting `max_iterations` is not silently a success.
+- [ ] Results are materialized on a schedule, not computed per request. **Slice F, not attempted.**
+- [ ] Analytics never trigger an automatic action (decision 5) — asserted structurally. **Slice F, not attempted** — nothing calls these functions from any action-taking code path yet, so the structural test has nothing to guard.
+- [x] `graph-owl-analytics` performs **zero I/O** — no dependency in its `Cargo.toml` reaches storage, network, or the filesystem.
+- [ ] The `PageRank` bake-off (Slice E) is run and its result recorded in this file. **Not attempted** — see the write-up below for why.
+
+## Slices A–D: projection, degree, components, `PageRank` — shipped 8 August 2026
+
+**`project(all_nodes, flakes, edge_types, budget)`** builds a
+[`GraphProjection`] as compressed sparse row, deterministic by construction
+(nodes numbered in sorted-`Sid` order, each adjacency list sorted by
+neighbour). **`all_nodes` is a real addition beyond the plan's own
+implementation reference**: without it, a node touched by no matching edge
+can never enter the projection at all — it cannot be an edge endpoint with
+no edge — which would make orphan detection (Slice C's whole reason to
+exist) structurally unable to find the single most important case:
+an asset connected to *nothing*. Found by this slice's own RED test, not
+anticipated in the plan.
+
+**`degree_centrality`** returns every node's in/out/total degree,
+including zero — never silently dropping a disconnected node, which would
+make "not scored" indistinguishable from "scored zero". Weighted when the
+projection carries confidence weights.
+
+**`connected_components`** is union-find with path compression, weakly
+connected (edge direction ignored for connectivity, kept for degree).
+`Components::orphans()` is the size-1 set. **The filter-visibility
+criterion the plan itself calls out as the subtle one** — "orphan" means
+nothing without saying which edges were considered — is carried
+structurally: `GraphProjection` now records its own `edge_types`, and
+`Components` copies it forward, so a result can never be presented as a
+filter-independent fact.
+
+**`pagerank`** is power iteration with damping, `converged: false` reported
+honestly on iteration exhaustion rather than ever implied by iteration
+count alone, dangling mass explicitly redistributed every pass (not
+dropped), weighted when the projection carries weights. The reference
+check (a directed cycle converges to the uniform distribution) is derived
+from the algorithm's own symmetry, not transcribed from any external
+implementation's fixture.
+
+**Mutation testing found three real gaps**, all now fixed: two off-by-one
+budget boundaries (`>` vs `>=`, invisible because no test checked "exactly
+at budget" specifically), which side of an edge `UnionFind::union` visits
+first (a `<` vs `==` distinction only observable when the smaller root is
+visited *first*, not merely when the two runs of the same input agree with
+each other), and `PageRank`'s own normalization step (`/` vs `*`/`%`,
+invisible on every earlier fixture because each happened to have
+`out_weight_total == 1.0`, where all three operators coincide). One
+mutant — `<` vs `<=` in the same union comparison — is **provably
+equivalent**, not a missing test: the comparison is only ever reached
+after a guard establishing the two roots differ, so `<=` degenerates to
+exactly `<` on every call this line can see. Documented in the code rather
+than chased. Final: 30 tests, 0 missed mutants (1 documented equivalent).
+
+## Explicitly deferred this pass (not silently dropped)
+
+- **Slice E, the `PageRank` bake-off.** Its own acceptance criteria name a
+  *real corpus* and *a human rating a blind sample* — neither is available
+  to an unattended implementation pass, and faking either would violate
+  this project's own "measured, not assumed" discipline (`CLAUDE.md`'s
+  build-loop section, and the identical lesson already recorded for Epic
+  98's sidecar timing and Epic 37a's soak test). Decision 6 stays honest
+  about `PageRank` remaining on probation until this actually runs.
+- **Slice F, scheduling/caching/HTTP surfacing.** Needs Epic 15's
+  scheduler, storage for materialized results, and wiring into
+  `graph-owl-api`/the HTTP surface — cross-crate work of a different kind
+  than Slices A–D's pure algorithms, not attempted in this pass.
 
 ## Which library, and which is licence-poison
 

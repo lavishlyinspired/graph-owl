@@ -1142,6 +1142,11 @@ dependencies = [
 [[package]]
 name = "graph-owl-analytics"
 version = "0.1.0"
+dependencies = [
+ "graph-owl-core",
+ "petgraph 0.8.3",
+ "thiserror 2.0.19",
+]
 
 [[package]]
 name = "graph-owl-api"
@@ -2742,6 +2747,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "petgraph"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
+dependencies = [
+ "fixedbitset",
+ "hashbrown 0.15.5",
+ "indexmap 2.14.0",
+ "serde",
+]
+
+[[package]]
 name = "phf"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2925,7 +2942,7 @@ dependencies = [
  "log",
  "multimap",
  "once_cell",
- "petgraph",
+ "petgraph 0.7.1",
  "prettyplease",
  "prost",
  "prost-types",

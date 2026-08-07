@@ -29,6 +29,12 @@ chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 tower = "0.5"
 refinery = { version = "0.8", features = ["tokio-postgres"] }
+# Epic 38's arithmetic (PageRank, connected components) — MIT/Apache-2.0,
+# checked 4 Aug 2026 and re-checked 8 Aug 2026 (456M downloads, same
+# licence). See `00l-build-vs-adopt.md` and `38-graph-analytics.md`'s own
+# "Which library, and which is licence-poison" section — `rust-igraph` has
+# the same algorithms and is GPL-2.0-or-later, rejected on licence alone.
+petgraph = "0.8"
 tokio-postgres = "0.7"
 # `reusable-containers` is what lets the whole workspace share one Postgres
 # across test binaries *and* across runs, instead of starting one per test.
