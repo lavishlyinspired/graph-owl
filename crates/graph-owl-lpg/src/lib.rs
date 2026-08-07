@@ -109,6 +109,20 @@ impl PropertyValue {
             FlakeValue::Bytes(bytes) => PropertyValue::Bytes(bytes.clone()),
             FlakeValue::Uuid(id) => PropertyValue::String(id.to_string()),
             FlakeValue::Duration(seconds) => PropertyValue::Duration(*seconds),
+            // **This arm should be unreachable in practice, and that is a
+            // decision this project made, not an oversight.** Epic 94
+            // decision 3: a triple term is synthesized at query time for
+            // `rdf:reifies` and never written to the store, so nothing a
+            // real `Flake`'s `.o` holds — which is all `from_flake` ever
+            // sees — should be one. Kept exhaustive anyway, per this
+            // function's own stated reason for having no wildcard: a
+            // genuinely unrepresentable arm must still make a decision
+            // now rather than default to whatever the compiler tolerates
+            // later. `{value:?}` rather than a hand-rolled `<< s p o >>`
+            // renderer, because inventing pretty output here would make
+            // this look like a supported conversion rather than a
+            // decision-3 violation made visible.
+            FlakeValue::TripleTerm(_) => PropertyValue::String(format!("{value:?}")),
         }
     }
 }
@@ -849,6 +863,24 @@ mod tests {
                 expected,
                 "{flake_value:?} projected wrongly"
             );
+        }
+    }
+
+    /// A triple term should never actually reach this function (Epic 94
+    /// decision 3), but the match is exhaustive on purpose (see
+    /// `from_flake`'s own doc comment), so this pins what happens if
+    /// decision 3 is ever violated: a visible, non-panicking `String`
+    /// rather than data loss.
+    #[test]
+    fn a_triple_term_projects_as_a_visible_string_not_a_panic() {
+        let term = FlakeValue::TripleTerm(graph_owl_core::flake::TripleTerm {
+            s: sid("a"),
+            p: sid("b"),
+            o: Box::new(FlakeValue::Ref(sid("c"))),
+        });
+        match PropertyValue::from_flake(&term) {
+            PropertyValue::String(text) => assert!(!text.is_empty(), "{text}"),
+            other => panic!("{other:?}"),
         }
     }
 

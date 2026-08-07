@@ -36,6 +36,14 @@ pub fn value_key(value: &FlakeValue) -> String {
             acc
         }),
         FlakeValue::Uuid(uuid) => uuid.to_string(),
+        // Provably unreachable today (Epic 94 decision 3: a triple term is
+        // synthesized at query time, never written to the store — `columns`
+        // below refuses one before this function's `base.key` is even
+        // built). Kept exhaustive rather than a wildcard, and `{value:?}`
+        // rather than a crafted key, so a caller who somehow reaches this
+        // sees an obviously-not-a-real-key string instead of one that
+        // silently sorts and dedups as if it meant something.
+        FlakeValue::TripleTerm(_) => format!("{value:?}"),
     }
 }
 
@@ -64,7 +72,20 @@ pub struct ValueColumns<'a> {
 /// Returns the offending text if a [`FlakeValue::Json`] does not parse. Storing
 /// it in a `JSONB` column would fail at the database anyway; failing here names
 /// the value instead of surfacing a driver error about a bind parameter.
+///
+/// Also returns an error for [`FlakeValue::TripleTerm`] — Epic 94 decision 3
+/// is that a triple term is synthesized at query time for `rdf:reifies` and
+/// never written to the store, so reaching this function with one means that
+/// decision was violated somewhere upstream, and the honest response is a
+/// named refusal here rather than inventing a storage encoding nothing reads.
 pub fn columns(value: &FlakeValue) -> Result<ValueColumns<'_>, String> {
+    if matches!(value, FlakeValue::TripleTerm(_)) {
+        return Err(
+            "a triple term is never written to the store — it is synthesized \
+             at query time for rdf:reifies (Epic 94 decision 3)"
+                .to_string(),
+        );
+    }
     let base = ValueColumns {
         value_type: value.value_type(),
         key: value_key(value),
@@ -127,6 +148,10 @@ pub fn columns(value: &FlakeValue) -> Result<ValueColumns<'_>, String> {
             int_value: Some(*seconds),
             ..base
         },
+        // The `matches!` guard at the top of this function already
+        // returned for this variant — provably unreachable, not a
+        // shortcut around exhaustiveness.
+        FlakeValue::TripleTerm(_) => unreachable!("refused above"),
     })
 }
 
@@ -355,6 +380,20 @@ mod column_tests {
         )
         .expect("decodes");
         assert_eq!(decoded, FlakeValue::Duration(60));
+    }
+
+    /// **The RED test**: Epic 94 decision 3 — a triple term is synthesized
+    /// at query time for `rdf:reifies`, never written to the store. This
+    /// is the boundary that decision lives at: `columns` must refuse
+    /// rather than invent a storage encoding nobody reads.
+    #[test]
+    fn a_triple_term_is_refused_rather_than_stored() {
+        let term = FlakeValue::TripleTerm(graph_owl_core::flake::TripleTerm {
+            s: Sid::dsc("a"),
+            p: Sid::dsc("b"),
+            o: Box::new(FlakeValue::Ref(Sid::dsc("c"))),
+        });
+        assert!(columns(&term).is_err());
     }
 
     /// Each variant writes exactly one column. Writing two would make the row

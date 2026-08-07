@@ -793,6 +793,16 @@ fn cypher_value_of_term(
                 acc
             },
         ))),
+        // `from_term` cannot produce this today — `Term::Triple` exists
+        // only under `oxrdf`'s `rdf-12` feature, which `graph-owl-query`
+        // does not enable (Epic 94 Slice D is what would turn it on). Kept
+        // as a named refusal rather than `unreachable!()`: Cypher has no
+        // triple-term concept at all, so even once Slice D teaches
+        // `from_term` about one, this arm should still refuse — the
+        // reachability changes, the right answer does not.
+        FlakeValue::TripleTerm(_) => Err(CatalogError::Storage(StorageError::Unexpected(
+            "a triple term has no Cypher representation".to_string(),
+        ))),
     }
 }
 
@@ -13662,6 +13672,13 @@ fn display_flake_value(value: &graph_owl_core::flake::FlakeValue) -> String {
         FlakeValue::Bytes(bytes) => format!("{} bytes", bytes.len()),
         FlakeValue::Uuid(u) => u.to_string(),
         FlakeValue::Duration(seconds) => format!("{seconds}s"),
+        // `parse_with_location` cannot produce this: RDF 1.2 Turtle/TriG
+        // syntax (the `<< s p o >>` literal) is a Working Draft this
+        // project deliberately does not emit or parse yet (Epic 94's own
+        // "explicitly deferred" list), so nothing the ontology editor
+        // parses today reaches here. A short, honest placeholder rather
+        // than a panic if that ever changes.
+        FlakeValue::TripleTerm(_) => "<< triple term >>".to_string(),
     }
 }
 

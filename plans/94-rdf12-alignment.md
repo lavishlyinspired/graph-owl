@@ -213,9 +213,9 @@ about an entire category.
 
 ## Acceptance criteria
 
-- [ ] `FlakeValue::TripleTerm` at discriminant 10, pinning test extended.
+- [x] `FlakeValue::TripleTerm` at discriminant 10, pinning test extended. (Slice A)
 - [ ] A relationship serializes to `rdf:reifies` + a triple term, and parses back.
-- [ ] A triple term in subject position is refused with an error naming why.
+- [x] A triple term in subject position is refused with an error naming why. (Slice A)
 - [ ] A language-tagged literal round-trips with its tag **and** direction.
 - [ ] An `rtl` literal keeps its direction through serialization — asserted with
       real Arabic or Hebrew text, not a placeholder.
@@ -224,12 +224,59 @@ about an entire category.
 
 ## Slices
 
-### Slice A: The value variant
+### Slice A: The value variant — **shipped, 7 August 2026**
 
 **RED**: the pinning test gains discriminant 10 and still passes for 0–9 — the
 point is that appending changed nothing. A subject-position triple term is
 refused.
 **Done when**: criteria met, mutation report reviewed.
+
+**Shipped.** `FlakeValue::TripleTerm(TripleTerm)` at discriminant 10;
+`TripleTerm { s: Sid, p: Sid, o: Box<FlakeValue> }` matching this plan's own
+implementation reference exactly. `TripleTerm::refuse_if_subject_position`
+refuses by name (`TripleTermAsSubject`, a `Display`-only error matching this
+crate's own `FqnError`-style convention — no `std::error::Error` impl, since
+none of its siblings have one either) — kept deliberately narrow (only
+distinguishes "is this a triple term" from everything else) rather than a
+general subject-shape validator nothing yet calls, since `Flake.s`,
+`TriplePattern.s`, and `TripleTerm.s` are all already `Sid`-typed and
+structurally cannot hold a `FlakeValue` today. The real caller is Slice D's
+eventual term-to-subject conversion; this is the boundary it will call.
+
+**Adding a tenth `FlakeValue` variant breaks every exhaustive match over the
+enum, and finding all of them was the actual size of this slice** — the
+type itself is nine lines. Two crates (`graph-owl-query`'s `to_term`,
+`graph-owl-lpg`'s `PropertyValue::from_flake`) are exhaustive **on purpose**,
+each with its own doc comment saying so, matching exactly the "planted
+compile error" philosophy this plan's own Slice D section describes for
+`term.rs`'s *other* exhaustive match — this slice is the first time that
+philosophy actually paid for itself, on a different function than the one
+it was written about. Three more sites needed the same decision:
+`graph-owl-api`'s `cypher_value_of_term` (Cypher has no triple-term concept,
+so refused by name, and deliberately *not* `unreachable!()` since Slice D
+will make `from_term` able to produce one and Cypher's answer should not
+change when that happens) and `display_flake_value` (the ontology editor's
+own preview — a placeholder string, since RDF 1.2 Turtle syntax is
+explicitly deferred and nothing this function's caller parses can produce
+one); `graph-owl-engine-postgres`'s `columns`/`value_key` (decision 3 says a
+triple term is never written to the store, so `columns` refuses by name
+before ever reaching a column, and `value_key` — used separately by
+pushdown's identity-key binding — gets a `{value:?}`-based fallback so the
+function stays infallible without a signature change cascading into a SQL
+query builder). `graph-owl-constraint`'s `as_number` and
+`graph-owl-ontology`'s `DataType::matches` needed no change: both already
+use a wildcard/tuple-match shape that is *correctly* wildcard here — a
+triple term has no numeric reading and no SHACL datatype, so "matches
+nothing" was already the right answer, not a gap.
+
+**Mutation report**: `graph-owl-core/src/flake.rs`'s diff, 6/6 mutants
+caught after one round — the survivor was `TripleTermAsSubject`'s `Display`
+body collapsing to an empty string, since the existing test only checked
+`Err(TripleTermAsSubject)` by equality, never the message text. Fixed with
+a dedicated test asserting the message names both "subject" and "object
+position". `graph-owl-engine-postgres/src/value.rs`'s diff: 2 caught, 1
+unviable (mutating `columns`'s return type to `Ok(Default::default())`
+does not compile, since `ValueColumns` holds borrowed fields) — 0 missed.
 
 ### Slice B: `rdf:reifies` on export
 

@@ -207,6 +207,67 @@ pub enum FlakeValue {
     /// sub-second resolution; `i64` seconds round-trips through Postgres
     /// `BIGINT` without the ambiguity `INTERVAL` carries around months.
     Duration(i64),
+    /// RDF 1.2's triple term — a triple used in object position, so an
+    /// `rdf:reifies` statement can name *which* proposition a reifier
+    /// (this project's already-shipped reified relationship node) stands
+    /// for. Appended at the end, never inserted (`00i` rule 4 / Epic 94
+    /// decision 1): the pinning test below is the one safe way to extend
+    /// this value space, and renumbering would be a migration over every
+    /// flake ever written. Object-position only — Epic 94 decision 2 and
+    /// [`TripleTerm::refuse_if_subject_position`].
+    TripleTerm(TripleTerm),
+}
+
+/// A triple used as a value — RDF 1.2's triple term. Boxed `o` because a
+/// triple term may nest (annotating a triple that is itself an annotation),
+/// and an unboxed recursive enum cannot have a known size.
+///
+/// `s` and `p` are `Sid`, matching every other flake's subject and
+/// predicate — a triple term's own subject and predicate name real
+/// entities/relations the same way an ordinary flake's do; only the
+/// *object* position is where this project's value space actually widens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TripleTerm {
+    /// The inner triple's subject.
+    pub s: Sid,
+    /// The inner triple's predicate.
+    pub p: Sid,
+    /// The inner triple's object. Boxed: a triple term may nest.
+    pub o: Box<FlakeValue>,
+}
+
+/// Why a value could not be used where a subject was expected — currently
+/// the one case that exists: [`TripleTerm::refuse_if_subject_position`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TripleTermAsSubject;
+
+impl fmt::Display for TripleTermAsSubject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "a triple term cannot be a subject — RDF 1.2 restricts triple \
+             terms to object position, and this store's index orderings \
+             (SPOT, POST, ...) assume every subject is a Sid"
+        )
+    }
+}
+
+impl TripleTerm {
+    /// Refuses a [`FlakeValue::TripleTerm`] offered in subject position,
+    /// naming why rather than silently producing a value this store's
+    /// `Sid`-keyed indexes cannot address. Every other value is accepted
+    /// here — this function is narrowly about the one new restriction
+    /// Epic 94 introduces, not a general subject-shape validator.
+    ///
+    /// # Errors
+    ///
+    /// [`TripleTermAsSubject`] when `value` is a triple term.
+    pub fn refuse_if_subject_position(value: &FlakeValue) -> Result<(), TripleTermAsSubject> {
+        match value {
+            FlakeValue::TripleTerm(_) => Err(TripleTermAsSubject),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Discriminants, pinned. Named constants rather than bare numbers in a match,
@@ -232,6 +293,9 @@ pub mod value_type {
     pub const UUID: i16 = 8;
     /// [`super::FlakeValue::Duration`].
     pub const DURATION: i16 = 9;
+    /// [`super::FlakeValue::TripleTerm`]. Appended, never inserted — Epic 94
+    /// decision 1.
+    pub const TRIPLE_TERM: i16 = 10;
 }
 
 impl FlakeValue {
@@ -249,6 +313,7 @@ impl FlakeValue {
             FlakeValue::Bytes(_) => value_type::BYTES,
             FlakeValue::Uuid(_) => value_type::UUID,
             FlakeValue::Duration(_) => value_type::DURATION,
+            FlakeValue::TripleTerm(_) => value_type::TRIPLE_TERM,
         }
     }
 
@@ -352,6 +417,14 @@ mod flake_value_tests {
             (FlakeValue::Bytes(vec![1]), 7),
             (FlakeValue::Uuid(uuid), 8),
             (FlakeValue::Duration(1), 9),
+            (
+                FlakeValue::TripleTerm(TripleTerm {
+                    s: Sid::dsc("a"),
+                    p: Sid::dsc("b"),
+                    o: Box::new(FlakeValue::Ref(Sid::dsc("c"))),
+                }),
+                10,
+            ),
         ] {
             assert_eq!(
                 value.value_type(),
@@ -377,11 +450,53 @@ mod flake_value_tests {
             FlakeValue::Bytes(vec![1]),
             FlakeValue::Uuid(Uuid::nil()),
             FlakeValue::Duration(1),
+            FlakeValue::TripleTerm(TripleTerm {
+                s: Sid::dsc("a"),
+                p: Sid::dsc("b"),
+                o: Box::new(FlakeValue::Ref(Sid::dsc("c"))),
+            }),
         ];
         let mut seen: Vec<i16> = all.iter().map(FlakeValue::value_type).collect();
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), all.len(), "two variants share a discriminant");
+    }
+
+    /// **The RED test**: RDF 1.2 restricts a triple term to object
+    /// position — permitting one as a subject would create a value space
+    /// this store's index orderings (SPOT, POST, ...) cannot address,
+    /// since each assumes a `Sid` leading column. Named, not a bare
+    /// `bool`, so a caller can report *why* rather than just *that*.
+    #[test]
+    fn a_triple_term_in_subject_position_is_refused_by_name() {
+        let term = FlakeValue::TripleTerm(TripleTerm {
+            s: Sid::dsc("a"),
+            p: Sid::dsc("b"),
+            o: Box::new(FlakeValue::Ref(Sid::dsc("c"))),
+        });
+        assert_eq!(
+            TripleTerm::refuse_if_subject_position(&term),
+            Err(TripleTermAsSubject)
+        );
+    }
+
+    /// "Named" is the whole point of this error over a bare `bool` — a
+    /// mutant that empties the `Display` body would still satisfy the
+    /// `Err(TripleTermAsSubject)` equality check above, so the message
+    /// text itself needs its own assertion.
+    #[test]
+    fn the_refusal_names_both_the_restriction_and_the_reason() {
+        let message = TripleTermAsSubject.to_string();
+        assert!(message.contains("subject"), "{message}");
+        assert!(message.contains("object position"), "{message}");
+    }
+
+    /// The negative case matters as much: an ordinary reference must not
+    /// be refused, or the check is not discriminating triple terms at all.
+    #[test]
+    fn a_reference_in_subject_position_is_not_refused() {
+        let reference = FlakeValue::Ref(Sid::dsc("a"));
+        assert_eq!(TripleTerm::refuse_if_subject_position(&reference), Ok(()));
     }
 
     #[test]

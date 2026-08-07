@@ -62,6 +62,16 @@ pub fn to_term(value: &FlakeValue) -> Result<Term, TermError> {
         FlakeValue::Duration(seconds) => {
             Literal::new_typed_literal(seconds.to_string(), xsd::INTEGER).into()
         }
+        // `Term::Triple` exists only under `oxrdf`'s `rdf-12` feature,
+        // which this crate does not yet enable (Epic 94 Slice D — the
+        // gate is taken once, for the whole `rdf:reifies` query-surface
+        // slice, not piecemeal). Until then a stored triple term has no
+        // term to become, so this is `Unrepresentable` rather than a type
+        // this function cannot construct — the same shape `from_term`'s
+        // own doc comment already anticipates for the reverse direction.
+        FlakeValue::TripleTerm(_) => {
+            return Err(TermError::Unrepresentable("a triple term".to_string()));
+        }
     })
 }
 
@@ -262,6 +272,24 @@ mod tests {
         let term = Term::BlankNode(oxrdf::BlankNode::default());
         assert!(matches!(
             from_term(&term),
+            Err(TermError::Unrepresentable(_))
+        ));
+    }
+
+    /// **The RED test**: `Term::Triple` exists only under `oxrdf`'s
+    /// `rdf-12` feature, which this crate does not enable yet (Epic 94
+    /// Slice D). Until then a stored triple term genuinely has no `Term`
+    /// to become — refused by name, not coerced into a string that would
+    /// make a query silently match on the wrong thing.
+    #[test]
+    fn a_triple_term_has_no_term_to_become_yet() {
+        let value = FlakeValue::TripleTerm(graph_owl_core::flake::TripleTerm {
+            s: Sid::dsc("a"),
+            p: Sid::dsc("b"),
+            o: Box::new(FlakeValue::Ref(Sid::dsc("c"))),
+        });
+        assert!(matches!(
+            to_term(&value),
             Err(TermError::Unrepresentable(_))
         ));
     }
