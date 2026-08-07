@@ -52,7 +52,7 @@ is the condition that index exists to catch.
 | **12** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 15/15 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **13** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 10/10 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **14** | 5 | [`14-mcp-activation.md`](14-mcp-activation.md) | In progress | 7/8 (+1 partial) | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard… |
-| **15** | 1 | [`15-connectors.md`](15-connectors.md) | In progress | 13/17 | Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable) |
+| **15** | 1 | [`15-connectors.md`](15-connectors.md) | In progress | 13/15 | Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable) |
 | **16** | 6 | [`16-ingestion-apis.md`](16-ingestion-apis.md) | In progress | 5/6 (+1 partial) | Epic 1 (contract), Epic 15 (upsert semantics) |
 | **17** | 6 | [`17-entity-resolution.md`](17-entity-resolution.md) | **Shipped** | 4/4 | Epic 4 (`sameAs` in the graph), Epic 15 + 16 (two write paths make this necessa… |
 | **18** | 6 | [`18-inbound-events.md`](18-inbound-events.md) | **Shipped** | 5/5 | Epic 16 (ingestion contract), Epic 17 (resolution, so pushes do not duplicate) |
@@ -323,8 +323,6 @@ is the condition that index exists to catch.
 - [x] The fingerprint covers source-owned fields only.
 - [x] A skipped record still counts as reported by the source
 - [x] The run reports `skipped` alongside `created`: a run that wrote nothing because nothing 
-- [ ] Deletion detection, threshold guard
-- [ ] `source_hash` fingerprinting
 - [ ] Python connector protocol + one non-Postgres source
 
 ### Epic 16 — Ingestion APIs, SDKs, Batch & Custom Adapters *(Demo 6)*

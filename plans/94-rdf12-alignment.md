@@ -1,6 +1,12 @@
 # Plan: RDF 1.2 Alignment (Epic 94)
 
-**Status**: Not started
+**Status**: **Shipped (backend), 7 August 2026** — corrected 8 August 2026,
+this line was never updated after Slices A–D landed. `plans/DEMOS.md`'s own
+heading states it directly: "shipped, 7 August 2026 (backend; console half
+partial)". All four backend slices are `[x]`: `FlakeValue::TripleTerm`,
+`rdf:reifies` on export, `rdf:dirLangString` + console direction rendering,
+and `rdf:reifies` reachable at the SPARQL query surface. The console half
+(Epic 41/42 territory) remains the honestly-tracked partial.
 **Depends on**: Epic 4 (flakes, reified relationships), Epic 9 (serialization)
 **Unblocks**: standards interop claims that survive inspection
 **Crates**: `graph-owl-core`, `graph-owl-engine-postgres`, `graph-owl-rdf-io`

@@ -1,7 +1,13 @@
 # Plan: RDF Interop & Open Standards (Epic 9)
 
 **Branch**: feat/engine-rdf-io
-**Status**: **Slice A shipped, 5 August 2026 — Slices B–F not started.**
+**Status**: **Shipped — all six slices, 6 August 2026.** Corrected 8 August
+2026, this line had stopped at Slice A. `plans/DEMOS.md`'s own section
+confirms B (JSON-LD, `oxjsonld`, refused remote `@context` by default),
+C (DCAT/PROV-O export against DCAT-AP 3.0.1), D (OpenLineage export/import
+with column lineage), E (import validation against Epic 5 shapes,
+transactional per subject), and F (`export_manifest`, lossiness table) all
+landed alongside A.
 **Depends on**: Epic 4 (triples to serialize) — shipped. ~~Epic 7 (CONSTRUCT produces Turtle)~~ — **overstated for Slice A**: checked before implementing (`verify-blockers-against-code`), CONSTRUCT is not wired (`execute_algebra`'s result collector discards `spareval::QueryResults::Graph` today) and Slice A does not need it — it serializes `&[Flake]` directly, sourced from `TripleStore::query_pattern`, never from a SPARQL result. A later slice that wants "export via `CONSTRUCT`" as a convenience would need CONSTRUCT wired first; Slice A itself does not.
 **Crate**: `graph-owl-rdf-io`
 

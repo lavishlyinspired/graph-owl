@@ -1,7 +1,14 @@
 # Plan: Constraint Validation (Epic 5)
 
 **Branch**: feat/engine-constraints
-**Status**: Not started
+**Status**: **Shipped** — corrected 8 August 2026, this line had never been
+updated since the epic began. `plans/DEMOS.md`'s own Epic 5 section (the
+authority per its rule 0) shows 9 of 10 items `[x]` and 1 `[~]`: shapes, all
+six target kinds, seed shapes, and `sh:not`/`sh:and`/`sh:or` are built.
+Pending: `sh:in` as an RDF list rather than a repeated predicate (a stated
+departure, recorded in `00k`, not an omission), and
+`RelationshipShape`/`EnvelopeShape` from the seed table, which need Epic 2's
+relationship projection to have anything to target.
 **Depends on**: Epic 4 (triples to validate)
 **Crates**: `graph-owl-ontology` (types), `graph-owl-constraint` (pure logic)
 

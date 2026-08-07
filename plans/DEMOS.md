@@ -490,7 +490,6 @@ actually holds could not be asserted at all.
 - [~] **Pending in this epic**: ownership and domain inheritance down `contains`, and the differential test asserting they agree with Epics 11 and 23 — **those epics are not built**, so there is nothing yet to differ from and a rule written now would be a second implementation of a first that does not exist; certification invalidation on an upstream Major bump (Epic 26)
 
 ### Epic 41 — Workbench & governance
-### Epic 41 — Workbench & governance
 - [x] **Violations queue** — grouped by asset rather than by finding, because forty rows about one table is one piece of work; worst-first and stable, so it can be worked from the top; each row carries the shape's own message, the offending value, and the suggested repair. The header states how far behind the graph the report is, which is the only thing that makes an empty queue trustworthy
 - [x] **Both engines triggerable from the console** — validation and reasoning, with the refused-shape count shown rather than hidden
 - [x] **SPARQL editor with plan display** — the engine now reports the scans pushdown decided on, and the workbench shows them. A lone `? ? ?` means nothing could be bounded and the whole graph was read, which is the entry worth seeing: without it an author cannot tell a query that is inherently expensive from one a single triple pattern away from being cheap. Truncation is called out above the results, because a truncated answer that looks complete is the failure this project refuses everywhere else
@@ -686,8 +685,6 @@ back. Two HTTP tests now do:
 - **The wire-name bug from Epic 18 recurred, in a type shaped to invite it.** `#[serde(rename_all)]` on a tagged enum renames the *variants*, not the fields inside them, so `SubmissionOutcome` shipped `run_id` beside a wire of camelCase. Found only by the HTTP test that tried to *use* the id — and the idempotence test that compared `second["runId"] == first["runId"]` had been passing vacuously all along, because two absent keys compare equal. Both fixed: `rename_all_fields`, a unit test asserting the serialized bytes so HTTP is not the only guard, and an `is_string()` check before the equality.
 
 ### Epic 15 — Connectors, completed
-- [ ] Deletion detection, threshold guard
-- [ ] `source_hash` fingerprinting
 - [ ] Python connector protocol + one non-Postgres source
 
 

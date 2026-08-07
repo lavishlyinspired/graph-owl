@@ -1,7 +1,13 @@
 # Plan: Ontology Alignment & Curated Mappings (Epic 104)
 
 **Branch**: feat/ontology-alignment
-**Status**: Not started — **new, 28 July 2026**. Created because `00n-large-ontology-reality.md` §2.5 found it genuinely uncovered
+**Status**: **Backend shipped through Slice D, 7 August 2026** — corrected
+8 August 2026, this line was never updated past the epic's creation.
+`plans/DEMOS.md` confirms all four backend slices `[x]`: the alignment fact
+and store, resumable UMLS RRF ingestion, cross-vocabulary traversal, and
+computed-alignment confidence gating with human-confirmation protection and
+the review queue. Console work (Epic 41/42) remains explicitly deferred, not
+silently dropped.
 **Depends on**: Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detection), Epic 17 (entity resolution — the *instance* analogue this must not be confused with)
 **Crates**: `graph-owl-ontology` · `graph-owl-connectors` (RRF reader) · `graph-owl-resolution` (shares the confidence machinery, not the algorithm)
 

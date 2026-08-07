@@ -1,7 +1,13 @@
 # Plan: Reasoning Overlay (Epic 6)
 
 **Branch**: feat/engine-reasoning
-**Status**: **In progress** — Slice A shipped 28 Jul 2026 (eight axioms, fixpoint, dedup). B's fixpoint/dedup landed with it because a symmetric property does not terminate without them; C–F not started
+**Status**: **Shipped** — corrected 8 August 2026, this line had stopped at
+Slice A/B and never caught up. `plans/DEMOS.md`'s own Epic 6 section shows
+all 7 tracked items `[x]`: eight OWL 2 RL axioms with semi-naive fixpoint
+and `CappedReason` limits (Slices A–C), the reasoning overlay never
+persisted into the base graph (Slice E), `GET /reasoning/explain`
+derivation chains (Slice D), reasoning correctly skipped on historical
+(`as_of`) queries, and classification propagation along `feeds` (Slice F).
 **Depends on**: Epic 4 (triples), Epic 5 (ontology types)
 **Crate**: `graph-owl-reasoning` (pure logic)
 
