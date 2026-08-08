@@ -34,9 +34,9 @@ is the condition that index exists to catch.
 | Epic | Demo | Plan | State | Tracked items | Depends on |
 |---|---|---|---|---|---|
 | **1** | 1 | [`01-api-conventions.md`](01-api-conventions.md) | **Shipped** | 12/12 | nothing |
-| **2** | 1 | [`02-entity-hierarchy.md`](02-entity-hierarchy.md) | In progress | 6/7 | Epic 1 (conventions, relationship taxonomy) |
+| **2** | 1 | [`02-entity-hierarchy.md`](02-entity-hierarchy.md) | In progress | 7/8 | Epic 1 (conventions, relationship taxonomy) |
 | **3** | 2 | [`03-versioning.md`](03-versioning.md) | In progress | 11/13 (+1 partial) | Epic 2 (four entity types to apply the envelope to) |
-| **4** | 3 | [`04-engine-triples.md`](04-engine-triples.md) | In progress | 8/11 (+1 partial) | Epic 3 (four entity types with an envelope to project) |
+| **4** | 3 | [`04-engine-triples.md`](04-engine-triples.md) | In progress | 10/11 (+1 partial) | Epic 3 (four entity types with an envelope to project) |
 | **5** | 4 | [`05-engine-constraints.md`](05-engine-constraints.md) | In progress | 9/10 (+1 partial) | Epic 4 (triples to validate) |
 | **6** | 4, 12 | [`06-engine-reasoning.md`](06-engine-reasoning.md) | In progress | 7/8 (+1 partial) | Epic 4 (triples), Epic 5 (ontology types) |
 | **7** | 3 | [`07-engine-query.md`](07-engine-query.md) | In progress | 8/9 | Epic 4 (triples), Epic 13 (authorization to compile into queries), **Epic 7a**… |
@@ -66,7 +66,7 @@ is the condition that index exists to catch.
 | **26** | 7 | [`26-lifecycle-certification.md`](26-lifecycle-certification.md) | In progress | 7/8 (+1 partial) | Epic 11 (issuers are principals), Epic 24 (metrics are certifiable) |
 | **27** | 7 | [`27-contracts.md`](27-contracts.md) | In progress | 4/6 (+1 partial) | Epic 2 (schemas to guarantee), Epic 3 (version diffs detect breakage) |
 | **28** | 7 | [`28-usage.md`](28-usage.md) | In progress | 5/6 | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
-| **29** | 7 | [`29-lineage.md`](29-lineage.md) | In progress | 10/14 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
+| **29** | 7 | [`29-lineage.md`](29-lineage.md) | In progress | 13/14 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
 | **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | In progress | 7/8 | Epic 29 (lineage, for propagating trust signals) |
 | **31** | 5 | [`31-memory.md`](31-memory.md) | In progress | 2/4 (+1 partial) | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
 | **32** | 5 | [`32-agent-capabilities.md`](32-agent-capabilities.md) | In progress | 1/2 (+1 partial) | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
@@ -86,10 +86,10 @@ is the condition that index exists to catch.
 | **93** | 3 | [`93-console-overview.md`](93-console-overview.md) | **Shipped** | 2/2 | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
 | **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | In progress | 5/7 (+1 partial) | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
 | **95** | 10 | [`95-owl-rl-completion.md`](95-owl-rl-completion.md) | **Shipped** | 2/2 | Epic 6 (the eight rules and the fixpoint that runs them) |
-| **96** | 10 | [`96-shacl-sparql.md`](96-shacl-sparql.md) | In progress | 1/3 | Epic 5 (SHACL Core), Epic 7 (SPARQL) |
+| **96** | 10 | [`96-shacl-sparql.md`](96-shacl-sparql.md) | In progress | 2/4 | Epic 5 (SHACL Core), Epic 7 (SPARQL) |
 | **97** | 10, 12 | [`97-incremental-parallel-reasoning.md`](97-incremental-parallel-reasoning.md) | In progress | 1/2 | Epic 6 (semi-naive fixpoint), Epic 37a (the measurement) |
-| **98** | 11, 12 | [`98-owl-el-reasoning.md`](98-owl-el-reasoning.md) | In progress | 1/2 | Epic 6 (overlay, budgets, explainability), Epic 24 (ontologies as entities) |
-| **99** | 11, 12 | [`99-owl-ql-reasoning.md`](99-owl-ql-reasoning.md) | In progress | 1/2 | Epic 7 (query algebra to rewrite), Epic 6 (explanation contract) |
+| **98** | 11, 12 | [`98-owl-el-reasoning.md`](98-owl-el-reasoning.md) | In progress | 3/4 | Epic 6 (overlay, budgets, explainability), Epic 24 (ontologies as entities) |
+| **99** | 11, 12 | [`99-owl-ql-reasoning.md`](99-owl-ql-reasoning.md) | In progress | 3/4 | Epic 7 (query algebra to rewrite), Epic 6 (explanation contract) |
 | **100** | 11, 12 | [`100-profile-detection-and-routing.md`](100-profile-detection-and-routing.md) | In progress | 4/6 | Epic 6 (RL engine — shipped), ~~Epic 24 (ontologies as entities)~~ — **phantom*… |
 | **101** | 11 | [`101-sparql-federation.md`](101-sparql-federation.md) | **Shipped** | 5/5 | Epic 7 (algebra and executor), Epic 13 (authorization) |
 | **102** | 11 | [`102-read-write-partitions.md`](102-read-write-partitions.md) | In progress | 1/2 | Epic 4 (the flake table), Epic 37a (the measurement) |
@@ -121,7 +121,8 @@ is the condition that index exists to catch.
 - [x] Hierarchy endpoints: roots, children, ancestors, search, stats
 - [x] `PATCH /assets/{id}` and `DELETE /assets/{id}` (soft, cascading to the subtree) — shippe
 - [x] Containment cascade characterised
-- [ ] Non-database services (dashboard, pipeline, ML) → deferred to Epic 34
+- [x] Non-database services (dashboard, pipeline, ML) → deferred to Epic 34, which shipped all
+- [ ] Cascade-on-rename for `Asset` — the original Slice E acceptance criterion ("renaming an 
 
 ### Epic 3 — Envelope, Versioning, Soft Delete & Change Events *(Demo 2)*
 
@@ -150,8 +151,8 @@ is the condition that index exists to catch.
 - [x] As-of query API
 - [x] Reconciliation and drift metric — drift computed by comparison rather than from a queue 
 - [~] Runtime predicate registry — define/lookup/list, duplicate refused, core vocabulary seed
-- [ ] `rdf:reifies` + triple terms → **Epic 94**
-- [ ] Language-tag side table → **Epic 94**, and it needs three components not two: `rdf:dirLa
+- [x] `rdf:reifies` + triple terms → **Epic 94**, shipped (Slices A, B, D)
+- [x] Language-tag side table → **Epic 94**, shipped (Slice C) via a deliberate design pivot: 
 
 ### Epic 5 — Constraint Validation *(Demo 4)*
 
@@ -449,9 +450,9 @@ is the condition that index exists to catch.
 - [x] A bounded walk in both directions, each spending its **own** budget: a merged frontier w
 - [x] A diamond yields the shared node once with both inbound edges; a tombstoned node stays i
 - [x] A cycle terminates. The graph is called acyclic because it should be, not because anythi
-- [ ] Column-level lineage — the legality table already admits `column feeds column`; nothing 
-- [ ] Connector-asserted lineage reconciles with curated edges → the two-source model above is
-- [ ] Lineage survives entity deletion → today a hard delete cascades the edge away; a tombsto
+- [x] Column-level lineage — shipped 3 August 2026; see "Epic 29 — Lineage, the column half" b
+- [x] Connector-asserted lineage reconciles with curated edges — shipped; see "Epic 29 — Linea
+- [x] Lineage survives entity deletion — shipped (soft delete retains edges and they return on
 - [x] Lineage: table and column, with source-scoped reconciliation *(Slices A–C 29 Jul, D–F 3 
 - [x] Column-level mappings, many-to-one
 - [x] Source-scoped reconciliation
@@ -611,6 +612,7 @@ is the condition that index exists to catch.
 ### Epic 96 — SHACL-SPARQL *(Demo 10)*
 
 - [x] `sh:sparql`/`sh:SPARQLConstraint`, the bare constraint — shipped 8 August 2026
+- [x] The bare constraint is now actually reachable — found and fixed 8 August 2026
 - [ ] SPARQL-based constraint components (`sh:SPARQLConstraintComponent`, `sh:parameter`, `sh:
 - [ ] The violations workflow is unchanged; **authoring gains a second language**, so the cons
 
@@ -622,12 +624,16 @@ is the condition that index exists to catch.
 ### Epic 98 — OWL 2 EL Reasoning *(Demo 11, 12)*
 
 - [x] EL and QL reasoners alongside RL — **Both shipped, 5 August 2026
+- [x] `qlRewrite`/`refusedAxioms` now actually reach `/sparql`'s response — found and fixed 8 
 - [ ] No UI of their own
+- [x] Epic 98's EL classification is now actually reachable — found and fixed 8 August 2026
 
 ### Epic 99 — OWL 2 QL Reasoning *(Demo 11, 12)*
 
 - [x] EL and QL reasoners alongside RL — **Both shipped, 5 August 2026
+- [x] `qlRewrite`/`refusedAxioms` now actually reach `/sparql`'s response — found and fixed 8 
 - [ ] No UI of their own
+- [x] Epic 98's EL classification is now actually reachable — found and fixed 8 August 2026
 
 ### Epic 100 — Ontology Profile Detection & Routing *(Demo 11, 12)*
 

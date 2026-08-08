@@ -248,6 +248,8 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/reasoning/runs", post(run_reasoning))
         .route("/reasoning/explain", get(explain_fact))
         .route("/reasoning/derived", get(derived_about))
+        .route("/reasoning/el/classify", post(classify_ontology))
+        .route("/reasoning/el/explain", get(explain_el_subsumption))
         .route("/validation/runs", post(run_validation))
         .route("/validation/shapes/seed", post(seed_core_shapes))
         .route("/validation/report", get(validation_report))
@@ -2590,7 +2592,48 @@ fn query_outcome_json(outcome: &graph_owl_api::SparqlOutcome) -> serde_json::Val
         // "no such data" or omitted from the response entirely.
         "federatedEndpoints": outcome.federated_endpoints,
         "silencedFailures": outcome.silenced_endpoints,
+        // Epic 99 Slices B/C: the OWL 2 QL rewrite this query underwent, and
+        // any construct QL could not rewrite through. Both fields existed on
+        // `SparqlOutcome` and were populated server-side since Epic 99
+        // shipped, but were never serialized here — two of that epic's own
+        // checked acceptance criteria ("the rewritten query is retrievable",
+        // "an axiom outside QL is reported, not silently dropped") were true
+        // only inside the Rust process, never in the wire response a real
+        // client actually sees. Found wiring `plans/EPIC-COMPLETION-PLAN.md`
+        // Phase 1.2.
+        "qlRewrite": outcome.ql_rewrite.as_ref().map(|rewrite| json!({
+            "expandedQuery": rewrite.expanded_query,
+            "branches": rewrite.branches.iter().map(|branch| json!({
+                "class": branch.class.to_string(),
+                "subclassOf": branch.subclass_of.to_string(),
+            })).collect::<Vec<_>>(),
+        })),
+        "refusedAxioms": outcome.refused_axioms.iter().map(|refused| json!({
+            "class": refused.class.to_string(),
+            "construct": forbidden_construct_name(refused.construct),
+        })).collect::<Vec<_>>(),
     })
+}
+
+/// `graph_owl_reasoning_ql::ForbiddenConstruct` has no `Serialize` impl —
+/// it holds no `Sid`, so it could derive one, but every sibling enum this
+/// project puts on the wire (`RuleName`) is rendered `camelCase` by a derive
+/// with that exact convention, and matching that by hand here keeps the
+/// mapping in one place a reviewer can check against the enum's variants
+/// directly, rather than trusting a derive macro nobody re-reads.
+fn forbidden_construct_name(construct: graph_owl_reasoning_ql::ForbiddenConstruct) -> &'static str {
+    use graph_owl_reasoning_ql::ForbiddenConstruct::{
+        Cardinality, FunctionalProperty, HasKey, InverseFunctionalProperty, PropertyChain,
+        TransitiveProperty,
+    };
+    match construct {
+        PropertyChain => "propertyChain",
+        TransitiveProperty => "transitiveProperty",
+        FunctionalProperty => "functionalProperty",
+        InverseFunctionalProperty => "inverseFunctionalProperty",
+        HasKey => "hasKey",
+        Cardinality => "cardinality",
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -2773,11 +2816,20 @@ async fn restore_archive(
     Ok(Json(outcome?))
 }
 
-/// Run a validation pass and replace the stored queue — Epic 5 Slice C.
+/// Run a validation pass and replace the stored queue — Epic 5 Slice C, plus
+/// every `sh:sparql`/`sh:SPARQLConstraint` shape (Epic 96 Slice A).
 ///
 /// Admin-only and `POST`, for the reasons the reasoning run is: a full pass
 /// over the estate is the cheapest way an unprivileged caller could load the
 /// database, and it replaces stored state.
+///
+/// **Calls `run_validation_as`, not the plain `run_validation`.** Only the
+/// former evaluates SPARQL constraints — the plain pass reports every one of
+/// them as satisfied unconditionally. Calling the wrong one here meant a
+/// `sh:sparql` shape produced zero violations through this endpoint no
+/// matter what the data said, even though the evaluator itself was correct
+/// and unit-tested (found while wiring Epic 96 into
+/// `plans/EPIC-COMPLETION-PLAN.md`'s Phase 1 audit).
 async fn run_validation(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
@@ -2785,7 +2837,11 @@ async fn run_validation(
     if !principal.is_admin {
         return Err(AppError::NotFound);
     }
-    Ok(Json(catalog.run_validation().await?))
+    Ok(Json(
+        catalog
+            .run_validation_as(&principal, SparqlBudget::default())
+            .await?,
+    ))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -6638,6 +6694,88 @@ async fn run_reasoning(
         .run_reasoning(&graph_owl_reasoning::Budget::default())
         .await?;
     Ok(Json(report))
+}
+
+/// Classify the ontology's `TBox` against OWL 2 EL via the `whelk` sidecar
+/// — Epic 98. Admin-gated, the same reason `run_reasoning` is: this spawns
+/// an external process over the whole `TBox`.
+///
+/// **`Catalog::classify_ontology` had no route at all until this one** —
+/// found wiring `plans/EPIC-COMPLETION-PLAN.md` Phase 1.3. The sidecar
+/// invocation, budget handling, caching and explanation were all correct
+/// and tested; EL classification was simply unreachable in a running
+/// deployment, and still returns a named `Validation` error rather than a
+/// generic failure when no sidecar is configured (`GRAPH_OWL_EL_SIDECAR`
+/// unset), the same as it always has for a direct `Catalog` caller.
+async fn classify_ontology(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let classification = catalog.classify_ontology().await?;
+    Ok(Json(el_classification_body(&classification)))
+}
+
+fn el_classification_body(classification: &graph_owl_api::ElClassification) -> serde_json::Value {
+    json!({
+        "subsumptions": classification.subsumptions.iter().map(|(sub, sup)| json!({
+            "subclass": sub.to_string(),
+            "superclass": sup.to_string(),
+        })).collect::<Vec<_>>(),
+        "refusedAxioms": classification.refused_axioms.iter().map(|refused| json!({
+            "subject": refused.subject.to_string(),
+            "construct": forbidden_el_construct_name(refused.construct),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// `graph_owl_reasoning_el::ForbiddenElConstruct` has no `Serialize` impl,
+/// the same reason and the same fix as `forbidden_construct_name` above.
+fn forbidden_el_construct_name(
+    construct: graph_owl_reasoning_el::ForbiddenElConstruct,
+) -> &'static str {
+    use graph_owl_reasoning_el::ForbiddenElConstruct::{
+        Cardinality, Disjunction, InverseObjectProperty, Negation, UniversalQuantification,
+    };
+    match construct {
+        UniversalQuantification => "universalQuantification",
+        Cardinality => "cardinality",
+        Disjunction => "disjunction",
+        Negation => "negation",
+        InverseObjectProperty => "inverseObjectProperty",
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ElExplainQuery {
+    subclass: String,
+    superclass: String,
+}
+
+/// Why `subclass` is classified under `superclass` — Epic 98 Slice D.
+///
+/// **Had no route at all until this one** — same finding as
+/// `classify_ontology` above. `404` when no such subsumption holds, the
+/// same "absent is absent" convention `explain_fact` already established
+/// for the RL/OWL overlay: read-only, and never admin-gated, since
+/// re-deriving one explanation over already-fetched TBox edges costs
+/// nothing like a whole classification run does.
+async fn explain_el_subsumption(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Query(query): Query<ElExplainQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let subclass = parse_sid("subclass", &query.subclass)?;
+    let superclass = parse_sid("superclass", &query.superclass)?;
+
+    match catalog.explain_subsumption(&subclass, &superclass).await? {
+        Some(path) => Ok(Json(json!(
+            path.iter().map(ToString::to_string).collect::<Vec<_>>()
+        ))),
+        None => Err(AppError::NotFound),
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]

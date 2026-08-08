@@ -41,6 +41,15 @@ graph-owl-bolt = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 graph-owl-reasoning = { path = "../graph-owl-reasoning" }
+# Epic 99: `ForbiddenConstruct` (naming what `/sparql`'s QL rewrite could not
+# express) is rendered directly in `query_outcome_json` — it holds no `Sid`
+# and has no `Serialize` impl of its own, so the response builder names each
+# variant by hand rather than deriving one just for this one call site.
+graph-owl-reasoning-ql = { path = "../graph-owl-reasoning-ql" }
+# Epic 98: `ForbiddenElConstruct`, named by hand in `el_classification_body`
+# for the identical reason `graph-owl-reasoning-ql` is above. Also needed by
+# `main.rs` to configure the optional `whelk` sidecar from the environment.
+graph-owl-reasoning-el = { path = "../graph-owl-reasoning-el" }
 # Epic 9 Slice B: the served, versioned JSON-LD `@context` route compacted
 # output references by URL — `JsonLdContext::to_document()` is the same
 # function `graph-owl-rdf-io`'s own serializer compacts against.

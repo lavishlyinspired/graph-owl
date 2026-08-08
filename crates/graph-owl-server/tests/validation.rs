@@ -616,3 +616,88 @@ async fn a_finding_cannot_be_waived_twice_and_a_waiver_can_be_withdrawn() {
         "the waiver outlived its revocation: {after}"
     );
 }
+
+/// A `sh:sparql`/`sh:SPARQLConstraint` shape — the SHACL-SPARQL escape
+/// hatch (Epic 96 Slice A). `Catalog::run_validation_as` is the only method
+/// that evaluates it; `POST /validation/runs` must call that one, not the
+/// plain `run_validation` that silently treats every SPARQL constraint as
+/// satisfied. Fixture mirrors `graph_owl_api`'s own
+/// `sparql_constraint_validation` unit tests.
+async fn seed_no_owner_shape(store: &graph_owl_engine_postgres::PostgresTripleStore) {
+    const NO_OWNER_QUERY: &str = "SELECT $this WHERE { \
+        FILTER NOT EXISTS { $this <https://graph-owl.dev/ns/catalog#owner> ?o } }";
+    let t = store.next_time().await.expect("a transaction time");
+    let shapes_graph = Sid::dsc("graph:shapes");
+    let in_shapes = |s: Sid, p: Sid, o: FlakeValue| Flake {
+        s,
+        p,
+        o,
+        cx: Some(shapes_graph.clone()),
+        t,
+        op: true,
+    };
+    let facts = vec![
+        in_shapes(
+            a("NoOwnerShape"),
+            rdf_type(),
+            FlakeValue::Ref(sh("NodeShape")),
+        ),
+        in_shapes(
+            a("NoOwnerShape"),
+            sh("targetClass"),
+            FlakeValue::Ref(a("Unowned")),
+        ),
+        in_shapes(
+            a("NoOwnerShape"),
+            sh("sparql"),
+            FlakeValue::Ref(a("NoOwnerShape/constraint")),
+        ),
+        in_shapes(
+            a("NoOwnerShape/constraint"),
+            sh("select"),
+            FlakeValue::String(NO_OWNER_QUERY.to_string()),
+        ),
+    ];
+    store.assert_flakes(&facts).await.expect("seed the shape");
+}
+
+async fn seed_unowned_offender(store: &graph_owl_engine_postgres::PostgresTripleStore) {
+    let t = store.next_time().await.expect("a transaction time");
+    store
+        .assert_flakes(&[Flake::assert(
+            a("orphaned-table"),
+            rdf_type(),
+            FlakeValue::Ref(a("Unowned")),
+            t,
+        )])
+        .await
+        .expect("seed the table");
+}
+
+/// **Phase 1.1 of `plans/EPIC-COMPLETION-PLAN.md`**: `POST /validation/runs`
+/// called `catalog.run_validation()`, which never evaluates `sh:sparql` at
+/// all — a shape using it would report zero violations forever, regardless
+/// of the data. Only `run_validation_as` evaluates it. This is the RED test
+/// for that fix: it drives the real HTTP endpoint, not `Catalog` directly.
+#[tokio::test]
+async fn a_sparql_constraint_shape_is_actually_evaluated_through_the_http_endpoint() {
+    let (app, _database, connection_string) = test_app().await;
+    let store = graph(&connection_string).await;
+    seed_no_owner_shape(&store).await;
+    seed_unowned_offender(&store).await;
+
+    let run = run_validation(&app).await;
+
+    assert_eq!(run["shapes"], 1, "{run}");
+    assert_eq!(run["conforms"], false, "{run}");
+    assert_eq!(
+        run["violations"], 1,
+        "the SPARQL constraint must have actually run against the seeded offender: {run}"
+    );
+
+    let queue = report(&app, "").await;
+    let rows = queue["data"].as_array().expect("data");
+    assert_eq!(rows.len(), 1, "{queue}");
+    assert_eq!(rows[0]["focusNode"], "1:orphaned-table", "{queue}");
+    assert_eq!(rows[0]["constraint"], "sparql", "{queue}");
+}

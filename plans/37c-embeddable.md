@@ -1,6 +1,6 @@
 # Plan: Embeddable Library (Epic 37c) ★
 **Branch**: feat/embeddable
-**Status**: Slices A–D shipped 4 August 2026. `graph-owl-storage-memory` is now a real published crate (Slice B), `examples/embedded.rs` proves the embedding claim end to end (Slice C), and both `core` and `api` now build under `#![deny(missing_docs)]` with doctests and a stated stability policy (Slice D). Slice E (publish metadata, `cargo publish --dry-run`) remains. Slice F stays blocked on Epic 34, unchanged.
+**Status**: Slices A–D shipped 4 August 2026. `graph-owl-storage-memory` is now a real published crate (Slice B), `examples/embedded.rs` proves the embedding claim end to end (Slice C), and both `core` and `api` now build under `#![deny(missing_docs)]` with doctests and a stated stability policy (Slice D). Slice E (publish metadata, `cargo publish --dry-run`) remains. **Slice F's stated blocker is stale**: it names Epic 34 (a second entity family to expand the embedding surface against), but Epic 34 shipped 5 August 2026 — one day *after* these Slices A–D — and nobody has revisited Slice F since. It is unblocked and unstarted, not blocked.
 **Depends on**: Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate against)
 **Differentiator** — see `plans/00a-product-position.md`
 **Crates**: **`graph-owl-storage-memory`** (new — promoted from the test fake to a published crate) · `graph-owl-core` + `graph-owl-api` (documented, `#![deny(missing_docs)]`, published) · dependency-boundary CI check

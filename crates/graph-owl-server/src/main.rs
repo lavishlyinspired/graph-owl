@@ -100,11 +100,24 @@ async fn main() {
         Err(_) => graph_owl_api::federation::DEFAULT_TIMEOUT,
     };
 
-    let catalog = Catalog::new(Arc::new(storage))
+    let mut catalog = Catalog::new(Arc::new(storage))
         .with_graph(graph.clone())
         .with_traversal(graph)
         .with_federation_endpoints(federation_endpoints)
         .with_federation_timeout(federation_timeout);
+    // Epic 98: off by default, like every other deployment-level capability
+    // here. `Catalog::classify_ontology`/`explain_subsumption` existed and
+    // were tested since this epic shipped, but nothing ever called
+    // `with_el_sidecar` outside a test — found wiring
+    // `plans/EPIC-COMPLETION-PLAN.md` Phase 1.3. A bare name (`"whelk"`,
+    // resolved via `PATH`) or an absolute path both work, matching
+    // `SidecarConfig::binary`'s own doc comment.
+    if let Ok(binary) = std::env::var("GRAPH_OWL_EL_SIDECAR") {
+        catalog = catalog.with_el_sidecar(graph_owl_reasoning_el::SidecarConfig {
+            binary: std::path::PathBuf::from(binary),
+            budget: graph_owl_reasoning_el::ElBudget::default(),
+        });
+    }
 
     // Resumes every enabled subscription from its last committed offset —
     // Epic 19 decision 1 ("a durable subscription, not a push endpoint")

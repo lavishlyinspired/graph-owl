@@ -7830,6 +7830,58 @@
         "summary": "What the reasoner concluded about one subject"
       }
     },
+    "/reasoning/el/classify": {
+      "post": {
+        "operationId": "post_reasoning_el_classify",
+        "responses": {
+          "200": {
+            "description": "Classify the ontology's TBox against OWL 2 EL via the whelk sidecar"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Classify the ontology's TBox against OWL 2 EL via the whelk sidecar"
+      }
+    },
+    "/reasoning/el/explain": {
+      "get": {
+        "operationId": "get_reasoning_el_explain",
+        "responses": {
+          "200": {
+            "description": "Why one class is classified under another, per OWL 2 EL"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Why one class is classified under another, per OWL 2 EL"
+      }
+    },
     "/reasoning/explain": {
       "get": {
         "operationId": "get_reasoning_explain",
