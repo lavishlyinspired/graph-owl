@@ -66,9 +66,40 @@ async fn loaded_store() -> (PostgresTripleStore, common::TestDb) {
         store.assert_flakes(&batch).await.expect("bulk load");
     }
 
+    // Epic 102: `assert_flakes` writes only to `flakes_delta` (minimal
+    // index — see `V9__flakes_delta_partition.sql`), and this test is
+    // specifically about `flakes_main`'s four *read-optimised* orderings,
+    // not the write path. Moved by hand rather than through a real
+    // compaction pass, which this epic has not built yet — the same
+    // stand-in `tests/partition_split.rs` uses, and for the same reason:
+    // this test's premise ("100k flakes, check the plan uses the right
+    // index") is a property of `flakes_main`'s schema, independent of how
+    // a row arrives there.
+    sqlx::query(
+        "INSERT INTO flakes_main
+             (id, namespace_s, sid_s, namespace_p, sid_p, value_type, value_key,
+              value_ref_ns, value_ref_id, value_str, value_bool, value_int,
+              value_float, value_inst, value_json, value_bytes, value_uuid,
+              value_lang, value_dir, cx_namespace, cx_id, t, op)
+         SELECT id, namespace_s, sid_s, namespace_p, sid_p, value_type, value_key,
+                value_ref_ns, value_ref_id, value_str, value_bool, value_int,
+                value_float, value_inst, value_json, value_bytes, value_uuid,
+                value_lang, value_dir, cx_namespace, cx_id, t, op
+         FROM flakes_delta",
+    )
+    .execute(store.pool())
+    .await
+    .expect("move to main");
+    sqlx::query("DELETE FROM flakes_delta")
+        .execute(store.pool())
+        .await
+        .expect("clear delta");
+
     // Without fresh statistics the planner is working from defaults and its
-    // choice says nothing about the data.
-    sqlx::query("ANALYZE flakes")
+    // choice says nothing about the data. `flakes` is a view now (the same
+    // migration) and `ANALYZE` cannot target one — it silently skips with a
+    // warning rather than failing, found only by checking, not assuming.
+    sqlx::query("ANALYZE flakes_main")
         .execute(store.pool())
         .await
         .expect("analyze");
@@ -83,10 +114,22 @@ fn assert_uses_index(plan: &str, expected: &str, shape: &str) {
     );
 }
 
+/// **`flakes_main` specifically, not the whole plan text — found running
+/// this suite after Epic 102's split, not designed around in advance.**
+/// `flakes_delta` intentionally carries only one index (the SPOT-style
+/// identity constraint; `V9__flakes_delta_partition.sql`), so a shape that
+/// index cannot serve — e.g. `(?, p, ?)`, which does not bind subject —
+/// legitimately falls back to `Seq Scan on flakes_delta` in the plan. That
+/// is by design, not a regression: it is the entire tradeoff the split
+/// makes, and it stays cheap only because delta is meant to stay small
+/// between compaction passes. What this test must still catch is a scan of
+/// `flakes_main` — the table all four orderings exist to keep indexed —
+/// which is the only sequential scan this schema was ever supposed to
+/// avoid.
 fn assert_no_sequential_scan(plan: &str, shape: &str) {
     assert!(
-        !plan.contains("Seq Scan on flakes"),
-        "{shape} fell back to a sequential scan over 100k flakes.\nPlan was:\n{plan}"
+        !plan.contains("Seq Scan on flakes_main"),
+        "{shape} fell back to a sequential scan over flakes_main.\nPlan was:\n{plan}"
     );
 }
 

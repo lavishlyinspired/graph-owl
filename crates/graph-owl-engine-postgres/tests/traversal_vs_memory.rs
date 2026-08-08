@@ -135,7 +135,10 @@ async fn compare_at_depth(depth: usize) {
     );
     eprintln!("{:->6}-+-{:->14}-+-{:->14}-+-{:->8}", "", "", "", "");
 
-    let steps: Vec<usize> = (1..=depth).step_by((depth / 4).max(1)).chain([depth]).collect();
+    let steps: Vec<usize> = (1..=depth)
+        .step_by((depth / 4).max(1))
+        .chain([depth])
+        .collect();
     for max_hops in steps {
         let (pg_time, pg_count) = timed_neighbours(postgres.as_ref(), max_hops).await;
         let (mem_time, mem_count) = timed_neighbours(&memory, max_hops).await;

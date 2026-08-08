@@ -270,6 +270,59 @@ impl PostgresTripleStore {
             .join("\n"))
     }
 
+    /// Epic 102: move up to `batch_size` rows from `flakes_delta` into
+    /// `flakes_main`, oldest first, and report how many moved.
+    ///
+    /// One statement: a `DELETE ... RETURNING` feeding an `INSERT ...
+    /// SELECT` through a CTE, so the move is atomic by construction — no
+    /// explicit transaction to open or forget to commit. That atomicity is
+    /// what makes repeated small-batch calls an *interruptible* compaction
+    /// pass (`102-read-write-partitions.md` decision 3): every call either
+    /// fully happens or fully does not, so a process that stops calling
+    /// this between calls (a crash, a deliberate pause) leaves some rows
+    /// moved and some not, and the `flakes` view resolves correctly either
+    /// way — a row is current-state-visible whichever partition currently
+    /// holds it.
+    ///
+    /// `ON CONFLICT DO NOTHING` on the insert guards against a row that
+    /// somehow already exists in main with an identical uniqueness key —
+    /// not expected to happen given each delta row moves exactly once, but
+    /// cheap to guard against, matching `write()`'s own idempotency
+    /// posture on the same uniqueness index.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Backend`] if the move fails.
+    pub async fn compact(&self, batch_size: i64) -> Result<u64, EngineError> {
+        let rows_affected = sqlx::query(
+            "WITH moved AS (
+                 DELETE FROM flakes_delta
+                 WHERE id IN (SELECT id FROM flakes_delta ORDER BY id LIMIT $1)
+                 RETURNING namespace_s, sid_s, namespace_p, sid_p, value_type, value_key,
+                           value_ref_ns, value_ref_id, value_str, value_bool, value_int,
+                           value_float, value_inst, value_json, value_bytes, value_uuid,
+                           value_lang, value_dir, cx_namespace, cx_id, t, op
+             )
+             INSERT INTO flakes_main
+                 (namespace_s, sid_s, namespace_p, sid_p, value_type, value_key,
+                  value_ref_ns, value_ref_id, value_str, value_bool, value_int,
+                  value_float, value_inst, value_json, value_bytes, value_uuid,
+                  value_lang, value_dir, cx_namespace, cx_id, t, op)
+             SELECT namespace_s, sid_s, namespace_p, sid_p, value_type, value_key,
+                    value_ref_ns, value_ref_id, value_str, value_bool, value_int,
+                    value_float, value_inst, value_json, value_bytes, value_uuid,
+                    value_lang, value_dir, cx_namespace, cx_id, t, op
+             FROM moved
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(batch_size)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| EngineError::Backend(e.to_string()))?
+        .rows_affected();
+        Ok(rows_affected)
+    }
+
     /// The one place a flake row is written.
     ///
     /// `op` comes from the calling verb, never from the flake: an assertion
@@ -309,8 +362,14 @@ impl PostgresTripleStore {
             .map_err(|e| EngineError::Backend(e.to_string()))?;
 
         for chunk in encoded.chunks(MAX_FLAKES_PER_STATEMENT) {
+            // Epic 102: every write lands in `flakes_delta`, never directly in
+            // `flakes_main` — this is the one place a row is written, and
+            // `flakes_delta` is the only table a write can reach. Reads still
+            // go through the `flakes` view (`current_state_query`,
+            // `push_live_flakes`), which unions both partitions, so a write
+            // here is visible immediately with no change to either reader.
             let mut builder = QueryBuilder::new(
-                "INSERT INTO flakes (namespace_s, sid_s, namespace_p, sid_p, value_type, \
+                "INSERT INTO flakes_delta (namespace_s, sid_s, namespace_p, sid_p, value_type, \
                  value_key, value_ref_ns, value_ref_id, value_str, value_bool, value_int, \
                  value_float, value_inst, value_json, value_bytes, value_uuid, value_lang, \
                  value_dir, cx_namespace, cx_id, t, op) ",
