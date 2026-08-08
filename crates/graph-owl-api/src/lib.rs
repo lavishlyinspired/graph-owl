@@ -26057,6 +26057,456 @@ mod projection_isolation_tests {
             assert_eq!(asset.description, None, "nothing landed");
         }
 
+        // ---- Phase 3 item 3.6: the other 8 capabilities, wired ----
+
+        /// **Accepting a tags proposal applies every tag in the list.** Mirrors
+        /// `ApplyTags`'s own direct-apply behaviour (Automated/Suggested), now
+        /// reachable through the human-review path too.
+        #[tokio::test]
+        async fn accepting_a_tags_proposal_applies_every_tag() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeTags]))).await;
+            let classification = catalog
+                .create_classification(&steward(), "sensitivity".to_string(), None, false)
+                .await
+                .expect("classification");
+            let pii = catalog
+                .create_tag(&steward(), classification.id, "pii".to_string(), None)
+                .await
+                .expect("tag");
+
+            let proposal = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::ProposeTags,
+                    "warehouse",
+                    serde_json::json!({ "tags": [pii.fully_qualified_name] }),
+                    "column names suggest personal data",
+                    0.9,
+                )
+                .await
+                .expect("proposed");
+
+            catalog
+                .accept_proposal(&steward(), proposal.id)
+                .await
+                .expect("accepted");
+
+            let labels = catalog.labels_on("warehouse").await.expect("labels");
+            assert!(
+                labels
+                    .iter()
+                    .any(|label| label.tag_fqn == pii.fully_qualified_name),
+                "the tag must actually land on the asset: {labels:?}"
+            );
+        }
+
+        /// **Accepting an owner proposal sets the owners**, replacing whatever
+        /// was there — `set_asset_owners`'s own contract, now reachable through
+        /// acceptance.
+        #[tokio::test]
+        async fn accepting_an_owner_proposal_sets_the_owners() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeOwner]))).await;
+            catalog
+                .upsert_team(&graph_owl_storage::Team {
+                    id: "platform".to_string(),
+                    display_name: "Platform".to_string(),
+                    description: None,
+                    members: Vec::new(),
+                    parent_team_id: None,
+                })
+                .await
+                .expect("team");
+
+            let proposal = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::ProposeOwner,
+                    "warehouse",
+                    serde_json::json!({ "owner": [{ "id": "platform", "kind": "team" }] }),
+                    "platform team's connector cataloged this",
+                    0.9,
+                )
+                .await
+                .expect("proposed");
+
+            catalog
+                .accept_proposal(&steward(), proposal.id)
+                .await
+                .expect("accepted");
+
+            let asset = catalog
+                .get_asset_by_fqn("warehouse")
+                .await
+                .expect("read")
+                .expect("present");
+            let owners = catalog.asset_owners(asset.id).await.expect("owners");
+            assert_eq!(owners.len(), 1);
+            assert_eq!(owners[0].id, "platform");
+        }
+
+        /// **An owner shaped wrong is a validation error, not a panic or a
+        /// silent no-op.** `OwnerRef` refuses to infer `kind`, so a malformed
+        /// `change` must be reported, not guessed at.
+        #[tokio::test]
+        async fn an_owner_proposal_shaped_wrong_is_refused_not_applied() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::ProposeOwner]))).await;
+            let proposal = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::ProposeOwner,
+                    "warehouse",
+                    serde_json::json!({ "owner": "platform" }),
+                    "guessed a bare string",
+                    0.9,
+                )
+                .await
+                .expect("proposed");
+
+            let outcome = catalog.accept_proposal(&steward(), proposal.id).await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::Validation(_))),
+                "{outcome:?}"
+            );
+            let asset = catalog
+                .get_asset_by_fqn("warehouse")
+                .await
+                .expect("read")
+                .expect("present");
+            assert!(
+                catalog
+                    .asset_owners(asset.id)
+                    .await
+                    .expect("owners")
+                    .is_empty(),
+                "nothing must land from a proposal the applier could not read"
+            );
+        }
+
+        /// **Accepting a memory proposal writes an agent-authored `Memory`**,
+        /// anchored to the target with `About`, carrying the proposal's own
+        /// confidence.
+        #[tokio::test]
+        async fn accepting_a_memory_proposal_creates_an_agent_authored_memory() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::RecordMemory]))).await;
+            let proposal = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::RecordMemory,
+                    "warehouse",
+                    serde_json::json!({ "content": "this schema only gets nightly loads" }),
+                    "observed three nights of load timestamps",
+                    0.75,
+                )
+                .await
+                .expect("proposed");
+
+            catalog
+                .accept_proposal(&steward(), proposal.id)
+                .await
+                .expect("accepted");
+
+            let (memories, _total) = catalog
+                .search_memories(&graph_owl_storage::MemorySearchFilter {
+                    limit: 100,
+                    ..Default::default()
+                })
+                .await
+                .expect("search");
+            let written = memories
+                .iter()
+                .find(|memory| memory.content == "this schema only gets nightly loads")
+                .expect("the memory landed");
+            assert_eq!(
+                written.authorship,
+                graph_owl_core::memory::Authorship::Agent {
+                    agent_id: "agent-alpha".to_string(),
+                    model: "unknown".to_string(),
+                },
+                "authored by the agent, not the approving steward"
+            );
+            assert!((written.confidence - 0.75).abs() < 1e-9);
+        }
+
+        /// **An investigation's evidence becomes real links when it resolves**,
+        /// and stays in `content` either way — nothing an agent cited is
+        /// silently dropped even when the schema has no link target for it.
+        #[tokio::test]
+        async fn accepting_an_investigation_links_evidence_that_resolves_to_an_asset() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::RecordInvestigation]))).await;
+            let evidence_asset = catalog
+                .upsert_asset(&Principal::system(), service("orders-db"))
+                .await
+                .expect("evidence asset");
+
+            let proposal = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::RecordInvestigation,
+                    "warehouse",
+                    serde_json::json!({
+                        "findings": "the nightly load silently drops late-arriving rows",
+                        "evidence": ["orders-db", "a query nobody catalogued"],
+                    }),
+                    "compared row counts across two runs",
+                    0.85,
+                )
+                .await
+                .expect("proposed");
+
+            catalog
+                .accept_proposal(&steward(), proposal.id)
+                .await
+                .expect("accepted");
+
+            let (memories, _total) = catalog
+                .search_memories(&graph_owl_storage::MemorySearchFilter {
+                    limit: 100,
+                    ..Default::default()
+                })
+                .await
+                .expect("search");
+            let written = memories
+                .iter()
+                .find(|memory| memory.kind == graph_owl_core::memory::MemoryKind::Investigation)
+                .expect("the investigation landed");
+            assert!(
+                written.content.contains("a query nobody catalogued"),
+                "unresolvable evidence must still be readable: {}",
+                written.content
+            );
+            assert!(
+                written.links.iter().any(|link| link.relation
+                    == graph_owl_core::memory::LinkRelation::Evidence
+                    && link.target == evidence_asset.id),
+                "the evidence that does resolve must become a real link: {:?}",
+                written.links
+            );
+            assert_eq!(
+                written.links.len(),
+                2,
+                "one About link plus exactly the one evidence item that resolved: {:?}",
+                written.links
+            );
+        }
+
+        /// **A glossary term proposal lands as a `Draft`** under a lazily
+        /// provisioned glossary — never attached, since `attach_term` refuses
+        /// anything but `Approved` and a fresh term cannot be that yet.
+        #[tokio::test]
+        async fn accepting_a_glossary_term_proposal_creates_a_draft_term() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::CreateGlossaryTerm]))).await;
+            let proposal = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::CreateGlossaryTerm,
+                    "warehouse",
+                    serde_json::json!({
+                        "name": "GMV",
+                        "definition": "Gross merchandise value",
+                        "status": "draft",
+                    }),
+                    "this abbreviation appears undefined on three dashboards",
+                    0.8,
+                )
+                .await
+                .expect("proposed");
+
+            catalog
+                .accept_proposal(&steward(), proposal.id)
+                .await
+                .expect("accepted");
+
+            let glossaries = catalog.list_glossaries().await.expect("glossaries");
+            let agent_glossary = glossaries
+                .iter()
+                .find(|glossary| glossary.name == "Agent Suggestions")
+                .expect("the glossary was provisioned");
+            let terms = catalog.list_terms(agent_glossary.id).await.expect("terms");
+            let term = terms
+                .iter()
+                .find(|term| term.name == "GMV")
+                .expect("the term landed");
+            assert_eq!(term.definition, "Gross merchandise value");
+            assert_eq!(
+                term.status,
+                graph_owl_core::glossary::TermStatus::Draft,
+                "never auto-approved — naming is a governance act"
+            );
+        }
+
+        /// **A second accepted term proposal reuses the same glossary** rather
+        /// than provisioning a duplicate — the lookup-or-create must actually
+        /// look up.
+        #[tokio::test]
+        async fn a_second_glossary_term_proposal_reuses_the_agent_suggestions_glossary() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::CreateGlossaryTerm]))).await;
+            for name in ["GMV", "ARR"] {
+                let proposal = catalog
+                    .propose_as_agent(
+                        &bot(),
+                        AgentCapability::CreateGlossaryTerm,
+                        "warehouse",
+                        serde_json::json!({
+                            "name": name,
+                            "definition": "some metric",
+                            "status": "draft",
+                        }),
+                        "undefined on dashboards",
+                        0.8,
+                    )
+                    .await
+                    .expect("proposed");
+                catalog
+                    .accept_proposal(&steward(), proposal.id)
+                    .await
+                    .expect("accepted");
+            }
+
+            let glossaries = catalog.list_glossaries().await.expect("glossaries");
+            let agent_glossaries: Vec<_> = glossaries
+                .iter()
+                .filter(|glossary| glossary.name == "Agent Suggestions")
+                .collect();
+            assert_eq!(
+                agent_glossaries.len(),
+                1,
+                "must not provision a second glossary: {glossaries:?}"
+            );
+        }
+
+        /// **A quality-test proposal registers a test case**, never a result —
+        /// Epic 30's own boundary: graph-owl catalogs tests, it does not run
+        /// them.
+        #[tokio::test]
+        async fn accepting_a_quality_test_proposal_registers_the_test_case() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::CreateQualityTest]))).await;
+            let proposal = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::CreateQualityTest,
+                    "warehouse",
+                    serde_json::json!({
+                        "name": "row_count_positive",
+                        "expression": "SELECT count(*) > 0 FROM warehouse",
+                    }),
+                    "every load should leave at least one row",
+                    0.9,
+                )
+                .await
+                .expect("proposed");
+
+            catalog
+                .accept_proposal(&steward(), proposal.id)
+                .await
+                .expect("accepted");
+
+            let cases = catalog
+                .list_test_cases(Some("warehouse"), None)
+                .await
+                .expect("cases");
+            let case = cases
+                .iter()
+                .find(|case| case.name == "row_count_positive")
+                .expect("the test case landed");
+            assert_eq!(
+                case.description.as_deref(),
+                Some("SELECT count(*) > 0 FROM warehouse")
+            );
+            assert_eq!(case.test_type, "custom");
+        }
+
+        /// **A lineage proposal asserts a `Feeds` edge with `LineageSource::Agent`**
+        /// on accept — attributed to the agent via `created_by`, while `source`
+        /// records that it arrived as a reviewed agent claim rather than
+        /// something a person typed in directly.
+        #[tokio::test]
+        async fn accepting_a_lineage_proposal_asserts_the_feeds_edge() {
+            let (catalog, _) =
+                catalog_with(Some(grant_of(vec![AgentCapability::LinkLineage]))).await;
+            // `Feeds` only admits table-to-table (or column-to-column); the
+            // fixture's own "warehouse" is a `Service`, so both sides of the
+            // edge need their own tables.
+            let warehouse = catalog
+                .get_asset_by_fqn("warehouse")
+                .await
+                .expect("read")
+                .expect("present");
+            let table = |kind: AssetKind, name: &str, parent_id: Uuid| UpsertAsset {
+                kind,
+                name: name.to_string(),
+                parent_id: Some(parent_id),
+                description: None,
+                properties: None,
+                extension: None,
+            };
+            let database = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    table(AssetKind::Database, "analytics", warehouse.id),
+                )
+                .await
+                .expect("database");
+            let schema = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    table(AssetKind::Schema, "public", database.id),
+                )
+                .await
+                .expect("schema");
+            let orders = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    table(AssetKind::Table, "orders", schema.id),
+                )
+                .await
+                .expect("downstream table");
+            let raw_events = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    table(AssetKind::Table, "raw_events", schema.id),
+                )
+                .await
+                .expect("upstream table");
+
+            let proposal = catalog
+                .propose_as_agent(
+                    &bot(),
+                    AgentCapability::LinkLineage,
+                    &orders.fully_qualified_name,
+                    serde_json::json!({ "upstreamFqn": raw_events.fully_qualified_name }),
+                    "warehouse.orders's load job reads from raw_events hourly",
+                    0.9,
+                )
+                .await
+                .expect("proposed");
+
+            catalog
+                .accept_proposal(&steward(), proposal.id)
+                .await
+                .expect("accepted");
+
+            let (_nodes, edges, _truncated) = catalog
+                .lineage_graph(orders.id, 1, 0, 50)
+                .await
+                .expect("lineage graph");
+            assert!(
+                edges.iter().any(|edge| {
+                    edge.relationship == graph_owl_core::relationship_type::RelationshipType::Feeds
+                        && edge.details.source == graph_owl_core::lineage::LineageSource::Agent
+                }),
+                "expected an agent-sourced Feeds edge: {edges:?}"
+            );
+        }
+
         /// **Proposals are listable per agent**, so a steward can review an
         /// agent's track record rather than only its individual suggestions.
         #[tokio::test]
@@ -27500,11 +27950,65 @@ impl Catalog {
         Ok(())
     }
 
+    /// A `MemoryError` as the field a client can fix, mirroring
+    /// `graph-owl-server`'s own `memory_rejection` for the same reason: a
+    /// malformed proposal `change` is a validation problem, not a storage one.
+    fn memory_error_to_validation(
+        field: &str,
+        error: graph_owl_core::memory::MemoryError,
+    ) -> CatalogError {
+        use graph_owl_core::memory::MemoryError;
+        let code = match error {
+            MemoryError::NoAnchor => FieldErrorCode::Required,
+            MemoryError::NoContent => FieldErrorCode::Empty,
+            MemoryError::ConfidenceOutOfRange(_) | MemoryError::AgentWithoutConfidence => {
+                FieldErrorCode::Type
+            }
+        };
+        CatalogError::Validation(vec![FieldError::new(field, code, error.to_string())])
+    }
+
+    /// The glossary agent-drafted terms land in until a human moves them.
+    ///
+    /// **Lazily provisioned, not seeded.** No `00c`-documented "default
+    /// glossary" exists, and Epic 42 Slice B shipped multiple vocabularies
+    /// precisely so terms could be organised by domain — guessing one of those
+    /// for an agent's draft would silently misfile it. A dedicated, obviously
+    /// named glossary keeps every agent-drafted term visibly separate until a
+    /// human reviews and moves it, which is reversible; nothing else in the
+    /// product currently expresses "the default container for an unclassified
+    /// draft."
+    async fn agent_suggestions_glossary(
+        &self,
+    ) -> Result<graph_owl_storage::Glossary, CatalogError> {
+        const NAME: &str = "Agent Suggestions";
+        if let Some(existing) = self
+            .list_glossaries()
+            .await?
+            .into_iter()
+            .find(|glossary| glossary.name == NAME)
+        {
+            return Ok(existing);
+        }
+        self.create_glossary(
+            NAME,
+            Some(
+                "Terms drafted by agents via the `create_glossary_term` capability. \
+                 Always created as a draft here — naming something is a governance \
+                 act, and this glossary keeps that draft visible until a human \
+                 reviews it."
+                    .to_string(),
+            ),
+        )
+        .await
+    }
+
     /// Apply what a proposal proposed.
     ///
-    /// Only the capabilities that *can* be applied are handled; everything else
-    /// is a proposal shape nobody built an applier for yet, and is reported as
-    /// such rather than silently accepted-and-discarded.
+    /// One arm per capability that can create a `Proposal` — every variant in
+    /// [`AgentCapability`] reaches here on accept, because [`Self::propose_as_agent`]
+    /// admits any of them. The facade method each arm calls already exists from
+    /// its own epic; this is per-variant wiring.
     async fn apply_proposed_change(
         &self,
         author: &Principal,
@@ -27526,16 +28030,201 @@ impl Catalog {
                 self.update_asset(author, asset_id, &update, None).await?;
                 Ok(())
             }
-            other => Err(CatalogError::Validation(vec![FieldError::new(
-                "capability",
-                FieldErrorCode::Type,
-                format!(
-                    "`{}` proposals cannot be applied automatically yet; accept \
-                     it by making the change directly so the history says who \
-                     really made it",
-                    other.as_str()
-                ),
-            )])),
+            AgentCapability::ProposeTags | AgentCapability::ApplyTags => {
+                let tags = proposal
+                    .change
+                    .get("tags")
+                    .and_then(|value| value.as_array());
+                for tag in tags.into_iter().flatten() {
+                    let Some(tag_fqn) = tag.as_str() else {
+                        continue;
+                    };
+                    self.apply_tag(
+                        author,
+                        tag_fqn,
+                        &proposal.target_fqn,
+                        graph_owl_core::classification::LabelType::Automated,
+                        graph_owl_core::classification::LabelState::Suggested,
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+            AgentCapability::ProposeOwner => {
+                let raw = proposal
+                    .change
+                    .get("owner")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                // Accepts a single `{id, kind}` or a list of them — the tool
+                // schema leaves "the proposed value" untyped, and `OwnerRef`
+                // itself refuses to infer `kind`, so both shapes are read
+                // rather than guessed at.
+                let owners: Vec<graph_owl_core::ownership::OwnerRef> =
+                    serde_json::from_value::<Vec<graph_owl_core::ownership::OwnerRef>>(raw.clone())
+                        .or_else(|_| {
+                            serde_json::from_value::<graph_owl_core::ownership::OwnerRef>(raw)
+                                .map(|owner| vec![owner])
+                        })
+                        .map_err(|error| {
+                            CatalogError::Validation(vec![FieldError::new(
+                                "change.owner",
+                                FieldErrorCode::Type,
+                                format!(
+                                    "must be an owner `{{id, kind}}` or a list of them: {error}"
+                                ),
+                            )])
+                        })?;
+                self.set_asset_owners(asset_id, &owners).await?;
+                Ok(())
+            }
+            AgentCapability::RecordMemory => {
+                let content = proposal
+                    .change
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let memory = graph_owl_core::memory::Memory::new(
+                    graph_owl_core::memory::MemoryKind::Rationale,
+                    content,
+                    graph_owl_core::memory::Authorship::Agent {
+                        agent_id: author.id.clone(),
+                        model: "unknown".to_string(),
+                    },
+                    Some(proposal.confidence),
+                    vec![graph_owl_core::memory::MemoryLink {
+                        relation: graph_owl_core::memory::LinkRelation::About,
+                        target: asset_id,
+                    }],
+                    Utc::now(),
+                )
+                .map_err(|error| Self::memory_error_to_validation("change.content", error))?;
+                self.create_memory(&memory).await
+            }
+            AgentCapability::RecordInvestigation => {
+                let findings = proposal
+                    .change
+                    .get("findings")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                let evidence: Vec<&str> = proposal
+                    .change
+                    .get("evidence")
+                    .and_then(|value| value.as_array())
+                    .map(|items| items.iter().filter_map(|item| item.as_str()).collect())
+                    .unwrap_or_default();
+
+                let mut links = vec![graph_owl_core::memory::MemoryLink {
+                    relation: graph_owl_core::memory::LinkRelation::About,
+                    target: asset_id,
+                }];
+                // Best-effort: an evidence entry becomes a real, queryable link
+                // when it names a live asset. One that does not resolve (a test
+                // name, a query string) still survives in `content` below, so
+                // nothing an agent cited is silently dropped — it just does not
+                // get a structural link the schema has no target for.
+                for evidence_fqn in &evidence {
+                    if let Some(evidence_asset) = self.get_asset_by_fqn(evidence_fqn).await? {
+                        links.push(graph_owl_core::memory::MemoryLink {
+                            relation: graph_owl_core::memory::LinkRelation::Evidence,
+                            target: evidence_asset.id,
+                        });
+                    }
+                }
+                let mut content = findings.to_string();
+                if !evidence.is_empty() {
+                    content.push_str("\n\nEvidence examined: ");
+                    content.push_str(&evidence.join(", "));
+                }
+                let memory = graph_owl_core::memory::Memory::new(
+                    graph_owl_core::memory::MemoryKind::Investigation,
+                    content,
+                    graph_owl_core::memory::Authorship::Agent {
+                        agent_id: author.id.clone(),
+                        model: "unknown".to_string(),
+                    },
+                    Some(proposal.confidence),
+                    links,
+                    Utc::now(),
+                )
+                .map_err(|error| Self::memory_error_to_validation("change.findings", error))?;
+                self.create_memory(&memory).await
+            }
+            AgentCapability::CreateGlossaryTerm => {
+                let name = proposal
+                    .change
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                let definition = proposal
+                    .change
+                    .get("definition")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let glossary = self.agent_suggestions_glossary().await?;
+                // Always Draft (`create_term`'s own default) and never
+                // attached: `attach_term` refuses anything but `Approved`, so a
+                // freshly drafted term structurally cannot be linked yet — a
+                // human moves and attaches it through the normal term workflow.
+                self.create_term(glossary.id, name, definition, Vec::new(), Vec::new())
+                    .await?;
+                Ok(())
+            }
+            AgentCapability::CreateQualityTest => {
+                let name = proposal
+                    .change
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let expression = proposal
+                    .change
+                    .get("expression")
+                    .and_then(|value| value.as_str());
+                self.create_test_case(CreateTestCase {
+                    name,
+                    target_fqn: proposal.target_fqn.clone(),
+                    test_type: "custom".to_string(),
+                    description: expression.map(ToString::to_string),
+                    ..CreateTestCase::default()
+                })
+                .await?;
+                Ok(())
+            }
+            AgentCapability::LinkLineage => {
+                let Some(upstream_fqn) = proposal
+                    .change
+                    .get("upstreamFqn")
+                    .and_then(|value| value.as_str())
+                else {
+                    return Err(CatalogError::Validation(vec![FieldError::new(
+                        "change.upstreamFqn",
+                        FieldErrorCode::Required,
+                        "a lineage proposal needs an upstream asset".to_string(),
+                    )]));
+                };
+                let upstream = self
+                    .get_asset_by_fqn(upstream_fqn)
+                    .await?
+                    .ok_or(CatalogError::NotFound)?;
+                self.assert_lineage(
+                    author,
+                    upstream.id,
+                    asset_id,
+                    graph_owl_core::relationship_type::RelationshipType::Feeds,
+                    graph_owl_core::lineage::LineageDetails {
+                        source: graph_owl_core::lineage::LineageSource::Agent,
+                        query: None,
+                        description: Some(proposal.rationale.clone()),
+                        pipeline: None,
+                        openlineage_event_id: None,
+                    },
+                )
+                .await?;
+                Ok(())
+            }
         }
     }
 

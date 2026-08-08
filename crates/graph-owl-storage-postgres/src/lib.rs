@@ -46,6 +46,7 @@ const fn memory_kind_str(kind: MemoryKind) -> &'static str {
         MemoryKind::Incident => "incident",
         MemoryKind::Decision => "decision",
         MemoryKind::Caveat => "caveat",
+        MemoryKind::Investigation => "investigation",
     }
 }
 
@@ -125,6 +126,7 @@ fn memory_kind_from(value: &str) -> Result<MemoryKind, StorageError> {
         "incident" => Ok(MemoryKind::Incident),
         "decision" => Ok(MemoryKind::Decision),
         "caveat" => Ok(MemoryKind::Caveat),
+        "investigation" => Ok(MemoryKind::Investigation),
         other => Err(StorageError::Unexpected(format!(
             "unknown memory kind in storage: {other}"
         ))),

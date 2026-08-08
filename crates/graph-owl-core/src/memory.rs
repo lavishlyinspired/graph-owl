@@ -30,6 +30,11 @@ pub enum MemoryKind {
     Decision,
     /// How to interpret something correctly.
     Caveat,
+    /// What was examined, what was found, and the evidence for it — Epic 32's
+    /// `record_investigation`. Named in the epic plan from the start; the
+    /// variant itself was simply never added until the accept-a-proposal path
+    /// needed to construct one.
+    Investigation,
 }
 
 /// Who wrote this, and therefore how much it is worth.

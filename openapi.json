@@ -458,6 +458,13 @@
               "object",
               "null"
             ]
+          },
+          "name": {
+            "description": "The new name — Phase 3 item 3.3. Absent leaves it alone; a name can\nnever itself be cleared (unlike `description`), so this is a plain\n`Option`, not the `description` field's double option. Renaming\ncascades the fully-qualified name to every descendant in the same\ntransaction, the same guarantee Epic 23 already gives domains.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "type": "object"
@@ -1544,7 +1551,8 @@
           "rationale",
           "incident",
           "decision",
-          "caveat"
+          "caveat",
+          "investigation"
         ],
         "type": "string"
       },

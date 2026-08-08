@@ -26,6 +26,15 @@ pub enum LineageSource {
     Connector,
     /// Imported from an `OpenLineage` run event — Epic 9 Slice D.
     OpenLineage,
+    /// Asserted by an agent and accepted by a human — Epic 32's `link_lineage`.
+    /// Deliberately its own variant rather than [`LineageSource::Manual`]: that
+    /// variant means "a person said so", and an accepted agent proposal is a
+    /// person *reviewing* a claim they did not originate — a different fact
+    /// about how the edge was obtained, on the same axis `Connector` and
+    /// `OpenLineage` already separate from `Manual`. *Who gets credit* is a
+    /// separate question, answered by `LineageEdge::created_by`, which already
+    /// carries the proposing agent's id regardless of this field.
+    Agent,
 }
 
 impl LineageSource {
@@ -36,6 +45,7 @@ impl LineageSource {
             LineageSource::Manual => "manual",
             LineageSource::Connector => "connector",
             LineageSource::OpenLineage => "openlineage",
+            LineageSource::Agent => "agent",
         }
     }
 
@@ -46,6 +56,7 @@ impl LineageSource {
             "manual" => Ok(LineageSource::Manual),
             "connector" => Ok(LineageSource::Connector),
             "openlineage" => Ok(LineageSource::OpenLineage),
+            "agent" => Ok(LineageSource::Agent),
             other => Err(other.to_string()),
         }
     }

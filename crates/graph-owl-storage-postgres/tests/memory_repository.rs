@@ -134,6 +134,35 @@ async fn a_memory_round_trips_with_its_links() {
     assert_eq!(read.anchors(), vec![table]);
 }
 
+/// **`MemoryKind::Investigation` round-trips through the real `CHECK`
+/// constraint.** Epic 32's `record_investigation` was always meant to write
+/// this kind (`plans/32-agent-capabilities.md`), but the variant — and the
+/// migration widening `memories_kind_check` to admit it — did not exist until
+/// Phase 3 item 3.6. Nothing in `graph-owl-core`'s own unit tests can catch a
+/// missing `CHECK` entry; only a real Postgres write can.
+#[tokio::test]
+async fn an_investigation_memory_round_trips_through_the_check_constraint() {
+    let (storage, _database, _url) = test_storage().await;
+    let table = subject(&storage, "orders").await;
+    let written = memory(
+        MemoryKind::Investigation,
+        "The nightly load silently drops late-arriving rows past the 10-minute window.",
+        vec![about(table)],
+    );
+
+    assert_eq!(
+        storage.save_memory(&written).await.expect("save"),
+        MemoryWrite::Saved
+    );
+    let read = storage
+        .find_memory(written.id)
+        .await
+        .expect("read")
+        .expect("present");
+
+    assert_eq!(read.kind, MemoryKind::Investigation);
+}
+
 // The two authorship shapes take different columns and a `CHECK` that ties them
 // to the discriminant, so both have to be proven to survive a round trip. An
 // agent read back as a human would be the exact relabelling the domain refuses.
