@@ -156,7 +156,7 @@ value/risk, not epic number.
 | 3.10 | 96 | SPARQL-based constraint components (`sh:SPARQLConstraintComponent`, `sh:parameter`, `sh:labelTemplate`) — a real, separate mechanism (component registry + parameter substitution + message templating), not a generalization of the bare constraint | medium, possibly large if message templating is done properly | zero implementation exists; sequence after 1.1 |
 | 3.11 | 97 | `maintained_to` freshness stamp on `ReasoningReport` — track the base transaction-time watermark the last run computed against | small (<1 day) once 1.9/4.4 lands | Epic 98's EL cache already has an identical watermark pattern to copy |
 | 3.12 | 15 | Generic connector-run governance surface (open/close a run, report FQN extent for deletion reconciliation) exposed as endpoints an out-of-process Python worker can call — currently entangled entirely inside `run_postgres_connector` | large (>3 days) — see Phase 5, this is the meat of Epic 15's remaining scope | `crates/graph-owl-server/src/lib.rs:7061` |
-| 3.13 | 104 | UMLS ingestion delivery mechanism — `ingest_mrconso` has no caller anywhere (no HTTP endpoint, no CLI, no job registration). Files are typically GBs; needs progress persisted by whatever calls it. | medium (1-3 days) for a basic CLI/admin-triggered runner; see Phase 4.8 | `crates/graph-owl-connectors/src/umls.rs` |
+| 3.13 | 104 | ~~UMLS ingestion delivery mechanism~~ **DONE 8 Aug 2026** (decision 4.8: CLI subcommand) — `graph-owl umls-ingest --in <file> [--skip N]` streams an `MRCONSO.RRF` file one `POST /alignments` per row, resumable, reporting `resume with --skip N`. `graph-owl-connectors` deliberately not added as a CLI dependency (pulls in sqlx/tokio/rdkafka/pulsar unconditionally, breaking the CLI's own minimal-deps rule) — the small MRCONSO parser is independently duplicated instead, verified against the same fixture. One alignment per call preserves `upsert_alignment`'s human-confirmed protection rather than a new unprotected bulk path. `graph_owl_connectors::umls` refactored (`mrconso_alignments` extracted, `ingest_mrconso` rebuilt on it, zero behaviour change, regression-tested). Mutation testing found and closed a real skip-boundary coverage gap (`already_processed`/`one_based_line_number` extracted as tested pure functions); `ingest()`'s own HTTP body matches `backup()`/`restore()`'s pre-existing, accepted no-test-coverage precedent. | medium (1-3 days) for a basic CLI/admin-triggered runner; see Phase 4.8 | `crates/graph-owl-connectors/src/umls.rs` |
 | 3.14 | 42 | Review queue Epic 104 alignment as a 5th `QueueConfig`, once 1.7's DTO shape settles | small, once 1.7 lands | proven-generic pattern, 4 instances already exist |
 | 3.15 | 42 | Export dialog (`ExportDialog.tsx`) — does not exist at all (zero files). Needs scope/as-of/preview filtering added to the existing 5 LPG export routes plus the new RDF route (1.8), and the dialog UI itself. | medium-large | shared scope with Epic 94's RDF-export gap (1.8) — plan together |
 
@@ -197,13 +197,13 @@ restructuring `apply_order` from an all-or-nothing `Result` into something
 that isolates just the offending indices — a real algorithmic change to an
 already mutation-tested pure function.
 
-**4.4 — Incremental reasoning retraction tracking (Epic 97).** DRed exists
-and is correct, but nothing supplies it with `retracted` flakes automatically.
-**Question**: should the server track retractions itself between reasoning
-runs (a durable retraction log/watermark — more infrastructure, fully
-automatic), or should an explicit endpoint/body parameter accept a caller-
-supplied retraction list (less infrastructure, requires every caller to know
-what changed)?
+**4.4 — Incremental reasoning retraction tracking (Epic 97). DECIDED 8 Aug
+2026: server-tracked watermark/log**, not caller-supplied. DRed exists and is
+correct, but nothing supplies it with `retracted` flakes automatically. The
+server durably tracks retractions between reasoning runs and DRed maintains
+automatically with no caller involvement — real new infrastructure (a
+persistent retraction log keyed to `ReasoningReport.maintained_to`'s
+watermark), unblocking 1.9 and 3.11 together rather than sequentially.
 
 **4.5 — Health/certification filtering infrastructure (Epics 26 + 30, shared
 question).** Both want to filter/facet on a *computed* status (quality health,
@@ -216,25 +216,32 @@ on-write for just these two cases, or build a general async-refresh
 mechanism reusable by future "filter on a computed thing" needs? This is one
 decision that unblocks two epics at once.
 
-**4.6 — BFSI ontology pack scope (Epic 33).** FIBO's production distribution
-is RDF/XML with OWL-native `rdfs:label`, not the `skos:prefLabel` the shipped
-importer requires. **Question**: extend the SKOS importer to accept OWL-native
-annotation predicates as aliases (benefits future packs too), or write a
-one-off FIBO-specific conversion step? Also: the plan's narrative about
-per-axiom RL-subset-drop reporting is aspirational text, not a tracked
-acceptance criterion — should it become one, or is flat concept+relation
-import (what's actually built) sufficient for a first BFSI pack?
+**4.6 — BFSI ontology pack scope (Epic 33). DECIDED 8 Aug 2026: extend the
+SKOS importer for OWL-native labels; agent sources FIBO directly** (CC-BY 4.0,
+EDM Council, publicly hosted). FIBO's production distribution is RDF/XML with
+OWL-native `rdfs:label`, not the `skos:prefLabel` the shipped importer
+requires — `rdfs:label`/`rdfs:subClassOf` become accepted aliases in
+`crates/graph-owl-rdf-io/src/skos.rs`, benefiting any future OWL-native pack.
+Per-axiom RL-subset-drop reporting stays aspirational text, not a tracked
+acceptance criterion — flat concept+relation import is what ships.
 
-**4.7 — Alignment review DTO shape (Epic 104, blocks 1.7 and 3.14).**
-`pending_alignment_review`'s return type is described in the plan itself as
-"a deliberately minimal backend contract, not a finished API." **Question**:
-should I design the response DTO now (needed to build 1.7/3.14), or do you
-want to see/approve the shape before it's wired into a real endpoint?
+**4.7 — Alignment review DTO shape (Epic 104, blocks 1.7 and 3.14). DECIDED
+8 Aug 2026: design it now, as part of the build.** `pending_alignment_review`'s
+return type is described in the plan itself as "a deliberately minimal
+backend contract, not a finished API" — the real shape is designed and
+documented directly in the 1.7/3.14 implementation, reviewable in the diff
+rather than in a separate approval round-trip.
 
-**4.8 — UMLS ingestion delivery mechanism (Epic 104, blocks 3.13).**
-**Question**: CLI binary, admin-HTTP-triggered background job, or wired into
-the generic `/connectors/*` job framework? RRF files are typically
-gigabytes, which argues against a synchronous HTTP call.
+**4.8 — UMLS ingestion delivery mechanism (Epic 104, blocks 3.13). DECIDED
+8 Aug 2026: CLI binary/subcommand.** RRF files are typically gigabytes, which
+rules out a synchronous HTTP call, and this codebase has no async job queue
+to make an admin-HTTP-triggered background job cheap (4.5 found the identical
+gap). `ingest_mrconso` is already pure and resumable via a `skip` offset — a
+new `graph-owl-cli` subcommand reading the local RRF file, calling it in
+batches, and persisting `skip` between runs is the leanest fit, matching the
+CLI's existing Validate/Plan/Apply-against-local-files shape rather than
+building the generic `/connectors/*` job framework 3.12 already scopes as its
+own separate, large piece of work.
 
 **4.9 — Automatic partition compaction scheduling (Epic 102, follows 1.5).**
 Once a manual `POST /admin/compact` exists, **question**: is manual-trigger

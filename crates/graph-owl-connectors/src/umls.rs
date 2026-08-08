@@ -135,23 +135,29 @@ pub struct IngestProgress {
     pub errors: u64,
 }
 
-/// Ingest `MRCONSO.RRF` lines into alignment flakes, skipping the first
-/// `skip` lines.
+/// Parse `MRCONSO.RRF` lines into raw alignments, skipping the first `skip`
+/// lines.
 ///
 /// **Resumable by construction, not by tracked cross-row state.** Every
 /// row maps to its own self-contained alignment — [`atom_to_alignment`]
 /// never reads a previous row — so "skip `N`, continue" and "process from
-/// the start" produce the identical union of flakes once every row has
+/// the start" produce the identical set of alignments once every row has
 /// been seen exactly once between the two calls. The caller owns
 /// persisting `skip` between calls; this function is pure, no I/O, and
 /// does not know whether it is the first call or a resume.
+///
+/// **This, not [`ingest_mrconso`], is what a caller with no local graph to
+/// write into needs** — `graph-owl-cli` (Phase 3 item 3.13/4.8) has no
+/// direct engine access by design (decision 6, `20-metadata-as-code.md`),
+/// so it submits each `Alignment` individually over the existing, already
+/// human-confirmation-protected `POST /alignments`, never pre-converted
+/// flakes it has nowhere local to write.
 #[must_use]
-pub fn ingest_mrconso<'a>(
+pub fn mrconso_alignments<'a>(
     lines: impl Iterator<Item = &'a str>,
     skip: u64,
-    t: i64,
-) -> (Vec<Flake>, IngestProgress) {
-    let mut flakes = Vec::new();
+) -> (Vec<Alignment>, IngestProgress) {
+    let mut alignments = Vec::new();
     let mut progress = IngestProgress::default();
 
     for (index, line) in lines.enumerate() {
@@ -165,13 +171,30 @@ pub fn ingest_mrconso<'a>(
             Ok(atom) => match atom_to_alignment(&atom) {
                 None => progress.skipped += 1,
                 Some(alignment) => {
-                    flakes.extend(alignment_to_flakes(&alignment, t));
+                    alignments.push(alignment);
                     progress.aligned += 1;
                 }
             },
         }
     }
 
+    (alignments, progress)
+}
+
+/// Ingest `MRCONSO.RRF` lines into alignment flakes, skipping the first
+/// `skip` lines — [`mrconso_alignments`] plus the flake conversion, for a
+/// caller with direct graph-engine access.
+#[must_use]
+pub fn ingest_mrconso<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    skip: u64,
+    t: i64,
+) -> (Vec<Flake>, IngestProgress) {
+    let (alignments, progress) = mrconso_alignments(lines, skip);
+    let flakes = alignments
+        .iter()
+        .flat_map(|alignment| alignment_to_flakes(alignment, t))
+        .collect();
     (flakes, progress)
 }
 
@@ -356,5 +379,70 @@ mod tests {
             combined, expected,
             "resumed result must equal the uninterrupted run"
         );
+    }
+
+    /// Phase 3 item 3.13/4.8: `mrconso_alignments` is what
+    /// `graph-owl-cli`'s new `umls-ingest` subcommand calls — it has no
+    /// direct engine access (decision 6, `20-metadata-as-code.md`), so it
+    /// needs the raw `Alignment`s to submit one at a time over the existing
+    /// `POST /alignments`, not pre-converted flakes with nowhere local to
+    /// write them.
+    #[test]
+    fn mrconso_alignments_yields_the_same_alignments_ingest_mrconso_would_flake() {
+        let file = synthetic_file(3);
+
+        let (alignments, progress) = mrconso_alignments(file.iter().map(String::as_str), 0);
+
+        assert_eq!(progress.rows_processed, 3);
+        assert_eq!(progress.aligned, 3);
+        assert_eq!(alignments.len(), 3);
+        assert_eq!(
+            alignments[0],
+            Alignment::Match {
+                left: Sid::new(namespace::CUI, "C0000000"),
+                right: Sid::new(namespace::SNOMED_CT, "0000000"),
+                predicate: MatchPredicate::ExactMatch,
+                source: AlignmentSource::Curated {
+                    authority: "UMLS".to_string()
+                },
+                confidence: 1.0,
+                lossy_reverse: false,
+            }
+        );
+    }
+
+    /// **Negative half.** A skipped or errored row must not appear as an
+    /// alignment at all — the same counters `ingest_mrconso` already
+    /// proves, now proven for the function the CLI actually calls.
+    #[test]
+    fn mrconso_alignments_omits_skipped_and_errored_rows() {
+        let mut file = synthetic_file(1);
+        file.push(REAL_MRCONSO_LINE.to_string()); // skipped: SAB=MSH
+        file.push("too|few|fields".to_string()); // errored
+
+        let (alignments, progress) = mrconso_alignments(file.iter().map(String::as_str), 0);
+
+        assert_eq!(progress.rows_processed, 3);
+        assert_eq!(progress.skipped, 1);
+        assert_eq!(progress.errors, 1);
+        assert_eq!(alignments.len(), 1, "{alignments:#?}");
+    }
+
+    /// **`ingest_mrconso` is unchanged behaviour, now built on top of
+    /// `mrconso_alignments`.** Every flake test above still has to pass
+    /// unmodified — this is the refactor's own regression guard.
+    #[test]
+    fn ingest_mrconso_still_flakes_what_mrconso_alignments_would_yield() {
+        let file = synthetic_file(5);
+        let (alignments, alignment_progress) =
+            mrconso_alignments(file.iter().map(String::as_str), 0);
+        let (flakes, flake_progress) = ingest_mrconso(file.iter().map(String::as_str), 0, 1);
+
+        assert_eq!(alignment_progress, flake_progress);
+        let expected_flakes: Vec<Flake> = alignments
+            .iter()
+            .flat_map(|a| alignment_to_flakes(a, 1))
+            .collect();
+        assert_eq!(flakes, expected_flakes);
     }
 }

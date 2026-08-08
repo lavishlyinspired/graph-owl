@@ -17,4 +17,5 @@ pub mod format;
 pub mod http;
 pub mod plan;
 pub mod prune;
+pub mod umls;
 pub mod validate;

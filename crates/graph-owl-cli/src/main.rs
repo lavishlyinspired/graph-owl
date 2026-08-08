@@ -147,6 +147,18 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Stream an `MRCONSO.RRF` file into the catalog's alignment store —
+    /// Phase 3 item 3.13, decision 4.8. Streaming a multi-gigabyte file is
+    /// exactly `20-metadata-as-code.md`'s own stated CLI boundary, the same
+    /// one `backup`/`restore` already occupy.
+    UmlsIngest {
+        #[arg(long = "in")]
+        input: PathBuf,
+        /// Resume from a previous, interrupted run — the line number the
+        /// last run's summary reported as `resume with --skip N`.
+        #[arg(long, default_value_t = 0)]
+        skip: u64,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -393,6 +405,26 @@ fn run(cli: &Cli) -> Result<i32, String> {
                 corpus.soft_deleted_count,
                 corpus.has_cycle
             );
+            Ok(NO_CHANGES)
+        }
+
+        Command::UmlsIngest { input, skip } => {
+            let server = cli
+                .server
+                .as_deref()
+                .ok_or("no catalog given: pass --server or set GRAPH_OWL_SERVER")?;
+            let summary = graph_owl_cli::umls::ingest(server, cli.token.as_deref(), input, *skip)?;
+            eprintln!(
+                "{} rows read, {} submitted, {} refused, {} skipped, {} errors",
+                summary.rows_processed,
+                summary.submitted,
+                summary.refused,
+                summary.skipped,
+                summary.errors
+            );
+            if summary.rows_processed > 0 {
+                eprintln!("resume with --skip {}", summary.last_line);
+            }
             Ok(NO_CHANGES)
         }
     }
