@@ -131,9 +131,9 @@ pattern itself is the spec.
 | 2.9 | 37c | Slice E — crate publishability: `description`/`repository`/`keywords` on every crate `Cargo.toml`, `publish = false` on adapter/server crates, path→version+path deps, a `cargo publish --dry-run` CI step | small–medium | none — greenfield within the crate, mechanical across ~10 `Cargo.toml`s |
 | 2.10 | 37c | Slice F — surface survives expansion: extend `crates/graph-owl-api/examples/embedded.rs` with a second entity family, add a `cargo public-api` snapshot test | small (<1 day) | existing `embedded.rs` (60 lines, one entity kind) |
 | 2.11 | 39 | `AssetDetail`'s ancestors/children fetches swallow errors into an empty array — replicate the `*Failed` boolean pattern already used for search | trivial (<1hr) | `ui/src/App.tsx:1660-1662` next to the already-fixed search case |
-| 2.12 | 42 | Heading-order bug on Governance and Connectors pages (`<Title level={4}>` with nothing at 2/3) — the identical bug already fixed on 5 other pages | trivial | one-line change per page, `ui/src/App.tsx:3037` |
-| 2.13 | 42 | Keyboard-selection gap on `ReviewQueue.tsx`'s `List.Item` — the identical pattern already fixed in `AgentActivityPanel`'s grant table, left unfixed here on purpose ("a follow-up") | trivial | `tabIndex`/`role`/`onKeyDown` pattern already in `AgentActivityPanel.tsx` |
-| 2.14 | 42 | Agent-session deep link (`?agent=<id>`) on `AgentActivityPanel` — the one surface in this epic missing the `readParam`/`writeParam` convention every sibling surface uses | trivial | `readParam`/`writeParam` used elsewhere in the same epic |
+| 2.12 | 42 | ~~Heading-order bug on Governance and Connectors pages~~ **DONE, marked here 8 Aug 2026** (shipped earlier this session as part of the "Three more quiet gaps" fix, this row was simply never updated) — both now `<Title level={2}>`. Verified directly. | trivial | one-line change per page, `ui/src/App.tsx:3037` |
+| 2.13 | 42 | ~~Keyboard-selection gap on `ReviewQueue.tsx`'s `List.Item`~~ **DONE, marked here 8 Aug 2026** — `tabIndex={0}`/`aria-selected`/`onKeyDown` present. Verified directly. | trivial | `tabIndex`/`role`/`onKeyDown` pattern already in `AgentActivityPanel.tsx` |
+| 2.14 | 42 | ~~Agent-session deep link (`?agent=<id>`) on `AgentActivityPanel`~~ **DONE, marked here 8 Aug 2026** — `readParam("agent")`/`writeParam("agent", id)` present. Verified directly. | trivial | `readParam`/`writeParam` used elsewhere in the same epic |
 
 ---
 
@@ -305,7 +305,7 @@ medium (1-3 days), no blocking dependency.
 | 11 | 4.1 (soft-delete decision, shared with Epic 3) | 37c | 2.9 + 2.10 |
 | 14 | 5.2, gated on 4.2 | 38 | 5.7 (part needs you directly) |
 | 15 | 5.1 | 39 | 2.11 + 5.8 |
-| 16 | 2.7 + 4.3 (needs decision for full scope) | 42 | 3.2 + 3.14 DONE; 3.15 + 2.12–2.14 remain |
+| 16 | 2.7 + 4.3 (needs decision for full scope) | 42 | 3.2 + 3.14 + 2.12–2.14 DONE; 3.15 remains |
 | 19 | 2.8 | 94 | 1.8 |
 | 24 | small remaining items not itemized above (Metric-as-lineage-endpoint needs a schema decision; event emission on term transitions needs a shape decision) — see note | 96 | 1.1 + 3.10 |
 | 25 | 2.1 | 97 | 1.9 + 3.11, gated on 4.4 |
