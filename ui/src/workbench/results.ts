@@ -182,3 +182,37 @@ export function verdict(
   }
   return { warnings, canDraw: graphShape(solutions) !== null };
 }
+
+/** The fields [`alignmentBadgeLabel`] needs — a structural subset of
+ *  `AlignmentReviewEntry` (`../api`) rather than that type imported
+ *  directly: `api.ts` imports [`Solution`] from this module, so importing
+ *  back from `api.ts` here would be circular. TypeScript's structural
+ *  typing means a real `AlignmentReviewEntry` satisfies this with no
+ *  conversion. */
+export interface AlignmentBadgeInput {
+  readonly predicate: string | null;
+  readonly sourceKind: string | null;
+  readonly confidence: number | null;
+}
+
+/** The text a reader sees for one alignment a query crossed — Epic 104's
+ *  console criterion, verbatim: "a result that crossed an approximate
+ *  match must be distinguishable from one that did not, and **not by
+ *  colour alone**." This function is where that distinction actually
+ *  lives: the words themselves, not a tag's colour, are what a screen
+ *  reader, a log line, or a colour-blind reader all still get.
+ *
+ *  A curated match's confidence is never printed — decision 1 makes it
+ *  definitionally trustworthy, always `1.0`, so a `100%` on every curated
+ *  entry would be noise repeated on every row rather than information. A
+ *  computed match's confidence is **always** printed, because it is
+ *  exactly the number that says how much to trust this specific result.
+ */
+export function alignmentBadgeLabel(entry: AlignmentBadgeInput): string {
+  const predicate = entry.predicate ?? "alignment";
+  const kind = entry.sourceKind ?? "unknown";
+  if (kind === "computed" && entry.confidence !== null) {
+    return `${predicate} · computed ${Math.round(entry.confidence * 100)}%`;
+  }
+  return `${predicate} · ${kind}`;
+}

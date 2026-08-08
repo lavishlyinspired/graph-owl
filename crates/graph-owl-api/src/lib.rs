@@ -539,6 +539,13 @@ pub struct SparqlOutcome {
     /// so a client can tell "expanded, and also incomplete" from "expanded,
     /// fully".
     pub refused_axioms: Vec<graph_owl_reasoning_ql::RefusedAxiom>,
+    /// Alignments (Epic 104) this query's scoped facts crossed — the
+    /// console acceptance criterion "on any cross-vocabulary result the
+    /// alignment that made it reachable is inspectable". Query-level, not
+    /// per-row, for the same reason `federated_endpoints` is: see
+    /// [`Catalog::alignments_touched`]. Empty for the overwhelming majority
+    /// of queries, which touch no alignment predicate at all.
+    pub alignments_used: Vec<AlignmentReviewEntry>,
 }
 
 /// What one query's OWL 2 QL rewrite produced — Epic 99 Slice B. The
@@ -757,6 +764,69 @@ fn dedup_flakes(flakes: &mut Vec<graph_owl_core::flake::Flake>) {
         (&a.s, &a.p, format!("{:?}", a.o), a.t).cmp(&(&b.s, &b.p, format!("{:?}", b.o), b.t))
     });
     flakes.dedup();
+}
+
+/// An [`AlignmentReviewEntry`] resolved from a reified alignment node's own
+/// flakes — shared by [`Catalog::pending_alignment_review_detailed`] and
+/// [`Catalog::alignments_touched`] so the two call sites cannot resolve the
+/// same vocabulary two different ways. `confidence` is read from
+/// `subject_flakes` the same as every other field, rather than trusted from
+/// a separately-fetched flake: the reified node's own `confidence` flake
+/// (written by `metadata_flakes`) shares its subject with everything else
+/// resolved here, so a `TriplePattern { s: Some(subject), .. }` scan already
+/// returns it.
+fn alignment_entry_from_flakes(subject: Sid, subject_flakes: &[Flake]) -> AlignmentReviewEntry {
+    let find_ref = |name: &str| {
+        subject_flakes.iter().find_map(|f| {
+            (f.p == Sid::dsc(name))
+                .then_some(&f.o)
+                .and_then(|o| match o {
+                    FlakeValue::Ref(sid) => Some(sid.clone()),
+                    _ => None,
+                })
+        })
+    };
+    let find_string = |name: &str| {
+        subject_flakes.iter().find_map(|f| {
+            (f.p == Sid::dsc(name))
+                .then_some(&f.o)
+                .and_then(|o| match o {
+                    FlakeValue::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+        })
+    };
+    let find_bool = |name: &str| {
+        subject_flakes.iter().find_map(|f| {
+            (f.p == Sid::dsc(name))
+                .then_some(&f.o)
+                .and_then(|o| match o {
+                    FlakeValue::Boolean(b) => Some(*b),
+                    _ => None,
+                })
+        })
+    };
+    let find_float = |name: &str| {
+        subject_flakes.iter().find_map(|f| {
+            (f.p == Sid::dsc(name))
+                .then_some(&f.o)
+                .and_then(|o| match o {
+                    FlakeValue::Float(c) => Some(*c),
+                    _ => None,
+                })
+        })
+    };
+
+    AlignmentReviewEntry {
+        subject,
+        left: find_ref("alignmentLeft"),
+        right: find_ref("alignmentRight"),
+        predicate: find_string("alignmentPredicate"),
+        source_kind: find_string("alignmentSourceKind"),
+        source_detail: find_string("alignmentSourceDetail"),
+        confidence: find_float("confidence"),
+        lossy_reverse: find_bool("lossyReverse"),
+    }
 }
 
 /// Whether `namespace_code` names external vocabulary/ontology content —
@@ -2665,6 +2735,9 @@ impl Catalog {
         budget: SparqlBudget,
     ) -> Result<SparqlOutcome, CatalogError> {
         let scoped = self.scoped_facts(principal, parsed, as_of, budget).await?;
+        // Read before `scoped.dataset` is moved out below — a borrow of
+        // `scoped.facts` alone, so the two partial moves don't conflict.
+        let alignments_used = self.alignments_touched(&scoped.facts, scoped.at).await?;
 
         let query_error = |e: spareval::QueryEvaluationError| {
             CatalogError::Validation(vec![FieldError::new(
@@ -2742,6 +2815,7 @@ impl Catalog {
             // queries a caller typed as SPARQL).
             ql_rewrite: None,
             refused_axioms: Vec::new(),
+            alignments_used,
         })
     }
 
@@ -12334,51 +12408,85 @@ impl Catalog {
                 })
                 .await
                 .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            entries.push(alignment_entry_from_flakes(subject, &subject_flakes));
+        }
+        Ok(entries)
+    }
 
-            let find_ref = |name: &str| {
-                subject_flakes.iter().find_map(|f| {
-                    (f.p == Sid::dsc(name))
-                        .then_some(&f.o)
-                        .and_then(|o| match o {
-                            FlakeValue::Ref(sid) => Some(sid.clone()),
-                            _ => None,
-                        })
-                })
-            };
-            let find_string = |name: &str| {
-                subject_flakes.iter().find_map(|f| {
-                    (f.p == Sid::dsc(name))
-                        .then_some(&f.o)
-                        .and_then(|o| match o {
-                            FlakeValue::String(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                })
-            };
-            let find_bool = |name: &str| {
-                subject_flakes.iter().find_map(|f| {
-                    (f.p == Sid::dsc(name))
-                        .then_some(&f.o)
-                        .and_then(|o| match o {
-                            FlakeValue::Boolean(b) => Some(*b),
-                            _ => None,
-                        })
-                })
-            };
+    /// Alignments the query's own scoped fact set actually crossed — Epic
+    /// 104's console acceptance criterion ("on any cross-vocabulary result
+    /// the alignment that made it reachable is inspectable, a result that
+    /// crossed an approximate match must be distinguishable from one that
+    /// did not"), read by [`Self::execute_algebra`] and rendered by Epic
+    /// 41's Workbench.
+    ///
+    /// **Query-level attribution, not per-row** — the same simplification
+    /// Epic 101 Slice C's federation attribution already made for the
+    /// identical structural reason: `spareval` gives no hook to tag a bound
+    /// term with the flake that produced it, so this reports which
+    /// alignments the query's *scoped fact set* contains, not which
+    /// alignment produced which specific result row. Decision 2 keeps
+    /// alignment traversal as an ordinary flake scan with no query-layer
+    /// support, so this reads the already-scoped facts a second time rather
+    /// than adding a hook to the evaluator — the same boundary Epic 104
+    /// Slice C drew when it found and fixed `scope_facts`/`scoped_facts`
+    /// bugs without touching the query layer itself.
+    ///
+    /// Cheap on the overwhelmingly common query that touches no alignment
+    /// predicate at all: one in-memory filter over facts already fetched,
+    /// zero extra reads. Only a query whose scoped facts include an
+    /// alignment's direct triple pays for the follow-up lookup — one
+    /// `query_pattern` call per distinct alignment, the same "bounded by
+    /// what actually matched" shape [`Self::pending_alignment_review_detailed`]
+    /// already uses.
+    async fn alignments_touched(
+        &self,
+        facts: &[Flake],
+        as_of: Option<i64>,
+    ) -> Result<Vec<AlignmentReviewEntry>, CatalogError> {
+        use graph_owl_ontology::alignment::{alignment_subject_for, known_alignment_predicates};
 
-            entries.push(AlignmentReviewEntry {
-                subject,
-                left: find_ref("alignmentLeft"),
-                right: find_ref("alignmentRight"),
-                predicate: find_string("alignmentPredicate"),
-                source_kind: find_string("alignmentSourceKind"),
-                source_detail: find_string("alignmentSourceDetail"),
-                confidence: match confidence_flake.o {
-                    FlakeValue::Float(c) => Some(c),
-                    _ => None,
-                },
-                lossy_reverse: find_bool("lossyReverse"),
-            });
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let predicates = known_alignment_predicates();
+        let mut subjects: Vec<Sid> = Vec::new();
+        for fact in facts {
+            if !predicates.contains(&fact.p) {
+                continue;
+            }
+            let FlakeValue::Ref(right) = &fact.o else {
+                continue;
+            };
+            let subject = alignment_subject_for(&fact.s, &fact.p, right);
+            if !subjects.contains(&subject) {
+                subjects.push(subject);
+            }
+        }
+
+        let mut entries = Vec::new();
+        for subject in subjects {
+            let subject_flakes = graph
+                .query_pattern(&TriplePattern {
+                    s: Some(subject.clone()),
+                    as_of,
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            // The direct triple is in scope but its metadata node is not —
+            // should never happen for anything `upsert_alignment` itself
+            // wrote (`Disposition::Assert` always writes both together),
+            // but this reads the graph rather than trusting that
+            // invariant, and fabricating an entry with every field `None`
+            // would misreport an uninspectable alignment as inspectable.
+            if subject_flakes.is_empty() {
+                continue;
+            }
+            entries.push(alignment_entry_from_flakes(subject, &subject_flakes));
         }
         Ok(entries)
     }
@@ -22559,6 +22667,17 @@ mod projection_isolation_tests {
         /// *question* and not the answer, and are invisible in the result.
         pub(super) fn patterns(&self) -> Vec<TriplePattern> {
             self.queried.lock().expect("lock").clone()
+        }
+
+        /// Fixes what `time_at` resolves any instant to — used by a sibling
+        /// module's `as_of` tests to pin a historical read to an exact `t`
+        /// without needing a real wall-clock round trip. `at_resolves_to`
+        /// itself stays private; this is the same accessor-method shape as
+        /// [`Self::patterns`]/[`Self::retracted_flakes`] above, not a reason
+        /// to widen the field.
+        pub(super) fn resolve_at(&self, t: i64) {
+            self.at_resolves_to
+                .store(t, std::sync::atomic::Ordering::SeqCst);
         }
 
         fn broken() -> Arc<Self> {
@@ -34766,6 +34885,271 @@ mod cross_vocabulary_alignment_tests {
             outcome.rows
         );
     }
+
+    /// **The console acceptance criterion this slice adds**: "on any
+    /// cross-vocabulary result the alignment that made it reachable is
+    /// inspectable". Reuses the exact fixture from
+    /// `a_snomed_concept_reaches_its_rxnorm_counterpart_via_the_shared_cui`
+    /// — a query that crosses two curated alignments must report both,
+    /// resolved to their source kind and confidence, not merely their raw
+    /// subject.
+    #[tokio::test]
+    async fn a_cross_vocabulary_query_reports_the_alignments_it_crossed() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let mut flakes = alignment_to_flakes(&snomed_alignment("C0004057", "387458008"), 1);
+        flakes.extend(alignment_to_flakes(
+            &rxnorm_alignment("C0004057", "1191"),
+            1,
+        ));
+        graph
+            .assert_flakes(&flakes)
+            .await
+            .expect("seed both curated alignments");
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?rxnorm WHERE { \
+                    ?cui <http://www.w3.org/2004/02/skos/core#exactMatch> \
+                         <http://snomed.info/id/387458008> . \
+                    ?cui <http://www.w3.org/2004/02/skos/core#exactMatch> ?rxnorm . \
+                    FILTER(?rxnorm != <http://snomed.info/id/387458008>) \
+                 }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("a two-hop join through a shared CUI must parse and evaluate");
+
+        assert_eq!(
+            outcome.alignments_used.len(),
+            2,
+            "both curated alignments the join crossed must be reported: {:?}",
+            outcome.alignments_used
+        );
+        assert!(
+            outcome
+                .alignments_used
+                .iter()
+                .all(|entry| entry.source_kind.as_deref() == Some("curated")),
+            "{:?}",
+            outcome.alignments_used
+        );
+        assert!(
+            outcome
+                .alignments_used
+                .iter()
+                .all(|entry| entry.confidence == Some(1.0)),
+            "{:?}",
+            outcome.alignments_used
+        );
+        assert!(
+            outcome
+                .alignments_used
+                .iter()
+                .all(|entry| entry.predicate.as_deref() == Some("exactMatch")),
+            "{:?}",
+            outcome.alignments_used
+        );
+
+        // **Distinguishes each entry's own resolved fields, not just what
+        // both happen to share.** Two entries with identical `sourceKind`/
+        // `confidence`/`predicate` (asserted above) would pass even if
+        // `left`/`right` were resolved wrong, swapped, or blended together
+        // — this is the part of "inspectable" that actually matters: a
+        // reviewer must be able to tell *which* alignment each entry is.
+        let cui = Sid::new(namespace::CUI, "C0004057");
+        let snomed = Sid::new(namespace::SNOMED_CT, "387458008");
+        let rxnorm = Sid::new(namespace::RXNORM, "1191");
+        let snomed_entry = outcome
+            .alignments_used
+            .iter()
+            .find(|entry| entry.right.as_ref() == Some(&snomed))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the SNOMED alignment must be one of the two: {:?}",
+                    outcome.alignments_used
+                )
+            });
+        assert_eq!(snomed_entry.left.as_ref(), Some(&cui), "{snomed_entry:?}");
+        assert_eq!(snomed_entry.lossy_reverse, Some(false), "{snomed_entry:?}");
+        let rxnorm_entry = outcome
+            .alignments_used
+            .iter()
+            .find(|entry| entry.right.as_ref() == Some(&rxnorm))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the RxNorm alignment must be one of the two: {:?}",
+                    outcome.alignments_used
+                )
+            });
+        assert_eq!(rxnorm_entry.left.as_ref(), Some(&cui), "{rxnorm_entry:?}");
+        assert_ne!(
+            snomed_entry.subject, rxnorm_entry.subject,
+            "two different alignments must resolve to two different reified nodes"
+        );
+    }
+
+    /// **The negative complement, and the mutator this guards against**: a
+    /// membership check that always returns true would pass every other
+    /// test in this module. Reading an alignment's own *metadata*
+    /// (`alignmentLeft`/`alignmentRight`) is not the same as a result
+    /// crossing its *direct triple* — the one thing that actually makes a
+    /// query cross-vocabulary — so a query that reads only the former must
+    /// report no alignments used, even though the fixture is unambiguously
+    /// alignment data.
+    #[tokio::test]
+    async fn a_query_touching_only_alignment_metadata_not_the_direct_triple_reports_none() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&alignment_to_flakes(
+                &snomed_alignment("C0004057", "387458008"),
+                1,
+            ))
+            .await
+            .expect("seed one curated alignment");
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?left ?right WHERE { \
+                    ?alignment <https://graph-owl.dev/ns/catalog#alignmentLeft> ?left ; \
+                               <https://graph-owl.dev/ns/catalog#alignmentRight> ?right . \
+                 }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("reading the reified metadata directly must still evaluate");
+
+        assert!(
+            !outcome.rows.is_empty(),
+            "the fixture's metadata must be found"
+        );
+        assert!(
+            outcome.alignments_used.is_empty(),
+            "querying an alignment's *metadata* is not the same as a result \
+             reaching across vocabularies through its direct triple: {:?}",
+            outcome.alignments_used
+        );
+    }
+
+    /// A **computed** alignment confident enough to have become a graph
+    /// edge (decision 4, `>= 0.8`) must be distinguishable from a curated
+    /// one at the point a query actually crosses it — the whole reason
+    /// this criterion exists ("a result that crossed an approximate match
+    /// must be distinguishable from one that did not").
+    #[tokio::test]
+    async fn a_computed_alignment_crossed_by_a_query_is_reported_as_computed() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let computed = Alignment::Match {
+            left: Sid::new(namespace::CUI, "C9999999"),
+            right: Sid::new(namespace::SNOMED_CT, "11111111"),
+            predicate: MatchPredicate::CloseMatch,
+            source: AlignmentSource::Computed {
+                method: "embedding-cosine".to_string(),
+            },
+            confidence: 0.91,
+            lossy_reverse: false,
+        };
+        graph
+            .assert_flakes(&alignment_to_flakes(&computed, 1))
+            .await
+            .expect("seed the confident computed alignment");
+
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?snomed WHERE { \
+                    <https://uts.nlm.nih.gov/uts/umls/concept/C9999999> \
+                        <http://www.w3.org/2004/02/skos/core#closeMatch> ?snomed \
+                 }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("a query crossing the computed alignment's direct triple must evaluate");
+
+        assert_eq!(outcome.rows.len(), 1, "{:?}", outcome.rows);
+        assert_eq!(
+            outcome.alignments_used.len(),
+            1,
+            "{:?}",
+            outcome.alignments_used
+        );
+        assert_eq!(
+            outcome.alignments_used[0].source_kind.as_deref(),
+            Some("computed"),
+            "a computed match must never be reported indistinguishably from a \
+             curated one: {:?}",
+            outcome.alignments_used
+        );
+        assert_eq!(outcome.alignments_used[0].confidence, Some(0.91));
+    }
+
+    /// **`as_of` must bound the metadata lookup, not only the initial
+    /// scan.** `Catalog::alignments_touched` runs a *second* query
+    /// (resolving the reified node's own metadata) after `scoped_facts`'s
+    /// own scan already found the direct triple — this proves that second
+    /// query is bounded by the same `as_of`, not "current state". Built by
+    /// writing the direct triple alone at `t=1`, and its metadata only at
+    /// `t=2`: querying `as_of=1` must still find the row (the direct
+    /// triple existed by then) but report **no** alignment, because its
+    /// metadata genuinely did not exist yet at that point in time — an
+    /// unbounded follow-up lookup would find the `t=2` metadata anyway and
+    /// wrongly report it as available at `t=1`.
+    #[tokio::test]
+    async fn as_of_bounds_the_metadata_lookup_not_just_the_initial_scan() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let alignment = snomed_alignment("C0004057", "387458008");
+        graph
+            .assert_flakes(&[graph_owl_ontology::alignment::direct_triple(&alignment, 1)])
+            .await
+            .expect("the direct triple exists from t=1");
+        graph
+            .assert_flakes(&alignment_to_flakes(&alignment, 2))
+            .await
+            .expect("the metadata (and a duplicate direct triple) exist only from t=2");
+
+        graph.resolve_at(1);
+        let outcome = catalog
+            .sparql(
+                &Principal::system(),
+                "SELECT ?snomed WHERE { \
+                    <https://uts.nlm.nih.gov/uts/umls/concept/C0004057> \
+                        <http://www.w3.org/2004/02/skos/core#exactMatch> ?snomed \
+                 }",
+                Some(Utc::now()),
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("the direct triple existed by t=1 and must still answer");
+
+        assert_eq!(
+            outcome.rows.len(),
+            1,
+            "the direct triple existed by t=1: {:?}",
+            outcome.rows
+        );
+        assert!(
+            outcome.alignments_used.is_empty(),
+            "the metadata did not exist at t=1 — an as_of query must not \
+             report it as though it did: {:?}",
+            outcome.alignments_used
+        );
+    }
 }
 
 /// Epic 104 Slice D: confidence-band gating through `upsert_alignment`,
@@ -35086,5 +35470,43 @@ mod alignment_confidence_and_confirmation_tests {
             "no query narrowed to the confidence predicate: {:#?}",
             graph.patterns()
         );
+    }
+
+    /// [`Catalog::pending_alignment_review_detailed`] itself, directly —
+    /// every other test in this module reaches it only through
+    /// `GET /alignments/review`'s real-Postgres HTTP test
+    /// (`crates/graph-owl-server/tests/alignments.rs`), invisible to a
+    /// `--lib`-scoped mutation run. Without this, a mutant collapsing the
+    /// whole function to `Ok(vec![])` survives `--lib` even though the
+    /// function is correct and covered — the coverage just lives one crate
+    /// over, in an integration test `--lib` never runs.
+    #[tokio::test]
+    async fn pending_alignment_review_detailed_resolves_a_review_band_entry() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        catalog
+            .upsert_alignment(&computed(0.62))
+            .await
+            .expect("upsert must succeed");
+
+        let entries = catalog
+            .pending_alignment_review_detailed()
+            .await
+            .expect("review listing must succeed");
+
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.left, Some(Sid::new(namespace::CUI, "C0009044")));
+        assert_eq!(
+            entry.right,
+            Some(Sid::new(namespace::SNOMED_CT, "22298006"))
+        );
+        assert_eq!(entry.predicate.as_deref(), Some("closeMatch"));
+        assert_eq!(entry.source_kind.as_deref(), Some("computed"));
+        assert_eq!(entry.source_detail.as_deref(), Some("embedding"));
+        assert_eq!(entry.confidence, Some(0.62));
+        assert_eq!(entry.lossy_reverse, Some(false));
     }
 }

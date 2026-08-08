@@ -148,6 +148,7 @@ import {
 } from "./governance/explanation";
 import {
   type Solution,
+  alignmentBadgeLabel,
   columns as resultColumns,
   display as displayTerm,
   graphShape,
@@ -2159,6 +2160,33 @@ function WorkbenchPage({ colors }: { colors: (typeof palette)["light"] }) {
             </span>
           </Tooltip>
         )}
+        {/* Epic 104's console criterion: "on any cross-vocabulary result the
+            alignment that made it reachable is inspectable — a result that
+            crossed an approximate match must be distinguishable from one
+            that did not, and not by colour alone." The tag's own text
+            (`alignmentBadgeLabel`) carries curated-vs-computed and, for a
+            computed match, its confidence — colour here is a supplementary
+            cue, never the only signal. The tooltip is what makes it
+            *inspectable*: the alignment's own left/right terms, source
+            detail, and directionality, without cluttering the results
+            table itself. */}
+        {result &&
+          result.alignmentsUsed.map((entry) => (
+            <Tooltip
+              key={entry.subject}
+              title={
+                <>
+                  {entry.left ?? "?"} → {entry.right ?? "?"}
+                  {entry.sourceDetail ? ` · ${entry.sourceDetail}` : ""}
+                  {entry.lossyReverse ? " · lossy walking back from right to left" : ""}
+                </>
+              }
+            >
+              <Tag color={entry.sourceKind === "computed" ? "gold" : "purple"}>
+                {alignmentBadgeLabel(entry)}
+              </Tag>
+            </Tooltip>
+          ))}
       </Space>
 
       {failed && <Alert type="error" showIcon message="The query did not run" description={failed} />}

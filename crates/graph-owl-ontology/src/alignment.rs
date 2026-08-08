@@ -253,8 +253,39 @@ impl Alignment {
     #[must_use]
     pub fn subject(&self) -> Sid {
         let (left, right, predicate, ..) = self.parts();
-        Sid::dsc(format!("alignment:{left}:{predicate}:{right}"))
+        alignment_subject_for(left, &predicate, right)
     }
+}
+
+/// [`Alignment::subject`]'s formula, exposed standalone for the inverse
+/// direction: given a direct triple *already read from the graph*
+/// (`left {predicate} right`), find the reified metadata node describing
+/// it — without constructing a full [`Alignment`] value, which needs a
+/// source and confidence a caller reading the graph may not have in hand.
+///
+/// Used by `graph-owl-api`'s query-time alignment attribution (Epic 104's
+/// console acceptance criterion: "on any cross-vocabulary result the
+/// alignment that made it reachable is inspectable") — a SPARQL result that
+/// crossed this triple looks up its metadata node directly, rather than
+/// re-deriving this same format string a second time.
+#[must_use]
+pub fn alignment_subject_for(left: &Sid, predicate: &Sid, right: &Sid) -> Sid {
+    Sid::dsc(format!("alignment:{left}:{predicate}:{right}"))
+}
+
+/// Every predicate an alignment's own direct triple can be written under —
+/// the four `skos:*Match` variants plus `owl:equivalentClass`. Used to
+/// recognise, among facts a query already scanned, which ones are alignment
+/// edges at all.
+#[must_use]
+pub fn known_alignment_predicates() -> [Sid; 5] {
+    [
+        MatchPredicate::ExactMatch.sid(),
+        MatchPredicate::CloseMatch.sid(),
+        MatchPredicate::BroadMatch.sid(),
+        MatchPredicate::NarrowMatch.sid(),
+        Sid::new(namespace::OWL, "equivalentClass"),
+    ]
 }
 
 /// The **reified metadata node**'s own flakes — source, confidence and
@@ -730,6 +761,64 @@ mod tests {
         );
         assert!(!alignment_to_flakes_gated(&computed(0.5), 1).is_empty());
         assert!(alignment_to_flakes_gated(&computed(0.499_999), 1).is_empty());
+    }
+
+    /// [`alignment_subject_for`] must agree with [`Alignment::subject`] on
+    /// the identical triple — it is the same formula, exposed for a caller
+    /// that has only read a direct triple off the graph and has no
+    /// `Alignment` value to build.
+    #[test]
+    fn alignment_subject_for_agrees_with_alignment_subject() {
+        let alignment = Alignment::Match {
+            left: cui("C0009044"),
+            right: snomed("22298006"),
+            predicate: MatchPredicate::ExactMatch,
+            source: AlignmentSource::Curated {
+                authority: "UMLS".to_string(),
+            },
+            confidence: 1.0,
+            lossy_reverse: false,
+        };
+        assert_eq!(
+            alignment_subject_for(
+                &cui("C0009044"),
+                &MatchPredicate::ExactMatch.sid(),
+                &snomed("22298006")
+            ),
+            alignment.subject()
+        );
+    }
+
+    /// The inverse direction from a different left/right must not collide —
+    /// the same property [`a_different_pair_names_a_different_subject`]
+    /// pins on [`Alignment::subject`] itself.
+    #[test]
+    fn alignment_subject_for_differs_for_a_different_pair() {
+        let a = alignment_subject_for(
+            &cui("C0009044"),
+            &MatchPredicate::ExactMatch.sid(),
+            &snomed("22298006"),
+        );
+        let b = alignment_subject_for(
+            &cui("C0000001"),
+            &MatchPredicate::ExactMatch.sid(),
+            &snomed("22298006"),
+        );
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn known_alignment_predicates_names_the_four_skos_matches_and_equivalent_class() {
+        let predicates = known_alignment_predicates();
+        assert!(predicates.contains(&MatchPredicate::ExactMatch.sid()));
+        assert!(predicates.contains(&MatchPredicate::CloseMatch.sid()));
+        assert!(predicates.contains(&MatchPredicate::BroadMatch.sid()));
+        assert!(predicates.contains(&MatchPredicate::NarrowMatch.sid()));
+        assert!(predicates.contains(&Sid::new(namespace::OWL, "equivalentClass")));
+        // An ordinary catalog predicate must never be mistaken for an
+        // alignment edge — the mutator this guards against is the "always
+        // true" membership check.
+        assert!(!predicates.contains(&Sid::dsc("name")));
     }
 
     #[test]

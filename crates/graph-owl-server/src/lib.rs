@@ -2775,6 +2775,30 @@ fn query_outcome_json(outcome: &graph_owl_api::SparqlOutcome) -> serde_json::Val
             "class": refused.class.to_string(),
             "construct": forbidden_construct_name(refused.construct),
         })).collect::<Vec<_>>(),
+        // Epic 104's console criterion: "on any cross-vocabulary result the
+        // alignment that made it reachable is inspectable, not by colour
+        // alone" — query-level, mirroring `federatedEndpoints` above for
+        // the identical structural reason (see
+        // `Catalog::alignments_touched`'s own doc comment). Empty on the
+        // overwhelming majority of queries, which cross no alignment at all.
+        "alignmentsUsed": outcome.alignments_used.iter().map(alignment_entry_json).collect::<Vec<_>>(),
+    })
+}
+
+/// [`graph_owl_api::AlignmentReviewEntry`] on the wire — shared by
+/// `alignment_review_queue` and `query_outcome_json` so the two surfaces
+/// (the review queue and a query result's alignment attribution) render the
+/// identical shape and cannot drift apart field by field.
+fn alignment_entry_json(entry: &graph_owl_api::AlignmentReviewEntry) -> serde_json::Value {
+    json!({
+        "subject": entry.subject.to_string(),
+        "left": entry.left.as_ref().map(ToString::to_string),
+        "right": entry.right.as_ref().map(ToString::to_string),
+        "predicate": entry.predicate,
+        "sourceKind": entry.source_kind,
+        "sourceDetail": entry.source_detail,
+        "confidence": entry.confidence,
+        "lossyReverse": entry.lossy_reverse,
     })
 }
 
@@ -7439,19 +7463,7 @@ async fn alignment_review_queue(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let entries = catalog.pending_alignment_review_detailed().await?;
     Ok(Json(json!(
-        entries
-            .iter()
-            .map(|entry| json!({
-                "subject": entry.subject.to_string(),
-                "left": entry.left.as_ref().map(ToString::to_string),
-                "right": entry.right.as_ref().map(ToString::to_string),
-                "predicate": entry.predicate,
-                "sourceKind": entry.source_kind,
-                "sourceDetail": entry.source_detail,
-                "confidence": entry.confidence,
-                "lossyReverse": entry.lossy_reverse,
-            }))
-            .collect::<Vec<_>>()
+        entries.iter().map(alignment_entry_json).collect::<Vec<_>>()
     )))
 }
 

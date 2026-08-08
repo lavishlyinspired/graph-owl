@@ -1,13 +1,13 @@
 # Plan: Ontology Alignment & Curated Mappings (Epic 104)
 
 **Branch**: feat/ontology-alignment
-**Status**: **Backend shipped through Slice D, 7 August 2026** — corrected
-8 August 2026, this line was never updated past the epic's creation.
-`plans/DEMOS.md` confirms all four backend slices `[x]`: the alignment fact
-and store, resumable UMLS RRF ingestion, cross-vocabulary traversal, and
-computed-alignment confidence gating with human-confirmation protection and
-the review queue. Console work (Epic 41/42) remains explicitly deferred, not
-silently dropped.
+**Status**: **Shipped, 9 August 2026.** Backend through Slice D shipped 7
+August 2026: the alignment fact and store, resumable UMLS RRF ingestion,
+cross-vocabulary traversal, and computed-alignment confidence gating with
+human-confirmation protection and the review queue. The review queue UI
+shipped separately (Epic 42, Phase 3 item 3.14); Slice E below closes the
+epic's remaining acceptance criterion — a cross-vocabulary result naming
+the alignment that made it reachable, in the Workbench (Epic 41).
 **Depends on**: Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detection), Epic 17 (entity resolution — the *instance* analogue this must not be confused with)
 **Crates**: `graph-owl-ontology` · `graph-owl-connectors` (RRF reader) · `graph-owl-resolution` (shares the confidence machinery, not the algorithm)
 
@@ -65,7 +65,7 @@ pub struct Alignment {
 - [x] A human-confirmed alignment records **who** confirmed it and when; a later automated run does not overwrite it. (Slice D — "when" is the flake's own transaction time `t`, not a separate timestamp field)
 - [x] A lossy reverse mapping is marked, and a query traversing it in the lossy direction can tell. (Slice C)
 - [x] Alignment ingestion is budgeted and resumable — UMLS is millions of rows and a failure at 80% must not mean starting again. (Slice B — resumable by construction; "budgeted" in the sense of bounded per-call cost is inherited from the caller owning batch size, not yet wired to a job/error-cap harness like Epic 16's `graph-owl-connectors::job`)
-- [ ] **Console**: an alignment review queue *(Epic 42)*, and on any cross-vocabulary result the alignment that made it reachable is inspectable — a result that crossed an approximate match must be distinguishable from one that did not, and not by colour alone.
+- [x] **Console**: an alignment review queue *(Epic 42)*, and on any cross-vocabulary result the alignment that made it reachable is inspectable — a result that crossed an approximate match must be distinguishable from one that did not, and not by colour alone. (Review queue: Epic 42, Phase 3 item 3.14. The inspectability half shipped 9 August 2026 — see Slice E below.)
 
 ## Slices
 
@@ -294,14 +294,16 @@ flakes in the `Surface` band — the backend surface a review-queue UI
 would read (every other field of a pending alignment is reachable from
 its own subject via an ordinary query), not the UI itself.
 
-**Honestly deferred, not silently dropped**: the **console** half
-(review queue UI, and making the alignment behind a cross-vocabulary
-result inspectable) is Epic 41/42 territory and is not attempted here —
-matching this epic's own acceptance criterion wording, which names those
-epics explicitly. `pending_alignment_review`'s raw-flake return type is a
-deliberately minimal backend contract, not a finished API — a richer DTO
-is exactly the kind of thing a real console consumer should drive the
-shape of, not a guess made without one.
+**Deferred at the time, not silently dropped — since shipped**: the
+**console** half (review queue UI, and making the alignment behind a
+cross-vocabulary result inspectable) was Epic 41/42 territory and not
+attempted in this slice, matching this epic's own acceptance criterion
+wording, which names those epics explicitly. `pending_alignment_review`'s
+raw-flake return type was a deliberately minimal backend contract, not a
+finished API — and the richer DTO a real console consumer would want is
+exactly what `AlignmentReviewEntry` (Phase 3 item 3.14) became. Both
+halves are now built: the review queue (Epic 42) and the inspectability
+criterion (Slice E below, Epic 41's Workbench).
 
 **Mutation testing on the `graph-owl-api` diff (`upsert_alignment` +
 `pending_alignment_review`) first surfaced 6 real MISSED mutants**, all
@@ -335,6 +337,90 @@ a confident alignment; `a_human_confirmed_alignment_is_not_overwritten_
 by_a_later_automated_run` and `a_second_human_confirmation_is_written_
 not_refused` (the boundary the refusal is actually about — automation
 overriding a person, not a second write ever being possible).
+
+### Slice E: A cross-vocabulary result names the alignment that made it reachable — **shipped, 9 August 2026**
+
+**RED**: a query crossing a curated and a computed alignment must report
+both, resolved to their own left/right/source/confidence, not blended or
+uniform across entries.
+
+**Decision 2's own constraint held: no query-layer code.** An alignment's
+direct triple is an ordinary flake `spareval` already traverses with no
+special handling, so this could not hook the evaluator to tag a bound row
+with the flake that produced it — the identical structural wall Epic 101
+Slice C hit for `SERVICE` attribution. The same simplification applies
+here: `Catalog::alignments_touched` reports which alignments the query's
+*scoped fact set* contains (a post-scan filter over facts `scoped_facts`
+already fetched, by predicate membership in
+`graph_owl_ontology::alignment::known_alignment_predicates`), not which
+alignment produced which row — query-level, not per-row. A new
+`SparqlOutcome::alignments_used: Vec<AlignmentReviewEntry>` reuses the
+exact DTO Phase 3 item 3.14's review queue already established, rather
+than a second near-identical shape.
+
+**A new inverse-direction primitive**, `graph_owl_ontology::alignment::
+alignment_subject_for(left, predicate, right)`: `Alignment::subject()`
+already computes a reified node's id from a value not yet written; this is
+the same formula for a caller that has only read a *direct triple* off the
+graph and has no `Alignment` value to reconstruct one from. `Alignment::
+subject()` itself now delegates to it, so the formula exists in exactly
+one place.
+
+**Mutation testing found 7 real MISSED mutants**, none of them the
+`TriplePattern`-field class Slice D's own note above already fixed once —
+a *new* instance of it, plus two others:
+
+- Four in the shared `alignment_entry_from_flakes` helper (`find_ref`'s
+  `==`/match-arm, `find_bool`'s `==`/match-arm) — the multi-alignment RED
+  test asserted only the fields every entry happened to share
+  (`sourceKind`, `confidence`, `predicate`), never `left`/`right`/
+  `lossyReverse` themselves, so a resolver that silently returned the
+  wrong value (or always `None`) for those fields passed anyway. Fixed by
+  asserting each of the two entries' own distinct `left`/`right` and one
+  `lossyReverse` value directly, matched by which alignment they belong to
+  rather than only the shared fields.
+- `Catalog::pending_alignment_review_detailed` collapsing to `Ok(vec![])`
+  — no `--lib` test called it directly; every existing test reached it
+  only through `GET /alignments/review`'s real-Postgres HTTP test, which a
+  `--lib`-scoped mutation run cannot see (the same class of gap Slice D's
+  own note above already names for `observability.rs`). Fixed with a
+  direct `--lib` unit test.
+- The **new** instance of the `TriplePattern`-field class: `alignments_
+  touched`'s own follow-up metadata lookup dropping its `s`/`as_of`
+  fields. Every existing fixture's graph was too clean to expose it (one
+  alignment present, or every entry sharing identical resolved fields) —
+  fixed with `as_of_bounds_the_metadata_lookup_not_just_the_initial_scan`,
+  which writes an alignment's direct triple at `t=1` and its metadata only
+  at `t=2`, then queries `as_of=1` and asserts the row exists but no
+  alignment is reported — an unbounded follow-up lookup would find the
+  `t=2` metadata anyway and wrongly report it as available a transaction
+  early. Re-run: 18 mutants, 0 missed.
+
+**Console**: `ui/src/workbench/results.ts` gained `alignmentBadgeLabel`,
+the one piece of this feature with real logic worth a unit test rather
+than a screenshot — the acceptance criterion's own words, "not by colour
+alone", are met by what the tag's *text* says (`exactMatch · curated`,
+`closeMatch · computed 62%`), not by which colour it is painted. A curated
+match's confidence is never printed (decision 1: definitionally
+trustworthy, always `1.0`, so a `100%` on every row would be noise); a
+computed match's is always printed, since it is exactly the number that
+says how much to trust this specific result. `WorkbenchPage` renders one
+tag per crossed alignment beside the existing `federated:` tags, each
+wrapped in a tooltip naming the alignment's own left/right terms, source
+detail, and directionality — the "inspectable" half of the criterion.
+
+**Acceptance criteria, verified**: `a_cross_vocabulary_query_reports_the_
+alignments_it_crossed` (two distinct curated alignments, each resolved to
+its own fields), `a_computed_alignment_crossed_by_a_query_is_reported_as_
+computed` (a confident computed match is never indistinguishable from a
+curated one), `a_query_touching_only_alignment_metadata_not_the_direct_
+triple_reports_none` (reading `alignmentLeft`/`alignmentRight` is not the
+same as a result reaching across vocabularies through the direct triple),
+`as_of_bounds_the_metadata_lookup_not_just_the_initial_scan`. HTTP,
+end-to-end against real Postgres:
+`sparql_alignments_used.rs`'s `a_cross_vocabulary_result_names_the_
+alignment_that_made_it_reachable` and `an_ordinary_query_reports_an_
+empty_alignments_used_array`.
 
 ## Explicitly deferred (with destination)
 

@@ -399,6 +399,13 @@ export interface SparqlResult {
    *  contributes no error and often no rows either, which is otherwise
    *  indistinguishable from "this endpoint genuinely has no matching data". */
   readonly silencedFailures: readonly string[];
+  /** Alignments (Epic 104) this query's results crossed — the console
+   *  criterion "on any cross-vocabulary result the alignment that made it
+   *  reachable is inspectable". Result-level, not per-row, for the same
+   *  reason `federatedEndpoints` is: the same [`AlignmentReviewEntry`]
+   *  shape the review queue uses, reused rather than duplicated. Empty for
+   *  the overwhelming majority of queries, which cross no alignment. */
+  readonly alignmentsUsed: readonly AlignmentReviewEntry[];
 }
 
 // ---- Epic 42 Slice E: one asset as a property-graph node ----

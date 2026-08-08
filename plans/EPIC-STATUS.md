@@ -94,7 +94,7 @@ is the condition that index exists to catch.
 | **101** | 11 | [`101-sparql-federation.md`](101-sparql-federation.md) | **Shipped** | 5/5 | Epic 7 (algebra and executor), Epic 13 (authorization) |
 | **102** | 11 | [`102-read-write-partitions.md`](102-read-write-partitions.md) | **Shipped** | 3/3 | Epic 4 (the flake table), Epic 37a (the measurement) |
 | **103** | 11 | [`103-in-process-traversal.md`](103-in-process-traversal.md) | **Shipped** | 5/5 | Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger) |
-| **104** | 12 | [`104-ontology-alignment.md`](104-ontology-alignment.md) | In progress | 6/7 | Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detecti… |
+| **104** | 12 | [`104-ontology-alignment.md`](104-ontology-alignment.md) | **Shipped** | 7/7 | Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detecti… |
 
 ## Tracked items, per epic
 
@@ -685,7 +685,7 @@ is the condition that index exists to catch.
 - [x] Computed alignment, confirmation, and the review queue — `graph_owl_core::extraction::Di
 - [x] `POST /alignments` and `GET /alignments/review` — found and fixed 8 August 2026
 - [x] Console
-- [ ] Console
+- [x] Console
 
 ## Epics with slice marks and no plan file
 

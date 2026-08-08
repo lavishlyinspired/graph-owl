@@ -324,7 +324,7 @@ medium (1-3 days), no blocking dependency.
 | — | — | 100 | 1.4 |
 | — | — | 102 | 1.5 + 1.6 + admin panel — all DONE 8 Aug 2026, optionally 4.9 |
 | — | — | 103 | no action — confirmed zero remaining work |
-| — | — | 104 | 1.7 + 3.13 — both DONE 8 Aug 2026 (4.7 + 4.8 decided and implemented) |
+| — | — | 104 | 1.7 + 3.13 + 3.14 (Epic 42's queue) DONE 8 Aug 2026 (4.7 + 4.8 decided and implemented); the epic's own remaining console criterion — a cross-vocabulary result naming the alignment that made it reachable — DONE 9 Aug 2026, not itemized above since it surfaced only when re-checking `plans/104-ontology-alignment.md`'s own acceptance criteria directly. `Catalog::alignments_touched` (query-level attribution, the same simplification Epic 101 Slice C's federation attribution already established) + `SparqlOutcome::alignments_used`, wired onto `/sparql`/`/cypher`; Workbench renders one tag per crossed alignment with the distinguishing text in the label itself (`alignmentBadgeLabel`), not colour alone. Epic 104 is now fully shipped |
 
 **Notes on items not fully itemized in the phases above** (found during the
 audit but small enough to fold into whichever phase they land in, not

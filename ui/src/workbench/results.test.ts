@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   type Solution,
+  alignmentBadgeLabel,
   columns,
   display,
   graphShape,
@@ -301,5 +302,72 @@ describe("what a reader is told before trusting the answer", () => {
 
   it("says nothing about federation when no SILENT clause failed", () => {
     expect(verdict(triples, clean).warnings).toEqual([]);
+  });
+});
+
+// Epic 104's console criterion: "on any cross-vocabulary result the
+// alignment that made it reachable is inspectable — a result that crossed
+// an approximate match must be distinguishable from one that did not, and
+// not by colour alone." The label text itself is what carries that
+// distinction, so it is the one part of this feature worth a unit test
+// rather than trusting a screenshot.
+describe("alignmentBadgeLabel names what a colour cannot", () => {
+  it("names a curated match by predicate and source kind", () => {
+    expect(
+      alignmentBadgeLabel({
+        predicate: "exactMatch",
+        sourceKind: "curated",
+        confidence: 1,
+      }),
+    ).toBe("exactMatch · curated");
+  });
+
+  // The whole point of the criterion: a computed match must carry its own
+  // confidence in the label text, not just a different tag colour — a
+  // reader who cannot see colour (or a log, or a screen reader) must still
+  // be able to tell "this is an approximate match" from the text alone.
+  it("names a computed match's confidence, not just its kind", () => {
+    expect(
+      alignmentBadgeLabel({
+        predicate: "closeMatch",
+        sourceKind: "computed",
+        confidence: 0.62,
+      }),
+    ).toBe("closeMatch · computed 62%");
+  });
+
+  it("rounds confidence to a whole percentage", () => {
+    expect(
+      alignmentBadgeLabel({
+        predicate: "closeMatch",
+        sourceKind: "computed",
+        confidence: 0.916,
+      }),
+    ).toBe("closeMatch · computed 92%");
+  });
+
+  it("omits a percentage for a curated match even with a confidence value", () => {
+    // Curated alignments are definitionally trustworthy (decision 1) — a
+    // curated match always ships at confidence 1.0, and printing "100%"
+    // for every one of them would be noise, not information.
+    expect(
+      alignmentBadgeLabel({
+        predicate: "exactMatch",
+        sourceKind: "curated",
+        confidence: 1,
+      }),
+    ).not.toContain("%");
+  });
+
+  it("falls back to a generic label for missing fields rather than throwing", () => {
+    expect(
+      alignmentBadgeLabel({ predicate: null, sourceKind: null, confidence: null }),
+    ).toBe("alignment · unknown");
+  });
+
+  it("still shows a computed confidence even when the predicate is missing", () => {
+    expect(
+      alignmentBadgeLabel({ predicate: null, sourceKind: "computed", confidence: 0.55 }),
+    ).toBe("alignment · computed 55%");
   });
 });
