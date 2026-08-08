@@ -765,3 +765,92 @@ async fn propagated_labels_are_independent_of_the_parents() {
         "removing the parent tag does not auto-remove what it propagated"
     );
 }
+
+// ── `?tags=` filter — Phase 2.1 of plans/EPIC-COMPLETION-PLAN.md ───────────
+
+async fn asset_names(app: &axum::Router, uri: &str) -> Vec<String> {
+    let (status, page) = send(app, "GET", uri, None).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let mut found: Vec<String> = page["data"]
+        .as_array()
+        .expect("a page")
+        .iter()
+        .map(|a| a["name"].as_str().expect("a name").to_string())
+        .collect();
+    found.sort();
+    found
+}
+
+/// AND across every tag named — matching a table only when it carries **all**
+/// of them, not any.
+#[tokio::test]
+async fn the_tags_filter_returns_only_assets_carrying_every_named_tag() {
+    let (app, _db, _url) = test_app().await;
+    let pii = classification(&app, "PII", false).await;
+    let sensitive = tag(&app, &pii, "Sensitive").await;
+    let tier = classification(&app, "Tier", false).await;
+    let gold = tag(&app, &tier, "Gold").await;
+    let both = hierarchy(&app, "orders-svc").await;
+    let only_one = hierarchy(&app, "returns-svc").await;
+
+    apply(&app, &both[3].1, &sensitive).await;
+    apply(&app, &both[3].1, &gold).await;
+    apply(&app, &only_one[3].1, &sensitive).await;
+
+    let matched = asset_names(&app, &format!("/assets?kind=table&tags={sensitive},{gold}")).await;
+
+    assert_eq!(matched, vec!["orders"], "{matched:?}");
+}
+
+/// **A table-level match counts a confirmed label on one of its own columns
+/// too** — a steward asking "what carries PII" is asking about the table.
+#[tokio::test]
+async fn the_tags_filter_counts_a_confirmed_column_label_as_the_table_carrying_it() {
+    let (app, _db, _url) = test_app().await;
+    let pii = classification(&app, "PII", false).await;
+    let sensitive = tag(&app, &pii, "Sensitive").await;
+    let fqns = hierarchy(&app, "orders-svc").await;
+    // The column, not the table itself.
+    apply(&app, &fqns[4].1, &sensitive).await;
+
+    let matched = asset_names(&app, &format!("/assets?kind=table&tags={sensitive}")).await;
+
+    assert_eq!(matched, vec!["orders"], "{matched:?}");
+}
+
+/// **A suggested-not-confirmed label counts for nothing** — the same rule
+/// the triage queue itself already enforces.
+#[tokio::test]
+async fn the_tags_filter_excludes_a_label_still_awaiting_confirmation() {
+    let (app, _db, _url) = test_app().await;
+    let pii = classification(&app, "PII", false).await;
+    let sensitive = tag(&app, &pii, "Sensitive").await;
+    let fqns = hierarchy(&app, "orders-svc").await;
+    suggest(&app, &fqns[3].1, &sensitive).await;
+
+    let matched = asset_names(&app, &format!("/assets?kind=table&tags={sensitive}")).await;
+
+    assert!(
+        matched.is_empty(),
+        "a suggestion is not yet a fact: {matched:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_tags_filter_also_applies_to_search() {
+    let (app, _db, _url) = test_app().await;
+    let pii = classification(&app, "PII", false).await;
+    let sensitive = tag(&app, &pii, "Sensitive").await;
+    let fqns = hierarchy(&app, "orders-svc").await;
+    apply(&app, &fqns[3].1, &sensitive).await;
+
+    let matched = asset_names(&app, &format!("/assets/search?q=orders&tags={sensitive}")).await;
+    assert_eq!(matched, vec!["orders"], "{matched:?}");
+
+    let empty = asset_names(
+        &app,
+        &format!("/assets/search?q=orders&tags={sensitive},Tier.Gold"),
+    )
+    .await;
+    assert!(empty.is_empty(), "Tier.Gold was never applied: {empty:?}");
+}

@@ -2895,6 +2895,24 @@
             }
           },
           {
+            "description": "draft, active, deprecated, or retired — an exact match, not inherited",
+            "in": "query",
+            "name": "lifecycle",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Comma-separated tag FQNs (classification.tag) — AND across every tag named; a confirmed label on one of a table's own columns counts too",
+            "in": "query",
+            "name": "tags",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "description": "Page size",
             "in": "query",
             "name": "limit",
@@ -3034,6 +3052,24 @@
             "description": "A data product id — membership, not ownership",
             "in": "query",
             "name": "dataProduct",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "draft, active, deprecated, or retired — an exact match, not inherited",
+            "in": "query",
+            "name": "lifecycle",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Comma-separated tag FQNs (classification.tag) — AND across every tag named; a confirmed label on one of a table's own columns counts too",
+            "in": "query",
+            "name": "tags",
             "required": false,
             "schema": {
               "type": "string"

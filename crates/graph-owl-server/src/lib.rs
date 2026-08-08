@@ -2087,6 +2087,15 @@ struct AssetListQuery {
     domain: Option<Uuid>,
     /// Membership of a data product.
     data_product: Option<Uuid>,
+    /// Where the asset is in its life — Epic 26. An exact match, not a walk:
+    /// lifecycle does not inherit down containment the way ownership and
+    /// domain do.
+    lifecycle: Option<String>,
+    /// Comma-separated tag FQNs (`{classification}.{tag}`) — Epic 25, matching
+    /// `fields`'s existing comma-separated convention rather than a repeated
+    /// parameter. AND across every tag named, and a table-level match counts
+    /// a confirmed label on one of its own columns too.
+    tags: Option<String>,
     limit: Option<usize>,
     after: Option<String>,
 }
@@ -2096,13 +2105,55 @@ struct AssetListQuery {
 struct AssetSearchQuery {
     q: String,
     kind: Option<String>,
-    /// The same two filters the list endpoint takes, so a client does not have
+    /// The same filters the list endpoint takes, so a client does not have
     /// to learn two filtering languages — and so the one that got it wrong is
     /// not the one that silently returns more.
     domain: Option<Uuid>,
     data_product: Option<Uuid>,
+    lifecycle: Option<String>,
+    tags: Option<String>,
     limit: Option<usize>,
     after: Option<String>,
+}
+
+/// `?tags=A,B` into the list `AssetFilter::tags` matches AND-wise —
+/// `fields`'s existing comma-separated convention, not a repeated parameter.
+/// Blank segments (`tags=,` or a trailing comma) are dropped rather than
+/// producing an empty-string tag FQN nothing could ever carry.
+fn parse_tags(raw: Option<&str>) -> Vec<String> {
+    raw.map(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// A lifecycle state from a query parameter, naming what *is* supported when
+/// it is not one — the same convention [`parse_kind`] already uses.
+fn parse_lifecycle(
+    raw: Option<&str>,
+) -> Result<Option<graph_owl_core::lifecycle::LifecycleState>, AppError> {
+    raw.map(|value| {
+        graph_owl_core::lifecycle::LifecycleState::parse(value).map_err(|_| {
+            AppError::Validation(vec![FieldError::new(
+                "lifecycle",
+                FieldErrorCode::Type,
+                format!(
+                    "`{value}` is not a lifecycle state; expected one of: {}",
+                    graph_owl_core::lifecycle::LifecycleState::all()
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )])
+        })
+    })
+    .transpose()
 }
 
 /// An asset kind from a query parameter, naming what *is* supported when it is
@@ -2170,6 +2221,8 @@ async fn list_assets(
     // name is a `400` rather than an empty page that reads like an answer.
     let extension = catalog.extension_filters(kind, &requested).await?;
     let (domain, data_product) = (query.domain, query.data_product);
+    let lifecycle = parse_lifecycle(query.lifecycle.as_deref())?;
+    let tags = parse_tags(query.tags.as_deref());
     let filter = graph_owl_storage::AssetFilter {
         kind,
         owner: query.owner.as_deref(),
@@ -2177,6 +2230,8 @@ async fn list_assets(
         extension: &extension,
         domain,
         data_product,
+        lifecycle,
+        tags: &tags,
     };
     Ok(Json(
         catalog.list_assets_for(&principal, &filter, &page).await?,
@@ -2192,6 +2247,8 @@ async fn search_assets(
     let page = PageRequest::new(query.limit, query.after.as_deref())?;
     let extension = catalog.extension_filters(kind, &requested).await?;
     let (domain, data_product) = (query.domain, query.data_product);
+    let lifecycle = parse_lifecycle(query.lifecycle.as_deref())?;
+    let tags = parse_tags(query.tags.as_deref());
     let filter = graph_owl_storage::AssetFilter {
         kind,
         owner: None,
@@ -2199,6 +2256,8 @@ async fn search_assets(
         extension: &extension,
         domain,
         data_product,
+        lifecycle,
+        tags: &tags,
     };
     let page_result = catalog
         .search_assets_for(&principal, &query.q, &filter, &page)

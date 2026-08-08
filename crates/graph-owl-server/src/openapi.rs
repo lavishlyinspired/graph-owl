@@ -127,6 +127,19 @@ const QUERY_PARAMS: &[(&str, &str, &[QueryParam])] = &[
                 "string",
                 "A data product id — membership, not ownership",
             ),
+            query_param(
+                "lifecycle",
+                false,
+                "string",
+                "draft, active, deprecated, or retired — an exact match, not inherited",
+            ),
+            query_param(
+                "tags",
+                false,
+                "string",
+                "Comma-separated tag FQNs (classification.tag) — AND across every tag \
+                 named; a confirmed label on one of a table's own columns counts too",
+            ),
             query_param("limit", false, "integer", "Page size"),
             query_param("after", false, "string", "The previous page's cursor"),
         ],
@@ -167,6 +180,19 @@ const QUERY_PARAMS: &[(&str, &str, &[QueryParam])] = &[
                 false,
                 "string",
                 "A data product id — membership, not ownership",
+            ),
+            query_param(
+                "lifecycle",
+                false,
+                "string",
+                "draft, active, deprecated, or retired — an exact match, not inherited",
+            ),
+            query_param(
+                "tags",
+                false,
+                "string",
+                "Comma-separated tag FQNs (classification.tag) — AND across every tag \
+                 named; a confirmed label on one of a table's own columns counts too",
             ),
             query_param("limit", false, "integer", "Page size"),
             query_param("after", false, "string", "The previous page's cursor"),

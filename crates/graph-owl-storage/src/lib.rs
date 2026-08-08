@@ -1023,6 +1023,19 @@ pub struct AssetFilter<'a> {
     pub domain: Option<Uuid>,
     /// Assets belonging to this data product.
     pub data_product: Option<Uuid>,
+    /// Only assets in this lifecycle state — Epic 26. Unlike `owner`/`domain`,
+    /// this is an exact match against a stored column, not a walk: lifecycle
+    /// does not inherit down containment the way ownership and domain do.
+    pub lifecycle: Option<LifecycleState>,
+    /// Only assets carrying **every** one of these tag FQNs (`{classification}.
+    /// {tag}`), confirmed — Epic 25. AND, matching the conventions doc's rule
+    /// for repeated filters, the same as `extension`. A **table-level match
+    /// counts a column's own tags too**: `tag_labels.target_fqn` addresses a
+    /// column by its own FQN (Epic 25 decision), so a tag confirmed on
+    /// `orders.email` must still surface `orders` in a `?tags=PII.Sensitive`
+    /// result — a steward asking "what carries this tag" is asking about the
+    /// table, not which of its columns happened to carry it directly.
+    pub tags: &'a [String],
 }
 
 /// One condition on a custom property's value — Epic 22 Slice D.

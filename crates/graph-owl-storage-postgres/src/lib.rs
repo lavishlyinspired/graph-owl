@@ -4666,7 +4666,9 @@ impl Storage for PostgresStorage {
         // measurement still misses budget at a larger target, the escape
         // hatch is the maintained effective-owner projection this comment
         // already flagged, not another constant-factor pass here.
-        let extension = extension_clauses(filter.extension, 11);
+        let extension = extension_clauses(filter.extension, 13);
+        let tags_filter: Option<&[String]> = (!filter.tags.is_empty()).then_some(filter.tags);
+        let tags = tags_expr(12);
         let sql = format!(
             "SELECT {ASSET_COLUMNS}, effective_owners.owners FROM assets
              LEFT JOIN LATERAL (SELECT {OWNERS_EXPR} AS owners) effective_owners ON true
@@ -4682,6 +4684,8 @@ impl Storage for PostgresStorage {
                AND ($10::uuid IS NULL OR EXISTS (
                      SELECT 1 FROM data_product_assets m
                       WHERE m.asset_id = assets.id AND m.data_product_id = $10))
+               AND ($11::text IS NULL OR lifecycle = $11)
+               {tags}
                {extension}
              ORDER BY fully_qualified_name, id
              LIMIT $4"
@@ -4696,7 +4700,9 @@ impl Storage for PostgresStorage {
             .bind(filter.owner)
             .bind(filter.unowned)
             .bind(filter.domain)
-            .bind(filter.data_product);
+            .bind(filter.data_product)
+            .bind(filter.lifecycle.map(LifecycleState::as_str))
+            .bind(tags_filter);
         for condition in filter.extension {
             query = query.bind(&condition.name).bind(&condition.value);
         }
@@ -4722,7 +4728,9 @@ impl Storage for PostgresStorage {
         let overfetch = i64::try_from(page.limit)
             .unwrap_or(i64::MAX)
             .saturating_add(1);
-        let extension = extension_clauses(filter.extension, 10);
+        let extension = extension_clauses(filter.extension, 12);
+        let tags_filter: Option<&[String]> = (!filter.tags.is_empty()).then_some(filter.tags);
+        let tags = tags_expr(11);
         let sql = format!(
             "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners, {RANK_KEY} AS sort_key
              FROM assets, to_tsquery('english', $1) AS q (ts)
@@ -4735,6 +4743,8 @@ impl Storage for PostgresStorage {
                AND ($9::uuid IS NULL OR EXISTS (
                      SELECT 1 FROM data_product_assets m
                       WHERE m.asset_id = assets.id AND m.data_product_id = $9))
+               AND ($10::text IS NULL OR lifecycle = $10)
+               {tags}
                {extension}
              ORDER BY {RANK_KEY}, id
              LIMIT $5"
@@ -4748,7 +4758,9 @@ impl Storage for PostgresStorage {
             .bind(&allow)
             .bind(&deny)
             .bind(filter.domain)
-            .bind(filter.data_product);
+            .bind(filter.data_product)
+            .bind(filter.lifecycle.map(LifecycleState::as_str))
+            .bind(tags_filter);
         for condition in filter.extension {
             q = q.bind(&condition.name).bind(&condition.value);
         }
@@ -10207,6 +10219,36 @@ const VISIBILITY: &str =
     "AND (fully_qualified_name LIKE ANY($5)) AND NOT (fully_qualified_name LIKE ANY($6))";
 const VISIBILITY_SEARCH: &str =
     "AND (fully_qualified_name LIKE ANY($6)) AND NOT (fully_qualified_name LIKE ANY($7))";
+
+/// **AND across requested tags, table-level match includes a column's own
+/// tag** — Epic 25, wired to `?tags=` Phase 2.1. `count(DISTINCT ...) =
+/// array_length(...)` rather than one `EXISTS` per tag: the tag list is a
+/// single bound array, not one placeholder per value, so its length is not
+/// known when this string is built.
+///
+/// **`kind = 'table'` guards the prefix branch, and this is load-bearing, not
+/// decorative.** A bare `target_fqn LIKE fully_qualified_name || '.%'` was
+/// tried first and matches *any* descendant at *any* depth — which makes a
+/// tag on a table's column also read as carried by that table's schema,
+/// database and service, since a table's own FQN is itself a `LIKE` match
+/// against its ancestors' prefixes. Gating on `kind = 'table'` restricts the
+/// leniency to exactly the case the plan asks for (a column's tag counting
+/// toward its own table), because a column's only possible parent kind in
+/// this schema is `table` — every other kind falls through to the exact
+/// match only.
+fn tags_expr(param: usize) -> String {
+    format!(
+        "AND (${param}::text[] IS NULL OR (
+               SELECT count(DISTINCT t.fully_qualified_name)
+                 FROM tag_labels l JOIN tags t ON t.id = l.tag_id
+                WHERE l.state = 'confirmed'
+                  AND t.fully_qualified_name = ANY(${param})
+                  AND (l.target_fqn = assets.fully_qualified_name
+                       OR (assets.kind = 'table'
+                           AND l.target_fqn LIKE assets.fully_qualified_name || '.%'))
+             ) = array_length(${param}, 1))"
+    )
+}
 
 /// The relevance score **and** the keyset cursor for a relevance-ordered page,
 /// in one expression.

@@ -756,3 +756,86 @@ async fn a_deprecated_asset_is_still_listed_and_visibly_marked() {
         "and it must say so: {found}"
     );
 }
+
+// ── `?lifecycle=` filter — Phase 2.2 of plans/EPIC-COMPLETION-PLAN.md ──────
+//
+// The column and its partial index shipped with Slice A; nothing wired a
+// query parameter to it. An exact match against a stored column, not a walk
+// like `owner`/`domain` — lifecycle does not inherit down containment.
+
+fn names(page: &Value) -> Vec<String> {
+    let mut found: Vec<String> = page["data"]
+        .as_array()
+        .expect("a page")
+        .iter()
+        .map(|a| a["name"].as_str().expect("a name").to_string())
+        .collect();
+    found.sort();
+    found
+}
+
+#[tokio::test]
+async fn the_lifecycle_filter_returns_only_the_matching_state() {
+    let (app, _db, _url) = test_app().await;
+    service(&app, "orders-svc").await;
+    let (going_away, _) = service(&app, "legacy-svc").await;
+    deprecate(&app, &going_away, "superseded", None).await;
+
+    let (status, page) = send(&app, "GET", "/assets?lifecycle=deprecated", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(names(&page), vec!["legacy-svc"], "{page}");
+}
+
+/// And the negative half of the same claim: `active` must exclude what
+/// `deprecated` included, or the filter would be indistinguishable from no
+/// filter at all.
+#[tokio::test]
+async fn the_lifecycle_filter_excludes_other_states() {
+    let (app, _db, _url) = test_app().await;
+    service(&app, "orders-svc").await;
+    let (going_away, _) = service(&app, "legacy-svc").await;
+    deprecate(&app, &going_away, "superseded", None).await;
+
+    let (status, page) = send(&app, "GET", "/assets?lifecycle=active", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(names(&page), vec!["orders-svc"], "{page}");
+}
+
+#[tokio::test]
+async fn the_lifecycle_filter_also_applies_to_search() {
+    let (app, _db, _url) = test_app().await;
+    let (id, _) = service(&app, "orders-svc").await;
+    deprecate(&app, &id, "superseded", None).await;
+
+    let (status, page) = send(
+        &app,
+        "GET",
+        "/assets/search?q=orders&lifecycle=deprecated",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(names(&page), vec!["orders-svc"], "{page}");
+
+    let (status, empty) = send(
+        &app,
+        "GET",
+        "/assets/search?q=orders&lifecycle=retired",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert!(names(&empty).is_empty(), "nothing is retired yet: {empty}");
+}
+
+#[tokio::test]
+async fn an_unrecognised_lifecycle_filter_is_refused_naming_the_real_states() {
+    let (app, _db, _url) = test_app().await;
+
+    let (status, body) = send(&app, "GET", "/assets?lifecycle=archived", None).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["errors"][0]["field"], "lifecycle", "{body}");
+}

@@ -762,7 +762,7 @@ back. Two HTTP tests now do:
 
 - [x] **Propagation never downgrades a manual label** *(Slice I)*. A steward's deliberate choice survives, and relabelling it `propagated` would also be a lie about where it came from. One level unless `?recursive=true`.
 
-- [ ] **`?tags=` filtering** — the one feature-level criterion not delivered. The labels, the usage query and the index exist; the filter does not, because the **column-level** half is a different query: matching a table because one of its *columns* carries `PII.Sensitive` is not matching the table's own label, and shipping only the first would under-report exactly the case the epic exists for.
+- [x] **`?tags=` filtering — shipped 8 August 2026** (`plans/EPIC-COMPLETION-PLAN.md` Phase 2.1). Both halves in one slice, as the note above said they had to be: table-level (`tag_labels` matched directly against the asset's own FQN) and column-level (a confirmed label on one of a table's own columns counts toward the table) via one subquery, `AND`-ed across every tag named — matching the conventions doc's rule for repeated filters, the same as `extension`. Only `state = 'confirmed'` counts, the same rule the triage queue already enforces; a suggestion is not yet a fact. **A real bug the RED test caught before it shipped**: the first attempt's column-inclusion used a bare `target_fqn LIKE fully_qualified_name || '.%'`, which matches *any* descendant at *any* depth — a tag on a table's column read as carried by that table's schema, database and service too, since the table's own FQN is itself a prefix match against its ancestors'. Fixed by gating the prefix branch on `kind = 'table'`, since a column's only possible parent kind in this schema is `table` — every other kind falls through to the exact match only. Proven in `crates/graph-owl-server/tests/classification.rs`: AND across two tags, a column's confirmed label counted toward its table, a suggested-not-confirmed label excluded, and the filter applies to `/assets/search` too.
 
 ### Epic 26 — Lifecycle and certification
 
@@ -778,7 +778,9 @@ back. Two HTTP tests now do:
 
 - [x] **Renewal re-checks** *(Slice E)*. The same path as issuance, so a renewal whose evidence has since disappeared fails: renewing on stale grounds is how certification decays into theatre.
 
-- [~] **Discoverable** *(Slice F, partial)*. A deprecated asset is returned **with its marker** — filtering hides reality, unmarking misleads. `?lifecycle=` / `?certification=` filters and facets are not built.
+- [~] **Discoverable** *(Slice F, partial)*. A deprecated asset is returned **with its marker** — filtering hides reality, unmarking misleads. `?certification=` filtering and facets are not built.
+
+- [x] **`?lifecycle=` filtering — shipped 8 August 2026** (`plans/EPIC-COMPLETION-PLAN.md` Phase 2.2). The column and its partial index shipped with Slice A; nothing wired a query parameter to it. An exact match against the stored column, not a walk — lifecycle does not inherit down containment the way ownership and domain do, so this is a plain `lifecycle = $n` predicate beside the existing `kind`/`owner`/`domain` filters, applying to both `/assets` and `/assets/search`. Proven in `crates/graph-owl-server/tests/lifecycle.rs`: an active and a deprecated asset in the same page are separable by the filter in both directions, and an unrecognised state is refused naming the real ones.
 
 - **`rename_all_fields` missing, for the fourth time in this codebase.** `CertificationStatus::ExpiringSoon` shipped `days_remaining` beside a camelCase wire. `rename_all` on an enum renames *variants*, not the fields inside them — after `Authorship.agent_id`, `SubmissionOutcome.run_id` and `AssetListQuery.data_product`. Caught only because a unit test asserts the serialized bytes, which is now habit rather than luck.
 
