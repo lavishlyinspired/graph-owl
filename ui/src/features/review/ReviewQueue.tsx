@@ -6,7 +6,7 @@
  *  `VocabularyBrowser.structural.test.ts` does for the vocabulary
  *  browser. */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Button, Empty, Flex, Input, List, Modal, Segmented, Space, Spin, Tag, Typography } from "antd";
 import type { QueueAction, QueueConfig, QueueEntry } from "./queues";
 import { readParam, writeParam } from "../deepLink";
@@ -213,6 +213,19 @@ export function ReviewQueue({ config }: ReviewQueueProps) {
             renderItem={(entry) => (
               <List.Item
                 onClick={() => setSelectedId(entry.id)}
+                // Same gap, same fix, as AgentActivityPanel's grant table: a
+                // click-only row has no keyboard equivalent. `tabIndex={0}`
+                // plus Enter/Space makes it operable; `aria-selected` over
+                // `role="button"` leaves the implicit `listitem` role intact
+                // rather than replacing it.
+                tabIndex={0}
+                aria-selected={entry.id === selectedId}
+                onKeyDown={(event: ReactKeyboardEvent) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setSelectedId(entry.id);
+                  }
+                }}
                 style={{
                   cursor: "pointer",
                   padding: 12,

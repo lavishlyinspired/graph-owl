@@ -14,6 +14,7 @@
 import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useState } from "react";
 import { Alert, Empty, Input, Select, Space, Spin, Table, Tag, Typography } from "antd";
 import { api, type AgentActivity, type AgentCapability, type AgentGrant } from "../../api";
+import { readParam, writeParam } from "../deepLink";
 import { describeCapability, describeOutcome, filterActivity } from "./agentActivity";
 
 const { Text, Title, Paragraph } = Typography;
@@ -50,12 +51,21 @@ function outcomeColor(outcome: AgentActivity["outcome"]): string {
 export function AgentActivityPanel() {
   const [grants, setGrants] = useState<AgentGrant[] | null>(null);
   const [grantsError, setGrantsError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  // The one surface in this epic missing the `readParam`/`writeParam`
+  // convention every sibling surface (`ReviewQueue`, the asset explorer's
+  // `?asset=`) already uses — `?agent=<id>` so a shared link opens
+  // straight into the same agent's history.
+  const [selected, setSelectedRaw] = useState<string | null>(() => readParam("agent"));
   const [activity, setActivity] = useState<AgentActivity[] | null>(null);
   const [activityError, setActivityError] = useState<string | null>(null);
   const [capabilityFilter, setCapabilityFilter] = useState<AgentCapability | null>(null);
   const [outcomeFilter, setOutcomeFilter] = useState<AgentActivity["outcome"] | null>(null);
   const [entityFilter, setEntityFilter] = useState("");
+
+  const setSelected = (id: string | null) => {
+    setSelectedRaw(id);
+    writeParam("agent", id);
+  };
 
   useEffect(() => {
     api

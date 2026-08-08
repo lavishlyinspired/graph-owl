@@ -1655,11 +1655,28 @@ function AssetDetail({
 }) {
   const [ancestors, setAncestors] = useState<Asset[]>([]);
   const [children, setChildren] = useState<Asset[]>([]);
+  const [ancestorsFailed, setAncestorsFailed] = useState(false);
+  const [childrenFailed, setChildrenFailed] = useState(false);
 
   useEffect(() => {
-    api.ancestors(asset.id).then(setAncestors).catch(() => setAncestors([]));
+    setAncestorsFailed(false);
+    api
+      .ancestors(asset.id)
+      .then(setAncestors)
+      .catch(() => {
+        setAncestors([]);
+        setAncestorsFailed(true);
+      });
+    setChildrenFailed(false);
     if (asset.kind === "column") setChildren([]);
-    else api.children(asset.id).then(setChildren).catch(() => setChildren([]));
+    else
+      api
+        .children(asset.id)
+        .then(setChildren)
+        .catch(() => {
+          setChildren([]);
+          setChildrenFailed(true);
+        });
   }, [asset.id, asset.kind]);
 
   const properties = Object.entries(asset.properties ?? {});
@@ -1683,7 +1700,11 @@ function AssetDetail({
         </Card>
       )}
 
-      {children.length > 0 && (
+      {childrenFailed && (
+        <Alert type="error" showIcon message="Contents failed to load — this is not a leaf asset." />
+      )}
+
+      {!childrenFailed && children.length > 0 && (
         <Card
           size="small"
           title={`${children[0]!.kind === "column" ? "Columns" : "Contains"} (${children.length})`}
@@ -1741,7 +1762,11 @@ function AssetDetail({
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      <Breadcrumb items={ancestors.map((a) => ({ title: a.name }))} />
+      {ancestorsFailed ? (
+        <Alert type="error" showIcon message="Ancestors failed to load — this is not a root-level asset." />
+      ) : (
+        <Breadcrumb items={ancestors.map((a) => ({ title: a.name }))} />
+      )}
 
       <Flex align="center" gap={12} wrap>
         <Title level={2} dir={userTextDir(asset.name)} style={{ margin: 0, fontWeight: 600, fontSize: 24 }}>
@@ -2803,7 +2828,9 @@ function GovernancePage({ colors }: { colors: (typeof palette)["light"] }) {
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Flex justify="space-between" align="flex-start" wrap gap={12}>
         <div>
-          <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+          {/* level 2, not 4: directly under the chrome's own h1, matching
+           *  Workbench/Admin's own fix for the same heading-order bug. */}
+          <Title level={2} style={{ margin: 0, fontWeight: 600, fontSize: 16 }}>
             Governance
           </Title>
           <Paragraph type="secondary" style={{ margin: "4px 0 0", fontSize: 13 }}>
@@ -3034,7 +3061,9 @@ function ConnectorsPage({ onDone, colors }: { onDone: () => void; colors: (typeo
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <div>
-        <Title level={4} style={{ margin: 0, fontWeight: 600 }}>
+        {/* level 2, not 4: directly under the chrome's own h1, matching
+         *  Workbench/Admin's own fix for the same heading-order bug. */}
+        <Title level={2} style={{ margin: 0, fontWeight: 600, fontSize: 16 }}>
           Connectors
         </Title>
         <Text type="secondary">Choose a source to catalogue.</Text>
