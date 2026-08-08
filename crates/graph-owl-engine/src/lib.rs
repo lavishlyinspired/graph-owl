@@ -32,6 +32,51 @@ pub enum EngineError {
     )]
     UnregisteredPredicate { namespace: u16, name: String },
 
+    /// A flake's object is not the `FlakeValue` variant the predicate is
+    /// registered to carry.
+    ///
+    /// Refused rather than written, for the same reason an unregistered
+    /// predicate is: every reader of `dsc:confidence` assumes a `Float`
+    /// because the registry says so, and a `String` written past this check
+    /// is indistinguishable from a correct value until something tries to
+    /// use it — at which point the failure is far from its cause and the row
+    /// is already permanent.
+    #[error(
+        "{namespace}:{name} is registered as value_type {expected}, but this flake carries value_type {actual}"
+    )]
+    WrongValueType {
+        namespace: u16,
+        name: String,
+        expected: i16,
+        actual: i16,
+    },
+
+    /// One assertion batch names two *different* values for the same
+    /// (subject, predicate) on a predicate the registry declares
+    /// single-valued (`many = FALSE`).
+    ///
+    /// **Scoped to one batch, not the store's current state.** Catching a
+    /// batch that contradicts itself is unambiguous — nothing about ordering
+    /// or a concurrent writer is in question, both values arrived in the
+    /// same call. Catching a batch that contradicts an *existing* row would
+    /// need a query per candidate subject before every write and a decision
+    /// about the retract-then-assert sequence every update path in this
+    /// codebase already uses (retract the old value, assert the new one, as
+    /// two separate calls) — a real, larger obligation, not this check's
+    /// job. An update that skips the retract still overwrites cleanly at
+    /// read time, because current-state resolution already takes the
+    /// latest `t`; it just leaves a stale row time travel can still see,
+    /// which is a data-hygiene question, not a correctness one this check
+    /// is positioned to catch.
+    #[error(
+        "{namespace}:{name} is single-valued (many = false), but this batch asserts more than one value for {subject}"
+    )]
+    CardinalityViolation {
+        namespace: u16,
+        name: String,
+        subject: String,
+    },
+
     #[error("engine backend failed: {0}")]
     Backend(String),
 }
@@ -273,7 +318,7 @@ pub fn reject_unset_namespaces(flakes: &[Flake]) -> Result<(), EngineError> {
 
 /// Rejects a flake naming a predicate that is not in `registered`.
 ///
-/// Takes the known set rather than the registry itself so it stays pure and
+/// Takes the known map rather than the registry itself so it stays pure and
 /// synchronous: the adapter owns *how* the set is obtained and cached, this
 /// owns what makes a batch acceptable. Lives here for the same reason
 /// [`reject_unset_namespaces`] does — every backend must refuse the same rows.
@@ -287,14 +332,90 @@ pub fn reject_unset_namespaces(flakes: &[Flake]) -> Result<(), EngineError> {
 /// [`EngineError::UnregisteredPredicate`] naming the first one not defined.
 pub fn reject_unregistered_predicates<S: std::hash::BuildHasher>(
     flakes: &[Flake],
-    registered: &std::collections::HashSet<Sid, S>,
+    registered: &std::collections::HashMap<Sid, PredicateDef, S>,
 ) -> Result<(), EngineError> {
     for flake in flakes {
-        if !registered.contains(&flake.p) {
+        if !registered.contains_key(&flake.p) {
             return Err(EngineError::UnregisteredPredicate {
                 namespace: flake.p.namespace_code,
                 name: flake.p.id.clone(),
             });
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a flake whose object is not the `FlakeValue` variant its
+/// predicate is registered to carry.
+///
+/// A flake naming an unregistered predicate is not reported here a second
+/// time — [`reject_unregistered_predicates`] already refuses it, and a
+/// predicate absent from `registered` has no declared type to check against.
+///
+/// # Errors
+///
+/// [`EngineError::WrongValueType`] naming the first mismatch.
+pub fn reject_wrong_datatypes<S: std::hash::BuildHasher>(
+    flakes: &[Flake],
+    registered: &std::collections::HashMap<Sid, PredicateDef, S>,
+) -> Result<(), EngineError> {
+    for flake in flakes {
+        let Some(def) = registered.get(&flake.p) else {
+            continue;
+        };
+        let actual = flake.o.value_type();
+        if actual != def.value_type {
+            return Err(EngineError::WrongValueType {
+                namespace: flake.p.namespace_code,
+                name: flake.p.id.clone(),
+                expected: def.value_type,
+                actual,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a batch that asserts two *different* values for the same
+/// (subject, predicate) on a predicate registered `many = false`.
+///
+/// **Scoped to this batch only** — see [`EngineError::CardinalityViolation`]
+/// for why checking against the store's current state is a separate, larger
+/// obligation this function does not attempt. The *same* value repeated
+/// twice is not a violation: idempotent re-assertion is ordinary, and
+/// refusing it would make a caller that retries a partially-failed batch
+/// worse off than one that never retried.
+///
+/// # Errors
+///
+/// [`EngineError::CardinalityViolation`] naming the first subject/predicate
+/// pair asserting more than one distinct value.
+pub fn reject_cardinality_violations<S: std::hash::BuildHasher>(
+    flakes: &[Flake],
+    registered: &std::collections::HashMap<Sid, PredicateDef, S>,
+) -> Result<(), EngineError> {
+    let mut seen: std::collections::HashMap<(&Sid, &Sid), &FlakeValue> =
+        std::collections::HashMap::new();
+    for flake in flakes {
+        let Some(def) = registered.get(&flake.p) else {
+            continue;
+        };
+        if def.many {
+            continue;
+        }
+        match seen.entry((&flake.s, &flake.p)) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(&flake.o);
+            }
+            std::collections::hash_map::Entry::Occupied(slot) => {
+                if *slot.get() != &flake.o {
+                    return Err(EngineError::CardinalityViolation {
+                        namespace: flake.p.namespace_code,
+                        name: flake.p.id.clone(),
+                        subject: flake.s.to_string(),
+                    });
+                }
+            }
         }
     }
     Ok(())
@@ -310,10 +431,23 @@ fn check(sid: &Sid, position: &'static str) -> Result<(), EngineError> {
 #[cfg(test)]
 mod unregistered_predicate_tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::HashMap;
 
-    fn registered() -> HashSet<Sid> {
-        [Sid::dsc("name"), Sid::dsc("fqn")].into_iter().collect()
+    fn def() -> PredicateDef {
+        PredicateDef {
+            namespace: namespace::DSC,
+            name: String::new(),
+            value_type: 1,
+            many: false,
+            core: true,
+        }
+    }
+
+    fn registered() -> HashMap<Sid, PredicateDef> {
+        [Sid::dsc("name"), Sid::dsc("fqn")]
+            .into_iter()
+            .map(|sid| (sid, def()))
+            .collect()
     }
 
     fn about(predicate: Sid) -> Flake {
@@ -358,7 +492,10 @@ mod unregistered_predicate_tests {
     /// unregistered predicate whenever *any* namespace had defined that name.
     #[test]
     fn the_namespace_is_half_of_the_predicate_identity() {
-        let dsc_type: HashSet<Sid> = [Sid::dsc("type")].into_iter().collect();
+        let dsc_type: HashMap<Sid, PredicateDef> = [Sid::dsc("type")]
+            .into_iter()
+            .map(|sid| (sid, def()))
+            .collect();
 
         let error =
             reject_unregistered_predicates(&[about(Sid::new(namespace::RDF, "type"))], &dsc_type)
@@ -424,8 +561,229 @@ mod unregistered_predicate_tests {
     #[test]
     fn an_empty_registry_admits_nothing() {
         assert!(
-            reject_unregistered_predicates(&[about(Sid::dsc("name"))], &HashSet::new()).is_err()
+            reject_unregistered_predicates(&[about(Sid::dsc("name"))], &HashMap::new()).is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod wrong_datatype_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn registered() -> HashMap<Sid, PredicateDef> {
+        [
+            (Sid::dsc("confidence"), 4), // float
+            (Sid::dsc("name"), 1),       // string
+            (Sid::dsc("owner"), 0),      // ref
+        ]
+        .into_iter()
+        .map(|(sid, value_type)| {
+            (
+                sid,
+                PredicateDef {
+                    namespace: namespace::DSC,
+                    name: String::new(),
+                    value_type,
+                    many: false,
+                    core: true,
+                },
+            )
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_value_matching_its_predicates_type_is_accepted() {
+        let flake = Flake::assert(
+            Sid::dsc("orders"),
+            Sid::dsc("confidence"),
+            FlakeValue::Float(0.9),
+            1,
+        );
+        assert!(reject_wrong_datatypes(&[flake], &registered()).is_ok());
+    }
+
+    /// **The real failure mode this check exists for**: a `String` written
+    /// where every reader assumes a `Float` looks like an ordinary row until
+    /// something tries to use it, far from where the mistake happened.
+    #[test]
+    fn a_string_where_a_float_is_registered_is_refused_naming_both_types() {
+        let flake = Flake::assert(
+            Sid::dsc("orders"),
+            Sid::dsc("confidence"),
+            FlakeValue::String("high".into()),
+            1,
+        );
+
+        let error = reject_wrong_datatypes(&[flake], &registered())
+            .expect_err("a String is not the registered Float");
+
+        assert!(
+            matches!(
+                &error,
+                EngineError::WrongValueType { name, expected, actual, .. }
+                    if name == "confidence" && *expected == 4 && *actual == 1
+            ),
+            "got {error:?}"
+        );
+    }
+
+    /// And the negative half of `a_value_matching_its_predicates_type_is_accepted`:
+    /// a `Ref` is not a `String`, even though both are common object shapes.
+    #[test]
+    fn a_ref_where_a_string_is_registered_is_refused() {
+        let flake = Flake::assert(
+            Sid::dsc("orders"),
+            Sid::dsc("name"),
+            FlakeValue::Ref(Sid::dsc("not-a-name")),
+            1,
+        );
+        assert!(reject_wrong_datatypes(&[flake], &registered()).is_err());
+    }
+
+    /// An unregistered predicate has no declared type to check against — that
+    /// is [`reject_unregistered_predicates`]'s failure to report, not this
+    /// one's, and reporting it here too would name the wrong problem.
+    #[test]
+    fn an_unregistered_predicate_is_not_reported_as_a_wrong_type() {
+        let flake = Flake::assert(
+            Sid::dsc("orders"),
+            Sid::dsc("rbiCircular"),
+            FlakeValue::String("anything".into()),
+            1,
+        );
+        assert!(reject_wrong_datatypes(&[flake], &registered()).is_ok());
+    }
+
+    #[test]
+    fn a_ref_object_matching_a_ref_predicate_is_accepted() {
+        let flake = Flake::assert(
+            Sid::dsc("orders"),
+            Sid::dsc("owner"),
+            FlakeValue::Ref(Sid::dsc("ops-team")),
+            1,
+        );
+        assert!(reject_wrong_datatypes(&[flake], &registered()).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod cardinality_violation_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn registered() -> HashMap<Sid, PredicateDef> {
+        [
+            (Sid::dsc("name"), false), // single-valued
+            (Sid::dsc("owner"), true), // many-valued
+        ]
+        .into_iter()
+        .map(|(sid, many)| {
+            (
+                sid,
+                PredicateDef {
+                    namespace: namespace::DSC,
+                    name: String::new(),
+                    value_type: 1,
+                    many,
+                    core: true,
+                },
+            )
+        })
+        .collect()
+    }
+
+    fn named(subject: &str, value: &str) -> Flake {
+        Flake::assert(
+            Sid::dsc(subject),
+            Sid::dsc("name"),
+            FlakeValue::String(value.into()),
+            1,
+        )
+    }
+
+    #[test]
+    fn one_value_for_a_single_valued_predicate_is_accepted() {
+        assert!(reject_cardinality_violations(&[named("orders", "Orders")], &registered()).is_ok());
+    }
+
+    /// **The failure mode this check exists for**: a batch that asserts two
+    /// different names for the same table would leave "which one is current"
+    /// unanswerable, with nothing in the write path ever having refused it.
+    #[test]
+    fn two_different_values_for_one_subject_are_refused_naming_the_subject() {
+        let batch = [named("orders", "Orders"), named("orders", "OrdersRenamed")];
+
+        let error = reject_cardinality_violations(&batch, &registered())
+            .expect_err("two different names for one subject must be refused");
+
+        assert!(
+            matches!(
+                &error,
+                EngineError::CardinalityViolation { name, subject, .. }
+                    if name == "name" && subject == &Sid::dsc("orders").to_string()
+            ),
+            "got {error:?}"
+        );
+    }
+
+    /// **Idempotent re-assertion is not a violation.** A retried batch that
+    /// happens to repeat the same value must not be worse off than one that
+    /// never retried.
+    #[test]
+    fn the_same_value_repeated_is_not_a_violation() {
+        let batch = [named("orders", "Orders"), named("orders", "Orders")];
+        assert!(reject_cardinality_violations(&batch, &registered()).is_ok());
+    }
+
+    /// A many-valued predicate is exactly what several values per subject
+    /// look like — the whole reason the registry marks some predicates this
+    /// way rather than refusing every repeat.
+    #[test]
+    fn several_values_for_a_many_valued_predicate_are_accepted() {
+        let batch = [
+            Flake::assert(
+                Sid::dsc("orders"),
+                Sid::dsc("owner"),
+                FlakeValue::Ref(Sid::dsc("ops-team")),
+                1,
+            ),
+            Flake::assert(
+                Sid::dsc("orders"),
+                Sid::dsc("owner"),
+                FlakeValue::Ref(Sid::dsc("data-team")),
+                1,
+            ),
+        ];
+        assert!(reject_cardinality_violations(&batch, &registered()).is_ok());
+    }
+
+    /// Two *different subjects* asserting the same single-valued predicate is
+    /// not a clash — cardinality is per subject, not per predicate.
+    #[test]
+    fn the_same_predicate_on_different_subjects_is_not_a_clash() {
+        let batch = [named("orders", "Orders"), named("returns", "Returns")];
+        assert!(reject_cardinality_violations(&batch, &registered()).is_ok());
+    }
+
+    #[test]
+    fn an_unregistered_predicate_is_not_reported_as_a_cardinality_violation() {
+        let batch = [
+            Flake::assert(
+                Sid::dsc("orders"),
+                Sid::dsc("rbiCircular"),
+                FlakeValue::String("a".into()),
+                1,
+            ),
+            Flake::assert(
+                Sid::dsc("orders"),
+                Sid::dsc("rbiCircular"),
+                FlakeValue::String("b".into()),
+                1,
+            ),
+        ];
+        assert!(reject_cardinality_violations(&batch, &registered()).is_ok());
     }
 }
 

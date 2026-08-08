@@ -363,6 +363,137 @@ async fn an_uninitialized_predicate_reports_the_unset_namespace_not_the_registry
     );
 }
 
+/// **A second gap this closes, alongside existence.** `dsc:confidence` is
+/// registered `Float` (`V3__predicate_registry.sql`); a `String` written past
+/// the existence check would sit in the graph indistinguishable from a real
+/// value until something tried to read it as a number.
+#[tokio::test]
+async fn asserting_a_string_where_a_float_is_registered_is_refused_and_names_both_types() {
+    let (store, _container, _url) = store().await;
+
+    let error = store
+        .assert_flakes(&[Flake::assert(
+            Sid::dsc("orders"),
+            Sid::dsc("confidence"),
+            FlakeValue::String("high".into()),
+            1,
+        )])
+        .await
+        .expect_err("a String is not the registered Float");
+
+    assert!(
+        matches!(
+            &error,
+            EngineError::WrongValueType { name, expected, actual, .. }
+                if name == "confidence" && *expected == 4 && *actual == 1
+        ),
+        "got {error:?}"
+    );
+    assert_eq!(
+        flake_count(&store).await,
+        0,
+        "a refused batch writes nothing"
+    );
+}
+
+/// The same enforcement applies to a runtime-defined predicate, not only the
+/// seeded core ones — the check reads the registry, not a hardcoded list.
+#[tokio::test]
+async fn a_runtime_defined_predicates_type_is_enforced_too() {
+    let (store, _container, _url) = store().await;
+    store
+        .define(&PredicateDef {
+            namespace: 1024,
+            name: "retentionYears".to_string(),
+            value_type: 3, // int
+            many: false,
+            core: false,
+        })
+        .await
+        .expect("define");
+
+    let error = store
+        .assert_flakes(&[Flake::assert(
+            Sid::dsc("orders"),
+            Sid::new(1024, "retentionYears"),
+            FlakeValue::String("seven".into()),
+            1,
+        )])
+        .await
+        .expect_err("a String is not the registered Int");
+    assert!(
+        matches!(error, EngineError::WrongValueType { .. }),
+        "got {error:?}"
+    );
+}
+
+/// **`dsc:name` is single-valued.** A batch asserting two different names for
+/// one table would leave "which one is current" unanswerable, and nothing in
+/// the write path used to refuse it.
+#[tokio::test]
+async fn asserting_two_different_names_for_one_subject_is_refused_and_names_the_subject() {
+    let (store, _container, _url) = store().await;
+
+    let error = store
+        .assert_flakes(&[
+            Flake::assert(
+                Sid::dsc("orders"),
+                Sid::dsc("name"),
+                FlakeValue::String("Orders".into()),
+                1,
+            ),
+            Flake::assert(
+                Sid::dsc("orders"),
+                Sid::dsc("name"),
+                FlakeValue::String("OrdersRenamed".into()),
+                1,
+            ),
+        ])
+        .await
+        .expect_err("two different names for one subject must be refused");
+
+    assert!(
+        matches!(
+            &error,
+            EngineError::CardinalityViolation { name, subject, .. }
+                if name == "name" && subject == &Sid::dsc("orders").to_string()
+        ),
+        "got {error:?}"
+    );
+    assert_eq!(
+        flake_count(&store).await,
+        0,
+        "a refused batch writes nothing"
+    );
+}
+
+/// **The negative half.** `dsc:owner` is many-valued (`V3` seeds it
+/// `TRUE`), so several distinct values for one subject in one batch is
+/// exactly the case the cardinality check must let through.
+#[tokio::test]
+async fn several_owners_for_one_asset_in_one_batch_are_accepted() {
+    let (store, _container, _url) = store().await;
+
+    store
+        .assert_flakes(&[
+            Flake::assert(
+                Sid::dsc("orders"),
+                Sid::dsc("owner"),
+                FlakeValue::Ref(Sid::dsc("ops-team")),
+                1,
+            ),
+            Flake::assert(
+                Sid::dsc("orders"),
+                Sid::dsc("owner"),
+                FlakeValue::Ref(Sid::dsc("data-team")),
+                1,
+            ),
+        ])
+        .await
+        .expect("a many-valued predicate must accept several values in one batch");
+    assert_eq!(flake_count(&store).await, 2);
+}
+
 /// Retraction is deliberately **not** gated.
 ///
 /// A retraction only ever withdraws a fact that is already in the graph.

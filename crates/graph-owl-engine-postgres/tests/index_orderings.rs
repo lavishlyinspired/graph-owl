@@ -53,6 +53,11 @@ async fn loaded_store() -> (PostgresTripleStore, common::TestDb) {
                     }
                     "nullable" => FlakeValue::Boolean(subject % 2 == 0),
                     "confidence" => FlakeValue::Float(0.5),
+                    // `dsc:updatedAt` is registered `Instant` (V3), not a
+                    // literal string — found by the predicate-registry
+                    // datatype check (Phase 2.6) refusing this fixture's own
+                    // catch-all arm, which had been writing it wrong.
+                    "updatedAt" => FlakeValue::Instant(chrono::Utc::now()),
                     _ => FlakeValue::String(format!("{predicate}-value-{subject}")),
                 };
                 batch.push(Flake::assert(

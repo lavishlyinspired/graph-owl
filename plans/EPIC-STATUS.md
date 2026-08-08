@@ -36,7 +36,7 @@ is the condition that index exists to catch.
 | **1** | 1 | [`01-api-conventions.md`](01-api-conventions.md) | **Shipped** | 12/12 | nothing |
 | **2** | 1 | [`02-entity-hierarchy.md`](02-entity-hierarchy.md) | In progress | 7/8 | Epic 1 (conventions, relationship taxonomy) |
 | **3** | 2 | [`03-versioning.md`](03-versioning.md) | In progress | 11/13 (+1 partial) | Epic 2 (four entity types to apply the envelope to) |
-| **4** | 3 | [`04-engine-triples.md`](04-engine-triples.md) | In progress | 10/11 (+1 partial) | Epic 3 (four entity types with an envelope to project) |
+| **4** | 3 | [`04-engine-triples.md`](04-engine-triples.md) | **Shipped** | 11/11 | Epic 3 (four entity types with an envelope to project) |
 | **5** | 4 | [`05-engine-constraints.md`](05-engine-constraints.md) | In progress | 9/10 (+1 partial) | Epic 4 (triples to validate) |
 | **6** | 4, 12 | [`06-engine-reasoning.md`](06-engine-reasoning.md) | In progress | 7/8 (+1 partial) | Epic 4 (triples), Epic 5 (ontology types) |
 | **7** | 3 | [`07-engine-query.md`](07-engine-query.md) | In progress | 8/9 | Epic 4 (triples), Epic 13 (authorization to compile into queries), **Epic 7a**… |
@@ -150,7 +150,7 @@ is the condition that index exists to catch.
 - [x] Reified relationships — each edge is a node of its own carrying `rdf:type`, both endpoin
 - [x] As-of query API
 - [x] Reconciliation and drift metric — drift computed by comparison rather than from a queue 
-- [~] Runtime predicate registry — define/lookup/list, duplicate refused, core vocabulary seed
+- [x] Runtime predicate registry — define/lookup/list, duplicate refused, core vocabulary seed
 - [x] `rdf:reifies` + triple terms → **Epic 94**, shipped (Slices A, B, D)
 - [x] Language-tag side table → **Epic 94**, shipped (Slice C) via a deliberate design pivot: 
 

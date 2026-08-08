@@ -13,11 +13,12 @@ pub mod value;
 use async_trait::async_trait;
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, TriplePattern};
 use graph_owl_engine::{
-    EngineError, PartitionHealth, TripleStore, reject_unregistered_predicates,
-    reject_unset_namespaces,
+    EngineError, PartitionHealth, PredicateDef, PredicateRegistry, TripleStore,
+    reject_cardinality_violations, reject_unregistered_predicates, reject_unset_namespaces,
+    reject_wrong_datatypes,
 };
 use sqlx::{PgPool, QueryBuilder, Row, postgres::PgRow};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{PoisonError, RwLock};
 
 mod embedded {
@@ -59,7 +60,10 @@ const MAX_FLAKES_PER_STATEMENT: usize = MAX_BIND_PARAMETERS / COLUMNS_PER_FLAKE;
 
 pub struct PostgresTripleStore {
     pool: PgPool,
-    /// The registered predicates, cached.
+    /// The registered predicates, cached — `value_type`/`many` alongside
+    /// existence now, not just existence: `PredicateRegistry` has no
+    /// `update`/`delete`, so once a predicate is defined, both are as
+    /// immutable as the definition itself.
     ///
     /// Starts empty and is re-read whenever a batch names something it does
     /// not hold, which is both the initial load and the invalidation — one
@@ -70,7 +74,7 @@ pub struct PostgresTripleStore {
     ///
     /// Nothing is ever removed from the registry, so a cached entry cannot go
     /// stale in the accepting direction — only a miss needs re-reading.
-    predicates: RwLock<HashSet<Sid>>,
+    predicates: RwLock<HashMap<Sid, PredicateDef>>,
 }
 
 impl PostgresTripleStore {
@@ -97,7 +101,7 @@ impl PostgresTripleStore {
 
         Ok(Self {
             pool,
-            predicates: RwLock::new(HashSet::new()),
+            predicates: RwLock::new(HashMap::new()),
         })
     }
 
@@ -106,17 +110,23 @@ impl PostgresTripleStore {
         &self.pool
     }
 
-    /// Refuses a batch naming a predicate the registry has never heard of.
+    /// Refuses a batch that names an undefined predicate, carries the wrong
+    /// `FlakeValue` variant for one it does name, or asserts two different
+    /// values for one subject on a single-valued predicate.
     ///
-    /// A miss re-reads the registry before concluding absence: the cache is an
-    /// optimization, and an optimization that turns into a refusal is a bug
-    /// that only shows up on the second instance.
-    async fn reject_unregistered(&self, flakes: &[Flake]) -> Result<(), EngineError> {
-        if self.check_against_cache(flakes).is_ok() {
-            return Ok(());
+    /// **Only an `UnregisteredPredicate` miss reloads and retries.** A wrong
+    /// datatype or a cardinality clash is a fact about the batch, not about
+    /// whether the cache is stale — reloading cannot make either one pass,
+    /// so retrying past them would spend a registry read on an outcome that
+    /// cannot change.
+    async fn validate_against_registry(&self, flakes: &[Flake]) -> Result<(), EngineError> {
+        match self.check_against_cache(flakes) {
+            Err(EngineError::UnregisteredPredicate { .. }) => {
+                self.reload_predicates().await?;
+                self.check_against_cache(flakes)
+            }
+            other => other,
         }
-        self.reload_predicates().await?;
-        self.check_against_cache(flakes)
     }
 
     fn check_against_cache(&self, flakes: &[Flake]) -> Result<(), EngineError> {
@@ -128,28 +138,21 @@ impl PostgresTripleStore {
             .predicates
             .read()
             .unwrap_or_else(PoisonError::into_inner);
-        reject_unregistered_predicates(flakes, &cache)
+        reject_unregistered_predicates(flakes, &cache)?;
+        reject_wrong_datatypes(flakes, &cache)?;
+        reject_cardinality_violations(flakes, &cache)
     }
 
     async fn reload_predicates(&self) -> Result<(), EngineError> {
-        let rows = sqlx::query("SELECT namespace, name FROM predicates")
-            .fetch_all(&self.pool)
+        let defined = self
+            .list(None)
             .await
             .map_err(|e| EngineError::Backend(e.to_string()))?;
 
-        let known = rows
-            .iter()
-            .map(|row| {
-                let namespace: i32 = row.get("namespace");
-                u16::try_from(namespace)
-                    .map(|ns| Sid::new(ns, row.get::<String, _>("name")))
-                    .map_err(|_| {
-                        EngineError::Backend(format!(
-                            "registered predicate namespace {namespace} is outside u16"
-                        ))
-                    })
-            })
-            .collect::<Result<HashSet<Sid>, _>>()?;
+        let known: HashMap<Sid, PredicateDef> = defined
+            .into_iter()
+            .map(|def| (Sid::new(def.namespace, def.name.clone()), def))
+            .collect();
 
         *self
             .predicates
@@ -475,7 +478,7 @@ impl TripleStore for PostgresTripleStore {
         // `write` checks again, because it is the one place a row is written
         // and its guarantee should not depend on which caller reached it.
         reject_unset_namespaces(flakes)?;
-        self.reject_unregistered(flakes).await?;
+        self.validate_against_registry(flakes).await?;
         self.write(flakes, true).await
     }
 

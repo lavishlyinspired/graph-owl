@@ -631,7 +631,16 @@ pub fn core_shapes(t: i64) -> Vec<Flake> {
                     "ordinalPosition",
                     &[
                         ("datatype", FlakeValue::String("int".into())),
-                        ("minInclusive", FlakeValue::Int(0)),
+                        // `sh:minInclusive` is registered `Float` (V5,
+                        // matching `ConfidenceShape`'s own use below) —
+                        // found by Phase 2.6's write-time datatype check,
+                        // which this shape had silently failed since Epic 5
+                        // shipped. `as_number()` converts either
+                        // representation to `f64` before comparing, so this
+                        // is a pure wire-representation fix: `0` and `0.0`
+                        // compare identically against a real Int-valued
+                        // `ordinalPosition`.
+                        ("minInclusive", FlakeValue::Float(0.0)),
                     ],
                 ),
             ],
