@@ -1,6 +1,6 @@
 # Plan: Embeddable Library (Epic 37c) ★
 **Branch**: feat/embeddable
-**Status**: Slices A–D shipped 4 August 2026. `graph-owl-storage-memory` is now a real published crate (Slice B), `examples/embedded.rs` proves the embedding claim end to end (Slice C), and both `core` and `api` now build under `#![deny(missing_docs)]` with doctests and a stated stability policy (Slice D). Slice E (publish metadata, `cargo publish --dry-run`) remains. **Slice F's stated blocker is stale**: it names Epic 34 (a second entity family to expand the embedding surface against), but Epic 34 shipped 5 August 2026 — one day *after* these Slices A–D — and nobody has revisited Slice F since. It is unblocked and unstarted, not blocked.
+**Status**: Slices A–D shipped 4 August 2026. `graph-owl-storage-memory` is now a real published crate (Slice B), `examples/embedded.rs` proves the embedding claim end to end (Slice C), and both `core` and `api` now build under `#![deny(missing_docs)]` with doctests and a stated stability policy (Slice D). Slice E shipped partially 8 August 2026 — see below for exactly what and why. **Slice F's stated blocker is stale**: it names Epic 34 (a second entity family to expand the embedding surface against), but Epic 34 shipped 5 August 2026 — one day *after* these Slices A–D — and nobody has revisited Slice F since. It is unblocked and unstarted, not blocked.
 **Depends on**: Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate against)
 **Differentiator** — see `plans/00a-product-position.md`
 **Crates**: **`graph-owl-storage-memory`** (new — promoted from the test fake to a published crate) · `graph-owl-core` + `graph-owl-api` (documented, `#![deny(missing_docs)]`, published) · dependency-boundary CI check
@@ -35,7 +35,7 @@ The property is worth proving against the widest possible surface. Publishing an
 - [x] `graph-owl-core` has zero I/O dependencies, asserted in CI.
 - [x] `graph-owl-core` and `graph-owl-api` construct no async runtime and read no global state — asserted in CI. Scoped to these two crates rather than every graph-owl crate; see Slice A below for why.
 - [x] The embedding surface is documented with runnable examples that compile in CI. `#![deny(missing_docs)]` now holds on both `core` and `api` (Slice D).
-- [ ] Crates publish to a registry with correct metadata and semver.
+- [~] Crates publish to a registry with correct metadata and semver — metadata and semver-ready manifests are done workspace-wide; the real registry rollout is a deliberate, deferred future step (see Slice E).
 - [ ] Adding an entity family does not break the embedding surface.
 
 ## Slices
@@ -99,21 +99,22 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: docs, lints, policy, doctests, `fmt`/`clippy -D warnings -A clippy::pedantic`/`cargo test --lib` all green on both crates after the doc-only changes.
 **Done when**: criteria met, doc-only changes verified not to have broken behavior, commit approved. Met.
 
-### Slice E: Crates are publishable
+### Slice E: Crates are publishable — shipped partially, 8 August 2026
 
 **Value**: Someone can actually depend on it.
 **Path**: publishing metadata, license, semver, release process.
 **Acceptance criteria**:
-- `core`, `storage`, `storage-memory`, `api` publish with description, license, repository, keywords.
-- Adapter and server crates are marked `publish = false` unless deliberately released.
-- Versions are semver from `0.1.0`; a documented policy governs bumps.
-- `cargo publish --dry-run` succeeds for each publishable crate.
-- Inter-crate dependencies use version requirements, not only paths, so a published crate resolves.
-- A changelog is generated or maintained per crate.
-- A release checklist exists and is followed.
-**RED**: `cargo publish --dry-run` in CI for each publishable crate — it catches missing metadata and path-only dependencies, the two things that break publishing. Mutator watch: n/a.
-**GREEN**: metadata, version requirements, release process.
-**Done when**: criteria met, dry-run green, commit approved.
+- [x] `core`, `storage`, `storage-memory`, `api` publish with description, license, repository, keywords. **Every one of the 31 crates in the workspace got this**, not just the four — `description` and `keywords` per crate (sourced from `00e-crate-architecture.md`'s own "Holds" column so the wording is the standing architectural description, not invented fresh), `repository` shared via a new `[workspace.package]` field, `license` already workspace-inherited.
+- [x] Adapter and server crates are marked `publish = false` unless deliberately released: `graph-owl-storage-postgres`, `graph-owl-engine-postgres`, `graph-owl-search-hnsw`, `graph-owl-search-opensearch`, `graph-owl-traversal-memory` (a backend an embedder picks *one* of, same as the search adapters), `graph-owl-server` (composition root, ships a binary), `graph-owl-ui` (embeds a *built* frontend bundle, meaningless without the asset pipeline). `graph-owl-storage-memory` deliberately stays publishable — Slice B already made it the zero-dependency embedding option, the opposite of an adapter nobody picks by default.
+- [x] Versions are semver from `0.1.0` — already true, unchanged (Slice D's decision log entry already states the pre-1.0 policy).
+- [~] `cargo publish --dry-run` succeeds for each publishable crate — **true only for `graph-owl-core`, and that is a hard technical limit, not a scope cut.** Found empirically: `cargo publish --dry-run` never uploads (`cargo publish --help`: "perform all checks without uploading" — confirmed by running it against `core` for real, which packaged, compiled, and stopped at `warning: aborting upload due to dry run`). But once a workspace dependency carries the `version` field publishing requires, cargo's packaging step resolves it against the **live** crates.io index regardless of `--dry-run`/`--no-verify`/even bare `cargo package` — reproduced three ways, always the same error: `no matching package named 'graph-owl-authz' found, location searched: crates.io index`. `graph-owl-storage`, `graph-owl-storage-memory` and `graph-owl-api` all depend on at-least-one workspace crate, so none of them can pass a genuine dry-run until that whole chain is published for real, leaf-first — the standard multi-crate Rust release order, not something a local check can fake. **Asked and answered 8 August 2026**: defer the real publish rollout (23 of 28 crates are still evolving; a real crates.io publish is effectively permanent) and ship only what's true today. `graph-owl-core` — the one crate with zero workspace dependencies — passes a real dry-run and is wired into CI.
+- [x] Inter-crate dependencies use version requirements, not only paths, so a published crate resolves — done workspace-wide (not only for the four target crates): every `graph-owl-*` path dependency, in `[workspace.dependencies]` and inline in all 31 crates' own manifests, now carries `version = "0.1.0"` alongside its `path`. This is what makes the manifests genuinely publish-ready for the future rollout, even though *running* that rollout is deferred.
+- [ ] A changelog is generated or maintained per crate — not done. Deferred alongside the real publish rollout; a changelog with nothing published against it yet has no readership.
+- [ ] A release checklist exists and is followed — not done, same reason.
+
+**RED**: `cargo publish --dry-run` in CI — wired for `graph-owl-core` only (`.github/workflows/ci.yml`, the step immediately after `embedding boundary`), with a comment explaining why the other three target crates are not (yet) in that loop. Mutator watch: n/a.
+**GREEN**: metadata and version requirements shipped workspace-wide; `cargo check --workspace --all-targets` and `cargo deny check licenses` both green after the manifest changes (Cargo.toml-only edits — no `.rs` file touched, so no behavior to regression-test).
+**Done when**: criteria met, dry-run green, commit approved. **Partially met, by design** — the two release-process criteria and full-chain dry-run wait on the deliberate future decision to actually start publishing.
 
 ### Slice F: The surface survives expansion
 

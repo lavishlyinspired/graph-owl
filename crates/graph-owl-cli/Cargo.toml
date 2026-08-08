@@ -3,6 +3,9 @@ name = "graph-owl-cli"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "Metadata-as-code CLI for graph-owl -- plan, apply, diff, drift"
+repository.workspace = true
+keywords = ["knowledge-graph", "cli", "metadata-as-code"]
 
 [lints]
 workspace = true
@@ -14,7 +17,7 @@ workspace = true
 # pull the storage adapter into a binary that must be able to run against a
 # remote instance. `graph-owl-core` is pure domain types with no I/O, which is
 # what validating a declaration's `kind` actually needs.
-graph-owl-core = { path = "../graph-owl-core" }
+graph-owl-core = { path = "../graph-owl-core", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -57,10 +60,10 @@ serde_norway = "0.9"
 # payload shape forever, so a wrong URL or a wrong field name (`parentFqn`
 # where the server wants `parentId` — which is exactly what this found)
 # stays invisible until something real refuses it.
-graph-owl-server = { path = "../graph-owl-server" }
-graph-owl-api = { path = "../graph-owl-api" }
-graph-owl-storage-postgres = { path = "../graph-owl-storage-postgres" }
-graph-owl-engine-postgres = { path = "../graph-owl-engine-postgres" }
+graph-owl-server = { path = "../graph-owl-server", version = "0.1.0" }
+graph-owl-api = { path = "../graph-owl-api", version = "0.1.0" }
+graph-owl-storage-postgres = { path = "../graph-owl-storage-postgres", version = "0.1.0" }
+graph-owl-engine-postgres = { path = "../graph-owl-engine-postgres", version = "0.1.0" }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }

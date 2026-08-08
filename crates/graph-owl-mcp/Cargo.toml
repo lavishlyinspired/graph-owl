@@ -3,16 +3,19 @@ name = "graph-owl-mcp"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "Model Context Protocol server for graph-owl"
+repository.workspace = true
+keywords = ["knowledge-graph", "mcp", "llm"]
 
 [lints]
 workspace = true
 
 [dependencies]
-graph-owl-core = { path = "../graph-owl-core" }
-graph-owl-api = { path = "../graph-owl-api" }
-graph-owl-storage = { path = "../graph-owl-storage" }
+graph-owl-core = { path = "../graph-owl-core", version = "0.1.0" }
+graph-owl-api = { path = "../graph-owl-api", version = "0.1.0" }
+graph-owl-storage = { path = "../graph-owl-storage", version = "0.1.0" }
 # Epic 32: agent capabilities and grants.
-graph-owl-authz = { path = "../graph-owl-authz" }
+graph-owl-authz = { path = "../graph-owl-authz", version = "0.1.0" }
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

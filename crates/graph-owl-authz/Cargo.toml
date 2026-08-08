@@ -3,6 +3,9 @@ name = "graph-owl-authz"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "Pure policy and rule evaluation for graph-owl authorization"
+repository.workspace = true
+keywords = ["knowledge-graph", "authorization", "policy"]
 
 [lints]
 workspace = true
@@ -14,7 +17,7 @@ workspace = true
 # *authorization*, which is what this crate is, so the architecture and the
 # build cost point the same way — see `plans/32-agent-capabilities.md`, which
 # named this crate from the start.
-graph-owl-core = { path = "../graph-owl-core" }
+graph-owl-core = { path = "../graph-owl-core", version = "0.1.0" }
 serde.workspace = true
 thiserror.workspace = true
 chrono.workspace = true

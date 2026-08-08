@@ -3,6 +3,9 @@ name = "graph-owl-storage"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "Storage port trait and StorageError for graph-owl entities"
+repository.workspace = true
+keywords = ["knowledge-graph", "storage"]
 
 [dependencies]
 chrono.workspace = true
@@ -10,7 +13,7 @@ serde_json.workspace = true
 serde.workspace = true
 graph-owl-core.workspace = true
 graph-owl-authz.workspace = true
-graph-owl-ontology = { path = "../graph-owl-ontology" }
+graph-owl-ontology = { path = "../graph-owl-ontology", version = "0.1.0" }
 async-trait.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

@@ -3,12 +3,15 @@ name = "graph-owl-events"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "EventSink port trait and ChangeEvent types for graph-owl"
+repository.workspace = true
+keywords = ["knowledge-graph", "events", "change-data"]
 
 [lints]
 workspace = true
 
 [dependencies]
-graph-owl-core = { path = "../graph-owl-core" }
+graph-owl-core = { path = "../graph-owl-core", version = "0.1.0" }
 async-trait.workspace = true
 thiserror.workspace = true
 chrono.workspace = true

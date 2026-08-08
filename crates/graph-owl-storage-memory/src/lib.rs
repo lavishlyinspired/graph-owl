@@ -2596,7 +2596,7 @@ impl Storage for InMemoryStorage {
 
         let mut relationships: Vec<Relationship> =
             self.relationships.lock().unwrap().iter().cloned().collect();
-        relationships.sort_by(|a, b| a.id.to_string().cmp(&b.id.to_string()));
+        relationships.sort_by_key(|a| a.id.to_string());
         if let Some(cursor) = &page.after {
             relationships.retain(|r| r.id.to_string().as_str() > cursor.sort_key.as_str());
         }
@@ -5622,7 +5622,7 @@ impl Storage for InMemoryStorage {
             .filter(|a| a.about == about)
             .cloned()
             .collect();
-        matching.sort_by(|a, b| b.starts_at.cmp(&a.starts_at));
+        matching.sort_by_key(|b| std::cmp::Reverse(b.starts_at));
         let total = i64::try_from(matching.len()).unwrap_or(i64::MAX);
         let page = matching.into_iter().skip(offset).take(limit).collect();
         Ok((page, total))

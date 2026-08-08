@@ -3,14 +3,17 @@ name = "graph-owl-resolution"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "Entity resolution, coreference and temporal matching for graph-owl"
+repository.workspace = true
+keywords = ["knowledge-graph", "entity-resolution"]
 
 [lints]
 workspace = true
 
 [dependencies]
-graph-owl-core = { path = "../graph-owl-core" }
-graph-owl-engine = { path = "../graph-owl-engine" }
-graph-owl-storage = { path = "../graph-owl-storage" }
+graph-owl-core = { path = "../graph-owl-core", version = "0.1.0" }
+graph-owl-engine = { path = "../graph-owl-engine", version = "0.1.0" }
+graph-owl-storage = { path = "../graph-owl-storage", version = "0.1.0" }
 async-trait.workspace = true
 thiserror.workspace = true
 chrono.workspace = true

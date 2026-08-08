@@ -3,6 +3,9 @@ name = "graph-owl-core"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "Pure domain types for graph-owl -- Flake, Sid, predicate vocabulary; zero I/O"
+repository.workspace = true
+keywords = ["knowledge-graph", "rdf", "domain-model"]
 
 [dependencies]
 utoipa.workspace = true

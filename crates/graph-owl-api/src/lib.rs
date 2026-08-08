@@ -3302,20 +3302,19 @@ impl Catalog {
         // update naming one new downstream task must still see the ones it
         // already had, or a two-step cycle built one edge per request would
         // slip through.
-        if let Some(existing) = siblings.iter().find(|sibling| sibling.name == task_name) {
-            if let Some(existing_downstream) = existing
+        if let Some(existing) = siblings.iter().find(|sibling| sibling.name == task_name)
+            && let Some(existing_downstream) = existing
                 .properties
                 .as_ref()
                 .and_then(|p| p.get("downstreamTasks"))
                 .and_then(|v| v.as_array())
-            {
-                edges.extend(
-                    existing_downstream
-                        .iter()
-                        .filter_map(|entry| entry.as_str().map(str::to_string))
-                        .map(|to| (task_name.to_string(), to)),
-                );
-            }
+        {
+            edges.extend(
+                existing_downstream
+                    .iter()
+                    .filter_map(|entry| entry.as_str().map(str::to_string))
+                    .map(|to| (task_name.to_string(), to)),
+            );
         }
 
         for target in &downstream {

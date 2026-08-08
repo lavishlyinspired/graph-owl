@@ -10,6 +10,7 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/lavishlyinspired/graph-owl"
 
 [workspace.lints.clippy]
 all = "warn"
@@ -86,24 +87,24 @@ oxjsonld = "0.2"
 # for hand-written Turtle: owning XML escaping by hand on one side of a
 # round trip is exactly where such output silently corrupts.
 quick-xml = "0.41"
-graph-owl-core = { path = "crates/graph-owl-core" }
-graph-owl-ontology = { path = "crates/graph-owl-ontology" }
-graph-owl-events = { path = "crates/graph-owl-events" }
-graph-owl-storage = { path = "crates/graph-owl-storage" }
-graph-owl-storage-postgres = { path = "crates/graph-owl-storage-postgres" }
-graph-owl-storage-memory = { path = "crates/graph-owl-storage-memory" }
-graph-owl-authz = { path = "crates/graph-owl-authz" }
-graph-owl-mcp = { path = "crates/graph-owl-mcp" }
-graph-owl-lpg = { path = "crates/graph-owl-lpg" }
-graph-owl-engine = { path = "crates/graph-owl-engine" }
-graph-owl-engine-postgres = { path = "crates/graph-owl-engine-postgres" }
-graph-owl-traversal = { path = "crates/graph-owl-traversal" }
-graph-owl-traversal-memory = { path = "crates/graph-owl-traversal-memory" }
-graph-owl-api = { path = "crates/graph-owl-api" }
-graph-owl-bolt = { path = "crates/graph-owl-bolt" }
-graph-owl-ui = { path = "crates/graph-owl-ui" }
-graph-owl-connectors = { path = "crates/graph-owl-connectors" }
-graph-owl-search = { path = "crates/graph-owl-search" }
+graph-owl-core = { path = "crates/graph-owl-core", version = "0.1.0" }
+graph-owl-ontology = { path = "crates/graph-owl-ontology", version = "0.1.0" }
+graph-owl-events = { path = "crates/graph-owl-events", version = "0.1.0" }
+graph-owl-storage = { path = "crates/graph-owl-storage", version = "0.1.0" }
+graph-owl-storage-postgres = { path = "crates/graph-owl-storage-postgres", version = "0.1.0" }
+graph-owl-storage-memory = { path = "crates/graph-owl-storage-memory", version = "0.1.0" }
+graph-owl-authz = { path = "crates/graph-owl-authz", version = "0.1.0" }
+graph-owl-mcp = { path = "crates/graph-owl-mcp", version = "0.1.0" }
+graph-owl-lpg = { path = "crates/graph-owl-lpg", version = "0.1.0" }
+graph-owl-engine = { path = "crates/graph-owl-engine", version = "0.1.0" }
+graph-owl-engine-postgres = { path = "crates/graph-owl-engine-postgres", version = "0.1.0" }
+graph-owl-traversal = { path = "crates/graph-owl-traversal", version = "0.1.0" }
+graph-owl-traversal-memory = { path = "crates/graph-owl-traversal-memory", version = "0.1.0" }
+graph-owl-api = { path = "crates/graph-owl-api", version = "0.1.0" }
+graph-owl-bolt = { path = "crates/graph-owl-bolt", version = "0.1.0" }
+graph-owl-ui = { path = "crates/graph-owl-ui", version = "0.1.0" }
+graph-owl-connectors = { path = "crates/graph-owl-connectors", version = "0.1.0" }
+graph-owl-search = { path = "crates/graph-owl-search", version = "0.1.0" }
 
 # ---------------------------------------------------------------------------
 # Build-time profile tuning. Added after a session where the compile/test loop

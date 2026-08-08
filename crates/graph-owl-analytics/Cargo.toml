@@ -3,11 +3,14 @@ name = "graph-owl-analytics"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "Degree, connected-components and PageRank over a caller-supplied graph projection"
+repository.workspace = true
+keywords = ["knowledge-graph", "graph-analytics", "pagerank"]
 
 [lints]
 workspace = true
 
 [dependencies]
-graph-owl-core = { path = "../graph-owl-core" }
+graph-owl-core = { path = "../graph-owl-core", version = "0.1.0" }
 petgraph.workspace = true
 thiserror.workspace = true

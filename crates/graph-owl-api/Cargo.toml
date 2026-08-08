@@ -3,6 +3,9 @@ name = "graph-owl-api"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "Catalog facade over the graph-owl storage and engine ports"
+repository.workspace = true
+keywords = ["knowledge-graph", "catalog", "facade"]
 
 [dependencies]
 tracing.workspace = true
@@ -14,16 +17,16 @@ graph-owl-authz.workspace = true
 graph-owl-engine.workspace = true
 graph-owl-traversal.workspace = true
 graph-owl-connectors.workspace = true
-graph-owl-query = { path = "../graph-owl-query" }
+graph-owl-query = { path = "../graph-owl-query", version = "0.1.0" }
 graph-owl-lpg.workspace = true
-graph-owl-reasoning = { path = "../graph-owl-reasoning" }
-graph-owl-reasoning-ql = { path = "../graph-owl-reasoning-ql" }
-graph-owl-reasoning-el = { path = "../graph-owl-reasoning-el" }
-graph-owl-constraint = { path = "../graph-owl-constraint" }
-graph-owl-ontology = { path = "../graph-owl-ontology" }
-graph-owl-resolution = { path = "../graph-owl-resolution" }
-graph-owl-rdf-io = { path = "../graph-owl-rdf-io" }
-graph-owl-lpg-io = { path = "../graph-owl-lpg-io" }
+graph-owl-reasoning = { path = "../graph-owl-reasoning", version = "0.1.0" }
+graph-owl-reasoning-ql = { path = "../graph-owl-reasoning-ql", version = "0.1.0" }
+graph-owl-reasoning-el = { path = "../graph-owl-reasoning-el", version = "0.1.0" }
+graph-owl-constraint = { path = "../graph-owl-constraint", version = "0.1.0" }
+graph-owl-ontology = { path = "../graph-owl-ontology", version = "0.1.0" }
+graph-owl-resolution = { path = "../graph-owl-resolution", version = "0.1.0" }
+graph-owl-rdf-io = { path = "../graph-owl-rdf-io", version = "0.1.0" }
+graph-owl-lpg-io = { path = "../graph-owl-lpg-io", version = "0.1.0" }
 spareval = "0.2"
 spargebra = "0.4"
 sparesults = "0.3"

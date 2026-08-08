@@ -6,6 +6,10 @@ edition.workspace = true
 # run -p graph-owl-server` is ambiguous without this.
 default-run = "graph-owl-server"
 license.workspace = true
+description = "axum HTTP layer and composition root for graph-owl"
+repository.workspace = true
+keywords = ["knowledge-graph", "http", "axum"]
+publish = false
 
 [features]
 default = []
@@ -19,12 +23,12 @@ bolt = ["dep:graph-owl-bolt", "dep:async-trait", "dep:thiserror"]
 utoipa.workspace = true
 base64.workspace = true
 graph-owl-api.workspace = true
-graph-owl-ontology = { path = "../graph-owl-ontology" }
+graph-owl-ontology = { path = "../graph-owl-ontology", version = "0.1.0" }
 # Epic 9a's export-authorization gap, closed: `GET /graph/export/{format}`
 # returns `Catalog::export_*`'s output, and the JSON Graph format's schema
 # (`JsonGraphView`) is registered in the OpenAPI contract, both of which need
 # this crate's types named directly rather than only through `graph-owl-api`.
-graph-owl-lpg-io = { path = "../graph-owl-lpg-io" }
+graph-owl-lpg-io = { path = "../graph-owl-lpg-io", version = "0.1.0" }
 # Bundles bulk-CSV export's multiple files (one per node label plus
 # `relationships.csv`) into one HTTP download — the identical `tar`+`zstd`
 # pairing `graph-owl-api::archive` already uses for the same "one response,
@@ -40,20 +44,20 @@ zstd.workspace = true
 graph-owl-bolt = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
-graph-owl-reasoning = { path = "../graph-owl-reasoning" }
+graph-owl-reasoning = { path = "../graph-owl-reasoning", version = "0.1.0" }
 # Epic 99: `ForbiddenConstruct` (naming what `/sparql`'s QL rewrite could not
 # express) is rendered directly in `query_outcome_json` — it holds no `Sid`
 # and has no `Serialize` impl of its own, so the response builder names each
 # variant by hand rather than deriving one just for this one call site.
-graph-owl-reasoning-ql = { path = "../graph-owl-reasoning-ql" }
+graph-owl-reasoning-ql = { path = "../graph-owl-reasoning-ql", version = "0.1.0" }
 # Epic 98: `ForbiddenElConstruct`, named by hand in `el_classification_body`
 # for the identical reason `graph-owl-reasoning-ql` is above. Also needed by
 # `main.rs` to configure the optional `whelk` sidecar from the environment.
-graph-owl-reasoning-el = { path = "../graph-owl-reasoning-el" }
+graph-owl-reasoning-el = { path = "../graph-owl-reasoning-el", version = "0.1.0" }
 # Epic 9 Slice B: the served, versioned JSON-LD `@context` route compacted
 # output references by URL — `JsonLdContext::to_document()` is the same
 # function `graph-owl-rdf-io`'s own serializer compacts against.
-graph-owl-rdf-io = { path = "../graph-owl-rdf-io" }
+graph-owl-rdf-io = { path = "../graph-owl-rdf-io", version = "0.1.0" }
 graph-owl-connectors.workspace = true
 graph-owl-ui.workspace = true
 graph-owl-authz.workspace = true
@@ -89,7 +93,7 @@ graph-owl-engine.workspace = true
 # real server to restore into) is fine — dev-dependencies are per-package
 # test-only edges, not part of the linked graph, so Cargo does not treat
 # this as circular.
-graph-owl-cli = { path = "../graph-owl-cli" }
+graph-owl-cli = { path = "../graph-owl-cli", version = "0.1.0" }
 jsonwebtoken = "9"
 sqlx.workspace = true
 tower.workspace = true

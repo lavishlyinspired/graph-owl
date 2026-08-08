@@ -565,7 +565,7 @@ fn attr_value(
         let attribute = attribute.map_err(|e| parse_error(line, column, e.to_string()))?;
         if attribute.key.as_ref() == name.as_bytes() {
             return attribute
-                .unescape_value()
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                 .map(std::borrow::Cow::into_owned)
                 .map_err(|e| parse_error(line, column, e.to_string()));
         }

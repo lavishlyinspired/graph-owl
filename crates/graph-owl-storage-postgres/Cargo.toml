@@ -3,11 +3,15 @@ name = "graph-owl-storage-postgres"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "sqlx-backed Storage adapter with refinery migrations for graph-owl"
+repository.workspace = true
+keywords = ["knowledge-graph", "postgres", "sqlx"]
+publish = false
 
 [dependencies]
 tracing.workspace = true
 graph-owl-core.workspace = true
-graph-owl-ontology = { path = "../graph-owl-ontology" }
+graph-owl-ontology = { path = "../graph-owl-ontology", version = "0.1.0" }
 graph-owl-storage.workspace = true
 graph-owl-authz.workspace = true
 graph-owl-search.workspace = true

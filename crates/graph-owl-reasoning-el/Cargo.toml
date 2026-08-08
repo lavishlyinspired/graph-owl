@@ -3,10 +3,13 @@ name = "graph-owl-reasoning-el"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "OWL 2 EL classification reasoning for graph-owl"
+repository.workspace = true
+keywords = ["knowledge-graph", "owl", "reasoning"]
 
 [lints]
 workspace = true
 
 [dependencies]
-graph-owl-core = { path = "../graph-owl-core" }
+graph-owl-core = { path = "../graph-owl-core", version = "0.1.0" }
 thiserror.workspace = true

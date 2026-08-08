@@ -3,10 +3,13 @@ name = "graph-owl-reasoning-ql"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "OWL 2 QL query rewriting over SPARQL algebra for graph-owl"
+repository.workspace = true
+keywords = ["knowledge-graph", "owl", "sparql"]
 
 [lints]
 workspace = true
 
 [dependencies]
-graph-owl-core = { path = "../graph-owl-core" }
+graph-owl-core = { path = "../graph-owl-core", version = "0.1.0" }
 spargebra = "0.4"

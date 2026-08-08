@@ -3,15 +3,18 @@ name = "graph-owl-ontology"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "Shape and axiom domain types for graph-owl"
+repository.workspace = true
+keywords = ["knowledge-graph", "owl", "ontology"]
 
 [lints]
 workspace = true
 
 [dependencies]
-graph-owl-core = { path = "../graph-owl-core" }
-graph-owl-reasoning-el = { path = "../graph-owl-reasoning-el" }
-graph-owl-reasoning-ql = { path = "../graph-owl-reasoning-ql" }
-graph-owl-rdf-io = { path = "../graph-owl-rdf-io" }
+graph-owl-core = { path = "../graph-owl-core", version = "0.1.0" }
+graph-owl-reasoning-el = { path = "../graph-owl-reasoning-el", version = "0.1.0" }
+graph-owl-reasoning-ql = { path = "../graph-owl-reasoning-ql", version = "0.1.0" }
+graph-owl-rdf-io = { path = "../graph-owl-rdf-io", version = "0.1.0" }
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true

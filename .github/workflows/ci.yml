@@ -53,6 +53,23 @@ jobs:
       - name: embedding boundary
         run: python3 scripts/check-embedding-boundary.py
 
+      # Epic 37c Slice E: `cargo publish --dry-run` never uploads (it "performs
+      # all checks without uploading" per `cargo publish --help`) but it does
+      # need every non-dev dependency's `version` to resolve against the real
+      # crates.io index once specified — verified empirically 8 August 2026,
+      # `cargo package` fails with "no matching package named `graph-owl-authz`
+      # found" for any workspace crate that is not itself live yet. That makes
+      # a genuine dry-run only achievable, right now, for `graph-owl-core`: it
+      # is the one publishable crate with zero workspace dependencies. Every
+      # crate meant to publish (core, storage, storage-memory, api) has
+      # `version` alongside every internal `path` dependency so the manifests
+      # are publish-ready, but `storage`/`storage-memory`/`api` cannot pass a
+      # real dry-run until the crates they depend on are actually published —
+      # that is a deliberate, separate release-ordering step, not something a
+      # CI check can fake.
+      - name: publish dry-run (graph-owl-core)
+        run: cargo publish --dry-run -p graph-owl-core
+
       - name: clippy
         # `-A clippy::pedantic` and not a bare `-D warnings`. The workspace sets
         # `all = "warn", pedantic = "warn"` deliberately: pedantic is read as
