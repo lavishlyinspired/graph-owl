@@ -252,6 +252,8 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/reasoning/el/classify", post(classify_ontology))
         .route("/reasoning/el/explain", get(explain_el_subsumption))
         .route("/ontology/profile", get(ontology_profile))
+        .route("/alignments", post(upsert_alignment))
+        .route("/alignments/review", get(alignment_review_queue))
         .route("/validation/runs", post(run_validation))
         .route("/validation/shapes/seed", post(seed_core_shapes))
         .route("/validation/report", get(validation_report))
@@ -6918,6 +6920,202 @@ async fn explain_el_subsumption(
         ))),
         None => Err(AppError::NotFound),
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AlignmentSourceRequest {
+    kind: String,
+    detail: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertAlignmentRequest {
+    /// `"match"` (`skos:exactMatch`/`closeMatch`/`broadMatch`/`narrowMatch`,
+    /// any source) or `"equivalentClass"` (`owl:equivalentClass`, decision
+    /// 3: never a `computed` source — logical force, so an automated guess
+    /// must never poison the inference set).
+    kind: String,
+    left: String,
+    right: String,
+    /// Required for `kind: "match"`, ignored for `"equivalentClass"`
+    /// (which has exactly one predicate, `owl:equivalentClass`, by
+    /// construction).
+    #[serde(default)]
+    predicate: Option<String>,
+    source: AlignmentSourceRequest,
+    confidence: f64,
+    #[serde(default)]
+    lossy_reverse: bool,
+}
+
+impl ValidateBody for UpsertAlignmentRequest {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        // `kind`/`predicate`/`source.kind` are each checked downstream in
+        // the handler, which names the accepted values per field rather
+        // than a bare "invalid" this pass could only give.
+        Vec::new()
+    }
+}
+
+fn parse_match_predicate(
+    raw: &str,
+) -> Result<graph_owl_ontology::alignment::MatchPredicate, AppError> {
+    use graph_owl_ontology::alignment::MatchPredicate;
+    match raw {
+        "exactMatch" => Ok(MatchPredicate::ExactMatch),
+        "closeMatch" => Ok(MatchPredicate::CloseMatch),
+        "broadMatch" => Ok(MatchPredicate::BroadMatch),
+        "narrowMatch" => Ok(MatchPredicate::NarrowMatch),
+        other => Err(AppError::Validation(vec![FieldError::new(
+            "predicate",
+            FieldErrorCode::Value,
+            format!(
+                "`{other}` is not a supported match predicate — use exactMatch, closeMatch, \
+                 broadMatch, or narrowMatch"
+            ),
+        )])),
+    }
+}
+
+/// Write one alignment — Epic 104 Slice D, put on the wire.
+///
+/// **`Catalog::upsert_alignment`/`pending_alignment_review` had no route at
+/// all until this one** — found auditing
+/// `plans/EPIC-COMPLETION-PLAN.md` Phase 1.7. Admin-only: writing a
+/// cross-vocabulary alignment — especially `owl:equivalentClass`, which a
+/// reasoner draws conclusions from — is exactly the class of operation
+/// `/reasoning/runs` and `/validation/shapes/seed` already gate the same
+/// way, not an ordinary authenticated write.
+///
+/// Decision 3 (a computed source can never assert `owl:equivalentClass`)
+/// is enforced here at the request boundary — `AssertableSource` has no
+/// `Computed` variant, so the type system refuses it once construction is
+/// reached; a `kind: "equivalentClass"` request naming `source.kind:
+/// "computed"` is refused before that point, naming the field, rather than
+/// surfacing as a confusing type-conversion failure.
+async fn upsert_alignment(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(request): AppJson<UpsertAlignmentRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use graph_owl_ontology::alignment::{Alignment, AlignmentSource, AssertableSource};
+
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+
+    let left = parse_sid("left", &request.left)?;
+    let right = parse_sid("right", &request.right)?;
+
+    let alignment = match request.kind.as_str() {
+        "match" => {
+            let predicate_raw = request.predicate.as_deref().ok_or_else(|| {
+                AppError::Validation(vec![FieldError::new(
+                    "predicate",
+                    FieldErrorCode::Required,
+                    "required when kind is \"match\"".to_string(),
+                )])
+            })?;
+            let predicate = parse_match_predicate(predicate_raw)?;
+            let source = match request.source.kind.as_str() {
+                "curated" => AlignmentSource::Curated {
+                    authority: request.source.detail,
+                },
+                "computed" => AlignmentSource::Computed {
+                    method: request.source.detail,
+                },
+                "human" => AlignmentSource::Human {
+                    principal: request.source.detail,
+                },
+                other => {
+                    return Err(AppError::Validation(vec![FieldError::new(
+                        "source.kind",
+                        FieldErrorCode::Value,
+                        format!("`{other}` is not curated, computed, or human"),
+                    )]));
+                }
+            };
+            Alignment::Match {
+                left,
+                right,
+                predicate,
+                source,
+                confidence: request.confidence,
+                lossy_reverse: request.lossy_reverse,
+            }
+        }
+        "equivalentClass" => {
+            let source = match request.source.kind.as_str() {
+                "curated" => AssertableSource::Curated {
+                    authority: request.source.detail,
+                },
+                "human" => AssertableSource::Human {
+                    principal: request.source.detail,
+                },
+                "computed" => {
+                    return Err(AppError::Validation(vec![FieldError::new(
+                        "source.kind",
+                        FieldErrorCode::Value,
+                        "owl:equivalentClass carries logical force — a computed source can \
+                         never assert it (decision 3); use kind: \"match\" instead, or a \
+                         curated/human source"
+                            .to_string(),
+                    )]));
+                }
+                other => {
+                    return Err(AppError::Validation(vec![FieldError::new(
+                        "source.kind",
+                        FieldErrorCode::Value,
+                        format!("`{other}` is not curated or human"),
+                    )]));
+                }
+            };
+            Alignment::EquivalentClass {
+                left,
+                right,
+                source,
+                confidence: request.confidence,
+                lossy_reverse: request.lossy_reverse,
+            }
+        }
+        other => {
+            return Err(AppError::Validation(vec![FieldError::new(
+                "kind",
+                FieldErrorCode::Value,
+                format!("`{other}` is not match or equivalentClass"),
+            )]));
+        }
+    };
+
+    let outcome = catalog.upsert_alignment(&alignment).await?;
+    Ok(Json(json!({ "outcome": outcome })))
+}
+
+/// Alignments in decision 4's review band, resolved — Epic 104 Slice D put
+/// on the wire alongside `upsert_alignment` above. Read-only, never
+/// admin-gated: reviewing what is pending needs no elevated tier, only
+/// writing a confirmed one does.
+async fn alignment_review_queue(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let entries = catalog.pending_alignment_review_detailed().await?;
+    Ok(Json(json!(
+        entries
+            .iter()
+            .map(|entry| json!({
+                "subject": entry.subject.to_string(),
+                "left": entry.left.as_ref().map(ToString::to_string),
+                "right": entry.right.as_ref().map(ToString::to_string),
+                "sourceKind": entry.source_kind,
+                "sourceDetail": entry.source_detail,
+                "confidence": entry.confidence,
+                "lossyReverse": entry.lossy_reverse,
+            }))
+            .collect::<Vec<_>>()
+    )))
 }
 
 /// Which OWL profiles the ontology's `TBox` belongs to, and which one

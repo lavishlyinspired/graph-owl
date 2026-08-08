@@ -565,6 +565,34 @@ pub struct ElClassification {
     pub refused_axioms: Vec<graph_owl_reasoning_el::RefusedAxiom>,
 }
 
+/// One entry from [`Catalog::pending_alignment_review_detailed`] — Epic
+/// 104. Every field but `subject` and `confidence` is `Option`: this reads
+/// the graph rather than trusting that every property
+/// [`graph_owl_ontology::alignment::Alignment::subject`]'s own metadata
+/// flakes always wrote is actually present.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlignmentReviewEntry {
+    /// The reified alignment node itself — stable per `(left, predicate,
+    /// right)`, the same subject a later `upsert_alignment` call updates
+    /// rather than duplicates.
+    pub subject: graph_owl_core::flake::Sid,
+    /// The left-hand vocabulary term this alignment maps from.
+    pub left: Option<graph_owl_core::flake::Sid>,
+    /// The right-hand vocabulary term this alignment maps to.
+    pub right: Option<graph_owl_core::flake::Sid>,
+    /// `"curated"`, `"computed"`, or `"human"`.
+    pub source_kind: Option<String>,
+    /// The authority, method, or confirming principal named by
+    /// `source_kind` — e.g. an authority name for `"curated"`, a method
+    /// name for `"computed"`, a principal id for `"human"`.
+    pub source_detail: Option<String>,
+    /// This alignment's own confidence, `0.0..=1.0`.
+    pub confidence: Option<f64>,
+    /// Decision 6: `true` when walking `right` back to `left` loses
+    /// information a consumer must know it is losing.
+    pub lossy_reverse: Option<bool>,
+}
+
 /// One value in a [`CypherRow`] — Epic 7d Slice D.
 ///
 /// **Typed, not rendered.** [`SparqlOutcome`]'s rows stringify every bound
@@ -12059,6 +12087,100 @@ impl Catalog {
                 _ => false,
             })
             .collect())
+    }
+
+    /// [`Self::pending_alignment_review`], resolved into the properties a
+    /// caller actually needs to show a reviewer something — left, right,
+    /// source, confidence, directionality — rather than the raw
+    /// `confidence` flake alone.
+    ///
+    /// **Had no HTTP-reachable form at all** — found wiring
+    /// `plans/EPIC-COMPLETION-PLAN.md` Phase 1.7. The DTO shape here is the
+    /// straightforward one: one entry per pending alignment, its known
+    /// properties resolved by name from
+    /// [`graph_owl_ontology::alignment::metadata_flakes`]'s own vocabulary.
+    /// A property absent from a given entry (which should not happen for
+    /// anything `upsert_alignment` itself wrote, but this reads the graph
+    /// rather than trusting that invariant) is `None`, never a default
+    /// that could be mistaken for a real value.
+    ///
+    /// One query per pending alignment, not one bulk query — deliberately:
+    /// this band is a review queue (curated/computed alignments awaiting a
+    /// human look), not a bulk table, so its cardinality is bounded by how
+    /// much is actually pending, the same "small and naturally bounded"
+    /// shape [`Self::derived_about`]'s own per-subject fetch already
+    /// assumes.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured or a read fails.
+    pub async fn pending_alignment_review_detailed(
+        &self,
+    ) -> Result<Vec<AlignmentReviewEntry>, CatalogError> {
+        use graph_owl_core::flake::TriplePattern;
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let mut entries = Vec::new();
+        for confidence_flake in self.pending_alignment_review().await? {
+            let subject = confidence_flake.s.clone();
+            let subject_flakes = graph
+                .query_pattern(&TriplePattern {
+                    s: Some(subject.clone()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+            let find_ref = |name: &str| {
+                subject_flakes.iter().find_map(|f| {
+                    (f.p == Sid::dsc(name))
+                        .then_some(&f.o)
+                        .and_then(|o| match o {
+                            FlakeValue::Ref(sid) => Some(sid.clone()),
+                            _ => None,
+                        })
+                })
+            };
+            let find_string = |name: &str| {
+                subject_flakes.iter().find_map(|f| {
+                    (f.p == Sid::dsc(name))
+                        .then_some(&f.o)
+                        .and_then(|o| match o {
+                            FlakeValue::String(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                })
+            };
+            let find_bool = |name: &str| {
+                subject_flakes.iter().find_map(|f| {
+                    (f.p == Sid::dsc(name))
+                        .then_some(&f.o)
+                        .and_then(|o| match o {
+                            FlakeValue::Boolean(b) => Some(*b),
+                            _ => None,
+                        })
+                })
+            };
+
+            entries.push(AlignmentReviewEntry {
+                subject,
+                left: find_ref("alignmentLeft"),
+                right: find_ref("alignmentRight"),
+                source_kind: find_string("alignmentSourceKind"),
+                source_detail: find_string("alignmentSourceDetail"),
+                confidence: match confidence_flake.o {
+                    FlakeValue::Float(c) => Some(c),
+                    _ => None,
+                },
+                lossy_reverse: find_bool("lossyReverse"),
+            });
+        }
+        Ok(entries)
     }
 
     // ----- Constraint validation (Epic 5, slices C, D and E) -----

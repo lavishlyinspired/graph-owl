@@ -2793,6 +2793,58 @@
         "summary": "Grant or replace an agent's capabilities"
       }
     },
+    "/alignments": {
+      "post": {
+        "operationId": "post_alignments",
+        "responses": {
+          "200": {
+            "description": "Write one cross-vocabulary alignment (skos:*Match or owl:equivalentClass)"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Write one cross-vocabulary alignment (skos:*Match or owl:equivalentClass)"
+      }
+    },
+    "/alignments/review": {
+      "get": {
+        "operationId": "get_alignments_review",
+        "responses": {
+          "200": {
+            "description": "Alignments in decision 4's review band, resolved"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Alignments in decision 4's review band, resolved"
+      }
+    },
     "/assets": {
       "get": {
         "operationId": "get_assets",
