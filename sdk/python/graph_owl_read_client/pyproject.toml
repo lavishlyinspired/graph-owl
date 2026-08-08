@@ -1,0 +1,25 @@
+[project]
+name = "graph-owl-read-client"
+version = "0.1.0"
+description = "Generated read client for the graph-owl HTTP API — Epic 36 Slice D."
+requires-python = ">=3.10"
+# The runtime dependencies `openapi-python-client` itself generates calls
+# against (`client.py` imports `attrs`/`httpx`; `models/` import `dateutil`
+# for RFC 3339 fields and `typing_extensions.Self` for attrs-generated
+# `from_dict` return types) — a real, unavoidable difference from
+# `graph_owl_sdk`'s stdlib-only philosophy, because this package's code was
+# not hand-written to avoid them.
+dependencies = [
+    "attrs>=22.2.0",
+    "httpx>=0.20.0,<0.29.0",
+    "python-dateutil>=2.8.0,<3.0.0",
+    "typing-extensions>=4.3.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["graph_owl_read_client*"]

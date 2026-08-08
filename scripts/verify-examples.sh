@@ -25,6 +25,18 @@ CONTAINER=graph-owl-examples-check
 VENV="${TMPDIR:-/tmp}/graph-owl-examples-venv"
 JWT_SECRET="graph-owl-example-fixture-secret-not-for-production"
 
+echo "==> regenerating the contract from the code"
+cargo run -q -p graph-owl-server --bin openapi > openapi.json
+
+echo "==> generating the Python read client from the contract"
+# Not committed — mirrors `sdk/typescript/src/generated/`
+# (`verify-generated-client.sh`'s own reasoning: a committed copy is a
+# second thing to keep in step with `openapi.json`). `uvx` runs it
+# ephemerally, the same role `npx --yes openapi-typescript` plays for the
+# TypeScript client.
+uvx openapi-python-client generate --path openapi.json --meta none \
+    --overwrite --output-path sdk/python/graph_owl_read_client/src/graph_owl_read_client
+
 echo "==> surface purity"
 python3 scripts/check-examples-purity.py
 
@@ -45,6 +57,7 @@ trap stop_all EXIT
 python3 -m venv "$VENV"
 "$VENV/bin/pip" -q install pytest
 "$VENV/bin/pip" -q install -e sdk/python
+"$VENV/bin/pip" -q install -e sdk/python/graph_owl_read_client
 
 echo "==> phase 1: open mode (adapter-csv, browse) "
 start_postgres
@@ -57,6 +70,10 @@ until curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; do sleep 1; done
 echo "==> adapter-csv"
 GRAPH_OWL_TEST_ENDPOINT="http://127.0.0.1:$PORT" \
     "$VENV/bin/python" -m pytest -q sdk/python/tests/test_example_adapter_live.py
+
+echo "==> browse"
+GRAPH_OWL_TEST_ENDPOINT="http://127.0.0.1:$PORT" \
+    "$VENV/bin/python" -m pytest -q examples/browse/test_browse.py
 
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true

@@ -73,7 +73,7 @@ is the condition that index exists to catch.
 | **33** | 9 | [`33-ontology-packs.md`](33-ontology-packs.md) | In progress | 1/2 | Epic 24 (glossary and taxonomy model), Epic 9 (standards import) |
 | **34** | 9 | [`34-entity-expansion.md`](34-entity-expansion.md) | **Shipped** | 1/1 | Epic 8 (each new type indexes for free — the property being demonstrated), Epic… |
 | **35** | 9 | [`35-collaboration.md`](35-collaboration.md) | In progress | 0/1 (+1 partial) | Epic 11 (users), Epic 12 (real identity on posts) |
-| **36** | 9 | [`36-reference-apps.md`](36-reference-apps.md) | In progress | 0/1 (+1 partial) | Epic 14 (MCP), Epic 16 (SDKs), Epic 29 (graph API) |
+| **36** | 9 | [`36-reference-apps.md`](36-reference-apps.md) | **Shipped** | 1/1 | Epic 14 (MCP), Epic 16 (SDKs), Epic 29 (graph API) |
 | **37a** | 9 | [`37a-scale.md`](37a-scale.md) | In progress | 0/1 (+1 partial) | Epic 34 (a realistic entity mix to generate) — shipped |
 | **37b** | 9 | [`37b-portability.md`](37b-portability.md) | **Shipped** | 1/1 | Epic 3 (history is part of what must survive) — shipped |
 | **37c** | 9 | [`37c-embeddable.md`](37c-embeddable.md) | In progress | 0/1 (+1 partial) | Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate again… |
@@ -497,7 +497,7 @@ is the condition that index exists to catch.
 
 ### Epic 36 — Reference Applications *(Demo 9)*
 
-- [~] Reference applications (Python, published surfaces only) — **Slices A-C shipped, 8 Augus
+- [x] Reference applications (Python, published surfaces only) — **Shipped, 8 August 2026: all
 
 ### Epic 37a — Scale Validation *(Demo 9)*
 

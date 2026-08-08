@@ -55,6 +55,125 @@ const fn route(
     }
 }
 
+/// One query parameter.
+///
+/// **Epic 36 Slice D's own finding**: before this, the contract had no
+/// mechanism for query parameters on *any* route — only the `{id}` path
+/// parameter was ever documented. A generated client had no typed way to
+/// pass `?fields=` to `GET /assets/{id}`, even though the handler has
+/// supported it since Epic 37a Slice B. This is a small, additive lookup
+/// keyed by `(method, path)` rather than a change to [`Route`]/[`route`]
+/// themselves — [`ROUTES`] has 180+ call sites using positional arguments,
+/// and adding a required field there would touch every one of them for a
+/// property only a handful of routes need documented today.
+///
+/// **Deliberately not a blanket backfill.** Every other endpoint's query
+/// parameters remain undocumented — a real, structural gap, recorded in
+/// `36-reference-apps.md`'s defect log as its own, separately-scoped
+/// finding rather than attempted here.
+struct QueryParam {
+    name: &'static str,
+    required: bool,
+    schema_type: &'static str,
+    description: &'static str,
+}
+
+const fn query_param(
+    name: &'static str,
+    required: bool,
+    schema_type: &'static str,
+    description: &'static str,
+) -> QueryParam {
+    QueryParam {
+        name,
+        required,
+        schema_type,
+        description,
+    }
+}
+
+/// `(method, path, params)` — looked up per route while building the spec.
+/// Scoped to exactly what Epic 36 Slice D's browse reference app needs: a
+/// generated client that can page `GET /assets`, pass `q`/`kind`/`domain`/
+/// `dataProduct`/`limit`/`after` to search, and pass `fields`/`asOf` to a
+/// single asset.
+const QUERY_PARAMS: &[(&str, &str, &[QueryParam])] = &[
+    (
+        "get",
+        "/assets",
+        &[
+            query_param("kind", false, "string", "Restrict to one asset kind"),
+            query_param(
+                "owner",
+                false,
+                "string",
+                "A user or team id — matches effective (direct or inherited) ownership",
+            ),
+            query_param(
+                "unowned",
+                false,
+                "boolean",
+                "Only assets with no effective owner anywhere up their chain",
+            ),
+            query_param(
+                "domain",
+                false,
+                "string",
+                "A domain id, direct or inherited",
+            ),
+            query_param(
+                "dataProduct",
+                false,
+                "string",
+                "A data product id — membership, not ownership",
+            ),
+            query_param("limit", false, "integer", "Page size"),
+            query_param("after", false, "string", "The previous page's cursor"),
+        ],
+    ),
+    (
+        "get",
+        "/assets/{id}",
+        &[
+            query_param(
+                "fields",
+                false,
+                "string",
+                "Comma-separated related data to include in this request: \
+                 owners, tags, lineage, columns (00d-api-conventions.md field selection)",
+            ),
+            query_param(
+                "asOf",
+                false,
+                "string",
+                "RFC 3339 timestamp — the asset's state at that instant, not the current one",
+            ),
+        ],
+    ),
+    (
+        "get",
+        "/assets/search",
+        &[
+            query_param("q", true, "string", "The search text"),
+            query_param("kind", false, "string", "Restrict to one asset kind"),
+            query_param(
+                "domain",
+                false,
+                "string",
+                "A domain id, direct or inherited",
+            ),
+            query_param(
+                "dataProduct",
+                false,
+                "string",
+                "A data product id — membership, not ownership",
+            ),
+            query_param("limit", false, "integer", "Page size"),
+            query_param("after", false, "string", "The previous page's cursor"),
+        ],
+    ),
+];
+
 /// Every operation this server serves.
 ///
 /// Ordered as `app()` registers them, so the two read the same way side by
@@ -1936,6 +2055,27 @@ pub fn document() -> Value {
                 "name": "id", "in": "path", "required": true,
                 "schema": { "type": "string", "format": "uuid" }
             }]);
+        }
+        // Additive to the `{id}` path parameter above, not a replacement —
+        // `GET /assets/{id}` carries both.
+        if let Some((_, _, params)) = QUERY_PARAMS
+            .iter()
+            .find(|(method, path, _)| *method == route.method && *path == route.path)
+        {
+            let mut all_params = operation["parameters"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for param in *params {
+                all_params.push(json!({
+                    "name": param.name,
+                    "in": "query",
+                    "required": param.required,
+                    "description": param.description,
+                    "schema": { "type": param.schema_type }
+                }));
+            }
+            operation["parameters"] = Value::Array(all_params);
         }
 
         paths

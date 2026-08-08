@@ -682,3 +682,30 @@ correctness or security path; the property that matters is "produces a
 client that calls the documented endpoints correctly," which is exactly
 what a widely-used, actively-maintained generator is exercised against by
 its own enormous user base.
+
+Regenerate after any `openapi.json` change:
+
+```
+openapi-python-client generate --path openapi.json --meta none \
+  --output-path sdk/python/graph_owl_read_client/src/graph_owl_read_client
+```
+
+**Packaged as its own distribution, in a `src/` layout — found necessary
+while wiring it up, not designed in advance.** `--meta none` outputs the
+package flat at `--output-path`, with no `pyproject.toml` of its own.
+`graph_owl_sdk` and `graph_owl_read_client` cannot share `sdk/python`'s
+existing `pyproject.toml`: that file declares `dependencies = []`
+deliberately (a hand-written adapter SDK with zero runtime deps to
+resolve), and `graph_owl_read_client` genuinely needs `attrs`/`httpx`/
+`python-dateutil` (declared in its own
+`sdk/python/graph_owl_read_client/pyproject.toml`) — folding them into one
+distribution would give every `graph_owl_sdk`-only consumer three
+dependencies they never asked for. A flat `pyproject.toml` placed directly
+inside the generated package directory does not work either: setuptools'
+`packages.find` searches *inside* the directory the `pyproject.toml`
+lives in, so `include = ["graph_owl_read_client*"]` found nothing (the
+`graph_owl_read_client` package would need to be a subdirectory of
+itself). The standard fix is the standard layout: `pyproject.toml` at
+`sdk/python/graph_owl_read_client/`, the actual package one level down at
+`sdk/python/graph_owl_read_client/src/graph_owl_read_client/`, and
+`[tool.setuptools.packages.find] where = ["src"]`.

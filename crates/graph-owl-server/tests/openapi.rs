@@ -281,3 +281,85 @@ async fn an_unknown_json_ld_context_version_is_not_found() {
         .expect("handled");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+/// **Epic 36 Slice D's own finding**: the contract had no mechanism for
+/// query parameters on *any* endpoint — only the `{id}` path parameter was
+/// ever documented (`operation["parameters"]` was set exactly once, inside
+/// `if route.path.contains("{id}")`, nowhere else). A generated client
+/// (`sdk/python/graph_owl_read_client`, built to prove Epic 36's browse
+/// reference app) had no typed way to pass `?fields=` to `GET /assets/{id}`
+/// even though the handler has supported it since Epic 37a Slice B. Fixed
+/// for the endpoints Slice D's own browse app actually needs — `GET
+/// /assets/{id}` (`fields`, `asOf`) and `GET /assets/search` (`q`, `kind`,
+/// `domain`, `dataProduct`, `limit`, `after`) — not a blanket backfill of
+/// every endpoint's query parameters, which is a separate, much larger
+/// undertaking recorded in `36-reference-apps.md`'s defect log rather than
+/// attempted here.
+#[test]
+fn get_asset_by_id_documents_its_query_parameters() {
+    let doc = document();
+    let params = doc["paths"]["/assets/{id}"]["get"]["parameters"]
+        .as_array()
+        .expect("GET /assets/{id} must document its parameters");
+    let names: Vec<&str> = params
+        .iter()
+        .map(|p| p["name"].as_str().expect("a parameter name"))
+        .collect();
+    assert!(names.contains(&"fields"), "{names:?}");
+    assert!(names.contains(&"asOf"), "{names:?}");
+    // The path parameter must still be there too — this is additive, not a
+    // replacement of the existing `{id}` documentation.
+    assert!(names.contains(&"id"), "{names:?}");
+}
+
+#[test]
+fn search_documents_its_query_parameters() {
+    let doc = document();
+    let params = doc["paths"]["/assets/search"]["get"]["parameters"]
+        .as_array()
+        .expect("GET /assets/search must document its parameters");
+    let names: Vec<&str> = params
+        .iter()
+        .map(|p| p["name"].as_str().expect("a parameter name"))
+        .collect();
+    for expected in ["q", "kind", "domain", "dataProduct", "limit", "after"] {
+        assert!(
+            names.contains(&expected),
+            "missing {expected:?} in {names:?}"
+        );
+    }
+    // `q` is the one required query parameter on this route — a generated
+    // client that treats it as optional lets a caller send a request that
+    // can only 400.
+    let q = params
+        .iter()
+        .find(|p| p["name"] == "q")
+        .expect("q parameter");
+    assert_eq!(q["required"], true, "{q}");
+}
+
+#[test]
+fn list_assets_documents_pagination_and_filters() {
+    let doc = document();
+    let params = doc["paths"]["/assets"]["get"]["parameters"]
+        .as_array()
+        .expect("GET /assets must document its parameters");
+    let names: Vec<&str> = params
+        .iter()
+        .map(|p| p["name"].as_str().expect("a parameter name"))
+        .collect();
+    for expected in [
+        "limit",
+        "after",
+        "kind",
+        "owner",
+        "unowned",
+        "domain",
+        "dataProduct",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing {expected:?} in {names:?}"
+        );
+    }
+}

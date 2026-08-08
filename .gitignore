@@ -50,6 +50,12 @@
 /sdk/python/.venv/
 /sdk/python/build/
 /sdk/python/*.egg-info/
+# `graph_owl_read_client` itself (Epic 36 Slice D) is generated the same way
+# `sdk/typescript/src/generated/` is above — its own `pyproject.toml` is
+# hand-written and stays committed. Regenerate with `scripts/verify-examples.sh`
+# or `plans/00l-build-vs-adopt.md`'s recorded `openapi-python-client` command.
+/sdk/python/graph_owl_read_client/src/
+/sdk/python/graph_owl_read_client/*.egg-info/
 __pycache__/
 .pytest_cache/
 .git/credentials

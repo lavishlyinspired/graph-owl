@@ -2796,6 +2796,71 @@
     "/assets": {
       "get": {
         "operationId": "get_assets",
+        "parameters": [
+          {
+            "description": "Restrict to one asset kind",
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A user or team id — matches effective (direct or inherited) ownership",
+            "in": "query",
+            "name": "owner",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only assets with no effective owner anywhere up their chain",
+            "in": "query",
+            "name": "unowned",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "A domain id, direct or inherited",
+            "in": "query",
+            "name": "domain",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A data product id — membership, not ownership",
+            "in": "query",
+            "name": "dataProduct",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The previous page's cursor",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2885,6 +2950,62 @@
     "/assets/search": {
       "get": {
         "operationId": "get_assets_search",
+        "parameters": [
+          {
+            "description": "The search text",
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Restrict to one asset kind",
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A domain id, direct or inherited",
+            "in": "query",
+            "name": "domain",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A data product id — membership, not ownership",
+            "in": "query",
+            "name": "dataProduct",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The previous page's cursor",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2975,6 +3096,24 @@
             "required": true,
             "schema": {
               "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Comma-separated related data to include in this request: owners, tags, lineage, columns (00d-api-conventions.md field selection)",
+            "in": "query",
+            "name": "fields",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "RFC 3339 timestamp — the asset's state at that instant, not the current one",
+            "in": "query",
+            "name": "asOf",
+            "required": false,
+            "schema": {
               "type": "string"
             }
           }
