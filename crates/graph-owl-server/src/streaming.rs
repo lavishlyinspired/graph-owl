@@ -221,19 +221,28 @@ impl StreamConsumer {
         }
     }
 
-    /// `None` for Pulsar: lag there is *subscription backlog*, which lives
-    /// on the admin REST API (a separate HTTP surface on a different port),
-    /// not on the binary protocol this consumer speaks. Reporting a
-    /// fabricated zero would be worse than reporting nothing — see
-    /// `19-streaming.md` Slice F.
+    /// `None` for Pulsar when no admin REST URL was configured: lag there is
+    /// *subscription backlog*, which lives on a separate HTTP surface from
+    /// the binary protocol this consumer speaks, not derivable from it.
+    /// Reporting a fabricated zero would be worse than reporting nothing —
+    /// see `19-streaming.md` Slice F. **Wired for real 8 August 2026**
+    /// (`plans/EPIC-COMPLETION-PLAN.md` Phase 2.8): when a broker's
+    /// `admin_url` is configured, this fetches real backlog from it.
+    ///
+    /// Async, unlike Kafka's own `lag` — `rdkafka`'s watermark query is
+    /// synchronous, but Pulsar's is an HTTP round trip, and the two live
+    /// behind one method because [`report_lag_periodically`] polls both the
+    /// same way.
+    ///
     /// # Errors
     ///
-    /// [`StreamError::Connection`] if watermarks cannot be read.
+    /// [`StreamError::Connection`] if watermarks cannot be read, or the
+    /// admin REST call fails.
     #[must_use]
-    pub fn lag(&self, topic: &str) -> Option<Result<HashMap<i32, i64>, StreamError>> {
+    pub async fn lag(&self, topic: &str) -> Option<Result<HashMap<i32, i64>, StreamError>> {
         match self {
             StreamConsumer::Kafka(c) => Some(c.lag(topic)),
-            StreamConsumer::Pulsar(_) => None,
+            StreamConsumer::Pulsar(c) => c.lag(topic).await,
         }
     }
 }
@@ -254,18 +263,20 @@ async fn run_consumer(catalog: Catalog, subscription: StreamSubscription) {
             subscription.start_position,
         )
         .map(StreamConsumer::Kafka),
-        BrokerConfig::Pulsar { service_url } => {
-            graph_owl_connectors::streaming_pulsar::PulsarConsumer::connect(
-                service_url,
-                &subscription.topic,
-                // Pulsar's subscription name is what owns cursor position,
-                // the same role a Kafka consumer group plays — so the same
-                // configured field feeds both.
-                &subscription.consumer_group,
-            )
-            .await
-            .map(|c| StreamConsumer::Pulsar(Box::new(c)))
-        }
+        BrokerConfig::Pulsar {
+            service_url,
+            admin_url,
+        } => graph_owl_connectors::streaming_pulsar::PulsarConsumer::connect(
+            service_url,
+            &subscription.topic,
+            // Pulsar's subscription name is what owns cursor position,
+            // the same role a Kafka consumer group plays — so the same
+            // configured field feeds both.
+            &subscription.consumer_group,
+            admin_url.as_deref(),
+        )
+        .await
+        .map(|c| StreamConsumer::Pulsar(Box::new(c))),
     };
     let consumer = match connected {
         Ok(consumer) => Arc::new(consumer),
@@ -320,9 +331,9 @@ async fn report_lag_periodically(consumer: Arc<StreamConsumer>, topic: String) {
     let mut interval = tokio::time::interval(HEALTH_POLL_INTERVAL);
     loop {
         interval.tick().await;
-        let Some(measured) = consumer.lag(&topic) else {
-            // Pulsar: no lag surface on this protocol. Stop polling rather
-            // than spin re-discovering that every interval.
+        let Some(measured) = consumer.lag(&topic).await else {
+            // Pulsar with no admin URL configured: no lag surface. Stop
+            // polling rather than spin re-discovering that every interval.
             return;
         };
         match measured {

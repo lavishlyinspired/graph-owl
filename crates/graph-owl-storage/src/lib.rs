@@ -1318,8 +1318,21 @@ pub enum GlossaryDeletion {
     tag = "kind"
 )]
 pub enum BrokerConfig {
-    KafkaProtocol { bootstrap_servers: String },
-    Pulsar { service_url: String },
+    KafkaProtocol {
+        bootstrap_servers: String,
+    },
+    Pulsar {
+        service_url: String,
+        /// The admin REST API's own base URL (`http://host:8080`, typically
+        /// a different port from `service_url` and sometimes a different
+        /// host entirely) — Epic 19 Slice F, completed 8 August 2026.
+        /// Subscription backlog lives there, not on the binary protocol
+        /// `service_url` speaks, so it cannot be derived from `service_url`.
+        /// `None` keeps this project's original behaviour: no Pulsar lag
+        /// reported, rather than a fabricated zero.
+        #[serde(default)]
+        admin_url: Option<String>,
+    },
 }
 
 /// Where a new subscription starts reading from — Epic 19.

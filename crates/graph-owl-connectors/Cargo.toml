@@ -49,11 +49,20 @@ rdkafka = "0.39"
 # have to remember — the same vendor-rather-than-assume choice `rdkafka-sys`
 # already makes for librdkafka, both needing the same C/C++ toolchain class.
 pulsar = { version = "6", default-features = false, features = ["tokio-rustls-runtime-ring", "compression", "protobuf-src"] }
+# Epic 19 Slice F: subscription backlog lives on Pulsar's admin REST API, a
+# separate HTTP surface from the binary protocol `pulsar` (above) speaks.
+# Already vetted and used elsewhere in this workspace (`graph-owl-server`'s
+# federation and connector-test callers).
+reqwest.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+# Test-only: a real local admin-REST double for Epic 19 Slice F's Pulsar
+# backlog fetch, the same "a real local server, not a mock" pattern Epic
+# 101's federation tests already use for SPARQL SERVICE.
+axum.workspace = true
 # Test-only: measuring process CPU time directly to prove an idle consumer
 # does not busy-poll (Epic 19 Slice A). Already in the dependency tree
 # transitively via `rdkafka`; declared explicitly because using a crate's

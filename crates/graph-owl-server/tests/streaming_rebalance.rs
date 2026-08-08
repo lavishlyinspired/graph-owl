@@ -211,7 +211,11 @@ async fn replaying_a_window_is_idempotent_and_leaves_live_offsets_alone() {
     for _ in 0..3 {
         process_one_message(&catalog, &live, &sub).await;
     }
-    let live_lag_before = live.lag(&topic).expect("kafka reports lag").expect("lag");
+    let live_lag_before = live
+        .lag(&topic)
+        .await
+        .expect("kafka reports lag")
+        .expect("lag");
 
     let summary = replay_window(&catalog, sub.id, before_everything)
         .await
@@ -229,7 +233,10 @@ async fn replaying_a_window_is_idempotent_and_leaves_live_offsets_alone() {
         );
     }
     assert_eq!(
-        live.lag(&topic).expect("kafka reports lag").expect("lag"),
+        live.lag(&topic)
+            .await
+            .expect("kafka reports lag")
+            .expect("lag"),
         live_lag_before,
         "the replay ran in its own consumer group, so the live subscription's \
          committed position must be untouched"

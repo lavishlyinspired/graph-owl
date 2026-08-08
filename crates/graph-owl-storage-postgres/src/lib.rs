@@ -1572,18 +1572,19 @@ impl Storage for PostgresStorage {
         subscription: graph_owl_storage::StreamSubscription,
         secret: Option<&[u8]>,
     ) -> Result<graph_owl_storage::StreamSubscription, StorageError> {
-        let (broker_kind, broker_address) = broker_columns(&subscription.broker);
+        let (broker_kind, broker_address, broker_admin_url) = broker_columns(&subscription.broker);
         let (start_position, start_timestamp, start_offset) =
             start_position_columns(subscription.start_position);
         let row = sqlx::query(
             "INSERT INTO stream_subscriptions
-                 (id, broker_kind, broker_address, topic, consumer_group, mapping,
-                  start_position, start_timestamp, start_offset, max_in_flight,
+                 (id, broker_kind, broker_address, broker_admin_url, topic, consumer_group,
+                  mapping, start_position, start_timestamp, start_offset, max_in_flight,
                   poison_threshold, enabled, secret)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
              ON CONFLICT (id) DO UPDATE SET
                  broker_kind      = EXCLUDED.broker_kind,
                  broker_address   = EXCLUDED.broker_address,
+                 broker_admin_url = EXCLUDED.broker_admin_url,
                  topic            = EXCLUDED.topic,
                  consumer_group   = EXCLUDED.consumer_group,
                  mapping          = EXCLUDED.mapping,
@@ -1595,16 +1596,17 @@ impl Storage for PostgresStorage {
                  enabled          = EXCLUDED.enabled,
                  -- `None` means leave an existing credential alone — same
                  -- reasoning as `upsert_webhook_endpoint`.
-                 secret           = COALESCE($13, stream_subscriptions.secret),
+                 secret           = COALESCE($14, stream_subscriptions.secret),
                  updated_at       = now()
-             RETURNING id, broker_kind, broker_address, topic, consumer_group, mapping,
-                       start_position, start_timestamp, start_offset, max_in_flight,
+             RETURNING id, broker_kind, broker_address, broker_admin_url, topic, consumer_group,
+                       mapping, start_position, start_timestamp, start_offset, max_in_flight,
                        poison_threshold, enabled, (secret IS NOT NULL) AS has_secret,
                        created_at, updated_at",
         )
         .bind(subscription.id)
         .bind(broker_kind)
         .bind(broker_address)
+        .bind(broker_admin_url)
         .bind(&subscription.topic)
         .bind(&subscription.consumer_group)
         .bind(&subscription.mapping)
@@ -1639,8 +1641,8 @@ impl Storage for PostgresStorage {
         id: Uuid,
     ) -> Result<Option<graph_owl_storage::StreamSubscription>, StorageError> {
         let row = sqlx::query(
-            "SELECT id, broker_kind, broker_address, topic, consumer_group, mapping,
-                    start_position, start_timestamp, start_offset, max_in_flight,
+            "SELECT id, broker_kind, broker_address, broker_admin_url, topic, consumer_group,
+                    mapping, start_position, start_timestamp, start_offset, max_in_flight,
                     poison_threshold, enabled, (secret IS NOT NULL) AS has_secret,
                     created_at, updated_at
              FROM stream_subscriptions WHERE id = $1",
@@ -1657,8 +1659,8 @@ impl Storage for PostgresStorage {
         &self,
     ) -> Result<Vec<graph_owl_storage::StreamSubscription>, StorageError> {
         let rows = sqlx::query(
-            "SELECT id, broker_kind, broker_address, topic, consumer_group, mapping,
-                    start_position, start_timestamp, start_offset, max_in_flight,
+            "SELECT id, broker_kind, broker_address, broker_admin_url, topic, consumer_group,
+                    mapping, start_position, start_timestamp, start_offset, max_in_flight,
                     poison_threshold, enabled, (secret IS NOT NULL) AS has_secret,
                     created_at, updated_at
              FROM stream_subscriptions ORDER BY topic, consumer_group",
@@ -10784,21 +10786,29 @@ fn webhook_endpoint_from_row(row: PgRow) -> graph_owl_storage::WebhookEndpoint {
     }
 }
 
-fn broker_columns(broker: &graph_owl_storage::BrokerConfig) -> (&'static str, &str) {
+fn broker_columns(broker: &graph_owl_storage::BrokerConfig) -> (&'static str, &str, Option<&str>) {
     use graph_owl_storage::BrokerConfig;
     match broker {
         BrokerConfig::KafkaProtocol { bootstrap_servers } => {
-            ("kafka_protocol", bootstrap_servers.as_str())
+            ("kafka_protocol", bootstrap_servers.as_str(), None)
         }
-        BrokerConfig::Pulsar { service_url } => ("pulsar", service_url.as_str()),
+        BrokerConfig::Pulsar {
+            service_url,
+            admin_url,
+        } => ("pulsar", service_url.as_str(), admin_url.as_deref()),
     }
 }
 
-fn broker_config_from_columns(kind: &str, address: String) -> graph_owl_storage::BrokerConfig {
+fn broker_config_from_columns(
+    kind: &str,
+    address: String,
+    admin_url: Option<String>,
+) -> graph_owl_storage::BrokerConfig {
     use graph_owl_storage::BrokerConfig;
     if kind == "pulsar" {
         BrokerConfig::Pulsar {
             service_url: address,
+            admin_url,
         }
     } else {
         BrokerConfig::KafkaProtocol {
@@ -10841,10 +10851,11 @@ fn start_position_from_row(row: &PgRow) -> graph_owl_storage::StartPosition {
 fn stream_subscription_from_row(row: PgRow) -> graph_owl_storage::StreamSubscription {
     let broker_kind: String = row.get("broker_kind");
     let broker_address: String = row.get("broker_address");
+    let broker_admin_url: Option<String> = row.get("broker_admin_url");
     let start_position = start_position_from_row(&row);
     graph_owl_storage::StreamSubscription {
         id: row.get("id"),
-        broker: broker_config_from_columns(&broker_kind, broker_address),
+        broker: broker_config_from_columns(&broker_kind, broker_address, broker_admin_url),
         topic: row.get("topic"),
         consumer_group: row.get("consumer_group"),
         mapping: row.get("mapping"),

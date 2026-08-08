@@ -190,6 +190,7 @@ async fn a_pulsar_broker_round_trips() {
     let mut candidate = subscription("dbt.runs", "graph-owl");
     candidate.broker = BrokerConfig::Pulsar {
         service_url: "pulsar://localhost:6650".to_string(),
+        admin_url: None,
     };
 
     let written = storage
@@ -197,4 +198,31 @@ async fn a_pulsar_broker_round_trips() {
         .await
         .expect("register");
     assert_eq!(written.broker, candidate.broker);
+}
+
+/// **Epic 19 Slice F, completed 8 August 2026.** `admin_url` is a second
+/// column, not a reuse of `broker_address` — it lives on a separate HTTP
+/// surface from the binary protocol `service_url` speaks, sometimes on a
+/// different host entirely, so it has to round-trip independently.
+#[tokio::test]
+async fn a_pulsar_brokers_admin_url_round_trips_too() {
+    let (storage, _db) = test_storage().await;
+    let mut candidate = subscription("dbt.runs", "graph-owl");
+    candidate.broker = BrokerConfig::Pulsar {
+        service_url: "pulsar://localhost:6650".to_string(),
+        admin_url: Some("http://localhost:8080".to_string()),
+    };
+
+    let written = storage
+        .upsert_stream_subscription(candidate.clone(), None)
+        .await
+        .expect("register");
+    assert_eq!(written.broker, candidate.broker);
+
+    let fetched = storage
+        .get_stream_subscription(written.id)
+        .await
+        .expect("get")
+        .expect("found");
+    assert_eq!(fetched.broker, candidate.broker);
 }

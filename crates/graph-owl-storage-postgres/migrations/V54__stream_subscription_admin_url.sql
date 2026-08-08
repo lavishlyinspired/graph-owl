@@ -1,0 +1,14 @@
+-- Epic 19 Slice F, completed 8 August 2026 (plans/EPIC-COMPLETION-PLAN.md
+-- Phase 2.8): Pulsar lag is subscription backlog, which lives on the admin
+-- REST API -- a separate HTTP surface on a different port from the binary
+-- protocol `service_url` speaks (confirmed against the official Apache
+-- Pulsar docs, admin-api-topics: `GET /admin/v2/persistent/{tenant}/
+-- {namespace}/{topic}/stats`). The two are not derivable from one another
+-- in general -- TLS termination, load balancers and managed Pulsar
+-- deployments routinely put them on entirely different hosts -- so this is
+-- a second column, not a second use of `broker_address`.
+--
+-- Nullable, and meaningful only for `broker_kind = 'pulsar'`: a deployment
+-- that does not configure it keeps today's behaviour (no Pulsar lag
+-- reported) exactly as before this column existed.
+ALTER TABLE stream_subscriptions ADD COLUMN broker_admin_url TEXT;
