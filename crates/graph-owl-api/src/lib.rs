@@ -2214,6 +2214,7 @@ impl Catalog {
                         .update_asset(
                             live.id,
                             &AssetUpdate {
+                                name: None,
                                 description: Some(entity.asset.description.clone()),
                                 extension: None,
                             },
@@ -9093,6 +9094,7 @@ impl Catalog {
                     principal,
                     item.asset_id,
                     &AssetUpdate {
+                        name: None,
                         description: Some(item.declared_value.clone()),
                         extension: None,
                     },
@@ -9293,6 +9295,22 @@ impl Catalog {
             && let Some(merged) = update.merged_extension(before.extension.as_ref())
         {
             self.check_extension(before.kind, Some(&merged)).await?;
+        }
+
+        // Validated here, before storage ever sees it — the same split
+        // `update_domain` already uses (`validate_domain_name` in the
+        // facade, `domain_fqn`'s own concatenation trusted to be
+        // infallible once past this check). Only the new segment's own
+        // shape is checked; the parent's FQN plays no part, so no extra
+        // read is needed to reject a bad name early.
+        if let Some(name) = &update.name {
+            graph_owl_core::fqn::derive(&[name]).map_err(|error| {
+                CatalogError::Validation(vec![FieldError::new(
+                    "name",
+                    FieldErrorCode::Value,
+                    error.to_string(),
+                )])
+            })?;
         }
 
         let updated = match self
@@ -10169,6 +10187,7 @@ impl Catalog {
                 .update_asset(
                     proposal.about,
                     &AssetUpdate {
+                        name: None,
                         description: Some(proposal.proposed_value.clone()),
                         extension: None,
                     },
@@ -24339,6 +24358,7 @@ mod projection_isolation_tests {
                     &Principal::system(),
                     created.id,
                     &AssetUpdate {
+                        name: None,
                         description: Some(Some(text.to_string())),
                         extension: None,
                     },
@@ -24379,6 +24399,7 @@ mod projection_isolation_tests {
                 &Principal::system(),
                 created.id,
                 &AssetUpdate {
+                    name: None,
                     description: Some(Some("the first description".to_string())),
                     extension: None,
                 },
@@ -24394,6 +24415,7 @@ mod projection_isolation_tests {
                 &Principal::system(),
                 created.id,
                 &AssetUpdate {
+                    name: None,
                     description: Some(Some("the corrected description".to_string())),
                     extension: None,
                 },
@@ -24438,6 +24460,7 @@ mod projection_isolation_tests {
                 &Principal::system(),
                 created.id,
                 &AssetUpdate {
+                    name: None,
                     description: Some(Some("written then withdrawn".to_string())),
                     extension: None,
                 },
@@ -24451,6 +24474,7 @@ mod projection_isolation_tests {
                 &Principal::system(),
                 created.id,
                 &AssetUpdate {
+                    name: None,
                     description: Some(None),
                     extension: None,
                 },
@@ -24547,6 +24571,7 @@ mod projection_isolation_tests {
                 &Principal::system(),
                 created.id,
                 &AssetUpdate {
+                    name: None,
                     description: Some(Some("core banking".to_string())),
                     extension: None,
                 },
@@ -24615,6 +24640,7 @@ mod projection_isolation_tests {
                 &Principal::system(),
                 created.id,
                 &AssetUpdate {
+                    name: None,
                     description: Some(Some("core banking".to_string())),
                     extension: None,
                 },
@@ -25944,6 +25970,7 @@ mod projection_isolation_tests {
                     &steward(),
                     asset.id,
                     &AssetUpdate {
+                        name: None,
                         description: Some(Some("what the human wrote".to_string())),
                         ..AssetUpdate::default()
                     },
@@ -26535,6 +26562,7 @@ mod projection_isolation_tests {
 
         fn describe(text: &str) -> AssetUpdate {
             AssetUpdate {
+                name: None,
                 description: Some(Some(text.to_string())),
                 extension: None,
             }
@@ -27491,6 +27519,7 @@ impl Catalog {
                     .get("description")
                     .and_then(|value| value.as_str());
                 let update = AssetUpdate {
+                    name: None,
                     description: Some(description.map(ToString::to_string)),
                     ..AssetUpdate::default()
                 };
@@ -27655,6 +27684,198 @@ mod entity_expansion_tests {
             description: None,
             pipeline: None,
             openlineage_event_id: None,
+        }
+    }
+
+    /// Phase 3 item 3.3, against `InMemoryStorage` directly — the HTTP-level
+    /// tests in `crates/graph-owl-server/tests/asset_rename.rs` exercise
+    /// only `PostgresStorage` (`test_app()` always runs against a real
+    /// container), so without these, `InMemoryStorage::update_asset`'s own
+    /// cascade logic would ship with zero coverage — found by mutation
+    /// testing the Postgres change and then re-running it against this
+    /// crate: every mutant here was MISSED because nothing called this
+    /// path at all.
+    mod asset_rename_cascades {
+        use super::*;
+
+        async fn catalog() -> Catalog {
+            Catalog::new(Arc::new(InMemoryStorage::default()))
+        }
+
+        #[tokio::test]
+        async fn renaming_a_root_asset_moves_its_own_fqn() {
+            let catalog = catalog().await;
+            let service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Service, "warehouse", None),
+                )
+                .await
+                .expect("create");
+
+            let renamed = catalog
+                .update_asset(
+                    &Principal::system(),
+                    service.id,
+                    &AssetUpdate {
+                        name: Some("lakehouse".to_string()),
+                        description: None,
+                        extension: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("rename");
+
+            assert_eq!(renamed.name, "lakehouse");
+            assert_eq!(renamed.fully_qualified_name, "lakehouse");
+        }
+
+        /// **The RED case.** Mirrors `renaming_an_asset_moves_its_descendants_fqns_too`
+        /// in `asset_rename.rs`, against the in-memory adapter instead of Postgres.
+        #[tokio::test]
+        async fn renaming_an_asset_moves_its_descendants_fqns_too() {
+            let catalog = catalog().await;
+            let service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Service, "warehouse", None),
+                )
+                .await
+                .expect("create service");
+            let database = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Database, "sales", Some(service.id)),
+                )
+                .await
+                .expect("create database");
+            let schema = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Schema, "public", Some(database.id)),
+                )
+                .await
+                .expect("create schema");
+
+            catalog
+                .update_asset(
+                    &Principal::system(),
+                    service.id,
+                    &AssetUpdate {
+                        name: Some("lakehouse".to_string()),
+                        description: None,
+                        extension: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("rename");
+
+            let moved_database = catalog
+                .get_asset(database.id)
+                .await
+                .expect("read")
+                .expect("present");
+            assert_eq!(moved_database.fully_qualified_name, "lakehouse.sales");
+
+            let moved_schema = catalog
+                .get_asset(schema.id)
+                .await
+                .expect("read")
+                .expect("present");
+            assert_eq!(
+                moved_schema.fully_qualified_name, "lakehouse.sales.public",
+                "the whole subtree moves, not only the direct child"
+            );
+        }
+
+        #[tokio::test]
+        async fn renaming_to_a_taken_sibling_name_is_a_conflict() {
+            let catalog = catalog().await;
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Service, "warehouse", None),
+                )
+                .await
+                .expect("create");
+            let other = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Service, "lakehouse", None),
+                )
+                .await
+                .expect("create");
+
+            let outcome = catalog
+                .update_asset(
+                    &Principal::system(),
+                    other.id,
+                    &AssetUpdate {
+                        name: Some("warehouse".to_string()),
+                        description: None,
+                        extension: None,
+                    },
+                    None,
+                )
+                .await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::Conflict { .. })),
+                "{outcome:?}"
+            );
+        }
+
+        /// A sibling under a *different* parent may reuse the name freely —
+        /// only the FQN, not the bare name, has to be unique.
+        #[tokio::test]
+        async fn renaming_does_not_collide_with_a_same_named_asset_under_a_different_parent() {
+            let catalog = catalog().await;
+            let warehouse = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Service, "warehouse", None),
+                )
+                .await
+                .expect("create warehouse");
+            let lakehouse = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Service, "lakehouse", None),
+                )
+                .await
+                .expect("create lakehouse");
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Database, "sales", Some(warehouse.id)),
+                )
+                .await
+                .expect("create warehouse.sales");
+            let other_sales = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Database, "orders", Some(lakehouse.id)),
+                )
+                .await
+                .expect("create lakehouse.orders");
+
+            let renamed = catalog
+                .update_asset(
+                    &Principal::system(),
+                    other_sales.id,
+                    &AssetUpdate {
+                        name: Some("sales".to_string()),
+                        description: None,
+                        extension: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("no collision across different parents");
+
+            assert_eq!(renamed.fully_qualified_name, "lakehouse.sales");
         }
     }
 
@@ -30373,6 +30594,7 @@ mod archive_round_trip_tests {
                 &Principal::system(),
                 a.id,
                 &AssetUpdate {
+                    name: None,
                     description: Some(Some("a different description now".to_string())),
                     extension: None,
                 },
@@ -31116,6 +31338,7 @@ mod dcat_export_tests {
                 &Principal::system(),
                 table_id,
                 &AssetUpdate {
+                    name: None,
                     description: Some(Some("Customer orders, revised".to_string())),
                     ..Default::default()
                 },
@@ -31128,6 +31351,7 @@ mod dcat_export_tests {
                 &Principal::system(),
                 table_id,
                 &AssetUpdate {
+                    name: None,
                     description: Some(Some("Customer orders, revised again".to_string())),
                     ..Default::default()
                 },
@@ -31684,6 +31908,7 @@ mod lossiness_tests {
                 &Principal::system(),
                 table.id,
                 &AssetUpdate {
+                    name: None,
                     description: Some(Some("Customer orders, revised".to_string())),
                     ..Default::default()
                 },

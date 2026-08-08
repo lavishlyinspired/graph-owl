@@ -34,7 +34,7 @@ is the condition that index exists to catch.
 | Epic | Demo | Plan | State | Tracked items | Depends on |
 |---|---|---|---|---|---|
 | **1** | 1 | [`01-api-conventions.md`](01-api-conventions.md) | **Shipped** | 12/12 | nothing |
-| **2** | 1 | [`02-entity-hierarchy.md`](02-entity-hierarchy.md) | In progress | 7/8 | Epic 1 (conventions, relationship taxonomy) |
+| **2** | 1 | [`02-entity-hierarchy.md`](02-entity-hierarchy.md) | **Shipped** | 8/8 | Epic 1 (conventions, relationship taxonomy) |
 | **3** | 2 | [`03-versioning.md`](03-versioning.md) | In progress | 11/13 (+1 partial) | Epic 2 (four entity types to apply the envelope to) |
 | **4** | 3 | [`04-engine-triples.md`](04-engine-triples.md) | **Shipped** | 11/11 | Epic 3 (four entity types with an envelope to project) |
 | **5** | 4 | [`05-engine-constraints.md`](05-engine-constraints.md) | In progress | 9/10 (+1 partial) | Epic 4 (triples to validate) |
@@ -122,7 +122,7 @@ is the condition that index exists to catch.
 - [x] `PATCH /assets/{id}` and `DELETE /assets/{id}` (soft, cascading to the subtree) — shippe
 - [x] Containment cascade characterised
 - [x] Non-database services (dashboard, pipeline, ML) → deferred to Epic 34, which shipped all
-- [ ] Cascade-on-rename for `Asset` — the original Slice E acceptance criterion ("renaming an 
+- [x] Cascade-on-rename for `Asset`, closed 8 August 2026 (Phase 3 item 3.3)
 
 ### Epic 3 — Envelope, Versioning, Soft Delete & Change Events *(Demo 2)*
 

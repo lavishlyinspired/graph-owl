@@ -224,6 +224,13 @@ pub struct AssetVersion {
 #[derive(utoipa::ToSchema, Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetUpdate {
+    /// The new name — Phase 3 item 3.3. Absent leaves it alone; a name can
+    /// never itself be cleared (unlike `description`), so this is a plain
+    /// `Option`, not the `description` field's double option. Renaming
+    /// cascades the fully-qualified name to every descendant in the same
+    /// transaction, the same guarantee Epic 23 already gives domains.
+    #[serde(default)]
+    pub name: Option<String>,
     /// The new description. Absent (`None`) leaves it alone; present with an
     /// inner `None` (explicit JSON `null`) clears it.
     #[serde(default, deserialize_with = "double_option")]
@@ -625,6 +632,7 @@ mod principal_tests {
             }))
             .expect("a bag");
         let update = AssetUpdate {
+            name: None,
             description: None,
             extension: serde_json::from_value(serde_json::json!({ "costCenter": "CC-2" })).ok(),
         };
@@ -649,6 +657,7 @@ mod principal_tests {
             }))
             .expect("a bag");
         let update = AssetUpdate {
+            name: None,
             description: None,
             extension: serde_json::from_value(serde_json::json!({ "costCenter": null })).ok(),
         };
@@ -668,6 +677,7 @@ mod principal_tests {
         let before: serde_json::Map<String, serde_json::Value> =
             serde_json::from_value(serde_json::json!({ "costCenter": "CC-1" })).expect("a bag");
         let update = AssetUpdate {
+            name: None,
             description: Some(Some("new".to_string())),
             extension: None,
         };
@@ -682,6 +692,7 @@ mod principal_tests {
     #[test]
     fn a_patch_onto_an_absent_bag_creates_it() {
         let update = AssetUpdate {
+            name: None,
             description: None,
             extension: serde_json::from_value(serde_json::json!({ "costCenter": "CC-1" })).ok(),
         };

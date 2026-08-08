@@ -1982,10 +1982,9 @@ impl Storage for InMemoryStorage {
         use graph_owl_core::envelope::{ChangeDescription, ChangeKind, classify};
         self.guard_write("update_asset");
         let mut assets = self.assets.lock().unwrap();
-        let Some(existing) = assets.iter_mut().find(|a| a.id == id) else {
+        let Some(before) = assets.iter().find(|a| a.id == id).cloned() else {
             return Ok(UpdateOutcome::NotFound);
         };
-        let before = existing.clone();
         // The fake enforces the precondition too. One that ignored it would
         // let a lost-update bug pass here and fail only against Postgres.
         if expected_version.is_some_and(|expected| before.version != expected) {
@@ -1994,6 +1993,37 @@ impl Storage for InMemoryStorage {
         let mut after = before.clone();
         if let Some(description) = &update.description {
             after.description = description.clone();
+        }
+        // Phase 3 item 3.3 — the same subtree-cascade guarantee the Postgres
+        // adapter gives, over a plain `Vec` instead of a recursive CTE.
+        // Computed here, before taking a mutable borrow of `existing` below,
+        // since scanning `assets` for the parent's row and a mutable borrow
+        // of one of its own elements cannot coexist.
+        if let Some(name) = &update.name {
+            after.name.clone_from(name);
+            let parent_fqn = after
+                .parent_id
+                .and_then(|parent_id| assets.iter().find(|a| a.id == parent_id))
+                .map(|parent| parent.fully_qualified_name.clone());
+            after.fully_qualified_name = match &parent_fqn {
+                Some(parent) => graph_owl_core::fqn::child_of(parent, &after.name),
+                None => graph_owl_core::fqn::derive(&[&after.name]),
+            }
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            if after.fully_qualified_name != before.fully_qualified_name
+                && assets
+                    .iter()
+                    .any(|a| a.id != id && a.fully_qualified_name == after.fully_qualified_name)
+            {
+                return Err(StorageError::Conflict {
+                    detail: format!(
+                        "an asset already exists at `{}`",
+                        after.fully_qualified_name
+                    ),
+                    existing_id: None,
+                    kind: ConflictKind::Fqn,
+                });
+            }
         }
         let diff = ChangeDescription::between(
             &serde_json::to_value(&before).unwrap_or_default(),
@@ -2007,6 +2037,39 @@ impl Storage for InMemoryStorage {
         after.updated_by = updated_by.to_string();
         after.change_description = Some(diff.clone());
         after.updated_at = Utc::now();
+
+        // **The subtree's paths move with it** — every descendant's own
+        // `fully_qualified_name` gets the old prefix swapped for the new
+        // one, transitively, matching `update_domain`'s own cascade.
+        if before.fully_qualified_name != after.fully_qualified_name {
+            let old_prefix = before.fully_qualified_name.clone();
+            let new_prefix = after.fully_qualified_name.clone();
+            let mut descendants: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+            loop {
+                let mut grew = false;
+                for asset in assets.iter() {
+                    let parent_is_self_or_descendant = asset.parent_id == Some(id)
+                        || asset.parent_id.is_some_and(|p| descendants.contains(&p));
+                    if parent_is_self_or_descendant && !descendants.contains(&asset.id) {
+                        descendants.insert(asset.id);
+                        grew = true;
+                    }
+                }
+                if !grew {
+                    break;
+                }
+            }
+            for asset in assets.iter_mut() {
+                if descendants.contains(&asset.id) {
+                    asset.fully_qualified_name = format!(
+                        "{new_prefix}{}",
+                        &asset.fully_qualified_name[old_prefix.len()..]
+                    );
+                }
+            }
+        }
+
+        let existing = assets.iter_mut().find(|a| a.id == id).expect("just read");
         *existing = after.clone();
         self.versions.lock().unwrap().push(AssetVersion {
             version: after.version,

@@ -4312,6 +4312,31 @@ impl Storage for PostgresStorage {
         if let Some(merged) = update.merged_extension(before.extension.as_ref()) {
             after.extension = Some(merged);
         }
+        // Phase 3 item 3.3. Re-derived from the *current* parent's FQN, read
+        // fresh here under the row lock already held — the same reasoning
+        // `update_domain` already uses, so a concurrent rename of the parent
+        // cannot leave this asset's own FQN computed against a stale prefix.
+        if let Some(name) = &update.name {
+            after.name.clone_from(name);
+            let parent_fqn: Option<String> = match before.parent_id {
+                None => None,
+                Some(parent_id) => {
+                    sqlx::query_scalar("SELECT fully_qualified_name FROM assets WHERE id = $1")
+                        .bind(parent_id)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(|e| StorageError::Unexpected(e.to_string()))?
+                }
+            };
+            after.fully_qualified_name = match &parent_fqn {
+                Some(parent) => graph_owl_core::fqn::child_of(parent, &after.name),
+                None => graph_owl_core::fqn::derive(&[&after.name]),
+            }
+            // The facade already validated the raw segment before this was
+            // ever called; a failure here would mean the parent's own FQN
+            // changed shape between read and lock, not a client mistake.
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
 
         let diff = ChangeDescription::between(
             &serde_json::to_value(&before).unwrap_or_default(),
@@ -4329,12 +4354,15 @@ impl Storage for PostgresStorage {
 
         let next = before.version.bump(kind);
         let updated_row = sqlx::query(&format!(
-            "UPDATE assets SET description = $2, version_major = $3, version_minor = $4,
-                 updated_by = $5, change_description = $6, extension = $7, updated_at = now()
+            "UPDATE assets SET name = $2, fully_qualified_name = $3, description = $4,
+                 version_major = $5, version_minor = $6, updated_by = $7,
+                 change_description = $8, extension = $9, updated_at = now()
              WHERE id = $1
              RETURNING {ASSET_COLUMNS}"
         ))
         .bind(id)
+        .bind(&after.name)
+        .bind(&after.fully_qualified_name)
         .bind(&after.description)
         .bind(i32::try_from(next.major).unwrap_or(i32::MAX))
         .bind(i32::try_from(next.minor).unwrap_or(i32::MAX))
@@ -4343,7 +4371,45 @@ impl Storage for PostgresStorage {
         .bind(serde_json::to_value(after.extension.clone().unwrap_or_default()).unwrap_or_default())
         .fetch_one(&mut *tx)
         .await
-        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        .map_err(|e| {
+            if e.as_database_error()
+                .is_some_and(|d| d.is_unique_violation())
+            {
+                StorageError::Conflict {
+                    detail: format!(
+                        "an asset already exists at `{}`",
+                        after.fully_qualified_name
+                    ),
+                    existing_id: None,
+                    kind: ConflictKind::Fqn,
+                }
+            } else {
+                StorageError::Unexpected(e.to_string())
+            }
+        })?;
+
+        // **The subtree's paths move with it**, in the same transaction — the
+        // same guarantee `update_domain` already gives domains. A rename
+        // that moved only its own path would leave every descendant
+        // claiming to sit under a name that no longer exists.
+        if before.fully_qualified_name != after.fully_qualified_name {
+            sqlx::query(
+                "WITH RECURSIVE subtree (id) AS (
+                         SELECT id FROM assets WHERE parent_id = $1
+                     UNION ALL
+                         SELECT a.id FROM assets a JOIN subtree ON a.parent_id = subtree.id
+                 )
+                 UPDATE assets
+                    SET fully_qualified_name = $3 || substring(fully_qualified_name from length($2) + 1)
+                  WHERE id IN (SELECT id FROM subtree)",
+            )
+            .bind(id)
+            .bind(&before.fully_qualified_name)
+            .bind(&after.fully_qualified_name)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        }
 
         let updated = asset_from_row(updated_row);
 
