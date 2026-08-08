@@ -186,3 +186,70 @@ async fn a_principal_with_no_policy_at_all_gets_200_and_an_empty_export_not_a_re
     let view: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
     assert_eq!(view["nodes"].as_array().expect("nodes").len(), 0, "{view}");
 }
+
+/// The sixth format, and the first RDF-shaped one — Epic 94. Same
+/// authorization proof as `graphml_export_over_http_omits_what_the_principal_may_not_see`,
+/// against `Catalog::export_rdf`'s own `authorized_flakes` rather than
+/// `authorized_lpg_elements`, which had no HTTP-level coverage at all
+/// before this route existed to test.
+#[tokio::test]
+async fn rdf_turtle_export_over_http_omits_what_the_principal_may_not_see() {
+    let (app, _container, _catalog) = authorization_fixture().await;
+
+    let (status, bytes) = get_as(&app, "/graph/export/rdf?format=turtle", "asha").await;
+    assert_eq!(status, StatusCode::OK);
+    let turtle = String::from_utf8(bytes).expect("Turtle is UTF-8 text");
+    assert!(turtle.contains("payments"), "{turtle}");
+    assert!(!turtle.contains("core_banking"), "{turtle}");
+
+    let (admin_status, admin_bytes) = get_as(&app, "/graph/export/rdf?format=turtle", "root").await;
+    assert_eq!(admin_status, StatusCode::OK);
+    let admin_turtle = String::from_utf8(admin_bytes).expect("Turtle is UTF-8 text");
+    assert!(
+        admin_turtle.contains("core_banking"),
+        "an admin's own export is not scoped by the same restriction: {admin_turtle}"
+    );
+}
+
+#[tokio::test]
+async fn rdf_export_is_served_with_the_right_content_type_per_format() {
+    let (app, _container, _catalog) = authorization_fixture().await;
+
+    for (format, content_type) in [
+        ("turtle", "text/turtle"),
+        ("jsonld", "application/ld+json"),
+        ("ntriples", "application/n-triples"),
+        ("nquads", "application/n-quads"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/graph/export/rdf?format={format}"))
+                    .header("authorization", format!("Bearer {}", token("root")))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("handled");
+        assert_eq!(response.status(), StatusCode::OK, "format={format}");
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some(content_type),
+            "format={format}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unsupported_rdf_format_is_a_named_validation_error() {
+    let (app, _container, _catalog) = authorization_fixture().await;
+    let (status, bytes) = get_as(&app, "/graph/export/rdf?format=rdfxml", "root").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    assert_eq!(body["errors"][0]["field"], "format", "{body}");
+}

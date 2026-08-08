@@ -172,6 +172,16 @@ const QUERY_PARAMS: &[(&str, &str, &[QueryParam])] = &[
             query_param("after", false, "string", "The previous page's cursor"),
         ],
     ),
+    (
+        "get",
+        "/graph/export/rdf",
+        &[query_param(
+            "format",
+            true,
+            "string",
+            "turtle, jsonld, ntriples, or nquads",
+        )],
+    ),
 ];
 
 /// Every operation this server serves.
@@ -358,6 +368,15 @@ pub static ROUTES: &[Route] = &[
         "Export the caller's authorized estate as one JSON graph view",
         None,
         Some("JsonGraphView"),
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/graph/export/rdf",
+        "Export the caller's authorized estate as RDF (turtle, jsonld, ntriples, or nquads)",
+        None,
+        None,
         200,
         true,
     ),

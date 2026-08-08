@@ -13438,6 +13438,74 @@ impl Catalog {
         Ok(writer.into_view())
     }
 
+    /// Every flake `principal` is authorized to see, across the whole
+    /// current estate. The same query-all/group-by-subject/filter shape
+    /// [`Self::authorized_lpg_elements`] already established, kept as its
+    /// own method rather than sharing that one's plumbing: this returns
+    /// raw flakes, not the LPG node/edge conversion every existing
+    /// `export_*` method needs, and RDF serialization has no use for that
+    /// conversion at all.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, or a
+    /// read fails.
+    async fn authorized_flakes(&self, principal: &Principal) -> Result<Vec<Flake>, CatalogError> {
+        use graph_owl_authz::MetadataOperation;
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let all_flakes = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern::default())
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let mut by_subject: std::collections::BTreeMap<&Sid, Vec<Flake>> =
+            std::collections::BTreeMap::new();
+        for flake in &all_flakes {
+            by_subject.entry(&flake.s).or_default().push(flake.clone());
+        }
+
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+
+        Ok(by_subject
+            .into_iter()
+            .filter(|(subject, subject_flakes)| {
+                predicate.admits(&Self::authorization_key(subject, subject_flakes))
+            })
+            .flat_map(|(_, subject_flakes)| subject_flakes)
+            .collect())
+    }
+
+    /// Exports every flake `principal` is authorized to see, serialized as
+    /// `format` — Epic 94. `graph_owl_rdf_io::StandardRdfIo::serialize`
+    /// (with the Slice B `rdf:reifies` synthesis already built in) existed
+    /// and was unit-tested, with zero callers outside its own crate's
+    /// tests until this one — no RDF export reached HTTP at all, only the
+    /// five LPG-shaped formats above did.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, a read
+    /// fails, or serialization fails (an unmapped namespace, or a format
+    /// not yet implemented).
+    pub async fn export_rdf(
+        &self,
+        principal: &Principal,
+        format: graph_owl_rdf_io::RdfFormat,
+    ) -> Result<Vec<u8>, CatalogError> {
+        use graph_owl_rdf_io::RdfSerializer as _;
+
+        let flakes = self.authorized_flakes(principal).await?;
+        graph_owl_rdf_io::StandardRdfIo
+            .serialize(&flakes, format)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
     /// Imports one `OpenLineage` `RunEvent` — Epic 9 Slice D. Idempotent by
     /// event id **through the same uniqueness [`Self::assert_lineage`]
     /// already enforces** (`from`, `to`, `relationship`, `source`): two

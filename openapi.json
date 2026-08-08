@@ -6116,6 +6116,43 @@
         "summary": "Export the caller's authorized estate as JSON Lines"
       }
     },
+    "/graph/export/rdf": {
+      "get": {
+        "operationId": "get_graph_export_rdf",
+        "parameters": [
+          {
+            "description": "turtle, jsonld, ntriples, or nquads",
+            "in": "query",
+            "name": "format",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Export the caller's authorized estate as RDF (turtle, jsonld, ntriples, or nquads)"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Export the caller's authorized estate as RDF (turtle, jsonld, ntriples, or nquads)"
+      }
+    },
     "/graph/reconcile": {
       "post": {
         "operationId": "post_graph_reconcile",

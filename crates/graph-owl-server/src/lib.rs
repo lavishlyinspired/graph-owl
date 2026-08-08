@@ -82,6 +82,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/graph/export/cypher", get(export_cypher_script))
         .route("/graph/export/jsonl", get(export_json_lines))
         .route("/graph/export/json-graph", get(export_json_graph))
+        .route("/graph/export/rdf", get(export_rdf))
         // Epic 42 Slice G: the text-first ontology editor. `preview` is the
         // fast, as-the-author-types path (parse only); `dry-run` is the
         // explicit "Check" button (shapes + reasoning, matching the policy
@@ -7209,6 +7210,50 @@ async fn export_json_graph(
     Auth(principal): Auth,
 ) -> Result<Json<graph_owl_lpg_io::JsonGraphView>, AppError> {
     Ok(Json(catalog.export_json_graph(&principal).await?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RdfExportQuery {
+    format: String,
+}
+
+/// The sixth export format, and the first RDF-shaped one — Epic 94.
+/// `graph_owl_rdf_io::StandardRdfIo::serialize` (with `rdf:reifies`
+/// synthesis already built in) had no route at all until this one; every
+/// format above is LPG-shaped, and none of them serve the triple form this
+/// project's own reasoning, SHACL and SPARQL surfaces actually operate
+/// over. Same authorization posture as its five siblings: not admin-gated,
+/// scoped to what `principal` may see.
+async fn export_rdf(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Query(query): Query<RdfExportQuery>,
+) -> Result<axum::response::Response, AppError> {
+    let (format, content_type) = match query.format.as_str() {
+        "turtle" => (graph_owl_rdf_io::RdfFormat::Turtle, "text/turtle"),
+        "jsonld" => (graph_owl_rdf_io::RdfFormat::JsonLd, "application/ld+json"),
+        "ntriples" => (
+            graph_owl_rdf_io::RdfFormat::NTriples,
+            "application/n-triples",
+        ),
+        "nquads" => (graph_owl_rdf_io::RdfFormat::NQuads, "application/n-quads"),
+        other => {
+            return Err(AppError::Validation(vec![FieldError::new(
+                "format",
+                FieldErrorCode::Value,
+                format!(
+                    "`{other}` is not a supported RDF format — use turtle, jsonld, ntriples, \
+                     or nquads"
+                ),
+            )]));
+        }
+    };
+    let bytes = catalog.export_rdf(&principal, format).await?;
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, content_type)
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 /// Every document the ontology editor writes lands under one fixed source

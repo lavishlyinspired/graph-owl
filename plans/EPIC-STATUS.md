@@ -84,7 +84,7 @@ is the condition that index exists to catch.
 | **42** | 7 | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | In progress | 2/4 (+2 partial) | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
 | **43** | 5 | [`43-framework-integrations.md`](43-framework-integrations.md) | **Shipped** | 6/6 | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
 | **93** | 3 | [`93-console-overview.md`](93-console-overview.md) | **Shipped** | 2/2 | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
-| **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | In progress | 5/7 (+1 partial) | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
+| **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | In progress | 6/8 (+1 partial) | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
 | **95** | 10 | [`95-owl-rl-completion.md`](95-owl-rl-completion.md) | **Shipped** | 2/2 | Epic 6 (the eight rules and the fixpoint that runs them) |
 | **96** | 10 | [`96-shacl-sparql.md`](96-shacl-sparql.md) | In progress | 2/4 | Epic 5 (SHACL Core), Epic 7 (SPARQL) |
 | **97** | 10, 12 | [`97-incremental-parallel-reasoning.md`](97-incremental-parallel-reasoning.md) | In progress | 1/2 | Epic 6 (semi-naive fixpoint), Epic 37a (the measurement) |
@@ -602,7 +602,8 @@ is the condition that index exists to catch.
 - [~] C (console)
 - [x] `rdf:reifies` synthesised at the query surface, so the standard vocabulary returns rows 
 - [x] Slices B, C and D share one `oxrdf/rdf-12` feature gate — one decision, taken once for t
-- [ ] Export dialog offers RDF 1
+- [x] `GET /graph/export/rdf` — found and fixed 8 August 2026
+- [ ] Export dialog offers RDF as one of its format choices and previews it *(UI → Epic 42)* —
 
 ### Epic 95 — OWL 2 RL Completion *(Demo 10)*
 
