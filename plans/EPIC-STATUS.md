@@ -81,10 +81,10 @@ is the condition that index exists to catch.
 | **39** | 1 | [`39-ui-foundation.md`](39-ui-foundation.md) | In progress | 25/26 (+1 partial) | Epic 1 (API conventions + OpenAPI), Epic 8 (search), Epic 12 (authn), Epic 13 (… |
 | **40** | 3 | [`40-ui-graph-explorer.md`](40-ui-graph-explorer.md) | **Shipped** | 11/11 | Epic 39 (console shell, trust components), Epic 7a (traversal), Epic 4 (flakes,… |
 | **41** | 4 | [`41-ui-workbench-governance.md`](41-ui-workbench-governance.md) | **Shipped** | 12/12 | Epic 39 (shell, trust components), Epic 40 (graph model and renderers), Epic 5… |
-| **42** | 7 | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | In progress | 3/4 (+1 partial) | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
+| **42** | 7 | [`42-ui-semantic-surfaces.md`](42-ui-semantic-surfaces.md) | In progress | 4/5 (+1 partial) | Epic 39 (shell, patterns, trust components), Epic 41 (admin section, schema-dri… |
 | **43** | 5 | [`43-framework-integrations.md`](43-framework-integrations.md) | **Shipped** | 6/6 | Epic 14 (MCP), Epic 13 (authorization), Epic 31 (memory), Epic 16 (Python SDK),… |
 | **93** | 3 | [`93-console-overview.md`](93-console-overview.md) | **Shipped** | 2/2 | Epic 2 (hierarchy), Epic 3 (envelope), Epic 4 (graph), Epic 13 (authorization) |
-| **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | In progress | 6/8 (+1 partial) | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
+| **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | In progress | 7/8 (+1 partial) | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
 | **95** | 10 | [`95-owl-rl-completion.md`](95-owl-rl-completion.md) | **Shipped** | 2/2 | Epic 6 (the eight rules and the fixpoint that runs them) |
 | **96** | 10 | [`96-shacl-sparql.md`](96-shacl-sparql.md) | In progress | 2/4 | Epic 5 (SHACL Core), Epic 7 (SPARQL) |
 | **97** | 10, 12 | [`97-incremental-parallel-reasoning.md`](97-incremental-parallel-reasoning.md) | **Shipped** | 5/5 | Epic 6 (semi-naive fixpoint), Epic 37a (the measurement) |
@@ -586,6 +586,7 @@ is the condition that index exists to catch.
 - [x] One review queue over five proposal sources — **Slices C–D shipped, 7 August 2026, propo
 - [~] Agent activity audit — **shipped 7 August 2026, write-backs only**: see the full account
 - [x] A text-first ontology editor, graph as feedback — **Slice G shipped, 7 August 2026**: a 
+- [x] Export dialog — format, scope, as-of, preview before download — **Slice E's own gap, shi
 
 ### Epic 43 — Agent Framework Integrations *(Demo 5)*
 
@@ -610,7 +611,7 @@ is the condition that index exists to catch.
 - [x] `rdf:reifies` synthesised at the query surface, so the standard vocabulary returns rows 
 - [x] Slices B, C and D share one `oxrdf/rdf-12` feature gate — one decision, taken once for t
 - [x] `GET /graph/export/rdf` — found and fixed 8 August 2026
-- [ ] Export dialog offers RDF as one of its format choices and previews it *(UI → Epic 42)* —
+- [x] Export dialog offers RDF as one of its format choices and previews it *(UI → Epic 42)* —
 
 ### Epic 95 — OWL 2 RL Completion *(Demo 10)*
 

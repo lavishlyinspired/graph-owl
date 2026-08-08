@@ -1227,6 +1227,26 @@
           }
         ]
       },
+      "ExportPreview": {
+        "description": "What an export would contain, without writing it — Phase 3 item 3.15's\npreview. Counts, not the elements themselves: a reader deciding whether\na scope is too broad needs the size, not the data a moment before\ndownloading it.",
+        "properties": {
+          "edges": {
+            "description": "How many edges the export would contain.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "nodes": {
+            "description": "How many nodes the export would contain.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "nodes",
+          "edges"
+        ],
+        "type": "object"
+      },
       "FieldChange": {
         "description": "One field's before and after. `None` on either side means the field was\nadded or removed — distinct from changed, because a consumer reacts\ndifferently to a dropped column than to a retyped one.",
         "properties": {
@@ -6140,6 +6160,26 @@
     "/graph/export/bulk-csv": {
       "get": {
         "operationId": "get_graph_export_bulk-csv",
+        "parameters": [
+          {
+            "description": "An FQN prefix — only subjects whose resolved FQN starts with it are included",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "RFC 3339 timestamp — the export's state at that instant, not the current one",
+            "in": "query",
+            "name": "asOf",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Export the caller's authorized estate as Neo4j bulk-import CSV, bundled as .tar.zst"
@@ -6166,6 +6206,26 @@
     "/graph/export/cypher": {
       "get": {
         "operationId": "get_graph_export_cypher",
+        "parameters": [
+          {
+            "description": "An FQN prefix — only subjects whose resolved FQN starts with it are included",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "RFC 3339 timestamp — the export's state at that instant, not the current one",
+            "in": "query",
+            "name": "asOf",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Export the caller's authorized estate as a batched, idempotent Cypher script"
@@ -6192,6 +6252,26 @@
     "/graph/export/graphml": {
       "get": {
         "operationId": "get_graph_export_graphml",
+        "parameters": [
+          {
+            "description": "An FQN prefix — only subjects whose resolved FQN starts with it are included",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "RFC 3339 timestamp — the export's state at that instant, not the current one",
+            "in": "query",
+            "name": "asOf",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Export the caller's authorized estate as GraphML"
@@ -6218,6 +6298,26 @@
     "/graph/export/json-graph": {
       "get": {
         "operationId": "get_graph_export_json-graph",
+        "parameters": [
+          {
+            "description": "An FQN prefix — only subjects whose resolved FQN starts with it are included",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "RFC 3339 timestamp — the export's state at that instant, not the current one",
+            "in": "query",
+            "name": "asOf",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -6251,6 +6351,26 @@
     "/graph/export/jsonl": {
       "get": {
         "operationId": "get_graph_export_jsonl",
+        "parameters": [
+          {
+            "description": "An FQN prefix — only subjects whose resolved FQN starts with it are included",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "RFC 3339 timestamp — the export's state at that instant, not the current one",
+            "in": "query",
+            "name": "asOf",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Export the caller's authorized estate as JSON Lines"
@@ -6274,6 +6394,59 @@
         "summary": "Export the caller's authorized estate as JSON Lines"
       }
     },
+    "/graph/export/preview": {
+      "get": {
+        "operationId": "get_graph_export_preview",
+        "parameters": [
+          {
+            "description": "An FQN prefix — only subjects whose resolved FQN starts with it are included",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "RFC 3339 timestamp — the export's state at that instant, not the current one",
+            "in": "query",
+            "name": "asOf",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportPreview"
+                }
+              }
+            },
+            "description": "Count what an export would contain, without writing anything"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Count what an export would contain, without writing anything"
+      }
+    },
     "/graph/export/rdf": {
       "get": {
         "operationId": "get_graph_export_rdf",
@@ -6283,6 +6456,24 @@
             "in": "query",
             "name": "format",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "An FQN prefix — only subjects whose resolved FQN starts with it are included",
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "RFC 3339 timestamp — the export's state at that instant, not the current one",
+            "in": "query",
+            "name": "asOf",
+            "required": false,
             "schema": {
               "type": "string"
             }

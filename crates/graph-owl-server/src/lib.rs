@@ -83,6 +83,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/graph/export/jsonl", get(export_json_lines))
         .route("/graph/export/json-graph", get(export_json_graph))
         .route("/graph/export/rdf", get(export_rdf))
+        .route("/graph/export/preview", get(export_preview))
         // Epic 42 Slice G: the text-first ontology editor. `preview` is the
         // fast, as-the-author-types path (parse only); `dry-run` is the
         // explicit "Check" button (shapes + reasoning, matching the policy
@@ -7680,12 +7681,63 @@ async fn serve_temp_file(
         .map_err(|e| AppError::Internal(e.to_string()))
 }
 
+/// `?scope=`/`?asOf=`, shared by all six export routes and the preview
+/// route — Phase 3 item 3.15's export dialog. `scope` is an FQN prefix
+/// (the same convention `?domain=` already established); `asOf` is RFC
+/// 3339, parsed and resolved to a transaction time the identical way
+/// `/sparql`'s own `asOf` is.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportScopeQuery {
+    scope: Option<String>,
+    as_of: Option<String>,
+}
+
+/// Parses and resolves `?asOf=` — shared by every export handler and the
+/// preview handler below, so the parse-then-resolve step exists in one
+/// place rather than six times. `None` means "current state", the same
+/// meaning an absent `asOf` already has on `/sparql`.
+///
+/// **`TripleStore::time_at` returning `None` is not "unbounded" — its own
+/// doc comment warns callers not to collapse the two**: `None` there means
+/// "nothing had happened yet", a graph younger than the question, not "no
+/// historical view was requested". Passing that straight through as
+/// `Option::None` would silently widen an `asOf` before the estate existed
+/// into an unbounded, current-state read — found by this feature's own RED
+/// test (`asOf=1970-01-01T00:00:00Z` returned every row instead of none).
+/// Mapped instead to `i64::MIN`: a transaction time no real flake's `t` can
+/// ever be `<=`, so the *existing* `t <= as_of` bound both engines already
+/// implement (`RecordingGraph::resolve`, `graph-owl-engine-postgres`'s own
+/// `AND t <= $as_of`) correctly returns nothing — one sentinel value reuses
+/// the query path every other `as_of` already takes, rather than a special
+/// "return empty" branch duplicated per export format.
+async fn resolve_export_as_of(
+    catalog: &Catalog,
+    raw: Option<&str>,
+) -> Result<Option<i64>, AppError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let instant = chrono::DateTime::parse_from_rfc3339(raw)
+        .map_err(|e| {
+            AppError::Validation(vec![FieldError::new(
+                "asOf",
+                FieldErrorCode::Type,
+                format!("`{raw}` is not an RFC 3339 timestamp: {e}"),
+            )])
+        })?
+        .with_timezone(&chrono::Utc);
+    Ok(Some(
+        catalog.resolve_as_of(instant).await?.unwrap_or(i64::MIN),
+    ))
+}
+
 /// One node/edge query, five wire formats — Epic 9a's export-authorization
 /// gap closed and put on the wire (`plans/09a-lpg-interchange.md`, "Epic-level
 /// gap found late"). Every handler below calls the matching
 /// `Catalog::export_*` wrapper, which is already scoped to what `principal`
-/// may see via [`graph_owl_api::Catalog::authorized_lpg_elements`] — nothing
-/// here re-applies or duplicates that filtering.
+/// may see via [`graph_owl_api::Catalog::authorized_lpg_elements_scoped`] —
+/// nothing here re-applies or duplicates that filtering.
 ///
 /// **Not admin-gated**, unlike `/admin/export`: that route is a full,
 /// unfiltered backup of the whole estate. These return only what the calling
@@ -7695,27 +7747,39 @@ async fn serve_temp_file(
 async fn export_graphml(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
+    Query(query): Query<ExportScopeQuery>,
 ) -> Result<axum::response::Response, AppError> {
+    let as_of = resolve_export_as_of(&catalog, query.as_of.as_deref()).await?;
     let path = std::env::temp_dir().join(format!("graph-owl-export-{}.graphml", Uuid::new_v4()));
-    catalog.export_graphml(&principal, &path).await?;
+    catalog
+        .export_graphml(&principal, &path, query.scope.as_deref(), as_of)
+        .await?;
     serve_temp_file(&path, "application/xml", "graph.graphml").await
 }
 
 async fn export_cypher_script(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
+    Query(query): Query<ExportScopeQuery>,
 ) -> Result<axum::response::Response, AppError> {
+    let as_of = resolve_export_as_of(&catalog, query.as_of.as_deref()).await?;
     let path = std::env::temp_dir().join(format!("graph-owl-export-{}.cypher", Uuid::new_v4()));
-    catalog.export_cypher_script(&principal, &path).await?;
+    catalog
+        .export_cypher_script(&principal, &path, query.scope.as_deref(), as_of)
+        .await?;
     serve_temp_file(&path, "text/plain", "graph.cypher").await
 }
 
 async fn export_json_lines(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
+    Query(query): Query<ExportScopeQuery>,
 ) -> Result<axum::response::Response, AppError> {
+    let as_of = resolve_export_as_of(&catalog, query.as_of.as_deref()).await?;
     let path = std::env::temp_dir().join(format!("graph-owl-export-{}.jsonl", Uuid::new_v4()));
-    catalog.export_json_lines(&principal, &path).await?;
+    catalog
+        .export_json_lines(&principal, &path, query.scope.as_deref(), as_of)
+        .await?;
     serve_temp_file(&path, "application/x-ndjson", "graph.jsonl").await
 }
 
@@ -7729,10 +7793,14 @@ async fn export_json_lines(
 async fn export_bulk_csv(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
+    Query(query): Query<ExportScopeQuery>,
 ) -> Result<axum::response::Response, AppError> {
+    let as_of = resolve_export_as_of(&catalog, query.as_of.as_deref()).await?;
     let id = Uuid::new_v4();
     let dir = std::env::temp_dir().join(format!("graph-owl-export-{id}-csv"));
-    catalog.export_bulk_csv(&principal, &dir).await?;
+    catalog
+        .export_bulk_csv(&principal, &dir, query.scope.as_deref(), as_of)
+        .await?;
 
     let archive_path = std::env::temp_dir().join(format!("graph-owl-export-{id}.tar.zst"));
     let dir_for_blocking = dir.clone();
@@ -7755,13 +7823,38 @@ async fn export_bulk_csv(
 async fn export_json_graph(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
+    Query(query): Query<ExportScopeQuery>,
 ) -> Result<Json<graph_owl_lpg_io::JsonGraphView>, AppError> {
-    Ok(Json(catalog.export_json_graph(&principal).await?))
+    let as_of = resolve_export_as_of(&catalog, query.as_of.as_deref()).await?;
+    Ok(Json(
+        catalog
+            .export_json_graph(&principal, query.scope.as_deref(), as_of)
+            .await?,
+    ))
+}
+
+/// A count of what an export would contain, without writing anything —
+/// Phase 3 item 3.15's preview half, so the export dialog can show "this
+/// scope covers 1,204 nodes" before the reader commits to a download.
+async fn export_preview(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Query(query): Query<ExportScopeQuery>,
+) -> Result<Json<graph_owl_api::ExportPreview>, AppError> {
+    let as_of = resolve_export_as_of(&catalog, query.as_of.as_deref()).await?;
+    Ok(Json(
+        catalog
+            .export_preview(&principal, query.scope.as_deref(), as_of)
+            .await?,
+    ))
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RdfExportQuery {
     format: String,
+    scope: Option<String>,
+    as_of: Option<String>,
 }
 
 /// The sixth export format, and the first RDF-shaped one — Epic 94.
@@ -7795,7 +7888,10 @@ async fn export_rdf(
             )]));
         }
     };
-    let bytes = catalog.export_rdf(&principal, format).await?;
+    let as_of = resolve_export_as_of(&catalog, query.as_of.as_deref()).await?;
+    let bytes = catalog
+        .export_rdf(&principal, format, query.scope.as_deref(), as_of)
+        .await?;
     axum::response::Response::builder()
         .status(StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, content_type)

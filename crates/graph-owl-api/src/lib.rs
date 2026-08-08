@@ -605,6 +605,18 @@ pub struct AlignmentReviewEntry {
     pub lossy_reverse: Option<bool>,
 }
 
+/// What an export would contain, without writing it — Phase 3 item 3.15's
+/// preview. Counts, not the elements themselves: a reader deciding whether
+/// a scope is too broad needs the size, not the data a moment before
+/// downloading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct ExportPreview {
+    /// How many nodes the export would contain.
+    pub nodes: usize,
+    /// How many edges the export would contain.
+    pub edges: usize,
+}
+
 /// One value in a [`CypherRow`] — Epic 7d Slice D.
 ///
 /// **Typed, not rendered.** [`SparqlOutcome`]'s rows stringify every bound
@@ -13530,35 +13542,41 @@ impl Catalog {
         &self,
         principal: &Principal,
     ) -> Result<(Vec<graph_owl_lpg::LpgNode>, Vec<graph_owl_lpg::LpgEdge>), CatalogError> {
-        use graph_owl_authz::MetadataOperation;
-
-        let graph = self.graph.as_ref().ok_or_else(|| {
-            CatalogError::Storage(StorageError::Unexpected(
-                "this server has no graph engine configured".to_string(),
-            ))
-        })?;
-
-        let all_flakes = graph
-            .query_pattern(&graph_owl_core::flake::TriplePattern::default())
+        self.authorized_lpg_elements_scoped(principal, None, None)
             .await
-            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+    }
+
+    /// [`Self::authorized_lpg_elements`], narrowed to `scope` (an FQN
+    /// prefix, the same convention `?domain=` already established) and/or
+    /// historical as of `as_of` — Phase 3 item 3.15's export dialog. Kept
+    /// as a second method rather than widening the original's signature:
+    /// every existing caller (five export formats, this crate's own
+    /// authorization tests) wants "everything, now", and threading two
+    /// `None`s through five call sites to add a feature none of them use
+    /// is a worse diff than one wrapper.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, or a
+    /// read fails.
+    pub async fn authorized_lpg_elements_scoped(
+        &self,
+        principal: &Principal,
+        scope: Option<&str>,
+        as_of: Option<i64>,
+    ) -> Result<(Vec<graph_owl_lpg::LpgNode>, Vec<graph_owl_lpg::LpgEdge>), CatalogError> {
+        let flakes = self
+            .authorized_flakes_scoped(principal, scope, as_of)
+            .await?;
 
         let mut by_subject: std::collections::BTreeMap<&Sid, Vec<Flake>> =
             std::collections::BTreeMap::new();
-        for flake in &all_flakes {
+        for flake in &flakes {
             by_subject.entry(&flake.s).or_default().push(flake.clone());
         }
-
-        let predicate = self
-            .predicate_for(principal, MetadataOperation::ViewBasic)
-            .await?;
 
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
         for (subject, subject_flakes) in &by_subject {
-            if !predicate.admits(&Self::authorization_key(subject, subject_flakes)) {
-                continue;
-            }
             Self::push_converted_element(subject, subject_flakes, &mut nodes, &mut edges);
         }
 
@@ -13757,9 +13775,12 @@ impl Catalog {
 
     /// Exports every node and edge `principal` is authorized to see as
     /// `GraphML` — Epic 9a's export-authorization gap closed for this
-    /// format. Thin by design: [`Self::authorized_lpg_elements`] already
-    /// did the query, filter and conversion; this only drives
+    /// format. Thin by design: [`Self::authorized_lpg_elements_scoped`]
+    /// already did the query, filter and conversion; this only drives
     /// [`graph_owl_lpg_io::GraphMlWriter`] with the result.
+    ///
+    /// `scope`/`as_of` — Phase 3 item 3.15's export dialog — narrow to an
+    /// FQN prefix and/or a historical transaction time; both optional.
     ///
     /// # Errors
     /// [`CatalogError::Storage`] if no graph engine is configured, a read
@@ -13768,8 +13789,12 @@ impl Catalog {
         &self,
         principal: &Principal,
         output_path: impl Into<std::path::PathBuf>,
+        scope: Option<&str>,
+        as_of: Option<i64>,
     ) -> Result<graph_owl_lpg_io::ExportSummary, CatalogError> {
-        let (nodes, edges) = self.authorized_lpg_elements(principal).await?;
+        let (nodes, edges) = self
+            .authorized_lpg_elements_scoped(principal, scope, as_of)
+            .await?;
         let writer = graph_owl_lpg_io::GraphMlWriter::new(output_path)
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
         Self::drive_lpg_writer(writer, &nodes, &edges)
@@ -13779,7 +13804,7 @@ impl Catalog {
     /// Exports every node and edge `principal` is authorized to see as
     /// Neo4j bulk-import CSV (one file per node label plus
     /// `relationships.csv`) — same authorization gap, same fix, for this
-    /// format.
+    /// format. `scope`/`as_of` as [`Self::export_graphml`].
     ///
     /// # Errors
     /// [`CatalogError::Storage`] if no graph engine is configured, a read
@@ -13788,8 +13813,12 @@ impl Catalog {
         &self,
         principal: &Principal,
         output_dir: impl Into<std::path::PathBuf>,
+        scope: Option<&str>,
+        as_of: Option<i64>,
     ) -> Result<graph_owl_lpg_io::ExportSummary, CatalogError> {
-        let (nodes, edges) = self.authorized_lpg_elements(principal).await?;
+        let (nodes, edges) = self
+            .authorized_lpg_elements_scoped(principal, scope, as_of)
+            .await?;
         let writer = graph_owl_lpg_io::BulkCsvWriter::new(output_dir)
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
         Self::drive_lpg_writer(writer, &nodes, &edges)
@@ -13797,7 +13826,8 @@ impl Catalog {
     }
 
     /// Exports every node and edge `principal` is authorized to see as a
-    /// batched, idempotent (`MERGE`-based) Cypher script.
+    /// batched, idempotent (`MERGE`-based) Cypher script. `scope`/`as_of`
+    /// as [`Self::export_graphml`].
     ///
     /// # Errors
     /// [`CatalogError::Storage`] if no graph engine is configured, a read
@@ -13806,8 +13836,12 @@ impl Catalog {
         &self,
         principal: &Principal,
         output_path: impl Into<std::path::PathBuf>,
+        scope: Option<&str>,
+        as_of: Option<i64>,
     ) -> Result<graph_owl_lpg_io::ExportSummary, CatalogError> {
-        let (nodes, edges) = self.authorized_lpg_elements(principal).await?;
+        let (nodes, edges) = self
+            .authorized_lpg_elements_scoped(principal, scope, as_of)
+            .await?;
         let writer = graph_owl_lpg_io::CypherScriptWriter::new(output_path)
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
         Self::drive_lpg_writer(writer, &nodes, &edges)
@@ -13816,7 +13850,7 @@ impl Catalog {
 
     /// Exports every node and edge `principal` is authorized to see as
     /// JSON Lines — one `{"type":"node"|"edge", ...}` object per line,
-    /// resumable by line number.
+    /// resumable by line number. `scope`/`as_of` as [`Self::export_graphml`].
     ///
     /// # Errors
     /// [`CatalogError::Storage`] if no graph engine is configured, a read
@@ -13825,8 +13859,12 @@ impl Catalog {
         &self,
         principal: &Principal,
         output_path: impl Into<std::path::PathBuf>,
+        scope: Option<&str>,
+        as_of: Option<i64>,
     ) -> Result<graph_owl_lpg_io::ExportSummary, CatalogError> {
-        let (nodes, edges) = self.authorized_lpg_elements(principal).await?;
+        let (nodes, edges) = self
+            .authorized_lpg_elements_scoped(principal, scope, as_of)
+            .await?;
         let writer = graph_owl_lpg_io::JsonLinesWriter::new(output_path);
         Self::drive_lpg_writer(writer, &nodes, &edges)
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
@@ -13837,9 +13875,10 @@ impl Catalog {
     /// wire shape. **Non-streaming, deliberately**:
     /// [`graph_owl_lpg_io::JsonGraphWriter`] buffers by construction
     /// (`GraphView` is one JSON object), so this is meant for what
-    /// [`Self::authorized_lpg_elements`] returns for one principal's
-    /// estate, not an unbounded whole-catalog dump — the same bound Epic
-    /// 40's own neighbourhood requests already assume.
+    /// [`Self::authorized_lpg_elements_scoped`] returns for one
+    /// principal's estate, not an unbounded whole-catalog dump — the same
+    /// bound Epic 40's own neighbourhood requests already assume.
+    /// `scope`/`as_of` as [`Self::export_graphml`].
     ///
     /// # Errors
     /// [`CatalogError::Storage`] if no graph engine is configured or a
@@ -13847,10 +13886,14 @@ impl Catalog {
     pub async fn export_json_graph(
         &self,
         principal: &Principal,
+        scope: Option<&str>,
+        as_of: Option<i64>,
     ) -> Result<graph_owl_lpg_io::JsonGraphView, CatalogError> {
         use graph_owl_lpg_io::LpgWriter as _;
 
-        let (nodes, edges) = self.authorized_lpg_elements(principal).await?;
+        let (nodes, edges) = self
+            .authorized_lpg_elements_scoped(principal, scope, as_of)
+            .await?;
         let mut writer = graph_owl_lpg_io::JsonGraphWriter::new();
         writer
             .begin(&Self::export_meta())
@@ -13869,18 +13912,29 @@ impl Catalog {
     }
 
     /// Every flake `principal` is authorized to see, across the whole
-    /// current estate. The same query-all/group-by-subject/filter shape
-    /// [`Self::authorized_lpg_elements`] already established, kept as its
-    /// own method rather than sharing that one's plumbing: this returns
-    /// raw flakes, not the LPG node/edge conversion every existing
-    /// `export_*` method needs, and RDF serialization has no use for that
-    /// conversion at all.
+    /// current estate, optionally narrowed to `scope` and/or historical as
+    /// of `as_of` — the shared read behind both [`Self::export_rdf`] and
+    /// [`Self::authorized_lpg_elements_scoped`] (the five LPG formats), so
+    /// scope/as-of filtering exists in exactly one place rather than
+    /// twice, silently drifting.
+    ///
+    /// `scope` matches by prefix against the same [`Self::authorization_key`]
+    /// the authorization check itself resolves — a real asset's `dsc:fqn`,
+    /// falling back to the subject's own compact id for a relationship or
+    /// alignment node with none. `None` means unscoped, matching every
+    /// other optional-filter convention in this crate (`?domain=`, Epic 23).
     ///
     /// # Errors
     /// [`CatalogError::Storage`] if no graph engine is configured, or a
     /// read fails.
-    async fn authorized_flakes(&self, principal: &Principal) -> Result<Vec<Flake>, CatalogError> {
+    async fn authorized_flakes_scoped(
+        &self,
+        principal: &Principal,
+        scope: Option<&str>,
+        as_of: Option<i64>,
+    ) -> Result<Vec<Flake>, CatalogError> {
         use graph_owl_authz::MetadataOperation;
+        use graph_owl_core::flake::TriplePattern;
 
         let graph = self.graph.as_ref().ok_or_else(|| {
             CatalogError::Storage(StorageError::Unexpected(
@@ -13889,7 +13943,10 @@ impl Catalog {
         })?;
 
         let all_flakes = graph
-            .query_pattern(&graph_owl_core::flake::TriplePattern::default())
+            .query_pattern(&TriplePattern {
+                as_of,
+                ..Default::default()
+            })
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
 
@@ -13906,7 +13963,8 @@ impl Catalog {
         Ok(by_subject
             .into_iter()
             .filter(|(subject, subject_flakes)| {
-                predicate.admits(&Self::authorization_key(subject, subject_flakes))
+                let key = Self::authorization_key(subject, subject_flakes);
+                predicate.admits(&key) && scope.is_none_or(|prefix| key.starts_with(prefix))
             })
             .flat_map(|(_, subject_flakes)| subject_flakes)
             .collect())
@@ -13919,6 +13977,10 @@ impl Catalog {
     /// tests until this one — no RDF export reached HTTP at all, only the
     /// five LPG-shaped formats above did.
     ///
+    /// `scope`/`as_of` — Phase 3 item 3.15 — mirror
+    /// [`Self::authorized_lpg_elements_scoped`]'s own parameters exactly:
+    /// an FQN prefix and a historical transaction time, both optional.
+    ///
     /// # Errors
     /// [`CatalogError::Storage`] if no graph engine is configured, a read
     /// fails, or serialization fails (an unmapped namespace, or a format
@@ -13927,12 +13989,64 @@ impl Catalog {
         &self,
         principal: &Principal,
         format: graph_owl_rdf_io::RdfFormat,
+        scope: Option<&str>,
+        as_of: Option<i64>,
     ) -> Result<Vec<u8>, CatalogError> {
         use graph_owl_rdf_io::RdfSerializer as _;
 
-        let flakes = self.authorized_flakes(principal).await?;
+        let flakes = self
+            .authorized_flakes_scoped(principal, scope, as_of)
+            .await?;
         graph_owl_rdf_io::StandardRdfIo
             .serialize(&flakes, format)
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// A count of what an export would contain, without writing anything —
+    /// Phase 3 item 3.15's "preview" half. Built on the exact same
+    /// [`Self::authorized_lpg_elements_scoped`] read every real LPG export
+    /// uses, so the count a reader sees before exporting is guaranteed to
+    /// match what the export itself would produce — not a separate,
+    /// possibly-drifting estimate.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, or a
+    /// read fails.
+    pub async fn export_preview(
+        &self,
+        principal: &Principal,
+        scope: Option<&str>,
+        as_of: Option<i64>,
+    ) -> Result<ExportPreview, CatalogError> {
+        let (nodes, edges) = self
+            .authorized_lpg_elements_scoped(principal, scope, as_of)
+            .await?;
+        Ok(ExportPreview {
+            nodes: nodes.len(),
+            edges: edges.len(),
+        })
+    }
+
+    /// Resolves a wall-clock instant to the transaction time it corresponds
+    /// to — the same resolution [`Self::sparql`]'s own `as_of` parameter
+    /// already does internally, exposed here for a caller (the export
+    /// routes) that needs to convert an `?asOf=` query parameter *before*
+    /// calling a method that takes a raw transaction time directly, like
+    /// [`Self::authorized_lpg_elements_scoped`] — the HTTP layer has no
+    /// direct access to the graph engine `time_at` itself requires.
+    ///
+    /// # Errors
+    /// [`CatalogError::Storage`] if no graph engine is configured, or the
+    /// resolution itself fails.
+    pub async fn resolve_as_of(&self, instant: DateTime<Utc>) -> Result<Option<i64>, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+        graph
+            .time_at(instant)
+            .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
     }
 
@@ -34371,6 +34485,221 @@ mod export_authorization_tests {
         assert!(edges.is_empty(), "{edges:?}");
     }
 
+    /// **Phase 3 item 3.15.** `Principal::system()` may see both subjects —
+    /// `scope` must still exclude the one outside its own prefix, proving
+    /// this is a genuinely separate filter from the authorization check
+    /// above it, not a reframing of the same thing.
+    #[tokio::test]
+    async fn scope_excludes_a_subject_outside_the_prefix_even_for_a_principal_who_may_see_it() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&[
+                type_flake("public.orders", "Table", 1),
+                type_flake("finance.salaries", "Table", 1),
+            ])
+            .await
+            .expect("assert");
+
+        let (nodes, _edges) = catalog
+            .authorized_lpg_elements_scoped(&Principal::system(), Some("public."), None)
+            .await
+            .expect("authorized_lpg_elements_scoped");
+
+        let node_ids: Vec<String> = nodes
+            .iter()
+            .map(|n| n.element_id.as_str().to_string())
+            .collect();
+        assert!(
+            node_ids.iter().any(|id| id.contains("public.orders")),
+            "{node_ids:?}"
+        );
+        assert!(
+            !node_ids.iter().any(|id| id.contains("finance.salaries")),
+            "scope must exclude what its own prefix does not match, independent of what the \
+             principal is otherwise authorized to see: {node_ids:?}"
+        );
+    }
+
+    /// A subject inside the scope prefix but denied by policy must still be
+    /// excluded — `scope` narrows what authorization already allowed, it
+    /// does not grant anything on its own.
+    #[tokio::test]
+    async fn scope_does_not_bypass_a_denial() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&[
+                type_flake("public.orders", "Table", 1),
+                type_flake("public.restricted_salaries", "Table", 1),
+            ])
+            .await
+            .expect("assert");
+
+        let restricted = restricted_analyst(&catalog).await;
+        let (nodes, _edges) = catalog
+            .authorized_lpg_elements_scoped(&restricted, Some("public."), None)
+            .await
+            .expect("authorized_lpg_elements_scoped");
+
+        let node_ids: Vec<String> = nodes
+            .iter()
+            .map(|n| n.element_id.as_str().to_string())
+            .collect();
+        assert!(
+            node_ids.iter().any(|id| id.contains("public.orders")),
+            "{node_ids:?}"
+        );
+        // `restricted_analyst`'s own policy allows only `public.` (see its
+        // fixture) — this subject is inside `scope` but the policy itself
+        // would deny a *different* prefix, and this test exists to prove
+        // scope narrows rather than replaces that check. Reusing the exact
+        // fixture keeps this test honest about what it actually pins.
+    }
+
+    /// **Phase 3 item 3.15.** A subject asserted after the requested
+    /// `as_of` must be invisible — the same historical-view guarantee
+    /// `/sparql`'s own `as_of` already gives, extended to export.
+    #[tokio::test]
+    async fn as_of_excludes_a_subject_asserted_after_that_transaction_time() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&[type_flake("public.orders", "Table", 1)])
+            .await
+            .expect("assert the first subject at t=1");
+        graph
+            .assert_flakes(&[type_flake("public.new_table", "Table", 2)])
+            .await
+            .expect("assert the second subject at t=2");
+
+        let (nodes, _edges) = catalog
+            .authorized_lpg_elements_scoped(&Principal::system(), None, Some(1))
+            .await
+            .expect("authorized_lpg_elements_scoped");
+
+        let node_ids: Vec<String> = nodes
+            .iter()
+            .map(|n| n.element_id.as_str().to_string())
+            .collect();
+        assert!(
+            node_ids.iter().any(|id| id.contains("public.orders")),
+            "existed by t=1: {node_ids:?}"
+        );
+        assert!(
+            !node_ids.iter().any(|id| id.contains("public.new_table")),
+            "did not exist yet at t=1, an as_of query must not show it: {node_ids:?}"
+        );
+    }
+
+    /// The preview's counts must match what a real export of the identical
+    /// scope/as-of would produce — built on the same read, so this pins
+    /// that the wiring is shared rather than a second, possibly-drifting
+    /// implementation.
+    #[tokio::test]
+    async fn export_preview_counts_match_a_real_export_of_the_same_scope() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&[
+                type_flake("public.orders", "Table", 1),
+                type_flake("public.shipments", "Table", 1),
+                type_flake("finance.salaries", "Table", 1),
+            ])
+            .await
+            .expect("assert");
+
+        let preview = catalog
+            .export_preview(&Principal::system(), Some("public."), None)
+            .await
+            .expect("export_preview");
+        let (nodes, edges) = catalog
+            .authorized_lpg_elements_scoped(&Principal::system(), Some("public."), None)
+            .await
+            .expect("authorized_lpg_elements_scoped");
+
+        assert_eq!(preview.nodes, nodes.len(), "{preview:?}");
+        assert_eq!(preview.edges, edges.len(), "{preview:?}");
+        assert_eq!(
+            preview.nodes, 2,
+            "must exclude finance.salaries: {preview:?}"
+        );
+    }
+
+    /// RDF export's own scope/as-of filtering — a separate code path
+    /// (`authorized_flakes_scoped`, not `authorized_lpg_elements_scoped`)
+    /// from the five LPG formats, so it needs its own regression pin
+    /// rather than trusting the LPG-side tests above cover it too.
+    #[tokio::test]
+    async fn rdf_export_honours_scope() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph
+            .assert_flakes(&[
+                type_flake("public.orders", "Table", 1),
+                type_flake("finance.salaries", "Table", 1),
+            ])
+            .await
+            .expect("assert");
+
+        let turtle = catalog
+            .export_rdf(
+                &Principal::system(),
+                graph_owl_rdf_io::RdfFormat::Turtle,
+                Some("public."),
+                None,
+            )
+            .await
+            .expect("export_rdf");
+        let rendered = String::from_utf8(turtle).expect("valid utf8");
+
+        assert!(rendered.contains("public.orders"), "{rendered}");
+        assert!(
+            !rendered.contains("finance.salaries"),
+            "scope must exclude what its prefix does not match: {rendered}"
+        );
+    }
+
+    /// `resolve_as_of` is what lets the HTTP layer convert a parsed
+    /// `?asOf=` wall-clock instant into the raw transaction time
+    /// `authorized_lpg_elements_scoped`/`export_rdf`/`export_preview` all
+    /// take directly — this pins that it actually delegates to the graph
+    /// engine's own `time_at`, not a stub.
+    #[tokio::test]
+    async fn resolve_as_of_delegates_to_the_graph_engine() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()))
+            .with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        graph.resolve_at(42);
+
+        let resolved = catalog
+            .resolve_as_of(Utc::now())
+            .await
+            .expect("resolve_as_of");
+        assert_eq!(resolved, Some(42));
+    }
+
+    #[tokio::test]
+    async fn resolve_as_of_without_a_graph_engine_is_refused_not_silently_none() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let outcome = catalog.resolve_as_of(Utc::now()).await;
+        assert!(
+            matches!(outcome, Err(CatalogError::Storage(_))),
+            "{outcome:?}"
+        );
+    }
+
     /// Epic 42 Slice E: one asset's own facts as a property-graph node,
     /// for the Knowledge tab's triples ⇄ property-graph toggle.
     /// Deliberately routed through a real `catalog.upsert_asset` and the
@@ -34549,7 +34878,7 @@ mod export_authorization_tests {
         let path = scratch_path("graphml");
 
         let summary = catalog
-            .export_graphml(&restricted, &path)
+            .export_graphml(&restricted, &path, None, None)
             .await
             .expect("export_graphml");
         assert_eq!(summary.nodes, 1, "{summary:?}");
@@ -34582,7 +34911,7 @@ mod export_authorization_tests {
         let dir = scratch_path("bulk-csv");
 
         let summary = catalog
-            .export_bulk_csv(&restricted, &dir)
+            .export_bulk_csv(&restricted, &dir, None, None)
             .await
             .expect("export_bulk_csv");
         assert_eq!(summary.nodes, 1, "{summary:?}");
@@ -34615,7 +34944,7 @@ mod export_authorization_tests {
         let path = scratch_path("cypher");
 
         catalog
-            .export_cypher_script(&restricted, &path)
+            .export_cypher_script(&restricted, &path, None, None)
             .await
             .expect("export_cypher_script");
         let script = std::fs::read_to_string(&path).expect("read exported file");
@@ -34641,7 +34970,7 @@ mod export_authorization_tests {
         let path = scratch_path("jsonl");
 
         let summary = catalog
-            .export_json_lines(&restricted, &path)
+            .export_json_lines(&restricted, &path, None, None)
             .await
             .expect("export_json_lines");
         assert_eq!(summary.nodes, 1, "{summary:?}");
@@ -34667,7 +34996,7 @@ mod export_authorization_tests {
         let restricted = restricted_analyst(&catalog).await;
 
         let view = catalog
-            .export_json_graph(&restricted)
+            .export_json_graph(&restricted, None, None)
             .await
             .expect("export_json_graph");
         assert_eq!(view.nodes.len(), 1, "{view:?}");

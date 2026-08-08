@@ -229,12 +229,51 @@ const QUERY_PARAMS: &[(&str, &str, &[QueryParam])] = &[
     (
         "get",
         "/graph/export/rdf",
-        &[query_param(
-            "format",
-            true,
-            "string",
-            "turtle, jsonld, ntriples, or nquads",
-        )],
+        &[
+            query_param(
+                "format",
+                true,
+                "string",
+                "turtle, jsonld, ntriples, or nquads",
+            ),
+            query_param(
+                "scope",
+                false,
+                "string",
+                "An FQN prefix — only subjects whose resolved FQN starts with it are included",
+            ),
+            query_param(
+                "asOf",
+                false,
+                "string",
+                "RFC 3339 timestamp — the export's state at that instant, not the current one",
+            ),
+        ],
+    ),
+    ("get", "/graph/export/graphml", EXPORT_SCOPE_PARAMS),
+    ("get", "/graph/export/bulk-csv", EXPORT_SCOPE_PARAMS),
+    ("get", "/graph/export/cypher", EXPORT_SCOPE_PARAMS),
+    ("get", "/graph/export/jsonl", EXPORT_SCOPE_PARAMS),
+    ("get", "/graph/export/json-graph", EXPORT_SCOPE_PARAMS),
+    ("get", "/graph/export/preview", EXPORT_SCOPE_PARAMS),
+];
+
+/// `?scope=`/`?asOf=` — shared by every export format and the preview
+/// route (Phase 3 item 3.15), since all six read through the identical
+/// `Catalog::authorized_lpg_elements_scoped`/`authorized_flakes_scoped`
+/// filtering and the parameters mean exactly the same thing everywhere.
+const EXPORT_SCOPE_PARAMS: &[QueryParam] = &[
+    query_param(
+        "scope",
+        false,
+        "string",
+        "An FQN prefix — only subjects whose resolved FQN starts with it are included",
+    ),
+    query_param(
+        "asOf",
+        false,
+        "string",
+        "RFC 3339 timestamp — the export's state at that instant, not the current one",
     ),
 ];
 
@@ -431,6 +470,15 @@ pub static ROUTES: &[Route] = &[
         "Export the caller's authorized estate as RDF (turtle, jsonld, ntriples, or nquads)",
         None,
         None,
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/graph/export/preview",
+        "Count what an export would contain, without writing anything",
+        None,
+        Some("ExportPreview"),
         200,
         true,
     ),
@@ -2002,6 +2050,7 @@ pub static ROUTES: &[Route] = &[
     graph_owl_lpg_io::JsonGraphNode,
     graph_owl_lpg_io::JsonGraphEdge,
     graph_owl_lpg_io::JsonGraphView,
+    graph_owl_api::ExportPreview,
 )))]
 struct Components;
 

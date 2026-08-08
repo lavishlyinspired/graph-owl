@@ -57,5 +57,13 @@ export default {
     // `explanation.ts` predate this list and were never audited for
     // inclusion — a separate task, not silently folded into this one.
     "src/governance/reasoningRun.ts",
+    // `src/features/export/exportFormats.ts` (Phase 3 item 3.15): which
+    // URL a chosen format/scope/asOf combination actually downloads from.
+    // Wrong here means a reader downloads the wrong scope with no way to
+    // notice before opening the file — exactly the "invisible to the
+    // reader" failure mode this list exists to guard against.
+    // `ExportDialog.tsx` stays excluded, the same reason every other
+    // `.tsx` in this list does.
+    "src/features/export/exportFormats.ts",
   ],
 };

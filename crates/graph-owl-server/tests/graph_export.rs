@@ -253,3 +253,102 @@ async fn an_unsupported_rdf_format_is_a_named_validation_error() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
     assert_eq!(body["errors"][0]["field"], "format", "{body}");
 }
+
+/// **Phase 3 item 3.15's `?scope=`.** `root` may see both `core_banking`
+/// and `payments` — scope must still exclude `core_banking`, proving this
+/// is a genuinely separate filter from authorization, not a reframing of
+/// it, over real HTTP against a real-Postgres-cataloged estate.
+#[tokio::test]
+async fn scope_narrows_an_export_the_principal_may_otherwise_fully_see() {
+    let (app, _container, _catalog) = authorization_fixture().await;
+
+    // The FQN's `database` segment (`hdfc-core.<random-id>.payments...`) is
+    // generated per test run — discovered from a real export rather than
+    // assumed, the same reason `json_graph_export_returns_only_the_authorized_node_in_the_epic_40_shape`
+    // above reads `fullyQualifiedName` back rather than hardcoding one.
+    let (_, unscoped_bytes) = get_as(&app, "/graph/export/json-graph", "root").await;
+    let unscoped: serde_json::Value = serde_json::from_slice(&unscoped_bytes).expect("valid JSON");
+    let payments_prefix = unscoped["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .filter_map(|n| n["fullyQualifiedName"].as_str())
+        .find_map(|fqn| {
+            let end = fqn.find(".payments")? + ".payments".len();
+            Some(fqn[..end].to_string())
+        })
+        .expect("the fixture must catalog something under .payments");
+
+    let (status, bytes) = get_as(
+        &app,
+        &format!("/graph/export/graphml?scope={payments_prefix}"),
+        "root",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = String::from_utf8(bytes).expect("GraphML is UTF-8 XML");
+    assert!(body.contains("payments"), "{body}");
+    assert!(
+        !body.contains("core_banking"),
+        "scope must exclude what its prefix does not match, even for a principal who may \
+         otherwise see it: {body}"
+    );
+}
+
+/// **Phase 3 item 3.15's `?asOf=`.** A timestamp before the estate was
+/// catalogued must return an export with nothing in it — the same
+/// historical-view guarantee `/sparql`'s own `asOf` already gives.
+#[tokio::test]
+async fn as_of_before_the_estate_existed_returns_an_empty_export() {
+    let (app, _container, _catalog) = authorization_fixture().await;
+
+    let (status, bytes) = get_as(
+        &app,
+        "/graph/export/json-graph?asOf=1970-01-01T00:00:00Z",
+        "root",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let view: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    assert_eq!(
+        view["nodes"].as_array().expect("nodes").len(),
+        0,
+        "nothing existed by 1970: {view}"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_as_of_is_a_named_validation_error() {
+    let (app, _container, _catalog) = authorization_fixture().await;
+    let (status, bytes) = get_as(&app, "/graph/export/graphml?asOf=not-a-timestamp", "root").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    assert_eq!(body["errors"][0]["field"], "asOf", "{body}");
+}
+
+/// The preview route — Phase 3 item 3.15's other half: a count before a
+/// reader commits to a download, matching the real export's own
+/// authorization and scope exactly (`asha` is denied `core_banking`, so
+/// the preview must not count it either).
+#[tokio::test]
+async fn export_preview_reports_counts_without_downloading_anything() {
+    let (app, _container, _catalog) = authorization_fixture().await;
+
+    let (status, bytes) = get_as(&app, "/graph/export/preview", "asha").await;
+    assert_eq!(status, StatusCode::OK);
+    let preview: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    let node_count = preview["nodes"].as_u64().expect("nodes is a number");
+    assert!(node_count > 0, "{preview}");
+
+    let (json_graph_status, json_graph_bytes) =
+        get_as(&app, "/graph/export/json-graph", "asha").await;
+    assert_eq!(json_graph_status, StatusCode::OK);
+    let view: serde_json::Value = serde_json::from_slice(&json_graph_bytes).expect("valid JSON");
+    let real_node_count = view["nodes"].as_array().expect("nodes").len() as u64;
+
+    assert_eq!(
+        node_count, real_node_count,
+        "the preview must count exactly what a real export of the identical \
+         principal/scope/asOf would contain: {preview} vs {real_node_count} real nodes"
+    );
+}

@@ -53,6 +53,7 @@ import ApartmentOutlined from "@ant-design/icons/es/icons/ApartmentOutlined";
 import ArrowLeftOutlined from "@ant-design/icons/es/icons/ArrowLeftOutlined";
 import BookOutlined from "@ant-design/icons/es/icons/BookOutlined";
 import BulbOutlined from "@ant-design/icons/es/icons/BulbOutlined";
+import DownloadOutlined from "@ant-design/icons/es/icons/DownloadOutlined";
 import CheckCircleFilled from "@ant-design/icons/es/icons/CheckCircleFilled";
 import ClockCircleOutlined from "@ant-design/icons/es/icons/ClockCircleOutlined";
 import CloudServerOutlined from "@ant-design/icons/es/icons/CloudServerOutlined";
@@ -163,6 +164,7 @@ import {
 } from "./graph/cytoscape";
 import type { ConnectorRun, ReasoningReport } from "./api";
 import { describeReasoningRun } from "./governance/reasoningRun";
+import { ExportDialog } from "./features/export/ExportDialog";
 import watermarkImg from "./assets/watermark1.png";
 
 const { Header, Sider, Content } = Layout;
@@ -4103,6 +4105,7 @@ function AppShell() {
   // Null is now. Deep-linkable, so a screenshot of a past state carries the
   // instant it was taken at rather than being unreproducible.
   const [asOf, setAsOf] = useState<string | null>(() => readParam("asOf"));
+  const [exportOpen, setExportOpen] = useState(false);
   const [facets, setFacets] = useState<SearchFacets | null>(null);
   // Which facet bucket is narrowing the results, if any. Filtering happens on
   // the client over the returned page: the server's facet counts are already
@@ -4409,11 +4412,21 @@ function AppShell() {
                   </Button>
                 </Tooltip>
               )}
+              <Tooltip title="Export the graph — Phase 3 item 3.15">
+                <Button
+                  type="text"
+                  icon={<DownloadOutlined />}
+                  onClick={() => setExportOpen(true)}
+                  aria-label="Export"
+                />
+              </Tooltip>
               <Tooltip title={dark ? "Switch to light" : "Switch to dark"}>
                 <Button type="text" icon={<BulbOutlined />} onClick={toggle} aria-label="Toggle theme" />
               </Tooltip>
             </Space>
           </Header>
+
+          <ExportDialog open={exportOpen} onClose={() => setExportOpen(false)} defaultAsOf={asOf} />
 
           <Layout style={{ minHeight: 0 }}>
             {/* A refused request and an empty catalog are different

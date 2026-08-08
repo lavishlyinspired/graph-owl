@@ -586,6 +586,12 @@ export interface ReasoningReport {
   readonly partial: boolean;
   readonly ignoredAxioms: readonly { readonly subject: string; readonly reason: string }[];
 }
+
+/** A count of what an export would contain — Phase 3 item 3.15's preview. */
+export interface ExportPreview {
+  readonly nodes: number;
+  readonly edges: number;
+}
 import type { LineageGraph } from "./graph/lineage";
 import type { Explanation } from "./governance/explanation";
 
@@ -746,6 +752,45 @@ export async function fetchAuthConfig(): Promise<unknown> {
   return (await response.json()) as unknown;
 }
 
+/** Downloads an export route's response as a file — Phase 3 item 3.15.
+ *
+ *  **Not a plain `<a href>`.** Every export route is Bearer-token
+ *  authenticated the same way `request` above is, and a browser navigating
+ *  directly to a URL sends no custom headers — a plain link would 401. This
+ *  fetches with the same `Authorization` header `request` attaches, then
+ *  hands the response off as a `Blob` for the browser's own save flow,
+ *  which is the standard pattern for an authenticated SPA download.
+ *
+ *  The filename comes from the response's own `Content-Disposition` when
+ *  the server sent one (every format but JSON graph, which has no file to
+ *  name) — read from the real response rather than guessed client-side, so
+ *  a server-side rename is never silently out of sync with what the
+ *  browser saves it as.
+ */
+export async function downloadExport(path: string, fallbackFilename: string): Promise<void> {
+  const token = authToken();
+  const response = await fetch(`${BASE}${path}`, {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
+  if (!response.ok) {
+    const problem = (await response.json()) as Problem;
+    throw new ApiError(problem);
+  }
+  const disposition = response.headers.get("content-disposition");
+  const match = disposition ? /filename="([^"]+)"/.exec(disposition) : null;
+  const filename = match?.[1] ?? fallbackFilename;
+
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 async function request<T>(path: string, init?: RequestInit, retried?: boolean): Promise<T> {
   const token = authToken();
   const response = await fetch(`${BASE}${path}`, {
@@ -857,6 +902,10 @@ export const api = {
   revokeWaiver: (id: string) =>
     request<void>(`/validation/waivers/${id}`, { method: "DELETE" }),
   runReasoning: () => request<ReasoningReport>("/reasoning/runs", { method: "POST" }),
+  /** A count of what an export would contain, without downloading anything
+   *  — Phase 3 item 3.15. `path` is `previewPath(filters)` from
+   *  `features/export/exportDialog.ts`, already carrying `?scope=`/`?asOf=`. */
+  exportPreview: (path: string) => request<ExportPreview>(path),
   /** Run a SPARQL query. The budget is the server's, not ours — a client that
    *  could raise its own limit does not have one. */
   sparql: (query: string) =>
