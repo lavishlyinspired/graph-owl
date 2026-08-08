@@ -170,6 +170,78 @@ async fn an_unresolvable_parent_fails_only_its_own_item() {
     );
 }
 
+// **Phase 2.7 of plans/EPIC-COMPLETION-PLAN.md.** An unrecognised kind is
+// data the batch supplied, the same as an unresolvable parent — not a
+// malformed request. The handler's own contract says so: "207, always,
+// once anything was attempted... a 400 would say it failed when 999 items
+// landed. Neither is true." A bad kind used to break that promise by
+// aborting the whole batch before any item was attempted.
+#[tokio::test]
+async fn an_invalid_kind_string_fails_only_its_own_item() {
+    let (app, _db, _) = test_app().await;
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/ingest",
+        Some(json!({ "items": [
+            item("service", "svc", None),
+            item("not-a-real-kind", "bogus", None),
+        ]})),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::MULTI_STATUS,
+        "one bad kind must not cost the whole batch: {body}"
+    );
+    assert_eq!(body["accepted"], json!(1), "{body}");
+    assert_eq!(body["rejected"], json!(1), "{body}");
+    let results = body["results"].as_array().expect("results");
+    assert_eq!(results[0]["status"], json!(200), "{body}");
+    assert_eq!(results[1]["status"], json!(400), "{body}");
+    assert!(
+        results[1]["problem"]
+            .as_str()
+            .expect("problem")
+            .contains("not-a-real-kind"),
+        "the problem should name the offending kind: {body}"
+    );
+}
+
+/// A child under a parent whose *own* kind was invalid cannot resolve that
+/// parent either — a genuine cascade, not a second bug. Proves the rejected
+/// item does not silently vanish from dependency resolution.
+#[tokio::test]
+async fn a_child_of_an_invalid_kind_item_fails_as_an_unresolved_parent() {
+    let (app, _db, _) = test_app().await;
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/ingest",
+        Some(json!({ "items": [
+            item("not-a-real-kind", "bogus", None),
+            item("database", "child-db", Some("bogus")),
+        ]})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::MULTI_STATUS, "{body}");
+    let results = body["results"].as_array().expect("results");
+    assert_eq!(
+        results[0]["status"],
+        json!(400),
+        "the bad kind itself: {body}"
+    );
+    assert_eq!(
+        results[1]["status"],
+        json!(400),
+        "its child cannot resolve a parent that was never created: {body}"
+    );
+}
+
 // "≤1000 items, larger → `400`." A request is not a job.
 #[tokio::test]
 async fn a_batch_over_the_ceiling_is_refused_whole() {

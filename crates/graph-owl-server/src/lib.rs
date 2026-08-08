@@ -3234,25 +3234,48 @@ async fn ingest(
         )]));
     }
 
+    // **An unrecognised kind is data the batch supplied, the same as an
+    // unresolvable parent — not a malformed request.** This handler's own
+    // contract (above) is "207, always, once anything was attempted"; a bad
+    // kind used to break that promise with a bare 400 before any item was
+    // attempted, costing every other item in the batch for one typo. Kept
+    // out of `Catalog::ingest`'s own `items` — a bad kind cannot become a
+    // real `AssetKind` to construct one — and reported as a synthetic
+    // outcome at the item's *original* submitted index instead, matching
+    // `IngestOutcome::index`'s own documented meaning. `catalog.ingest`
+    // indexes by position in the `items` it receives, so the mapping from
+    // "position among the valid items" back to "position in the submitted
+    // batch" has to be carried alongside rather than assumed to agree.
     let mut items = Vec::with_capacity(payload.items.len());
+    let mut submitted_index = Vec::with_capacity(payload.items.len());
+    let mut invalid_kind_outcomes = Vec::new();
     for (index, item) in payload.items.iter().enumerate() {
-        // The kind is parsed up front rather than per item during application:
-        // an unknown kind is a malformed *request*, not a per-item failure, and
-        // reporting it as one would let a typo look like a rejected entity.
-        let kind = parse_kind(Some(&item.kind))?.ok_or_else(|| {
-            AppError::Validation(vec![FieldError::new(
-                format!("items[{index}].kind"),
-                FieldErrorCode::Required,
-                "an item needs a kind",
-            )])
-        })?;
-        items.push(graph_owl_api::IngestItem {
-            kind,
-            name: item.name.clone(),
-            parent_fqn: item.parent_fqn.clone(),
-            description: item.description.clone(),
-            properties: item.properties.clone(),
-        });
+        match AssetKind::parse(&item.kind) {
+            Ok(kind) => {
+                items.push(graph_owl_api::IngestItem {
+                    kind,
+                    name: item.name.clone(),
+                    parent_fqn: item.parent_fqn.clone(),
+                    description: item.description.clone(),
+                    properties: item.properties.clone(),
+                });
+                submitted_index.push(index);
+            }
+            Err(_) => invalid_kind_outcomes.push(graph_owl_api::IngestOutcome {
+                index,
+                status: 400,
+                id: None,
+                problem: Some(format!(
+                    "`{}` is not an asset kind; expected one of: {}",
+                    item.kind,
+                    AssetKind::ALL
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            }),
+        }
     }
 
     let edges = payload
@@ -3267,7 +3290,23 @@ async fn ingest(
         })
         .collect();
 
-    let outcomes = catalog.ingest(&principal, items, edges).await?;
+    // `Catalog::ingest` indexes edge outcomes starting right after its own
+    // `items` — the *filtered* list, not what was submitted. An edge
+    // outcome's index is shifted by the same gap the item outcomes above it
+    // were remapped past, not looked up: an edge has no entry in
+    // `submitted_index` to look up in the first place.
+    let valid_item_count = submitted_index.len();
+    let mut outcomes = catalog.ingest(&principal, items, edges).await?;
+    for outcome in &mut outcomes {
+        outcome.index = if outcome.index < valid_item_count {
+            submitted_index[outcome.index]
+        } else {
+            payload.items.len() + (outcome.index - valid_item_count)
+        };
+    }
+    outcomes.extend(invalid_kind_outcomes);
+    outcomes.sort_by_key(|o| o.index);
+
     let accepted = outcomes.iter().filter(|o| o.status < 400).count();
     let body = json!({
         "accepted": accepted,
