@@ -16,26 +16,35 @@ import { resolutionQueue } from "./resolutionQueue";
 import { extractionQueue } from "./extractionQueue";
 import { driftQueue } from "./driftQueue";
 import { proposalsQueue } from "./proposalsQueue";
+import { alignmentQueue } from "./alignmentQueue";
 import type { QueueConfig } from "./queues";
 import { readParam, writeParam } from "../deepLink";
 
-type QueueKind = "resolution" | "extraction" | "drift" | "proposals";
+type QueueKind = "resolution" | "extraction" | "drift" | "proposals" | "alignment";
 
 const KIND_OPTIONS: { readonly label: string; readonly value: QueueKind }[] = [
   { label: "Merge review", value: "resolution" },
   { label: "Extraction claims", value: "extraction" },
   { label: "Drift", value: "drift" },
   { label: "Proposals", value: "proposals" },
+  { label: "Alignments", value: "alignment" },
 ];
 
 function isQueueKind(value: string | null): value is QueueKind {
-  return value === "resolution" || value === "extraction" || value === "drift" || value === "proposals";
+  return (
+    value === "resolution" ||
+    value === "extraction" ||
+    value === "drift" ||
+    value === "proposals" ||
+    value === "alignment"
+  );
 }
 
 function configFor(kind: QueueKind): QueueConfig {
   if (kind === "extraction") return extractionQueue();
   if (kind === "drift") return driftQueue();
   if (kind === "proposals") return proposalsQueue();
+  if (kind === "alignment") return alignmentQueue();
   return resolutionQueue();
 }
 

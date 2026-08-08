@@ -580,6 +580,11 @@ pub struct AlignmentReviewEntry {
     pub left: Option<graph_owl_core::flake::Sid>,
     /// The right-hand vocabulary term this alignment maps to.
     pub right: Option<graph_owl_core::flake::Sid>,
+    /// `"exactMatch"`, `"closeMatch"`, `"broadMatch"`, `"narrowMatch"`, or
+    /// `"equivalentClass"` — Phase 3 item 3.14. Without this, a reviewer
+    /// confirming an entry (re-`POST`ing it with `source.kind: "human"`)
+    /// has no way to know which predicate to name.
+    pub predicate: Option<String>,
     /// `"curated"`, `"computed"`, or `"human"`.
     pub source_kind: Option<String>,
     /// The authority, method, or confirming principal named by
@@ -12270,6 +12275,7 @@ impl Catalog {
                 subject,
                 left: find_ref("alignmentLeft"),
                 right: find_ref("alignmentRight"),
+                predicate: find_string("alignmentPredicate"),
                 source_kind: find_string("alignmentSourceKind"),
                 source_detail: find_string("alignmentSourceDetail"),
                 confidence: match confidence_flake.o {

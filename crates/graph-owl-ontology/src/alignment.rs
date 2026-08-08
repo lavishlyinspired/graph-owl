@@ -263,7 +263,7 @@ impl Alignment {
 /// metadata for a `Surface`-disposition alignment (what a review queue
 /// reads) while withholding the direct triple.
 fn metadata_flakes(alignment: &Alignment, t: i64) -> Vec<Flake> {
-    let (left, right, _predicate, source, confidence, lossy_reverse) = alignment.parts();
+    let (left, right, predicate, source, confidence, lossy_reverse) = alignment.parts();
     let subject = alignment.subject();
 
     vec![
@@ -283,6 +283,19 @@ fn metadata_flakes(alignment: &Alignment, t: i64) -> Vec<Flake> {
             subject.clone(),
             Sid::dsc("alignmentRight"),
             FlakeValue::Ref(right.clone()),
+            t,
+        ),
+        // **Found while building Epic 42's alignment review queue (Phase 3
+        // item 3.14).** `Alignment::subject()` already encodes the
+        // predicate in its own compound local name, but nothing wrote it
+        // as its own readable flake — a review-queue reader had
+        // `left`/`right`/`source`/`confidence` but no way to reconstruct
+        // which `skos:*Match` a "confirm" action should resubmit, short of
+        // parsing a compound subject string.
+        Flake::assert(
+            subject.clone(),
+            Sid::dsc("alignmentPredicate"),
+            FlakeValue::String(predicate.id.clone()),
             t,
         ),
         Flake::assert(
@@ -495,6 +508,41 @@ mod tests {
         );
         assert_eq!(get("confidence").o, FlakeValue::Float(0.62));
         assert_eq!(get("lossyReverse").o, FlakeValue::Boolean(true));
+    }
+
+    /// **Found while building Epic 42's alignment review queue (Phase 3
+    /// item 3.14) — a real, pre-existing gap.** `Alignment::subject()`
+    /// itself encodes the predicate (`alignment:{left}:{predicate}:{right}`),
+    /// but nothing wrote it as its *own* readable flake, so a review-queue
+    /// reader with `left`/`right`/`source`/`confidence` in hand still had
+    /// no way to reconstruct which `skos:*Match` a "confirm" action should
+    /// resubmit — short of parsing a compound subject string, which is
+    /// exactly the kind of fragile string-splitting this project's own
+    /// flake model exists to avoid.
+    #[test]
+    fn to_flakes_writes_the_match_predicate_itself_on_the_reified_node() {
+        let alignment = Alignment::Match {
+            left: cui("C0009044"),
+            right: snomed("22298006"),
+            predicate: MatchPredicate::CloseMatch,
+            source: AlignmentSource::Computed {
+                method: "embedding-cosine".to_string(),
+            },
+            confidence: 0.62,
+            lossy_reverse: false,
+        };
+        let subject = alignment.subject();
+        let flakes = alignment_to_flakes(&alignment, 1);
+
+        let predicate_flake = flakes
+            .iter()
+            .find(|f| f.s == subject && f.p == Sid::dsc("alignmentPredicate"))
+            .unwrap_or_else(|| panic!("missing alignmentPredicate: {flakes:#?}"));
+        assert_eq!(
+            predicate_flake.o,
+            FlakeValue::String("closeMatch".to_string()),
+            "must name the real predicate, not always exactMatch"
+        );
     }
 
     /// The subject a computed alignment writes to and the subject a

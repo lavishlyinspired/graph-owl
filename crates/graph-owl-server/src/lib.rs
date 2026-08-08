@@ -7384,6 +7384,7 @@ async fn alignment_review_queue(
                 "subject": entry.subject.to_string(),
                 "left": entry.left.as_ref().map(ToString::to_string),
                 "right": entry.right.as_ref().map(ToString::to_string),
+                "predicate": entry.predicate,
                 "sourceKind": entry.source_kind,
                 "sourceDetail": entry.source_detail,
                 "confidence": entry.confidence,

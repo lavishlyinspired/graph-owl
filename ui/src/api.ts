@@ -273,6 +273,45 @@ export interface WhoAmI {
   isAdmin: boolean;
 }
 
+/** `"exactMatch"`/`"closeMatch"`/`"broadMatch"`/`"narrowMatch"` (a
+ *  `skos:*Match`) or `"equivalentClass"` (`owl:equivalentClass`) — the same
+ *  string doubles as both the wire predicate and, on a review entry, the
+ *  discriminator for which `kind` a confirming `POST /alignments` must
+ *  name (`graph_owl_ontology::alignment::Alignment::parts` writes the
+ *  literal local name `"equivalentClass"` for that variant, so there is no
+ *  separate `kind` field to read). */
+export type AlignmentPredicate = "exactMatch" | "closeMatch" | "broadMatch" | "narrowMatch" | "equivalentClass";
+
+export type AlignmentSourceKind = "curated" | "computed" | "human";
+
+/** One entry in decision 4's confidence review band (`0.5..0.8`) — Epic 104
+ *  Slice D's backend, put on the wire by Phase 3 item 3.14. Every field but
+ *  `subject` is optional because the server reads them back from the
+ *  reified node's own flakes rather than trusting they are always present
+ *  (`graph-owl-api`'s own doc comment on `AlignmentReviewEntry`). */
+export interface AlignmentReviewEntry {
+  subject: string;
+  left: string | null;
+  right: string | null;
+  predicate: AlignmentPredicate | null;
+  sourceKind: AlignmentSourceKind | null;
+  sourceDetail: string | null;
+  confidence: number | null;
+  lossyReverse: boolean | null;
+}
+
+/** The exact body `POST /alignments` accepts — mirrors
+ *  `UpsertAlignmentRequest` in `graph-owl-server` field for field. */
+export interface UpsertAlignmentRequest {
+  kind: "match" | "equivalentClass";
+  left: string;
+  right: string;
+  predicate?: string;
+  source: { kind: AlignmentSourceKind; detail: string };
+  confidence: number;
+  lossyReverse?: boolean;
+}
+
 export interface DriftItem {
   id: string;
   assetId: string;
@@ -1086,4 +1125,21 @@ export const api = {
    *  gap: the frontend had no way to answer "who am I" for a per-user
    *  fallback view. */
   whoAmI: () => request<WhoAmI>("/me"),
+  /** A bare array, like `extractionQueue` — no envelope, no pagination, no
+   *  status filter. Always the review-band set as it stands right now:
+   *  there is no server-side "confirmed"/"rejected" history to page
+   *  through, because confirming or rejecting an entry (via
+   *  `upsertAlignment` below) either promotes it out of the band or
+   *  retracts it outright — it does not transition to a stored status. */
+  alignmentReviewQueue: () => request<AlignmentReviewEntry[]>("/alignments/review"),
+  /** Admin-only server-side (`principal.is_admin`, enforced in
+   *  `graph-owl-server`, not re-checked here). Writes one alignment,
+   *  gated by decision 4's confidence bands regardless of source kind —
+   *  `alignmentQueue.tsx`'s Confirm/Reject actions are both just specific
+   *  bodies to this one call. */
+  upsertAlignment: (body: UpsertAlignmentRequest) =>
+    request<{ outcome: string }>("/alignments", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 };

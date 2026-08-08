@@ -114,6 +114,10 @@ async fn a_computed_match_in_the_review_band_lands_in_the_review_queue_resolved(
     assert_eq!(entry["sourceDetail"], "embedding-cosine", "{entry}");
     assert_eq!(entry["confidence"], 0.62, "{entry}");
     assert_eq!(entry["lossyReverse"], false, "{entry}");
+    // Phase 3 item 3.14: without this, a reviewer confirming this entry
+    // (re-POSTing it with source.kind: "human") has no way to know which
+    // skos:*Match to name — closeMatch here, not always exactMatch.
+    assert_eq!(entry["predicate"], "closeMatch", "{entry}");
 }
 
 /// Decision 3, at the request boundary: `AssertableSource` (what

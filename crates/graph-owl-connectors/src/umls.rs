@@ -308,9 +308,10 @@ mod tests {
         assert_eq!(progress.rows_processed, 10);
         assert_eq!(progress.aligned, 10);
         assert_eq!(progress.errors, 0);
-        // 8 flakes per alignment: the direct triple + 7 reified metadata
-        // flakes (see alignment_to_flakes).
-        assert_eq!(flakes.len(), 80, "{flakes:#?}");
+        // 9 flakes per alignment: the direct triple + 8 reified metadata
+        // flakes (see alignment_to_flakes) — 9, not 8, since Phase 3 item
+        // 3.14 added `alignmentPredicate` to the reified node.
+        assert_eq!(flakes.len(), 90, "{flakes:#?}");
     }
 
     /// `synthetic_file` alone never exercises the skip-or-error counters —
@@ -333,7 +334,7 @@ mod tests {
         assert_eq!(progress.errors, 1, "{progress:?}");
         assert_eq!(
             flakes.len(),
-            16,
+            18,
             "only the 2 aligned rows write flakes: {flakes:#?}"
         );
     }
