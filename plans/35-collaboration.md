@@ -173,14 +173,14 @@ the same field-selection-shaped gap as Slices B and D, not fixed here either.
 **GREEN**: merged query, deterministic ordering, authz predicate.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-**Shipped, 6 August 2026, with three scope cuts recorded rather than assumed away**:
+**Shipped, 6 August 2026, with three scope cuts recorded rather than assumed away — the first closed 8 August 2026 (Phase 3 item 3.1)**:
 
-1. **No authorization filtering.** `entity_activity` takes `principal` but does not use
-   it — Epic 13's `AccessPredicate` is not applied to feed rows. Unlike Epic 9a's
-   `project_incremental` (which does apply it), nothing here narrows a merged,
-   multi-source feed by field-level or row-level visibility yet. This is the one gap
-   in this slice that is a real correctness question, not a convenience cut — flagged
-   for whoever picks this back up.
+1. ~~**No authorization filtering.**~~ **Closed.** `entity_activity` now checks the
+   caller's `ViewBasic` predicate against the entity's own FQN before assembling
+   any feed row, returning `NotFound` (not a distinguishable "forbidden") when
+   denied — the same reasoning `agent_activity` and `authorized_lpg_elements`
+   already use. Full write-up in "Explicitly deferred" below, which this scope
+   cut has moved out of.
 2. **No user-scoped feed.** `GET /users/{id}/activity` ("entities they own or follow")
    is not implemented. "Follow" names a watch mechanism this codebase does not have
    anywhere — not in this epic's own resolved decisions, no migration, no facade
@@ -220,11 +220,22 @@ HTTP test asserting all four activity kinds (`change`, `threadStarted`,
   computed cross-table value is a different extension shape it was not built for.
   Revisit as a small, focused slice once a second cross-table computed field wants the
   same thing (Epic 20's drift count is the other candidate).
-- **Authorization filtering on the activity feed** — Slice F's own acceptance
-  criterion ("respects Epic 13 authorization: activity on unreadable entities is
-  omitted") is unmet; `entity_activity` accepts a `principal` but does not apply
-  `AccessPredicate` to feed rows. Recorded as the one gap in this epic that is a
-  correctness question rather than a convenience cut.
+- ~~**Authorization filtering on the activity feed**~~ — **Closed 8 August 2026
+  (Phase 3 item 3.1)**. `entity_activity` now checks `predicate.admits(&asset.
+  fully_qualified_name)` against a `ViewBasic` predicate before assembling any
+  feed row, and returns `NotFound` — not a distinguishable "forbidden" — when
+  denied, matching the reasoning `agent_activity` and `authorized_lpg_elements`
+  already use for the same class of leak. Five new unit tests in
+  `graph-owl-api/src/lib.rs`'s `the_activity_feed_respects_authorization`
+  module prove: a scoped viewer gets `NotFound` for an entity outside their
+  policy; the same viewer still sees an entity inside it; an admin and the
+  system principal are unaffected; a genuinely unknown id is still
+  `NotFound`. Mutation-tested (`--in-diff`, `--lib`): 2 caught, 1 unviable, 0
+  survivors — critically, deleting the `!` in the admits check (which would
+  invert allow/deny) is caught. The existing HTTP-level activity-feed test
+  needed no change: its principal is promoted to real admin via raw SQL for
+  an unrelated reason (`PUT /assets/{id}/owners` is admin-gated), so it was
+  never exercising the restricted path this fix closes.
 
 ## Pre-PR quality gate
 

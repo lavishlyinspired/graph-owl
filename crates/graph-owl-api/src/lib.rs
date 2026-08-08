@@ -10456,16 +10456,32 @@ impl Catalog {
     /// separate feature. Recorded here rather than silently assumed;
     /// `35-collaboration.md` carries the same note.
     ///
+    /// **Respects Epic 13 authorization** (Phase 3 item 3.1, 8 August
+    /// 2026): a principal who cannot [`MetadataOperation::ViewBasic`] the
+    /// entity gets `NotFound`, matching a genuinely nonexistent id — an
+    /// audit feature is exactly the wrong place for a distinguishable
+    /// "forbidden" to leak that something exists.
+    ///
     /// # Errors
-    /// `NotFound` if `about` does not exist.
+    /// `NotFound` if `about` does not exist, or if `principal` may not
+    /// view it.
     pub async fn entity_activity(
         &self,
         principal: &Principal,
         about: Uuid,
         limit: usize,
     ) -> Result<Vec<ActivityEntry>, CatalogError> {
-        let _ = principal;
-        if self.storage.get_asset(about).await?.is_none() {
+        let Some(asset) = self.storage.get_asset(about).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+        if !predicate.admits(&asset.fully_qualified_name) {
+            // Reads as not-found, not forbidden — the same reasoning
+            // `authorized_lpg_elements` and `agent_activity` already use:
+            // a distinguishable "forbidden" would itself confirm the
+            // entity exists to a caller who cannot otherwise see it.
             return Err(CatalogError::NotFound);
         }
 
@@ -26312,6 +26328,152 @@ mod projection_isolation_tests {
                 .gate_agent_write(&bot(), AgentCapability::ApplyDescription, "warehouse")
                 .await;
             assert!(outcome.is_err(), "{outcome:?}");
+        }
+    }
+
+    /// Epic 35 Slice F / Phase 3 item 3.1 — the activity feed's own named,
+    /// unresolved acceptance criterion: "respects Epic 13 authorization:
+    /// activity on unreadable entities is omitted." `entity_activity` took
+    /// `principal` and discarded it (`let _ = principal;`), the same class
+    /// of leak `agent_activity` above was built to prevent for agent
+    /// writes — an audit feature revealing an unreadable entity's own
+    /// change history and collaboration content through the back door.
+    mod the_activity_feed_respects_authorization {
+        use super::*;
+
+        fn service(name: &str) -> UpsertAsset {
+            UpsertAsset {
+                kind: AssetKind::Service,
+                name: name.to_string(),
+                parent_id: None,
+                description: None,
+                properties: None,
+                extension: None,
+            }
+        }
+
+        async fn catalog_with_warehouse_only_policy() -> (Catalog, Arc<InMemoryStorage>, Uuid, Uuid)
+        {
+            let storage = Arc::new(InMemoryStorage::default());
+            let catalog = Catalog::new(storage.clone());
+            let warehouse = catalog
+                .upsert_asset(&Principal::system(), service("warehouse"))
+                .await
+                .expect("create warehouse");
+            let vault = catalog
+                .upsert_asset(&Principal::system(), service("vault"))
+                .await
+                .expect("create vault");
+            storage
+                .upsert_policy(
+                    &graph_owl_authz::Policy {
+                        name: "warehouse-only".to_string(),
+                        rules: vec![graph_owl_authz::Rule {
+                            name: "warehouse-only-read".to_string(),
+                            effect: graph_owl_authz::Effect::Allow,
+                            operations: vec![graph_owl_authz::MetadataOperation::ViewBasic],
+                            resources: graph_owl_authz::ResourceMatcher::FqnPrefix(
+                                "warehouse".to_string(),
+                            ),
+                        }],
+                    },
+                    &["warehouse-viewer".to_string()],
+                )
+                .await
+                .expect("policy");
+            (catalog, storage, warehouse.id, vault.id)
+        }
+
+        fn scoped_viewer() -> Principal {
+            Principal {
+                id: "priya".to_string(),
+                name: "Priya".to_string(),
+                kind: graph_owl_core::PrincipalKind::User,
+                roles: vec!["warehouse-viewer".to_string()],
+                is_admin: false,
+            }
+        }
+
+        /// **The RED test.** A viewer scoped to `warehouse` must not learn
+        /// `vault` even exists via its activity feed — `NotFound`, the same
+        /// answer a genuinely nonexistent id gets, not a distinguishable
+        /// "forbidden" that would itself leak existence.
+        #[tokio::test]
+        async fn an_unreadable_entitys_activity_is_not_found_to_a_scoped_viewer() {
+            let (catalog, _storage, _warehouse, vault) = catalog_with_warehouse_only_policy().await;
+
+            let outcome = catalog.entity_activity(&scoped_viewer(), vault, 10).await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::NotFound)),
+                "an entity the viewer cannot see must read as not-found: {outcome:?}"
+            );
+        }
+
+        /// The same viewer, scoped to `warehouse`, can still see its own
+        /// activity — proving the fix narrows visibility rather than
+        /// denying everything indiscriminately.
+        #[tokio::test]
+        async fn a_readable_entitys_activity_is_still_visible_to_a_scoped_viewer() {
+            let (catalog, _storage, warehouse, _vault) = catalog_with_warehouse_only_policy().await;
+
+            let outcome = catalog
+                .entity_activity(&scoped_viewer(), warehouse, 10)
+                .await;
+
+            assert!(outcome.is_ok(), "{outcome:?}");
+        }
+
+        /// An admin is exempt from every policy (`compile`'s own
+        /// `is_admin` short-circuit) and must still see `vault`'s activity.
+        #[tokio::test]
+        async fn an_admin_sees_every_entitys_activity() {
+            let (catalog, _storage, _warehouse, vault) = catalog_with_warehouse_only_policy().await;
+            let admin = Principal {
+                id: "admin".to_string(),
+                name: "Admin".to_string(),
+                kind: graph_owl_core::PrincipalKind::User,
+                roles: Vec::new(),
+                is_admin: true,
+            };
+
+            let outcome = catalog.entity_activity(&admin, vault, 10).await;
+
+            assert!(outcome.is_ok(), "{outcome:?}");
+        }
+
+        /// The system principal (used for connector runs and every fixture
+        /// above) is `is_admin: true` and must be unaffected too — a
+        /// regression here would break every existing caller of this
+        /// method that has never passed a scoped principal.
+        #[tokio::test]
+        async fn the_system_principal_still_sees_everything() {
+            let (catalog, _storage, _warehouse, vault) = catalog_with_warehouse_only_policy().await;
+
+            let outcome = catalog
+                .entity_activity(&Principal::system(), vault, 10)
+                .await;
+
+            assert!(outcome.is_ok(), "{outcome:?}");
+        }
+
+        /// A genuinely unknown id must still read as `NotFound` for an
+        /// unrestricted principal — the fix must not have piggybacked
+        /// authorization onto the existence check in a way that changes
+        /// this existing behavior.
+        #[tokio::test]
+        async fn an_unknown_entity_is_still_not_found_for_an_unrestricted_principal() {
+            let (catalog, _storage, _warehouse, _vault) =
+                catalog_with_warehouse_only_policy().await;
+
+            let outcome = catalog
+                .entity_activity(&Principal::system(), Uuid::new_v4(), 10)
+                .await;
+
+            assert!(
+                matches!(outcome, Err(CatalogError::NotFound)),
+                "{outcome:?}"
+            );
         }
     }
 
