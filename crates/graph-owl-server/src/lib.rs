@@ -6745,6 +6745,120 @@ struct RunReasoningQuery {
     force: bool,
 }
 
+/// The request body `POST /reasoning/runs` accepts to drive
+/// [`graph_owl_api::Catalog::run_reasoning_incremental`] — Epic 97, wired
+/// **Phase 1.9 of `plans/EPIC-COMPLETION-PLAN.md`**, per the user's own
+/// decision on Phase 4.4 (explicit caller-supplied retractions, not a
+/// server-tracked watermark). Optional and empty by default, so every
+/// existing caller sending no body at all keeps getting a full run
+/// unchanged.
+///
+/// **This endpoint does not itself retract anything from the base graph.**
+/// `retracted` names facts the caller has *already* withdrawn through its
+/// own write path (an asset delete, an ontology-editor save, a policy
+/// change) — it is a report of what changed, not an instruction to change
+/// it. A caller that names something still present in the base produces an
+/// overlay that disagrees with a full re-run, exactly as
+/// `Catalog::run_reasoning_incremental`'s own contract says.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunReasoningBody {
+    #[serde(default)]
+    retracted: Vec<RetractedFlakeDto>,
+}
+
+/// One retracted flake, in the compact `namespace:id` `Sid` form
+/// `flake_body` already renders elsewhere in this file — not an IRI, since a
+/// runtime-registered predicate (namespace code ≥ 1024) has no IRI mapping
+/// at all ([`graph_owl_core::flake::namespace_iri`] only covers the fixed
+/// standards set).
+#[derive(Debug, serde::Deserialize)]
+struct RetractedFlakeDto {
+    s: String,
+    p: String,
+    o: RetractedValueDto,
+    #[serde(default)]
+    cx: Option<String>,
+    t: i64,
+}
+
+/// Only the scalar shapes `DRed` maintenance actually needs to withdraw a
+/// premise. `Json`/`Bytes`/`Duration`/`TripleTerm`/`LangString` are
+/// deliberately absent — an attempt to send one is a named `serde` "unknown
+/// variant" rejection, not a silent misinterpretation.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+enum RetractedValueDto {
+    Ref(String),
+    String(String),
+    Boolean(bool),
+    Int(i64),
+    Float(f64),
+    Instant(chrono::DateTime<chrono::Utc>),
+    Uuid(uuid::Uuid),
+}
+
+fn parse_retracted_value(
+    value: RetractedValueDto,
+    index: usize,
+) -> Result<graph_owl_core::flake::FlakeValue, AppError> {
+    use graph_owl_core::flake::FlakeValue;
+    Ok(match value {
+        RetractedValueDto::Ref(raw) => {
+            FlakeValue::Ref(parse_sid(&format!("retracted[{index}].o"), &raw)?)
+        }
+        RetractedValueDto::String(s) => FlakeValue::String(s),
+        RetractedValueDto::Boolean(b) => FlakeValue::Boolean(b),
+        RetractedValueDto::Int(i) => FlakeValue::Int(i),
+        RetractedValueDto::Float(f) => FlakeValue::Float(f),
+        RetractedValueDto::Instant(dt) => FlakeValue::Instant(dt),
+        RetractedValueDto::Uuid(u) => FlakeValue::Uuid(u),
+    })
+}
+
+fn parse_retracted_flake_dto(
+    dto: RetractedFlakeDto,
+    index: usize,
+) -> Result<graph_owl_core::flake::Flake, AppError> {
+    let s = parse_sid(&format!("retracted[{index}].s"), &dto.s)?;
+    let p = parse_sid(&format!("retracted[{index}].p"), &dto.p)?;
+    let o = parse_retracted_value(dto.o, index)?;
+    let cx = dto
+        .cx
+        .map(|raw| parse_sid(&format!("retracted[{index}].cx"), &raw))
+        .transpose()?;
+    Ok(graph_owl_core::flake::Flake {
+        s,
+        p,
+        o,
+        cx,
+        t: dto.t,
+        // Always a retraction, whatever the caller sent — this field exists
+        // on `Flake` because assertions and retractions share a row shape,
+        // not because this endpoint's `retracted` array could ever mean
+        // anything else.
+        op: false,
+    })
+}
+
+/// Empty body → no retraction, the full-run path every caller before Phase
+/// 1.9 already relies on. A non-empty body is parsed leniently against
+/// `serde_json::Value` first so a malformed document reports as
+/// `AppError::MalformedBody` rather than a confusing `Bytes`-extraction
+/// failure.
+fn parse_run_reasoning_body(bytes: &[u8]) -> Result<Vec<graph_owl_core::flake::Flake>, AppError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let body: RunReasoningBody =
+        serde_json::from_slice(bytes).map_err(|e| AppError::MalformedBody(e.to_string()))?;
+    body.retracted
+        .into_iter()
+        .enumerate()
+        .map(|(index, dto)| parse_retracted_flake_dto(dto, index))
+        .collect()
+}
+
 /// **Epic 100: refuses an ontology outside the RL profile before running
 /// the RL engine over it, unless the caller opts in.** Found unwired while
 /// auditing `plans/EPIC-COMPLETION-PLAN.md` Phase 1.4: `detect_ontology_profiles`/
@@ -6765,10 +6879,12 @@ async fn run_reasoning(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
     Query(query): Query<RunReasoningQuery>,
+    body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
     if !principal.is_admin {
         return Err(AppError::NotFound);
     }
+    let retracted = parse_run_reasoning_body(&body)?;
 
     let mut ignored = Vec::new();
     if query.force {
@@ -6812,9 +6928,15 @@ async fn run_reasoning(
 
     // The budget is the server's, not the caller's — the same rule SPARQL
     // follows. A client that can raise its own limit does not have one.
-    let report = catalog
-        .run_reasoning(&graph_owl_reasoning::Budget::default())
-        .await?;
+    let report = if retracted.is_empty() {
+        catalog
+            .run_reasoning(&graph_owl_reasoning::Budget::default())
+            .await?
+    } else {
+        catalog
+            .run_reasoning_incremental(&retracted, &graph_owl_reasoning::Budget::default())
+            .await?
+    };
 
     let mut body = serde_json::to_value(&report).map_err(|e| AppError::Internal(e.to_string()))?;
     let map = body
