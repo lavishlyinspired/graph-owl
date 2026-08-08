@@ -105,6 +105,14 @@ testcontainers-modules-kafka = { package = "testcontainers-modules", version = "
 # `graph-owl-connectors` depends on `rdkafka` itself but does not re-export
 # it, so using its producer API here needs its own declaration.
 rdkafka = "0.39"
+# Epic 37a Slice F: the soak test's own RSS-growth assertion needs the test
+# binary's process memory, cross-platform (CI is Linux, local dev is macOS).
+# Checked via `00l-build-vs-adopt.md`'s crates.io process before adding: MIT,
+# 179M downloads, last published 9 Jul 2026 — hand-rolling `/proc/self/status`
+# parsing would also silently not work on macOS, where local dev-loop sanity
+# runs of this test actually happen.
+sysinfo = "0.39"
+rand.workspace = true
 
 [lints]
 workspace = true

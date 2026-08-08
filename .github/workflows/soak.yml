@@ -1,0 +1,58 @@
+# Epic 37a Slice F: sustained mixed load, real time.
+#
+# Not part of `gate.yml` — the plan's own acceptance criterion is 1 hour of
+# real duration, and a per-PR job of that length would make every PR pay
+# for a property only regressed by a leak, not by an ordinary code change.
+# Runs nightly instead, plus on demand.
+#
+# No prior scheduled-workflow precedent existed in this repository when
+# this was added (checked: `grep -rn "schedule:" .github/workflows/` before
+# writing this file) — this is the first.
+
+name: soak
+
+on:
+  schedule:
+    # 03:17 UTC nightly — off the hour, so this does not compete with other
+    # projects' on-the-hour scheduled jobs for shared GitHub Actions runner
+    # capacity.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Override GRAPH_OWL_SOAK_SECONDS (default 3600 — the plan's own 1-hour criterion)"
+        required: false
+        default: "3600"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  soak:
+    name: sustained mixed load is stable
+    runs-on: ubuntu-latest
+    # The plan's own 1-hour criterion plus build time plus margin for a
+    # loaded runner — generous rather than tight, since a timeout here
+    # reads as "hung", which this job exists to distinguish from "leaking".
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: soak test
+        env:
+          GRAPH_OWL_SOAK_SECONDS: ${{ github.event.inputs.seconds || '3600' }}
+        run: |
+          cargo test -p graph-owl-server --test soak -- --ignored --nocapture
+
+      # The soak test's own `println!`s (RSS timeline endpoints, connection
+      # counts, table growth, latency percentiles) are the actionable
+      # artifact the plan's AC asks for — captured in the step log above by
+      # `--nocapture`, on both pass and fail, so a failure's log is already
+      # the diagnosis rather than a bare red X.
+      - name: surface the run in the job summary
+        if: always()
+        run: |
+          echo "See the \"soak test\" step log above for the full RSS/connection/latency timeline." >> "$GITHUB_STEP_SUMMARY"

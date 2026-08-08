@@ -636,3 +636,24 @@ no spike needed** — this is not a correctness-sensitive parser on a security
 path (`00i` rule 4's heightened bar), it is a well-understood, extremely
 widely used container format with a huge user base that would have already
 surfaced any correctness problem in `tar`'s round-trip behaviour.
+
+### Process RSS measurement (`sysinfo`) — checked before Epic 37a Slice F
+
+**8 August 2026, checked before implementation.** Slice F's soak test needs
+the test binary's own resident memory, sampled repeatedly over up to an
+hour, to assert RSS growth stays under 10%. `/proc/self/status` parsing
+would work on the Linux CI runner this test's nightly job actually runs on,
+but not on macOS, where this test's dev-loop sanity runs (short-duration,
+`GRAPH_OWL_SOAK_SECONDS` override) actually happen — a hand-rolled
+Linux-only reader would silently pass CI and be unusable locally.
+
+| Name | Licence | Newest version | Downloads (8 Aug 2026) | Repository |
+|---|---|---|---|---|
+| `sysinfo` | MIT | 0.39.6 (9 Jul 2026) | 179,750,316 | github.com/GuillaumeGomez/sysinfo |
+
+Permissive, heavily used, actively maintained. **Adopted, no spike needed**
+— this is an operational-measurement dependency (test-only, in
+`graph-owl-server`'s `[dev-dependencies]`), not a parser on a correctness or
+security path; the only property that matters is "reads the right number
+for this OS," which is exactly the cross-platform portability a hand-rolled
+`/proc` reader would not have.

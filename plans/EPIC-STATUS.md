@@ -501,7 +501,7 @@ is the condition that index exists to catch.
 
 ### Epic 37a — Scale Validation *(Demo 9)*
 
-- [~] 100k-entity scale validation — **Slices A–E shipped, 8 August 2026; Slice F (1-hour soak
+- [~] 100k-entity scale validation — **Slices A–F shipped, 8 August 2026 — epic complete, with
 
 ### Epic 37b — Backup & Portability *(Demo 9)*
 
