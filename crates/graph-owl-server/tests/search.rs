@@ -201,6 +201,105 @@ async fn a_name_match_outranks_a_description_match() {
     );
 }
 
+async fn record_read(app: &axum::Router, asset_fqn: &str, consumer: &str) {
+    let (status, body) = send(
+        app,
+        "POST",
+        "/usage",
+        Some(json!({
+            "observations": [{
+                "assetFqn": asset_fqn,
+                "consumer": consumer,
+                "operation": "read",
+                "occurredAt": chrono::Utc::now().to_rfc3339(),
+            }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// Phase 3 item 3.5's own named RED test, reframed against the shape the
+/// popularity term actually takes: rather than a caller-facing weight
+/// nobody would expose (see the constant's own doc comment for why), the
+/// "would weight zero reproduce prior ordering exactly" claim is proved
+/// as the real, deployed behavior for an asset with no recorded usage —
+/// `COALESCE(pop.recent, 0)` makes the term's own contribution `0.15 * 0
+/// / 10 = 0.0` exactly, so a result nobody has ever read ranks purely on
+/// `ts_rank_cd`, unchanged from before this slice.
+#[tokio::test]
+async fn a_result_with_no_recorded_usage_ranks_by_lexical_relevance_alone() {
+    let (app, _container, _) = test_app().await;
+    estate(&app).await;
+
+    // Same claim `a_name_match_outranks_a_description_match` already makes —
+    // repeated here as the "before" half of this slice's own before/after
+    // proof, on a fixture where nothing has ever been read.
+    let hits = search(&app, "transactions").await;
+
+    assert_eq!(
+        hits.first().map(String::as_str),
+        Some("upi_transactions"),
+        "no popularity data exists for either asset, so ranking must be exactly \
+         what it was before this slice: {hits:?}"
+    );
+}
+
+/// **The RED case's other half.** Two tables carry the *identical*
+/// description, so `ts_rank_cd` ties them exactly — deliberately named so
+/// the quiet one would win any FQN tie-break, which is what makes a
+/// popularity-driven reordering unambiguous rather than an artifact of
+/// alphabetical luck.
+#[tokio::test]
+async fn a_frequently_read_asset_outranks_an_equally_relevant_unread_one() {
+    let (app, _container, _) = test_app().await;
+    let service = create(&app, json!({ "kind": "service", "name": "svc" })).await;
+    let marker = "a distinctive marker phrase nothing else in this fixture uses";
+    let quiet = create(
+        &app,
+        json!({
+            "kind": "database",
+            "name": "aaa_quiet",
+            "parentId": service["id"],
+            "description": marker,
+        }),
+    )
+    .await;
+    let popular = create(
+        &app,
+        json!({
+            "kind": "database",
+            "name": "zzz_popular",
+            "parentId": service["id"],
+            "description": marker,
+        }),
+    )
+    .await;
+
+    for consumer in ["alice", "bob", "carol"] {
+        record_read(
+            &app,
+            popular["fullyQualifiedName"].as_str().expect("fqn"),
+            consumer,
+        )
+        .await;
+    }
+
+    let hits = search(&app, "distinctive").await;
+
+    assert_eq!(hits, vec!["zzz_popular", "aaa_quiet"], "{hits:?}");
+    // Sanity check on the fixture itself: without the popularity term,
+    // `aaa_quiet` would sort first on the FQN tie-break alone, so this
+    // ordering is real evidence of the term's effect, not a coincidence of
+    // naming.
+    assert!(
+        quiet["fullyQualifiedName"].as_str().unwrap()
+            < popular["fullyQualifiedName"].as_str().unwrap(),
+        "the fixture must make the tie-break disagree with the popularity ordering, \
+         or the test above proves nothing"
+    );
+}
+
 /// An unusable query is an empty result, not a 500. `to_tsquery('english', '')`
 /// raises a syntax error, so an all-punctuation search has to be answered
 /// without asking Postgres at all.

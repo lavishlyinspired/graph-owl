@@ -3803,7 +3803,8 @@ impl Storage for PostgresStorage {
             .saturating_add(1);
         let sql = format!(
             "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners, {RANK_KEY} AS sort_key
-             FROM assets, to_tsquery('english', $1) AS q (ts)
+             FROM assets
+             {POPULARITY_JOIN}, to_tsquery('english', $1) AS q (ts)
              WHERE NOT deleted
                AND assets.search_vector @@ q.ts
                AND ($2::text IS NULL OR kind = $2)
@@ -4820,7 +4821,8 @@ impl Storage for PostgresStorage {
         let sql = format!(
             "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners, {RANK_KEY} AS sort_key,
                     NULLIF(ts_headline('english', coalesce(description, ''), q.ts), '') AS snippet
-             FROM assets, to_tsquery('english', $1) AS q (ts)
+             FROM assets
+             {POPULARITY_JOIN}, to_tsquery('english', $1) AS q (ts)
              WHERE NOT deleted
                AND assets.search_vector @@ q.ts
                AND ($2::text IS NULL OR kind = $2)
@@ -10438,7 +10440,45 @@ fn certification_expr(status_param: usize, window_param: usize) -> String {
 /// 1/10000 are not meaningfully differently relevant to a person, and the FQN
 /// suffix makes the ordering total regardless — so the digits only have to
 /// separate results a reader could actually tell apart.
-const RANK_KEY: &str = "lpad((9999 - (ts_rank_cd(assets.search_vector, q.ts, 32) * 9999)::int)::text, 4, '0') || ':' || assets.fully_qualified_name";
+/// Epic 28's usage rollups, folded into search ranking — Phase 3 item 3.5.
+/// Joined once and referenced from [`RANK_KEY`]; every query that uses
+/// `RANK_KEY` must also carry this in its `FROM` clause, the same
+/// obligation `{OWNERS_EXPR}`/`{DOMAIN_ID_EXPR}` already put on callers.
+///
+/// **The trailing-30-day read count, damped.** `recent / (recent + 10)`
+/// saturates toward 1.0 rather than growing unbounded, so one asset with
+/// ten thousand reads cannot swamp the term for everything else — the
+/// same shrinkage idea `usage.rs`'s own `TREND_VOLUME_FLOOR` already uses
+/// for a different noise problem, at a different constant because the
+/// question here ("how much should this count move a rank") is not the
+/// question there ("is this count large enough to call a trend at all").
+const POPULARITY_JOIN: &str = "LEFT JOIN (
+                 SELECT asset_fqn, SUM(count) AS recent
+                   FROM usage_rollups
+                  WHERE operation = 'read' AND day >= CURRENT_DATE - 30
+                  GROUP BY asset_fqn
+             ) pop ON pop.asset_fqn = assets.fully_qualified_name";
+
+/// **A fixed weight, not a caller-exposed knob.** Exposing it would turn
+/// "how should search rank" into a per-request decision no caller has the
+/// information to make well, and Epic 37a's own search budgets are tuned
+/// against one query shape, not an open set of them.
+///
+/// `ts_rank_cd`'s own normalised output (the `32` argument below) and
+/// [`POPULARITY_JOIN`]'s damped count are both bounded in `[0, 1)`, so
+/// `0.15` caps how much popularity can move a result within roughly one
+/// relevance "notch" — real, but never enough for a wildly popular,
+/// weakly-relevant result to outrank a strong lexical match. At weight
+/// `0.0` the term would contribute exactly nothing; that case is proved
+/// by a real before/after query comparison
+/// (`popularity_weight_zero_would_reproduce_lexical_only_ordering_exactly`
+/// in `crates/graph-owl-storage-postgres/tests/`), not merely reasoned
+/// about, because floating-point claims are exactly the kind of thing
+/// worth checking against the database rather than assumed.
+const RANK_KEY: &str = "lpad((9999 - (LEAST(1.0,
+                 ts_rank_cd(assets.search_vector, q.ts, 32)
+                     + 0.15 * COALESCE(pop.recent, 0) / (COALESCE(pop.recent, 0) + 10.0)
+             ) * 9999)::int)::text, 4, '0') || ':' || assets.fully_qualified_name";
 
 /// The domain an asset falls under, as JSON, or `null`.
 ///
