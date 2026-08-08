@@ -67,6 +67,25 @@ entity, and that is a *derivation with an explanation* rather than a fuzzy
 match. Of everything in this pack, that is the part that does work no
 hand-written matcher does as well.
 
+**A first real import shipped 8 August 2026** (`plans/EPIC-COMPLETION-PLAN.md`
+Phase 3 item 3.9, decision 4.6), and it found the size/format claims above
+needed a correction the 28 July check did not catch: **the "production
+release" is not one importable document.** `edmcouncil/fibo` ships ~90
+separate RDF/XML module files (`FND`, `BE`, `SEC`, `LOAN`, ...), and a file
+that looks like a merged whole (`AllFND.rdf`) is a pure `owl:imports`
+manifest — checked directly, it names 33 imports and defines zero classes
+of its own. `POST /ontology-packs` takes one document per call, so "import
+FIBO" now means either one real module at a time or a new multi-file
+`owl:imports`-merge step; scoped with the user to **one module first**, the
+merge step not attempted. Its classes use `rdfs:label`/`rdfs:subClassOf`
+throughout, never `skos:prefLabel` — the importer gained both as aliases
+(`graph_owl_rdf_io::skos`), plus real RDF/XML parsing (`oxrdfxml`), to read
+the real distribution shape rather than only the format Slice A originally
+targeted. No real FIBO content is vendored anywhere this needed proving —
+source, docs, or test fixtures — per decision 1 above, restated explicitly
+for fixtures by `graph-owl-server/tests/ontology_packs.rs`'s own module
+comment.
+
 ## Implementation reference
 
 ```rust

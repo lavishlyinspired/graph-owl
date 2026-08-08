@@ -1460,6 +1460,7 @@ dependencies = [
  "graph-owl-query",
  "oxjsonld",
  "oxrdf",
+ "oxrdfxml",
  "oxttl",
  "reqwest",
  "serde",
@@ -2688,6 +2689,19 @@ dependencies = [
  "oxiri",
  "oxsdatatypes",
  "rand 0.9.5",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "oxrdfxml"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd5516ae083d09bc57ec65ed5ee97701481725de6ffaa83d968ab42a96157ba1"
+dependencies = [
+ "oxilangtag",
+ "oxiri",
+ "oxrdf",
+ "quick-xml 0.37.5",
  "thiserror 2.0.19",
 ]
 

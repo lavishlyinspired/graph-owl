@@ -155,6 +155,81 @@ async fn importing_a_pack_creates_terms_with_hierarchy_intact() {
     assert_eq!(loan["effective"]["overridden"], false);
 }
 
+/// An OWL-native document, in FIBO's real distribution shape (RDF/XML,
+/// `rdfs:label`/`rdfs:subClassOf`, verified against `edmcouncil/fibo` — MIT,
+/// checked 8 August 2026) — but invented content, per this file's own "not
+/// vendored, in a test fixture or otherwise" rule above. `Catalog::import_pack`
+/// only accepts Turtle, so this is converted with
+/// `graph_owl_rdf_io::skos::rdfxml_to_turtle` before the request, exactly the
+/// step a real FIBO module import needs (Phase 3 item 3.9, decision 4.6).
+fn owl_native_pack_as_turtle() -> Vec<u8> {
+    let rdfxml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE rdf:RDF [
+	<!ENTITY ex "http://ex.org/owlpack#">
+	<!ENTITY owl "http://www.w3.org/2002/07/owl#">
+	<!ENTITY rdf "http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+	<!ENTITY rdfs "http://www.w3.org/2000/01/rdf-schema#">
+	<!ENTITY skos "http://www.w3.org/2004/02/skos/core#">
+]>
+<rdf:RDF xml:base="http://ex.org/owlpack#"
+	xmlns:ex="http://ex.org/owlpack#"
+	xmlns:owl="http://www.w3.org/2002/07/owl#"
+	xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+	xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#"
+	xmlns:skos="http://www.w3.org/2004/02/skos/core#">
+
+	<owl:Class rdf:about="&ex;FinancialInstrument">
+		<rdfs:label>financial instrument</rdfs:label>
+		<skos:definition>a monetary contract between parties</skos:definition>
+	</owl:Class>
+
+	<owl:Class rdf:about="&ex;Loan">
+		<rdfs:subClassOf rdf:resource="&ex;FinancialInstrument"/>
+		<rdfs:label>loan</rdfs:label>
+		<skos:definition>a sum of money lent</skos:definition>
+	</owl:Class>
+
+</rdf:RDF>
+"#;
+    graph_owl_rdf_io::skos::rdfxml_to_turtle(rdfxml).expect("valid RDF/XML converts")
+}
+
+/// **The real distribution shape, end to end through the real HTTP route.**
+/// `rdfs:label`/`rdfs:subClassOf` (never `skos:prefLabel`/`skos:broader`) are
+/// what FIBO's production distribution actually uses — the importer as
+/// originally shipped would have recognised zero concepts from this document.
+#[tokio::test]
+async fn an_owl_native_pack_converted_from_rdfxml_imports_with_hierarchy_intact() {
+    let (app, _db, _connection_string) = test_app().await;
+
+    let (status, pack) = import(&app, "owlpack", "1.0", owl_native_pack_as_turtle()).await;
+    assert_eq!(status, StatusCode::CREATED, "{pack}");
+    assert_eq!(pack["termCount"], json!(2));
+
+    let pack_id = pack["id"].as_str().expect("an id").to_string();
+    let (status, terms) = json_send(
+        &app,
+        "GET",
+        &format!("/ontology-packs/{pack_id}/terms"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{terms}");
+    let terms = terms.as_array().expect("array");
+    assert_eq!(terms.len(), 2);
+
+    let loan = terms
+        .iter()
+        .find(|t| t["sourceIri"] == "http://ex.org/owlpack#Loan")
+        .expect("the rdfs:label-only class must still land as a term");
+    // `name` is derived from the concept's own IRI local name, not its
+    // label — `pref_label`'s value is validated (present or the import is
+    // refused) but never itself stored, matching `skos:prefLabel`-sourced
+    // imports' existing behaviour exactly.
+    assert_eq!(loan["term"]["name"], "Loan");
+    assert_eq!(loan["term"]["definition"], "a sum of money lent");
+}
+
 #[tokio::test]
 async fn reimporting_the_same_version_is_a_no_op() {
     let (app, _db, _connection_string) = test_app().await;

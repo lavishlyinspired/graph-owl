@@ -34,6 +34,15 @@ serde.workspace = true
 oxrdf = { version = "0.3.3", features = ["rdf-12"] }
 oxttl = { workspace = true, features = ["rdf-12"] }
 oxjsonld = { workspace = true, features = ["rdf-12"] }
+# Real RDF/XML parsing — Phase 3 item 3.9/decision 4.6. Same Oxigraph project
+# and licence (MIT OR Apache-2.0) already adopted for `oxrdf`/`oxttl`/
+# `oxjsonld`; checked via crates.io 8 August 2026 (0.2.3, updated 2026-04-11,
+# 690k downloads) before adding — see `00l-build-vs-adopt.md`. `rdf-12`
+# explicit for the same reason `oxttl`'s own comment above states: workspace
+# feature unification enables `oxrdf/rdf-12` regardless, and `oxrdfxml`'s own
+# internal matches are behind its *own* `rdf-12` cfg gate — without it,
+# `TermRef::Triple` is non-exhaustive in its serializer.
+oxrdfxml = { version = "0.2", features = ["rdf-12"] }
 chrono.workspace = true
 uuid.workspace = true
 tracing.workspace = true

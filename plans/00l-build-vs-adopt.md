@@ -38,6 +38,7 @@ rejected by default** (`00i`).
 | `spareval` | Apache-2.0 / MIT | **SPARQL evaluator over a caller-supplied `QueryableDataset`** — plus `ServiceHandler` for federation and custom aggregates | **Adopt — this is the finding that shrinks Epic 7** |
 | `sparesults` | Apache-2.0 / MIT | SPARQL results serialization (JSON, XML, CSV) | **Adopt** — the wire formats clients expect |
 | `oxrdf`, `oxttl`, `oxjsonld` | Apache-2.0 / MIT | RDF terms, Turtle/N-Triples, JSON-LD | **Adopt** — Epic 9 |
+| `oxrdfxml` | Apache-2.0 / MIT | RDF/XML parsing | **Adopt** — same Oxigraph project/maintainer already trusted for `oxrdf`/`oxttl`/`oxjsonld`; checked 8 August 2026 (0.2.3, updated 2026-04-11, 690k downloads) before adding, for Epic 33's FIBO import (Phase 3 item 3.9) — the crate description already scoped "RDF/XML import/export" as this module's mandate, unbuilt until now |
 | `oxsdatatypes` | Apache-2.0 / MIT | XSD datatypes | **Adopt** where `FlakeValue` needs XSD semantics |
 | `reasonable` | BSD-3-Clause | OWL 2 RL via Datalog, *subset* of rules, Python bindings | **Evaluate** — see below |
 | `whelk-rs` | BSD-3-Clause | **OWL EL reasoner** | **Evaluate seriously** — Epic 98 |
