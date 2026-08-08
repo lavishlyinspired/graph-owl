@@ -63,7 +63,7 @@ is the condition that index exists to catch.
 | **23** | 7 | [`23-domains.md`](23-domains.md) | **Shipped** | 7/7 | Epic 11 (domains and products are owned) |
 | **24** | 7 | [`24-business-semantics.md`](24-business-semantics.md) | In progress | 8/9 (+1 partial) | Epic 2 (FQN derivation and the hierarchy terms attach to), Epic 11 (term review… |
 | **25** | 7 | [`25-classification.md`](25-classification.md) | **Shipped** | 9/9 | Epic 3 (envelope carries `tags`), Epic 11 (term reviewers are users) |
-| **26** | 7 | [`26-lifecycle-certification.md`](26-lifecycle-certification.md) | In progress | 8/9 (+1 partial) | Epic 11 (issuers are principals), Epic 24 (metrics are certifiable) |
+| **26** | 7 | [`26-lifecycle-certification.md`](26-lifecycle-certification.md) | In progress | 9/10 (+1 partial) | Epic 11 (issuers are principals), Epic 24 (metrics are certifiable) |
 | **27** | 7 | [`27-contracts.md`](27-contracts.md) | In progress | 4/6 (+1 partial) | Epic 2 (schemas to guarantee), Epic 3 (version diffs detect breakage) |
 | **28** | 7 | [`28-usage.md`](28-usage.md) | In progress | 5/6 | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
 | **29** | 7 | [`29-lineage.md`](29-lineage.md) | In progress | 13/14 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
@@ -425,6 +425,7 @@ is the condition that index exists to catch.
 - [x] Renewal re-checks
 - [~] Discoverable
 - [x] `?lifecycle=` filtering — shipped 8 August 2026
+- [x] `?certification=` filtering — shipped 8 August 2026
 
 ### Epic 27 — Data Contracts *(Demo 7)*
 

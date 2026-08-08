@@ -15,14 +15,15 @@ use graph_owl_core::{
     page::{Cursor, Page, PageRequest},
 };
 use graph_owl_storage::{
-    BreachReport, ColumnMapping, ConflictKind, DataProductUpdate, DiscardedClaimRecord,
-    DomainDeletion, DomainHoldings, DomainUpdate, DriftFilter, ExtractionRunRecord, FollowOutcome,
-    Holdings, IdempotencyClaim, IssueOutcome, LabelDecision, LabelOutcome, LifecycleOutcome,
-    LineageReconciliation, MembershipRefusal, MemorySearchFilter, MemoryWrite, OwnersWrite,
-    PrincipalDeletion, QueuedClaimRecord, ResultIngest, RetractOutcome, ReviewQueueFilter,
-    SplitOutcome, Storage, StorageError, StoredCertification, StoredCertificationType,
-    StoredContract, StoredTestCase, StoredTestDefinition, StoredTestResult, StoredUser,
-    SupersedeOutcome, TagUsage, TestResultWrite, UpdateOutcome, UsageIngest, UsageWrite,
+    BreachReport, CertificationFilter, ColumnMapping, ConflictKind, DataProductUpdate,
+    DiscardedClaimRecord, DomainDeletion, DomainHoldings, DomainUpdate, DriftFilter,
+    ExtractionRunRecord, FollowOutcome, Holdings, IdempotencyClaim, IssueOutcome, LabelDecision,
+    LabelOutcome, LifecycleOutcome, LineageReconciliation, MembershipRefusal, MemorySearchFilter,
+    MemoryWrite, OwnersWrite, PrincipalDeletion, QueuedClaimRecord, ResultIngest, RetractOutcome,
+    ReviewQueueFilter, SplitOutcome, Storage, StorageError, StoredCertification,
+    StoredCertificationType, StoredContract, StoredTestCase, StoredTestDefinition,
+    StoredTestResult, StoredUser, SupersedeOutcome, TagUsage, TestResultWrite, UpdateOutcome,
+    UsageIngest, UsageWrite,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -4666,9 +4667,10 @@ impl Storage for PostgresStorage {
         // measurement still misses budget at a larger target, the escape
         // hatch is the maintained effective-owner projection this comment
         // already flagged, not another constant-factor pass here.
-        let extension = extension_clauses(filter.extension, 13);
+        let extension = extension_clauses(filter.extension, 15);
         let tags_filter: Option<&[String]> = (!filter.tags.is_empty()).then_some(filter.tags);
         let tags = tags_expr(12);
+        let certification = certification_expr(13, 14);
         let sql = format!(
             "SELECT {ASSET_COLUMNS}, effective_owners.owners FROM assets
              LEFT JOIN LATERAL (SELECT {OWNERS_EXPR} AS owners) effective_owners ON true
@@ -4686,6 +4688,7 @@ impl Storage for PostgresStorage {
                       WHERE m.asset_id = assets.id AND m.data_product_id = $10))
                AND ($11::text IS NULL OR lifecycle = $11)
                {tags}
+               {certification}
                {extension}
              ORDER BY fully_qualified_name, id
              LIMIT $4"
@@ -4702,7 +4705,9 @@ impl Storage for PostgresStorage {
             .bind(filter.domain)
             .bind(filter.data_product)
             .bind(filter.lifecycle.map(LifecycleState::as_str))
-            .bind(tags_filter);
+            .bind(tags_filter)
+            .bind(filter.certification.map(CertificationFilter::as_str))
+            .bind(graph_owl_core::lifecycle::DEFAULT_EXPIRY_WINDOW_DAYS as i32);
         for condition in filter.extension {
             query = query.bind(&condition.name).bind(&condition.value);
         }
@@ -4728,9 +4733,10 @@ impl Storage for PostgresStorage {
         let overfetch = i64::try_from(page.limit)
             .unwrap_or(i64::MAX)
             .saturating_add(1);
-        let extension = extension_clauses(filter.extension, 12);
+        let extension = extension_clauses(filter.extension, 14);
         let tags_filter: Option<&[String]> = (!filter.tags.is_empty()).then_some(filter.tags);
         let tags = tags_expr(11);
+        let certification = certification_expr(12, 13);
         let sql = format!(
             "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners, {RANK_KEY} AS sort_key
              FROM assets, to_tsquery('english', $1) AS q (ts)
@@ -4745,6 +4751,7 @@ impl Storage for PostgresStorage {
                       WHERE m.asset_id = assets.id AND m.data_product_id = $9))
                AND ($10::text IS NULL OR lifecycle = $10)
                {tags}
+               {certification}
                {extension}
              ORDER BY {RANK_KEY}, id
              LIMIT $5"
@@ -4760,7 +4767,9 @@ impl Storage for PostgresStorage {
             .bind(filter.domain)
             .bind(filter.data_product)
             .bind(filter.lifecycle.map(LifecycleState::as_str))
-            .bind(tags_filter);
+            .bind(tags_filter)
+            .bind(filter.certification.map(CertificationFilter::as_str))
+            .bind(graph_owl_core::lifecycle::DEFAULT_EXPIRY_WINDOW_DAYS as i32);
         for condition in filter.extension {
             q = q.bind(&condition.name).bind(&condition.value);
         }
@@ -10247,6 +10256,45 @@ fn tags_expr(param: usize) -> String {
                        OR (assets.kind = 'table'
                            AND l.target_fqn LIKE assets.fully_qualified_name || '.%'))
              ) = array_length(${param}, 1))"
+    )
+}
+
+/// **A computed status, pushed into SQL rather than duplicated as a stored
+/// column** — Epic 26, wired to `?certification=` Phase 2.3. Matches "any
+/// type", not one specific certification type: a target can hold several
+/// certifications at once (Gold and a data-quality stamp, say), and asking
+/// which one this filter means would need a `?certificationType=` parameter
+/// nobody has asked for yet. `EXISTS`/`NOT EXISTS` per branch rather than
+/// aggregating to one status avoids the ambiguity a mixed-status target
+/// would otherwise force ("valid AND expired" has no single right answer).
+/// `status_param` is reused across every `WHEN` arm — one bound value,
+/// compared against each branch's own literal.
+fn certification_expr(status_param: usize, window_param: usize) -> String {
+    format!(
+        "AND (${status_param}::text IS NULL OR (
+               CASE ${status_param}
+                 WHEN 'none' THEN NOT EXISTS (
+                   SELECT 1 FROM certifications c
+                    WHERE c.target_fqn = assets.fully_qualified_name
+                      AND c.superseded_by IS NULL)
+                 WHEN 'valid' THEN EXISTS (
+                   SELECT 1 FROM certifications c
+                    WHERE c.target_fqn = assets.fully_qualified_name
+                      AND c.superseded_by IS NULL
+                      AND c.expires_at > now() + make_interval(days => ${window_param}))
+                 WHEN 'expiringSoon' THEN EXISTS (
+                   SELECT 1 FROM certifications c
+                    WHERE c.target_fqn = assets.fully_qualified_name
+                      AND c.superseded_by IS NULL
+                      AND c.expires_at > now()
+                      AND c.expires_at <= now() + make_interval(days => ${window_param}))
+                 WHEN 'expired' THEN EXISTS (
+                   SELECT 1 FROM certifications c
+                    WHERE c.target_fqn = assets.fully_qualified_name
+                      AND c.superseded_by IS NULL
+                      AND c.expires_at <= now())
+                 ELSE FALSE
+               END))"
     )
 }
 

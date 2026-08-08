@@ -1036,6 +1036,56 @@ pub struct AssetFilter<'a> {
     /// result — a steward asking "what carries this tag" is asking about the
     /// table, not which of its columns happened to carry it directly.
     pub tags: &'a [String],
+    /// Only assets whose **currently live** (non-superseded) certification —
+    /// of any type — is in this state, computed against `now()` — Epic 26.
+    /// Not a stored column: `[lifecycle::certification_status]` is the same
+    /// computation, and this filter is that computation pushed into SQL
+    /// rather than a second, stored copy of it that could drift from the
+    /// read path.
+    pub certification: Option<CertificationFilter>,
+}
+
+/// The value space for [`AssetFilter::certification`] — the state names
+/// [`lifecycle::CertificationStatus`] already serializes as, minus
+/// `ExpiringSoon`'s `daysRemaining` payload, which a filter has no use for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertificationFilter {
+    /// Outside the expiry warning window.
+    Valid,
+    /// Inside the expiry warning window, not yet expired.
+    ExpiringSoon,
+    /// Past `expires_at`, never renewed.
+    Expired,
+    /// No non-superseded certification of any type exists for this asset.
+    None,
+}
+
+impl CertificationFilter {
+    /// The wire name — matching `CertificationStatus::as_str`'s own
+    /// convention so a client filters using the same vocabulary a
+    /// certification's own `status.status` field already returns.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            CertificationFilter::Valid => "valid",
+            CertificationFilter::ExpiringSoon => "expiringSoon",
+            CertificationFilter::Expired => "expired",
+            CertificationFilter::None => "none",
+        }
+    }
+
+    /// # Errors
+    ///
+    /// The unrecognised name, so the caller can name it back.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "valid" => Ok(CertificationFilter::Valid),
+            "expiringSoon" => Ok(CertificationFilter::ExpiringSoon),
+            "expired" => Ok(CertificationFilter::Expired),
+            "none" => Ok(CertificationFilter::None),
+            other => Err(other.to_string()),
+        }
+    }
 }
 
 /// One condition on a custom property's value — Epic 22 Slice D.

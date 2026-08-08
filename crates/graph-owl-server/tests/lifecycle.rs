@@ -839,3 +839,136 @@ async fn an_unrecognised_lifecycle_filter_is_refused_naming_the_real_states() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["errors"][0]["field"], "lifecycle", "{body}");
 }
+
+// ── `?certification=` filter — Phase 2.3 of plans/EPIC-COMPLETION-PLAN.md ──
+//
+// Not a stored column: `certification_status` is computed against `now()`,
+// so the filter is that same computation pushed into SQL — matching "any
+// type", since a target can hold several certifications at once and no
+// `?certificationType=` parameter has ever been asked for.
+
+async fn certify(
+    app: &axum::Router,
+    fqn: &str,
+    type_id: &str,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) {
+    let (status, body) = send(
+        app,
+        "POST",
+        &format!("/certifications/{fqn}"),
+        Some(json!({ "typeId": type_id, "expiresAt": expires_at })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+#[tokio::test]
+async fn the_certification_filter_returns_only_assets_with_a_valid_certification() {
+    let (app, _db, _url) = test_app().await;
+    let gold = certification_type(&app, "Gold", &[], &[]).await;
+    let (_, certified_fqn) = service(&app, "orders-svc").await;
+    service(&app, "uncertified-svc").await;
+    certify(
+        &app,
+        &certified_fqn,
+        &gold,
+        chrono::Utc::now() + chrono::Duration::days(200),
+    )
+    .await;
+
+    let (status, page) = send(&app, "GET", "/assets?certification=valid", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(names(&page), vec!["orders-svc"], "{page}");
+}
+
+/// The negative half: a certification inside the warning window is
+/// `expiringSoon`, not `valid` — the two filters must not overlap.
+#[tokio::test]
+async fn the_certification_filter_separates_expiring_soon_from_valid() {
+    let (app, _db, _url) = test_app().await;
+    let gold = certification_type(&app, "Gold", &[], &[]).await;
+    let (_, soon_fqn) = service(&app, "orders-svc").await;
+    certify(
+        &app,
+        &soon_fqn,
+        &gold,
+        chrono::Utc::now() + chrono::Duration::days(5),
+    )
+    .await;
+
+    let (_, soon) = send(&app, "GET", "/assets?certification=expiringSoon", None).await;
+    assert_eq!(names(&soon), vec!["orders-svc"], "{soon}");
+
+    let (_, valid) = send(&app, "GET", "/assets?certification=valid", None).await;
+    assert!(
+        names(&valid).is_empty(),
+        "inside the warning window is not valid: {valid}"
+    );
+}
+
+#[tokio::test]
+async fn the_certification_filter_returns_assets_with_no_certification() {
+    let (app, _db, _url) = test_app().await;
+    let gold = certification_type(&app, "Gold", &[], &[]).await;
+    service(&app, "uncertified-svc").await;
+    let (_, certified_fqn) = service(&app, "orders-svc").await;
+    certify(
+        &app,
+        &certified_fqn,
+        &gold,
+        chrono::Utc::now() + chrono::Duration::days(200),
+    )
+    .await;
+
+    let (status, page) = send(&app, "GET", "/assets?certification=none", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(names(&page), vec!["uncertified-svc"], "{page}");
+}
+
+/// **A lapsed certification, not a freshly-issued one.** `POST
+/// /certifications/{fqn}` refuses an `expiresAt` in the past by design (an
+/// already-dead certification is nonsensical to *issue*) — real expiry only
+/// ever arises from time passing after a valid issuance, so the fixture
+/// issues a live certification and then backdates it directly, the same way
+/// `crates/graph-owl-server/tests/reasoning.rs` connects the engine directly
+/// for state the HTTP surface has no route to produce.
+#[tokio::test]
+async fn the_certification_filter_returns_lapsed_certifications() {
+    let (app, _db, url) = test_app().await;
+    let gold = certification_type(&app, "Gold", &[], &[]).await;
+    let (_, lapsed_fqn) = service(&app, "orders-svc").await;
+    certify(
+        &app,
+        &lapsed_fqn,
+        &gold,
+        chrono::Utc::now() + chrono::Duration::days(1),
+    )
+    .await;
+
+    let pool = sqlx::PgPool::connect(&url).await.expect("a pool");
+    sqlx::query(
+        "UPDATE certifications SET expires_at = now() - interval '1 day' WHERE target_fqn = $1",
+    )
+    .bind(&lapsed_fqn)
+    .execute(&pool)
+    .await
+    .expect("backdate the certification");
+
+    let (status, page) = send(&app, "GET", "/assets?certification=expired", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(names(&page), vec!["orders-svc"], "{page}");
+}
+
+#[tokio::test]
+async fn an_unrecognised_certification_filter_is_refused_naming_the_real_states() {
+    let (app, _db, _url) = test_app().await;
+
+    let (status, body) = send(&app, "GET", "/assets?certification=platinum", None).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["errors"][0]["field"], "certification", "{body}");
+}

@@ -2096,6 +2096,10 @@ struct AssetListQuery {
     /// parameter. AND across every tag named, and a table-level match counts
     /// a confirmed label on one of its own columns too.
     tags: Option<String>,
+    /// `valid`/`expiringSoon`/`expired`/`none` — Epic 26. Any certification
+    /// type in this state, computed against `now()` the same way a
+    /// certification's own `status.status` field already is.
+    certification: Option<String>,
     limit: Option<usize>,
     after: Option<String>,
 }
@@ -2112,8 +2116,30 @@ struct AssetSearchQuery {
     data_product: Option<Uuid>,
     lifecycle: Option<String>,
     tags: Option<String>,
+    certification: Option<String>,
     limit: Option<usize>,
     after: Option<String>,
+}
+
+/// A certification-status filter from a query parameter, naming the real
+/// values when it is not one of them — the same convention [`parse_kind`]
+/// and [`parse_lifecycle`] already use.
+fn parse_certification_filter(
+    raw: Option<&str>,
+) -> Result<Option<graph_owl_storage::CertificationFilter>, AppError> {
+    raw.map(|value| {
+        graph_owl_storage::CertificationFilter::parse(value).map_err(|_| {
+            AppError::Validation(vec![FieldError::new(
+                "certification",
+                FieldErrorCode::Type,
+                format!(
+                    "`{value}` is not a certification status; expected one of: valid, \
+                     expiringSoon, expired, none"
+                ),
+            )])
+        })
+    })
+    .transpose()
 }
 
 /// `?tags=A,B` into the list `AssetFilter::tags` matches AND-wise —
@@ -2223,6 +2249,7 @@ async fn list_assets(
     let (domain, data_product) = (query.domain, query.data_product);
     let lifecycle = parse_lifecycle(query.lifecycle.as_deref())?;
     let tags = parse_tags(query.tags.as_deref());
+    let certification = parse_certification_filter(query.certification.as_deref())?;
     let filter = graph_owl_storage::AssetFilter {
         kind,
         owner: query.owner.as_deref(),
@@ -2232,6 +2259,7 @@ async fn list_assets(
         data_product,
         lifecycle,
         tags: &tags,
+        certification,
     };
     Ok(Json(
         catalog.list_assets_for(&principal, &filter, &page).await?,
@@ -2249,6 +2277,7 @@ async fn search_assets(
     let (domain, data_product) = (query.domain, query.data_product);
     let lifecycle = parse_lifecycle(query.lifecycle.as_deref())?;
     let tags = parse_tags(query.tags.as_deref());
+    let certification = parse_certification_filter(query.certification.as_deref())?;
     let filter = graph_owl_storage::AssetFilter {
         kind,
         owner: None,
@@ -2258,6 +2287,7 @@ async fn search_assets(
         data_product,
         lifecycle,
         tags: &tags,
+        certification,
     };
     let page_result = catalog
         .search_assets_for(&principal, &query.q, &filter, &page)
