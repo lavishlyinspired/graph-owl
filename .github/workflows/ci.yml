@@ -125,6 +125,36 @@ jobs:
             exit 1
           }
 
+  public-api:
+    name: graph-owl-api's public surface matches the snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # `cargo public-api` needs nightly for rustdoc JSON extraction — it
+      # shells out to `+nightly` itself, so both toolchains are installed
+      # but only `stable` is ever used to build the crate under test.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+
+      # Epic 37c Slice F: `examples/embedded.rs` extending to a second
+      # entity family (Epic 34's `Topic`/`MessagingService`) needed no new
+      # public type — proved, not assumed, by diffing this snapshot before
+      # and after the example changed. Committed so a real surface change
+      # shows up in a PR diff a reviewer reads, the same reasoning
+      # `openapi.json` above already uses. `-sss` omits blanket/auto-trait/
+      # auto-derived impls, which are compiler-generated noise here, not a
+      # surface a caller chose.
+      - name: install cargo-public-api
+        run: cargo install cargo-public-api --locked
+      - name: regenerate and compare
+        run: |
+          cargo public-api -p graph-owl-api -sss > /tmp/public-api.txt
+          diff -u crates/graph-owl-api/public-api.txt /tmp/public-api.txt || {
+            echo "::error::crates/graph-owl-api/public-api.txt is stale — regenerate: cargo public-api -p graph-owl-api -sss > crates/graph-owl-api/public-api.txt"
+            exit 1
+          }
+
   sdks:
     name: SDKs generate and agree with the contract
     runs-on: ubuntu-latest

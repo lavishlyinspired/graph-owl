@@ -1,0 +1,754 @@
+pub mod graph_owl_api
+pub mod graph_owl_api::archive
+pub struct graph_owl_api::archive::RestoreOutcome
+pub graph_owl_api::archive::RestoreOutcome::aborted: bool
+pub graph_owl_api::archive::RestoreOutcome::conflicts: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::archive::RestoreOutcome::entities_restored: u64
+pub graph_owl_api::archive::RestoreOutcome::entities_skipped: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::archive::RestoreOutcome::relationships_restored: u64
+pub const graph_owl_api::archive::ENTITIES_FILE: &str
+pub const graph_owl_api::archive::MANIFEST_FILE: &str
+pub const graph_owl_api::archive::RELATIONSHIPS_FILE: &str
+pub fn graph_owl_api::archive::append_ndjson_line<T: serde_core::ser::Serialize>(&std::path::Path, &T) -> core::io::error::Result<()>
+pub fn graph_owl_api::archive::build_tar_zst(&std::path::Path, &std::path::Path) -> core::io::error::Result<()>
+pub fn graph_owl_api::archive::extract_tar_zst(&std::path::Path, &std::path::Path) -> core::io::error::Result<()>
+pub fn graph_owl_api::archive::read_entities(&std::path::Path) -> core::io::error::Result<alloc::vec::Vec<graph_owl_core::archive::ArchivedEntity>>
+pub fn graph_owl_api::archive::read_manifest(&std::path::Path) -> core::io::error::Result<graph_owl_core::archive::ArchiveManifest>
+pub fn graph_owl_api::archive::read_relationships(&std::path::Path) -> core::io::error::Result<alloc::vec::Vec<graph_owl_core::archive::ArchivedRelationship>>
+pub fn graph_owl_api::archive::redact_entity(&mut graph_owl_core::archive::ArchivedEntity, &[alloc::string::String])
+pub fn graph_owl_api::archive::section_checksum(&std::path::Path) -> core::io::error::Result<core::option::Option<alloc::string::String>>
+pub fn graph_owl_api::archive::verify_section_checksums(&std::path::Path, &graph_owl_core::archive::ArchiveManifest) -> core::io::error::Result<()>
+pub mod graph_owl_api::extraction
+pub enum graph_owl_api::extraction::ObjectShape
+pub graph_owl_api::extraction::ObjectShape::Literal
+pub graph_owl_api::extraction::ObjectShape::Reference
+pub enum graph_owl_api::extraction::SubmissionOutcome
+pub graph_owl_api::extraction::SubmissionOutcome::AlreadyExtracted
+pub graph_owl_api::extraction::SubmissionOutcome::AlreadyExtracted::run_id: uuid::Uuid
+pub graph_owl_api::extraction::SubmissionOutcome::Recorded
+pub graph_owl_api::extraction::SubmissionOutcome::Recorded::asserted: usize
+pub graph_owl_api::extraction::SubmissionOutcome::Recorded::discarded: usize
+pub graph_owl_api::extraction::SubmissionOutcome::Recorded::run_id: uuid::Uuid
+pub graph_owl_api::extraction::SubmissionOutcome::Recorded::surfaced: usize
+pub struct graph_owl_api::extraction::EvidenceWindow
+pub graph_owl_api::extraction::EvidenceWindow::passage: alloc::string::String
+pub graph_owl_api::extraction::EvidenceWindow::span: (usize, usize)
+pub struct graph_owl_api::extraction::PendingClaim
+pub graph_owl_api::extraction::PendingClaim::confidence: f64
+pub graph_owl_api::extraction::PendingClaim::id: uuid::Uuid
+pub graph_owl_api::extraction::PendingClaim::object: alloc::string::String
+pub graph_owl_api::extraction::PendingClaim::passage: alloc::string::String
+pub graph_owl_api::extraction::PendingClaim::predicate: alloc::string::String
+pub graph_owl_api::extraction::PendingClaim::run_id: uuid::Uuid
+pub graph_owl_api::extraction::PendingClaim::span: (usize, usize)
+pub graph_owl_api::extraction::PendingClaim::subject: alloc::string::String
+pub const graph_owl_api::extraction::CATALOG_PREDICATES: &[&str]
+pub const graph_owl_api::extraction::CONFIRMED_CONFIDENCE: f64
+pub const graph_owl_api::extraction::QUEUE_PAGE: i64
+pub const graph_owl_api::extraction::STATE_ASSERTED: &str
+pub const graph_owl_api::extraction::STATE_PENDING: &str
+pub fn graph_owl_api::extraction::claim_flake(uuid::Uuid, &str, &str, core::option::Option<uuid::Uuid>, i64) -> core::option::Option<graph_owl_core::flake::Flake>
+pub fn graph_owl_api::extraction::claim_flakes(&[graph_owl_storage::QueuedClaimRecord], &graph_owl_api::extraction::ResolvedMentions, i64) -> alloc::vec::Vec<graph_owl_core::flake::Flake>
+pub fn graph_owl_api::extraction::enters_graph_unreviewed(f64) -> bool
+pub fn graph_owl_api::extraction::extraction_graph() -> graph_owl_core::flake::Sid
+pub fn graph_owl_api::extraction::object_shape(&str) -> core::option::Option<graph_owl_api::extraction::ObjectShape>
+pub async fn graph_owl_api::extraction::submit(&dyn graph_owl_storage::Storage, uuid::Uuid, &graph_owl_core::extraction::ParsedDocument, graph_owl_core::extraction::ExtractionResult, &str, &str, &graph_owl_api::extraction::ResolvedMentions) -> core::result::Result<(graph_owl_api::extraction::SubmissionOutcome, alloc::vec::Vec<graph_owl_storage::QueuedClaimRecord>), graph_owl_storage::StorageError>
+pub fn graph_owl_api::extraction::windowed_passage(&str, usize, usize) -> core::option::Option<graph_owl_api::extraction::EvidenceWindow>
+pub type graph_owl_api::extraction::ResolvedMentions = std::collections::hash::map::HashMap<alloc::string::String, uuid::Uuid>
+pub mod graph_owl_api::federation
+pub enum graph_owl_api::federation::FederationError
+pub graph_owl_api::federation::FederationError::EndpointNotAllowed
+pub graph_owl_api::federation::FederationError::EndpointNotAllowed::allowed: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::federation::FederationError::EndpointNotAllowed::endpoint: alloc::string::String
+pub graph_owl_api::federation::FederationError::Parse
+pub graph_owl_api::federation::FederationError::Parse::detail: alloc::string::String
+pub graph_owl_api::federation::FederationError::Parse::endpoint: alloc::string::String
+pub graph_owl_api::federation::FederationError::Request
+pub graph_owl_api::federation::FederationError::Request::detail: alloc::string::String
+pub graph_owl_api::federation::FederationError::Request::endpoint: alloc::string::String
+impl core::error::Error for graph_owl_api::federation::FederationError
+impl core::fmt::Display for graph_owl_api::federation::FederationError
+pub fn graph_owl_api::federation::FederationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct graph_owl_api::federation::FederationAllowList
+impl graph_owl_api::federation::FederationAllowList
+pub fn graph_owl_api::federation::FederationAllowList::allows(&self, &str) -> bool
+pub fn graph_owl_api::federation::FederationAllowList::endpoints(&self) -> &[alloc::string::String]
+pub fn graph_owl_api::federation::FederationAllowList::new(alloc::vec::Vec<alloc::string::String>) -> Self
+pub struct graph_owl_api::federation::FederationServiceHandler
+impl graph_owl_api::federation::FederationServiceHandler
+pub fn graph_owl_api::federation::FederationServiceHandler::activity(&self) -> alloc::vec::Vec<(alloc::string::String, bool)>
+pub fn graph_owl_api::federation::FederationServiceHandler::new(graph_owl_api::federation::FederationAllowList, reqwest::async_impl::client::Client, core::time::Duration) -> Self
+impl spareval::service::DefaultServiceHandler for graph_owl_api::federation::FederationServiceHandler
+pub type graph_owl_api::federation::FederationServiceHandler::Error = graph_owl_api::federation::FederationError
+pub fn graph_owl_api::federation::FederationServiceHandler::handle(&self, &oxrdf::named_node::NamedNode, &spargebra::algebra::GraphPattern, core::option::Option<&oxiri::Iri<alloc::string::String>>) -> core::result::Result<spareval::model::QuerySolutionIter<'static>, Self::Error>
+pub struct graph_owl_api::federation::SharedFederationServiceHandler(_)
+impl graph_owl_api::federation::SharedFederationServiceHandler
+pub fn graph_owl_api::federation::SharedFederationServiceHandler::new(alloc::sync::Arc<graph_owl_api::federation::FederationServiceHandler>) -> Self
+impl spareval::service::DefaultServiceHandler for graph_owl_api::federation::SharedFederationServiceHandler
+pub type graph_owl_api::federation::SharedFederationServiceHandler::Error = graph_owl_api::federation::FederationError
+pub fn graph_owl_api::federation::SharedFederationServiceHandler::handle(&self, &oxrdf::named_node::NamedNode, &spargebra::algebra::GraphPattern, core::option::Option<&oxiri::Iri<alloc::string::String>>) -> core::result::Result<spareval::model::QuerySolutionIter<'static>, Self::Error>
+pub const graph_owl_api::federation::DEFAULT_TIMEOUT: core::time::Duration
+pub fn graph_owl_api::federation::endpoints_from_env(core::option::Option<&str>) -> alloc::vec::Vec<alloc::string::String>
+pub mod graph_owl_api::validation
+pub enum graph_owl_api::validation::FieldErrorCode
+pub graph_owl_api::validation::FieldErrorCode::Empty
+pub graph_owl_api::validation::FieldErrorCode::Required
+pub graph_owl_api::validation::FieldErrorCode::Type
+pub graph_owl_api::validation::FieldErrorCode::Value
+pub enum graph_owl_api::validation::Segment
+pub graph_owl_api::validation::Segment::Index(usize)
+pub graph_owl_api::validation::Segment::Key(alloc::string::String)
+pub struct graph_owl_api::validation::FieldError
+pub graph_owl_api::validation::FieldError::code: graph_owl_api::validation::FieldErrorCode
+pub graph_owl_api::validation::FieldError::detail: alloc::string::String
+pub graph_owl_api::validation::FieldError::field: alloc::string::String
+impl graph_owl_api::validation::FieldError
+pub fn graph_owl_api::validation::FieldError::new(impl core::convert::Into<alloc::string::String>, graph_owl_api::validation::FieldErrorCode, impl core::convert::Into<alloc::string::String>) -> Self
+pub struct graph_owl_api::validation::FieldPath(_)
+impl graph_owl_api::validation::FieldPath
+pub fn graph_owl_api::validation::FieldPath::index(&self, usize) -> Self
+pub fn graph_owl_api::validation::FieldPath::key(&self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn graph_owl_api::validation::FieldPath::render(&self) -> alloc::string::String
+pub fn graph_owl_api::validation::FieldPath::root() -> Self
+pub trait graph_owl_api::validation::ValidateBody
+pub fn graph_owl_api::validation::ValidateBody::validate_body(&serde_json::value::Value) -> alloc::vec::Vec<graph_owl_api::validation::FieldError>
+impl graph_owl_api::validation::ValidateBody for graph_owl_api::CreateRelationship
+pub fn graph_owl_api::CreateRelationship::validate_body(&serde_json::value::Value) -> alloc::vec::Vec<graph_owl_api::validation::FieldError>
+impl graph_owl_api::validation::ValidateBody for graph_owl_api::CreateTable
+pub fn graph_owl_api::CreateTable::validate_body(&serde_json::value::Value) -> alloc::vec::Vec<graph_owl_api::validation::FieldError>
+impl graph_owl_api::validation::ValidateBody for graph_owl_api::UpsertAsset
+pub fn graph_owl_api::UpsertAsset::validate_body(&serde_json::value::Value) -> alloc::vec::Vec<graph_owl_api::validation::FieldError>
+impl graph_owl_api::validation::ValidateBody for graph_owl_core::AssetUpdate
+pub fn graph_owl_core::AssetUpdate::validate_body(&serde_json::value::Value) -> alloc::vec::Vec<graph_owl_api::validation::FieldError>
+impl graph_owl_api::validation::ValidateBody for graph_owl_core::TableUpdate
+pub fn graph_owl_core::TableUpdate::validate_body(&serde_json::value::Value) -> alloc::vec::Vec<graph_owl_api::validation::FieldError>
+pub fn graph_owl_api::validation::optional_string(&serde_json::value::Value, &graph_owl_api::validation::FieldPath, &mut alloc::vec::Vec<graph_owl_api::validation::FieldError>)
+pub fn graph_owl_api::validation::require_non_empty_string(&serde_json::value::Value, &graph_owl_api::validation::FieldPath, &mut alloc::vec::Vec<graph_owl_api::validation::FieldError>)
+pub enum graph_owl_api::CatalogError
+pub graph_owl_api::CatalogError::AgentRefused(graph_owl_authz::agent::Refusal)
+pub graph_owl_api::CatalogError::Conflict
+pub graph_owl_api::CatalogError::Conflict::detail: alloc::string::String
+pub graph_owl_api::CatalogError::Conflict::existing_id: core::option::Option<uuid::Uuid>
+pub graph_owl_api::CatalogError::Conflict::kind: graph_owl_storage::ConflictKind
+pub graph_owl_api::CatalogError::Forbidden
+pub graph_owl_api::CatalogError::IllegalRelationship
+pub graph_owl_api::CatalogError::IllegalRelationship::from: graph_owl_core::relationship_type::EntityKind
+pub graph_owl_api::CatalogError::IllegalRelationship::relationship: graph_owl_core::relationship_type::RelationshipType
+pub graph_owl_api::CatalogError::IllegalRelationship::to: graph_owl_core::relationship_type::EntityKind
+pub graph_owl_api::CatalogError::NotFound
+pub graph_owl_api::CatalogError::PreconditionFailed
+pub graph_owl_api::CatalogError::PreconditionFailed::current: graph_owl_core::envelope::EntityVersion
+pub graph_owl_api::CatalogError::Storage(graph_owl_storage::StorageError)
+pub graph_owl_api::CatalogError::Unauthenticated
+pub graph_owl_api::CatalogError::Validation(alloc::vec::Vec<graph_owl_api::validation::FieldError>)
+impl core::convert::From<graph_owl_storage::StorageError> for graph_owl_api::CatalogError
+pub fn graph_owl_api::CatalogError::from(graph_owl_storage::StorageError) -> Self
+pub enum graph_owl_api::CypherValue
+pub graph_owl_api::CypherValue::Boolean(bool)
+pub graph_owl_api::CypherValue::Float(f64)
+pub graph_owl_api::CypherValue::Integer(i64)
+pub graph_owl_api::CypherValue::Node(graph_owl_lpg::LpgNode)
+pub graph_owl_api::CypherValue::Null
+pub graph_owl_api::CypherValue::Relationship(graph_owl_lpg::LpgEdge)
+pub graph_owl_api::CypherValue::String(alloc::string::String)
+pub enum graph_owl_api::ExportFormat
+pub graph_owl_api::ExportFormat::DcatProvO
+pub graph_owl_api::ExportFormat::OpenLineage
+pub enum graph_owl_api::MappingOutcome
+pub graph_owl_api::MappingOutcome::Draft(graph_owl_connectors::batch::RowDraft)
+pub graph_owl_api::MappingOutcome::InvalidKind
+pub graph_owl_api::MappingOutcome::InvalidKind::kind: alloc::string::String
+pub graph_owl_api::MappingOutcome::MissingField
+pub graph_owl_api::MappingOutcome::MissingField::field: &'static str
+pub graph_owl_api::MappingOutcome::ShapeViolation
+pub graph_owl_api::MappingOutcome::ShapeViolation::reason: alloc::string::String
+pub enum graph_owl_api::RdfEditDryRun
+pub graph_owl_api::RdfEditDryRun::Checked
+pub graph_owl_api::RdfEditDryRun::Checked::accepted: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::RdfEditDryRun::Checked::new_inferences: usize
+pub graph_owl_api::RdfEditDryRun::Checked::rejected: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub graph_owl_api::RdfEditDryRun::SyntaxError
+pub graph_owl_api::RdfEditDryRun::SyntaxError::column: core::option::Option<u64>
+pub graph_owl_api::RdfEditDryRun::SyntaxError::line: core::option::Option<u64>
+pub graph_owl_api::RdfEditDryRun::SyntaxError::message: alloc::string::String
+pub enum graph_owl_api::RdfEditSave
+pub graph_owl_api::RdfEditSave::Saved(graph_owl_api::ImportOutcome)
+pub graph_owl_api::RdfEditSave::SyntaxError
+pub graph_owl_api::RdfEditSave::SyntaxError::column: core::option::Option<u64>
+pub graph_owl_api::RdfEditSave::SyntaxError::line: core::option::Option<u64>
+pub graph_owl_api::RdfEditSave::SyntaxError::message: alloc::string::String
+pub enum graph_owl_api::ReasoningTechnique
+pub graph_owl_api::ReasoningTechnique::Full
+pub graph_owl_api::ReasoningTechnique::Incremental
+pub enum graph_owl_api::UpsertAlignmentOutcome
+pub graph_owl_api::UpsertAlignmentOutcome::RefusedHumanConfirmed
+pub graph_owl_api::UpsertAlignmentOutcome::Written
+pub struct graph_owl_api::ActivityEntry
+pub graph_owl_api::ActivityEntry::actor: alloc::string::String
+pub graph_owl_api::ActivityEntry::id: uuid::Uuid
+pub graph_owl_api::ActivityEntry::kind: graph_owl_core::collaboration::ActivityKind
+pub graph_owl_api::ActivityEntry::occurred_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub graph_owl_api::ActivityEntry::summary: alloc::string::String
+impl utoipa::ToSchema for graph_owl_api::ActivityEntry
+pub fn graph_owl_api::ActivityEntry::name() -> alloc::borrow::Cow<'static, str>
+pub fn graph_owl_api::ActivityEntry::schemas(&mut alloc::vec::Vec<(alloc::string::String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>)
+impl utoipa::__dev::ComposeSchema for graph_owl_api::ActivityEntry
+pub fn graph_owl_api::ActivityEntry::compose(alloc::vec::Vec<utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>>) -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>
+pub struct graph_owl_api::AlignmentReviewEntry
+pub graph_owl_api::AlignmentReviewEntry::confidence: core::option::Option<f64>
+pub graph_owl_api::AlignmentReviewEntry::left: core::option::Option<graph_owl_core::flake::Sid>
+pub graph_owl_api::AlignmentReviewEntry::lossy_reverse: core::option::Option<bool>
+pub graph_owl_api::AlignmentReviewEntry::right: core::option::Option<graph_owl_core::flake::Sid>
+pub graph_owl_api::AlignmentReviewEntry::source_detail: core::option::Option<alloc::string::String>
+pub graph_owl_api::AlignmentReviewEntry::source_kind: core::option::Option<alloc::string::String>
+pub graph_owl_api::AlignmentReviewEntry::subject: graph_owl_core::flake::Sid
+pub struct graph_owl_api::Catalog
+impl graph_owl_api::Catalog
+pub async fn graph_owl_api::Catalog::accept_change_proposal(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<graph_owl_core::collaboration::Proposal, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::active_announcements(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<graph_owl_core::collaboration::Announcement>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::add_product_asset(&self, uuid::Uuid, uuid::Uuid) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::add_term_relation(&self, uuid::Uuid, graph_owl_core::glossary::SkosRelation) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::ancestors_of(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<graph_owl_core::Asset>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::apply_drift(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<graph_owl_core::drift::DriftItem, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::apply_streamed_message(&self, &str, &serde_json::value::Value) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::apply_tag(&self, &graph_owl_core::Principal, &str, &str, graph_owl_core::classification::LabelType, graph_owl_core::classification::LabelState) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::assert_lineage(&self, &graph_owl_core::Principal, uuid::Uuid, uuid::Uuid, graph_owl_core::relationship_type::RelationshipType, graph_owl_core::lineage::LineageDetails) -> core::result::Result<graph_owl_core::lineage::LineageEdge, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::asset_owners(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<graph_owl_core::ownership::EntityReference>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::asset_products(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<graph_owl_core::domain::DataProduct>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::asset_subgraph(&self, &graph_owl_core::Principal, uuid::Uuid, graph_owl_traversal::Direction, graph_owl_traversal::Bounds, core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>) -> core::result::Result<graph_owl_traversal::Subgraph, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::asset_versions(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<graph_owl_core::AssetVersion>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::assets_followed_by(&self, &str, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<graph_owl_core::Asset>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::assign_asset_domain(&self, &graph_owl_core::Principal, uuid::Uuid, uuid::Uuid, bool) -> core::result::Result<graph_owl_core::Asset, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::assign_finding(&self, &graph_owl_core::Principal, &graph_owl_storage::ValidationFinding, &str) -> core::result::Result<graph_owl_storage::Assignment, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::attach_term(&self, uuid::Uuid, &str, &str) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::authorized_lpg_elements(&self, &graph_owl_core::Principal) -> core::result::Result<(alloc::vec::Vec<graph_owl_lpg::LpgNode>, alloc::vec::Vec<graph_owl_lpg::LpgEdge>), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::begin_run(&self, &graph_owl_storage::ConnectorRun) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::cancel_ingest_job(&self, uuid::Uuid) -> core::result::Result<bool, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::certifications_on(&self, &str) -> core::result::Result<alloc::vec::Vec<(graph_owl_storage::StoredCertification, graph_owl_core::lifecycle::CertificationStatus)>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::child_domains(&self, core::option::Option<uuid::Uuid>) -> core::result::Result<alloc::vec::Vec<graph_owl_core::domain::Domain>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::child_teams(&self, &str) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::Team>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::claim_idempotency(&self, &str, &str) -> core::result::Result<graph_owl_storage::IdempotencyClaim, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::classify_ontology(&self) -> core::result::Result<graph_owl_api::ElClassification, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::clear_asset_domain(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<graph_owl_core::Asset, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::clear_contract_breaches(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::column_mappings(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::ColumnMapping>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::compact(&self, i64) -> core::result::Result<u64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::confirm_review(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<graph_owl_core::resolution::Resolution, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::connector_configs(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::ConnectorConfig>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::contradictions_about(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<graph_owl_core::contradiction::Contradiction>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::count_assets_by_kind(&self) -> core::result::Result<alloc::vec::Vec<(graph_owl_core::AssetKind, i64)>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::count_assets_by_kind_for(&self, &graph_owl_core::Principal) -> core::result::Result<alloc::vec::Vec<(graph_owl_core::AssetKind, i64)>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::count_assets_in_domain(&self, uuid::Uuid) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_announcement(&self, &graph_owl_core::Principal, uuid::Uuid, alloc::string::String, chrono::datetime::DateTime<chrono::offset::utc::Utc>, chrono::datetime::DateTime<chrono::offset::utc::Utc>) -> core::result::Result<graph_owl_core::collaboration::Announcement, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_certification_type(&self, &graph_owl_core::Principal, graph_owl_api::CreateCertificationType) -> core::result::Result<graph_owl_storage::StoredCertificationType, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_classification(&self, &graph_owl_core::Principal, alloc::string::String, core::option::Option<alloc::string::String>, bool) -> core::result::Result<graph_owl_core::classification::Classification, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_contract(&self, &graph_owl_core::Principal, graph_owl_api::CreateContract) -> core::result::Result<graph_owl_core::contract::Contract, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_data_product(&self, &graph_owl_core::Principal, graph_owl_api::CreateDataProduct) -> core::result::Result<graph_owl_core::domain::DataProduct, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_domain(&self, &graph_owl_core::Principal, graph_owl_api::CreateDomain) -> core::result::Result<graph_owl_core::domain::Domain, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_glossary(&self, &str, core::option::Option<alloc::string::String>) -> core::result::Result<graph_owl_storage::Glossary, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_ingest_job(&self, uuid::Uuid, &str, &str) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_memory(&self, &graph_owl_core::memory::Memory) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_metric(&self, &str, alloc::string::String, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>, graph_owl_core::metric::CalculationType, alloc::vec::Vec<alloc::string::String>, core::option::Option<uuid::Uuid>) -> core::result::Result<graph_owl_storage::MetricRecord, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_pack_override(&self, &graph_owl_core::Principal, uuid::Uuid, alloc::string::String, graph_owl_ontology::pack::OverrideKind, serde_json::value::Value) -> core::result::Result<graph_owl_ontology::pack::PackOverride, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_relationship(&self, &graph_owl_core::Principal, uuid::Uuid, graph_owl_api::CreateRelationship) -> core::result::Result<graph_owl_core::Relationship, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_table(&self, &graph_owl_core::Principal, graph_owl_api::CreateTable) -> core::result::Result<graph_owl_core::Table, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_tag(&self, &graph_owl_core::Principal, uuid::Uuid, alloc::string::String, core::option::Option<alloc::string::String>) -> core::result::Result<graph_owl_core::classification::Tag, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_term(&self, uuid::Uuid, &str, alloc::string::String, alloc::vec::Vec<alloc::string::String>, alloc::vec::Vec<alloc::string::String>) -> core::result::Result<graph_owl_storage::GlossaryTermRecord, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_test_case(&self, graph_owl_api::CreateTestCase) -> core::result::Result<graph_owl_storage::StoredTestCase, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_test_definition(&self, alloc::string::String, alloc::string::String, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> core::result::Result<graph_owl_storage::StoredTestDefinition, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::create_test_suite(&self, alloc::string::String, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> core::result::Result<uuid::Uuid, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::cypher(&self, &graph_owl_core::Principal, &str, core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>, graph_owl_api::SparqlBudget) -> core::result::Result<graph_owl_api::SparqlOutcome, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::cypher_stream(&self, &graph_owl_core::Principal, &str, graph_owl_api::SparqlBudget, usize) -> core::result::Result<graph_owl_api::CypherStream, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::dead_letter_queue(&self, &graph_owl_storage::DeadLetterFilter) -> core::result::Result<alloc::vec::Vec<graph_owl_core::webhook::InboundEvent>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::decide_extraction_claim(&self, uuid::Uuid, graph_owl_core::extraction::ReviewDecision, &str) -> core::result::Result<graph_owl_storage::QueuedClaimRecord, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::decide_label(&self, &graph_owl_core::Principal, &str, &str, bool) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::define_custom_property(&self, graph_owl_core::custom_property::CustomProperty) -> core::result::Result<(uuid::Uuid, graph_owl_core::custom_property::CustomProperty), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_classification(&self, uuid::Uuid, bool) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_custom_property(&self, &graph_owl_core::Principal, uuid::Uuid, bool) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_data_product(&self, uuid::Uuid) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_domain(&self, &graph_owl_core::Principal, uuid::Uuid, core::option::Option<uuid::Uuid>) -> core::result::Result<graph_owl_storage::DomainDeletion, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_extraction_run(&self, uuid::Uuid) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_glossary(&self, uuid::Uuid, bool) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_import(&self, &str) -> core::result::Result<u64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_metric(&self, uuid::Uuid) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_pack_override(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<bool, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_policy(&self, &str) -> core::result::Result<bool, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_post(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_principal(&self, &graph_owl_core::ownership::OwnerRef, core::option::Option<&graph_owl_core::ownership::OwnerRef>) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_relationship(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<bool, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_table(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<bool, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_tag(&self, &graph_owl_core::Principal, &str, bool) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_term(&self, uuid::Uuid) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::delete_test_case(&self, uuid::Uuid) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::derived_about(&self, &graph_owl_core::flake::Sid) -> core::result::Result<alloc::vec::Vec<graph_owl_core::flake::Flake>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::detach_term(&self, uuid::Uuid, &str) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::detect_ontology_profiles(&self) -> core::result::Result<graph_owl_ontology::profile::Detection, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::dry_run_mapping(&self, &str, &serde_json::value::Value) -> core::result::Result<graph_owl_api::MappingOutcome, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::dry_run_policy(&self, &graph_owl_authz::Policy, &[alloc::string::String]) -> core::result::Result<graph_owl_api::PolicyDryRun, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::dry_run_rdf_edit(&self, graph_owl_rdf_io::RdfFormat, &str) -> core::result::Result<graph_owl_api::RdfEditDryRun, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::edit_post(&self, &graph_owl_core::Principal, uuid::Uuid, alloc::string::String) -> core::result::Result<graph_owl_core::collaboration::Post, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::entity_activity(&self, &graph_owl_core::Principal, uuid::Uuid, usize) -> core::result::Result<alloc::vec::Vec<graph_owl_api::ActivityEntry>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::evaluate_schema_change(&self, &str, &graph_owl_core::contract::SchemaChange, &str) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::BreachReport>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::evaluate_slas(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<(graph_owl_core::contract::Sla, graph_owl_core::contract::SlaEvaluation)>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::existing_fingerprints(&self, &[alloc::string::String]) -> core::result::Result<std::collections::hash::map::HashMap<alloc::string::String, graph_owl_connectors::Existing>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::explain_fact(&self, &graph_owl_core::flake::Sid, &graph_owl_core::flake::Sid, &graph_owl_core::flake::Sid, &graph_owl_reasoning::Budget) -> core::result::Result<graph_owl_reasoning::Explanation, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::explain_subsumption(&self, &graph_owl_core::flake::Sid, &graph_owl_core::flake::Sid) -> core::result::Result<core::option::Option<alloc::vec::Vec<graph_owl_core::flake::Sid>>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::export_archive(&self, core::option::Option<alloc::vec::Vec<graph_owl_core::archive::ScopeSelector>>, &[alloc::string::String], &std::path::Path) -> core::result::Result<graph_owl_core::archive::ArchiveManifest, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::export_bulk_csv(&self, &graph_owl_core::Principal, impl core::convert::Into<std::path::PathBuf>) -> core::result::Result<graph_owl_lpg_io::ExportSummary, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::export_cypher_script(&self, &graph_owl_core::Principal, impl core::convert::Into<std::path::PathBuf>) -> core::result::Result<graph_owl_lpg_io::ExportSummary, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::export_dcat(&self, &graph_owl_api::DcatExportScope) -> core::result::Result<alloc::vec::Vec<graph_owl_core::flake::Flake>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::export_graphml(&self, &graph_owl_core::Principal, impl core::convert::Into<std::path::PathBuf>) -> core::result::Result<graph_owl_lpg_io::ExportSummary, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::export_json_graph(&self, &graph_owl_core::Principal) -> core::result::Result<graph_owl_lpg_io::JsonGraphView, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::export_json_lines(&self, &graph_owl_core::Principal, impl core::convert::Into<std::path::PathBuf>) -> core::result::Result<graph_owl_lpg_io::ExportSummary, graph_owl_api::CatalogError>
+pub fn graph_owl_api::Catalog::export_manifest(graph_owl_api::ExportFormat) -> graph_owl_api::ExportManifest
+pub async fn graph_owl_api::Catalog::export_openlineage(&self, &graph_owl_api::DcatExportScope) -> core::result::Result<alloc::vec::Vec<serde_json::value::Value>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::export_rdf(&self, &graph_owl_core::Principal, graph_owl_rdf_io::RdfFormat) -> core::result::Result<alloc::vec::Vec<u8>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::extension_filters(&self, core::option::Option<graph_owl_core::AssetKind>, &[(alloc::string::String, graph_owl_storage::ExtensionOp, alloc::string::String)]) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::ExtensionFilter>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::extraction_queue(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_api::extraction::PendingClaim>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::fail_ingest_job(&self, uuid::Uuid, &str) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub fn graph_owl_api::Catalog::federation_endpoints(&self) -> &[alloc::string::String]
+pub async fn graph_owl_api::Catalog::finish_run(&self, &graph_owl_storage::ConnectorRun) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::follow_asset(&self, uuid::Uuid, &str) -> core::result::Result<graph_owl_storage::FollowOutcome, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::follower_count(&self, uuid::Uuid) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::force_ontology_reasoning(&self, graph_owl_ontology::profile::Profile) -> core::result::Result<graph_owl_ontology::profile::PartialRouting, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_asset(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_core::Asset>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_asset_as_of(&self, uuid::Uuid, chrono::datetime::DateTime<chrono::offset::utc::Utc>) -> core::result::Result<graph_owl_core::Asset, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_asset_by_fqn(&self, &str) -> core::result::Result<core::option::Option<graph_owl_core::Asset>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_asset_for(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<graph_owl_core::Asset, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_contract(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_storage::StoredContract>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_data_product(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_core::domain::DataProduct>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_domain(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_core::domain::Domain>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_glossary(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_storage::Glossary>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_metric(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_storage::MetricRecord>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_ontology_pack(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_ontology::pack::OntologyPack>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_table(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_core::Table>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_term(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_storage::GlossaryTermRecord>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::health_of(&self, &str) -> core::result::Result<graph_owl_core::quality::HealthSummary, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::ignore_drift(&self, &graph_owl_core::Principal, uuid::Uuid, alloc::string::String) -> core::result::Result<graph_owl_core::drift::DriftItem, graph_owl_api::CatalogError>
+pub fn graph_owl_api::Catalog::import_graph(&str) -> graph_owl_core::flake::Sid
+pub async fn graph_owl_api::Catalog::import_openlineage(&self, &graph_owl_core::Principal, &serde_json::value::Value) -> core::result::Result<graph_owl_api::OpenLineageImportOutcome, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::import_pack(&self, &graph_owl_core::Principal, alloc::string::String, alloc::string::String, graph_owl_ontology::pack::Licence, alloc::string::String, &[u8], bool) -> core::result::Result<graph_owl_ontology::pack::OntologyPack, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::import_rdf(&self, &str, &[u8], graph_owl_rdf_io::RdfFormat, core::option::Option<&str>, bool) -> core::result::Result<graph_owl_api::ImportOutcome, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::inbound_event(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_core::webhook::InboundEvent>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::ingest(&self, &graph_owl_core::Principal, alloc::vec::Vec<graph_owl_api::IngestItem>, alloc::vec::Vec<graph_owl_api::IngestEdge>) -> core::result::Result<alloc::vec::Vec<graph_owl_api::IngestOutcome>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::ingest_job(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_storage::IngestJob>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::ingest_record(&self, &graph_owl_core::Principal, graph_owl_core::AssetKind, &[alloc::string::String], core::option::Option<alloc::string::String>, core::option::Option<serde_json::value::Value>) -> core::result::Result<graph_owl_core::Asset, graph_owl_api::CatalogError>
+pub fn graph_owl_api::Catalog::invalidate_authorization(&self)
+pub async fn graph_owl_api::Catalog::issue_certification(&self, &graph_owl_core::Principal, &str, uuid::Uuid, core::option::Option<alloc::string::String>, core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>) -> core::result::Result<graph_owl_storage::StoredCertification, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::labels_on(&self, &str) -> core::result::Result<alloc::vec::Vec<graph_owl_core::classification::TagLabel>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::lineage_graph(&self, uuid::Uuid, usize, usize, usize) -> core::result::Result<(alloc::vec::Vec<graph_owl_core::Asset>, alloc::vec::Vec<graph_owl_core::lineage::LineageEdge>, bool), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_announcements(&self, uuid::Uuid, usize, usize) -> core::result::Result<(alloc::vec::Vec<graph_owl_core::collaboration::Announcement>, i64), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_assets(&self, core::option::Option<graph_owl_core::AssetKind>, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<graph_owl_core::Asset>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_assets_for(&self, &graph_owl_core::Principal, &graph_owl_storage::AssetFilter<'_>, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<graph_owl_core::Asset>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_certification_types(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::StoredCertificationType>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_change_proposals_by_user(&self, &str, usize, usize) -> core::result::Result<(alloc::vec::Vec<graph_owl_core::collaboration::Proposal>, i64), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_change_proposals_for_entity(&self, uuid::Uuid, core::option::Option<graph_owl_core::collaboration::ProposalStatus>, usize, usize) -> core::result::Result<(alloc::vec::Vec<graph_owl_core::collaboration::Proposal>, i64), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_children(&self, core::option::Option<uuid::Uuid>) -> core::result::Result<alloc::vec::Vec<graph_owl_core::Asset>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_children_for(&self, &graph_owl_core::Principal, core::option::Option<uuid::Uuid>) -> core::result::Result<alloc::vec::Vec<graph_owl_core::Asset>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_classifications(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_core::classification::Classification>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_contracts(&self, core::option::Option<&str>) -> core::result::Result<alloc::vec::Vec<graph_owl_core::contract::Contract>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_custom_properties(&self, core::option::Option<&str>) -> core::result::Result<alloc::vec::Vec<(uuid::Uuid, graph_owl_core::custom_property::CustomProperty)>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_data_products(&self, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<graph_owl_core::domain::DataProduct>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_domains(&self, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<graph_owl_core::domain::Domain>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_drift(&self, &graph_owl_core::Principal, &graph_owl_storage::DriftFilter) -> core::result::Result<(alloc::vec::Vec<graph_owl_core::drift::DriftItem>, i64), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_glossaries(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::Glossary>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_metrics(&self, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<graph_owl_storage::MetricRecord>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_ontology_packs(&self, &graph_owl_core::Principal) -> core::result::Result<alloc::vec::Vec<graph_owl_ontology::pack::OntologyPack>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_pack_overrides(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<graph_owl_ontology::pack::PackOverride>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_pack_terms(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<graph_owl_api::PackTermView>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_policies(&self) -> core::result::Result<alloc::vec::Vec<(graph_owl_authz::Policy, alloc::vec::Vec<alloc::string::String>)>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_posts(&self, &graph_owl_core::Principal, uuid::Uuid, usize, usize) -> core::result::Result<(alloc::vec::Vec<graph_owl_core::collaboration::Post>, i64), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_relationships_for_table(&self, uuid::Uuid) -> core::result::Result<core::option::Option<alloc::vec::Vec<graph_owl_core::Relationship>>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_stream_subscriptions(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::StreamSubscription>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_tables(&self, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<graph_owl_core::Table>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_tags(&self, core::option::Option<uuid::Uuid>) -> core::result::Result<alloc::vec::Vec<graph_owl_core::classification::Tag>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_terms(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::GlossaryTermRecord>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_test_cases(&self, core::option::Option<&str>, core::option::Option<uuid::Uuid>) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::StoredTestCase>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_test_definitions(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::StoredTestDefinition>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_threads(&self, &graph_owl_core::Principal, uuid::Uuid, core::option::Option<bool>, usize, usize) -> core::result::Result<(alloc::vec::Vec<graph_owl_core::collaboration::Thread>, i64), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_webhook_endpoints(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::WebhookEndpoint>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::lpg_node_for(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_api::LpgNodeView>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::mapping(&self, &str) -> core::result::Result<core::option::Option<graph_owl_storage::Mapping>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::mapping_versions(&self, &str) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::Mapping>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::memory(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_core::memory::Memory>, graph_owl_api::CatalogError>
+pub fn graph_owl_api::Catalog::new(alloc::sync::Arc<dyn graph_owl_storage::Storage>) -> Self
+pub async fn graph_owl_api::Catalog::overview(&self, &graph_owl_core::Principal) -> core::result::Result<graph_owl_api::Overview, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::partition_health(&self) -> core::result::Result<core::option::Option<graph_owl_engine::PartitionHealth>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::pending_alignment_review(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_core::flake::Flake>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::pending_alignment_review_detailed(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_api::AlignmentReviewEntry>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::ping(&self) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::policies_for(&self, &graph_owl_core::Principal) -> core::result::Result<alloc::vec::Vec<graph_owl_authz::Policy>, graph_owl_api::CatalogError>
+pub fn graph_owl_api::Catalog::pool_stats(&self) -> core::option::Option<graph_owl_storage::PoolStats>
+pub async fn graph_owl_api::Catalog::popularity(&self, &str) -> core::result::Result<graph_owl_core::usage::PopularitySummary, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::process_inbound_event(&self, uuid::Uuid) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::product_assets(&self, uuid::Uuid, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<graph_owl_core::Asset>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::project_incremental(&self, &graph_owl_core::Principal, &dyn graph_owl_lpg_io::projection::GraphProjectionTarget) -> core::result::Result<graph_owl_lpg_io::projection::ProjectionAck, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::projection_drift(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_core::Asset>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::propagate_tag(&self, &graph_owl_core::Principal, &str, &str, bool) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::propose_change(&self, &graph_owl_core::Principal, uuid::Uuid, alloc::string::String, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>, alloc::string::String) -> core::result::Result<graph_owl_core::collaboration::Proposal, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::prune_test_results(&self) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::prune_usage(&self) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::purge_dead_letters(&self, chrono::datetime::DateTime<chrono::offset::utc::Utc>) -> core::result::Result<u64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::push_drift_report(&self, &graph_owl_core::Principal, alloc::vec::Vec<graph_owl_core::drift::DriftReportItem>) -> core::result::Result<alloc::vec::Vec<graph_owl_core::drift::DriftItem>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::reaction_counts(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<(graph_owl_core::collaboration::ReactionKind, i64)>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::rebuild_usage_rollups(&self, &str) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::recall(&self, uuid::Uuid, &str, bool) -> core::result::Result<alloc::vec::Vec<graph_owl_api::RecalledMemory>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::receive_webhook(&self, &graph_owl_storage::WebhookEndpoint, core::option::Option<&str>, &[u8]) -> core::result::Result<graph_owl_core::webhook::InboundEvent, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::recent_runs(&self, &str, usize) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::ConnectorRun>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::recertification_queue(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::StoredCertification>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::reconcile_deletions(&self, &graph_owl_core::Principal, &str, &std::collections::hash::set::HashSet<alloc::string::String>, f64) -> core::result::Result<graph_owl_connectors::DeletionPlan, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::reconcile_lineage(&self, &graph_owl_core::Principal, &str, &str, &[(uuid::Uuid, uuid::Uuid, alloc::string::String)]) -> core::result::Result<graph_owl_storage::LineageReconciliation, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::reconcile_projection(&self) -> core::result::Result<usize, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::record_idempotent_response(&self, &str, u16, &serde_json::value::Value) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::record_stream_dead_letter(&self, graph_owl_storage::StreamDeadLetter) -> core::result::Result<graph_owl_storage::StreamDeadLetter, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::record_test_results(&self, alloc::vec::Vec<graph_owl_storage::TestResultWrite>) -> core::result::Result<graph_owl_storage::ResultIngest, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::record_usage(&self, alloc::vec::Vec<graph_owl_storage::UsageWrite>) -> core::result::Result<graph_owl_storage::UsageIngest, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::register_stream_subscription(&self, graph_owl_storage::StreamSubscription, core::option::Option<&[u8]>) -> core::result::Result<graph_owl_storage::StreamSubscription, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::register_webhook_endpoint(&self, graph_owl_storage::WebhookEndpoint, core::option::Option<&[u8]>) -> core::result::Result<graph_owl_storage::WebhookEndpoint, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::reject_change_proposal(&self, &graph_owl_core::Principal, uuid::Uuid, alloc::string::String) -> core::result::Result<graph_owl_core::collaboration::Proposal, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::reject_review(&self, &graph_owl_core::Principal, uuid::Uuid, alloc::string::String) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::remember_source_hash(&self, uuid::Uuid, &[u8]) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::remove_lineage(&self, uuid::Uuid) -> core::result::Result<bool, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::remove_pack(&self, &graph_owl_core::Principal, uuid::Uuid, bool) -> core::result::Result<graph_owl_api::PackRemovalReport, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::remove_product_asset(&self, uuid::Uuid, uuid::Uuid) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::remove_tag(&self, &str, &str) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::remove_term_relation(&self, uuid::Uuid, &graph_owl_core::glossary::SkosRelation) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::reopen_thread(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<graph_owl_core::collaboration::Thread, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::replay_stream_dead_letter(&self, uuid::Uuid) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::replay_window(&self, uuid::Uuid, chrono::datetime::DateTime<chrono::offset::utc::Utc>, chrono::datetime::DateTime<chrono::offset::utc::Utc>) -> core::result::Result<graph_owl_api::ReplaySummary, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::reply_to_thread(&self, &graph_owl_core::Principal, uuid::Uuid, alloc::string::String) -> core::result::Result<graph_owl_core::collaboration::Post, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::resolve_asset(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<graph_owl_core::resolution::Resolution, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::resolve_asset_domain(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_core::domain::DomainAssignment>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::resolve_mention(&self, &graph_owl_core::Principal, uuid::Uuid, graph_owl_core::resolution::TextMention) -> core::result::Result<core::option::Option<graph_owl_core::resolution::MentionResolution>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::resolve_principal(&self, &str, &str) -> core::result::Result<graph_owl_core::Principal, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::resolve_thread(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<graph_owl_core::collaboration::Thread, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::resolve_usage_consumer(&self, &str, &str) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::restore_archive(&self, &graph_owl_core::Principal, &std::path::Path, graph_owl_core::archive::ConflictPolicy, bool) -> core::result::Result<graph_owl_api::archive::RestoreOutcome, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::restore_asset(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<u64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::retract_memory(&self, uuid::Uuid, &str) -> core::result::Result<graph_owl_core::memory::Memory, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::review_contradiction(&self, graph_owl_core::contradiction::Review, &str, core::option::Option<&str>) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::review_queue(&self, &graph_owl_core::Principal, &graph_owl_storage::ReviewQueueFilter) -> core::result::Result<(alloc::vec::Vec<graph_owl_core::resolution::ReviewQueueEntry>, i64), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::revoke_waiver(&self, uuid::Uuid) -> core::result::Result<bool, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::route_ontology_reasoning(&self) -> core::result::Result<graph_owl_ontology::profile::RoutingDecision, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::run_batch_ingest(&self, uuid::Uuid, impl alloc::io::buf_read::BufRead + core::marker::Send + 'static, graph_owl_connectors::rows::Format, graph_owl_core::Principal, usize) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::run_reasoning(&self, &graph_owl_reasoning::Budget) -> core::result::Result<graph_owl_api::ReasoningReport, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::run_reasoning_incremental(&self, &[graph_owl_core::flake::Flake], &graph_owl_reasoning::Budget) -> core::result::Result<graph_owl_api::ReasoningReport, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::run_validation(&self) -> core::result::Result<graph_owl_api::ValidationRun, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::run_validation_as(&self, &graph_owl_core::Principal, graph_owl_api::SparqlBudget) -> core::result::Result<graph_owl_api::ValidationRun, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::save_connector_config(&self, &str, &str, serde_json::value::Value, core::option::Option<&str>) -> core::result::Result<graph_owl_storage::ConnectorConfig, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::save_rdf_edit(&self, &str, graph_owl_rdf_io::RdfFormat, &str) -> core::result::Result<graph_owl_api::RdfEditSave, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::search_assets(&self, &str, core::option::Option<graph_owl_core::AssetKind>, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<graph_owl_core::Asset>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::search_assets_for(&self, &graph_owl_core::Principal, &str, &graph_owl_storage::AssetFilter<'_>, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<graph_owl_storage::SearchHit>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::search_memories(&self, &graph_owl_storage::MemorySearchFilter) -> core::result::Result<(alloc::vec::Vec<graph_owl_core::memory::Memory>, i64), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::search_metrics(&self, &str) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::MetricRecord>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::search_terms(&self, &str) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::GlossaryTermRecord>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::seed_core_shapes(&self) -> core::result::Result<usize, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::set_asset_owners(&self, uuid::Uuid, &[graph_owl_core::ownership::OwnerRef]) -> core::result::Result<alloc::vec::Vec<graph_owl_core::ownership::EntityReference>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::set_column_mappings(&self, uuid::Uuid, alloc::vec::Vec<graph_owl_storage::ColumnMapping>) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::set_contract_status(&self, &graph_owl_core::Principal, uuid::Uuid, graph_owl_core::contract::ContractStatus) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::set_definition_cadence(&self, uuid::Uuid, core::option::Option<alloc::string::String>) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::set_lifecycle(&self, &graph_owl_core::Principal, uuid::Uuid, graph_owl_core::lifecycle::LifecycleState, core::option::Option<graph_owl_core::lifecycle::Deprecation>) -> core::result::Result<graph_owl_core::Asset, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::set_metric_sources(&self, uuid::Uuid, alloc::vec::Vec<alloc::string::String>) -> core::result::Result<graph_owl_storage::MetricRecord, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::set_term_reviewers(&self, uuid::Uuid, alloc::vec::Vec<alloc::string::String>) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::set_user_roles(&self, &str, alloc::vec::Vec<alloc::string::String>) -> core::result::Result<graph_owl_storage::StoredUser, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::soft_delete_asset(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<u64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::soft_delete_asset_forced(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<u64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::sparql(&self, &graph_owl_core::Principal, &str, core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>, graph_owl_api::SparqlBudget) -> core::result::Result<graph_owl_api::SparqlOutcome, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::split_merge(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<graph_owl_core::resolution::MergeRecord, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::start_thread(&self, &graph_owl_core::Principal, uuid::Uuid, core::option::Option<alloc::string::String>, alloc::string::String) -> core::result::Result<(graph_owl_core::collaboration::Thread, graph_owl_core::collaboration::Post), graph_owl_api::CatalogError>
+pub fn graph_owl_api::Catalog::storing_query_text(self) -> Self
+pub async fn graph_owl_api::Catalog::stream_dead_letters(&self, core::option::Option<uuid::Uuid>) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::StreamDeadLetter>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::stream_subscription(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_storage::StreamSubscription>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::submit_extraction(&self, &graph_owl_core::extraction::ParsedDocument, graph_owl_core::extraction::ExtractionResult, &str, &str) -> core::result::Result<graph_owl_api::extraction::SubmissionOutcome, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::suggested_labels(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_core::classification::TagLabel>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::supersede_memory(&self, uuid::Uuid, &graph_owl_core::memory::Memory) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::tag_usage(&self, &str) -> core::result::Result<graph_owl_storage::TagUsage, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::teams(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::Team>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::term_relations(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<graph_owl_core::glossary::SkosRelation>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::term_reviewers(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::term_usage(&self, uuid::Uuid, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<alloc::string::String>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::terminal_successor(&self, &str) -> core::result::Result<core::option::Option<graph_owl_core::Asset>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::test_results(&self, uuid::Uuid) -> core::result::Result<alloc::vec::Vec<graph_owl_storage::StoredTestResult>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::toggle_reaction(&self, &graph_owl_core::Principal, uuid::Uuid, graph_owl_core::collaboration::ReactionKind) -> core::result::Result<graph_owl_core::collaboration::ReactionAction, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::transition_term(&self, uuid::Uuid, graph_owl_core::glossary::TermStatus, &str, core::option::Option<alloc::string::String>, core::option::Option<uuid::Uuid>) -> core::result::Result<graph_owl_storage::GlossaryTermRecord, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::unassign_finding(&self, uuid::Uuid) -> core::result::Result<bool, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::unfollow_asset(&self, uuid::Uuid, &str) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::unresolved_thread_count(&self, uuid::Uuid) -> core::result::Result<i64, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::update_asset(&self, &graph_owl_core::Principal, uuid::Uuid, &graph_owl_core::AssetUpdate, core::option::Option<graph_owl_core::envelope::EntityVersion>) -> core::result::Result<graph_owl_core::Asset, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::update_custom_property(&self, uuid::Uuid, graph_owl_api::CustomPropertyUpdate) -> core::result::Result<graph_owl_core::custom_property::CustomProperty, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::update_data_product(&self, &graph_owl_core::Principal, uuid::Uuid, graph_owl_storage::DataProductUpdate) -> core::result::Result<graph_owl_core::domain::DataProduct, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::update_domain(&self, &graph_owl_core::Principal, uuid::Uuid, graph_owl_storage::DomainUpdate) -> core::result::Result<graph_owl_core::domain::Domain, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::update_metric(&self, uuid::Uuid, graph_owl_storage::MetricUpdate) -> core::result::Result<graph_owl_storage::MetricRecord, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::update_table(&self, &graph_owl_core::Principal, uuid::Uuid, graph_owl_core::TableUpdate) -> core::result::Result<core::option::Option<graph_owl_core::Table>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::update_term(&self, uuid::Uuid, graph_owl_storage::GlossaryTermUpdate) -> core::result::Result<graph_owl_storage::GlossaryTermRecord, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::upgrade_pack(&self, &graph_owl_core::Principal, uuid::Uuid, alloc::string::String, &[u8], bool) -> core::result::Result<graph_owl_api::PackUpgradeResult, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::upsert_alignment(&self, &graph_owl_ontology::alignment::Alignment) -> core::result::Result<graph_owl_api::UpsertAlignmentOutcome, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::upsert_asset(&self, &graph_owl_core::Principal, graph_owl_api::UpsertAsset) -> core::result::Result<graph_owl_core::Asset, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::upsert_mapping(&self, graph_owl_storage::Mapping) -> core::result::Result<graph_owl_storage::Mapping, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::upsert_policy(&self, &graph_owl_authz::Policy, &[alloc::string::String]) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::upsert_team(&self, &graph_owl_storage::Team) -> core::result::Result<graph_owl_storage::Team, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::upsert_user_record(&self, &str, &str, core::option::Option<&str>) -> core::result::Result<graph_owl_storage::StoredUser, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::upstream_health(&self, &str) -> core::result::Result<core::option::Option<graph_owl_api::UpstreamHealth>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::usage_rollups(&self, &str) -> core::result::Result<alloc::vec::Vec<graph_owl_core::usage::UsageRollup>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::validation_report(&self, &graph_owl_storage::ValidationFilter) -> core::result::Result<(alloc::vec::Vec<graph_owl_api::WaivedFinding>, i64, usize), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::waive_finding(&self, &graph_owl_core::Principal, &graph_owl_storage::ValidationFinding, &str, chrono::datetime::DateTime<chrono::offset::utc::Utc>) -> core::result::Result<graph_owl_storage::Waiver, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::webhook_endpoint(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_storage::WebhookEndpoint>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::webhook_endpoint_by_path(&self, &str) -> core::result::Result<core::option::Option<graph_owl_storage::WebhookEndpoint>, graph_owl_api::CatalogError>
+pub fn graph_owl_api::Catalog::with_auto_merge_enabled(self, bool) -> Self
+pub fn graph_owl_api::Catalog::with_el_sidecar(self, graph_owl_reasoning_el::SidecarConfig) -> Self
+pub fn graph_owl_api::Catalog::with_events(self, alloc::sync::Arc<dyn graph_owl_events::EventSink>) -> Self
+pub fn graph_owl_api::Catalog::with_federation_endpoints(self, alloc::vec::Vec<alloc::string::String>) -> Self
+pub fn graph_owl_api::Catalog::with_federation_timeout(self, core::time::Duration) -> Self
+pub fn graph_owl_api::Catalog::with_graph(self, alloc::sync::Arc<dyn graph_owl_engine::TripleStore>) -> Self
+pub fn graph_owl_api::Catalog::with_traversal(self, alloc::sync::Arc<dyn graph_owl_traversal::TraversalEngine>) -> Self
+impl graph_owl_api::Catalog
+pub async fn graph_owl_api::Catalog::accept_proposal(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<graph_owl_authz::agent::Proposal, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::agent_activity(&self, &graph_owl_core::Principal, &str, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<graph_owl_authz::agent::AgentActivity>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::agent_grant(&self, &str) -> core::result::Result<core::option::Option<graph_owl_authz::agent::AgentGrant>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::gate_agent_write(&self, &graph_owl_core::Principal, graph_owl_authz::agent::AgentCapability, &str) -> core::result::Result<graph_owl_api::GatedWrite, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::get_proposal(&self, uuid::Uuid) -> core::result::Result<core::option::Option<graph_owl_authz::agent::Proposal>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_agent_grants(&self) -> core::result::Result<alloc::vec::Vec<graph_owl_authz::agent::AgentGrant>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::list_proposals(&self, core::option::Option<&str>, core::option::Option<graph_owl_authz::agent::ProposalStatus>, &graph_owl_core::page::PageRequest) -> core::result::Result<graph_owl_core::page::Page<graph_owl_authz::agent::Proposal>, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::propose_as_agent(&self, &graph_owl_core::Principal, graph_owl_authz::agent::AgentCapability, &str, serde_json::value::Value, &str, f64) -> core::result::Result<graph_owl_authz::agent::Proposal, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::record_agent_write(&self, &str, graph_owl_authz::agent::AgentCapability, &str, graph_owl_authz::agent::ActivityOutcome) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::reject_proposal(&self, &graph_owl_core::Principal, uuid::Uuid) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::revoke_agent_grant(&self, &graph_owl_core::Principal, &str) -> core::result::Result<bool, graph_owl_api::CatalogError>
+pub async fn graph_owl_api::Catalog::set_agent_grant(&self, &graph_owl_core::Principal, &graph_owl_authz::agent::AgentGrant) -> core::result::Result<(), graph_owl_api::CatalogError>
+pub struct graph_owl_api::CreateCertificationType
+pub graph_owl_api::CreateCertificationType::authorized_issuers: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::CreateCertificationType::default_validity_days: i32
+pub graph_owl_api::CreateCertificationType::description: core::option::Option<alloc::string::String>
+pub graph_owl_api::CreateCertificationType::name: alloc::string::String
+pub graph_owl_api::CreateCertificationType::required_evidence: alloc::vec::Vec<alloc::string::String>
+pub struct graph_owl_api::CreateContract
+pub graph_owl_api::CreateContract::asset_fqn: alloc::string::String
+pub graph_owl_api::CreateContract::compatibility: graph_owl_core::contract::CompatibilityMode
+pub graph_owl_api::CreateContract::consumers: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::CreateContract::name: alloc::string::String
+pub graph_owl_api::CreateContract::producer: alloc::string::String
+pub graph_owl_api::CreateContract::schema_guarantee: graph_owl_core::contract::SchemaGuarantee
+pub graph_owl_api::CreateContract::slas: alloc::vec::Vec<graph_owl_core::contract::Sla>
+pub graph_owl_api::CreateContract::status: graph_owl_core::contract::ContractStatus
+pub struct graph_owl_api::CreateDataProduct
+pub graph_owl_api::CreateDataProduct::description: core::option::Option<alloc::string::String>
+pub graph_owl_api::CreateDataProduct::domain_id: core::option::Option<uuid::Uuid>
+pub graph_owl_api::CreateDataProduct::name: alloc::string::String
+pub graph_owl_api::CreateDataProduct::purpose: core::option::Option<alloc::string::String>
+pub struct graph_owl_api::CreateDomain
+pub graph_owl_api::CreateDomain::description: core::option::Option<alloc::string::String>
+pub graph_owl_api::CreateDomain::domain_type: core::option::Option<alloc::string::String>
+pub graph_owl_api::CreateDomain::experts: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::CreateDomain::name: alloc::string::String
+pub graph_owl_api::CreateDomain::parent_id: core::option::Option<uuid::Uuid>
+pub struct graph_owl_api::CreateRelationship
+pub graph_owl_api::CreateRelationship::relationship_type: alloc::string::String
+pub graph_owl_api::CreateRelationship::to_table_id: uuid::Uuid
+impl graph_owl_api::validation::ValidateBody for graph_owl_api::CreateRelationship
+pub fn graph_owl_api::CreateRelationship::validate_body(&serde_json::value::Value) -> alloc::vec::Vec<graph_owl_api::validation::FieldError>
+impl utoipa::ToSchema for graph_owl_api::CreateRelationship
+pub fn graph_owl_api::CreateRelationship::name() -> alloc::borrow::Cow<'static, str>
+pub fn graph_owl_api::CreateRelationship::schemas(&mut alloc::vec::Vec<(alloc::string::String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>)
+impl utoipa::__dev::ComposeSchema for graph_owl_api::CreateRelationship
+pub fn graph_owl_api::CreateRelationship::compose(alloc::vec::Vec<utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>>) -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>
+pub struct graph_owl_api::CreateTable
+pub graph_owl_api::CreateTable::description: core::option::Option<alloc::string::String>
+pub graph_owl_api::CreateTable::fully_qualified_name: alloc::string::String
+pub graph_owl_api::CreateTable::name: alloc::string::String
+impl graph_owl_api::validation::ValidateBody for graph_owl_api::CreateTable
+pub fn graph_owl_api::CreateTable::validate_body(&serde_json::value::Value) -> alloc::vec::Vec<graph_owl_api::validation::FieldError>
+impl utoipa::ToSchema for graph_owl_api::CreateTable
+pub fn graph_owl_api::CreateTable::name() -> alloc::borrow::Cow<'static, str>
+pub fn graph_owl_api::CreateTable::schemas(&mut alloc::vec::Vec<(alloc::string::String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>)
+impl utoipa::__dev::ComposeSchema for graph_owl_api::CreateTable
+pub fn graph_owl_api::CreateTable::compose(alloc::vec::Vec<utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>>) -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>
+pub struct graph_owl_api::CreateTestCase
+pub graph_owl_api::CreateTestCase::definition_id: core::option::Option<uuid::Uuid>
+pub graph_owl_api::CreateTestCase::description: core::option::Option<alloc::string::String>
+pub graph_owl_api::CreateTestCase::expected_cadence: core::option::Option<alloc::string::String>
+pub graph_owl_api::CreateTestCase::name: alloc::string::String
+pub graph_owl_api::CreateTestCase::suite_id: core::option::Option<uuid::Uuid>
+pub graph_owl_api::CreateTestCase::target_fqn: alloc::string::String
+pub graph_owl_api::CreateTestCase::test_type: alloc::string::String
+pub struct graph_owl_api::CustomPropertyUpdate
+pub graph_owl_api::CustomPropertyUpdate::constraints: core::option::Option<graph_owl_core::custom_property::Constraints>
+pub graph_owl_api::CustomPropertyUpdate::description: core::option::Option<core::option::Option<alloc::string::String>>
+pub graph_owl_api::CustomPropertyUpdate::name: core::option::Option<alloc::string::String>
+pub graph_owl_api::CustomPropertyUpdate::property_type: core::option::Option<graph_owl_core::custom_property::PropertyType>
+pub struct graph_owl_api::CypherRow
+pub graph_owl_api::CypherRow::lossy: alloc::vec::Vec<graph_owl_lpg::LossyMapping>
+pub graph_owl_api::CypherRow::values: alloc::vec::Vec<(alloc::string::String, graph_owl_api::CypherValue)>
+pub struct graph_owl_api::CypherStream
+pub graph_owl_api::CypherStream::fields: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::CypherStream::rows: tokio::sync::mpsc::bounded::Receiver<core::result::Result<graph_owl_api::CypherRow, graph_owl_api::CatalogError>>
+pub struct graph_owl_api::DcatExportScope
+pub graph_owl_api::DcatExportScope::domain_id: core::option::Option<uuid::Uuid>
+pub graph_owl_api::DcatExportScope::include_deleted: bool
+pub graph_owl_api::DcatExportScope::service_fqn: core::option::Option<alloc::string::String>
+pub struct graph_owl_api::ElClassification
+pub graph_owl_api::ElClassification::refused_axioms: alloc::vec::Vec<graph_owl_reasoning_el::RefusedAxiom>
+pub graph_owl_api::ElClassification::subsumptions: alloc::vec::Vec<(graph_owl_core::flake::Sid, graph_owl_core::flake::Sid)>
+pub struct graph_owl_api::ExportManifest
+pub graph_owl_api::ExportManifest::format: alloc::string::String
+pub graph_owl_api::ExportManifest::format_version: alloc::string::String
+pub graph_owl_api::ExportManifest::vocabulary_mappings: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub struct graph_owl_api::GatedWrite
+pub graph_owl_api::GatedWrite::decision: graph_owl_authz::agent::WriteDecision
+pub graph_owl_api::GatedWrite::grant: graph_owl_authz::agent::AgentGrant
+pub struct graph_owl_api::GraphSize
+pub graph_owl_api::GraphSize::edges: u64
+pub graph_owl_api::GraphSize::flakes: u64
+pub graph_owl_api::GraphSize::nodes: u64
+pub struct graph_owl_api::ImportOutcome
+pub graph_owl_api::ImportOutcome::landed: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::ImportOutcome::rejected: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub graph_owl_api::ImportOutcome::skipped: alloc::vec::Vec<alloc::string::String>
+pub struct graph_owl_api::IngestEdge
+pub graph_owl_api::IngestEdge::description: core::option::Option<alloc::string::String>
+pub graph_owl_api::IngestEdge::from_fqn: alloc::string::String
+pub graph_owl_api::IngestEdge::query: core::option::Option<alloc::string::String>
+pub graph_owl_api::IngestEdge::relationship: alloc::string::String
+pub graph_owl_api::IngestEdge::to_fqn: alloc::string::String
+pub struct graph_owl_api::IngestItem
+pub graph_owl_api::IngestItem::description: core::option::Option<alloc::string::String>
+pub graph_owl_api::IngestItem::kind: graph_owl_core::AssetKind
+pub graph_owl_api::IngestItem::name: alloc::string::String
+pub graph_owl_api::IngestItem::parent_fqn: core::option::Option<alloc::string::String>
+pub graph_owl_api::IngestItem::properties: core::option::Option<serde_json::value::Value>
+pub struct graph_owl_api::IngestOutcome
+pub graph_owl_api::IngestOutcome::id: core::option::Option<uuid::Uuid>
+pub graph_owl_api::IngestOutcome::index: usize
+pub graph_owl_api::IngestOutcome::problem: core::option::Option<alloc::string::String>
+pub graph_owl_api::IngestOutcome::status: u16
+pub struct graph_owl_api::LpgNodeView
+pub graph_owl_api::LpgNodeView::node: graph_owl_lpg::LpgNode
+pub graph_owl_api::LpgNodeView::report: graph_owl_lpg::MappingReport
+pub struct graph_owl_api::OpenLineageImportOutcome
+pub graph_owl_api::OpenLineageImportOutcome::landed: usize
+pub graph_owl_api::OpenLineageImportOutcome::run_id: alloc::string::String
+pub graph_owl_api::OpenLineageImportOutcome::skipped: usize
+pub graph_owl_api::OpenLineageImportOutcome::stub_datasets: alloc::vec::Vec<alloc::string::String>
+pub struct graph_owl_api::Overview
+pub graph_owl_api::Overview::by_kind: alloc::vec::Vec<(graph_owl_core::AssetKind, i64)>
+pub graph_owl_api::Overview::described: i64
+pub graph_owl_api::Overview::documented_total: i64
+pub graph_owl_api::Overview::graph: core::option::Option<graph_owl_api::GraphSize>
+pub graph_owl_api::Overview::recently_changed: alloc::vec::Vec<graph_owl_core::Asset>
+pub graph_owl_api::Overview::total: i64
+pub struct graph_owl_api::PackAttachmentCount
+pub graph_owl_api::PackAttachmentCount::count: i64
+pub graph_owl_api::PackAttachmentCount::source_iri: alloc::string::String
+impl utoipa::ToSchema for graph_owl_api::PackAttachmentCount
+pub fn graph_owl_api::PackAttachmentCount::name() -> alloc::borrow::Cow<'static, str>
+pub fn graph_owl_api::PackAttachmentCount::schemas(&mut alloc::vec::Vec<(alloc::string::String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>)
+impl utoipa::__dev::ComposeSchema for graph_owl_api::PackAttachmentCount
+pub fn graph_owl_api::PackAttachmentCount::compose(alloc::vec::Vec<utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>>) -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>
+pub struct graph_owl_api::PackRemovalReport
+pub graph_owl_api::PackRemovalReport::attachment_counts: alloc::vec::Vec<graph_owl_api::PackAttachmentCount>
+pub graph_owl_api::PackRemovalReport::term_count: usize
+pub graph_owl_api::PackRemovalReport::total_attachments: i64
+impl utoipa::ToSchema for graph_owl_api::PackRemovalReport
+pub fn graph_owl_api::PackRemovalReport::name() -> alloc::borrow::Cow<'static, str>
+pub fn graph_owl_api::PackRemovalReport::schemas(&mut alloc::vec::Vec<(alloc::string::String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>)
+impl utoipa::__dev::ComposeSchema for graph_owl_api::PackRemovalReport
+pub fn graph_owl_api::PackRemovalReport::compose(alloc::vec::Vec<utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>>) -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>
+pub struct graph_owl_api::PackTermView
+pub graph_owl_api::PackTermView::effective: graph_owl_ontology::pack::EffectiveTerm
+pub graph_owl_api::PackTermView::source_iri: alloc::string::String
+pub graph_owl_api::PackTermView::term: graph_owl_storage::GlossaryTermRecord
+pub struct graph_owl_api::PackUpgradeResult
+pub graph_owl_api::PackUpgradeResult::applied: bool
+pub graph_owl_api::PackUpgradeResult::report: graph_owl_ontology::pack::UpgradeReport
+impl utoipa::ToSchema for graph_owl_api::PackUpgradeResult
+pub fn graph_owl_api::PackUpgradeResult::name() -> alloc::borrow::Cow<'static, str>
+pub fn graph_owl_api::PackUpgradeResult::schemas(&mut alloc::vec::Vec<(alloc::string::String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>)
+impl utoipa::__dev::ComposeSchema for graph_owl_api::PackUpgradeResult
+pub fn graph_owl_api::PackUpgradeResult::compose(alloc::vec::Vec<utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>>) -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>
+pub struct graph_owl_api::PolicyDryRun
+pub graph_owl_api::PolicyDryRun::admits_everything: bool
+pub graph_owl_api::PolicyDryRun::admitted: usize
+pub graph_owl_api::PolicyDryRun::denied: usize
+pub graph_owl_api::PolicyDryRun::examples: alloc::vec::Vec<alloc::string::String>
+pub struct graph_owl_api::PreviewTriple
+pub graph_owl_api::PreviewTriple::o: alloc::string::String
+pub graph_owl_api::PreviewTriple::o_is_ref: bool
+pub graph_owl_api::PreviewTriple::p: alloc::string::String
+pub graph_owl_api::PreviewTriple::s: alloc::string::String
+pub struct graph_owl_api::QlRewrite
+pub graph_owl_api::QlRewrite::branches: alloc::vec::Vec<graph_owl_reasoning_ql::QlBranch>
+pub graph_owl_api::QlRewrite::expanded_query: alloc::string::String
+pub struct graph_owl_api::RdfEditPreview
+pub graph_owl_api::RdfEditPreview::declared: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::RdfEditPreview::triples: alloc::vec::Vec<graph_owl_api::PreviewTriple>
+pub struct graph_owl_api::RdfEditSyntaxError
+pub graph_owl_api::RdfEditSyntaxError::column: core::option::Option<u64>
+pub graph_owl_api::RdfEditSyntaxError::line: core::option::Option<u64>
+pub graph_owl_api::RdfEditSyntaxError::message: alloc::string::String
+impl core::convert::From<graph_owl_rdf_io::LocatedParseError> for graph_owl_api::RdfEditSyntaxError
+pub fn graph_owl_api::RdfEditSyntaxError::from(graph_owl_rdf_io::LocatedParseError) -> Self
+pub struct graph_owl_api::ReasoningReport
+pub graph_owl_api::ReasoningReport::capped: core::option::Option<graph_owl_reasoning::CappedReason>
+pub graph_owl_api::ReasoningReport::derived: usize
+pub graph_owl_api::ReasoningReport::duration_ms: u64
+pub graph_owl_api::ReasoningReport::iterations: usize
+pub graph_owl_api::ReasoningReport::replaced: usize
+pub graph_owl_api::ReasoningReport::technique: graph_owl_api::ReasoningTechnique
+pub struct graph_owl_api::RecalledMemory
+pub graph_owl_api::RecalledMemory::memory: graph_owl_core::memory::Memory
+pub graph_owl_api::RecalledMemory::score: graph_owl_core::recall::Score
+pub graph_owl_api::RecalledMemory::staleness: graph_owl_core::memory::Staleness
+pub struct graph_owl_api::ReplaySummary
+pub graph_owl_api::ReplaySummary::applied: usize
+pub graph_owl_api::ReplaySummary::attempted: usize
+pub graph_owl_api::ReplaySummary::skipped: usize
+pub graph_owl_api::ReplaySummary::still_failed: usize
+pub struct graph_owl_api::SparqlBudget
+pub graph_owl_api::SparqlBudget::max_facts: usize
+pub graph_owl_api::SparqlBudget::ql: graph_owl_reasoning_ql::RewriteBudget
+impl core::default::Default for graph_owl_api::SparqlBudget
+pub fn graph_owl_api::SparqlBudget::default() -> Self
+pub struct graph_owl_api::SparqlOutcome
+pub graph_owl_api::SparqlOutcome::as_of: core::option::Option<i64>
+pub graph_owl_api::SparqlOutcome::facts_scanned: usize
+pub graph_owl_api::SparqlOutcome::federated_endpoints: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::SparqlOutcome::plan: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::SparqlOutcome::ql_rewrite: core::option::Option<graph_owl_api::QlRewrite>
+pub graph_owl_api::SparqlOutcome::refused_axioms: alloc::vec::Vec<graph_owl_reasoning_ql::RefusedAxiom>
+pub graph_owl_api::SparqlOutcome::rows: alloc::vec::Vec<alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>>
+pub graph_owl_api::SparqlOutcome::silenced_endpoints: alloc::vec::Vec<alloc::string::String>
+pub graph_owl_api::SparqlOutcome::truncated: bool
+pub graph_owl_api::SparqlOutcome::variables: alloc::vec::Vec<alloc::string::String>
+pub struct graph_owl_api::UpsertAsset
+pub graph_owl_api::UpsertAsset::description: core::option::Option<alloc::string::String>
+pub graph_owl_api::UpsertAsset::extension: core::option::Option<serde_json::map::Map<alloc::string::String, serde_json::value::Value>>
+pub graph_owl_api::UpsertAsset::kind: graph_owl_core::AssetKind
+pub graph_owl_api::UpsertAsset::name: alloc::string::String
+pub graph_owl_api::UpsertAsset::parent_id: core::option::Option<uuid::Uuid>
+pub graph_owl_api::UpsertAsset::properties: core::option::Option<serde_json::value::Value>
+impl graph_owl_api::validation::ValidateBody for graph_owl_api::UpsertAsset
+pub fn graph_owl_api::UpsertAsset::validate_body(&serde_json::value::Value) -> alloc::vec::Vec<graph_owl_api::validation::FieldError>
+impl utoipa::ToSchema for graph_owl_api::UpsertAsset
+pub fn graph_owl_api::UpsertAsset::name() -> alloc::borrow::Cow<'static, str>
+pub fn graph_owl_api::UpsertAsset::schemas(&mut alloc::vec::Vec<(alloc::string::String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>)
+impl utoipa::__dev::ComposeSchema for graph_owl_api::UpsertAsset
+pub fn graph_owl_api::UpsertAsset::compose(alloc::vec::Vec<utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>>) -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>
+pub struct graph_owl_api::UpstreamHealth
+pub graph_owl_api::UpstreamHealth::asset_fqn: alloc::string::String
+pub graph_owl_api::UpstreamHealth::hops: usize
+pub graph_owl_api::UpstreamHealth::state: graph_owl_core::quality::Health
+pub struct graph_owl_api::ValidationRun
+pub graph_owl_api::ValidationRun::computed_at_t: i64
+pub graph_owl_api::ValidationRun::conforms: bool
+pub graph_owl_api::ValidationRun::info: usize
+pub graph_owl_api::ValidationRun::refused_shapes: usize
+pub graph_owl_api::ValidationRun::shapes: usize
+pub graph_owl_api::ValidationRun::sparql_truncated: bool
+pub graph_owl_api::ValidationRun::violations: usize
+pub graph_owl_api::ValidationRun::warnings: usize
+pub struct graph_owl_api::WaivedFinding
+pub graph_owl_api::WaivedFinding::assignment: core::option::Option<graph_owl_storage::Assignment>
+pub graph_owl_api::WaivedFinding::finding: graph_owl_storage::ValidationFinding
+pub graph_owl_api::WaivedFinding::waiver: core::option::Option<graph_owl_storage::Waiver>
+pub graph_owl_api::WaivedFinding::waiver_expired: bool
+pub const graph_owl_api::BATCH_ERROR_CAP: usize
+pub fn graph_owl_api::preview_rdf_edit(graph_owl_rdf_io::RdfFormat, &str) -> core::result::Result<graph_owl_api::RdfEditPreview, graph_owl_api::RdfEditSyntaxError>
+pub fn graph_owl_api::shapes_graph() -> graph_owl_core::flake::Sid

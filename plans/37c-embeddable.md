@@ -1,6 +1,6 @@
 # Plan: Embeddable Library (Epic 37c) ★
 **Branch**: feat/embeddable
-**Status**: Slices A–D shipped 4 August 2026. `graph-owl-storage-memory` is now a real published crate (Slice B), `examples/embedded.rs` proves the embedding claim end to end (Slice C), and both `core` and `api` now build under `#![deny(missing_docs)]` with doctests and a stated stability policy (Slice D). Slice E shipped partially 8 August 2026 — see below for exactly what and why. **Slice F's stated blocker is stale**: it names Epic 34 (a second entity family to expand the embedding surface against), but Epic 34 shipped 5 August 2026 — one day *after* these Slices A–D — and nobody has revisited Slice F since. It is unblocked and unstarted, not blocked.
+**Status**: Slices A–D shipped 4 August 2026. `graph-owl-storage-memory` is now a real published crate (Slice B), `examples/embedded.rs` proves the embedding claim end to end (Slice C), and both `core` and `api` now build under `#![deny(missing_docs)]` with doctests and a stated stability policy (Slice D). Slice E shipped partially and Slice F shipped in full, both 8 August 2026 — see below for exactly what and why. The epic's feature-level acceptance criteria are now all met or deliberately, recordedly partial; nothing remains unstarted.
 **Depends on**: Epic 1 (stable contract); benefits from Epic 34 (wide surface to validate against)
 **Differentiator** — see `plans/00a-product-position.md`
 **Crates**: **`graph-owl-storage-memory`** (new — promoted from the test fake to a published crate) · `graph-owl-core` + `graph-owl-api` (documented, `#![deny(missing_docs)]`, published) · dependency-boundary CI check
@@ -36,7 +36,7 @@ The property is worth proving against the widest possible surface. Publishing an
 - [x] `graph-owl-core` and `graph-owl-api` construct no async runtime and read no global state — asserted in CI. Scoped to these two crates rather than every graph-owl crate; see Slice A below for why.
 - [x] The embedding surface is documented with runnable examples that compile in CI. `#![deny(missing_docs)]` now holds on both `core` and `api` (Slice D).
 - [~] Crates publish to a registry with correct metadata and semver — metadata and semver-ready manifests are done workspace-wide; the real registry rollout is a deliberate, deferred future step (see Slice E).
-- [ ] Adding an entity family does not break the embedding surface.
+- [x] Adding an entity family does not break the embedding surface.
 
 ## Slices
 
@@ -116,19 +116,19 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **GREEN**: metadata and version requirements shipped workspace-wide; `cargo check --workspace --all-targets` and `cargo deny check licenses` both green after the manifest changes (Cargo.toml-only edits — no `.rs` file touched, so no behavior to regression-test).
 **Done when**: criteria met, dry-run green, commit approved. **Partially met, by design** — the two release-process criteria and full-chain dry-run wait on the deliberate future decision to actually start publishing.
 
-### Slice F: The surface survives expansion
+### Slice F: The surface survives expansion — shipped 8 August 2026
 
 **Value**: Proves the embedding API is not accidentally coupled to today's entity set.
 **Path**: verify against the entity families from Epic 34.
 **Acceptance criteria**:
-- The example extends to a second entity family with no change to the embedding surface.
-- No new public type was required to embed the expanded catalog.
-- The `Storage` trait's growth across Epics 37–18 did not force embedders to implement methods they do not use — or, if it did, that is recorded as a finding with a proposed remedy.
-- Documentation updated for the wider surface.
-**RED**: Extend the example to a second family and assert the public surface is unchanged (a snapshot test of the exported API, e.g. `cargo public-api`). Mutator watch: a surface change slipping through must fail the snapshot.
-**GREEN**: extension, surface snapshot test.
-**REFACTOR**: if the `Storage` trait has grown so large that implementing it is unreasonable for an embedder, that is a genuine finding. Assess splitting it into narrower traits (`EntityStore`, `RelationshipStore`, `HistoryStore`) — and record the reasoning either way in `plans/00b-architecture.md`.
-**Done when**: criteria met, surface snapshot green, commit approved.
+- [x] The example extends to a second entity family with no change to the embedding surface. `examples/embedded.rs` now also creates a `MessagingService` (Epic 34 Slice B, root-kind like `Service`) and a `Topic` under it — genuinely new, since `Topic` requires a `MessagingService` parent, exercising `parent_id` and FQN-under-parent derivation (`kafka.orders-placed`) that the original `Service`-only walkthrough never touched. Confirmed running against `InMemoryStorage`: all four assertions pass, including `list_children(Some(broker.id))` returning exactly the one topic.
+- [x] No new public type was required to embed the expanded catalog. Proved, not assumed: `cargo public-api -p graph-owl-api -sss` generated before and after the example change, `diff`'d, byte-identical (0 lines changed, 754 lines either side).
+- [x] The `Storage` trait's growth across Epics 37–18 did not force embedders to implement methods they do not use — or, if it did, that is recorded as a finding with a proposed remedy. **It did, and it's recorded**: the trait is 288 methods across 2,901 lines (`crates/graph-owl-storage/src/lib.rs`, counted by `awk` over the trait body, not estimated). Both adapters that exist (`InMemoryStorage`, `PostgresStorage`) already implement all 288, so *this* slice's own extension could not newly demonstrate the friction — a genuinely new third backend is what would. Recorded as `plans/00b-architecture.md` decision 29: deferred, not rejected, because splitting into `EntityStore`/`RelationshipStore`/`HistoryStore`-shaped traits is a real cross-cutting breaking change (every call site in `Catalog`, both adapters, the trait definition) disproportionate to a slice this plan itself scoped as "small (<1 day)".
+- [x] Documentation updated for the wider surface. The example's own module doc comment explains what the new family proves (no new public type) and, as importantly, what it does *not* prove (that `Storage`'s growth was painless for a from-scratch adapter) — so a reader cannot mistake "the two existing adapters still compile" for "implementing this trait is easy."
+**RED**: Extend the example to a second family and assert the public surface is unchanged (a snapshot test of the exported API, e.g. `cargo public-api`) — `cargo-public-api` installed (needs a nightly toolchain for rustdoc JSON extraction; `rustup toolchain install nightly` was required locally and is now a second toolchain in the new `public-api` CI job), baseline generated before touching the example, confirmed identical after. Mutator watch: n/a — this is a snapshot diff, not mutation-tested logic.
+**GREEN**: extension (`examples/embedded.rs`), surface snapshot committed at `crates/graph-owl-api/public-api.txt` (754 lines, `-sss` to omit blanket/auto-trait/auto-derived-impl noise), CI job `public-api` in `.github/workflows/ci.yml` regenerates and diffs on every PR — same "committed contract, diffed in CI" pattern the `contract` job already uses for `openapi.json`.
+**REFACTOR**: assessed, not executed — see the third acceptance criterion above and `00b` decision 29. Splitting `Storage` now would be a different, larger piece of work than this slice, and the finding needed measuring and recording more than it needed an immediate fix.
+**Done when**: criteria met, surface snapshot green, commit approved. Met.
 
 ## Explicitly deferred (with destination)
 
