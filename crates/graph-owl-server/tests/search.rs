@@ -469,3 +469,47 @@ async fn a_name_only_match_has_no_snippet() {
         "nothing to excerpt from an empty description: {hit}"
     );
 }
+
+// ── Phase 3 item 3.7: Decision 5's "column names" tier ──────────────────────
+
+/// **The slice's own RED test.** `search_vector` is a per-row `GENERATED`
+/// column with no way to reach a child row — this proves the denormalization
+/// (`Catalog::sync_table_column_names`, `V56__search_vector_column_names.sql`)
+/// that makes a table findable by a column it has anyway, the identical gap
+/// Epic 34 Slice A already closed for a dashboard and its charts.
+#[tokio::test]
+async fn a_table_is_findable_by_its_columns_name() {
+    let (app, _container, _) = test_app().await;
+    let service = create(&app, json!({ "kind": "service", "name": "hdfc-core" })).await;
+    let database = create(
+        &app,
+        json!({ "kind": "database", "name": "retail", "parentId": service["id"] }),
+    )
+    .await;
+    let schema = create(
+        &app,
+        json!({ "kind": "schema", "name": "payments", "parentId": database["id"] }),
+    )
+    .await;
+    let table = create(
+        &app,
+        json!({ "kind": "table", "name": "orders", "parentId": schema["id"] }),
+    )
+    .await;
+    create(
+        &app,
+        json!({
+            "kind": "column",
+            "name": "settlement_reference_code",
+            "parentId": table["id"],
+        }),
+    )
+    .await;
+
+    let hits = search(&app, "settlement_reference_code").await;
+
+    assert!(
+        hits.iter().any(|name| name == "orders"),
+        "searching a column's name must surface its table: {hits:?}"
+    );
+}

@@ -1640,6 +1640,13 @@ impl Storage for InMemoryStorage {
                         .as_ref()
                         .and_then(|p| p.get("chartNames"))
                         .and_then(|v| v.as_str())
+                        .is_some_and(|names| names.to_lowercase().contains(&needle))
+                    // Phase 3 item 3.7: the same treatment for a table's
+                    // columns — see `Catalog::sync_table_column_names`.
+                    || a.properties
+                        .as_ref()
+                        .and_then(|p| p.get("columnNames"))
+                        .and_then(|v| v.as_str())
                         .is_some_and(|names| names.to_lowercase().contains(&needle)))
                     && kind.is_none_or(|k| a.kind == k)
             })

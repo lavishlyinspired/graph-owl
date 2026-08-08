@@ -44,7 +44,7 @@ is the condition that index exists to catch.
 | **7b** | 8 | [`07b-engine-cypher.md`](07b-engine-cypher.md) | In progress | 0/1 (+1 partial) | Epic 7 (SPARQL plan is the lowering target), Epic 7a (traversal), **Epic 7c (LP… |
 | **7c** | 8 | [`07c-engine-lpg.md`](07c-engine-lpg.md) | **Shipped** | 1/1 | Epic 4 (flakes), Epic 1 (relationship taxonomy) |
 | **7d** | 8 | [`07d-engine-bolt.md`](07d-engine-bolt.md) | **Shipped** | 1/1 | Epic 7b (Cypher), Epic 7c (LPG projection), Epic 12 (auth), Epic 13 (authorizat… |
-| **8** | 2 | [`08-engine-search.md`](08-engine-search.md) | In progress | 8/9 | Epic 3 (change events to subscribe to), Epic 2 (FQNs to rank on), Epic 25 (tags… |
+| **8** | 2 | [`08-engine-search.md`](08-engine-search.md) | In progress | 9/10 | Epic 3 (change events to subscribe to), Epic 2 (FQNs to rank on), Epic 25 (tags… |
 | **9** | 8 | [`09-engine-rdf-io.md`](09-engine-rdf-io.md) | **Shipped** | 1/1 | Epic 4 (triples to serialize) — shipped. ~~Epic 7 (CONSTRUCT produces Turtle)~~… |
 | **9a** | 8 | [`09a-lpg-interchange.md`](09a-lpg-interchange.md) | **Shipped** | 1/1 | Epic 7c (LPG projection) — shipped, and its `FlakeValue::Ref`-vs-`String` kind… |
 | **10** | 2 | [`10-operability.md`](10-operability.md) | **Shipped** | 17/17 | Epic 1 (a server, an error model, and a contract to instrument) |
@@ -218,6 +218,7 @@ is the condition that index exists to catch.
 - [x] Relevance is asserted as an order, not as membership
 - [x] A user cannot reach the query language.
 - [x] The rank key *is* the pagination cursor
+- [x] Column-name search — shipped 8 August 2026
 - [ ] Decision 5's full relevance ordering (exact FQN > exact name > prefix > fuzzy > descript
 - [x] Snippets — shipped 8 August 2026
 - [x] A popularity term folded into ranking — shipped 8 August 2026

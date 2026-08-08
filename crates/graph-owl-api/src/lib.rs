@@ -5881,6 +5881,17 @@ impl Catalog {
             self.sync_dashboard_chart_names(dashboard_id).await?;
         }
 
+        // Phase 3 item 3.7 (Decision 5's "column names" tier). The identical
+        // gap Epic 34 Slice A already solved for a dashboard's charts, for a
+        // table's columns instead: `properties.columnNames` shares the same
+        // weight-D slot `sync_dashboard_chart_names` already writes
+        // `chartNames` into (`V56__search_vector_column_names.sql`).
+        if written.kind == AssetKind::Column
+            && let Some(table_id) = written.parent_id
+        {
+            self.sync_table_column_names(table_id).await?;
+        }
+
         // Epic 34 Slice D: "lineage edges are derived from feature sources
         // rather than asserted separately" — a caller names the columns a
         // feature was built from and the table-to-model edge follows
@@ -5930,6 +5941,40 @@ impl Catalog {
         }
         dashboard.properties = Some(serde_json::Value::Object(properties));
         self.storage.upsert_asset(dashboard).await?;
+        Ok(())
+    }
+
+    /// Recomputes and persists a table's `properties.columnNames` from its
+    /// current column children — [`Self::sync_dashboard_chart_names`]'s own
+    /// pattern, for the container/child pair Decision 5's "column names" tier
+    /// actually names. Same reasoning throughout: written directly through
+    /// storage so refreshing the cache neither bumps the table's semantic
+    /// version nor emits a change event nobody's edit produced.
+    async fn sync_table_column_names(&self, table_id: Uuid) -> Result<(), CatalogError> {
+        let Some(mut table) = self.storage.get_asset(table_id).await? else {
+            return Ok(());
+        };
+        let children = self.storage.list_children(Some(table_id)).await?;
+        let column_names: Vec<&str> = children
+            .iter()
+            .filter(|child| child.kind == AssetKind::Column && !child.deleted)
+            .map(|child| child.name.as_str())
+            .collect();
+
+        let mut properties = table
+            .properties
+            .and_then(|p| p.as_object().cloned())
+            .unwrap_or_default();
+        if column_names.is_empty() {
+            properties.remove("columnNames");
+        } else {
+            properties.insert(
+                "columnNames".to_string(),
+                serde_json::Value::String(column_names.join(" ")),
+            );
+        }
+        table.properties = Some(serde_json::Value::Object(properties));
+        self.storage.upsert_asset(table).await?;
         Ok(())
     }
 
@@ -28738,6 +28783,93 @@ mod entity_expansion_tests {
             .await
             .expect("table")
             .id
+    }
+
+    /// Phase 3 item 3.7 (Decision 5's "column names" tier,
+    /// `08-engine-search.md`). The identical gap Epic 34 Slice A already
+    /// solved for a dashboard and its charts
+    /// (`a_dashboard_is_findable_by_its_charts_names`), for a table and its
+    /// columns instead.
+    mod column_name_search {
+        use super::*;
+
+        #[tokio::test]
+        async fn a_table_is_findable_by_its_columns_names() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let table_id = a_table(&catalog, "warehouse", "orders").await;
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Column, "customer_email_address", Some(table_id)),
+                )
+                .await
+                .expect("column");
+
+            let hits = catalog
+                .search_assets_for(
+                    &Principal::system(),
+                    "customer_email_address",
+                    &graph_owl_storage::AssetFilter::default(),
+                    &page(),
+                )
+                .await
+                .expect("search");
+
+            assert!(
+                hits.data.iter().any(|h| h.asset.id == table_id),
+                "searching a column's name must surface its table: {:?}",
+                hits.data
+            );
+        }
+
+        /// **Mutator watch, the negative half.** A sync that never removes a
+        /// dropped column's name would leave a table findable by something it
+        /// no longer contains — the same "and Z does not" discipline every
+        /// positive assertion in this codebase pairs with.
+        #[tokio::test]
+        async fn a_removed_column_stops_making_its_table_findable_by_that_name() {
+            let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+            let table_id = a_table(&catalog, "warehouse", "orders").await;
+            let column = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Column, "temp_debug_flag", Some(table_id)),
+                )
+                .await
+                .expect("column");
+
+            catalog
+                .soft_delete_asset(&Principal::system(), column.id)
+                .await
+                .expect("delete");
+            // Deleting the column does not itself resync the parent (matching
+            // `sync_dashboard_chart_names`'s own accepted scope); a further
+            // write to the table's children is what refreshes the cache —
+            // proven here via a second, harmless column write.
+            catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Column, "another_column", Some(table_id)),
+                )
+                .await
+                .expect("second column");
+
+            let hits = catalog
+                .search_assets_for(
+                    &Principal::system(),
+                    "temp_debug_flag",
+                    &graph_owl_storage::AssetFilter::default(),
+                    &page(),
+                )
+                .await
+                .expect("search");
+
+            assert!(
+                !hits.data.iter().any(|h| h.asset.id == table_id),
+                "a deleted column's name must not keep surfacing its table: {:?}",
+                hits.data
+            );
+        }
     }
 
     mod dashboards_and_charts {
