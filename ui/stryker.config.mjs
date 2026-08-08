@@ -48,5 +48,14 @@ export default {
     // catch, so the check needs the same regression guard as everything
     // else in this list.
     "src/routes.ts",
+    // `src/governance/reasoningRun.ts` (Epic 41 Slice G / Epic 97): which
+    // technique ran, the ignored-axiom count, and the singular/plural
+    // wording are exactly this list's own "decision a screen renders but
+    // does not make" — a `partial` flag silently dropped from the warning
+    // is invisible to a reader in the same way a truncation flag would be.
+    // Scoped to this one file, not the whole directory: `queue.ts`/
+    // `explanation.ts` predate this list and were never audited for
+    // inclusion — a separate task, not silently folded into this one.
+    "src/governance/reasoningRun.ts",
   ],
 };

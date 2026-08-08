@@ -571,6 +571,20 @@ export interface ReasoningReport {
   readonly iterations: number;
   readonly capped: string | null;
   readonly durationMs: number;
+  /** Which strategy actually ran — Epic 97, Phase 3 item 3.11's own field. */
+  readonly technique: "full" | "incremental";
+  /** The transaction time this run accounts every retraction up to — the
+   *  overlay-staleness stamp Epic 41 Slice G requires be shown. No
+   *  wall-clock companion exists to convert it with (the same reason
+   *  `PartitionHealth.oldestDeltaT` is shown raw), so a reader sees the
+   *  watermark itself, not a fabricated age. */
+  readonly maintainedTo: number;
+  /** Routing was overridden (`?force=true`) against an ontology outside
+   *  this run's own profile — never inferred from `ignoredAxioms` being
+   *  non-empty, matching `SparqlOutcome.truncated`'s own always-present
+   *  convention. */
+  readonly partial: boolean;
+  readonly ignoredAxioms: readonly { readonly subject: string; readonly reason: string }[];
 }
 import type { LineageGraph } from "./graph/lineage";
 import type { Explanation } from "./governance/explanation";

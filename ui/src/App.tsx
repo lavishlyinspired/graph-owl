@@ -161,7 +161,8 @@ import {
   toElements,
   wantsWebgl,
 } from "./graph/cytoscape";
-import type { ConnectorRun } from "./api";
+import type { ConnectorRun, ReasoningReport } from "./api";
+import { describeReasoningRun } from "./governance/reasoningRun";
 import watermarkImg from "./assets/watermark1.png";
 
 const { Header, Sider, Content } = Layout;
@@ -2814,6 +2815,9 @@ function GovernancePage({ colors }: { colors: (typeof palette)["light"] }) {
   const [failed, setFailed] = useState<string | null>(null);
   const [waiving, setWaiving] = useState<Finding | null>(null);
   const [reason, setReason] = useState("");
+  const [reasoningRun, setReasoningRun] = useState<ReasoningReport | null>(null);
+  const [reasoningRunning, setReasoningRunning] = useState(false);
+  const [reasoningFailed, setReasoningFailed] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -2873,8 +2877,23 @@ function GovernancePage({ colors }: { colors: (typeof palette)["light"] }) {
             Run validation
           </Button>
           <Button
+            loading={reasoningRunning}
             onClick={() => {
-              void api.runReasoning().then(() => load());
+              setReasoningRunning(true);
+              setReasoningFailed(null);
+              void api
+                .runReasoning()
+                .then((result) => {
+                  setReasoningRun(result);
+                  return load();
+                })
+                .catch((error: unknown) => {
+                  setReasoningFailed(
+                    error instanceof ApiError ? error.problem.detail ?? error.problem.title : "the run did not complete",
+                  );
+                  setReasoningRun(null);
+                })
+                .finally(() => setReasoningRunning(false));
             }}
           >
             Run reasoning
@@ -2883,6 +2902,24 @@ function GovernancePage({ colors }: { colors: (typeof palette)["light"] }) {
       </Flex>
 
       {failed && <Alert type="error" showIcon message={failed} />}
+
+      {/* Epic 41 Slice G: "overlay staleness is shown... an out-of-profile
+          ontology, and an override-permitted partial result, are marked —
+          not by colour alone." The technique, counts and watermark are
+          named in the message text itself; a partial run gets its own
+          warning-coloured alert naming what was ignored, distinct from the
+          success alert a complete run gets. */}
+      {reasoningFailed && <Alert type="error" showIcon message={reasoningFailed} />}
+      {reasoningRun &&
+        (() => {
+          const description = describeReasoningRun(reasoningRun);
+          return (
+            <>
+              <Alert type="info" showIcon message={description.headline} />
+              {description.warning && <Alert type="warning" showIcon message={description.warning} />}
+            </>
+          );
+        })()}
 
       {lastRun && (
         <Alert
