@@ -2262,6 +2262,55 @@ impl Catalog {
         })
     }
 
+    // ---- Epic 102: read/write partition maintenance ----
+
+    /// Fold up to `batch_size` rows of `flakes_delta` into `flakes_main` —
+    /// the operational half of the partition split, missing until now.
+    ///
+    /// **Had no `Catalog` wrapper, and no caller anywhere outside its own
+    /// tests, until this one** — found auditing
+    /// `plans/EPIC-COMPLETION-PLAN.md` Phase 1.5: the split itself, the
+    /// atomic move, and the correctness tests all shipped, but nothing
+    /// above the storage layer could ever trigger it. A real deployment's
+    /// `flakes_delta` grew forever, and the whole point of the split — a
+    /// small, fast, unindexed-beyond-one-key table for writes — degraded
+    /// back into what it was built to avoid.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured, or the move fails.
+    pub async fn compact(&self, batch_size: i64) -> Result<u64, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+        graph
+            .compact(batch_size)
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// The delta partition's own backlog — Epic 102, the observability half
+    /// of the same gap `compact` above closes. `None` when no graph engine
+    /// is configured, matching [`TripleStore::partition_health`]'s own
+    /// "nothing to report" convention for a backend with no split.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn partition_health(
+        &self,
+    ) -> Result<Option<graph_owl_engine::PartitionHealth>, CatalogError> {
+        let Some(graph) = &self.graph else {
+            return Ok(None);
+        };
+        graph
+            .partition_health()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
     async fn fetch_rl_tbox(
         &self,
         graph: &dyn graph_owl_engine::TripleStore,

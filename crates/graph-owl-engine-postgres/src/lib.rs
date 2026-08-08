@@ -13,7 +13,8 @@ pub mod value;
 use async_trait::async_trait;
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, TriplePattern};
 use graph_owl_engine::{
-    EngineError, TripleStore, reject_unregistered_predicates, reject_unset_namespaces,
+    EngineError, PartitionHealth, TripleStore, reject_unregistered_predicates,
+    reject_unset_namespaces,
 };
 use sqlx::{PgPool, QueryBuilder, Row, postgres::PgRow};
 use std::collections::HashSet;
@@ -547,6 +548,21 @@ impl TripleStore for PostgresTripleStore {
         .await
         .map_err(|e| EngineError::Backend(e.to_string()))?;
         Ok(row.map(|(t,)| t))
+    }
+
+    async fn compact(&self, batch_size: i64) -> Result<u64, EngineError> {
+        Self::compact(self, batch_size).await
+    }
+
+    async fn partition_health(&self) -> Result<Option<PartitionHealth>, EngineError> {
+        let row: (i64, Option<i64>) = sqlx::query_as("SELECT count(*), min(t) FROM flakes_delta")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| EngineError::Backend(e.to_string()))?;
+        Ok(Some(PartitionHealth {
+            delta_rows: row.0.try_into().unwrap_or(0),
+            oldest_delta_t: row.1,
+        }))
     }
 }
 

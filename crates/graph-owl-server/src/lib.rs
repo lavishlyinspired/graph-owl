@@ -279,7 +279,12 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             Router::new()
                 .route("/admin/restore", post(restore_archive))
                 .layer(DefaultBodyLimit::max(RESTORE_MAX_BODY_BYTES)),
-        );
+        )
+        // Epic 102: fold the write-side partition into the read-optimized
+        // one, and report its backlog. See `compact_partition`'s own doc
+        // comment for why this had no route at all until now.
+        .route("/admin/compact", post(compact_partition))
+        .route("/admin/partition-health", get(partition_health));
     // Epic 7d / Epic 42 Slice F: Bolt endpoint status and active sessions,
     // read-only. A separate statement rather than one more link in the
     // chain above — the route only exists when this crate is built with
@@ -2815,6 +2820,55 @@ async fn restore_archive(
     tokio::fs::remove_file(&path).await.ok();
 
     Ok(Json(outcome?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CompactQuery {
+    #[serde(default = "default_compact_batch_size")]
+    batch_size: i64,
+}
+
+const fn default_compact_batch_size() -> i64 {
+    1000
+}
+
+/// Fold a batch of `flakes_delta` into `flakes_main` — Epic 102.
+///
+/// **Had no route at all until this one** — found alongside the rest of
+/// `plans/EPIC-COMPLETION-PLAN.md` Phase 1.5: the atomic move existed and
+/// was tested, but nothing could ever trigger it in a running deployment,
+/// so `flakes_delta` grew without bound. Admin-only and `POST`, the same
+/// tier as `/admin/export`: this is an operational action, not an
+/// ordinary read. Manual-trigger only — automatic scheduling (size- or
+/// age-based) is a separate, larger design question, deliberately not
+/// attempted here.
+async fn compact_partition(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Query(query): Query<CompactQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let moved = catalog.compact(query.batch_size).await?;
+    Ok(Json(json!({ "moved": moved })))
+}
+
+/// The write-side partition's own backlog — Epic 102, the observability
+/// half of the same gap `compact_partition` above closes. Read-only, never
+/// admin-gated: a row count and a timestamp cost nothing like a bulk move
+/// does.
+async fn partition_health(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    match catalog.partition_health().await? {
+        Some(health) => Ok(Json(json!({
+            "deltaRows": health.delta_rows,
+            "oldestDeltaT": health.oldest_delta_t,
+        }))),
+        None => Ok(Json(json!({ "deltaRows": null, "oldestDeltaT": null }))),
+    }
 }
 
 /// Run a validation pass and replace the stored queue — Epic 5 Slice C, plus

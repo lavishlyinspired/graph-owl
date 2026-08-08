@@ -137,6 +137,55 @@ pub trait TripleStore: Send + Sync {
     ///
     /// [`EngineError::Backend`] if the lookup fails.
     async fn time_at(&self, at: chrono::DateTime<chrono::Utc>) -> Result<Option<i64>, EngineError>;
+
+    /// Fold up to `batch_size` rows of write-side storage into the
+    /// read-optimized store, oldest first, and report how many moved —
+    /// Epic 102. A default no-op returning `0`: only a backend with a
+    /// genuine read/write partition split (`PostgresTripleStore`) has
+    /// anything to fold, and this trait must not force every other
+    /// implementation (an in-memory test fake, a future backend with no
+    /// such split) to reject a call that is simply meaningless for it.
+    ///
+    /// **Had no caller anywhere outside its own tests until this default
+    /// was added** — found auditing `plans/EPIC-COMPLETION-PLAN.md` Phase
+    /// 1.5: `PostgresTripleStore::compact` existed, was correct and
+    /// tested, but nothing above the storage layer ever called it, so in a
+    /// real deployment `flakes_delta` grew forever and the whole point of
+    /// the partition split degraded to nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Backend`] if the move fails.
+    async fn compact(&self, batch_size: i64) -> Result<u64, EngineError> {
+        let _ = batch_size;
+        Ok(0)
+    }
+
+    /// The write-side partition's own backlog, for an operator deciding
+    /// whether [`compact`] needs running — Epic 102. `None` for a backend
+    /// with no partition split, the same "nothing to report" convention
+    /// [`compact`]'s own no-op default uses.
+    ///
+    /// [`compact`]: TripleStore::compact
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Backend`] if the read fails.
+    async fn partition_health(&self) -> Result<Option<PartitionHealth>, EngineError> {
+        Ok(None)
+    }
+}
+
+/// [`TripleStore::partition_health`]'s answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartitionHealth {
+    /// Rows waiting in the write-side partition, not yet folded into the
+    /// read-optimized store.
+    pub delta_rows: u64,
+    /// The oldest transaction time still sitting in the delta partition —
+    /// `None` when it is empty. Age, not just count: a thousand rows
+    /// written a second ago is healthy; ten rows a week old is not.
+    pub oldest_delta_t: Option<i64>,
 }
 
 /// A predicate's definition.
