@@ -525,6 +525,15 @@ export type BoltStatus =
   | { enabled: false }
   | { enabled: true; maxConnections: number; activeConnections: number; sessions: BoltSession[] };
 
+/** Both `null` for a storage backend with no partition split — a real,
+ *  legitimate state (`TripleStore::partition_health`'s trait default),
+ *  not an error. `oldestDeltaT` is a transaction time, the same `t` every
+ *  as-of query uses — not wall-clock, no wall-clock companion exists. */
+export interface PartitionHealth {
+  deltaRows: number | null;
+  oldestDeltaT: number | null;
+}
+
 /** The stored violations queue, and the instant it reflects. */
 export interface ValidationReport {
   readonly data: readonly import("./governance/queue").Finding[];
@@ -876,6 +885,23 @@ export const api = {
    *  feature was not compiled in, or compiled in but never bound — a real,
    *  legitimate state, not an error. */
   boltStatus: () => request<BoltStatus>("/admin/bolt/status"),
+  /** Epic 102's write-side partition backlog — read-only, never admin-gated
+   *  (a row count and a transaction time cost nothing like a bulk move
+   *  does). `deltaRows`/`oldestDeltaT` are both `null` for a backend with
+   *  no partition split (`TripleStore::partition_health`'s trait default). */
+  partitionHealth: () => request<PartitionHealth>("/admin/partition-health"),
+  /** Admin-only. Folds up to `batchSize` rows of `flakes_delta` into
+   *  `flakes_main`; manual-trigger only, no automatic scheduling exists.
+   *  `/admin/*` query params are snake_case on the wire — unlike every
+   *  documented route, this tier is deliberately undocumented in the
+   *  OpenAPI contract (matching `/admin/restore`'s own `conflict_policy`/
+   *  `regenerate_ids`), so Epic 1's camelCase convention was never applied
+   *  here. */
+  compactPartition: (batchSize?: number) =>
+    request<{ moved: number }>(
+      `/admin/compact${batchSize !== undefined ? `?batch_size=${batchSize}` : ""}`,
+      { method: "POST" },
+    ),
   /** What the reasoner concluded about one subject, as the last run stored it.
    *  Not a fresh pass — an asset page opens with this. */
   derivedAbout: (subject: string) =>

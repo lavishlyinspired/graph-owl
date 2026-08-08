@@ -92,7 +92,7 @@ is the condition that index exists to catch.
 | **99** | 11, 12 | [`99-owl-ql-reasoning.md`](99-owl-ql-reasoning.md) | **Shipped** | 4/4 | Epic 7 (query algebra to rewrite), Epic 6 (explanation contract) |
 | **100** | 11, 12 | [`100-profile-detection-and-routing.md`](100-profile-detection-and-routing.md) | In progress | 5/7 | Epic 6 (RL engine — shipped), ~~Epic 24 (ontologies as entities)~~ — **phantom*… |
 | **101** | 11 | [`101-sparql-federation.md`](101-sparql-federation.md) | **Shipped** | 5/5 | Epic 7 (algebra and executor), Epic 13 (authorization) |
-| **102** | 11 | [`102-read-write-partitions.md`](102-read-write-partitions.md) | In progress | 2/3 | Epic 4 (the flake table), Epic 37a (the measurement) |
+| **102** | 11 | [`102-read-write-partitions.md`](102-read-write-partitions.md) | **Shipped** | 3/3 | Epic 4 (the flake table), Epic 37a (the measurement) |
 | **103** | 11 | [`103-in-process-traversal.md`](103-in-process-traversal.md) | **Shipped** | 5/5 | Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger) |
 | **104** | 12 | [`104-ontology-alignment.md`](104-ontology-alignment.md) | In progress | 6/7 | Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detecti… |
 
@@ -665,7 +665,7 @@ is the condition that index exists to catch.
 
 - [x] The split itself.
 - [x] Compaction trigger + partition-health metric — found and fixed 8 August 2026
-- [ ] A partition-health panel in admin *(UI → Epic 41 Slice G)* — the metric now exists to bu
+- [x] A partition-health panel in admin — **shipped 8 August 2026**
 
 ### Epic 103 — In-Process Traversal *(Demo 11)*
 

@@ -127,7 +127,7 @@ pattern itself is the spec.
 | 2.5 | 5 | `RelationshipShape`/`EnvelopeShape` seed shapes — the blocking dependency (relationship projection, envelope projection) shipped with Epic 4 Slice E; this is simply unbuilt, not blocked | small (<1 day) | two more entries in `shapes.rs`'s `definitions` array, constraints already worked out in the plan |
 | 2.6 | 4 | Predicate-registry cardinality/datatype enforcement on write — the registry already carries the data, nothing reads it at assert time | small (<1 day) | one write-path check in `graph-owl-engine`/`graph-owl-engine-postgres` |
 | 2.7 | 16 | Invalid-`kind`-string per-item fix — move `kind` parsing from the pre-loop into the per-item loop, matching how the neighboring parent-not-found case is already handled | small (<1 day) | `crates/graph-owl-server/src/lib.rs:3034-3043` vs. `~3105-3115` (existing per-item pattern) |
-| 2.8 | 19 | Pulsar lag reporting — currently hardcoded `None`; needs an admin-REST HTTP call to the Pulsar backlog API | small (<1 day) | `StreamConsumer::lag`, `crates/graph-owl-server/src/streaming.rs:230-238` (already has the `None` branch to fill) |
+| 2.8 | 19 | ~~Pulsar lag reporting~~ **Already DONE before this audit, marked here 8 Aug 2026** — `PulsarConsumer::lag` calls the admin REST API's `.../stats` endpoint and reads `msgBacklog`, verified against a real local admin-REST double, not a mock. **Epic 19 will not reach 100% regardless**: the remaining `[~]` is Pulsar's ack API taking the message *value*, which cannot survive a cross-broker signature carrying only coordinates — a genuine, permanent protocol-shape limitation (at-most-once-per-delivery vs. Kafka's at-least-once), not unfinished work. Honestly left `[~]` rather than dishonestly flipped to `[x]`. | small (<1 day) | `crates/graph-owl-connectors/src/streaming_pulsar.rs:161-206` |
 | 2.9 | 37c | Slice E — crate publishability: `description`/`repository`/`keywords` on every crate `Cargo.toml`, `publish = false` on adapter/server crates, path→version+path deps, a `cargo publish --dry-run` CI step | small–medium | none — greenfield within the crate, mechanical across ~10 `Cargo.toml`s |
 | 2.10 | 37c | Slice F — surface survives expansion: extend `crates/graph-owl-api/examples/embedded.rs` with a second entity family, add a `cargo public-api` snapshot test | small (<1 day) | existing `embedded.rs` (60 lines, one entity kind) |
 | 2.11 | 39 | `AssetDetail`'s ancestors/children fetches swallow errors into an empty array — replicate the `*Failed` boolean pattern already used for search | trivial (<1hr) | `ui/src/App.tsx:1660-1662` next to the already-fixed search case |
@@ -312,7 +312,7 @@ medium (1-3 days), no blocking dependency.
 | 26 | 2.2 + 2.3 + TrustSummary note | 98 | 1.3 |
 | — | — | 99 | 1.2 |
 | — | — | 100 | 1.4 |
-| — | — | 102 | 1.5 + 1.6, optionally 4.9 |
+| — | — | 102 | 1.5 + 1.6 + admin panel — all DONE 8 Aug 2026, optionally 4.9 |
 | — | — | 103 | no action — confirmed zero remaining work |
 | — | — | 104 | 1.7 + 3.13 — both DONE 8 Aug 2026 (4.7 + 4.8 decided and implemented) |
 
