@@ -830,6 +830,35 @@ async fn the_lifecycle_filter_also_applies_to_search() {
     assert!(names(&empty).is_empty(), "nothing is retired yet: {empty}");
 }
 
+/// Epic 26's own "Discoverable" gap (Slice F, partial): a lifecycle facet
+/// over the visible set, matching `kind`/`schema`'s own shape — free to
+/// compute, since `lifecycle` is a stored field on every `Asset` already
+/// on the page, unlike Epic 30's `health` facet which needs a read per hit.
+#[tokio::test]
+async fn search_reports_a_lifecycle_facet_over_the_visible_set() {
+    let (app, _db, _url) = test_app().await;
+    let (id, _) = service(&app, "facet-lifecycle-svc").await;
+    deprecate(&app, &id, "superseded", None).await;
+    service(&app, "facet-lifecycle-other").await;
+
+    let (status, body) = send(&app, "GET", "/assets/search?q=facet-lifecycle", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let buckets: std::collections::BTreeMap<&str, i64> = body["facets"]["lifecycle"]
+        .as_array()
+        .expect("a lifecycle facet array")
+        .iter()
+        .map(|b| {
+            (
+                b["value"].as_str().expect("value"),
+                b["count"].as_i64().expect("count"),
+            )
+        })
+        .collect();
+    assert_eq!(buckets.get("deprecated"), Some(&1), "{body}");
+    assert_eq!(buckets.get("active"), Some(&1), "{body}");
+}
+
 #[tokio::test]
 async fn an_unrecognised_lifecycle_filter_is_refused_naming_the_real_states() {
     let (app, _db, _url) = test_app().await;

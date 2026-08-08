@@ -1,7 +1,7 @@
 # Plan: Lifecycle & Certification (Epic 26)
 
 **Branch**: feat/lifecycle-certification
-**Status**: Slices A–E shipped; Slice F partial
+**Status**: Slices A–E shipped; Slice F partial — filters and a lifecycle facet shipped 8 August 2026; TrustSummary integration, a certification facet, and ranking boost remain open
 **Depends on**: Epic 11 (issuers are principals), Epic 24 (metrics are certifiable)
 **Crates**: `graph-owl-core` (LifecycleState, Certification, CertificationType, derived status) · `graph-owl-storage-postgres` · `graph-owl-api` · `graph-owl-server`
 
@@ -99,11 +99,13 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **RED**: A re-check test asserting renewal fails if the evidence has since disappeared (a quality test was deleted) — renewing on stale grounds is how certification decays into theatre. Mutator watch: skipping the re-check must fail it.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice F: Discoverability — **partial**
+### Slice F: Discoverability — **partial, most of it now shipped**
 
 **Acceptance criteria**: `?lifecycle=` and `?certification=` filters on list endpoints; both as search facets with counts respecting active filters; `TrustSummary` (Epic 14) carries lifecycle, certification status with expiry, and successor; a deprecated asset in search results is visibly marked, never silently ranked normally; certified assets are boostable in ranking (configurable).
 **RED**: A search test asserting a deprecated asset is returned **with its marker**, not filtered out and not unmarked — filtering hides reality, unmarking misleads. Mutator watch: either behaviour must fail.
 **Done when**: criteria met, mutation report reviewed, commit approved.
+
+**Shipped 8 August 2026**: `?lifecycle=`/`?certification=` filters (Phase 2.2/2.3), and a `lifecycle` search facet — free to compute, since `lifecycle` is a stored, non-optional field on every `Asset` already on the results page, unlike a health-shaped facet that needs a per-row read. **Still open**: a certification facet (an asset can hold several certifications of different types at once, and "the" bucket for that case is a real design question, not yet resolved — a plain single-state reduction like `health`'s would be a guess, not a decision), `TrustSummary` carrying certification (tracked separately as Epic 39's own "not captured yet" trust-bar gap, not duplicated here), and ranking boost for certified assets.
 
 ## Explicitly deferred (with destination)
 

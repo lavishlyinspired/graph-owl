@@ -319,7 +319,7 @@ medium (1-3 days), no blocking dependency.
 | 19 | 2.8 | 94 | 1.8 |
 | 24 | small remaining items not itemized above (Metric-as-lineage-endpoint needs a schema decision; event emission on term transitions needs a shape decision) — see note | 96 | 1.1 + 3.10 |
 | 25 | 2.1 | 97 | 1.9 + 3.11 — both DONE 8 Aug 2026 (4.4 decided and implemented) |
-| 26 | 2.2 + 2.3 + TrustSummary note | 98 | 1.3 |
+| 26 | 2.2 + 2.3 + a lifecycle search facet, DONE 8 Aug 2026 (certification facet investigated, not attempted — a multi-value bucketing question this session left open) + TrustSummary note | 98 | 1.3 |
 | — | — | 99 | 1.2 |
 | — | — | 100 | 1.4 |
 | — | — | 102 | 1.5 + 1.6 + admin panel — all DONE 8 Aug 2026, optionally 4.9 |

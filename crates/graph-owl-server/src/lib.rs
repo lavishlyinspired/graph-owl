@@ -2340,12 +2340,22 @@ async fn search_assets(
     let mut by_kind: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     let mut by_schema: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
+    // Epic 26's own "Discoverable" gap, closed alongside the health facet
+    // below: `lifecycle` is a stored, non-optional field on every `Asset`
+    // already present on the page, so unlike health this costs nothing
+    // extra — no per-hit read, just one more bucket over data already in
+    // hand.
+    let mut by_lifecycle: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
     for hit in &page_result.data {
         *by_kind.entry(hit.asset.kind.as_str()).or_default() += 1;
         // The schema is the third FQN segment: service.database.schema.…
         if let Some(schema) = hit.asset.fully_qualified_name.split('.').nth(2) {
             *by_schema.entry(schema.to_string()).or_default() += 1;
         }
+        *by_lifecycle
+            .entry(hit.asset.lifecycle.as_str())
+            .or_default() += 1;
     }
 
     // Epic 30, decision 4.5's other half: a health facet, over the same
@@ -2397,6 +2407,7 @@ async fn search_assets(
         "kind": by_kind.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
         "schema": by_schema.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
         "health": by_health.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
+        "lifecycle": by_lifecycle.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
     });
     if let Some(object) = facets.as_object_mut() {
         for (name, counts) in by_property {
