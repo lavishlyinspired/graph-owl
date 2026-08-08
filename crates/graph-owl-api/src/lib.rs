@@ -1153,14 +1153,30 @@ pub struct Catalog {
             )>,
         >,
     >,
-    /// The last successful reasoning run's full result — Epic 97's own
-    /// missing half. `derive_incremental` needs the *structured* previous
-    /// `Reasoning` (routes, not just flakes) as its starting point, and the
-    /// persisted overlay only ever holds the flat conclusions, so this is
-    /// not redundant with what is already written to the graph. `Arc` for
+    /// The last successful reasoning run's full result, alongside the
+    /// transaction time it accounted every retraction up to — Epic 97's
+    /// own missing half. `derive_incremental` needs the *structured*
+    /// previous `Reasoning` (routes, not just flakes) as its starting
+    /// point, and the persisted overlay only ever holds the flat
+    /// conclusions, so this is not redundant with what is already written
+    /// to the graph. The watermark alongside it is what
+    /// [`Catalog::run_reasoning_auto`] uses to ask
+    /// [`graph_owl_engine::TripleStore::retractions_since`] for exactly
+    /// what changed since last time, with no caller involvement — decision
+    /// 4.4. Both reset together on a restart (in-memory, not persisted),
+    /// which is always safe: no cached watermark means the next call falls
+    /// back to a full run, the same fallback `run_reasoning_incremental`
+    /// already uses when there is nothing to maintain against. `Arc` for
     /// the same reason `shape_cache`/`el_cache` are: axum clones `Catalog`
     /// per request.
-    reasoning_cache: Arc<Mutex<Option<reasoning::Reasoning>>>,
+    reasoning_cache: Arc<Mutex<Option<CachedReasoning>>>,
+}
+
+/// See [`Catalog`]'s own `reasoning_cache` field doc comment.
+#[derive(Clone)]
+struct CachedReasoning {
+    result: reasoning::Reasoning,
+    maintained_to: i64,
 }
 
 impl Catalog {
@@ -11826,13 +11842,26 @@ impl Catalog {
             ))
         })?;
 
+        // Reserved *before* the base is read, not after: a retraction
+        // landing while this run is in flight must stay visible to the
+        // *next* `retractions_since` call rather than being silently
+        // treated as already accounted for by this one.
+        let maintained_to = graph
+            .next_time()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
         let base = Self::reasoning_base(graph.as_ref(), budget).await?;
         // Parallel, not sequential: `derive_within_parallel` is byte-identical
         // to `derive_within` (Epic 97 Slice B), so a wholesale re-derivation
         // has no reason to run single-threaded.
         let concluded = reasoning::derive_within_parallel(&base, budget);
-        self.finish_reasoning_run(graph.as_ref(), concluded, ReasoningTechnique::Full)
-            .await
+        self.finish_reasoning_run(
+            graph.as_ref(),
+            concluded,
+            ReasoningTechnique::Full,
+            maintained_to,
+        )
+        .await
     }
 
     /// DRed maintenance instead of wholesale re-derivation, when there is a
@@ -11841,16 +11870,13 @@ impl Catalog {
     /// `graph-owl-reasoning` with nothing in this crate calling them; this
     /// is what makes them reachable.
     ///
-    /// **Scope, stated rather than assumed away.** This wires the two
-    /// already-verified algorithms into the invocation path; it does not
-    /// attempt the two obligations `97-incremental-parallel-reasoning.md`'s
-    /// own "Open" section names as separate, larger work: subscribing to
-    /// retraction events automatically (the caller still supplies
-    /// `retracted` explicitly, exactly matching `derive_incremental`'s own
-    /// signature), and the `maintained_to` freshness-stamp that would let a
-    /// reader see how far behind the base an incrementally-maintained
-    /// overlay has fallen. Both remain open, named there, not silently
-    /// dropped by this being merged.
+    /// **The caller still supplies `retracted` explicitly here**, exactly
+    /// matching `derive_incremental`'s own signature — this is the
+    /// low-level primitive. [`Catalog::run_reasoning_auto`] is the
+    /// decision-4.4 wrapper that computes `retracted` automatically via
+    /// [`graph_owl_engine::TripleStore::retractions_since`] and calls
+    /// this; a caller with its own list (an admin tool replaying a
+    /// specific retraction batch, say) still calls this one directly.
     ///
     /// **Falls back to a full run** when there is nothing cached yet (the
     /// first call ever, or after a process restart — the cache is
@@ -11883,10 +11909,14 @@ impl Catalog {
             ))
         })?;
 
+        let maintained_to = graph
+            .next_time()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
         let previous = self.reasoning_cache.lock().expect("lock").clone();
         let (concluded, technique) = match previous {
             Some(previous) if !retracted.is_empty() => (
-                reasoning::derive_incremental(&previous, retracted, budget),
+                reasoning::derive_incremental(&previous.result, retracted, budget),
                 ReasoningTechnique::Incremental,
             ),
             _ => {
@@ -11897,8 +11927,68 @@ impl Catalog {
                 )
             }
         };
-        self.finish_reasoning_run(graph.as_ref(), concluded, technique)
+        self.finish_reasoning_run(graph.as_ref(), concluded, technique, maintained_to)
             .await
+    }
+
+    /// Decision 4.4's automatic half: computes `retracted` for
+    /// [`Self::run_reasoning_incremental`] instead of asking a caller to
+    /// supply it, by asking the graph itself what changed since the last
+    /// run's [`ReasoningReport::maintained_to`] watermark.
+    ///
+    /// **No new durable state.** Retractions are already durable, ordinary
+    /// rows in the flake log — `TripleStore::retractions_since` queries
+    /// what already exists rather than a parallel log this needed to keep
+    /// in sync. The only in-memory state is the watermark itself, and
+    /// losing it (a restart) is always safe: [`Self::run_reasoning_incremental`]
+    /// already falls back to a full run when there is nothing cached, the
+    /// exact condition a lost watermark produces.
+    ///
+    /// **Excludes the reasoning overlay's own churn.** `finish_reasoning_run`
+    /// retracts the *previous* run's overlay before writing a new one —
+    /// that retraction is real, in the same flake log, and would otherwise
+    /// look exactly like a base fact disappearing. Filtered out by `cx`,
+    /// the same way every other reader of `graph:reasoning` distinguishes
+    /// derived conclusions from asserted facts.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured or a read/write fails.
+    ///
+    /// # Panics
+    ///
+    /// If the internal reasoning cache's lock is poisoned by another thread
+    /// panicking while holding it.
+    #[tracing::instrument(name = "catalog.run_reasoning_auto", skip_all)]
+    pub async fn run_reasoning_auto(
+        &self,
+        budget: &reasoning::Budget,
+    ) -> Result<ReasoningReport, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let previous_watermark = self
+            .reasoning_cache
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .map(|cached| cached.maintained_to);
+
+        let retracted = match previous_watermark {
+            Some(watermark) => graph
+                .retractions_since(watermark)
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?
+                .into_iter()
+                .filter(|f| f.cx.as_ref() != Some(&reasoning::reasoning_graph()))
+                .collect(),
+            None => Vec::new(),
+        };
+
+        self.run_reasoning_incremental(&retracted, budget).await
     }
 
     /// The withdraw-then-assert persistence both reasoning entry points
@@ -11912,6 +12002,7 @@ impl Catalog {
         graph: &dyn TripleStore,
         concluded: reasoning::Reasoning,
         technique: ReasoningTechnique,
+        maintained_to: i64,
     ) -> Result<ReasoningReport, CatalogError> {
         // Withdraw the previous run's overlay before writing this one.
         // Retracting what is *there* rather than re-deriving what was there
@@ -11974,9 +12065,13 @@ impl Catalog {
             capped: concluded.capped,
             duration_ms: u64::try_from(concluded.duration.as_millis()).unwrap_or(u64::MAX),
             technique,
+            maintained_to,
         };
 
-        *self.reasoning_cache.lock().expect("lock") = Some(concluded);
+        *self.reasoning_cache.lock().expect("lock") = Some(CachedReasoning {
+            result: concluded,
+            maintained_to,
+        });
 
         Ok(report)
     }
@@ -15377,6 +15472,13 @@ pub struct ReasoningReport {
     pub duration_ms: u64,
     /// Which strategy actually ran — see [`ReasoningTechnique`].
     pub technique: ReasoningTechnique,
+    /// The transaction time this run accounts for every retraction up to —
+    /// Epic 97's overlay-staleness stamp (Phase 3 item 3.11). Reserved
+    /// (`TripleStore::next_time`) *before* this run reads its base, not
+    /// after: a retraction landing while the run is in flight must remain
+    /// visible to [`Catalog::run_reasoning_auto`]'s *next* call rather than
+    /// being silently treated as already accounted for.
+    pub maintained_to: i64,
 }
 
 /// What [`Catalog::upsert_alignment`] did with one alignment.
@@ -22266,6 +22368,141 @@ mod reasoning_decides_before_it_writes {
             );
         }
     }
+
+    /// Epic 97 decision 4.4: `run_reasoning_auto` computes `retracted` for
+    /// `run_reasoning_incremental` itself, by asking the graph what changed
+    /// since the last run's `maintained_to` watermark — no caller supplies
+    /// a retracted list here, unlike every test above.
+    mod automatic_retraction_tracking_is_wired_in {
+        use super::*;
+
+        /// Every report carries the watermark it accounted retractions up
+        /// to — Phase 3 item 3.11, "overlay staleness is visible".
+        #[tokio::test]
+        async fn every_report_carries_a_maintained_to_watermark() {
+            let (catalog, _graph) = seeded().await;
+
+            let report = catalog
+                .run_reasoning(&Budget::default())
+                .await
+                .expect("a run");
+
+            assert!(report.maintained_to > 0, "{report:?}");
+        }
+
+        /// First call ever: no cache, so nothing to compute a retraction
+        /// window against — the same "no previous state" fallback
+        /// `run_reasoning_incremental` already has, reached automatically
+        /// this time.
+        #[tokio::test]
+        async fn a_first_call_with_no_cache_falls_back_to_a_full_run() {
+            let (catalog, _graph) = seeded().await;
+
+            let report = catalog
+                .run_reasoning_auto(&Budget::default())
+                .await
+                .expect("a first call must succeed even with nothing cached");
+
+            assert_eq!(report.technique, ReasoningTechnique::Full);
+        }
+
+        /// The real case decision 4.4 exists for: a retraction happens
+        /// through some *other* path (here, a direct `retract_flakes` —
+        /// standing in for whatever in the system actually withdrew a
+        /// base fact), with **no caller ever telling this method about
+        /// it**. `run_reasoning_auto` must discover it on its own.
+        #[tokio::test]
+        async fn a_retraction_no_caller_reported_is_discovered_automatically() {
+            let (catalog, graph) = seeded().await;
+            catalog
+                .run_reasoning_auto(&Budget::default())
+                .await
+                .expect("first call populates the cache and watermark");
+
+            // Nobody calls `run_reasoning_incremental` or passes this to
+            // `run_reasoning_auto` — the whole point under test.
+            let stale = hierarchy()[2].clone();
+            graph
+                .retract_flakes(&[Flake {
+                    op: false,
+                    t: 100,
+                    ..stale
+                }])
+                .await
+                .expect("retract, entirely outside this method's awareness");
+
+            let report = catalog
+                .run_reasoning_auto(&Budget::default())
+                .await
+                .expect("second call");
+
+            assert_eq!(
+                report.technique,
+                ReasoningTechnique::Incremental,
+                "the retraction must have been found without being told about it"
+            );
+        }
+
+        /// Nothing retracted since the watermark is the same "nothing to
+        /// maintain against" case `run_reasoning_incremental` already
+        /// falls back to full for — reached automatically, not because an
+        /// empty list was passed in by hand.
+        #[tokio::test]
+        async fn nothing_retracted_since_the_watermark_still_falls_back_to_full() {
+            let (catalog, _graph) = seeded().await;
+            catalog
+                .run_reasoning_auto(&Budget::default())
+                .await
+                .expect("first call");
+
+            let report = catalog
+                .run_reasoning_auto(&Budget::default())
+                .await
+                .expect("second call, nothing changed in between");
+
+            assert_eq!(report.technique, ReasoningTechnique::Full);
+        }
+
+        /// **The mutator this module exists to kill.** `finish_reasoning_run`
+        /// retracts the *previous* run's own overlay before writing a new
+        /// one — a real retraction, in the same flake log, that looks
+        /// exactly like a base fact disappearing if nothing filters it
+        /// out. Without the `cx` filter, a third `run_reasoning_auto` call
+        /// would see the second run's overlay-withdrawal and incorrectly
+        /// treat it as evidence something in the *base* was retracted,
+        /// even though the base never changed between run 2 and run 3.
+        #[tokio::test]
+        async fn the_reasoning_overlays_own_churn_is_never_mistaken_for_a_base_retraction() {
+            let (catalog, _graph) = seeded().await;
+
+            // Run 1: nothing to withdraw yet (first run).
+            catalog
+                .run_reasoning_auto(&Budget::default())
+                .await
+                .expect("run 1");
+            // Run 2: withdraws run 1's overlay before writing its own —
+            // this is the reasoning-graph retraction that must be filtered.
+            catalog
+                .run_reasoning_auto(&Budget::default())
+                .await
+                .expect("run 2");
+
+            // Run 3: the base has not changed since run 2. If overlay
+            // churn were mistaken for a base retraction, this would
+            // wrongly go Incremental.
+            let report = catalog
+                .run_reasoning_auto(&Budget::default())
+                .await
+                .expect("run 3");
+
+            assert_eq!(
+                report.technique,
+                ReasoningTechnique::Full,
+                "no base retraction happened between run 2 and run 3 — only the \
+                 overlay's own churn, which must not count: {report:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -22459,6 +22696,26 @@ mod projection_isolation_tests {
                 self.at_resolves_to
                     .load(std::sync::atomic::Ordering::SeqCst),
             ))
+        }
+
+        /// Filters the double's own real `retracted` log by `t`, exercising
+        /// the exact contract `PostgresTripleStore::retractions_since`
+        /// implements against the real `flakes` view — not a hand-rolled
+        /// canned response, since `retract_flakes` already tracks every
+        /// retraction this double has ever recorded, in order, with its
+        /// real `t`.
+        async fn retractions_since(&self, since: i64) -> Result<Vec<Flake>, EngineError> {
+            if self.fail {
+                return Self::refuse();
+            }
+            Ok(self
+                .retracted
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|f| f.t > since)
+                .cloned()
+                .collect())
         }
     }
 

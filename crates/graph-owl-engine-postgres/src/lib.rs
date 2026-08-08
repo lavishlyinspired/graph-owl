@@ -567,6 +567,24 @@ impl TripleStore for PostgresTripleStore {
             oldest_delta_t: row.1,
         }))
     }
+
+    /// Queries the `flakes` view directly rather than through
+    /// `current_state_query`'s builder: that builder resolves *current
+    /// state* (retracted rows excluded by construction), the opposite of
+    /// what this asks for. The view is the plain union of both partitions
+    /// with no filtering of its own — see its own migration comment — so
+    /// `op = false` here reads every retraction ever written, exactly as
+    /// `retract_flakes` left it.
+    #[tracing::instrument(name = "engine.retractions_since", skip_all)]
+    async fn retractions_since(&self, since: i64) -> Result<Vec<Flake>, EngineError> {
+        let query = format!("SELECT {FLAKE_COLUMNS} FROM flakes WHERE op = false AND t > $1");
+        let rows = sqlx::query(&query)
+            .bind(since)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| EngineError::Backend(e.to_string()))?;
+        rows.iter().map(flake_from_row).collect()
+    }
 }
 
 #[cfg(test)]

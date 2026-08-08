@@ -3,11 +3,14 @@
 //!
 //! `Catalog::run_reasoning_incremental` shipped, mutation-tested, with
 //! nothing in `graph-owl-server` calling it — `POST /reasoning/runs` always
-//! did a full run. Per the user's own decision (Phase 4.4): retractions
-//! reach it as an explicit, caller-supplied `retracted` list in the request
-//! body, naming exactly what it withdrew from the base graph itself — the
-//! endpoint does not perform that withdrawal, only maintains the overlay to
-//! match it.
+//! did a full run. This file's own explicit-`retracted`-list tests
+//! predate decision 4.4 and describe the lower-level primitive that
+//! decision left in place, not the decision itself: **4.4 (decided 8 Aug
+//! 2026) is a server-tracked watermark, not a caller-supplied list** — see
+//! `reasoning_auto.rs` for the automatic path an empty body now takes.
+//! Naming exactly what a caller's own tool withdrew from the base graph
+//! remains a legitimate lower-level entry point (this file), separate from
+//! the automatic one.
 
 mod common;
 

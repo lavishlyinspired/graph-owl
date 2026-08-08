@@ -307,3 +307,50 @@ async fn a_retraction_with_an_uninitialized_namespace_is_refused() {
         .expect_err("namespace 0 must be refused on the retract path too");
     assert_eq!(rows_in_table(&store).await, 0);
 }
+
+/// `retractions_since` — Epic 97 decision 4.4's server-tracked retraction
+/// watermark. Queries the `flakes` view directly (not through
+/// `current_state_query`'s resolution, which excludes retracted rows by
+/// design), so this must see the raw retraction row itself.
+#[tokio::test]
+async fn retractions_since_finds_a_retraction_strictly_after_the_watermark() {
+    let (store, _container) = store().await;
+
+    store.assert_flakes(&[named(1)]).await.expect("assert");
+    store.retract_flakes(&[named(2)]).await.expect("retract");
+
+    let found = store.retractions_since(1).await.expect("retractions_since");
+    assert_eq!(found.len(), 1, "got {found:?}");
+    assert_eq!(found[0].t, 2);
+    assert!(!found[0].op, "a retraction row has op = false");
+}
+
+/// The boundary: `since` itself is excluded, only strictly-later rows count
+/// — mirroring `time_at`'s own `<=` boundary reasoning in the other
+/// direction. A watermark equal to the retraction's own `t` must not
+/// re-report it as new on the next poll.
+#[tokio::test]
+async fn retractions_since_excludes_a_retraction_at_exactly_the_watermark() {
+    let (store, _container) = store().await;
+
+    store.assert_flakes(&[named(1)]).await.expect("assert");
+    store.retract_flakes(&[named(2)]).await.expect("retract");
+
+    let found = store.retractions_since(2).await.expect("retractions_since");
+    assert!(found.is_empty(), "got {found:?}");
+}
+
+/// An assertion is not a retraction. A watermark query over a table with
+/// only assertions in the window must report nothing.
+#[tokio::test]
+async fn retractions_since_ignores_assertions() {
+    let (store, _container) = store().await;
+
+    store.assert_flakes(&[named(1)]).await.expect("assert");
+
+    let found = store.retractions_since(0).await.expect("retractions_since");
+    assert!(
+        found.is_empty(),
+        "an assertion is not a retraction: {found:?}"
+    );
+}

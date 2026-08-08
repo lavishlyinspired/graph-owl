@@ -219,6 +219,35 @@ pub trait TripleStore: Send + Sync {
     async fn partition_health(&self) -> Result<Option<PartitionHealth>, EngineError> {
         Ok(None)
     }
+
+    /// Retracted flakes (`op: false`) with `t > since`, in no particular
+    /// order — Epic 97 decision 4.4's server-tracked retraction watermark.
+    /// **Never a separate log**: retractions are already durable, ordinary
+    /// rows in the same append-only store [`retract_flakes`] writes to
+    /// (never deleted — see its own doc comment), so this is a query over
+    /// what already exists, not new state to keep in sync with it. A
+    /// caller reasoning about *base* retractions specifically (rather than
+    /// churn in some other named graph, such as a reasoning overlay
+    /// replacing its own prior conclusions) filters the result by `cx` —
+    /// this trait has no opinion on any graph's meaning.
+    ///
+    /// A default no-op (`Ok(vec![])`) for a backend that cannot answer
+    /// this, the same convention [`compact`]/[`partition_health`] already
+    /// use: a caller building incremental maintenance on top of this
+    /// falls back to a full pass when nothing comes back, exactly as it
+    /// already does when there is nothing to maintain against.
+    ///
+    /// [`retract_flakes`]: TripleStore::retract_flakes
+    /// [`compact`]: TripleStore::compact
+    /// [`partition_health`]: TripleStore::partition_health
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Backend`] if the query fails.
+    async fn retractions_since(&self, since: i64) -> Result<Vec<Flake>, EngineError> {
+        let _ = since;
+        Ok(Vec::new())
+    }
 }
 
 /// [`TripleStore::partition_health`]'s answer.

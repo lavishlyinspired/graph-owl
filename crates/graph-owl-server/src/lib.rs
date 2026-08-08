@@ -7081,9 +7081,16 @@ async fn run_reasoning(
 
     // The budget is the server's, not the caller's — the same rule SPARQL
     // follows. A client that can raise its own limit does not have one.
+    //
+    // Epic 97 decision 4.4: an empty body no longer always means "full
+    // run" — `run_reasoning_auto` computes what changed since the last
+    // run's own watermark and takes the incremental path automatically
+    // when there is something to maintain against. A caller supplying its
+    // own `retracted` list still takes the explicit lower-level path,
+    // unchanged — an admin tool replaying a specific retraction batch, say.
     let report = if retracted.is_empty() {
         catalog
-            .run_reasoning(&graph_owl_reasoning::Budget::default())
+            .run_reasoning_auto(&graph_owl_reasoning::Budget::default())
             .await?
     } else {
         catalog

@@ -87,7 +87,7 @@ is the condition that index exists to catch.
 | **94** | 10 | [`94-rdf12-alignment.md`](94-rdf12-alignment.md) | In progress | 6/8 (+1 partial) | Epic 4 (flakes, reified relationships), Epic 9 (serialization) |
 | **95** | 10 | [`95-owl-rl-completion.md`](95-owl-rl-completion.md) | **Shipped** | 2/2 | Epic 6 (the eight rules and the fixpoint that runs them) |
 | **96** | 10 | [`96-shacl-sparql.md`](96-shacl-sparql.md) | In progress | 2/4 | Epic 5 (SHACL Core), Epic 7 (SPARQL) |
-| **97** | 10, 12 | [`97-incremental-parallel-reasoning.md`](97-incremental-parallel-reasoning.md) | In progress | 2/3 | Epic 6 (semi-naive fixpoint), Epic 37a (the measurement) |
+| **97** | 10, 12 | [`97-incremental-parallel-reasoning.md`](97-incremental-parallel-reasoning.md) | **Shipped** | 4/4 | Epic 6 (semi-naive fixpoint), Epic 37a (the measurement) |
 | **98** | 11, 12 | [`98-owl-el-reasoning.md`](98-owl-el-reasoning.md) | **Shipped** | 4/4 | Epic 6 (overlay, budgets, explainability), Epic 24 (ontologies as entities) |
 | **99** | 11, 12 | [`99-owl-ql-reasoning.md`](99-owl-ql-reasoning.md) | **Shipped** | 4/4 | Epic 7 (query algebra to rewrite), Epic 6 (explanation contract) |
 | **100** | 11, 12 | [`100-profile-detection-and-routing.md`](100-profile-detection-and-routing.md) | In progress | 5/7 | Epic 6 (RL engine — shipped), ~~Epic 24 (ontologies as entities)~~ — **phantom*… |
@@ -627,7 +627,8 @@ is the condition that index exists to catch.
 
 - [x] Incremental maintenance rather than full recomputation
 - [x] `POST /reasoning/runs` can now actually take the incremental path over HTTP — found and 
-- [ ] Overlay staleness is visible
+- [x] Decision 4.4 implemented: server-tracked retraction watermark, no caller involvement — s
+- [x] Overlay staleness is visible — shipped 8 August 2026 (Phase 3 item 3.11).
 
 ### Epic 98 — OWL 2 EL Reasoning *(Demo 11, 12)*
 
