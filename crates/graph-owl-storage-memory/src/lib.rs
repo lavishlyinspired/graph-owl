@@ -2067,6 +2067,28 @@ impl Storage for InMemoryStorage {
                     );
                 }
             }
+
+            // Phase 3 item 3.8, sequenced after this cascade landing in 3.3 —
+            // the same reasoning as the Postgres adapter's own cascade: a
+            // column mapping stores its FQNs as plain text, so a rename has
+            // to reach it explicitly or it keeps citing an FQN that moved.
+            let renames_column_fqn = |fqn: &str| -> Option<String> {
+                if fqn == old_prefix {
+                    Some(new_prefix.clone())
+                } else if let Some(rest) = fqn.strip_prefix(&format!("{old_prefix}.")) {
+                    Some(format!("{new_prefix}.{rest}"))
+                } else {
+                    None
+                }
+            };
+            for (_, mapping) in self.column_mappings.lock().unwrap().iter_mut() {
+                if let Some(renamed) = renames_column_fqn(&mapping.from_column_fqn) {
+                    mapping.from_column_fqn = renamed;
+                }
+                if let Some(renamed) = renames_column_fqn(&mapping.to_column_fqn) {
+                    mapping.to_column_fqn = renamed;
+                }
+            }
         }
 
         let existing = assets.iter_mut().find(|a| a.id == id).expect("just read");

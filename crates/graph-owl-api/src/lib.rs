@@ -28566,6 +28566,143 @@ mod entity_expansion_tests {
 
             assert_eq!(renamed.fully_qualified_name, "lakehouse.sales");
         }
+
+        /// **Phase 3 item 3.8, sequenced after this cascade landing in 3.3.**
+        /// `lineage_column_mappings` has no foreign key to `assets` — a
+        /// rename has to reach its FQN strings explicitly, mirroring the
+        /// dedicated Postgres coverage in `crates/graph-owl-server/tests/lineage_columns.rs`'s
+        /// `renaming_the_source_table_updates_its_columns_mappings`.
+        #[tokio::test]
+        async fn renaming_a_table_moves_its_columns_lineage_mappings() {
+            let catalog = catalog().await;
+            let source_service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Service, "raw-svc", None),
+                )
+                .await
+                .expect("source service");
+            let source_database = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Database, "sales", Some(source_service.id)),
+                )
+                .await
+                .expect("source database");
+            let source_schema = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Schema, "public", Some(source_database.id)),
+                )
+                .await
+                .expect("source schema");
+            let source_table = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Table, "orders", Some(source_schema.id)),
+                )
+                .await
+                .expect("source table");
+            let source_column = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Column, "customer_id", Some(source_table.id)),
+                )
+                .await
+                .expect("source column");
+
+            let target_service = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Service, "mart-svc", None),
+                )
+                .await
+                .expect("target service");
+            let target_database = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Database, "sales", Some(target_service.id)),
+                )
+                .await
+                .expect("target database");
+            let target_schema = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Schema, "public", Some(target_database.id)),
+                )
+                .await
+                .expect("target schema");
+            let target_table = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Table, "customers", Some(target_schema.id)),
+                )
+                .await
+                .expect("target table");
+            let target_column = catalog
+                .upsert_asset(
+                    &Principal::system(),
+                    asset_req(AssetKind::Column, "id", Some(target_table.id)),
+                )
+                .await
+                .expect("target column");
+
+            let edge = catalog
+                .assert_lineage(
+                    &Principal::system(),
+                    source_table.id,
+                    target_table.id,
+                    graph_owl_core::relationship_type::RelationshipType::Feeds,
+                    graph_owl_core::lineage::LineageDetails {
+                        source: graph_owl_core::lineage::LineageSource::Manual,
+                        query: None,
+                        description: None,
+                        pipeline: None,
+                        openlineage_event_id: None,
+                    },
+                )
+                .await
+                .expect("edge");
+            catalog
+                .set_column_mappings(
+                    edge.id,
+                    vec![graph_owl_storage::ColumnMapping {
+                        from_column_fqn: source_column.fully_qualified_name.clone(),
+                        to_column_fqn: target_column.fully_qualified_name.clone(),
+                        expression: None,
+                    }],
+                )
+                .await
+                .expect("mappings");
+
+            catalog
+                .update_asset(
+                    &Principal::system(),
+                    source_table.id,
+                    &AssetUpdate {
+                        name: Some("orders_v2".to_string()),
+                        description: None,
+                        extension: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("rename");
+
+            let mappings = catalog
+                .column_mappings(edge.id)
+                .await
+                .expect("read mappings");
+            assert_eq!(mappings.len(), 1);
+            assert_eq!(
+                mappings[0].from_column_fqn, "raw-svc.sales.public.orders_v2.customer_id",
+                "the mapping must follow the renamed table, not keep citing the old FQN"
+            );
+            assert_eq!(
+                mappings[0].to_column_fqn, target_column.fully_qualified_name,
+                "the unrelated target side must not move"
+            );
+        }
     }
 
     /// A real `Service -> Database -> Schema -> Table` chain — every

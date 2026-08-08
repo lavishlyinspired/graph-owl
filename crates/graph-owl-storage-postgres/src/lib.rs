@@ -4412,6 +4412,26 @@ impl Storage for PostgresStorage {
             .execute(&mut *tx)
             .await
             .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+            // Phase 3 item 3.8, sequenced after this cascade landing in 3.3.
+            // `lineage_column_mappings` stores column FQNs as plain TEXT with
+            // no foreign key (by design — the same choice `lineage_edges.source`
+            // makes), so a rename here has to reach it explicitly or a mapping
+            // silently keeps citing an FQN nothing answers to any more.
+            // `starts_with` rather than `LIKE`: an FQN segment routinely
+            // contains `_`, which `LIKE` would read as a wildcard.
+            for column in ["from_column_fqn", "to_column_fqn"] {
+                sqlx::query(&format!(
+                    "UPDATE lineage_column_mappings
+                        SET {column} = $2 || substring({column} from length($1) + 1)
+                      WHERE {column} = $1 OR starts_with({column}, $1 || '.')"
+                ))
+                .bind(&before.fully_qualified_name)
+                .bind(&after.fully_qualified_name)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            }
         }
 
         let updated = asset_from_row(updated_row);

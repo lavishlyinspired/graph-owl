@@ -162,6 +162,70 @@ async fn a_many_to_one_column_mapping_round_trips() {
     );
 }
 
+/// **Phase 3 item 3.8, sequenced after 3.3.** `lineage_column_mappings`
+/// stores plain-TEXT FQNs with no foreign key — renaming the table underneath
+/// a mapping used to leave it pointing at an FQN that no longer existed,
+/// because 3.3's cascade only ever touched `assets.fully_qualified_name`.
+/// This proves the rename reaches the mapping too, the same way it already
+/// reaches every descendant asset.
+#[tokio::test]
+async fn renaming_the_source_table_updates_its_columns_mappings() {
+    let (app, _db, _url) = test_app().await;
+    let (source_id, _, source_columns) =
+        table_with_columns(&app, "raw-svc", &["first_name", "last_name"]).await;
+    let (target_id, _, target_columns) = table_with_columns(&app, "mart-svc", &["full_name"]).await;
+    let edge_id = edge(&app, &source_id, &target_id, "manual").await;
+    let (status, body) = send(
+        &app,
+        "PUT",
+        &format!("/lineage/{edge_id}/columns"),
+        Some(json!({
+            "mappings": [
+                {
+                    "fromColumnFqn": source_columns[0],
+                    "toColumnFqn": target_columns[0],
+                    "expression": "concat(first_name, ' ', last_name)",
+                },
+                { "fromColumnFqn": source_columns[1], "toColumnFqn": target_columns[0] },
+            ],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, renamed) = send(
+        &app,
+        "PATCH",
+        &format!("/assets/{source_id}"),
+        Some(json!({ "name": "orders_v2" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    let new_table_fqn = renamed["fullyQualifiedName"]
+        .as_str()
+        .expect("an fqn")
+        .to_string();
+
+    let (_, listed) = send(&app, "GET", &format!("/lineage/{edge_id}/columns"), None).await;
+    let mappings = listed.as_array().expect("an array");
+    assert_eq!(mappings.len(), 2, "{listed}");
+    assert!(
+        mappings.iter().all(|m| m["fromColumnFqn"]
+            .as_str()
+            .expect("fqn")
+            .starts_with(&format!("{new_table_fqn}."))),
+        "every source column must move with the rename: {listed}"
+    );
+    // The target side is untouched — only the renamed subtree's own columns
+    // move, and a mapping is not symmetric.
+    assert!(
+        mappings
+            .iter()
+            .all(|m| m["toColumnFqn"] == target_columns[0].as_str()),
+        "the unrelated target side must not move: {listed}"
+    );
+}
+
 /// A mapping to a column that does not exist is a lineage claim nothing can
 /// render, and it would sit there looking like coverage.
 #[tokio::test]

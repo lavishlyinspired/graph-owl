@@ -66,7 +66,7 @@ is the condition that index exists to catch.
 | **26** | 7 | [`26-lifecycle-certification.md`](26-lifecycle-certification.md) | In progress | 9/10 (+1 partial) | Epic 11 (issuers are principals), Epic 24 (metrics are certifiable) |
 | **27** | 7 | [`27-contracts.md`](27-contracts.md) | In progress | 4/6 (+1 partial) | Epic 2 (schemas to guarantee), Epic 3 (version diffs detect breakage) |
 | **28** | 7 | [`28-usage.md`](28-usage.md) | In progress | 5/6 | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
-| **29** | 7 | [`29-lineage.md`](29-lineage.md) | In progress | 13/14 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
+| **29** | 7 | [`29-lineage.md`](29-lineage.md) | **Shipped** | 14/14 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
 | **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | In progress | 7/8 | Epic 29 (lineage, for propagating trust signals) |
 | **31** | 5 | [`31-memory.md`](31-memory.md) | In progress | 2/4 (+1 partial) | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
 | **32** | 5 | [`32-agent-capabilities.md`](32-agent-capabilities.md) | **Shipped** | 2/2 | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
@@ -460,7 +460,7 @@ is the condition that index exists to catch.
 - [x] Column-level mappings, many-to-one
 - [x] Source-scoped reconciliation
 - [x] Edges survive soft delete and return on restore
-- [ ] Rename and drop propagation
+- [x] Rename propagation
 - [x] The node budget Slice C's own acceptance criteria specified — built 8 August 2026, not 2
 
 ### Epic 30 — Quality Signals & Incidents *(Demo 7)*
