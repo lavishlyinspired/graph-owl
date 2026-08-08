@@ -4559,6 +4559,32 @@
         "summary": "Replace a metric's declared sources, reconciled by source"
       }
     },
+    "/change-proposals": {
+      "get": {
+        "operationId": "get_change-proposals",
+        "responses": {
+          "200": {
+            "description": "Every change proposal catalog-wide, status-filterable — for a review queue"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every change proposal catalog-wide, status-filterable — for a review queue"
+      }
+    },
     "/change-proposals/{id}/accept": {
       "post": {
         "operationId": "post_change-proposals__id__accept",
@@ -6605,6 +6631,32 @@
           }
         ],
         "summary": "MCP tools over JSON-RPC 2.0"
+      }
+    },
+    "/me": {
+      "get": {
+        "operationId": "get_me",
+        "responses": {
+          "200": {
+            "description": "The caller's own resolved identity"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "The caller's own resolved identity"
       }
     },
     "/memories": {

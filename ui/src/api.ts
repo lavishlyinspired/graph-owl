@@ -246,6 +246,33 @@ export type ClaimDecision =
 export type DriftKind = "liveEdited" | "unapplied";
 export type DriftStatus = "pending" | "applied" | "ignored";
 
+export type ChangeProposalStatus = "pending" | "accepted" | "rejected";
+
+export interface ChangeProposal {
+  id: string;
+  about: string;
+  field: string;
+  currentValue: string | null;
+  proposedValue: string | null;
+  rationale: string;
+  status: ChangeProposalStatus;
+  proposedBy: string;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  decisionReason: string | null;
+  createdAt: string;
+}
+
+export type PrincipalKind = "user" | "service" | "system";
+
+export interface WhoAmI {
+  id: string;
+  name: string;
+  kind: PrincipalKind;
+  roles: string[];
+  isAdmin: boolean;
+}
+
 export interface DriftItem {
   id: string;
   assetId: string;
@@ -1040,4 +1067,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ reason }),
     }),
+  /** Catalog-wide, unscoped by entity or proposer — Phase 3 item 3.2. */
+  changeProposals: (params: { status?: ChangeProposalStatus; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.status) query.set("status", params.status);
+    query.set("limit", String(params.limit ?? 50));
+    query.set("offset", String(params.offset ?? 0));
+    return request<{ data: ChangeProposal[]; total: number }>(`/change-proposals?${query}`);
+  },
+  acceptChangeProposal: (id: string) =>
+    request<ChangeProposal>(`/change-proposals/${id}/accept`, { method: "POST" }),
+  rejectChangeProposal: (id: string, reason: string) =>
+    request<ChangeProposal>(`/change-proposals/${id}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
+  /** The caller's own resolved identity — Phase 3 item 3.2's other named
+   *  gap: the frontend had no way to answer "who am I" for a per-user
+   *  fallback view. */
+  whoAmI: () => request<WhoAmI>("/me"),
 };

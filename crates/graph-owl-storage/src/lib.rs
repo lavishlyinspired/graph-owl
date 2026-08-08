@@ -3328,6 +3328,22 @@ pub trait Storage: Send + Sync {
         offset: usize,
     ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), StorageError>;
 
+    /// Catalog-wide, unscoped by entity or proposer — Phase 3 item 3.2's own
+    /// gap: `list_change_proposals_for_entity`/`_by_user` above answer "this
+    /// entity's" or "this person's" proposals, but a review queue needs
+    /// "every pending proposal", the same shape `list_review_queue` (Epic
+    /// 17) already serves. `status` filters when `Some`; `None` returns
+    /// every status.
+    ///
+    /// # Errors
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_change_proposals(
+        &self,
+        status: Option<graph_owl_core::collaboration::ProposalStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), StorageError>;
+
     /// Atomic and one-shot: `WHERE status = 'pending'` in the same
     /// statement, so a second decide call cannot flip an already-decided
     /// proposal — the same pattern `decide_review_queue_entry` (Epic 17)

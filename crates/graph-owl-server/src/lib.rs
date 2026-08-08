@@ -379,6 +379,11 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             "/users/{id}/change-proposals",
             get(list_change_proposals_by_user),
         )
+        // Catalog-wide, for the review queue (Phase 3 item 3.2) — distinct
+        // from the two routes above, which scope to one entity or one
+        // proposer. No path segment collides: axum's router keys on exact
+        // segment count, and this is zero past `/change-proposals`.
+        .route("/change-proposals", get(list_all_change_proposals))
         .route(
             "/change-proposals/{id}/accept",
             post(accept_change_proposal),
@@ -509,6 +514,12 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         // client reads *before* it holds a token, so requiring one would be
         // circular.
         .route("/auth/config", get(auth_configuration_endpoint))
+        // The opposite of its neighbor above: authenticated by necessity —
+        // "who am I" has no answer without a resolved principal. Phase 3
+        // item 3.2's own named gap: the review queue's per-user proposal
+        // fallback needs the caller's own id, and nothing anywhere returned
+        // it.
+        .route("/me", get(who_am_i))
         // Unauthenticated by design: an orchestrator's probe must not depend
         // on the identity provider being reachable.
         .route("/health", get(health))
@@ -5181,6 +5192,20 @@ async fn list_change_proposals_by_user(
     let limit = query.limit.unwrap_or(50).min(200);
     let (proposals, total) = catalog
         .list_change_proposals_by_user(&user_id, limit, query.offset.unwrap_or(0))
+        .await?;
+    Ok(Json(json!({ "data": proposals, "total": total })))
+}
+
+/// `GET /change-proposals` — Phase 3 item 3.2. Catalog-wide, for a review
+/// queue; `/assets/{id}/change-proposals` and `/users/{id}/change-proposals`
+/// above answer a narrower question each.
+async fn list_all_change_proposals(
+    State(catalog): State<Catalog>,
+    AppQuery(query): AppQuery<ListProposalsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    let (proposals, total) = catalog
+        .list_change_proposals(query.status, limit, query.offset.unwrap_or(0))
         .await?;
     Ok(Json(json!({ "data": proposals, "total": total })))
 }
@@ -10750,6 +10775,14 @@ async fn auth_configuration_endpoint() -> Json<AuthConfig> {
             .ok()
             .filter(|value| !value.is_empty()),
     ))
+}
+
+/// `GET /me` — Phase 3 item 3.2. `Principal` already round-trips to JSON
+/// (`#[serde(rename_all = "camelCase")]`, the same struct every other
+/// handler's `Auth` extraction already resolves), so this returns exactly
+/// what the auth layer decided the caller is, with nothing recomputed.
+async fn who_am_i(Auth(principal): Auth) -> Json<Principal> {
+    Json(principal)
 }
 
 /// The JSON-LD `@context` document compacted output points at by URL

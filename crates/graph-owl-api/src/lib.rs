@@ -10276,6 +10276,26 @@ impl Catalog {
             .await?)
     }
 
+    /// Every pending proposal catalog-wide, for a review queue — the shape
+    /// Phase 3 item 3.2 closes. Same authorization posture as
+    /// [`Self::review_queue`] (Epic 17): a review surface is read by
+    /// whoever reaches it, not narrowed per-entity, matching how every
+    /// other queue instance in this codebase already behaves.
+    ///
+    /// # Errors
+    /// `Storage` if the read fails.
+    pub async fn list_change_proposals(
+        &self,
+        status: Option<graph_owl_core::collaboration::ProposalStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), CatalogError> {
+        Ok(self
+            .storage
+            .list_change_proposals(status, limit, offset)
+            .await?)
+    }
+
     // ---- Epic 35 Slice D: announcements ----
 
     /// # Errors

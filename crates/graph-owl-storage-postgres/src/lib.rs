@@ -9474,6 +9474,41 @@ impl Storage for PostgresStorage {
         Ok((proposals, total))
     }
 
+    async fn list_change_proposals(
+        &self,
+        status: Option<graph_owl_core::collaboration::ProposalStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), StorageError> {
+        let status_str = status.map(change_proposal_status_str);
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let offset = i64::try_from(offset).unwrap_or(0);
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM proposals WHERE ($1::text IS NULL OR status = $1)",
+        )
+        .bind(status_str)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let rows = sqlx::query(
+            "SELECT * FROM proposals
+             WHERE ($1::text IS NULL OR status = $1)
+             ORDER BY created_at DESC, id
+             LIMIT $2 OFFSET $3",
+        )
+        .bind(status_str)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let proposals = rows
+            .into_iter()
+            .map(change_proposal_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((proposals, total))
+    }
+
     async fn decide_change_proposal(
         &self,
         id: Uuid,

@@ -5,15 +5,9 @@
  *  test) — the identical split `VocabularySection.tsx` already
  *  established one layer above `VocabularyBrowser.tsx`.
  *
- *  **Proposals (Epic 35) is not wired in.** There is no catalog-wide
- *  "every pending proposal" endpoint — only per-entity
- *  (`GET /assets/{id}/change-proposals`) and per-user
- *  (`GET /users/{id}/change-proposals`), and the frontend has no "who am
- *  I" endpoint to resolve the caller's own user id for the latter. A
- *  proposals queue built against either would show a slice of proposals
- *  under a "review queue" label claiming to be the whole thing. Recorded
- *  as a real backend gap (a catalog-wide listing route), not silently
- *  skipped. */
+ *  **Proposals (Epic 35) wired in, Phase 3 item 3.2**: `GET
+ *  /change-proposals` (catalog-wide, added alongside `GET /me`) closes the
+ *  gap this file's own comment used to name here. */
 
 import { useMemo, useState } from "react";
 import { Segmented, Space } from "antd";
@@ -21,24 +15,27 @@ import { ReviewQueue } from "./ReviewQueue";
 import { resolutionQueue } from "./resolutionQueue";
 import { extractionQueue } from "./extractionQueue";
 import { driftQueue } from "./driftQueue";
+import { proposalsQueue } from "./proposalsQueue";
 import type { QueueConfig } from "./queues";
 import { readParam, writeParam } from "../deepLink";
 
-type QueueKind = "resolution" | "extraction" | "drift";
+type QueueKind = "resolution" | "extraction" | "drift" | "proposals";
 
 const KIND_OPTIONS: { readonly label: string; readonly value: QueueKind }[] = [
   { label: "Merge review", value: "resolution" },
   { label: "Extraction claims", value: "extraction" },
   { label: "Drift", value: "drift" },
+  { label: "Proposals", value: "proposals" },
 ];
 
 function isQueueKind(value: string | null): value is QueueKind {
-  return value === "resolution" || value === "extraction" || value === "drift";
+  return value === "resolution" || value === "extraction" || value === "drift" || value === "proposals";
 }
 
 function configFor(kind: QueueKind): QueueConfig {
   if (kind === "extraction") return extractionQueue();
   if (kind === "drift") return driftQueue();
+  if (kind === "proposals") return proposalsQueue();
   return resolutionQueue();
 }
 

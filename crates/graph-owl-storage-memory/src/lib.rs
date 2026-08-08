@@ -5558,6 +5558,26 @@ impl Storage for InMemoryStorage {
         Ok((page, total))
     }
 
+    async fn list_change_proposals(
+        &self,
+        status: Option<graph_owl_core::collaboration::ProposalStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<graph_owl_core::collaboration::Proposal>, i64), StorageError> {
+        let mut matching: Vec<_> = self
+            .change_proposals
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| status.is_none_or(|want| p.status == want))
+            .cloned()
+            .collect();
+        matching.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+        let total = i64::try_from(matching.len()).unwrap_or(i64::MAX);
+        let page = matching.into_iter().skip(offset).take(limit).collect();
+        Ok((page, total))
+    }
+
     async fn decide_change_proposal(
         &self,
         id: Uuid,

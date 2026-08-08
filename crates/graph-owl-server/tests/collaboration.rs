@@ -832,6 +832,75 @@ async fn proposals_are_listable_per_entity_and_per_user_at_the_wire() {
     assert_eq!(for_user["total"], json!(1), "{for_user}");
 }
 
+// ---- Phase 3 item 3.2: the catalog-wide listing and "who am I" ----
+
+/// The RED case `proposals_are_listable_per_entity_and_per_user_at_the_wire`
+/// above cannot express: proposals against *two different* entities must
+/// both appear from one `GET /change-proposals` call — the whole reason
+/// this endpoint exists rather than the caller fanning out per entity.
+#[tokio::test]
+async fn every_proposal_catalog_wide_is_listable_at_the_wire() {
+    let (app, _db, _) = test_app_with_secret(SECRET).await;
+    let orders = asset_as(&app, "alice", "orders").await;
+    let payments = asset_as(&app, "alice", "payments").await;
+
+    for asset in [&orders, &payments] {
+        send_as(
+            &app,
+            "POST",
+            &format!("/assets/{asset}/change-proposals"),
+            "mallory",
+            Some(json!({
+                "field": "description",
+                "currentValue": Value::Null,
+                "proposedValue": "x",
+                "rationale": "y",
+            })),
+        )
+        .await;
+    }
+
+    let (status, all) = send_as(&app, "GET", "/change-proposals", "alice", None).await;
+    assert_eq!(status, StatusCode::OK, "{all}");
+    assert_eq!(
+        all["total"],
+        json!(2),
+        "both entities' proposals must appear from one call: {all}"
+    );
+    let abouts: Vec<&str> = all["data"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|p| p["about"].as_str().expect("about"))
+        .collect();
+    assert!(abouts.contains(&orders.as_str()), "{abouts:?}");
+    assert!(abouts.contains(&payments.as_str()), "{abouts:?}");
+}
+
+#[tokio::test]
+async fn who_am_i_resolves_the_callers_own_identity() {
+    let (app, _db, _) = test_app_with_secret(SECRET).await;
+
+    let (status, me) = send_as(&app, "GET", "/me", "alice", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{me}");
+    assert_eq!(me["id"], json!("alice"), "{me}");
+}
+
+#[tokio::test]
+async fn who_am_i_is_401_without_a_token() {
+    let (app, _db, _) = test_app_with_secret(SECRET).await;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/me")
+        .body(Body::empty())
+        .expect("request should build");
+    let response = app.oneshot(request).await.expect("request handled");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
 // ---- Slice D: announcements ----
 
 #[tokio::test]
