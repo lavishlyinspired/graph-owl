@@ -657,3 +657,28 @@ Permissive, heavily used, actively maintained. **Adopted, no spike needed**
 security path; the only property that matters is "reads the right number
 for this OS," which is exactly the cross-platform portability a hand-rolled
 `/proc` reader would not have.
+
+### Python OpenAPI read-client generator (`openapi-python-client`) — checked before Epic 36 Slice D
+
+**8 August 2026, checked before implementation.** Slice D (the browse
+reference app) needs a generated Python client for `GET` endpoints — the
+existing `graph_owl_sdk` package only covers the push/ingest surface
+(`ingest.py`), and Slice D's own acceptance criterion ("uses the generated
+client, never hand-rolled HTTP") rules out a hand-written `requests` wrapper.
+`sdk/typescript` already establishes the pattern of generating from
+`openapi.json` (via `openapi-typescript`) rather than hand-writing a client;
+this is the same decision for Python.
+
+| Name | Licence | Newest version | Downloads (8 Aug 2026) | Repository |
+|---|---|---|---|---|
+| `openapi-python-client` | MIT | 0.29.0 (30 May 2026) | 3,305,634/month | github.com/openapi-generators/openapi-python-client |
+
+Permissive, actively maintained, heavily used (the de facto standard Python
+OpenAPI-3-to-client generator, the same role `openapi-typescript` already
+fills for the TypeScript SDK). **Adopted, no spike needed** — a client
+generator is a build tool operating on an already-adopted spec format
+(OpenAPI, which this project already generates from), not a parser on a
+correctness or security path; the property that matters is "produces a
+client that calls the documented endpoints correctly," which is exactly
+what a widely-used, actively-maintained generator is exercised against by
+its own enormous user base.

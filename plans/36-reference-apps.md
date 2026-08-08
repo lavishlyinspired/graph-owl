@@ -1,7 +1,7 @@
 # Plan: Reference Applications (Epic 36)
 
 **Branch**: feat/reference-apps
-**Status**: Not started
+**Status**: **Slices A-C shipped, 8 August 2026 — Slice D (browse) and Slice E (defect log) in progress.** `examples/` holds `agent-triage/` (new, Python, MCP-only) and `adapter-csv/` (a pointer to the artifact Epic 16 Slice F already built at `sdk/python/examples/csv_adapter.py` — not duplicated, since Slice C's own AC says "the adapter is the artifact Epic 16's guide links to, so the guide and the code cannot drift"). Both verified against a real live service via `scripts/verify-examples.sh`, mirroring `verify-sdks.sh`/`verify-langchain.sh`'s own shape. See each slice's own account below for what building them actually found.
 **Depends on**: Epic 14 (MCP), Epic 16 (SDKs), Epic 29 (graph API)
 **Crates**: **No graph-owl crate changes.** Examples live in `examples/` and depend only on published crates and generated SDKs — enforced by Slice A. Any change required in a graph-owl crate is a defect logged against its owning epic.
 
@@ -51,25 +51,41 @@ A minimal read-only server rendering an asset with its context — the smallest 
 
 Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with implementation skills loaded first. Here the RED is usually a failing integration test against a live service.
 
-### Slice A: Surface-purity enforcement
+### Slice A: Surface-purity enforcement — **shipped, 8 August 2026**
 
 **Value**: The constraint that makes the whole epic meaningful.
 **Acceptance criteria**: a CI check asserts each example depends only on published crates and the generated SDK; an example importing an internal path fails the build with a message naming the import; the check is verified by a deliberately-broken branch; examples build against the *published* crate versions, not workspace paths, so a missing `pub` is caught.
 **RED**: The deliberate-violation branch must fail CI. A check that never fails is not a check. Mutator watch: an unconditional pass must fail this verification.
 **Done when**: criteria met, deliberate violation fails CI, commit approved.
+**Shipped as** — `scripts/check-examples-purity.py`, run from `scripts/verify-examples.sh`.
 
-### Slice B: Agent workflow
+- **The plan's own wording ("published crates", "pub(crate)") is Rust-flavoured, written before `00j-language-boundaries.md` settled reference applications as Python** ("examples should look like what a user would actually write"). Translated: an example may import only the standard library and the public (`__all__`-declared) exports of `graph_owl_sdk` — never a private submodule, never `sys.path` manipulation reaching into the monorepo's own source. Checked with `ast`, not a regex, because a regex cannot tell `from graph_owl_sdk import X` (public) from `from graph_owl_sdk.ingest import X` (the identical symbol, reached through a private path) without parsing the statement's real structure.
+- **Verified both directions, not just written**: a deliberately-broken scratch file (a private-submodule import, plus `sys.path.insert`) was run against the check and failed with both violations named; a clean file passed. A real bug was found doing this, not designed around in advance: the first version of the `sys.path.insert(...)` detector compared the wrong slice of the attribute chain (`("sys", "insert")` instead of `("sys.path", "insert")`) and silently missed the call — caught by actually running the deliberate-violation case, not by inspection.
+- **Test harnesses (`test_*.py`, `conftest.py`) are exempt** — proving an example works legitimately needs things the app itself must never do (mint a test JWT, call an admin endpoint to seed a scenario), and the check would otherwise flag its own test scaffolding.
+
+### Slice B: Agent workflow — **shipped, 8 August 2026**
 
 **Acceptance criteria**: as above; the tool-call-count assertion is enforced, not advisory; the filtered-view case asserts the agent says its view is partial; runs against a seeded graph in CI.
 **RED**: The call-count assertion is design feedback: if answering "who owns this" takes five calls, Epic 14's decision 5 was not honoured and the tool surface needs changing. The filtered-view test catches an agent confidently asserting absence.
 **REFACTOR**: any question needing more than three calls is an Epic 14 defect. Record it and fix the tool surface.
 **Done when**: criteria met, commit approved.
+**Shipped as** — `examples/agent-triage/` (`mcp_client.py`, `triage.py`, `conftest.py`, `test_triage.py`), verified against a real live service via `scripts/verify-examples.sh`.
 
-### Slice C: Ingestion adapter
+- **`triage.py` always makes exactly three MCP calls** — `search_assets` (resolve a name to a real asset), `get_asset_context` (the trust signal that answers the question), `recall_memory` (institutional notes) — a fixed, low, testable proxy for whether Epic 14's tools are task-shaped, not endpoint-shaped. All 6 real-service tests pass at this budget: a healthy certified asset (SAFE), a deprecated asset (NOT SAFE, successor named), an uncertified asset (NOT SAFE, gap named), a policy-filtered view (PARTIAL VIEW, not silently upgraded to either SAFE or NOT SAFE), the same asset for an unrestricted principal (no partial flag — the negative control), and a nonexistent asset (NOT FOUND, not asserted absent).
+- **A real, load-bearing discovery building this, not a Slice B bug**: this catalog's authorization **denies by default** (`plans/12-13-security.md`'s own words: "a completely successful sign-in renders as an empty estate"). A non-admin principal with no role and no policy sees nothing at all through `search_assets` — confirmed directly against a real server before writing the fix, not assumed. The reference app's own default querying principal (`alice`) needed an explicit baseline "can see everything" policy before any of the safe/deprecated/uncertified scenarios could mean anything — the same baseline viewer policy a real deployment needs before anyone but an admin can use the catalog. Recorded in `conftest.py`'s own comment rather than silently worked around.
+- **A second real discovery, checked rather than assumed**: `GRAPH_OWL_ADMIN_SUBJECTS` bootstrap-admin only applies on the OIDC verification path (`graph-owl-server::verify_jwks`) — the shared-secret HS256 path (`authenticate_bearer_token`'s other branch) never calls `is_bootstrap_admin` at all. Confirmed **deliberate, not an oversight**, by reading `plans/12-13-security.md`: `GRAPH_OWL_ADMIN_SUBJECTS` is documented paired with OIDC specifically ("unset GRAPH_OWL_JWT_SECRET"), and shared-secret mode is its own doc comment's "legacy, and a demo affordance". The test harness works within that boundary rather than widening it: `conftest.py`'s `bootstrap_admin()` grants the first admin via direct SQL, the exact mechanism the same plan names as sanctioned ("Granting the first role required direct SQL").
+- **A methodology fix, found the same way Slice D of Epic 37a found one**: `search_assets` full-text-searches names, and a dotted FQN does not tokenize the way a bare name does — the first version of every test searched by full FQN and got zero hits. Fixed by searching leaf names, safe within this suite because the container is recreated fresh per run.
+
+### Slice C: Ingestion adapter — **shipped, 8 August 2026**
 
 **Acceptance criteria**: as above; convergence proven by running twice and asserting zero new versions on the second; per-item error reporting asserted; the adapter is the artifact Epic 16's guide links to, so the guide and the code cannot drift.
 **RED**: Convergence test. A per-item test with one bad row asserting the rest land. Mutator watch: an adapter that aborts on first error must fail the per-item test.
 **Done when**: criteria met, commit approved.
+**Shipped as** — `sdk/python/tests/test_example_adapter_live.py`, exercising the *existing* `sdk/python/examples/csv_adapter.py` (Epic 16 Slice F) against a real live service. **Not duplicated into `examples/adapter-csv/`** — the acceptance criterion itself says the adapter is the artifact Epic 16's guide links to, and moving it would break that guide's own link for no benefit; `examples/adapter-csv/` documents the cross-reference instead of holding a second copy.
+
+- **Genuine convergence, verified against a real server**: pushing the identical CSV twice leaves the asset's version unchanged the second time — not merely "accepted", which the ingest response reports identically for both a real create and a real no-op.
+- **Two rejection scenarios were tried and found not to produce what the acceptance criterion actually needs, checked directly rather than assumed** — both a duplicate FQN within one batch and an unrecognised `kind` string turned out to be **whole-request `400`s** (every item refused together, no `results` array), not the per-item `207` shape `csv_adapter.py`'s own `report()` function is written to read. The genuine per-item case is a row whose `parentFqn` resolves to nothing already in the catalog and nothing else in the same batch — that failure is local to one item, confirmed directly against a real server, and the rest of the batch lands (`accepted: 1, rejected: 1`).
+- **A third test (threading a real per-item rejection through the CSV path specifically) was attempted and dropped**: `csv_adapter.py`'s own hierarchy derivation always builds a self-consistent parent chain from one row, so it structurally cannot reach the server's per-item rejection path on its own. The property is still covered end to end — the real per-item shape is proven above, and `report()`'s own reading of that exact shape is already unit-tested (`test_example_adapter.py`) — just not forced through a single test that would have been testing something other than what it claimed to.
 
 ### Slice D: Browse surface
 
