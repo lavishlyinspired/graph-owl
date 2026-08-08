@@ -20,7 +20,7 @@ use graph_owl_storage::{
     ExtractionRunRecord, FollowOutcome, Holdings, IdempotencyClaim, IssueOutcome, LabelDecision,
     LabelOutcome, LifecycleOutcome, LineageReconciliation, MembershipRefusal, MemorySearchFilter,
     MemoryWrite, OwnersWrite, PrincipalDeletion, QueuedClaimRecord, ResultIngest, RetractOutcome,
-    ReviewQueueFilter, SplitOutcome, Storage, StorageError, StoredCertification,
+    ReviewQueueFilter, SearchHit, SplitOutcome, Storage, StorageError, StoredCertification,
     StoredCertificationType, StoredContract, StoredTestCase, StoredTestDefinition,
     StoredTestResult, StoredUser, SupersedeOutcome, TagUsage, TestResultWrite, UpdateOutcome,
     UsageIngest, UsageWrite,
@@ -4721,14 +4721,16 @@ impl Storage for PostgresStorage {
         filter: &graph_owl_storage::AssetFilter<'_>,
         page: &PageRequest,
         predicate: &AccessPredicate,
-    ) -> Result<Page<Asset>, StorageError> {
+    ) -> Result<Page<SearchHit>, StorageError> {
         let Some((allow, deny)) = lower(predicate) else {
-            return Ok(Page::from_overfetch(Vec::new(), page.limit, |a: &Asset| {
-                Cursor::new(a.fully_qualified_name.clone(), a.id)
-            }));
+            return Ok(Page::from_overfetch(
+                Vec::new(),
+                page.limit,
+                |h: &SearchHit| Cursor::new(h.asset.fully_qualified_name.clone(), h.asset.id),
+            ));
         };
         let Some(terms) = graph_owl_search::tsquery(query) else {
-            return Ok(Self::empty_ranked_page(page));
+            return Ok(Self::empty_search_hit_page(page));
         };
         let overfetch = i64::try_from(page.limit)
             .unwrap_or(i64::MAX)
@@ -4737,8 +4739,19 @@ impl Storage for PostgresStorage {
         let tags_filter: Option<&[String]> = (!filter.tags.is_empty()).then_some(filter.tags);
         let tags = tags_expr(11);
         let certification = certification_expr(12, 13);
+        // **`NULLIF(..., '')`, not the bare `ts_headline` result.** An asset
+        // with no description makes `ts_headline` return `''`, not `NULL` —
+        // `coalesce`d in for the same reason. A client that sees an empty
+        // string cannot tell "matched, but there is nothing to excerpt" from
+        // "field absent"; `NULL` collapses both into one honest answer, "no
+        // snippet", the same way `Asset.description` itself is `Option`.
+        // Postgres's own `MaxWords=35`/`MinWords=15` defaults are used as-is
+        // rather than a locally invented number — they need no justification
+        // this project would have to state, because they are not this
+        // project's number to justify.
         let sql = format!(
-            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners, {RANK_KEY} AS sort_key
+            "SELECT {ASSET_COLUMNS}, {OWNERS_EXPR} AS owners, {RANK_KEY} AS sort_key,
+                    NULLIF(ts_headline('english', coalesce(description, ''), q.ts), '') AS snippet
              FROM assets, to_tsquery('english', $1) AS q (ts)
              WHERE NOT deleted
                AND assets.search_vector @@ q.ts
@@ -4773,7 +4786,7 @@ impl Storage for PostgresStorage {
         for condition in filter.extension {
             q = q.bind(&condition.name).bind(&condition.value);
         }
-        self.ranked_asset_page(q, page).await
+        self.ranked_search_hit_page(q, page).await
     }
 
     #[tracing::instrument(name = "storage.list_children_visible", skip_all)]
@@ -11177,6 +11190,38 @@ impl PostgresStorage {
         })
     }
 
+    /// [`Self::ranked_asset_page`], for a query that also carries a snippet
+    /// per row — kept separate rather than made generic, because the two
+    /// only diverge in what one extra column the closure reads before
+    /// [`asset_from_row`] consumes the [`PgRow`], and a generic over "what
+    /// extra field" would cost more than it would save at two call sites.
+    async fn ranked_search_hit_page(
+        &self,
+        query: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
+        page: &PageRequest,
+    ) -> Result<Page<SearchHit>, StorageError> {
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        let ranked: Vec<(SearchHit, String)> = rows
+            .into_iter()
+            .map(|row| {
+                let key: String = row.get("sort_key");
+                let snippet: Option<String> = row.get("snippet");
+                let asset = asset_from_row(row);
+                (SearchHit { asset, snippet }, key)
+            })
+            .collect();
+        let page = Page::from_overfetch(ranked, page.limit, |(hit, key)| {
+            Cursor::new(key.clone(), hit.asset.id)
+        });
+        Ok(Page {
+            data: page.data.into_iter().map(|(hit, _)| hit).collect(),
+            paging: page.paging,
+        })
+    }
+
     /// A query with no searchable terms matches nothing.
     ///
     /// `to_tsquery('english', '')` raises a syntax error rather than returning
@@ -11186,6 +11231,14 @@ impl PostgresStorage {
     fn empty_ranked_page(page: &PageRequest) -> Page<Asset> {
         Page::from_overfetch(Vec::new(), page.limit, |a: &Asset| {
             Cursor::new(a.fully_qualified_name.clone(), a.id)
+        })
+    }
+
+    /// [`Self::empty_ranked_page`], for [`Self::search_assets_visible`]'s
+    /// snippet-carrying result type.
+    fn empty_search_hit_page(page: &PageRequest) -> Page<SearchHit> {
+        Page::from_overfetch(Vec::new(), page.limit, |h: &SearchHit| {
+            Cursor::new(h.asset.fully_qualified_name.clone(), h.asset.id)
         })
     }
 }

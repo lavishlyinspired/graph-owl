@@ -7936,7 +7936,7 @@ impl Catalog {
         query: &str,
         filter: &graph_owl_storage::AssetFilter<'_>,
         page: &PageRequest,
-    ) -> Result<Page<Asset>, CatalogError> {
+    ) -> Result<Page<graph_owl_storage::SearchHit>, CatalogError> {
         let predicate = self
             .predicate_for(principal, MetadataOperation::ViewBasic)
             .await?;
@@ -27703,7 +27703,7 @@ mod entity_expansion_tests {
                 .expect("search");
 
             assert!(
-                hits.data.iter().any(|a| a.id == dashboard_id),
+                hits.data.iter().any(|h| h.asset.id == dashboard_id),
                 "searching a chart's name must surface its dashboard: {:?}",
                 hits.data
             );
@@ -29019,14 +29019,19 @@ mod entity_expansion_tests {
                 .expect("search");
 
             assert!(
-                visible.data.iter().all(
-                    |a| a.kind != AssetKind::Dashboard && a.kind != AssetKind::DashboardService
-                ),
+                visible
+                    .data
+                    .iter()
+                    .all(|h| h.asset.kind != AssetKind::Dashboard
+                        && h.asset.kind != AssetKind::DashboardService),
                 "the dashboard family must not leak through a predicate scoped to kafka: \
                  {visible:?}"
             );
             assert!(
-                visible.data.iter().any(|a| a.kind == AssetKind::Topic),
+                visible
+                    .data
+                    .iter()
+                    .any(|h| h.asset.kind == AssetKind::Topic),
                 "the allowed family must still be visible: {visible:?}"
             );
         }

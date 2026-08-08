@@ -1088,6 +1088,23 @@ impl CertificationFilter {
     }
 }
 
+/// One search result: the asset plus a highlighted excerpt of what matched
+/// — Epic 8, wired to `?q=` Phase 2.4. Flattened rather than nested
+/// (`#[serde(flatten)]`), so `/assets/search`'s existing wire shape only
+/// grows a `snippet` field rather than restructuring around a new envelope
+/// every existing consumer would have to learn.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    /// The matched asset, in full.
+    #[serde(flatten)]
+    pub asset: Asset,
+    /// An excerpt of `description` around the matched terms, or `None` when
+    /// the match came from `name`/FQN/`chartNames` rather than prose —
+    /// highlighting nothing would mislead more than showing nothing.
+    pub snippet: Option<String>,
+}
+
 /// One condition on a custom property's value — Epic 22 Slice D.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtensionFilter {
@@ -2235,7 +2252,7 @@ pub trait Storage: Send + Sync {
         filter: &AssetFilter<'_>,
         page: &PageRequest,
         predicate: &AccessPredicate,
-    ) -> Result<Page<Asset>, StorageError>;
+    ) -> Result<Page<SearchHit>, StorageError>;
 
     async fn list_children_visible(
         &self,

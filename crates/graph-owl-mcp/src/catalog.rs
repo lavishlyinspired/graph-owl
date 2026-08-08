@@ -308,11 +308,20 @@ impl ContextSource for CatalogContext {
         let hits: Vec<crate::SearchHit> = visible
             .data
             .iter()
-            .map(|asset| crate::SearchHit {
-                fully_qualified_name: asset.fully_qualified_name.clone(),
-                kind: asset.kind.to_string(),
-                snippet: asset.description.clone(),
-                trust: summarise(&observe(asset, false), chrono::Utc::now()),
+            .map(|hit| crate::SearchHit {
+                fully_qualified_name: hit.asset.fully_qualified_name.clone(),
+                kind: hit.asset.kind.to_string(),
+                // The real, highlighted excerpt where the query's own
+                // storage-layer `ts_headline` produced one (Phase 2.4);
+                // falling back to the whole description preserves this
+                // tool's prior behaviour for a match that came from
+                // `name`/FQN rather than prose, where there is nothing to
+                // highlight but the description is still worth showing.
+                snippet: hit
+                    .snippet
+                    .clone()
+                    .or_else(|| hit.asset.description.clone()),
+                trust: summarise(&observe(&hit.asset, false), chrono::Utc::now()),
             })
             .collect();
 

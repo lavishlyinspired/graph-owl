@@ -2299,10 +2299,10 @@ async fn search_assets(
     let mut by_kind: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     let mut by_schema: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
-    for asset in &page_result.data {
-        *by_kind.entry(asset.kind.as_str()).or_default() += 1;
+    for hit in &page_result.data {
+        *by_kind.entry(hit.asset.kind.as_str()).or_default() += 1;
         // The schema is the third FQN segment: service.database.schema.…
-        if let Some(schema) = asset.fully_qualified_name.split('.').nth(2) {
+        if let Some(schema) = hit.asset.fully_qualified_name.split('.').nth(2) {
             *by_schema.entry(schema.to_string()).or_default() += 1;
         }
     }
@@ -2325,8 +2325,8 @@ async fn search_assets(
         String,
         std::collections::BTreeMap<String, usize>,
     > = std::collections::BTreeMap::new();
-    for asset in &page_result.data {
-        let Some(bag) = &asset.extension else {
+    for hit in &page_result.data {
+        let Some(bag) = &hit.asset.extension else {
             continue;
         };
         for name in &enums {

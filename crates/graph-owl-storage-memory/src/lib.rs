@@ -2391,16 +2391,24 @@ impl Storage for InMemoryStorage {
         filter: &graph_owl_storage::AssetFilter<'_>,
         page: &PageRequest,
         predicate: &AccessPredicate,
-    ) -> Result<Page<Asset>, StorageError> {
+    ) -> Result<Page<graph_owl_storage::SearchHit>, StorageError> {
         let all = self.search_assets(query, filter.kind, page).await?;
-        let visible: Vec<Asset> = all
+        // `snippet: None` throughout — this fake has no text-search engine to
+        // excerpt from, the same reason it already leaves `domain`/
+        // `data_product`/`lifecycle` unfiltered rather than reimplementing
+        // Postgres's own query planner in-process.
+        let visible: Vec<graph_owl_storage::SearchHit> = all
             .data
             .into_iter()
             .filter(|a| predicate.admits(&a.fully_qualified_name))
             .filter(|a| admits_extension(a, filter.extension))
+            .map(|asset| graph_owl_storage::SearchHit {
+                asset,
+                snippet: None,
+            })
             .collect();
-        Ok(Page::from_overfetch(visible, page.limit, |a: &Asset| {
-            Cursor::new(a.fully_qualified_name.clone(), a.id)
+        Ok(Page::from_overfetch(visible, page.limit, |h| {
+            Cursor::new(h.asset.fully_qualified_name.clone(), h.asset.id)
         }))
     }
 

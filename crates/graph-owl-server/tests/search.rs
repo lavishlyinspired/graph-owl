@@ -314,3 +314,59 @@ async fn search_facets_by_kind_span_every_family() {
         );
     }
 }
+
+// ── Snippets — Phase 2.4 of plans/EPIC-COMPLETION-PLAN.md ──────────────────
+
+async fn search_data(app: &axum::Router, q: &str) -> Value {
+    let (status, page) = send(app, "GET", &format!("/assets/search?q={q}&limit=50"), None).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    page["data"].clone()
+}
+
+fn hit_named<'a>(data: &'a Value, name: &str) -> &'a Value {
+    data.as_array()
+        .expect("an array")
+        .iter()
+        .find(|a| a["name"] == name)
+        .unwrap_or_else(|| panic!("`{name}` must be in the results: {data}"))
+}
+
+/// **The point of the epic's own snippet criterion**: the excerpt names why
+/// this row matched, not just that it did — a bare hit list forces a reader
+/// to open every row to find the word they searched for.
+#[tokio::test]
+async fn a_snippet_is_returned_around_the_matched_word() {
+    let (app, _container, _) = test_app().await;
+    estate(&app).await;
+
+    let data = search_data(&app, "NPCI").await;
+
+    let hit = hit_named(&data, "upi_transactions");
+    let snippet = hit["snippet"].as_str().expect("a snippet");
+    assert!(
+        snippet.contains("NPCI"),
+        "the matched word must appear in its own snippet: {snippet}"
+    );
+}
+
+/// And the negative: a match on `name` alone, with nothing in `description`
+/// for `ts_headline` to excerpt, must report `null` rather than an empty or
+/// misleading string — the same "absent means absent" rule
+/// `CertificationStatus::None` already follows for a different field.
+#[tokio::test]
+async fn a_name_only_match_has_no_snippet() {
+    let (app, _container, _) = test_app().await;
+    create(
+        &app,
+        json!({ "kind": "service", "name": "nps-unique-root" }),
+    )
+    .await;
+
+    let data = search_data(&app, "nps").await;
+
+    let hit = hit_named(&data, "nps-unique-root");
+    assert!(
+        hit["snippet"].is_null(),
+        "nothing to excerpt from an empty description: {hit}"
+    );
+}
