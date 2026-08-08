@@ -454,7 +454,7 @@ async fn seeding_twice_does_not_double_the_shapes() {
 
     let run = run_validation(&app).await;
 
-    assert_eq!(run["shapes"], 3, "the seed set doubled: {run}");
+    assert_eq!(run["shapes"], 5, "the seed set doubled: {run}");
     assert_eq!(run["refusedShapes"], 0, "{run}");
 }
 

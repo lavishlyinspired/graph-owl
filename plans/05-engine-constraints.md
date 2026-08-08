@@ -1,14 +1,16 @@
 # Plan: Constraint Validation (Epic 5)
 
 **Branch**: feat/engine-constraints
-**Status**: **Shipped** — corrected 8 August 2026, this line had never been
-updated since the epic began. `plans/DEMOS.md`'s own Epic 5 section (the
-authority per its rule 0) shows 9 of 10 items `[x]` and 1 `[~]`: shapes, all
-six target kinds, seed shapes, and `sh:not`/`sh:and`/`sh:or` are built.
-Pending: `sh:in` as an RDF list rather than a repeated predicate (a stated
-departure, recorded in `00k`, not an omission), and
-`RelationshipShape`/`EnvelopeShape` from the seed table, which need Epic 2's
-relationship projection to have anything to target.
+**Status**: **In progress** — corrected 8 August 2026 (this line had never
+been updated since the epic began), then again the same day once
+`RelationshipShape`/`EnvelopeShape` shipped (`plans/EPIC-COMPLETION-PLAN.md`
+Phase 2.5). `plans/DEMOS.md`'s own Epic 5 section (the authority per its rule
+0) shows every item `[x]` except one `[~]`: shapes, all six target kinds, the
+full seed table (`TableShape`/`ColumnShape`/`ConfidenceShape`/
+`RelationshipShape`/`EnvelopeShape`), and `sh:not`/`sh:and`/`sh:or` are built.
+Pending: `sh:in` as an RDF list rather than a repeated predicate — a stated
+departure, recorded in `00k`, not an omission, and the one item keeping this
+epic from a full **Shipped**.
 **Depends on**: Epic 4 (triples to validate)
 **Crates**: `graph-owl-ontology` (types), `graph-owl-constraint` (pure logic)
 

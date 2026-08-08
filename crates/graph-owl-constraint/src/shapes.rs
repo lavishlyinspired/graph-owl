@@ -555,8 +555,10 @@ pub fn read_all(facts: &[Flake]) -> (Vec<CompiledShape>, Vec<ShapeError>) {
 type Term<'a> = (&'a str, FlakeValue);
 /// `(property suffix, path, terms)`.
 type Property<'a> = (&'a str, &'a str, &'a [Term<'a>]);
-/// `(shape, target, properties)`.
-type Definition<'a> = (&'a str, &'a str, &'a [Property<'a>]);
+/// `(shape, target, properties, severity)`. `severity` is `None` for SHACL's
+/// own default (`Violation`) — only [`EnvelopeShape`] states one, since it is
+/// advice rather than a hard failure.
+type Definition<'a> = (&'a str, &'a str, &'a [Property<'a>], Option<&'a str>);
 
 /// The shapes the core entity model ships with — Epic 5's seed set.
 ///
@@ -584,7 +586,16 @@ pub fn core_shapes(t: i64) -> Vec<Flake> {
         });
     };
 
-    // (shape, target class, [(property suffix, path, [(term, value)])])
+    // Built from the closed taxonomy rather than hand-copied, the same reason
+    // `fields()` in `projection.rs` builds its pairs once for reuse: a second,
+    // hand-maintained list of relationship type names is the one that goes
+    // stale the day `RelationshipType` grows an eighth variant.
+    let rel_type_terms: Vec<Term<'_>> = graph_owl_core::relationship_type::RelationshipType::ALL
+        .iter()
+        .map(|rt| ("in", FlakeValue::String(rt.as_str().to_string())))
+        .collect();
+
+    // (shape, target class, [(property suffix, path, [(term, value)])], severity)
     let definitions: &[Definition<'_>] = &[
         (
             "TableShape",
@@ -608,6 +619,7 @@ pub fn core_shapes(t: i64) -> Vec<Flake> {
                     ],
                 ),
             ],
+            None,
         ),
         (
             "ColumnShape",
@@ -623,6 +635,7 @@ pub fn core_shapes(t: i64) -> Vec<Flake> {
                     ],
                 ),
             ],
+            None,
         ),
         (
             "ConfidenceShape",
@@ -636,15 +649,70 @@ pub fn core_shapes(t: i64) -> Vec<Flake> {
                     ("maxInclusive", FlakeValue::Float(1.0)),
                 ],
             )],
+            None,
+        ),
+        (
+            // The reified relationship node `relationship_to_flakes`
+            // (`graph-owl-core::projection`) writes on every relationship —
+            // `dsc:fromEntity`/`dsc:toEntity` refs, `dsc:relType` a closed
+            // taxonomy member. `05-engine-constraints.md`'s own seed table.
+            "RelationshipShape",
+            "Relationship",
+            &[
+                (
+                    "from",
+                    "fromEntity",
+                    &[
+                        ("minCount", FlakeValue::Int(1)),
+                        ("nodeKind", FlakeValue::String("ref".into())),
+                    ],
+                ),
+                (
+                    "to",
+                    "toEntity",
+                    &[
+                        ("minCount", FlakeValue::Int(1)),
+                        ("nodeKind", FlakeValue::String("ref".into())),
+                    ],
+                ),
+                ("relType", "relType", &rel_type_terms),
+            ],
+            None,
+        ),
+        (
+            // `dsc:version`/`dsc:deleted` are asserted on every asset
+            // unconditionally (`fields()`, `graph-owl-core::projection`) —
+            // `targetSubjectsOf`, the same reasoning `ConfidenceShape` uses:
+            // anything carrying a version is in scope, whatever kind it is.
+            // Advice, not a hard failure (`core_shapes`'s own doc comment,
+            // written before this shape existed to make it true): a version
+            // string in the wrong format is worth flagging, not worth
+            // blocking an estate over.
+            "EnvelopeShape",
+            "version",
+            &[
+                (
+                    "version",
+                    "version",
+                    &[("pattern", FlakeValue::String(r"^\d+\.\d+$".into()))],
+                ),
+                (
+                    "deleted",
+                    "deleted",
+                    &[("datatype", FlakeValue::String("boolean".into()))],
+                ),
+            ],
+            Some("Warning"),
         ),
     ];
 
-    for (shape, target, properties) in definitions {
+    for (shape, target, properties, severity) in definitions {
         let id = Sid::dsc(*shape);
         state(id.clone(), rdf_type(), FlakeValue::Ref(sh("NodeShape")));
-        // `ConfidenceShape` is about a *predicate*, not a class: anything
-        // carrying a confidence is in scope, whatever kind it is.
-        let target_term = if *shape == "ConfidenceShape" {
+        // `ConfidenceShape`/`EnvelopeShape` are about a *predicate*, not a
+        // class: anything carrying that predicate is in scope, whatever kind
+        // it is.
+        let target_term = if matches!(*shape, "ConfidenceShape" | "EnvelopeShape") {
             "targetSubjectsOf"
         } else {
             "targetClass"
@@ -654,6 +722,13 @@ pub fn core_shapes(t: i64) -> Vec<Flake> {
             sh(target_term),
             FlakeValue::Ref(Sid::dsc(*target)),
         );
+        if let Some(severity) = severity {
+            state(
+                id.clone(),
+                sh("severity"),
+                FlakeValue::String((*severity).to_string()),
+            );
+        }
 
         for (suffix, path, terms) in *properties {
             let property = Sid::dsc(format!("{shape}/{suffix}"));
@@ -1499,7 +1574,7 @@ mod tests {
             let (shapes, failures) = read_all(&core_shapes(1));
 
             assert!(failures.is_empty(), "{failures:#?}");
-            assert_eq!(shapes.len(), 3, "{shapes:#?}");
+            assert_eq!(shapes.len(), 5, "{shapes:#?}");
         }
 
         /// They live in the shapes graph, so they are not themselves assets the
@@ -1521,6 +1596,19 @@ mod tests {
             facts.push(typed("orders", "table"));
             facts.push(typed("orders_id", "column"));
             facts.push(f(a("guess"), a("confidence"), FlakeValue::Float(1.5)));
+            facts.push(typed("bad_rel", "Relationship"));
+            facts.push(f(a("bad_rel"), a("fromEntity"), FlakeValue::Ref(a("x"))));
+            facts.push(f(a("bad_rel"), a("toEntity"), FlakeValue::Ref(a("y"))));
+            facts.push(f(
+                a("bad_rel"),
+                a("relType"),
+                FlakeValue::String("frobnicates".into()),
+            ));
+            facts.push(f(
+                a("bad_version"),
+                a("version"),
+                FlakeValue::String("v1".into()),
+            ));
 
             let (shapes, _) = read_all(&facts);
             let report = validate(&shapes, &facts);
@@ -1537,6 +1625,16 @@ mod tests {
                 report.violations
             );
             assert!(offenders.contains(&&a("guess")), "{:#?}", report.violations);
+            assert!(
+                offenders.contains(&&a("bad_rel")),
+                "a relType outside the taxonomy must be caught: {:#?}",
+                report.violations
+            );
+            assert!(
+                offenders.contains(&&a("bad_version")),
+                "a version not matching \\d+\\.\\d+ must be caught, even as advice: {:#?}",
+                report.violations
+            );
         }
 
         /// And the negative: a well-formed estate passes them. A seed set that
@@ -1563,6 +1661,24 @@ mod tests {
             ));
             facts.push(f(a("orders_id"), a("ordinalPosition"), FlakeValue::Int(0)));
             facts.push(f(a("guess"), a("confidence"), FlakeValue::Float(0.9)));
+            facts.push(typed("good_rel", "Relationship"));
+            facts.push(f(a("good_rel"), a("fromEntity"), FlakeValue::Ref(a("x"))));
+            facts.push(f(a("good_rel"), a("toEntity"), FlakeValue::Ref(a("y"))));
+            facts.push(f(
+                a("good_rel"),
+                a("relType"),
+                FlakeValue::String("contains".into()),
+            ));
+            facts.push(f(
+                a("well_formed"),
+                a("version"),
+                FlakeValue::String("1.2".into()),
+            ));
+            facts.push(f(
+                a("well_formed"),
+                a("deleted"),
+                FlakeValue::Boolean(false),
+            ));
 
             let (shapes, _) = read_all(&facts);
             let report = validate(&shapes, &facts);
