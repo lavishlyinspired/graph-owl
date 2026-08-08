@@ -2111,6 +2111,10 @@ struct AssetListQuery {
     /// type in this state, computed against `now()` the same way a
     /// certification's own `status.status` field already is.
     certification: Option<String>,
+    /// `healthy`/`unhealthy`/`stale`/`unknown` — Epic 30, decision 4.5.
+    /// Computed against the same test-case precedence
+    /// `graph_owl_core::quality::health_of` uses for a single asset.
+    health: Option<String>,
     limit: Option<usize>,
     after: Option<String>,
 }
@@ -2128,6 +2132,7 @@ struct AssetSearchQuery {
     lifecycle: Option<String>,
     tags: Option<String>,
     certification: Option<String>,
+    health: Option<String>,
     limit: Option<usize>,
     after: Option<String>,
 }
@@ -2146,6 +2151,27 @@ fn parse_certification_filter(
                 format!(
                     "`{value}` is not a certification status; expected one of: valid, \
                      expiringSoon, expired, none"
+                ),
+            )])
+        })
+    })
+    .transpose()
+}
+
+/// A health filter from a query parameter, naming the real values when it
+/// is not one of them — Epic 30, decision 4.5, the same convention
+/// [`parse_certification_filter`] already uses.
+fn parse_health_filter(
+    raw: Option<&str>,
+) -> Result<Option<graph_owl_core::quality::Health>, AppError> {
+    raw.map(|value| {
+        graph_owl_core::quality::Health::parse(value).map_err(|_| {
+            AppError::Validation(vec![FieldError::new(
+                "health",
+                FieldErrorCode::Type,
+                format!(
+                    "`{value}` is not a health state; expected one of: healthy, unhealthy, \
+                     stale, unknown"
                 ),
             )])
         })
@@ -2261,6 +2287,7 @@ async fn list_assets(
     let lifecycle = parse_lifecycle(query.lifecycle.as_deref())?;
     let tags = parse_tags(query.tags.as_deref());
     let certification = parse_certification_filter(query.certification.as_deref())?;
+    let health = parse_health_filter(query.health.as_deref())?;
     let filter = graph_owl_storage::AssetFilter {
         kind,
         owner: query.owner.as_deref(),
@@ -2271,6 +2298,7 @@ async fn list_assets(
         lifecycle,
         tags: &tags,
         certification,
+        health,
     };
     Ok(Json(
         catalog.list_assets_for(&principal, &filter, &page).await?,
@@ -2289,6 +2317,7 @@ async fn search_assets(
     let lifecycle = parse_lifecycle(query.lifecycle.as_deref())?;
     let tags = parse_tags(query.tags.as_deref());
     let certification = parse_certification_filter(query.certification.as_deref())?;
+    let health = parse_health_filter(query.health.as_deref())?;
     let filter = graph_owl_storage::AssetFilter {
         kind,
         owner: None,
@@ -2299,6 +2328,7 @@ async fn search_assets(
         lifecycle,
         tags: &tags,
         certification,
+        health,
     };
     let page_result = catalog
         .search_assets_for(&principal, &query.q, &filter, &page)
@@ -2316,6 +2346,18 @@ async fn search_assets(
         if let Some(schema) = hit.asset.fully_qualified_name.split('.').nth(2) {
             *by_schema.entry(schema.to_string()).or_default() += 1;
         }
+    }
+
+    // Epic 30, decision 4.5's other half: a health facet, over the same
+    // visible page as `by_kind`/`by_schema` above, for the identical
+    // "may not see it" reason. One read per hit — bounded by `page.limit`,
+    // the same cost every other per-row-computed filter in this codebase
+    // already accepted rather than building new refresh infrastructure for.
+    let mut by_health: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    for hit in &page_result.data {
+        let summary = catalog.health_of(&hit.asset.fully_qualified_name).await?;
+        *by_health.entry(summary.state.as_str()).or_default() += 1;
     }
 
     // Facets for enum-typed custom properties — Epic 22 Slice D. Only enums:
@@ -2354,6 +2396,7 @@ async fn search_assets(
     let mut facets = json!({
         "kind": by_kind.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
         "schema": by_schema.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
+        "health": by_health.iter().map(|(k, n)| json!({ "value": k, "count": n })).collect::<Vec<_>>(),
     });
     if let Some(object) = facets.as_object_mut() {
         for (name, counts) in by_property {

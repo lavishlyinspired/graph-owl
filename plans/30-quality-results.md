@@ -1,6 +1,6 @@
 # Plan: Quality Signals & Incidents (Epic 30)
 **Branch**: feat/quality-results
-**Status**: Slices A, B, C, E and F shipped; Slice D (denormalized filtering) deferred with a reason
+**Status**: All slices shipped, 8 August 2026. Slice D shipped on a narrower design than originally specified — per-row computation (decision 4.5) rather than the originally-planned denormalized async-refreshed column; see Slice D's own section for why
 **Depends on**: Epic 29 (lineage, for propagating trust signals)
 **Crates**: `graph-owl-core` (TestCase, TestResult, Incident, Alert, **pure health function**) · `graph-owl-storage-postgres` (time-series + denormalized health) · `graph-owl-api` · `graph-owl-server`
 
@@ -34,7 +34,7 @@ This is a deliberate narrowing that captures most of the visible value: a consum
 - [x] An asset shows current health derived from its test cases.
 - [x] A stale result reports as stale, not as its last status.
 - [x] An asset with no tests reports `Unknown`, never `Healthy`.
-- [ ] Health is filterable and available as a search facet — Slice D, deferred; see below.
+- [x] Health is filterable and available as a search facet — Slice D, shipped 8 August 2026 on a narrower design than originally specified here; see below.
 - [x] Result ingestion does not bump entity versions or emit change events.
 - [x] Result history is prunable, and the latest result per case always survives.
 
@@ -92,35 +92,63 @@ Every slice runs RED → GREEN → MUTATE → KILL MUTANTS → REFACTOR with imp
 **REFACTOR**: keep the health computation pure and in `core` — it is the highest-stakes logic in the epic and must be exhaustively testable.
 **Done when**: criteria met, mutation report reviewed, commit approved.
 
-### Slice D: Health is discoverable — **deferred, and the reason is in its own criteria**
+### Slice D: Health is discoverable — **shipped 8 August 2026, decision 4.5, on a narrower design than this section originally specified**
 
-This slice requires a **denormalized** health column refreshed **asynchronously**
-on ingestion, plus a query-plan test asserting no per-row computation, plus a
-documented staleness window for the denormalized value. That is three pieces of
-machinery this codebase does not yet have — there is no async work queue, and
-inventing one for a filter would be a larger decision than the filter.
+This section originally deferred the slice on the grounds that it needs a
+**denormalized** health column refreshed **asynchronously** on ingestion, plus a
+query-plan test asserting no per-row computation — three pieces of machinery
+this codebase does not have, since there is no async work queue anywhere in it.
 
-Computing health per row instead is not a shortcut worth taking: the criteria
-name it as the thing to avoid, because health is a per-case aggregate and doing
-it inside a list query is a correlated subquery per row over the largest table in
-the system. Shipping that and calling the slice done would be the worst of both.
+**`plans/EPIC-COMPLETION-PLAN.md` Phase 4 decision 4.5 revisited that framing
+and chose differently**: accept per-row computation rather than build the async
+refresh infrastructure this specific filter would otherwise need invented from
+nothing. The reasoning that decision recorded: certification/lifecycle
+filtering (Epic 26) already computes its status on read, the same shape this
+extends rather than a new one; a denormalized column needs a write-path
+refresh mechanism that does not exist anywhere in this codebase to keep
+correct; and a general async-refresh mechanism would be speculative
+generalization for exactly two call sites (this slice and Epic 26's own).
 
-The data is all present — `GET /health/{fqn}` answers for one asset — so this is
-a discovery gap rather than a modelling one.
+**What actually shipped is the opposite of this section's own "thing to
+avoid"**: `health_expr` (`crates/graph-owl-storage-postgres/src/lib.rs`) is a
+correlated `LEFT JOIN LATERAL` subquery per candidate row, computing the exact
+same precedence `graph_owl_core::quality::health_of` runs for a single asset —
+`?health=` on `GET /assets`/`GET /assets/search`, plus a `health` search facet
+mirroring the existing `kind`/`schema` ones. **This is a real, accepted,
+unmeasured-at-scale tradeoff, not a silent regression from what this section
+specified**: Epic 37a's own real 60,246-asset corpus exists and could measure
+this filter's actual cost the same way Slice D of that epic measured search
+budgets, but doing so was out of scope for the decision that unblocked this
+slice. Revisit only if a real measurement shows it failing a stated budget —
+matching Epic 37a's own precedent of shipping a found-but-unfixed gap (its
+type-ahead search measurement) with the gap named rather than hidden, not
+blocking on a fix nothing asked for yet.
 
+The data is all present — `GET /health/{fqn}` answers for one asset — so this
+was a discovery gap rather than a modelling one, exactly as originally framed.
 
 **Value**: "Show me unhealthy tables in my domain" — the steward's triage query.
 **Path**: `?health=` filter on list endpoints; health as a search facet.
-**Acceptance criteria**:
-- Filter by each health state, including `Unknown`.
-- Composes with other filters and pagination; `paging.total` respects it.
-- Search facet returns counts per health state, respecting active filters.
-- Health is denormalized for filtering, and the denormalization is refreshed on result ingestion — a filter must not require computing health for every row.
-- Refresh is asynchronous and does not slow ingestion.
-- A documented staleness window for the denormalized value, so the filter's accuracy is a known quantity rather than a surprise.
-**RED**: Test asserting the filter reflects a newly ingested failing result within the documented window. A query-plan test asserting no per-row computation. Mutator watch: computing health per row must fail the plan assertion.
-**GREEN**: denormalized column, async refresh, filter, facet.
-**Done when**: criteria met, mutation report reviewed, commit approved.
+**Acceptance criteria, as shipped** (the original three denormalization/async/
+staleness-window criteria below are explicitly **not** met — see above):
+- [x] Filter by each health state, including `Unknown`.
+- [x] Composes with other filters and pagination.
+- [x] Search facet returns counts per health state, over the same visible set every other facet already respects.
+- [ ] ~~Health is denormalized for filtering~~ — deliberately not built; see above.
+- [ ] ~~Refresh is asynchronous~~ — n/a, nothing to refresh.
+- [ ] ~~A documented staleness window~~ — n/a; the filter reads live, same as `GET /health/{fqn}`.
+**RED**: The precedence case a naive SQL translation gets wrong — a test case
+that is *both* stale and failed must file under `stale`, never `unhealthy`,
+matching `health_of`'s own per-case ordering exactly
+(`a_stale_and_failed_case_files_under_stale_not_unhealthy`,
+`crates/graph-owl-server/tests/quality.rs`). Mutator watch: swapping the SQL
+CASE's branch order (checking `any_stale` before `any_failed`) must fail this
+test.
+**GREEN**: `health_expr`, `?health=` wired into both list endpoints, `health`
+search facet, `Health::as_str`/`parse` for wire parsing. Mutation-tested on
+`graph-owl-core`, `graph-owl-storage-postgres`, `graph-owl-server`.
+**Done when**: criteria (as shipped, above) met, mutation report reviewed,
+commit approved. Met.
 
 ### Slice E: Results do not grow without bound — **shipped**
 

@@ -669,3 +669,182 @@ async fn an_asset_with_no_lineage_reports_only_its_own_health() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body["upstream"].is_null(), "{body}");
 }
+
+// ── `?health=` filter — Phase 4 decision 4.5 of plans/EPIC-COMPLETION-PLAN.md ──
+//
+// `health_expr` (graph-owl-storage-postgres) is a second, SQL-side
+// implementation of the exact precedence `graph_owl_core::quality::health_of`
+// already runs in Rust — the same "computation pushed into SQL rather than a
+// stored copy" shape `?certification=` already established. The tests below
+// exist specifically to catch the two implementations disagreeing, not just
+// to prove a route exists.
+
+fn names(page: &Value) -> Vec<String> {
+    page["data"]
+        .as_array()
+        .expect("a data array")
+        .iter()
+        .map(|a| a["name"].as_str().expect("a name").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn an_unrecognised_health_filter_is_refused_naming_the_real_states() {
+    let (app, _db, _url) = test_app().await;
+
+    let (status, body) = send(&app, "GET", "/assets?health=broken", None).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["errors"][0]["field"], "health", "{body}");
+}
+
+#[tokio::test]
+async fn the_health_filter_returns_only_assets_with_no_tests_for_unknown() {
+    let (app, _db, _url) = test_app().await;
+    service(&app, "untested-svc").await;
+    let tested = service(&app, "tested-svc").await;
+    let case = test_case(&app, &tested, "not_null", Some("P1D")).await;
+    post_result(&app, &case, "success", 1).await;
+
+    let (status, page) = send(&app, "GET", "/assets?health=unknown", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(names(&page), vec!["untested-svc"], "{page}");
+}
+
+#[tokio::test]
+async fn the_health_filter_returns_only_healthy_assets() {
+    let (app, _db, _url) = test_app().await;
+    let healthy = service(&app, "healthy-svc").await;
+    let case = test_case(&app, &healthy, "not_null", Some("P1D")).await;
+    post_result(&app, &case, "success", 1).await;
+    service(&app, "untested-svc").await;
+
+    let (status, page) = send(&app, "GET", "/assets?health=healthy", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(names(&page), vec!["healthy-svc"], "{page}");
+}
+
+#[tokio::test]
+async fn the_health_filter_returns_only_unhealthy_assets() {
+    let (app, _db, _url) = test_app().await;
+    let unhealthy = service(&app, "unhealthy-svc").await;
+    let case = test_case(&app, &unhealthy, "row_count", Some("P1D")).await;
+    post_result(&app, &case, "failed", 1).await;
+    let healthy = service(&app, "healthy-svc").await;
+    let ok_case = test_case(&app, &healthy, "not_null", Some("P1D")).await;
+    post_result(&app, &ok_case, "success", 1).await;
+
+    let (status, page) = send(&app, "GET", "/assets?health=unhealthy", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(names(&page), vec!["unhealthy-svc"], "{page}");
+}
+
+/// **The precedence case this filter exists to get right.** A case that is
+/// *both* stale and failed counts toward staleness, never toward failure —
+/// `health_of`'s own per-case loop checks `is_stale` before it checks
+/// `status == Failed`. A SQL translation that checked failure first would
+/// put this asset under `?health=unhealthy` instead of `?health=stale`,
+/// silently disagreeing with what `GET /health/{fqn}` reports for the exact
+/// same asset.
+#[tokio::test]
+async fn a_stale_and_failed_case_files_under_stale_not_unhealthy() {
+    let (app, _db, _url) = test_app().await;
+    let fqn = service(&app, "stale-failure-svc").await;
+    let case = test_case(&app, &fqn, "freshness", Some("P1D")).await;
+    post_result(&app, &case, "failed", 100).await;
+
+    // Cross-checked against the single-asset read path, which this filter
+    // must agree with.
+    let summary = health(&app, &fqn).await;
+    assert_eq!(summary["state"], "stale", "{summary}");
+
+    let (_, unhealthy) = send(&app, "GET", "/assets?health=unhealthy", None).await;
+    assert!(
+        !names(&unhealthy).contains(&"stale-failure-svc".to_string()),
+        "a stale failure must not count as unhealthy: {unhealthy}"
+    );
+
+    let (status, stale) = send(&app, "GET", "/assets?health=stale", None).await;
+    assert_eq!(status, StatusCode::OK, "{stale}");
+    assert_eq!(names(&stale), vec!["stale-failure-svc"], "{stale}");
+}
+
+/// A fresh failure beside an unrelated stale case on the *same* asset must
+/// still report unhealthy overall — `health_of`'s own outer precedence
+/// checks `any_failed` before `any_stale`.
+#[tokio::test]
+async fn a_fresh_failure_beside_a_stale_case_on_the_same_asset_is_unhealthy() {
+    let (app, _db, _url) = test_app().await;
+    let fqn = service(&app, "mixed-svc").await;
+    let failing = test_case(&app, &fqn, "row_count", Some("P1D")).await;
+    post_result(&app, &failing, "failed", 1).await;
+    let stopped = test_case(&app, &fqn, "freshness", Some("P1D")).await;
+    post_result(&app, &stopped, "success", 100).await;
+
+    let summary = health(&app, &fqn).await;
+    assert_eq!(summary["state"], "unhealthy", "{summary}");
+
+    let (status, unhealthy) = send(&app, "GET", "/assets?health=unhealthy", None).await;
+    assert_eq!(status, StatusCode::OK, "{unhealthy}");
+    assert_eq!(names(&unhealthy), vec!["mixed-svc"], "{unhealthy}");
+}
+
+/// `GET /assets/search` takes the same filter, matching every other
+/// computed-status filter's own convention.
+#[tokio::test]
+async fn the_search_endpoint_also_respects_the_health_filter() {
+    let (app, _db, _url) = test_app().await;
+    let fqn = service(&app, "orders-search-svc").await;
+    let case = test_case(&app, &fqn, "not_null", Some("P1D")).await;
+    post_result(&app, &case, "failed", 1).await;
+    service(&app, "orders-search-other").await;
+
+    let (status, body) = send(
+        &app,
+        "GET",
+        "/assets/search?q=orders-search&health=unhealthy",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hits: Vec<&str> = body["data"]
+        .as_array()
+        .expect("a data array")
+        .iter()
+        .map(|h| h["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(hits, vec!["orders-search-svc"], "{body}");
+}
+
+/// The facet half of decision 4.5, over the *unfiltered* result set — an
+/// unhealthy asset among a healthy one reports both buckets, not just the
+/// one a caller happened to filter for.
+#[tokio::test]
+async fn search_reports_a_health_facet_over_the_visible_set() {
+    let (app, _db, _url) = test_app().await;
+    let unhealthy = service(&app, "facet-search-unhealthy").await;
+    let case = test_case(&app, &unhealthy, "row_count", Some("P1D")).await;
+    post_result(&app, &case, "failed", 1).await;
+    service(&app, "facet-search-untested").await;
+
+    let (status, body) = send(&app, "GET", "/assets/search?q=facet-search", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let buckets: std::collections::BTreeMap<&str, i64> = body["facets"]["health"]
+        .as_array()
+        .expect("a health facet array")
+        .iter()
+        .map(|b| {
+            (
+                b["value"].as_str().expect("value"),
+                b["count"].as_i64().expect("count"),
+            )
+        })
+        .collect();
+    assert_eq!(buckets.get("unhealthy"), Some(&1), "{body}");
+    assert_eq!(buckets.get("unknown"), Some(&1), "{body}");
+}

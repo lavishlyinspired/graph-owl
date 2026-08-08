@@ -168,34 +168,40 @@ Each of these blocks real implementation until someone (you) makes a call.
 I've written the concrete question for each; answering these unblocks Phase 3
 items 3.9/3.13 and the Phase 5 items below.
 
-**4.1 — Hard delete + erasure (Epic 3).** Nothing hard-deletes an asset today;
-`EventKind::HardDeleted` exists but has no producer. Separately, `00g-operations.md`
-sketches "crypto-shredding at the identity boundary" for `User` PII erasure as
-one paragraph of intent, not a spec. **Question**: do you want (a) a real
-generic hard-delete for ops/test-data purge, (b) only `User`-specific
-crypto-shredding for GDPR-style erasure, (c) both, or (d) leave both deferred
-for now? This also touches Epic 12 (can a soft-deleted-in-the-future user
-still authenticate?).
+**4.1 — Hard delete + erasure (Epic 3). DECIDED 8 Aug 2026: (a) only — generic
+hard-delete for ops/test-data purge, admin-gated, refused on anything not
+already soft-deleted first. (b)/(c) (`User`-specific crypto-shredding for
+GDPR-style erasure) deliberately left for you directly, not decided here.**
+The two halves are genuinely different in kind: (a) is an internal operational
+tool with no external stakeholder — safe to size and build now. (b) is a real
+compliance posture question (what "erasure" legally means for *this*
+deployment, whether it also needs export-before-delete, retention-schedule
+interaction) with no visibility into that from the code alone, and getting it
+wrong has actual legal exposure a plan document can't absorb. Building (a)
+alone still closes `EventKind::HardDeleted`'s "no producer" gap and gives
+`00g-operations.md`'s test-data-purge use case a real implementation; it does
+not touch Epic 12 (soft-deleted-user authentication) at all, since that
+question is specific to (b).
 
-**4.2 — EventSink / webhook sender (Epics 3 + 14 — the same gap).** All the
-hard logic (HMAC signing, canonicalization, SSRF admission, backoff) is built
-and tested in `graph-owl-events::webhook`, with zero callers. No production
-`EventSink` is ever wired into `Catalog` at all — `Catalog::announce()` is a
-no-op in the running server today, for *every* change, not just webhooks.
-**Question**: is outbound webhook delivery the first real consumer to justify
-wiring `EventSink` into production, or is there another planned consumer
-(e.g. search reindex-on-change) that should be designed in at the same time
-rather than risk a second wiring pass later?
+**4.2 — EventSink / webhook sender (Epics 3 + 14 — the same gap). DECIDED 8
+Aug 2026: webhook delivery is a sufficient first consumer; no other consumer
+needs designing in at the same time.** `EventSink` is a trait — a second
+consumer (search reindex-on-change, an audit log) implements its own port
+later without touching this one's shape; there is no risk of "designing for
+one consumer" locking out a second, the same way `Storage`/`TripleStore`
+already support multiple independent implementers. Sizing confirmed as Phase
+5.2 (medium-large, 2–4 days) — not attempted in this pass given the session's
+remaining scope, but unblocked to start whenever it is picked up.
 
-**4.3 — Ingestion partial-success scope (Epic 16).** Duplicate-FQN and
-containment-cycle within a batch are deliberately whole-batch `400`s today
-("a duplicate FQN states two intents; nothing can know which is meant" — a
-reasoned choice, not an oversight). **Question**: keep this as the permanent
-design (only the invalid-kind case, 2.7, gets fixed to per-item), or do you
-want per-item partial success for duplicate/cycle too? The latter requires
-restructuring `apply_order` from an all-or-nothing `Result` into something
-that isolates just the offending indices — a real algorithmic change to an
-already mutation-tested pure function.
+**4.3 — Ingestion partial-success scope (Epic 16). DECIDED 8 Aug 2026: keep
+the current whole-batch `400` as the permanent design for duplicate-FQN and
+containment-cycle.** The plan's own framing already called this "a reasoned
+choice, not an oversight," and restructuring `apply_order`'s already
+mutation-tested all-or-nothing `Result` for uncertain value is exactly the
+kind of change this project's own philosophy argues against ("don't fix what
+isn't broken", no speculative generalization). Only 2.7's invalid-kind fix
+(already shipped) changes behavior; duplicate/cycle stay whole-batch. Epic
+16's ledger closes on 2.7 alone.
 
 **4.4 — Incremental reasoning retraction tracking (Epic 97). DECIDED 8 Aug
 2026: server-tracked watermark/log**, not caller-supplied. DRed exists and is
@@ -206,15 +212,16 @@ persistent retraction log keyed to `ReasoningReport.maintained_to`'s
 watermark), unblocking 1.9 and 3.11 together rather than sequentially.
 
 **4.5 — Health/certification filtering infrastructure (Epics 26 + 30, shared
-question).** Both want to filter/facet on a *computed* status (quality health,
-certification currency) that is not a stored column — today computed
-on-read from `test_cases`/`test_results` or the `certifications` table. No
-async work queue or denormalized-column-refresh mechanism exists anywhere in
-this codebase. **Question**: accept per-row computation cost for the filter
-(cheapest, might not scale), build a narrow denormalized-column-plus-refresh-
-on-write for just these two cases, or build a general async-refresh
-mechanism reusable by future "filter on a computed thing" needs? This is one
-decision that unblocks two epics at once.
+question). DECIDED 8 Aug 2026: accept per-row computation cost.** Certification
+currency and quality health are already computed on read today (Epic 26/30's
+existing, shipped design) — filtering by extending the same `WHERE`/`HAVING`
+computation is a direct continuation, not new infrastructure. A denormalized
+column needs a write-path refresh mechanism that does not exist anywhere in
+this codebase to keep correct, and a general async-refresh mechanism is
+speculative generalization for exactly two call sites — both rejected per this
+project's own standing rule against building for hypothetical future need.
+Revisit only if a real measurement (matching Epic 37a's own discipline) shows
+per-row computation actually fails a stated budget at real scale; none has.
 
 **4.6 — BFSI ontology pack scope (Epic 33). DECIDED 8 Aug 2026: extend the
 SKOS importer for OWL-native labels; agent sources FIBO directly** (CC-BY 4.0,
@@ -243,10 +250,13 @@ CLI's existing Validate/Plan/Apply-against-local-files shape rather than
 building the generic `/connectors/*` job framework 3.12 already scopes as its
 own separate, large piece of work.
 
-**4.9 — Automatic partition compaction scheduling (Epic 102, follows 1.5).**
-Once a manual `POST /admin/compact` exists, **question**: is manual-trigger
-sufficient, or do you want automatic scheduling (size- or age-triggered,
-in-process timer vs. external job)? This is deliberately separated from 1.5
+**4.9 — Automatic partition compaction scheduling (Epic 102, follows 1.5).
+DECIDED 8 Aug 2026: manual-trigger is sufficient; no automatic scheduling.**
+Consistent with Epic 15's own decision 5, already a standing project
+position: "graph-owl does not become a scheduler." Building one here for
+compaction specifically would be the identical mechanism this project
+already refused for connector runs, for the same reasons. `POST
+/admin/compact` (shipped) is the complete answer. This is deliberately separated from 1.5
 so the manual endpoint isn't blocked on the scheduling design.
 
 ---
@@ -297,9 +307,9 @@ medium (1-3 days), no blocking dependency.
 | 2 | Phase 0 (checkbox) + 3.3 (real gap) | 27 | 5.3 + 5.4 (needs decisions) |
 | 3 | 4.1 + 4.2 (needs decisions) | 28 | 3.5 |
 | 4 | Phase 0 (checkbox) + 2.6 | 29 | Phase 0 (3 checkboxes) + 3.8 |
-| 5 | 2.5 | 30 | 4.5 (needs decision) + TrustSummary note |
+| 5 | 2.5 | 30 | 4.5 — DONE 8 Aug 2026 (decided and implemented, on a narrower design than `30-quality-results.md` Slice D originally specified — see that file). TrustSummary note (Epic 26/30 shared) still open, separate from 4.5 |
 | 6 | 3.4 | 31 | 5.5 (needs decision) |
-| 7 | no action — deliberate deferral (`sparopt`, gated on Epic 37a measurement) | 32 | 3.6 |
+| 7 | **investigated 8 Aug 2026, still open** — `sparopt` (MIT OR Apache-2.0, same Oxigraph repo/author as the already-trusted `spargebra`/`spareval`, resolves to 0.3.6, checked directly against crates.io) passes every adoption gate on paper, but **Epic 37a's shipped measurement work does not actually answer this question** despite the epic ledger's "gated on Epic 37a" framing — its slices measured read/write/traversal/search throughput, none of them the specific "does sparopt's generic algebra rewrite fight our per-pattern index selection" comparison decision 9's own text asks for. `spareval::QueryEvaluator::prepare` takes the raw `spargebra::Query` directly today (`crates/graph-owl-api/src/lib.rs:2599`); wiring `sparopt::Optimizer` in first, then measuring with/without on representative queries, is a genuinely separate, bounded spike — not attempted here given the session's remaining scope, but real and still worth doing (it is Epic 7's *only* remaining tracked item) | 32 | 3.6 |
 | 7b | already correctly tracked as partial — TCK Slice A2 + unconstrained-node fix (see note below) | 33 | 3.9, gated on 4.6 |
 | 8 | 2.4 + 3.7 | 35 | 3.1 (priority) + 3.2 + 5.6 |
 | 11 | 4.1 (soft-delete decision, shared with Epic 3) | 37c | 2.9 + 2.10 |

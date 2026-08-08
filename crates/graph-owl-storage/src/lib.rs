@@ -1043,6 +1043,14 @@ pub struct AssetFilter<'a> {
     /// rather than a second, stored copy of it that could drift from the
     /// read path.
     pub certification: Option<CertificationFilter>,
+    /// Only assets whose derived test health — Epic 30's
+    /// [`graph_owl_core::quality::health_of`] — is in this state. The same
+    /// "computation pushed into SQL, not a second copy" reasoning as
+    /// `certification` above; the two adapters' implementations carry a
+    /// differential test against the Rust function directly (decision 4.5)
+    /// because the precedence (a stale *and* failed case counts as stale,
+    /// not failed) is subtle enough that a drift would be silent otherwise.
+    pub health: Option<graph_owl_core::quality::Health>,
 }
 
 /// The value space for [`AssetFilter::certification`] — the state names

@@ -52,7 +52,7 @@ is the condition that index exists to catch.
 | **12** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 15/15 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **13** | 2 | [`12-13-security.md`](12-13-security.md) | **Shipped** | 10/10 | Epic 11 (`Principal` seam), Epic 11 (users and teams to attach roles to) |
 | **14** | 5 | [`14-mcp-activation.md`](14-mcp-activation.md) | In progress | 7/8 (+1 partial) | Epic 7a (subgraph retrieval for agent context), Epic 13 (authorization — **hard… |
-| **15** | 1 | [`15-connectors.md`](15-connectors.md) | In progress | 13/15 | Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable) |
+| **15** | 1 | [`15-connectors.md`](15-connectors.md) | In progress | 14/15 | Epic 2 (hierarchy to populate), Epic 3 (versioning to make re-runs observable) |
 | **16** | 6 | [`16-ingestion-apis.md`](16-ingestion-apis.md) | **Shipped** | 6/6 | Epic 1 (contract), Epic 15 (upsert semantics) |
 | **17** | 6 | [`17-entity-resolution.md`](17-entity-resolution.md) | **Shipped** | 4/4 | Epic 4 (`sameAs` in the graph), Epic 15 + 16 (two write paths make this necessa… |
 | **18** | 6 | [`18-inbound-events.md`](18-inbound-events.md) | **Shipped** | 5/5 | Epic 16 (ingestion contract), Epic 17 (resolution, so pushes do not duplicate) |
@@ -67,7 +67,7 @@ is the condition that index exists to catch.
 | **27** | 7 | [`27-contracts.md`](27-contracts.md) | In progress | 4/6 (+1 partial) | Epic 2 (schemas to guarantee), Epic 3 (version diffs detect breakage) |
 | **28** | 7 | [`28-usage.md`](28-usage.md) | **Shipped** | 6/6 | Epic 16 (push ingestion), Epic 11 (consumers are principals) |
 | **29** | 7 | [`29-lineage.md`](29-lineage.md) | **Shipped** | 14/14 | Epic 15 (connectors assert lineage), Epic 2 (columns for column-level lineage),… |
-| **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | In progress | 7/8 | Epic 29 (lineage, for propagating trust signals) |
+| **30** | 7 | [`30-quality-results.md`](30-quality-results.md) | **Shipped** | 9/9 | Epic 29 (lineage, for propagating trust signals) |
 | **31** | 5 | [`31-memory.md`](31-memory.md) | In progress | 2/4 (+1 partial) | Epic 3 (envelope), Epic 11 (people), Epic 14 (MCP surface to serve it) |
 | **32** | 5 | [`32-agent-capabilities.md`](32-agent-capabilities.md) | **Shipped** | 2/2 | Epic 14 (read surface, validated by real usage), Epic 31 (memory to write into) |
 | **33** | 9 | [`33-ontology-packs.md`](33-ontology-packs.md) | **Shipped** | 3/3 | Epic 24 (glossary and taxonomy model), Epic 9 (standards import) |
@@ -321,7 +321,7 @@ is the condition that index exists to catch.
 - [x] Deletion detection with a threshold guard — off by default; a refusal deletes nothing at
 - [x] Run history persisted
 - [x] `GET /connectors/runs`, newest first, and the console's Connectors page shows it — a run
-- [ ] ~~Scheduled runs~~ — **refused by decision 5**, not missing: *"graph-owl does not become
+- [x] ~~Scheduled runs~~ — **refused by decision 5**, not missing (its own text already said s
 - [x] `source_hash` fingerprinting
 - [x] The fingerprint covers source-owned fields only.
 - [x] A skipped record still counts as reported by the source
@@ -471,9 +471,10 @@ is the condition that index exists to catch.
 - [x] Definitions, cases and suites
 - [x] Results are history
 - [x] Health is derived, and refuses to lie twice
+- [x] Health filtering and facets — shipped 8 August 2026
 - [x] The latest result survives pruning
 - [x] Upstream health is reported separately, never merged
-- [ ] Health filtering and facets
+- [x] Health filtering and facets
 
 ### Epic 31 — Organizational Memory ★ *(Demo 5)*
 

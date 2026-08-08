@@ -147,6 +147,13 @@ const QUERY_PARAMS: &[(&str, &str, &[QueryParam])] = &[
                 "valid, expiringSoon, expired, or none — any certification type in \
                  this state, computed against now()",
             ),
+            query_param(
+                "health",
+                false,
+                "string",
+                "healthy, unhealthy, stale, or unknown — the same precedence \
+                 health_of computes for a single asset",
+            ),
             query_param("limit", false, "integer", "Page size"),
             query_param("after", false, "string", "The previous page's cursor"),
         ],
@@ -207,6 +214,13 @@ const QUERY_PARAMS: &[(&str, &str, &[QueryParam])] = &[
                 "string",
                 "valid, expiringSoon, expired, or none — any certification type in \
                  this state, computed against now()",
+            ),
+            query_param(
+                "health",
+                false,
+                "string",
+                "healthy, unhealthy, stale, or unknown — the same precedence \
+                 health_of computes for a single asset",
             ),
             query_param("limit", false, "integer", "Page size"),
             query_param("after", false, "string", "The previous page's cursor"),

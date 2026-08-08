@@ -2930,6 +2930,15 @@
             }
           },
           {
+            "description": "healthy, unhealthy, stale, or unknown — the same precedence health_of computes for a single asset",
+            "in": "query",
+            "name": "health",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "description": "Page size",
             "in": "query",
             "name": "limit",
@@ -3096,6 +3105,15 @@
             "description": "valid, expiringSoon, expired, or none — any certification type in this state, computed against now()",
             "in": "query",
             "name": "certification",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "healthy, unhealthy, stale, or unknown — the same precedence health_of computes for a single asset",
+            "in": "query",
+            "name": "health",
             "required": false,
             "schema": {
               "type": "string"

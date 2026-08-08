@@ -82,6 +82,43 @@ pub enum Health {
     Unknown,
 }
 
+impl Health {
+    /// The wire name — matching `#[serde(rename_all = "camelCase")]`'s own
+    /// output, so a `?health=` filter uses the same vocabulary the JSON
+    /// body already returns.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Health::Healthy => "healthy",
+            Health::Unhealthy => "unhealthy",
+            Health::Stale => "stale",
+            Health::Unknown => "unknown",
+        }
+    }
+
+    /// Every state.
+    #[must_use]
+    pub const fn all() -> &'static [Health] {
+        &[
+            Health::Healthy,
+            Health::Unhealthy,
+            Health::Stale,
+            Health::Unknown,
+        ]
+    }
+
+    /// # Errors
+    ///
+    /// The unrecognised name, so the caller can name it back.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        Health::all()
+            .iter()
+            .copied()
+            .find(|candidate| candidate.as_str() == raw)
+            .ok_or_else(|| raw.to_string())
+    }
+}
+
 /// The whole picture, not just the verdict.
 ///
 /// **The counts are the point.** "Unhealthy" tells a steward to look; "three of
@@ -580,6 +617,18 @@ mod tests {
         // Pinned, because these are the values the database's `CHECK` accepts.
         assert_eq!(TestStatus::Success.as_str(), "success");
         assert_eq!(TestStatus::Aborted.as_str(), "aborted");
+    }
+
+    /// The same round-trip proof as `TestStatus` above — Epic 30 decision
+    /// 4.5's `?health=` filter parses these same wire names.
+    #[test]
+    fn health_states_round_trip_through_their_wire_names() {
+        for state in Health::all() {
+            assert_eq!(Health::parse(state.as_str()), Ok(*state));
+        }
+        assert!(Health::parse("broken").is_err());
+        assert_eq!(Health::Healthy.as_str(), "healthy");
+        assert_eq!(Health::Unknown.as_str(), "unknown");
     }
 
     #[test]

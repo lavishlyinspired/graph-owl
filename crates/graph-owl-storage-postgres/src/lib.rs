@@ -4758,10 +4758,11 @@ impl Storage for PostgresStorage {
         // measurement still misses budget at a larger target, the escape
         // hatch is the maintained effective-owner projection this comment
         // already flagged, not another constant-factor pass here.
-        let extension = extension_clauses(filter.extension, 15);
+        let extension = extension_clauses(filter.extension, 16);
         let tags_filter: Option<&[String]> = (!filter.tags.is_empty()).then_some(filter.tags);
         let tags = tags_expr(12);
         let certification = certification_expr(13, 14);
+        let health = health_expr(15);
         let sql = format!(
             "SELECT {ASSET_COLUMNS}, effective_owners.owners FROM assets
              LEFT JOIN LATERAL (SELECT {OWNERS_EXPR} AS owners) effective_owners ON true
@@ -4780,6 +4781,7 @@ impl Storage for PostgresStorage {
                AND ($11::text IS NULL OR lifecycle = $11)
                {tags}
                {certification}
+               {health}
                {extension}
              ORDER BY fully_qualified_name, id
              LIMIT $4"
@@ -4798,7 +4800,8 @@ impl Storage for PostgresStorage {
             .bind(filter.lifecycle.map(LifecycleState::as_str))
             .bind(tags_filter)
             .bind(filter.certification.map(CertificationFilter::as_str))
-            .bind(graph_owl_core::lifecycle::DEFAULT_EXPIRY_WINDOW_DAYS as i32);
+            .bind(graph_owl_core::lifecycle::DEFAULT_EXPIRY_WINDOW_DAYS as i32)
+            .bind(filter.health.map(graph_owl_core::quality::Health::as_str));
         for condition in filter.extension {
             query = query.bind(&condition.name).bind(&condition.value);
         }
@@ -4826,10 +4829,11 @@ impl Storage for PostgresStorage {
         let overfetch = i64::try_from(page.limit)
             .unwrap_or(i64::MAX)
             .saturating_add(1);
-        let extension = extension_clauses(filter.extension, 14);
+        let extension = extension_clauses(filter.extension, 15);
         let tags_filter: Option<&[String]> = (!filter.tags.is_empty()).then_some(filter.tags);
         let tags = tags_expr(11);
         let certification = certification_expr(12, 13);
+        let health = health_expr(14);
         // **`NULLIF(..., '')`, not the bare `ts_headline` result.** An asset
         // with no description makes `ts_headline` return `''`, not `NULL` —
         // `coalesce`d in for the same reason. A client that sees an empty
@@ -4857,6 +4861,7 @@ impl Storage for PostgresStorage {
                AND ($10::text IS NULL OR lifecycle = $10)
                {tags}
                {certification}
+               {health}
                {extension}
              ORDER BY {RANK_KEY}, id
              LIMIT $5"
@@ -4874,7 +4879,8 @@ impl Storage for PostgresStorage {
             .bind(filter.lifecycle.map(LifecycleState::as_str))
             .bind(tags_filter)
             .bind(filter.certification.map(CertificationFilter::as_str))
-            .bind(graph_owl_core::lifecycle::DEFAULT_EXPIRY_WINDOW_DAYS as i32);
+            .bind(graph_owl_core::lifecycle::DEFAULT_EXPIRY_WINDOW_DAYS as i32)
+            .bind(filter.health.map(graph_owl_core::quality::Health::as_str));
         for condition in filter.extension {
             q = q.bind(&condition.name).bind(&condition.value);
         }
@@ -10435,6 +10441,68 @@ fn certification_expr(status_param: usize, window_param: usize) -> String {
                       AND c.expires_at <= now())
                  ELSE FALSE
                END))"
+    )
+}
+
+/// **The same computation `graph_owl_core::quality::health_of` runs in
+/// Rust, pushed into SQL — Epic 30, decision 4.5, wired to `?health=`.**
+/// Not a stored column, the identical "computation pushed into SQL rather
+/// than a second, stored copy" reasoning `certification_expr` above already
+/// uses.
+///
+/// **Precedence, matched exactly, including the subtle case:** a test case
+/// that is *both* stale and failed counts toward staleness, never toward
+/// failure — `health_of`'s own per-case loop checks `is_stale` before it
+/// checks `status == Failed`. Getting this backwards here would make the
+/// filter disagree with the read path on exactly the ambiguous case a
+/// reviewer would reach for the filter to find. `bool_or(NOT is_stale AND
+/// status = 'failed')` for "any real failure" and `bool_or(is_stale)` for
+/// "any staleness" are aggregated once per asset via one grouped subquery,
+/// then mapped through the identical four-way precedence
+/// (`case_count = 0` → unknown, any failure → unhealthy, any staleness →
+/// stale, else healthy) `health_of` itself uses.
+///
+/// **`expected_cadence::interval` is a safe cast, not a guess**: the column
+/// only ever holds what `graph_owl_core::quality::parse_cadence` accepted
+/// on the way in, which refuses `Y`/`M` designators specifically because
+/// they are not fixed-length — the same property that makes every value
+/// Postgres could find there a valid ISO 8601 interval literal (`'P1D'`,
+/// `'P2W'`, verified directly: `'P2W'::interval` → `14 days`).
+///
+/// Kept as one `LEFT JOIN LATERAL` per case exactly matching
+/// `latest_results_for`'s own shape (the trusted, existing single-asset
+/// read path), rather than a second, differently-shaped query that could
+/// silently answer a different question.
+fn health_expr(status_param: usize) -> String {
+    format!(
+        "AND (${status_param}::text IS NULL OR (
+               SELECT CASE
+                        WHEN h.case_count = 0 THEN 'unknown'
+                        WHEN h.any_failed THEN 'unhealthy'
+                        WHEN h.any_stale THEN 'stale'
+                        ELSE 'healthy'
+                      END = ${status_param}
+                 FROM (
+                   SELECT count(*) AS case_count,
+                          bool_or(NOT stale_calc.is_stale AND r.status = 'failed') AS any_failed,
+                          bool_or(stale_calc.is_stale) AS any_stale
+                     FROM test_cases c
+                     LEFT JOIN test_definitions d ON d.id = c.definition_id
+                     LEFT JOIN LATERAL (
+                         SELECT status, observed_at FROM test_results
+                          WHERE case_id = c.id ORDER BY observed_at DESC LIMIT 1
+                     ) r ON TRUE
+                     CROSS JOIN LATERAL (
+                         SELECT (
+                           r.status IS NULL OR r.observed_at IS NULL OR r.status = 'aborted'
+                           OR (coalesce(c.expected_cadence, d.expected_cadence) IS NOT NULL
+                               AND now() - r.observed_at
+                                   > coalesce(c.expected_cadence, d.expected_cadence)::interval)
+                         ) AS is_stale
+                     ) stale_calc
+                    WHERE c.target_fqn = assets.fully_qualified_name
+                 ) h
+             ))"
     )
 }
 
