@@ -90,7 +90,7 @@ is the condition that index exists to catch.
 | **97** | 10, 12 | [`97-incremental-parallel-reasoning.md`](97-incremental-parallel-reasoning.md) | In progress | 1/2 | Epic 6 (semi-naive fixpoint), Epic 37a (the measurement) |
 | **98** | 11, 12 | [`98-owl-el-reasoning.md`](98-owl-el-reasoning.md) | In progress | 3/4 | Epic 6 (overlay, budgets, explainability), Epic 24 (ontologies as entities) |
 | **99** | 11, 12 | [`99-owl-ql-reasoning.md`](99-owl-ql-reasoning.md) | In progress | 3/4 | Epic 7 (query algebra to rewrite), Epic 6 (explanation contract) |
-| **100** | 11, 12 | [`100-profile-detection-and-routing.md`](100-profile-detection-and-routing.md) | In progress | 4/6 | Epic 6 (RL engine — shipped), ~~Epic 24 (ontologies as entities)~~ — **phantom*… |
+| **100** | 11, 12 | [`100-profile-detection-and-routing.md`](100-profile-detection-and-routing.md) | In progress | 5/7 | Epic 6 (RL engine — shipped), ~~Epic 24 (ontologies as entities)~~ — **phantom*… |
 | **101** | 11 | [`101-sparql-federation.md`](101-sparql-federation.md) | **Shipped** | 5/5 | Epic 7 (algebra and executor), Epic 13 (authorization) |
 | **102** | 11 | [`102-read-write-partitions.md`](102-read-write-partitions.md) | In progress | 1/2 | Epic 4 (the flake table), Epic 37a (the measurement) |
 | **103** | 11 | [`103-in-process-traversal.md`](103-in-process-traversal.md) | In progress | 4/5 | Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger) |
@@ -643,6 +643,7 @@ is the condition that index exists to catch.
 - [x] Detection over 400k axioms completes in seconds
 - [ ] Profile badge + the reasoner that produced each derivation
 - [ ] Out-of-profile and override-partial results marked
+- [x] Routing is now actually enforced on the live reasoning path — found and fixed 8 August 2
 
 ### Epic 101 — SPARQL Federation — `SERVICE` *(Demo 11)*
 

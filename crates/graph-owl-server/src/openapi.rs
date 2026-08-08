@@ -556,6 +556,15 @@ pub static ROUTES: &[Route] = &[
         true,
     ),
     route(
+        "get",
+        "/ontology/profile",
+        "Which OWL profiles the TBox belongs to, and which POST /reasoning/runs would route to",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
         "post",
         "/validation/runs",
         "Validate the estate against every shape and replace the queue",

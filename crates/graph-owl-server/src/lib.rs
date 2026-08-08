@@ -250,6 +250,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/reasoning/derived", get(derived_about))
         .route("/reasoning/el/classify", post(classify_ontology))
         .route("/reasoning/el/explain", get(explain_el_subsumption))
+        .route("/ontology/profile", get(ontology_profile))
         .route("/validation/runs", post(run_validation))
         .route("/validation/shapes/seed", post(seed_core_shapes))
         .route("/validation/report", get(validation_report))
@@ -6681,19 +6682,105 @@ async fn validation_report(
 /// Admin-only, for the same reason reconciliation is: a full forward-chaining
 /// pass over the estate is the cheapest way an unprivileged caller could load
 /// the database.
+#[derive(Debug, Default, serde::Deserialize)]
+struct RunReasoningQuery {
+    #[serde(default)]
+    force: bool,
+}
+
+/// **Epic 100: refuses an ontology outside the RL profile before running
+/// the RL engine over it, unless the caller opts in.** Found unwired while
+/// auditing `plans/EPIC-COMPLETION-PLAN.md` Phase 1.4: `detect_ontology_profiles`/
+/// `route_ontology_reasoning`/`force_ontology_reasoning` existed, were
+/// correct and tested, and were never called from this handler — meaning
+/// the exact failure this epic exists to prevent ("an ontology with axioms
+/// outside RL gets loaded into the RL engine... a confidently wrong
+/// hierarchy") was still live through the real API. This engine derives
+/// only OWL 2 RL conclusions; when the `TBox` is not an RL member (the common
+/// case — a plain `rdfs:subClassOf` hierarchy always is — passes through
+/// untouched), the run either refuses, naming the first offending axiom, or
+/// — with `?force=true` — proceeds anyway and marks the result `partial`,
+/// carrying exactly what routing found wrong. Routing to EL or QL instead
+/// is not attempted here: this endpoint only ever runs the RL fixpoint,
+/// `POST /reasoning/el/classify` and automatic SPARQL-time QL rewriting are
+/// the separate surfaces for those profiles.
 async fn run_reasoning(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,
-) -> Result<Json<graph_owl_api::ReasoningReport>, AppError> {
+    Query(query): Query<RunReasoningQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
     if !principal.is_admin {
         return Err(AppError::NotFound);
     }
+
+    let mut ignored = Vec::new();
+    if query.force {
+        let routing = catalog
+            .force_ontology_reasoning(graph_owl_ontology::profile::Profile::Rl)
+            .await?;
+        ignored = routing.ignored;
+    } else {
+        match catalog.route_ontology_reasoning().await? {
+            graph_owl_ontology::profile::RoutingDecision::Route(
+                graph_owl_ontology::profile::Profile::Rl,
+            ) => {}
+            graph_owl_ontology::profile::RoutingDecision::Route(other) => {
+                return Err(AppError::Validation(vec![FieldError::new(
+                    "profile",
+                    FieldErrorCode::Value,
+                    format!(
+                        "this ontology is not in the RL profile this endpoint reasons over \
+                         — routing prefers {other:?} instead. Use POST /reasoning/el/classify \
+                         for EL, or query directly (QL rewriting applies automatically to \
+                         every SPARQL query). Pass ?force=true to run RL anyway and accept a \
+                         partial result"
+                    ),
+                )]));
+            }
+            graph_owl_ontology::profile::RoutingDecision::Refused {
+                first_offending_axiom,
+                reason,
+            } => {
+                return Err(AppError::Validation(vec![FieldError::new(
+                    "profile",
+                    FieldErrorCode::Value,
+                    format!(
+                        "refused: {reason} (first offending axiom: {first_offending_axiom}). \
+                         Pass ?force=true to run RL anyway and accept a partial result"
+                    ),
+                )]));
+            }
+        }
+    }
+
     // The budget is the server's, not the caller's — the same rule SPARQL
     // follows. A client that can raise its own limit does not have one.
     let report = catalog
         .run_reasoning(&graph_owl_reasoning::Budget::default())
         .await?;
-    Ok(Json(report))
+
+    let mut body = serde_json::to_value(&report).map_err(|e| AppError::Internal(e.to_string()))?;
+    let map = body
+        .as_object_mut()
+        .expect("ReasoningReport always serializes to a JSON object");
+    // **Always present, never inferred from an empty array** — the same
+    // "truncated" convention `query_outcome_json` already established: a
+    // partial run presented as complete is the failure this project
+    // refuses everywhere.
+    map.insert("partial".to_string(), json!(!ignored.is_empty()));
+    map.insert(
+        "ignoredAxioms".to_string(),
+        json!(
+            ignored
+                .iter()
+                .map(|violation| json!({
+                    "subject": violation.subject.to_string(),
+                    "reason": violation.reason,
+                }))
+                .collect::<Vec<_>>()
+        ),
+    );
+    Ok(Json(body))
 }
 
 /// Classify the ontology's `TBox` against OWL 2 EL via the `whelk` sidecar
@@ -6760,7 +6847,7 @@ struct ElExplainQuery {
 /// `classify_ontology` above. `404` when no such subsumption holds, the
 /// same "absent is absent" convention `explain_fact` already established
 /// for the RL/OWL overlay: read-only, and never admin-gated, since
-/// re-deriving one explanation over already-fetched TBox edges costs
+/// re-deriving one explanation over already-fetched `TBox` edges costs
 /// nothing like a whole classification run does.
 async fn explain_el_subsumption(
     State(catalog): State<Catalog>,
@@ -6776,6 +6863,58 @@ async fn explain_el_subsumption(
         ))),
         None => Err(AppError::NotFound),
     }
+}
+
+/// Which OWL profiles the ontology's `TBox` belongs to, and which one
+/// `POST /reasoning/runs` would route to — Epic 100.
+///
+/// **Had no route at all until this one either** — found alongside
+/// `run_reasoning`'s own missing wiring (`plans/EPIC-COMPLETION-PLAN.md`
+/// Phase 1.4). Asking "what profile is this?" previously required
+/// attempting a reasoning run and reading the refusal, or nothing at all if
+/// the ontology was RL-safe. Read-only and never admin-gated, the same
+/// reason `explain_el_subsumption` is not: detection is a bounded
+/// construct-presence scan, not a reasoning pass.
+fn membership_body(
+    membership: &graph_owl_ontology::profile::ProfileMembership,
+) -> serde_json::Value {
+    json!({
+        "member": membership.member,
+        "violations": membership.violations.iter().map(|v| json!({
+            "subject": v.subject.to_string(),
+            "reason": v.reason,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+async fn ontology_profile(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let detection = catalog.detect_ontology_profiles().await?;
+    let routing = catalog.route_ontology_reasoning().await?;
+
+    let routing_body = match routing {
+        graph_owl_ontology::profile::RoutingDecision::Route(profile) => json!({
+            "outcome": "route",
+            "profile": format!("{profile:?}"),
+        }),
+        graph_owl_ontology::profile::RoutingDecision::Refused {
+            first_offending_axiom,
+            reason,
+        } => json!({
+            "outcome": "refused",
+            "firstOffendingAxiom": first_offending_axiom.to_string(),
+            "reason": reason,
+        }),
+    };
+
+    Ok(Json(json!({
+        "rl": membership_body(&detection.rl),
+        "el": membership_body(&detection.el),
+        "ql": membership_body(&detection.ql),
+        "routing": routing_body,
+    })))
 }
 
 #[derive(Debug, serde::Deserialize)]
