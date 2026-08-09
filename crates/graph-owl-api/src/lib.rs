@@ -6386,6 +6386,67 @@ impl Catalog {
         Ok(self.storage.list_stream_subscriptions().await?)
     }
 
+    // ---- Epic 14 Slice F: outbound webhooks ----
+
+    /// Registers or updates an outbound webhook subscription. `secret` is
+    /// the raw HMAC signing key; `None` leaves an existing one alone, and a
+    /// **first** registration with `None` is an error — same reasoning as
+    /// [`Self::register_webhook_endpoint`], except an outbound subscription
+    /// has no lower-security no-secret mode an inbound endpoint's Ed25519
+    /// case does.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the write fails, including a first registration with no
+    /// secret.
+    #[tracing::instrument(name = "catalog.register_outbound_webhook", skip_all)]
+    pub async fn register_outbound_webhook(
+        &self,
+        webhook: graph_owl_storage::OutboundWebhook,
+        secret: Option<&[u8]>,
+    ) -> Result<graph_owl_storage::OutboundWebhook, CatalogError> {
+        Ok(self
+            .storage
+            .upsert_outbound_webhook(webhook, secret)
+            .await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn outbound_webhook(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::OutboundWebhook>, CatalogError> {
+        Ok(self.storage.get_outbound_webhook(id).await?)
+    }
+
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn list_outbound_webhooks(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::OutboundWebhook>, CatalogError> {
+        Ok(self.storage.list_outbound_webhooks().await?)
+    }
+
+    /// Every enqueued delivery for one subscription — an operator's view of
+    /// what a sender (Slice B, not yet built) has pending or already
+    /// failed.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if the read fails.
+    pub async fn outbound_webhook_deliveries(
+        &self,
+        webhook_id: Uuid,
+    ) -> Result<Vec<graph_owl_storage::OutboundWebhookDelivery>, CatalogError> {
+        Ok(self
+            .storage
+            .list_outbound_webhook_deliveries(webhook_id)
+            .await?)
+    }
+
     /// Verifies an inbound delivery's signature and, if it verifies, records
     /// it. The HTTP layer is responsible for reading `raw_body` before any
     /// JSON parsing and for extracting exactly the header `endpoint`'s own
@@ -14766,6 +14827,95 @@ impl Catalog {
     }
 }
 
+/// Real [`EventSink`]: fans a committed change out to every enabled
+/// outbound webhook subscription that wants it — Epic 14 Slice F
+/// (decision 4.2, `EPIC-COMPLETION-PLAN.md`).
+///
+/// **Only the enqueue half.** What drains the queue and makes the actual
+/// HTTP request — `graph_owl_events::webhook`'s already-built and
+/// already-tested `backoff`/`admit_target`/`sign` — is Slice B, not yet
+/// built. Landing the enqueue half first, proven by a real queued row
+/// (`OutboundWebhookDelivery`), means a future sender has real work to
+/// drain against rather than an empty queue nothing has ever filled.
+pub struct OutboundWebhookSink {
+    storage: Arc<dyn graph_owl_storage::Storage>,
+}
+
+impl OutboundWebhookSink {
+    /// Fans out against every webhook registered in `storage`.
+    #[must_use]
+    pub fn new(storage: Arc<dyn graph_owl_storage::Storage>) -> Self {
+        Self { storage }
+    }
+}
+
+impl EventSink for OutboundWebhookSink {
+    fn emit(&self, event: &ChangeEvent) {
+        let storage = Arc::clone(&self.storage);
+        let payload = graph_owl_events::webhook::thin_payload(event);
+        let kind = event.kind;
+        // `EventSink::emit` is sync by contract — "emission failure does
+        // not fail the request" is a property of the signature, not a
+        // discipline every implementor remembers — so the async storage
+        // write has to be handed off rather than awaited here.
+        // `tokio::spawn` is sound because every call site
+        // (`Catalog::announce`) runs inside an async method already on the
+        // server's own runtime.
+        tokio::spawn(async move {
+            let webhooks = match storage.list_outbound_webhooks().await {
+                Ok(webhooks) => webhooks,
+                Err(error) => {
+                    tracing::warn!(%error, "outbound webhook fan-out: could not list subscriptions");
+                    return;
+                }
+            };
+            let payload_value = match serde_json::to_value(&payload) {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(%error, "outbound webhook fan-out: could not serialize payload");
+                    return;
+                }
+            };
+            for webhook in webhooks
+                .into_iter()
+                .filter(|webhook| webhook.enabled && outbound_webhook_wants(webhook, kind))
+            {
+                if let Err(error) = storage
+                    .enqueue_outbound_webhook_delivery(webhook.id, payload_value.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        webhook_id = %webhook.id,
+                        %error,
+                        "outbound webhook fan-out: could not enqueue delivery"
+                    );
+                }
+            }
+        });
+    }
+}
+
+/// Whether `webhook` wants events of `kind`.
+///
+/// Matches by `kind`'s own wire form (`EventKind`'s `camelCase` serde
+/// rename) rather than a hand-maintained second copy of the name mapping —
+/// the same string this event's `ThinPayload.kind` field would carry, so an
+/// admin's `eventTypes` list uses one vocabulary rather than two. Empty
+/// means every kind — `graph_owl_events::webhook::WebhookRegistration::wants`'s
+/// own convention, reused rather than re-decided here.
+fn outbound_webhook_wants(
+    webhook: &graph_owl_storage::OutboundWebhook,
+    kind: graph_owl_events::EventKind,
+) -> bool {
+    if webhook.event_types.is_empty() {
+        return true;
+    }
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .is_some_and(|kind_str| webhook.event_types.iter().any(|t| *t == kind_str))
+}
+
 /// The graph shapes are stated in.
 ///
 /// Its own graph, not the default one: a shape is a statement *about* the
@@ -20848,6 +20998,218 @@ mod webhooks_are_verified_before_they_are_believed {
             .expect("list endpoints");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, registered.id);
+    }
+}
+
+#[cfg(test)]
+mod outbound_webhooks_are_registered_and_enqueued {
+    //! Epic 14 Slice F (decision 4.2) at the **facade** and at the real
+    //! [`EventSink`].
+    //!
+    //! The Postgres repository tests (`outbound_webhooks.rs`) prove the
+    //! schema; this proves the **orchestration** two levels up: that
+    //! `Catalog::register_outbound_webhook` reaches storage, and — the part
+    //! nothing else exercises — that [`OutboundWebhookSink::emit`] actually
+    //! turns a committed change into a real, readable-back delivery row for
+    //! every subscription that wants it, and skips the ones that do not.
+
+    use super::*;
+    use graph_owl_events::{ChangeEvent, EventSink, EventSubject};
+    use graph_owl_storage::OutboundWebhook;
+    use tests::InMemoryStorage;
+
+    fn webhook(url: &str, event_types: Vec<&str>) -> OutboundWebhook {
+        let now = chrono::Utc::now();
+        OutboundWebhook {
+            id: Uuid::new_v4(),
+            url: url.to_string(),
+            event_types: event_types.into_iter().map(str::to_string).collect(),
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn created_event() -> ChangeEvent {
+        ChangeEvent::created(
+            EventSubject {
+                kind: AssetKind::Table,
+                id: Uuid::new_v4().to_string(),
+                fqn: "warehouse.retail.public.orders".to_string(),
+            },
+            graph_owl_core::envelope::EntityVersion::initial(),
+            "alice",
+        )
+    }
+
+    /// Polls rather than sleeping a fixed amount: `emit` hands the write off
+    /// to a spawned task, and a fixed sleep would either flake under load or
+    /// waste time when the task finishes instantly, which it always does
+    /// against `InMemoryStorage`.
+    async fn deliveries_eventually(
+        storage: &Arc<InMemoryStorage>,
+        webhook_id: Uuid,
+    ) -> Vec<graph_owl_storage::OutboundWebhookDelivery> {
+        for _ in 0..200 {
+            let found = storage
+                .list_outbound_webhook_deliveries(webhook_id)
+                .await
+                .expect("list deliveries");
+            if !found.is_empty() {
+                return found;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        Vec::new()
+    }
+
+    #[tokio::test]
+    async fn a_registered_subscription_round_trips_through_the_facade() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let registered = catalog
+            .register_outbound_webhook(
+                webhook("https://example.com/hooks/a", vec!["created"]),
+                Some(b"signing-secret"),
+            )
+            .await
+            .expect("register");
+
+        let fetched = catalog
+            .outbound_webhook(registered.id)
+            .await
+            .expect("get")
+            .expect("must exist");
+        assert_eq!(fetched, registered);
+
+        let listed = catalog.list_outbound_webhooks().await.expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, registered.id);
+    }
+
+    #[tokio::test]
+    async fn a_subscriptions_deliveries_are_readable_through_the_facade() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let catalog = Catalog::new(storage.clone());
+        let registered = catalog
+            .register_outbound_webhook(
+                webhook("https://example.com/hooks/a", vec!["created"]),
+                Some(b"secret"),
+            )
+            .await
+            .expect("register");
+
+        assert!(
+            catalog
+                .outbound_webhook_deliveries(registered.id)
+                .await
+                .expect("deliveries")
+                .is_empty()
+        );
+
+        let payload = serde_json::json!({ "kind": "created" });
+        storage
+            .enqueue_outbound_webhook_delivery(registered.id, payload.clone())
+            .await
+            .expect("enqueue");
+
+        let deliveries = catalog
+            .outbound_webhook_deliveries(registered.id)
+            .await
+            .expect("deliveries");
+        assert_eq!(deliveries.len(), 1, "{deliveries:?}");
+        assert_eq!(deliveries[0].payload, payload);
+    }
+
+    #[tokio::test]
+    async fn a_matching_committed_change_is_enqueued_for_delivery() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let registered = storage
+            .upsert_outbound_webhook(
+                webhook("https://example.com/hooks/a", vec!["created"]),
+                Some(b"secret"),
+            )
+            .await
+            .expect("register");
+
+        let sink = OutboundWebhookSink::new(storage.clone());
+        sink.emit(&created_event());
+
+        let deliveries = deliveries_eventually(&storage, registered.id).await;
+        assert_eq!(deliveries.len(), 1, "{deliveries:?}");
+        assert_eq!(deliveries[0].payload["kind"], "created");
+        assert_eq!(
+            deliveries[0].payload["fullyQualifiedName"],
+            "warehouse.retail.public.orders"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subscription_for_a_different_event_type_is_not_enqueued() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let registered = storage
+            .upsert_outbound_webhook(
+                // Only wants updates — the event below is a creation.
+                webhook("https://example.com/hooks/updates-only", vec!["updated"]),
+                Some(b"secret"),
+            )
+            .await
+            .expect("register");
+
+        let sink = OutboundWebhookSink::new(storage.clone());
+        sink.emit(&created_event());
+
+        // No fixed wait to prove a *negative* — poll a few times for
+        // something that must never arrive, which still catches a fan-out
+        // that fired the wrong kind without making the suite slow.
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        let deliveries = storage
+            .list_outbound_webhook_deliveries(registered.id)
+            .await
+            .expect("list deliveries");
+        assert!(deliveries.is_empty(), "{deliveries:?}");
+    }
+
+    #[tokio::test]
+    async fn an_empty_event_types_list_means_every_kind() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let registered = storage
+            .upsert_outbound_webhook(
+                webhook("https://example.com/hooks/every-kind", vec![]),
+                Some(b"secret"),
+            )
+            .await
+            .expect("register");
+
+        let sink = OutboundWebhookSink::new(storage.clone());
+        sink.emit(&created_event());
+
+        let deliveries = deliveries_eventually(&storage, registered.id).await;
+        assert_eq!(deliveries.len(), 1, "{deliveries:?}");
+    }
+
+    #[tokio::test]
+    async fn a_disabled_subscription_is_not_enqueued() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let mut disabled = webhook("https://example.com/hooks/disabled", vec![]);
+        disabled.enabled = false;
+        let registered = storage
+            .upsert_outbound_webhook(disabled, Some(b"secret"))
+            .await
+            .expect("register");
+
+        let sink = OutboundWebhookSink::new(storage.clone());
+        sink.emit(&created_event());
+
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        let deliveries = storage
+            .list_outbound_webhook_deliveries(registered.id)
+            .await
+            .expect("list deliveries");
+        assert!(deliveries.is_empty(), "{deliveries:?}");
     }
 }
 

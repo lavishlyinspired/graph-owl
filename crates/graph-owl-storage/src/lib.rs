@@ -1402,6 +1402,47 @@ pub struct StreamDeadLetter {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A registered outbound webhook subscription, **without its signing
+/// secret** — Epic 14 Slice F (decision 4.2, `EPIC-COMPLETION-PLAN.md`).
+/// Same reasoning as [`WebhookEndpoint`]: no field for the HMAC key, so a
+/// `Debug` derive or a response body can never leak it. Read through
+/// exactly one method ([`Storage::outbound_webhook_secret`]).
+///
+/// `event_types` is stored as plain strings rather than this crate's own
+/// enum: this crate has no dependency on `graph_owl_events`, which is where
+/// `EventKind` and the "empty means every kind" convention actually live
+/// (`graph_owl_events::webhook::WebhookRegistration::wants`) — storage keeps
+/// the bytes, the events crate keeps the meaning.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundWebhook {
+    pub id: Uuid,
+    pub url: String,
+    pub event_types: Vec<String>,
+    pub enabled: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// One enqueued delivery attempt for a matched event — Epic 14 Slice F.
+///
+/// This is the queue a sender (Slice B, not yet built) will drain;
+/// `attempt`/`next_attempt_at`/`dead_lettered` are that sender's own state
+/// machine, landed now so what enqueues into it can be proven correct ahead
+/// of what drains it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundWebhookDelivery {
+    pub id: Uuid,
+    pub webhook_id: Uuid,
+    pub payload: serde_json::Value,
+    pub attempt: i32,
+    pub next_attempt_at: chrono::DateTime<chrono::Utc>,
+    pub last_error: Option<String>,
+    pub dead_lettered: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[async_trait]
 pub trait Storage: Send + Sync {
     /// Connection-pool occupancy, if this backend has a pool.
@@ -2037,6 +2078,73 @@ pub trait Storage: Send + Sync {
     ///
     /// [`StorageError`] if the delete fails.
     async fn delete_stream_dead_letter(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    // ---- Epic 14 Slice F: outbound webhooks ----
+
+    /// Registers or updates an outbound webhook subscription.
+    ///
+    /// `secret` is the raw HMAC signing key; `None` leaves an existing one
+    /// alone — same reasoning as [`Self::upsert_webhook_endpoint`]. Unlike
+    /// an inbound endpoint or a stream subscription, a **new** subscription
+    /// has no existing key to fall back to, so a first registration with
+    /// `secret: None` is a write error rather than a silently unsigned,
+    /// unverifiable webhook.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails, including a first
+    /// registration with no secret.
+    async fn upsert_outbound_webhook(
+        &self,
+        webhook: OutboundWebhook,
+        secret: Option<&[u8]>,
+    ) -> Result<OutboundWebhook, StorageError>;
+
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn get_outbound_webhook(&self, id: Uuid)
+    -> Result<Option<OutboundWebhook>, StorageError>;
+
+    /// Every registered subscription, without secrets.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn list_outbound_webhooks(&self) -> Result<Vec<OutboundWebhook>, StorageError>;
+
+    /// The stored signing key, for the sender path only.
+    ///
+    /// **The one call site that sees a secret** — same reasoning as
+    /// [`Self::webhook_secret`].
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn outbound_webhook_secret(&self, id: Uuid) -> Result<Option<Vec<u8>>, StorageError>;
+
+    /// Enqueues one delivery attempt for a matched event.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn enqueue_outbound_webhook_delivery(
+        &self,
+        webhook_id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<OutboundWebhookDelivery, StorageError>;
+
+    /// Every enqueued delivery for one subscription, oldest first — a
+    /// sender's or an operator's view of what is pending or has already
+    /// failed.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn list_outbound_webhook_deliveries(
+        &self,
+        webhook_id: Uuid,
+    ) -> Result<Vec<OutboundWebhookDelivery>, StorageError>;
 
     /// Persists a received (already signature-verified) inbound event.
     ///

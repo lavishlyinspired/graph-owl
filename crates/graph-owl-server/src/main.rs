@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use graph_owl_api::Catalog;
+use graph_owl_api::{Catalog, OutboundWebhookSink};
 use graph_owl_engine_postgres::PostgresTripleStore;
+use graph_owl_storage::Storage;
 use graph_owl_storage_postgres::PostgresStorage;
 
 #[tokio::main]
@@ -100,11 +101,21 @@ async fn main() {
         Err(_) => graph_owl_api::federation::DEFAULT_TIMEOUT,
     };
 
-    let mut catalog = Catalog::new(Arc::new(storage))
+    // Kept alongside the `Catalog` rather than only inside it: Epic 14
+    // Slice F's outbound-webhook sink needs its own handle to storage (to
+    // enqueue a delivery row), independent of whatever `Catalog` does with
+    // its copy.
+    let storage: Arc<dyn Storage> = Arc::new(storage);
+    let mut catalog = Catalog::new(storage.clone())
         .with_graph(graph.clone())
         .with_traversal(graph)
         .with_federation_endpoints(federation_endpoints)
-        .with_federation_timeout(federation_timeout);
+        .with_federation_timeout(federation_timeout)
+        // Slice A only: this enqueues a delivery row per matching
+        // subscription. The sender that drains the queue and makes the
+        // HTTP request is Slice B, not yet built —
+        // `plans/EPIC-COMPLETION-PLAN.md` decision 4.2.
+        .with_events(Arc::new(OutboundWebhookSink::new(storage)));
     // Epic 98: off by default, like every other deployment-level capability
     // here. `Catalog::classify_ontology`/`explain_subsumption` existed and
     // were tested since this epic shipped, but nothing ever called

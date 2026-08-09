@@ -1753,6 +1753,145 @@ impl Storage for PostgresStorage {
         Ok(result.rows_affected() > 0)
     }
 
+    #[tracing::instrument(name = "storage.upsert_outbound_webhook", skip_all)]
+    async fn upsert_outbound_webhook(
+        &self,
+        webhook: graph_owl_storage::OutboundWebhook,
+        secret: Option<&[u8]>,
+    ) -> Result<graph_owl_storage::OutboundWebhook, StorageError> {
+        // Enforced here rather than by a `NOT NULL` column — see the
+        // migration's comment on `secret` for why a `NOT NULL` column
+        // fights the `COALESCE`-on-conflict upsert idiom used below.
+        if secret.is_none() {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM outbound_webhooks WHERE id = $1)")
+                    .bind(webhook.id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+            if !exists {
+                return Err(StorageError::Unexpected(
+                    "an outbound webhook requires a signing secret on first registration"
+                        .to_string(),
+                ));
+            }
+        }
+        let row = sqlx::query(
+            "INSERT INTO outbound_webhooks (id, url, secret, event_types, enabled)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (id) DO UPDATE SET
+                 url          = EXCLUDED.url,
+                 event_types  = EXCLUDED.event_types,
+                 enabled      = EXCLUDED.enabled,
+                 -- `None` means leave an existing key alone — same reasoning
+                 -- as `upsert_webhook_endpoint`. On a first insert `secret`
+                 -- is `NOT NULL`, so `None` here fails the write instead of
+                 -- silently registering an unsigned webhook.
+                 secret       = COALESCE($3, outbound_webhooks.secret),
+                 updated_at   = now()
+             RETURNING id, url, event_types, enabled, created_at, updated_at",
+        )
+        .bind(webhook.id)
+        .bind(&webhook.url)
+        .bind(secret)
+        .bind(&webhook.event_types)
+        .bind(webhook.enabled)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(outbound_webhook_from_row(&row))
+    }
+
+    #[tracing::instrument(name = "storage.get_outbound_webhook", skip_all)]
+    async fn get_outbound_webhook(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::OutboundWebhook>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, url, event_types, enabled, created_at, updated_at
+             FROM outbound_webhooks WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(row.as_ref().map(outbound_webhook_from_row))
+    }
+
+    #[tracing::instrument(name = "storage.list_outbound_webhooks", skip_all)]
+    async fn list_outbound_webhooks(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::OutboundWebhook>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, url, event_types, enabled, created_at, updated_at
+             FROM outbound_webhooks ORDER BY created_at",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows.iter().map(outbound_webhook_from_row).collect())
+    }
+
+    #[tracing::instrument(name = "storage.outbound_webhook_secret", skip_all)]
+    async fn outbound_webhook_secret(&self, id: Uuid) -> Result<Option<Vec<u8>>, StorageError> {
+        // The only place key material is read — same reasoning as
+        // `webhook_secret`. The column is nullable at the schema level (see
+        // the migration), but `upsert_outbound_webhook` never lets a row
+        // exist without one, so `Option::flatten` collapses "no such
+        // webhook" and "webhook exists with no secret" the same way
+        // `webhook_secret` does — the second case does not arise in
+        // practice.
+        sqlx::query_scalar("SELECT secret FROM outbound_webhooks WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map(Option::flatten)
+            .map_err(|e| StorageError::Unexpected(e.to_string()))
+    }
+
+    #[tracing::instrument(name = "storage.enqueue_outbound_webhook_delivery", skip_all)]
+    async fn enqueue_outbound_webhook_delivery(
+        &self,
+        webhook_id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<graph_owl_storage::OutboundWebhookDelivery, StorageError> {
+        let row = sqlx::query(
+            "INSERT INTO outbound_webhook_deliveries (id, webhook_id, payload)
+             VALUES ($1, $2, $3)
+             RETURNING id, webhook_id, payload, attempt, next_attempt_at, last_error,
+                       dead_lettered, created_at",
+        )
+        .bind(Uuid::new_v4())
+        .bind(webhook_id)
+        .bind(&payload)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(outbound_webhook_delivery_from_row(&row))
+    }
+
+    #[tracing::instrument(name = "storage.list_outbound_webhook_deliveries", skip_all)]
+    async fn list_outbound_webhook_deliveries(
+        &self,
+        webhook_id: Uuid,
+    ) -> Result<Vec<graph_owl_storage::OutboundWebhookDelivery>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, webhook_id, payload, attempt, next_attempt_at, last_error,
+                    dead_lettered, created_at
+             FROM outbound_webhook_deliveries
+             WHERE webhook_id = $1
+             ORDER BY created_at",
+        )
+        .bind(webhook_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows
+            .iter()
+            .map(outbound_webhook_delivery_from_row)
+            .collect())
+    }
+
     // The event row is inserted before the dedup marker — `first_event_id`
     // is a real foreign key, so the row it points to must already exist.
     // Both statements run in one transaction so "concurrent duplicate
@@ -11115,6 +11254,30 @@ fn stream_dead_letter_from_row(row: &PgRow) -> graph_owl_storage::StreamDeadLett
         offset: row.get("kafka_offset"),
         payload: row.get("payload"),
         reason: row.get("reason"),
+        created_at: row.get("created_at"),
+    }
+}
+
+fn outbound_webhook_from_row(row: &PgRow) -> graph_owl_storage::OutboundWebhook {
+    graph_owl_storage::OutboundWebhook {
+        id: row.get("id"),
+        url: row.get("url"),
+        event_types: row.get("event_types"),
+        enabled: row.get("enabled"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn outbound_webhook_delivery_from_row(row: &PgRow) -> graph_owl_storage::OutboundWebhookDelivery {
+    graph_owl_storage::OutboundWebhookDelivery {
+        id: row.get("id"),
+        webhook_id: row.get("webhook_id"),
+        payload: row.get("payload"),
+        attempt: row.get("attempt"),
+        next_attempt_at: row.get("next_attempt_at"),
+        last_error: row.get("last_error"),
+        dead_lettered: row.get("dead_lettered"),
         created_at: row.get("created_at"),
     }
 }

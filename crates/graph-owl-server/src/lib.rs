@@ -511,6 +511,17 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             "/streaming/dead-letters/{id}/replay",
             post(replay_stream_dead_letter),
         )
+        // Epic 14 Slice F (decision 4.2): outbound webhook subscriptions,
+        // admin-gated for the same reason inbound endpoints and stream
+        // subscriptions are — this one holds a signing secret. A distinct
+        // `/admin/` prefix from `/webhooks/*` (which names Epic 18's
+        // *inbound* receivers): the two are opposite directions of the
+        // same word and a shared prefix would make every future route
+        // under it ambiguous about which one it means.
+        .route(
+            "/admin/outbound-webhooks",
+            get(list_outbound_webhooks).post(register_outbound_webhook),
+        )
         // Unauthenticated by necessity rather than by design: this is what a
         // client reads *before* it holds a token, so requiring one would be
         // circular.
@@ -3884,6 +3895,77 @@ async fn list_stream_subscriptions(
         return Err(AppError::NotFound);
     }
     Ok(Json(catalog.list_stream_subscriptions().await?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OutboundWebhookRequest {
+    url: String,
+    /// `EventKind`'s own wire form (`"created"`, `"softDeleted"`, ...).
+    /// Empty means every kind — see `outbound_webhook_wants`'s doc comment.
+    #[serde(default)]
+    event_types: Vec<String>,
+    #[serde(default = "default_webhook_enabled")]
+    enabled: bool,
+    /// Required on first registration; write-only and never echoed back —
+    /// same reasoning as [`WebhookEndpointRequest::secret`], except an
+    /// outbound subscription has no lower-security no-secret mode, so
+    /// leaving this absent on a **new** subscription is a `422`, not a
+    /// silently unsigned webhook.
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+impl ValidateBody for OutboundWebhookRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("url"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// Register an outbound webhook subscription — Epic 14 Slice F (decision
+/// 4.2). Admin-only, same reasoning as [`register_webhook_endpoint`]: this
+/// holds a signing secret and decides where catalog events are delivered.
+async fn register_outbound_webhook(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<OutboundWebhookRequest>,
+) -> Result<(StatusCode, Json<graph_owl_storage::OutboundWebhook>), AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let now = chrono::Utc::now();
+    let webhook = graph_owl_storage::OutboundWebhook {
+        id: Uuid::new_v4(),
+        url: payload.url,
+        event_types: payload.event_types,
+        enabled: payload.enabled,
+        created_at: now,
+        updated_at: now,
+    };
+    let saved = catalog
+        .register_outbound_webhook(webhook, payload.secret.as_deref().map(str::as_bytes))
+        .await?;
+    // `OutboundWebhook` has no field for the secret, so this response
+    // cannot carry one — the guarantee is the type, not this handler
+    // remembering.
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+/// Every registered subscription, without secrets.
+async fn list_outbound_webhooks(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<Vec<graph_owl_storage::OutboundWebhook>>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.list_outbound_webhooks().await?))
 }
 
 #[derive(Debug, serde::Deserialize)]

@@ -197,6 +197,13 @@ pub struct InMemoryStorage {
     #[allow(clippy::type_complexity)]
     stream_subscriptions: Mutex<Vec<(graph_owl_storage::StreamSubscription, Option<Vec<u8>>)>>,
     stream_dead_letters: Mutex<Vec<graph_owl_storage::StreamDeadLetter>>,
+    /// `(webhook, secret)` — same reasoning as `webhook_endpoints`. Unlike
+    /// that field, `secret` here starts required: `upsert_outbound_webhook`
+    /// refuses a first registration with `None`, matching the real
+    /// `NOT NULL` column this fake stands in for.
+    #[allow(clippy::type_complexity)]
+    outbound_webhooks: Mutex<Vec<(graph_owl_storage::OutboundWebhook, Vec<u8>)>>,
+    outbound_webhook_deliveries: Mutex<Vec<graph_owl_storage::OutboundWebhookDelivery>>,
     mapping_versions: Mutex<Vec<graph_owl_storage::Mapping>>,
     entity_last_applied: Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
     custom_properties: Mutex<Vec<(Uuid, graph_owl_core::custom_property::CustomProperty)>>,
@@ -1160,6 +1167,97 @@ impl Storage for InMemoryStorage {
         let before = held.len();
         held.retain(|l| l.id != id);
         Ok(held.len() < before)
+    }
+
+    async fn upsert_outbound_webhook(
+        &self,
+        webhook: graph_owl_storage::OutboundWebhook,
+        secret: Option<&[u8]>,
+    ) -> Result<graph_owl_storage::OutboundWebhook, StorageError> {
+        let mut held = self.outbound_webhooks.lock().unwrap();
+        let existing_secret = held
+            .iter()
+            .find(|(w, _)| w.id == webhook.id)
+            .map(|(_, s)| s.clone());
+        let Some(kept) = secret.map(<[u8]>::to_vec).or(existing_secret) else {
+            return Err(StorageError::Unexpected(
+                "an outbound webhook requires a signing secret on first registration".to_string(),
+            ));
+        };
+        held.retain(|(w, _)| w.id != webhook.id);
+        held.push((webhook.clone(), kept));
+        Ok(webhook)
+    }
+
+    async fn get_outbound_webhook(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_storage::OutboundWebhook>, StorageError> {
+        Ok(self
+            .outbound_webhooks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(w, _)| w.id == id)
+            .map(|(w, _)| w.clone()))
+    }
+
+    async fn list_outbound_webhooks(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::OutboundWebhook>, StorageError> {
+        Ok(self
+            .outbound_webhooks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(w, _)| w.clone())
+            .collect())
+    }
+
+    async fn outbound_webhook_secret(&self, id: Uuid) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self
+            .outbound_webhooks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(w, _)| w.id == id)
+            .map(|(_, s)| s.clone()))
+    }
+
+    async fn enqueue_outbound_webhook_delivery(
+        &self,
+        webhook_id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<graph_owl_storage::OutboundWebhookDelivery, StorageError> {
+        let delivery = graph_owl_storage::OutboundWebhookDelivery {
+            id: Uuid::new_v4(),
+            webhook_id,
+            payload,
+            attempt: 0,
+            next_attempt_at: chrono::Utc::now(),
+            last_error: None,
+            dead_lettered: false,
+            created_at: chrono::Utc::now(),
+        };
+        self.outbound_webhook_deliveries
+            .lock()
+            .unwrap()
+            .push(delivery.clone());
+        Ok(delivery)
+    }
+
+    async fn list_outbound_webhook_deliveries(
+        &self,
+        webhook_id: Uuid,
+    ) -> Result<Vec<graph_owl_storage::OutboundWebhookDelivery>, StorageError> {
+        Ok(self
+            .outbound_webhook_deliveries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| d.webhook_id == webhook_id)
+            .cloned()
+            .collect())
     }
 
     async fn create_inbound_event(

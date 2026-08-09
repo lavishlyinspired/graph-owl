@@ -1740,6 +1740,27 @@ pub static ROUTES: &[Route] = &[
         200,
         true,
     ),
+    // Epic 14 Slice F (decision 4.2): outbound subscriptions — the opposite
+    // direction from `/webhooks/*` above, which is Epic 18's *inbound*
+    // receivers.
+    route(
+        "post",
+        "/admin/outbound-webhooks",
+        "Register an outbound webhook subscription; the signing secret is write-only",
+        None,
+        None,
+        201,
+        true,
+    ),
+    route(
+        "get",
+        "/admin/outbound-webhooks",
+        "Every registered outbound webhook subscription, without secrets",
+        None,
+        None,
+        200,
+        true,
+    ),
     route(
         "post",
         "/teams",

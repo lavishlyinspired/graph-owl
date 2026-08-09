@@ -2647,6 +2647,56 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/admin/outbound-webhooks": {
+      "get": {
+        "operationId": "get_admin_outbound-webhooks",
+        "responses": {
+          "200": {
+            "description": "Every registered outbound webhook subscription, without secrets"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every registered outbound webhook subscription, without secrets"
+      },
+      "post": {
+        "operationId": "post_admin_outbound-webhooks",
+        "responses": {
+          "201": {
+            "description": "Register an outbound webhook subscription; the signing secret is write-only"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Register an outbound webhook subscription; the signing secret is write-only"
+      }
+    },
     "/agents/grants": {
       "get": {
         "operationId": "get_agents_grants",
