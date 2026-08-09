@@ -58,4 +58,8 @@
 /sdk/python/graph_owl_read_client/*.egg-info/
 __pycache__/
 .pytest_cache/
+# Python worker: editable-install metadata and mutmut's mutant scratch space.
+/workers/python/*.egg-info/
+/workers/python/mutants/
+/workers/python/mutants.out
 .git/credentials
