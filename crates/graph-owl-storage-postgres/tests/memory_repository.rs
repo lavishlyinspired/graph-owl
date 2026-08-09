@@ -709,3 +709,118 @@ async fn deleting_the_subject_removes_the_link_and_keeps_the_memory() {
 
     assert!(read.links.is_empty());
 }
+
+// ---- Epic 31's semantic ranking term: a memory's stored embedding ----
+
+#[tokio::test]
+async fn a_memorys_embedding_round_trips() {
+    let (storage, _database, _url) = test_storage().await;
+    let table = subject(&storage, "orders").await;
+    let written = memory(
+        MemoryKind::Rationale,
+        "Refunds excluded.",
+        vec![about(table)],
+    );
+    storage.save_memory(&written).await.expect("save");
+    let embedding: Vec<f32> = vec![0.1, -0.2, 0.3];
+
+    storage
+        .save_memory_embedding(written.id, &embedding)
+        .await
+        .expect("save embedding");
+    let read = storage
+        .memory_embeddings(&[written.id])
+        .await
+        .expect("read embeddings");
+
+    assert_eq!(read.get(&written.id), Some(&embedding));
+}
+
+/// Writing a second embedding for the same memory replaces the first — a
+/// memory can be re-embedded (a model upgrade, a retry after a transient
+/// failure) without a unique-constraint conflict blocking every retry.
+#[tokio::test]
+async fn re_saving_an_embedding_replaces_it_rather_than_conflicting() {
+    let (storage, _database, _url) = test_storage().await;
+    let table = subject(&storage, "orders").await;
+    let written = memory(
+        MemoryKind::Rationale,
+        "Refunds excluded.",
+        vec![about(table)],
+    );
+    storage.save_memory(&written).await.expect("save");
+    storage
+        .save_memory_embedding(written.id, &[0.1, 0.2])
+        .await
+        .expect("first save");
+
+    storage
+        .save_memory_embedding(written.id, &[0.9, 0.8])
+        .await
+        .expect("second save");
+    let read = storage
+        .memory_embeddings(&[written.id])
+        .await
+        .expect("read embeddings");
+
+    assert_eq!(read.get(&written.id), Some(&vec![0.9, 0.8]));
+}
+
+/// **The negative that makes the round-trip test real.** A memory nobody
+/// has embedded — written before this feature existed, or whose embedding
+/// call failed at write time — must be simply absent from the map, not an
+/// error and not a zero vector. `Catalog::recall` reads exactly this
+/// absence to decide `Candidate::semantic` stays `None`.
+#[tokio::test]
+async fn a_memory_with_no_stored_embedding_is_absent_not_zero() {
+    let (storage, _database, _url) = test_storage().await;
+    let table = subject(&storage, "orders").await;
+    let written = memory(
+        MemoryKind::Rationale,
+        "Refunds excluded.",
+        vec![about(table)],
+    );
+    storage.save_memory(&written).await.expect("save");
+
+    let read = storage
+        .memory_embeddings(&[written.id])
+        .await
+        .expect("read embeddings");
+
+    assert_eq!(read.get(&written.id), None);
+    assert!(read.is_empty());
+}
+
+/// A batch read returns only the memories that actually have a stored
+/// embedding, keyed correctly — not a positional array a caller could
+/// misalign against the ids it asked for.
+#[tokio::test]
+async fn a_batch_read_returns_only_the_embedded_memories_correctly_keyed() {
+    let (storage, _database, _url) = test_storage().await;
+    let table = subject(&storage, "orders").await;
+    let embedded = memory(
+        MemoryKind::Rationale,
+        "Refunds excluded.",
+        vec![about(table)],
+    );
+    let unembedded = memory(
+        MemoryKind::Rationale,
+        "Chargebacks pending.",
+        vec![about(table)],
+    );
+    storage.save_memory(&embedded).await.expect("save");
+    storage.save_memory(&unembedded).await.expect("save");
+    storage
+        .save_memory_embedding(embedded.id, &[0.5, 0.5])
+        .await
+        .expect("save embedding");
+
+    let read = storage
+        .memory_embeddings(&[embedded.id, unembedded.id])
+        .await
+        .expect("read embeddings");
+
+    assert_eq!(read.len(), 1);
+    assert_eq!(read.get(&embedded.id), Some(&vec![0.5, 0.5]));
+    assert_eq!(read.get(&unembedded.id), None);
+}

@@ -54,6 +54,7 @@ graph-owl-reasoning-ql = { path = "../graph-owl-reasoning-ql", version = "0.1.0"
 # for the identical reason `graph-owl-reasoning-ql` is above. Also needed by
 # `main.rs` to configure the optional `whelk` sidecar from the environment.
 graph-owl-reasoning-el = { path = "../graph-owl-reasoning-el", version = "0.1.0" }
+graph-owl-search = { path = "../graph-owl-search", version = "0.1.0" }
 # Epic 9 Slice B: the served, versioned JSON-LD `@context` route compacted
 # output references by URL — `JsonLdContext::to_document()` is the same
 # function `graph-owl-rdf-io`'s own serializer compacts against.

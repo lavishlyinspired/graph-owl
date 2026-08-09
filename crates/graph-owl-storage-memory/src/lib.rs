@@ -154,6 +154,7 @@ pub struct InMemoryStorage {
     runs: Mutex<Vec<graph_owl_storage::ConnectorRun>>,
     lineage: Mutex<Vec<graph_owl_core::lineage::LineageEdge>>,
     memories: Mutex<Vec<graph_owl_core::memory::Memory>>,
+    memory_embeddings: Mutex<std::collections::HashMap<Uuid, Vec<f32>>>,
     reviews: Mutex<Vec<graph_owl_core::contradiction::Review>>,
     /// `(asset, owners)` in submitted order — order is part of the contract,
     /// because validation reports failures by index.
@@ -358,6 +359,30 @@ impl Storage for InMemoryStorage {
             .filter(|memory| memory.links.iter().any(|edge| edge.target == subject))
             .filter(|memory| include_superseded || memory.superseded_by.is_none())
             .cloned()
+            .collect())
+    }
+
+    async fn save_memory_embedding(
+        &self,
+        memory_id: Uuid,
+        embedding: &[f32],
+    ) -> Result<(), StorageError> {
+        self.guard_write("save_memory_embedding");
+        self.memory_embeddings
+            .lock()
+            .expect("lock")
+            .insert(memory_id, embedding.to_vec());
+        Ok(())
+    }
+
+    async fn memory_embeddings(
+        &self,
+        memory_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Vec<f32>>, StorageError> {
+        let held = self.memory_embeddings.lock().expect("lock");
+        Ok(memory_ids
+            .iter()
+            .filter_map(|id| held.get(id).map(|embedding| (*id, embedding.clone())))
             .collect())
     }
 

@@ -27,6 +27,7 @@ graph-owl-ontology = { path = "../graph-owl-ontology", version = "0.1.0" }
 graph-owl-resolution = { path = "../graph-owl-resolution", version = "0.1.0" }
 graph-owl-rdf-io = { path = "../graph-owl-rdf-io", version = "0.1.0" }
 graph-owl-lpg-io = { path = "../graph-owl-lpg-io", version = "0.1.0" }
+graph-owl-search = { path = "../graph-owl-search", version = "0.1.0" }
 spareval = "0.2"
 spargebra = "0.4"
 sparesults = "0.3"

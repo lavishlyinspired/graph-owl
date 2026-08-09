@@ -15,9 +15,14 @@
 //! detached engine lands (`08-engine-search.md` Slice A, `OpenSearch`; Epic 33's
 //! vector index), and the shape it should take is knowable then rather than now.
 //!
-//! `VectorIndex` is likewise not here: embeddings are generated out of process
-//! (`00j-language-boundaries.md`), so the port that matters is the one at that
-//! process boundary, and it does not exist yet either.
+//! `VectorIndex` (an ANN index over many vectors) is still not here — nothing
+//! in this codebase needs approximate nearest-neighbour search over an
+//! unbounded corpus yet. What now exists is [`embeddings`]: the process
+//! boundary itself, for Epic 31's semantic ranking term, which only ever
+//! reranks a small, already-filtered candidate set and has no need of an
+//! index.
+
+pub mod embeddings;
 
 /// Turn what a person typed into a Postgres `tsquery` expression.
 ///

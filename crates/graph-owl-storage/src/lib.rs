@@ -2498,6 +2498,41 @@ pub trait Storage: Send + Sync {
         include_superseded: bool,
     ) -> Result<Vec<Memory>, StorageError>;
 
+    /// Store a memory's embedding, computed out of process at write time
+    /// (`graph_owl_search::embeddings::EmbeddingClient`) — Epic 31's
+    /// semantic ranking term reads this back at recall time.
+    ///
+    /// Re-saving replaces the prior vector rather than conflicting: a
+    /// memory can be re-embedded (a model upgrade, a retry after a
+    /// transient failure) without a unique-constraint error blocking every
+    /// retry.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn save_memory_embedding(
+        &self,
+        memory_id: Uuid,
+        embedding: &[f32],
+    ) -> Result<(), StorageError>;
+
+    /// Every stored embedding among `memory_ids`, keyed by memory id.
+    ///
+    /// A memory with no stored embedding — written before this feature
+    /// existed, or whose embedding call failed at write time — is simply
+    /// **absent from the map, never an error and never a zero vector**:
+    /// [`graph_owl_core::recall::Candidate::semantic`] stays `None` for
+    /// exactly this reason, so a reader can tell "measured, not similar"
+    /// from "never measured".
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn memory_embeddings(
+        &self,
+        memory_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Vec<f32>>, StorageError>;
+
     /// Replace a memory with a correction, marking both sides in one
     /// transaction.
     ///

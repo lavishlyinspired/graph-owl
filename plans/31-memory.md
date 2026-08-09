@@ -1,7 +1,7 @@
 # Plan: Organizational Memory (Epic 31) ★
 
 **Branch**: feat/memory
-**Status**: **In progress** — Slices A, B, C, D and E have their domain core and
+**Status**: **Shipped, 9 August 2026.** Slices A, B, C, D and E have their domain core and
 their persistence, 30 Jul 2026. `graph-owl-core::memory` / `::recall` /
 `::contradiction`, `V15__memories.sql`, six `Storage` port methods with a
 Postgres adapter and 15 integration tests, and the `Catalog` facade
@@ -35,17 +35,50 @@ fills the silence; and superseded memories are **excluded rather than flagged**,
 because a withdrawn memory arriving as an unmarked peer of its own correction is
 not stale but retracted, and no flag makes presenting both defensible.
 
-**What is genuinely left**: Slice C's semantic term, and any console surface.
+**Slice C's semantic term — closed 9 August 2026.** The blocker was real: an
+embedding needs a provider outside this process (`00j`), and there was no
+such provider anywhere in the codebase. Rather than wait on Epic 8's own
+(larger, HNSW-scoped) search work, this was resolved directly as its own
+narrow slice, with the user making the two decisions that actually mattered:
 
-**Why the semantic term is not merely unfinished.** `graph-owl-search`'s own
-module docs already record that embeddings are generated **out of process**
-(`00j`), so the port that matters sits at that process boundary and does not
-exist. Implementing the term today would mean either fabricating a lexical
-similarity and labelling it semantic — which destroys the distinction
-`Score.semantic: Option<f64>` exists to preserve, since a reader could no longer
-tell "measured, not similar" from "never measured" — or inventing a seam with no
-implementation on either side, which `00e`'s growth trigger and that module's docs
-both refuse in writing. It waits for Epic 8.
+1. **Provider-agnostic, not a single hardcoded vendor.** `EmbeddingClient`
+   (new `graph_owl_search::embeddings` module) speaks the OpenAI-compatible
+   `/v1/embeddings` wire shape, so `EMBEDDING_API_BASE_URL` can point at
+   OpenAI itself, a self-hosted LiteLLM proxy, or a self-hosted vLLM
+   instance without a code change. Built on `async-openai` (MIT,
+   embeddings-only feature slice — see `00l-build-vs-adopt.md`) rather than
+   a hand-rolled HTTP client, per this project's own build-vs-adopt rule.
+2. **A hosted API called directly from Rust**, not a second Python service —
+   the smaller of the two shapes `00j` itself anticipated for an embedding
+   model ("those move out of process behind the ingestion API"), since a
+   plain HTTP call needs no Python at all.
+
+**What actually got built, and why it stayed honest about "measured, not
+similar" vs "never measured":** a new `memory_embeddings` table
+(`REAL[]`, no `pgvector` — this only ever reranks an already-filtered
+candidate set, never an ANN search over the whole corpus) backs two new
+`Storage` methods, `save_memory_embedding`/`memory_embeddings`.
+`Catalog::create_memory` computes and stores an embedding when a client is
+configured; `Catalog::recall` embeds the query once and scores every
+candidate via `cosine_similarity`. Both stay silently absent — leaving
+`Candidate::semantic` at `None`, exactly as before this existed — when no
+client is configured, when the query is empty (a real provider refuses an
+empty input string), or when a call fails: a transient provider outage
+degrades ranking quality, never availability, and never surfaces as a
+`create_memory`/`recall` failure for a memory that otherwise saved or
+retrieved successfully.
+
+**Verified end to end, not just at the unit level** — the same rigor a
+prior epic's pushdown bug (found only by an end-to-end test, after four
+passing unit tests missed it) made a standing rule here: a real
+`Catalog::create_memory` → `Catalog::recall` test drives a real local HTTP
+server standing in for the embedding provider, with two memories isolated
+on every ranking term *except* semantic (identical links, authorship,
+confidence, `as_of`; neither shares a word with the query) so only the
+semantic score can explain the ordering it asserts.
+
+**Console surface**: shipped separately, Epic 41's memory panel and memory
+administration.
 
 **Closed 4 August 2026**: a request resolving to a *person* rather than
 `Principal::system()`. The note above was written before Epic 12 shipped and

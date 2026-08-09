@@ -149,6 +149,24 @@ async fn main() {
         });
     }
 
+    // Epic 31's semantic ranking term: off by default, like every other
+    // deployment-level capability here. `EMBEDDING_API_BASE_URL` speaks
+    // the OpenAI-compatible `/v1/embeddings` shape, so it can point at
+    // OpenAI itself, a self-hosted LiteLLM proxy, or a self-hosted vLLM
+    // instance without a code change — deliberately provider-agnostic
+    // rather than a single hardcoded vendor integration. `EMBEDDING_MODEL`
+    // is required alongside it; `EMBEDDING_API_KEY` is not, since not
+    // every OpenAI-compatible server needs one.
+    if let Ok(base_url) = std::env::var("EMBEDDING_API_BASE_URL") {
+        let model = std::env::var("EMBEDDING_MODEL")
+            .unwrap_or_else(|_| panic!("EMBEDDING_API_BASE_URL is set but EMBEDDING_MODEL is not"));
+        catalog = catalog.with_embedding_client(graph_owl_search::embeddings::EmbeddingConfig {
+            base_url,
+            api_key: std::env::var("EMBEDDING_API_KEY").ok(),
+            model,
+        });
+    }
+
     // Resumes every enabled subscription from its last committed offset —
     // Epic 19 decision 1 ("a durable subscription, not a push endpoint")
     // means a restart must not go silently quiet until someone re-registers

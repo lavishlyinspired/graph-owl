@@ -2359,6 +2359,47 @@ impl Storage for PostgresStorage {
         Ok(memories)
     }
 
+    async fn save_memory_embedding(
+        &self,
+        memory_id: Uuid,
+        embedding: &[f32],
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO memory_embeddings (memory_id, embedding, updated_at)
+             VALUES ($1, $2, now())
+             ON CONFLICT (memory_id) DO UPDATE
+                SET embedding = EXCLUDED.embedding, updated_at = now()",
+        )
+        .bind(memory_id)
+        .bind(embedding)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn memory_embeddings(
+        &self,
+        memory_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Vec<f32>>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT memory_id, embedding FROM memory_embeddings WHERE memory_id = ANY($1)",
+        )
+        .bind(memory_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let memory_id: Uuid = row.get("memory_id");
+                let embedding: Vec<f32> = row.get("embedding");
+                (memory_id, embedding)
+            })
+            .collect())
+    }
+
     async fn supersede_memory(
         &self,
         original: Uuid,

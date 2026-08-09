@@ -14,3 +14,16 @@ workspace = true
 graph-owl-core = { path = "../graph-owl-core", version = "0.1.0" }
 async-trait.workspace = true
 thiserror.workspace = true
+# Embeddings only (`default-features = false`): chat, images, audio, and
+# every other OpenAI API surface stay uncompiled. `rustls` matches the
+# workspace's own `reqwest` TLS choice (`Cargo.toml`'s `rustls-tls`
+# feature) rather than pulling in a second TLS backend.
+async-openai = { version = "0.41", default-features = false, features = [
+    "rustls",
+    "embedding",
+] }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[dev-dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["full"] }

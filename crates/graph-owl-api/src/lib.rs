@@ -1252,6 +1252,13 @@ pub struct Catalog {
     /// the same reason `shape_cache`/`el_cache` are: axum clones `Catalog`
     /// per request.
     reasoning_cache: Arc<Mutex<Option<CachedReasoning>>>,
+    /// Where to call for Epic 31's semantic ranking term — `None` means the
+    /// capability is unavailable, the same "optional, catalog still fully
+    /// functional" shape `el_sidecar` already has. [`Self::create_memory`]
+    /// skips computing an embedding when this is unset, and
+    /// [`Self::recall`] leaves every candidate's `semantic` term `None`,
+    /// exactly as it already does before Epic 8/31 exist at all.
+    embedding_client: Option<Arc<graph_owl_search::embeddings::EmbeddingClient>>,
 }
 
 /// See [`Catalog`]'s own `reasoning_cache` field doc comment.
@@ -1291,6 +1298,7 @@ impl Catalog {
             el_sidecar: None,
             el_cache: Arc::new(Mutex::new(None)),
             reasoning_cache: Arc::new(Mutex::new(None)),
+            embedding_client: None,
         }
     }
 
@@ -1301,6 +1309,23 @@ impl Catalog {
     #[must_use]
     pub fn with_el_sidecar(mut self, config: graph_owl_reasoning_el::SidecarConfig) -> Self {
         self.el_sidecar = Some(config);
+        self
+    }
+
+    /// Configures the embedding client for Epic 31's semantic ranking term
+    /// — [`Self::create_memory`] and [`Self::recall`] both no-op on it
+    /// until this is set, the same "off by default, still fully
+    /// functional" shape [`Self::with_el_sidecar`] already has.
+    /// Deployment-level: set once at startup from `EMBEDDING_API_BASE_URL`
+    /// / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL`, not settable per request.
+    #[must_use]
+    pub fn with_embedding_client(
+        mut self,
+        config: graph_owl_search::embeddings::EmbeddingConfig,
+    ) -> Self {
+        self.embedding_client = Some(Arc::new(
+            graph_owl_search::embeddings::EmbeddingClient::new(config),
+        ));
         self
     }
 
@@ -10802,10 +10827,46 @@ impl Catalog {
         memory: &graph_owl_core::memory::Memory,
     ) -> Result<(), CatalogError> {
         match self.storage.save_memory(memory).await? {
-            graph_owl_storage::MemoryWrite::Saved => Ok(()),
+            graph_owl_storage::MemoryWrite::Saved => {
+                self.embed_and_store_memory(memory).await;
+                Ok(())
+            }
             graph_owl_storage::MemoryWrite::UnknownLinkTarget { index, target } => {
                 Err(unresolvable_link(index, target))
             }
+        }
+    }
+
+    /// Computes and stores a memory's embedding when a client is
+    /// configured — Epic 31's semantic ranking term.
+    ///
+    /// **Failure here is logged and swallowed, never surfaced to the
+    /// caller.** An embedding is `recall`'s enhancement, not a
+    /// precondition for a memory to exist: a transient embedding-provider
+    /// outage must not turn every `create_memory` call into a failure for
+    /// a domain object that already saved successfully.
+    async fn embed_and_store_memory(&self, memory: &graph_owl_core::memory::Memory) {
+        let Some(client) = &self.embedding_client else {
+            return;
+        };
+        let text = embeddable_memory_text(memory);
+        let embedding = match client.embed(&text).await {
+            Ok(embedding) => embedding,
+            Err(error) => {
+                tracing::warn!(
+                    memory_id = %memory.id,
+                    %error,
+                    "failed to embed memory; semantic ranking will skip it until re-embedded"
+                );
+                return;
+            }
+        };
+        if let Err(error) = self
+            .storage
+            .save_memory_embedding(memory.id, &embedding)
+            .await
+        {
+            tracing::warn!(memory_id = %memory.id, %error, "failed to store memory embedding");
         }
     }
 
@@ -10865,15 +10926,51 @@ impl Catalog {
             })
             .collect();
 
+        // Epic 31's semantic term. Both stay skipped — leaving every
+        // candidate's `semantic` `None`, exactly as before this existed —
+        // when no client is configured, when the query is empty (a real
+        // embedding provider refuses an empty input string, so this is a
+        // provider contract, not an invented rule), or when embedding the
+        // query itself fails. A transient provider outage degrades
+        // ranking quality, not availability.
+        let query_embedding = match &self.embedding_client {
+            Some(client) if !query.trim().is_empty() => match client.embed(query).await {
+                Ok(embedding) => Some(embedding),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "failed to embed recall query; semantic ranking skipped for this call"
+                    );
+                    None
+                }
+            },
+            _ => None,
+        };
+        // One batch read for the whole candidate set, same reasoning as
+        // `history` above — and skipped entirely when there is no query
+        // embedding to score against, since every `semantic` term would
+        // stay `None` regardless of what this returned.
+        let stored_embeddings = if query_embedding.is_some() {
+            let memory_ids: Vec<Uuid> = memories.iter().map(|memory| memory.id).collect();
+            self.storage.memory_embeddings(&memory_ids).await?
+        } else {
+            std::collections::HashMap::new()
+        };
+
         let candidates: Vec<graph_owl_core::recall::Candidate<'_>> = memories
             .iter()
             .zip(&staleness)
             .map(|(memory, verdict)| graph_owl_core::recall::Candidate {
                 memory,
                 staleness: verdict.clone(),
-                // Epic 8 fills this. `None` is honest — a reader can tell
-                // "measured, not similar" from "never measured".
-                semantic: None,
+                // `None` is honest — a reader can tell "measured, not
+                // similar" from "never measured" — for a memory with no
+                // stored embedding just as much as for a missing client.
+                semantic: query_embedding.as_ref().and_then(|query_vector| {
+                    stored_embeddings.get(&memory.id).map(|memory_vector| {
+                        graph_owl_search::embeddings::cosine_similarity(query_vector, memory_vector)
+                    })
+                }),
             })
             .collect();
 
@@ -15006,8 +15103,7 @@ impl OutboundWebhookSender {
         // subscription cannot happen today. Left as-is rather than acted
         // on, so a future delete route does not silently inherit "act on a
         // read error" behavior it never asked for.
-        let Ok(Some(webhook)) = self.storage.get_outbound_webhook(delivery.webhook_id).await
-        else {
+        let Ok(Some(webhook)) = self.storage.get_outbound_webhook(delivery.webhook_id).await else {
             return;
         };
         // Disabled, not deleted: leave the delivery queued rather than
@@ -15301,6 +15397,17 @@ fn unresolvable_link(index: usize, target: Uuid) -> CatalogError {
         validation::FieldErrorCode::Type,
         format!("{target} is neither a known asset nor a known memory"),
     )])
+}
+
+/// The text a memory is embedded from — the same haystack
+/// `graph_owl_core::recall::lexical_overlap` already searches, summary
+/// alongside content, since the summary is often where the findable
+/// phrasing lives, having been written to be read quickly.
+fn embeddable_memory_text(memory: &graph_owl_core::memory::Memory) -> String {
+    match &memory.summary {
+        Some(summary) => format!("{} {}", memory.content, summary),
+        None => memory.content.clone(),
+    }
 }
 
 /// One entity in a push — Epic 16 Slice A.
@@ -16176,6 +16283,197 @@ mod tests {
             .expect("create_table should succeed");
 
         assert_ne!(first.id, second.id);
+    }
+
+    /// Real local `/embeddings` endpoints, keyed by the exact input text a
+    /// request carries — this project's established real-local-HTTP-server
+    /// pattern (`start_mock_sparql_endpoint`, below), extended to let one
+    /// test give two different memories two genuinely different vectors
+    /// rather than one canned response every call would share.
+    async fn spawn_mock_embeddings_endpoint(
+        responses: std::collections::HashMap<String, Vec<f32>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a free loopback port");
+        let addr = listener.local_addr().expect("local addr");
+        let responses = std::sync::Arc::new(responses);
+        let router = axum::Router::new().route(
+            "/embeddings",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let responses = std::sync::Arc::clone(&responses);
+                async move {
+                    let input = body.get("input").and_then(|v| v.as_str()).unwrap_or("");
+                    let embedding = responses.get(input).cloned().unwrap_or_default();
+                    axum::Json(serde_json::json!({
+                        "object": "list",
+                        "model": "test-embedding-model",
+                        "data": [{"index": 0, "object": "embedding", "embedding": embedding}],
+                        "usage": {"prompt_tokens": 1, "total_tokens": 1}
+                    }))
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("mock embeddings endpoint");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// A root-kind asset (`Service`) — the cheap subject fixture for a
+    /// memory, since a `Table` requires a parent it would take another
+    /// write to provision.
+    fn memory_subject_request() -> UpsertAsset {
+        UpsertAsset {
+            kind: AssetKind::Service,
+            name: "warehouse".to_string(),
+            parent_id: None,
+            description: None,
+            properties: None,
+            extension: None,
+        }
+    }
+
+    fn memory_about(subject: Uuid, content: &str) -> graph_owl_core::memory::Memory {
+        graph_owl_core::memory::Memory::new(
+            graph_owl_core::memory::MemoryKind::Rationale,
+            content.to_string(),
+            graph_owl_core::memory::Authorship::Human {
+                user_id: "sakshi".to_string(),
+            },
+            Some(1.0),
+            vec![graph_owl_core::memory::MemoryLink {
+                relation: graph_owl_core::memory::LinkRelation::About,
+                target: subject,
+            }],
+            Utc::now(),
+        )
+        .expect("a memory the domain accepts")
+    }
+
+    /// **The end-to-end proof for Epic 31's semantic ranking term.** Not a
+    /// unit test of `cosine_similarity` alone (`graph-owl-search` already
+    /// has that) — this is the real entry points, `Catalog::create_memory`
+    /// then `Catalog::recall`, against a real local HTTP server standing
+    /// in for the embedding provider, the same rigor this project's own
+    /// standing rule demands after a prior epic's pushdown bug shipped
+    /// past four passing unit tests that never exercised the real path.
+    ///
+    /// **Isolated the way `graph_owl_core::recall`'s own tests isolate
+    /// every term**: both memories carry identical links, authorship,
+    /// confidence and `as_of`, and neither shares a single word with the
+    /// query — so anchor, lexical, staleness, recency, authorship and
+    /// confidence all score identically for both, and only the semantic
+    /// term can explain the ordering.
+    #[tokio::test]
+    async fn recall_ranks_by_real_embedded_semantic_similarity() {
+        let close_text = "Refunds are excluded from revenue reporting entirely";
+        let far_text = "Chargebacks are pending manual review this quarter";
+        let query = "unrelatedqueryword";
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(close_text.to_string(), vec![1.0, 0.0]);
+        responses.insert(far_text.to_string(), vec![0.0, 1.0]);
+        responses.insert(query.to_string(), vec![1.0, 0.0]);
+        let (base_url, _handle) = spawn_mock_embeddings_endpoint(responses).await;
+
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default())).with_embedding_client(
+            graph_owl_search::embeddings::EmbeddingConfig {
+                base_url,
+                api_key: None,
+                model: "test-embedding-model".to_string(),
+            },
+        );
+        let asset = catalog
+            .upsert_asset(&Principal::system(), memory_subject_request())
+            .await
+            .expect("upsert_asset");
+        let close = memory_about(asset.id, close_text);
+        let far = memory_about(asset.id, far_text);
+        catalog.create_memory(&close).await.expect("create close");
+        catalog.create_memory(&far).await.expect("create far");
+
+        let ranked = catalog
+            .recall(asset.id, query, false)
+            .await
+            .expect("recall");
+
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].memory.id, close.id);
+        assert_eq!(ranked[1].memory.id, far.id);
+        assert!(
+            ranked[0]
+                .score
+                .semantic
+                .expect("close has a semantic score")
+                > 0.9,
+            "{:?}",
+            ranked[0].score
+        );
+        assert!(
+            ranked[1].score.semantic.expect("far has a semantic score") < 0.1,
+            "{:?}",
+            ranked[1].score
+        );
+    }
+
+    /// A real embedding provider refuses an empty input string — so an
+    /// empty (or whitespace-only) query must never even reach the client,
+    /// with one configured or not. Proven against a mock server that
+    /// *would* answer if called: if the guard were ever weakened to call
+    /// it anyway, this test would see a real similarity score instead of
+    /// `None`.
+    #[tokio::test]
+    async fn recall_never_embeds_an_empty_query_even_with_a_client_configured() {
+        let mut responses = std::collections::HashMap::new();
+        responses.insert(String::new(), vec![1.0, 0.0]);
+        let (base_url, _handle) = spawn_mock_embeddings_endpoint(responses).await;
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default())).with_embedding_client(
+            graph_owl_search::embeddings::EmbeddingConfig {
+                base_url,
+                api_key: None,
+                model: "test-embedding-model".to_string(),
+            },
+        );
+        let asset = catalog
+            .upsert_asset(&Principal::system(), memory_subject_request())
+            .await
+            .expect("upsert_asset");
+        let memory = memory_about(asset.id, "Refunds are excluded from revenue.");
+        catalog.create_memory(&memory).await.expect("create");
+
+        let ranked = catalog
+            .recall(asset.id, "   ", false)
+            .await
+            .expect("recall");
+
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].score.semantic, None);
+    }
+
+    /// The negative that makes the test above about *the embedding
+    /// client*, not about some other change: with no client configured —
+    /// this crate's default, and every deployment until one opts in — the
+    /// semantic term stays `None` for every candidate, exactly as it did
+    /// before this feature existed at all.
+    #[tokio::test]
+    async fn recall_leaves_semantic_none_when_no_embedding_client_is_configured() {
+        let catalog = Catalog::new(Arc::new(InMemoryStorage::default()));
+        let asset = catalog
+            .upsert_asset(&Principal::system(), memory_subject_request())
+            .await
+            .expect("upsert_asset");
+        let memory = memory_about(asset.id, "Refunds are excluded from revenue.");
+        catalog.create_memory(&memory).await.expect("create");
+
+        let ranked = catalog
+            .recall(asset.id, "revenue", false)
+            .await
+            .expect("recall");
+
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].score.semantic, None);
     }
 
     #[tokio::test]
@@ -21720,7 +22018,10 @@ mod the_sender_drains_the_delivery_queue {
         }
         handle.abort();
 
-        assert!(drained, "run() must eventually drain a pending delivery on its own, not only when a caller drives process_pending directly");
+        assert!(
+            drained,
+            "run() must eventually drain a pending delivery on its own, not only when a caller drives process_pending directly"
+        );
         assert!(!recorder.requests.lock().unwrap().is_empty());
     }
 }
