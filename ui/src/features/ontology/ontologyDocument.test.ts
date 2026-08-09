@@ -226,6 +226,27 @@ describe("toOntologyElements — the RED test: declared vs referenced must be vi
     expect(edge?.data.id).toContain(`${NS}Product`);
   });
 
+  /** This pane draws through Cytoscape onto a `<canvas>` too — same gap as
+   *  the Explorer's own graph, same fix. A term's local name can carry
+   *  right-to-left text mixed with left-to-right text as freely as an
+   *  asset name can. A *standalone* right-to-left local name would not
+   *  distinguish "repositioned" from "never touched" — `fillText` already
+   *  reverses that case correctly on its own (`bidiLabel.ts`'s own doc
+   *  comment), so `canvasLabel` deliberately leaves it unchanged. */
+  it("repositions a right-to-left term's local name for canvas rendering rather than passing it through unchanged", () => {
+    const rtlLocalName = "לקוח_ref";
+    const withRtlSubject = preview({
+      triples: [{ s: `${NS}${rtlLocalName}`, p: `${NS}name`, o: "customer", oIsRef: false }],
+      declared: [`${NS}${rtlLocalName}`],
+    });
+
+    const elements = toOntologyElements(withRtlSubject, { namespace: null, predicate: null });
+    const node = elements.find((e) => e.data.id === `${NS}${rtlLocalName}`);
+
+    expect(node?.data.label).not.toBe(rtlLocalName);
+    expect(node?.data.label).toBe("ref_לקוח");
+  });
+
   it("filtering by predicate keeps the matching edge and its endpoints, and drops the rest", () => {
     const withTwoEdges = preview({
       triples: [

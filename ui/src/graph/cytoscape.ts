@@ -12,6 +12,7 @@
  */
 
 import type { GraphEdge, GraphNode } from "../api";
+import { canvasLabel } from "./bidiLabel";
 import type { Change, DiffEdge, DiffNode } from "./diff";
 
 /** A Cytoscape element. Typed structurally rather than imported, so this module
@@ -86,7 +87,10 @@ export function toElements(picture: Picture): Element[] {
 
   const nodes: Element[] = picture.nodes.map((node) => ({
     group: "nodes" as const,
-    data: { id: node.id, label: node.name },
+    // `canvasLabel`: Cytoscape draws this straight onto a `<canvas>`, which
+    // has no `dir` attribute — a right-to-left name needs to arrive already
+    // in visual order (`bidiLabel.ts`'s own doc comment).
+    data: { id: node.id, label: canvasLabel(node.name) },
     classes: nodeClasses(node, picture),
   }));
 

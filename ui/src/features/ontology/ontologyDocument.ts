@@ -8,6 +8,8 @@
  *  every half-typed triple makes the feedback the whole slice exists to
  *  give useless. */
 
+import { canvasLabel } from "../../graph/bidiLabel";
+
 export interface PreviewTriple {
   readonly s: string;
   readonly p: string;
@@ -161,7 +163,10 @@ export function toOntologyElements(
 
   const nodes: OntologyElement[] = [...nodeIds].map((id) => ({
     group: "nodes" as const,
-    data: { id, label: localName(id) },
+    // `canvasLabel`: this pane draws through Cytoscape onto a `<canvas>`
+    // too, and a term's local name can carry right-to-left text just as
+    // freely as an asset name can (`bidiLabel.ts`'s own doc comment).
+    data: { id, label: canvasLabel(localName(id)) },
     classes: declared.has(id) ? "declared" : "referenced",
   }));
 

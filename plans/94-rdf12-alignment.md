@@ -1,12 +1,14 @@
 # Plan: RDF 1.2 Alignment (Epic 94)
 
-**Status**: **Shipped (backend), 7 August 2026** — corrected 8 August 2026,
-this line was never updated after Slices A–D landed. `plans/DEMOS.md`'s own
-heading states it directly: "shipped, 7 August 2026 (backend; console half
-partial)". All four backend slices are `[x]`: `FlakeValue::TripleTerm`,
-`rdf:reifies` on export, `rdf:dirLangString` + console direction rendering,
-and `rdf:reifies` reachable at the SPARQL query surface. The console half
-(Epic 41/42 territory) remains the honestly-tracked partial.
+**Status**: **Shipped, 9 August 2026.** All four backend slices are `[x]`:
+`FlakeValue::TripleTerm`, `rdf:reifies` on export, `rdf:dirLangString` +
+console direction rendering, and `rdf:reifies` reachable at the SPARQL query
+surface. The console half's last recorded gap — canvas-rendered graph-node
+captions, which have no `dir` attribute to hook — closed 9 August 2026 via
+`ui/src/graph/bidiLabel.ts` (`canvasLabel`), wired into both graph panes
+(Explorer, ontology editor). See Slice C below for the full account,
+including the empirical browser-verified discovery of Canvas2D `fillText`'s
+undocumented auto-bidi behavior that the fix depends on.
 **Depends on**: Epic 4 (flakes, reified relationships), Epic 9 (serialization)
 **Unblocks**: standards interop claims that survive inspection
 **Crates**: `graph-owl-core`, `graph-owl-engine-postgres`, `graph-owl-rdf-io`
@@ -239,7 +241,7 @@ about an entire category.
 - [x] An `rtl` literal keeps its direction through serialization — asserted with
       real Arabic or Hebrew text, not a placeholder. (Slice C — real Postgres
       storage too, not just serialization; the console's canvas-rendered graph
-      nodes remain a recorded gap, see Slice C's own write-up)
+      nodes closed 9 August 2026, see Slice C's own write-up)
 - [x] `?rel rdf:reifies << ?a ?p ?b >>` binds against a real, stored
       relationship end to end through `Catalog::sparql` — not just
       `dataset.rs`'s own unit tests, which passed the whole time a real
@@ -325,7 +327,7 @@ node with properties rather than a statement about a proposition.
 
 **Mutation report**: `graph-owl-rdf-io/src/lib.rs`'s diff, 25/35 caught, 10 unviable (does not compile as mutated), 0 missed. `graph-owl-query`'s two touched files: `term.rs` 0/1 caught + 1 unviable, `pushdown.rs` 1/2 caught + 1 unviable — both 0 missed; the small mutant counts reflect how little of each file's diff was a real decision versus a required exhaustiveness arm.
 
-### Slice C: `rdf:dirLangString` — **shipped (backend), 7 August 2026 — see below for the console half**
+### Slice C: `rdf:dirLangString` — **shipped, 7 August 2026 (backend) / 9 August 2026 (console, including canvas)**
 
 **RED**: an `rtl` literal survives storage and serialization with its direction
 intact. The negative case matters as much: a plain string must not acquire a
@@ -409,27 +411,63 @@ the exact "TIMEOUT/contention reads as MISSED" pattern this project has
 hit before, and the same code path is directly proven by 20 passing
 integration tests including the one added for this slice.
 
-**The console half is genuinely two different problems, and only one of
-them is closed.** `userTextDir` (`ui/src/trust/direction.ts`, built ahead
-of this slice, in Epic 39 Slice E) already returns `"auto"` unconditionally
-for every DOM-rendered label — the entity header, search results, memory
-content — and a structural test already asserts nothing hard-codes
-`dir="ltr"` anywhere in the console. `dir="auto"` asks the browser's own
-bidi algorithm to read a label's first strong character, which already
-renders Arabic and Hebrew text correctly **today**, without needing this
-slice's own stored direction at all — confirmed against the plan's own
-acceptance wording, which asks for correct *rendering*, not for the
-stored value specifically to be what triggers it. **The "on a graph node"
-half of the criterion is not satisfied, and cannot be by adding a `dir`
-attribute**: both the Explorer's own graph (Epic 40) and the ontology
+**The console half was genuinely two different problems.** `userTextDir`
+(`ui/src/trust/direction.ts`, built ahead of this slice, in Epic 39 Slice E)
+already returns `"auto"` unconditionally for every DOM-rendered label — the
+entity header, search results, memory content — and a structural test
+already asserts nothing hard-codes `dir="ltr"` anywhere in the console.
+`dir="auto"` asks the browser's own bidi algorithm to read a label's first
+strong character, which already renders Arabic and Hebrew text correctly,
+without needing this slice's own stored direction at all — confirmed
+against the plan's own acceptance wording, which asks for correct
+*rendering*, not for the stored value specifically to be what triggers it.
+
+**The "on a graph node" half needed a second, different fix, closed 9
+August 2026.** Both the Explorer's own graph (Epic 40) and the ontology
 editor's graph pane (Slice G) render labels through Cytoscape onto a
 `<canvas>` element, and HTML's `dir` attribute has no meaning on canvas
-text at all — checked directly against the Explorer's own `cytoscape({…})`
-call, which sets no text-direction option of any kind. Bidi-correct canvas
-text needs the label *pre-shaped* before Cytoscape ever sees it (a real,
-separate piece of work — text shaping, not attribute-setting), which this
-slice did not attempt and is recorded here rather than silently assumed
-covered by the DOM-side `dir="auto"` fix above.
+text at all. Bidi-correct canvas text needs the label *pre-shaped* before
+Cytoscape ever sees it — `ui/src/graph/bidiLabel.ts` (`canvasLabel`), built
+on the MIT-licensed `bidi-js`, called from both graph panes' node-mapping
+code (`cytoscape.ts`, `ontologyDocument.ts`).
+
+**What shaping a canvas label actually requires was not the same as
+shaping one for `dir="auto"`, and that difference had to be found
+empirically against a real, running browser — twice, because the first
+empirical reading was also wrong.** The natural assumption — compute the
+same fully bidi-reordered string a `dir="auto"` renderer would need, hand
+it to `fillText` — produces the *wrong* reading order on canvas. Measured
+by seeding real Hebrew/Arabic data into a real Postgres-backed server,
+rendering it through the live Cytoscape canvas in a real browser, and
+reading the actual pixels back — not by eye (eyeballing unfamiliar Hebrew
+letterforms gave three different wrong answers across the debugging
+session before the check moved to objective pixel cross-correlation:
+individually-rendered reference glyphs matched against column-segmented
+crops of the screenshot via IoU overlap). The finding: Canvas2D's
+`fillText`, even with no `direction`/`textAlign` set, already reverses a
+run of strongly-right-to-left characters into correct reading order on its
+own — but does not reposition whole runs relative to each other the way a
+right-to-left *paragraph* base direction requires. So the fix is bidi-js's
+fully-reordered string with each right-to-left run reversed a *second*
+time within that result — undoing only the correction `fillText` was
+always going to make, keeping only the cross-run repositioning it does
+not. Verified end to end: the rendered canvas matches native DOM
+`dir="auto"` exactly for a mixed-direction label (`לקוח_orders` →
+`orders_לקוח`).
+
+7 new unit tests for `bidiLabel.ts` itself, plus one rewritten test each in
+`cytoscape.test.ts` and `ontologyDocument.test.ts` (63 tests total across
+the three files). 97.62% mutation score; the 4 survivors are the module's
+own RTL pre-check guards, each independently proven — by direct
+computation across every fixture shape, not assumption — to be pure
+performance optimizations: the underlying bidi-js pipeline is a correct
+no-op on text with no right-to-left content regardless of what the guard's
+regex matches, so no mutation of the guard can change final output for any
+input. **Known, documented limitation, not a silent gap**: bracket
+mirroring is not attempted — descoped after empirical testing showed it
+did not behave as hand-derived (`canvasLabel("(שלום)")` did not round-trip
+to the identity); real names carrying both a bracket and right-to-left
+text are rare enough that this is recorded rather than shipped unverified.
 
 **This slice does not end at the API — it has a console half, and without it the
 slice makes things worse.** A store that knows a label is right-to-left while the

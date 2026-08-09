@@ -66,6 +66,28 @@ describe("turning the model into elements", () => {
 
     expect(node?.data.label).toBe("upi_transactions");
   });
+
+  /** Cytoscape draws this straight onto a `<canvas>`, which has no `dir`
+   *  attribute — a right-to-left name mixed with left-to-right text has to
+   *  arrive with its runs already in the position `fillText` needs to draw
+   *  them correctly (`bidiLabel.ts`'s own doc comment; empirically verified
+   *  against a real browser, not merely against `bidi-js`'s output). Real
+   *  Hebrew text ("customer" — a stand-in fixture, not asserted for its
+   *  meaning), not a placeholder, matching this project's own standing rule
+   *  for bidi RED tests. A *standalone* right-to-left name is a weaker
+   *  fixture here — `fillText` reverses that correctly on its own, so
+   *  `canvasLabel` leaves it untouched and passing that through this test
+   *  would not distinguish "shaped" from "never called". Mutator watch:
+   *  dropping the `canvasLabel` call must fail this. */
+  it("repositions a right-to-left node name's runs for canvas rendering rather than passing it through unchanged", () => {
+    const rtlName = "לקוח_orders";
+    const graph = picture({ nodes: [{ id: "a", name: rtlName, kind: "table" }] });
+
+    const node = toElements(graph).find((e) => e.data.id === "a");
+
+    expect(node?.data.label).not.toBe(rtlName);
+    expect(node?.data.label).toBe("orders_לקוח");
+  });
 });
 
 describe("edge identity", () => {

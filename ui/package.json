@@ -19,6 +19,7 @@
     "@types/cytoscape": "^3.21.9",
     "@xyflow/react": "^12.11.2",
     "antd": "^6.5.2",
+    "bidi-js": "^1.0.3",
     "cytoscape": "^3.34.0",
     "d3-dag": "^1.2.2",
     "react": "^19.0.0",
