@@ -554,14 +554,27 @@ actually holds could not be asserted at all.
 ### Epic 31 — Organizational memory ★
 - [x] Memory objects: kind, content, authorship, confidence, `as_of`
 - [x] Supersession and contradiction detection
-- [~] Retrieval with reranking
+- [x] Retrieval with reranking, **semantic term closed 9 August 2026**
 
-**Pending in this epic**
-- The semantic ranking term. Blocked on Epic 8, and deliberately: embeddings are
-  generated out of process (`00j`), so the port that matters does not exist —
-  fabricating a lexical similarity and labelling it semantic would destroy the
-  distinction `Score.semantic: Option<f64>` exists to preserve between "measured,
-  not similar" and "never measured".
+**Semantic ranking term — closed 9 August 2026.** Real embeddings, not a
+fabricated lexical stand-in: new `graph_owl_search::embeddings::EmbeddingClient`
+speaks the OpenAI-compatible `/v1/embeddings` wire shape (built on MIT
+`async-openai`, embeddings-only feature slice), so `EMBEDDING_API_BASE_URL`
+can point at OpenAI, a self-hosted LiteLLM proxy, or a self-hosted vLLM
+instance without a code change — a deliberate provider-agnostic design over
+a single hardcoded vendor call. A new `memory_embeddings` table (`REAL[]`,
+no `pgvector` — this only ever reranks an already-filtered candidate set,
+never an ANN search) backs `Storage::save_memory_embedding`/
+`memory_embeddings`; `Catalog::create_memory` embeds and stores on write,
+`Catalog::recall` embeds the query once and scores every candidate via
+`cosine_similarity`. Off by default and fully graceful when unconfigured or
+when a call fails — `Candidate::semantic` stays `None` exactly as before
+this existed, preserving "measured, not similar" vs "never measured".
+Verified end to end (not just unit-level): a real `Catalog::create_memory`
+→ `Catalog::recall` test against a real local mock embeddings server, with
+every other ranking term (anchor, lexical, staleness, recency, authorship,
+confidence) held identical between two candidates so only the semantic
+score can explain the asserted ordering.
 
 **Closed 4 August 2026** — a person authoring a memory over HTTP: the note
 above was stale. Epic 12 shipped a real `Auth` extractor and
@@ -580,7 +593,7 @@ back. Two HTTP tests now do:
 - [x] Investigation and remediation proposals — `record_investigation` refuses a finding with no evidence, and every write tool is declared. **Every capability now applies on accept** *(Phase 3 item 3.6, 8 August 2026)*: `apply_proposed_change` wires all 10 `AgentCapability` variants (previously only `ApplyDescription`/`ProposeDescription`) to the facade method their own epic already shipped — `ProposeTags`/`ApplyTags` apply the tag list, `ProposeOwner` replaces the owner set, `RecordMemory` writes an agent-authored `Memory`, `RecordInvestigation` writes one carrying real `Evidence` links to whichever cited assets resolve, `CreateGlossaryTerm` drafts into a lazily provisioned "Agent Suggestions" glossary (never auto-attached — `attach_term` refuses anything but `Approved`), `CreateQualityTest` registers a test case (never a result — Epic 30's boundary), and `LinkLineage` asserts a `Feeds` edge tagged `LineageSource::Agent`. Two variants the plan named but never built landed as part of this: `MemoryKind::Investigation` (with a new Postgres migration widening `memories_kind_check`) and `LineageSource::Agent` (distinct from `Manual` — an accepted agent proposal is a person reviewing a claim they did not originate, a different fact from "a person said so")
 
 ### Console half
-- [~] **14** **Agent activity — sessions, reads, writes, webhooks** *(Epic 42 Slice F, 7 August 2026)*. An agent writing to the catalog with no visible audit is the single scariest thing in this demo. **Write-backs shipped**: Admin → Agent activity lists real grants and, per agent, its filterable history — `applied` (a genuine write-back) visually distinguished from `proposed`/`refused`. **Sessions, reads, and webhooks are not shipped**: Epic 32's `AgentActivity` has no "read" outcome at all (MCP's own query tools carry no persisted audit log), and there is no catalog-wide webhook-delivery listing endpoint — recorded as real backend gaps in `42-ui-semantic-surfaces.md`, not silently assumed covered. A real, unpatched authorization leak was found and fixed while building this: the activity endpoint was unfiltered by policy, letting any authenticated caller see every entity any agent had touched
+- [~] **14** **Agent activity — sessions, reads, writes, webhooks** *(Epic 42 Slice F, 7 August 2026; webhooks closed 9 August 2026)*. An agent writing to the catalog with no visible audit is the single scariest thing in this demo. **Write-backs shipped**: Admin → Agent activity lists real grants and, per agent, its filterable history — `applied` (a genuine write-back) visually distinguished from `proposed`/`refused`. **Webhooks — closed 9 August 2026**: `GET /admin/outbound-webhooks` and `GET /admin/outbound-webhooks/{id}/deliveries` had shipped earlier this session (Epic 14 Slice F) with no console consumer — the exact "design working, no reader" shape `PartitionHealthPanel` closed once already. New Admin → Outbound webhooks tab (`OutboundWebhooksPanel.tsx`, master-detail: subscriptions on the left, a selected subscription's queue on the right), read-only by construction (`AgentActivityPanel.structural.test.ts` extended to grep its source for a mutating call, the same absence-proof the panel beside it already uses). **Honestly scoped, not silently overclaimed**: a successfully delivered row is *deleted*, never marked "delivered" (`OutboundWebhookSender::attempt` calls `delete_outbound_webhook_delivery` on success) — so this panel can only ever show what is still pending, retrying, or has given up, never a full history, and its own empty-state copy says so. **Sessions and reads remain not shipped**: Epic 32's `AgentActivity` has no "read" outcome at all (MCP's own query tools carry no persisted audit log), and "session" has no defined boundary for MCP's stateless JSON-RPC-over-HTTP transport — both need a design decision this pass did not make. A real, unpatched authorization leak was found and fixed while building the write-back half: the activity endpoint was unfiltered by policy, letting any authenticated caller see every entity any agent had touched
 - [x] **31** Memory panel and memory administration *(Epic 41 Slice E, 5 August 2026)*
 - [x] **32** Agent capabilities; **write-back audit** *(Epic 42 Slice F, 7 August 2026)* — `applied` vs `proposed`/`refused` outcomes, filterable by type and entity, real refusal reasons surfaced verbatim
 

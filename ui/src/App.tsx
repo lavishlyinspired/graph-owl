@@ -106,6 +106,7 @@ import { KnowledgeGraphToggle } from "./features/knowledge/KnowledgeGraphToggle"
 import { AgentActivityPanel } from "./features/agents/AgentActivityPanel";
 import { BoltSessionsPanel } from "./features/agents/BoltSessionsPanel";
 import { PartitionHealthPanel } from "./features/agents/PartitionHealthPanel";
+import { OutboundWebhooksPanel } from "./features/agents/OutboundWebhooksPanel";
 import { OntologyEditor } from "./features/ontology/OntologyEditor";
 import { hierarchy, type TeamNode } from "./admin/hierarchy";
 import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
@@ -3735,6 +3736,7 @@ function AdminPage({ colors }: { colors: (typeof palette)["light"] }) {
           { key: "agents", label: "Agent activity", children: <AgentActivityPanel /> },
           { key: "bolt", label: "Bolt sessions", children: <BoltSessionsPanel /> },
           { key: "partitions", label: "Partition health", children: <PartitionHealthPanel /> },
+          { key: "webhooks", label: "Outbound webhooks", children: <OutboundWebhooksPanel /> },
         ]}
       />
     </Space>

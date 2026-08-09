@@ -541,6 +541,33 @@ export interface PartitionHealth {
   oldestDeltaT: number | null;
 }
 
+/** Epic 14 Slice F — a registered outbound subscription. Never carries a
+ *  secret: `register_outbound_webhook`'s response type has no field for
+ *  one, by construction, not by omission at the handler. */
+export interface OutboundWebhook {
+  id: string;
+  url: string;
+  eventTypes: string[];
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One queued delivery attempt. A successfully delivered row is deleted
+ *  rather than marked — see `outboundWebhooks.ts`'s own doc comment — so
+ *  every row reaching the console is still pending, retrying, or
+ *  dead-lettered, never "delivered". */
+export interface OutboundWebhookDelivery {
+  id: string;
+  webhookId: string;
+  payload: unknown;
+  attempt: number;
+  nextAttemptAt: string;
+  lastError: string | null;
+  deadLettered: boolean;
+  createdAt: string;
+}
+
 /** The stored violations queue, and the instant it reflects. */
 export interface ValidationReport {
   readonly data: readonly import("./governance/queue").Finding[];
@@ -972,6 +999,16 @@ export const api = {
       `/admin/compact${batchSize !== undefined ? `?batch_size=${batchSize}` : ""}`,
       { method: "POST" },
     ),
+  /** Every registered outbound webhook subscription, without secrets —
+   *  admin-only (`404` for anyone else, same tier as `/admin/bolt/status`),
+   *  since a subscription's target URL is operational configuration. */
+  outboundWebhooks: () => request<OutboundWebhook[]>("/admin/outbound-webhooks"),
+  /** One subscription's queued and dead-lettered deliveries. A
+   *  successfully delivered row is deleted, never marked "delivered" — see
+   *  `outboundWebhooks.ts`'s own doc comment — so this is never a full
+   *  history, only what is still pending or has given up. */
+  outboundWebhookDeliveries: (webhookId: string) =>
+    request<OutboundWebhookDelivery[]>(`/admin/outbound-webhooks/${webhookId}/deliveries`),
   /** What the reasoner concluded about one subject, as the last run stored it.
    *  Not a fresh pass — an asset page opens with this. */
   derivedAbout: (subject: string) =>
