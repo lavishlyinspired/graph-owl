@@ -1761,6 +1761,16 @@ pub static ROUTES: &[Route] = &[
         200,
         true,
     ),
+    // Epic 14 Slice B: what the sender is doing with a subscription's queue.
+    route(
+        "get",
+        "/admin/outbound-webhooks/{id}/deliveries",
+        "A subscription's deliveries — pending, retried, or dead-lettered",
+        None,
+        None,
+        200,
+        true,
+    ),
     route(
         "post",
         "/teams",

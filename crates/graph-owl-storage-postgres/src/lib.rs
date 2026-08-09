@@ -1892,6 +1892,61 @@ impl Storage for PostgresStorage {
             .collect())
     }
 
+    #[tracing::instrument(name = "storage.list_pending_outbound_webhook_deliveries", skip_all)]
+    async fn list_pending_outbound_webhook_deliveries(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::OutboundWebhookDelivery>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, webhook_id, payload, attempt, next_attempt_at, last_error,
+                    dead_lettered, created_at
+             FROM outbound_webhook_deliveries
+             WHERE NOT dead_lettered AND next_attempt_at <= now()
+             ORDER BY next_attempt_at",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(rows
+            .iter()
+            .map(outbound_webhook_delivery_from_row)
+            .collect())
+    }
+
+    #[tracing::instrument(name = "storage.delete_outbound_webhook_delivery", skip_all)]
+    async fn delete_outbound_webhook_delivery(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM outbound_webhook_deliveries WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[tracing::instrument(name = "storage.record_outbound_webhook_delivery_failure", skip_all)]
+    async fn record_outbound_webhook_delivery_failure(
+        &self,
+        id: Uuid,
+        error: &str,
+        next_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE outbound_webhook_deliveries
+             SET attempt = attempt + 1,
+                 last_error = $2,
+                 dead_lettered = $3,
+                 next_attempt_at = COALESCE($4, next_attempt_at)
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(error)
+        .bind(next_attempt_at.is_none())
+        .bind(next_attempt_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+        Ok(())
+    }
+
     // The event row is inserted before the dedup marker — `first_event_id`
     // is a real foreign key, so the row it points to must already exist.
     // Both statements run in one transaction so "concurrent duplicate

@@ -2146,6 +2146,42 @@ pub trait Storage: Send + Sync {
         webhook_id: Uuid,
     ) -> Result<Vec<OutboundWebhookDelivery>, StorageError>;
 
+    /// Every delivery due to be attempted now, across every subscription,
+    /// oldest-due first — the sender's global work queue (Epic 14 Slice B).
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the read fails.
+    async fn list_pending_outbound_webhook_deliveries(
+        &self,
+    ) -> Result<Vec<OutboundWebhookDelivery>, StorageError>;
+
+    /// Removes a delivery that was sent successfully. There is no
+    /// "delivered" state to leave behind: the whole table is the pending
+    /// queue, so a delivery that succeeded has nothing left to record.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the delete fails.
+    async fn delete_outbound_webhook_delivery(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Records a failed attempt: bumps `attempt` and `last_error`, and
+    /// either reschedules at `next_attempt_at` (`Some`) or dead-letters
+    /// (`None`) — the caller decides which by whether
+    /// `graph_owl_events::webhook::backoff` returned a delay, so there is
+    /// one method rather than a separate reschedule/dead-letter pair that
+    /// could be called inconsistently with the schedule that produced them.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError`] if the write fails.
+    async fn record_outbound_webhook_delivery_failure(
+        &self,
+        id: Uuid,
+        error: &str,
+        next_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<(), StorageError>;
+
     /// Persists a received (already signature-verified) inbound event.
     ///
     /// # Errors

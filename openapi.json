@@ -2697,6 +2697,53 @@
         "summary": "Register an outbound webhook subscription; the signing secret is write-only"
       }
     },
+    "/admin/outbound-webhooks/{id}/deliveries": {
+      "get": {
+        "operationId": "get_admin_outbound-webhooks__id__deliveries",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A subscription's deliveries — pending, retried, or dead-lettered"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "A subscription's deliveries — pending, retried, or dead-lettered"
+      }
+    },
     "/agents/grants": {
       "get": {
         "operationId": "get_agents_grants",

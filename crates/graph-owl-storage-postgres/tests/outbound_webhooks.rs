@@ -228,3 +228,128 @@ async fn deliveries_for_a_different_webhook_are_not_returned() {
     assert_eq!(listed_for_a.len(), 1);
     assert_eq!(listed_for_a[0].payload, serde_json::json!({ "for": "a" }));
 }
+
+async fn registered_webhook(storage: &PostgresStorage, url: &str) -> OutboundWebhook {
+    storage
+        .upsert_outbound_webhook(webhook(url), Some(b"secret"))
+        .await
+        .expect("register")
+}
+
+#[tokio::test]
+async fn a_freshly_enqueued_delivery_is_pending_immediately() {
+    let (storage, _db) = test_storage().await;
+    let registered = registered_webhook(&storage, "https://example.com/hooks/a").await;
+    let enqueued = storage
+        .enqueue_outbound_webhook_delivery(registered.id, serde_json::json!({}))
+        .await
+        .expect("enqueue");
+
+    let pending = storage
+        .list_pending_outbound_webhook_deliveries()
+        .await
+        .expect("list pending");
+    assert!(pending.iter().any(|d| d.id == enqueued.id), "{pending:?}");
+}
+
+#[tokio::test]
+async fn deleting_a_delivery_removes_it_from_pending() {
+    let (storage, _db) = test_storage().await;
+    let registered = registered_webhook(&storage, "https://example.com/hooks/a").await;
+    let enqueued = storage
+        .enqueue_outbound_webhook_delivery(registered.id, serde_json::json!({}))
+        .await
+        .expect("enqueue");
+
+    let deleted = storage
+        .delete_outbound_webhook_delivery(enqueued.id)
+        .await
+        .expect("delete");
+    assert!(deleted);
+
+    let pending = storage
+        .list_pending_outbound_webhook_deliveries()
+        .await
+        .expect("list pending");
+    assert!(!pending.iter().any(|d| d.id == enqueued.id), "{pending:?}");
+
+    // A second delete of the same id has nothing left to remove.
+    let deleted_again = storage
+        .delete_outbound_webhook_delivery(enqueued.id)
+        .await
+        .expect("delete again");
+    assert!(!deleted_again);
+}
+
+#[tokio::test]
+async fn recording_a_failure_with_a_next_attempt_reschedules_without_dead_lettering() {
+    let (storage, _db) = test_storage().await;
+    let registered = registered_webhook(&storage, "https://example.com/hooks/a").await;
+    let enqueued = storage
+        .enqueue_outbound_webhook_delivery(registered.id, serde_json::json!({}))
+        .await
+        .expect("enqueue");
+
+    let next_attempt_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    storage
+        .record_outbound_webhook_delivery_failure(
+            enqueued.id,
+            "connection refused",
+            Some(next_attempt_at),
+        )
+        .await
+        .expect("record failure");
+
+    let listed = storage
+        .list_outbound_webhook_deliveries(registered.id)
+        .await
+        .expect("list");
+    let found = listed
+        .iter()
+        .find(|d| d.id == enqueued.id)
+        .expect("still present");
+    assert_eq!(found.attempt, 1);
+    assert_eq!(found.last_error.as_deref(), Some("connection refused"));
+    assert!(!found.dead_lettered);
+
+    // Scheduled an hour out, so it must not show up as due right now.
+    let pending = storage
+        .list_pending_outbound_webhook_deliveries()
+        .await
+        .expect("list pending");
+    assert!(!pending.iter().any(|d| d.id == enqueued.id), "{pending:?}");
+}
+
+#[tokio::test]
+async fn recording_a_failure_with_no_next_attempt_dead_letters_it() {
+    let (storage, _db) = test_storage().await;
+    let registered = registered_webhook(&storage, "https://example.com/hooks/a").await;
+    let enqueued = storage
+        .enqueue_outbound_webhook_delivery(registered.id, serde_json::json!({}))
+        .await
+        .expect("enqueue");
+
+    storage
+        .record_outbound_webhook_delivery_failure(enqueued.id, "gave up", None)
+        .await
+        .expect("record failure");
+
+    let listed = storage
+        .list_outbound_webhook_deliveries(registered.id)
+        .await
+        .expect("list");
+    let found = listed
+        .iter()
+        .find(|d| d.id == enqueued.id)
+        .expect("still present");
+    assert!(found.dead_lettered);
+    assert_eq!(found.attempt, 1);
+
+    // Dead-lettered, so it must never be picked up again even though its
+    // `next_attempt_at` is unchanged (and therefore already due).
+    let pending = storage
+        .list_pending_outbound_webhook_deliveries()
+        .await
+        .expect("list pending");
+    assert!(!pending.iter().any(|d| d.id == enqueued.id), "{pending:?}");
+}

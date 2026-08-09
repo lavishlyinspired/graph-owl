@@ -522,6 +522,12 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             "/admin/outbound-webhooks",
             get(list_outbound_webhooks).post(register_outbound_webhook),
         )
+        // Epic 14 Slice B: what the sender is doing with a subscription's
+        // queue — pending, retried with backoff, or dead-lettered.
+        .route(
+            "/admin/outbound-webhooks/{id}/deliveries",
+            get(outbound_webhook_deliveries),
+        )
         // Unauthenticated by necessity rather than by design: this is what a
         // client reads *before* it holds a token, so requiring one would be
         // circular.
@@ -3966,6 +3972,20 @@ async fn list_outbound_webhooks(
         return Err(AppError::NotFound);
     }
     Ok(Json(catalog.list_outbound_webhooks().await?))
+}
+
+/// An operator's view of what the sender (Epic 14 Slice B) has pending or
+/// has already given up on — the only way to see a dead-lettered delivery
+/// short of reading the database directly.
+async fn outbound_webhook_deliveries(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<graph_owl_storage::OutboundWebhookDelivery>>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.outbound_webhook_deliveries(id).await?))
 }
 
 #[derive(Debug, serde::Deserialize)]

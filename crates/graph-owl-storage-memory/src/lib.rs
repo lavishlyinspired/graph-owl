@@ -1260,6 +1260,47 @@ impl Storage for InMemoryStorage {
             .collect())
     }
 
+    async fn list_pending_outbound_webhook_deliveries(
+        &self,
+    ) -> Result<Vec<graph_owl_storage::OutboundWebhookDelivery>, StorageError> {
+        let now = chrono::Utc::now();
+        let mut pending: Vec<_> = self
+            .outbound_webhook_deliveries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| !d.dead_lettered && d.next_attempt_at <= now)
+            .cloned()
+            .collect();
+        pending.sort_by_key(|d| d.next_attempt_at);
+        Ok(pending)
+    }
+
+    async fn delete_outbound_webhook_delivery(&self, id: Uuid) -> Result<bool, StorageError> {
+        let mut held = self.outbound_webhook_deliveries.lock().unwrap();
+        let before = held.len();
+        held.retain(|d| d.id != id);
+        Ok(held.len() < before)
+    }
+
+    async fn record_outbound_webhook_delivery_failure(
+        &self,
+        id: Uuid,
+        error: &str,
+        next_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<(), StorageError> {
+        let mut held = self.outbound_webhook_deliveries.lock().unwrap();
+        if let Some(delivery) = held.iter_mut().find(|d| d.id == id) {
+            delivery.attempt += 1;
+            delivery.last_error = Some(error.to_string());
+            match next_attempt_at {
+                Some(at) => delivery.next_attempt_at = at,
+                None => delivery.dead_lettered = true,
+            }
+        }
+        Ok(())
+    }
+
     async fn create_inbound_event(
         &self,
         mut event: graph_owl_core::webhook::InboundEvent,

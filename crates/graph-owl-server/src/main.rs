@@ -101,21 +101,40 @@ async fn main() {
         Err(_) => graph_owl_api::federation::DEFAULT_TIMEOUT,
     };
 
-    // Kept alongside the `Catalog` rather than only inside it: Epic 14
-    // Slice F's outbound-webhook sink needs its own handle to storage (to
-    // enqueue a delivery row), independent of whatever `Catalog` does with
-    // its copy.
+    // Kept alongside the `Catalog` rather than only inside it: the
+    // outbound-webhook sink and sender (Epic 14, decision 4.2) each need
+    // their own handle to storage, independent of whatever `Catalog` does
+    // with its copy.
     let storage: Arc<dyn Storage> = Arc::new(storage);
     let mut catalog = Catalog::new(storage.clone())
         .with_graph(graph.clone())
         .with_traversal(graph)
         .with_federation_endpoints(federation_endpoints)
         .with_federation_timeout(federation_timeout)
-        // Slice A only: this enqueues a delivery row per matching
-        // subscription. The sender that drains the queue and makes the
-        // HTTP request is Slice B, not yet built —
-        // `plans/EPIC-COMPLETION-PLAN.md` decision 4.2.
-        .with_events(Arc::new(OutboundWebhookSink::new(storage)));
+        // Enqueues a delivery row per matching subscription; the sender
+        // spawned below is what actually drains it.
+        .with_events(Arc::new(OutboundWebhookSink::new(storage.clone())));
+    // Epic 14 Slice B: the background sender. `admit_target` refuses
+    // loopback/private targets by default (SSRF protection) — this
+    // allowlist is the same "a deployment genuinely wants to call its own
+    // sidecar" escape hatch `graph_owl_events::webhook::admit_target`'s own
+    // doc comment names, off by default like every other deployment-level
+    // capability in this file.
+    let outbound_webhook_allowlist: std::collections::HashSet<String> =
+        std::env::var("GRAPH_OWL_OUTBOUND_WEBHOOK_ALLOWLIST")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|host| !host.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+    tokio::spawn(
+        graph_owl_api::OutboundWebhookSender::with_allowlist(storage, outbound_webhook_allowlist)
+            .run(graph_owl_api::DEFAULT_SENDER_POLL_INTERVAL),
+    );
     // Epic 98: off by default, like every other deployment-level capability
     // here. `Catalog::classify_ontology`/`explain_subsumption` existed and
     // were tested since this epic shipped, but nothing ever called

@@ -14916,6 +14916,206 @@ fn outbound_webhook_wants(
         .is_some_and(|kind_str| webhook.event_types.iter().any(|t| *t == kind_str))
 }
 
+/// Names the header a delivery's HMAC signature travels in.
+///
+/// graph-owl's own convention for its own outbound sender — there is no
+/// receiver-configurable scheme the way an *inbound* [`WebhookEndpoint`]
+/// carries one, because here graph-owl is the only party writing the
+/// request.
+pub const OUTBOUND_SIGNATURE_HEADER: &str = "X-GraphOwl-Signature";
+
+/// The Unix-seconds timestamp `sign` folded into the signed bytes — carried
+/// as its own header because a verifier has to reconstruct the exact same
+/// `canonical_bytes` to check the signature at all.
+pub const OUTBOUND_TIMESTAMP_HEADER: &str = "X-GraphOwl-Timestamp";
+
+/// Drains `outbound_webhook_deliveries`, making the real HTTP request the
+/// enqueue half ([`OutboundWebhookSink`]) only ever queued for — Epic 14
+/// Slice B.
+pub struct OutboundWebhookSender {
+    storage: Arc<dyn graph_owl_storage::Storage>,
+    client: reqwest::Client,
+    /// By host, matching [`graph_owl_events::webhook::admit_target`]'s own
+    /// convention — otherwise a deployment could never point a subscription
+    /// at its own sidecar, or a test at its own mock receiver.
+    allowlist: std::collections::HashSet<String>,
+}
+
+/// How often [`OutboundWebhookSender::run`] checks for due work.
+///
+/// Matches `graph_owl_events::webhook::backoff`'s own two-second base delay
+/// (the module's shortest possible reschedule): polling any less often would
+/// mean a delivery due at the earliest retry could sit for longer than the
+/// backoff schedule itself intended before this sender even looks at it.
+pub const DEFAULT_SENDER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl OutboundWebhookSender {
+    /// No allowlisted hosts — every target is checked against the full
+    /// SSRF-refusal rule.
+    #[must_use]
+    pub fn new(storage: Arc<dyn graph_owl_storage::Storage>) -> Self {
+        Self::with_allowlist(storage, std::collections::HashSet::new())
+    }
+
+    /// `allowlist` is checked by [`graph_owl_events::webhook::admit_target`]
+    /// before every send, not only at registration.
+    #[must_use]
+    pub fn with_allowlist(
+        storage: Arc<dyn graph_owl_storage::Storage>,
+        allowlist: std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            storage,
+            client: reqwest::Client::new(),
+            allowlist,
+        }
+    }
+
+    /// Polls forever at `poll_interval`. The caller `tokio::spawn`s this —
+    /// it never returns on its own.
+    pub async fn run(self, poll_interval: std::time::Duration) {
+        loop {
+            self.process_pending().await;
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
+    /// One pass over every currently-due delivery. Kept separate from
+    /// [`Self::run`] so a test can drive exactly one pass deterministically
+    /// rather than racing a sleep.
+    pub async fn process_pending(&self) {
+        let pending = match self
+            .storage
+            .list_pending_outbound_webhook_deliveries()
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "outbound webhook sender: could not list pending deliveries");
+                return;
+            }
+        };
+        for delivery in pending {
+            self.attempt(delivery).await;
+        }
+    }
+
+    async fn attempt(&self, delivery: graph_owl_storage::OutboundWebhookDelivery) {
+        // No delete route exists yet for an outbound webhook (Epic 14's own
+        // `enabled`-flag precedent), so a registered delivery outliving its
+        // subscription cannot happen today. Left as-is rather than acted
+        // on, so a future delete route does not silently inherit "act on a
+        // read error" behavior it never asked for.
+        let Ok(Some(webhook)) = self.storage.get_outbound_webhook(delivery.webhook_id).await
+        else {
+            return;
+        };
+        // Disabled, not deleted: leave the delivery queued rather than
+        // dead-lettering it, so re-enabling the subscription resumes
+        // delivery instead of losing everything queued while it was off.
+        if !webhook.enabled {
+            return;
+        }
+
+        if let Err(refusal) = graph_owl_events::webhook::admit_target(&webhook.url, &self.allowlist)
+        {
+            // Re-checked at send time, not only at registration — the
+            // module's own stated reason: a hostname can resolve
+            // differently later. A refused target will refuse on every
+            // retry, so this is dead-lettered immediately rather than
+            // spending the backoff schedule on it.
+            self.record_failure(delivery.id, &refusal.to_string(), None)
+                .await;
+            return;
+        }
+
+        let Ok(Some(secret)) = self.storage.outbound_webhook_secret(webhook.id).await else {
+            self.record_failure(delivery.id, "no signing secret on record", None)
+                .await;
+            return;
+        };
+
+        let body = match serde_json::to_vec(&delivery.payload) {
+            Ok(body) => body,
+            Err(error) => {
+                self.record_failure(
+                    delivery.id,
+                    &format!("could not serialize payload: {error}"),
+                    None,
+                )
+                .await;
+                return;
+            }
+        };
+        let timestamp = chrono::Utc::now().timestamp();
+        let signature = graph_owl_events::webhook::sign(&secret, timestamp, &body);
+
+        let response = self
+            .client
+            .post(&webhook.url)
+            .header("content-type", "application/json")
+            .header(OUTBOUND_SIGNATURE_HEADER, signature)
+            .header(OUTBOUND_TIMESTAMP_HEADER, timestamp.to_string())
+            .body(body)
+            .send()
+            .await;
+
+        match response {
+            Ok(response) if response.status().is_success() => {
+                if let Err(error) = self
+                    .storage
+                    .delete_outbound_webhook_delivery(delivery.id)
+                    .await
+                {
+                    tracing::warn!(
+                        delivery_id = %delivery.id, %error,
+                        "outbound webhook sender: delivered but could not remove from the queue"
+                    );
+                }
+            }
+            Ok(response) => {
+                self.record_failure(
+                    delivery.id,
+                    &format!("subscriber responded {}", response.status()),
+                    Some(delivery.attempt),
+                )
+                .await;
+            }
+            Err(error) => {
+                self.record_failure(delivery.id, &error.to_string(), Some(delivery.attempt))
+                    .await;
+            }
+        }
+    }
+
+    /// `attempt_before` is the delivery's attempt count *before* this
+    /// failure — `None` means dead-letter unconditionally (a permanent
+    /// refusal); `Some` asks
+    /// [`graph_owl_events::webhook::backoff`] whether there is another
+    /// attempt left.
+    async fn record_failure(&self, id: Uuid, error: &str, attempt_before: Option<i32>) {
+        let next_attempt_at = attempt_before.and_then(|attempt_before| {
+            let next_attempt = u32::try_from(attempt_before)
+                .unwrap_or(u32::MAX)
+                .saturating_add(1);
+            graph_owl_events::webhook::backoff(next_attempt).map(|delay| {
+                let seconds = i64::try_from(delay.as_secs()).unwrap_or(i64::MAX);
+                chrono::Utc::now() + chrono::Duration::seconds(seconds)
+            })
+        });
+        if let Err(storage_error) = self
+            .storage
+            .record_outbound_webhook_delivery_failure(id, error, next_attempt_at)
+            .await
+        {
+            tracing::warn!(
+                delivery_id = %id, %storage_error,
+                "outbound webhook sender: could not record a failed attempt"
+            );
+        }
+    }
+}
+
 /// The graph shapes are stated in.
 ///
 /// Its own graph, not the default one: a shape is a statement *about* the
@@ -21210,6 +21410,318 @@ mod outbound_webhooks_are_registered_and_enqueued {
             .await
             .expect("list deliveries");
         assert!(deliveries.is_empty(), "{deliveries:?}");
+    }
+}
+
+#[cfg(test)]
+mod the_sender_drains_the_delivery_queue {
+    //! Epic 14 Slice B at the sender.
+    //!
+    //! Everything upstream (`OutboundWebhookSink`, the Storage layer) only
+    //! ever proved a delivery gets **enqueued**. This proves it gets
+    //! **sent** — a real, independently-verifiable signed HTTP request —
+    //! and that failure, retry and the dead-letter boundary follow
+    //! `graph_owl_events::webhook::backoff`'s own schedule rather than a
+    //! second, competing decision made here.
+
+    use super::*;
+    use axum::{Router, body::Bytes, extract::State, http::HeaderMap, routing::post};
+    use std::sync::atomic::{AtomicU16, Ordering};
+    use tests::InMemoryStorage;
+
+    #[derive(Clone)]
+    struct Recorder {
+        requests: Arc<std::sync::Mutex<Vec<(HeaderMap, Bytes)>>>,
+        status: Arc<AtomicU16>,
+    }
+
+    async fn receive(
+        State(recorder): State<Recorder>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> axum::http::StatusCode {
+        recorder.requests.lock().unwrap().push((headers, body));
+        axum::http::StatusCode::from_u16(recorder.status.load(Ordering::SeqCst))
+            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+    }
+
+    /// A real local receiver, on the same `TcpListener::bind("127.0.0.1:0")`
+    /// pattern `tests/bolt.rs` already uses — this proves an actual HTTP
+    /// request is made, not that the sender merely decided to.
+    async fn spawn_receiver(initial_status: u16) -> (String, Recorder) {
+        let recorder = Recorder {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            status: Arc::new(AtomicU16::new(initial_status)),
+        };
+        let app = Router::new()
+            .route("/hook", post(receive))
+            .with_state(recorder.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        (format!("http://{addr}/hook"), recorder)
+    }
+
+    /// `admit_target` refuses loopback by default — every test target here
+    /// *is* loopback, so each one allowlists itself the same way a real
+    /// deployment would for its own sidecar.
+    fn allowlist_for(url: &str) -> std::collections::HashSet<String> {
+        let host = url
+            .strip_prefix("http://")
+            .expect("http url")
+            .split(['/', ':'])
+            .next()
+            .expect("host");
+        std::collections::HashSet::from([host.to_string()])
+    }
+
+    async fn registered(
+        storage: &Arc<InMemoryStorage>,
+        url: &str,
+        enabled: bool,
+    ) -> graph_owl_storage::OutboundWebhook {
+        let now = chrono::Utc::now();
+        storage
+            .upsert_outbound_webhook(
+                graph_owl_storage::OutboundWebhook {
+                    id: Uuid::new_v4(),
+                    url: url.to_string(),
+                    event_types: vec![],
+                    enabled,
+                    created_at: now,
+                    updated_at: now,
+                },
+                Some(b"shared-secret"),
+            )
+            .await
+            .expect("register")
+    }
+
+    #[tokio::test]
+    async fn a_successful_delivery_is_removed_from_the_queue_and_correctly_signed() {
+        let (url, recorder) = spawn_receiver(200).await;
+        let storage = Arc::new(InMemoryStorage::default());
+        let webhook = registered(&storage, &url, true).await;
+        let payload = serde_json::json!({ "kind": "created" });
+        storage
+            .enqueue_outbound_webhook_delivery(webhook.id, payload.clone())
+            .await
+            .expect("enqueue");
+
+        let sender = OutboundWebhookSender::with_allowlist(storage.clone(), allowlist_for(&url));
+        sender.process_pending().await;
+
+        let remaining = storage
+            .list_outbound_webhook_deliveries(webhook.id)
+            .await
+            .expect("list");
+        assert!(remaining.is_empty(), "{remaining:?}");
+
+        let requests = recorder.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let (headers, body) = &requests[0];
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(body).expect("json body"),
+            payload
+        );
+        let timestamp: i64 = headers
+            .get(OUTBOUND_TIMESTAMP_HEADER)
+            .expect("timestamp header")
+            .to_str()
+            .expect("ascii")
+            .parse()
+            .expect("integer");
+        // A verifier reconstructs the signature exactly this way — proving
+        // this round-trips proves the receiver's own check would pass,
+        // which is the entire point of signing.
+        let expected_signature = graph_owl_events::webhook::sign(b"shared-secret", timestamp, body);
+        assert_eq!(
+            headers
+                .get(OUTBOUND_SIGNATURE_HEADER)
+                .expect("signature header")
+                .to_str()
+                .expect("ascii"),
+            expected_signature
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_delivery_is_rescheduled_with_backoff_and_not_retried_before_its_time() {
+        let (url, recorder) = spawn_receiver(500).await;
+        let storage = Arc::new(InMemoryStorage::default());
+        let webhook = registered(&storage, &url, true).await;
+        storage
+            .enqueue_outbound_webhook_delivery(webhook.id, serde_json::json!({}))
+            .await
+            .expect("enqueue");
+
+        let sender = OutboundWebhookSender::with_allowlist(storage.clone(), allowlist_for(&url));
+        sender.process_pending().await;
+
+        let remaining = storage
+            .list_outbound_webhook_deliveries(webhook.id)
+            .await
+            .expect("list");
+        assert_eq!(remaining.len(), 1, "{remaining:?}");
+        assert_eq!(remaining[0].attempt, 1);
+        assert!(!remaining[0].dead_lettered);
+        assert!(
+            remaining[0].next_attempt_at > chrono::Utc::now(),
+            "backoff's shortest delay is 2s, so this must be scheduled into the future"
+        );
+        assert_eq!(recorder.requests.lock().unwrap().len(), 1);
+
+        // Immediately due again by wall-clock alone it would not be — a
+        // second pass right now must not re-attempt it.
+        sender.process_pending().await;
+        assert_eq!(
+            recorder.requests.lock().unwrap().len(),
+            1,
+            "must not retry before its scheduled time"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delivery_past_the_attempt_limit_is_dead_lettered_and_never_retried_again() {
+        let (url, recorder) = spawn_receiver(500).await;
+        let storage = Arc::new(InMemoryStorage::default());
+        let webhook = registered(&storage, &url, true).await;
+        let enqueued = storage
+            .enqueue_outbound_webhook_delivery(webhook.id, serde_json::json!({}))
+            .await
+            .expect("enqueue");
+
+        // Fast-forwards past every attempt but the last directly through
+        // storage, rather than waiting out six real backoff delays
+        // (2s..64s) — `backoff`'s own schedule is already unit-tested in
+        // graph_owl_events::webhook; this test proves the boundary the
+        // sender hands off to it, not the schedule itself.
+        for _ in 0..6 {
+            storage
+                .record_outbound_webhook_delivery_failure(
+                    enqueued.id,
+                    "fast-forward",
+                    Some(chrono::Utc::now()),
+                )
+                .await
+                .expect("fast-forward");
+        }
+        let before = storage
+            .list_outbound_webhook_deliveries(webhook.id)
+            .await
+            .expect("list");
+        assert_eq!(before[0].attempt, 6);
+        assert!(!before[0].dead_lettered, "one real attempt left");
+
+        let sender = OutboundWebhookSender::with_allowlist(storage.clone(), allowlist_for(&url));
+        sender.process_pending().await;
+
+        let after = storage
+            .list_outbound_webhook_deliveries(webhook.id)
+            .await
+            .expect("list");
+        assert_eq!(after.len(), 1);
+        assert!(after[0].dead_lettered, "{:?}", after[0]);
+        assert_eq!(after[0].attempt, 7);
+
+        let requests_so_far = recorder.requests.lock().unwrap().len();
+        sender.process_pending().await;
+        assert_eq!(
+            recorder.requests.lock().unwrap().len(),
+            requests_so_far,
+            "a dead-lettered delivery must never be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_target_admit_target_refuses_is_dead_lettered_without_a_request_being_made() {
+        let storage = Arc::new(InMemoryStorage::default());
+        // Loopback, and deliberately *not* allowlisted — the SSRF refusal
+        // this proves is exactly the case a bare `new` (no allowlist) must
+        // still catch even though every other test in this module has to
+        // allowlist its own loopback receiver to get past it.
+        let webhook = registered(&storage, "http://127.0.0.1:1/hook", true).await;
+        let enqueued = storage
+            .enqueue_outbound_webhook_delivery(webhook.id, serde_json::json!({}))
+            .await
+            .expect("enqueue");
+
+        let sender = OutboundWebhookSender::new(storage.clone());
+        sender.process_pending().await;
+
+        let after = storage
+            .list_outbound_webhook_deliveries(webhook.id)
+            .await
+            .expect("list");
+        assert_eq!(after.len(), 1);
+        assert!(after[0].dead_lettered, "{:?}", after[0]);
+        assert_eq!(
+            after[0].id, enqueued.id,
+            "a refused target dead-letters immediately, on the first attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disabled_webhooks_delivery_is_left_untouched() {
+        let (url, recorder) = spawn_receiver(200).await;
+        let storage = Arc::new(InMemoryStorage::default());
+        let webhook = registered(&storage, &url, false).await;
+        storage
+            .enqueue_outbound_webhook_delivery(webhook.id, serde_json::json!({}))
+            .await
+            .expect("enqueue");
+
+        let sender = OutboundWebhookSender::with_allowlist(storage.clone(), allowlist_for(&url));
+        sender.process_pending().await;
+
+        assert!(recorder.requests.lock().unwrap().is_empty());
+        let remaining = storage
+            .list_outbound_webhook_deliveries(webhook.id)
+            .await
+            .expect("list");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].attempt, 0, "untouched, not a failed attempt");
+    }
+
+    /// Every other test in this module drives `process_pending` directly,
+    /// by design — deterministic, no sleep racing a poll interval. This is
+    /// the one proof that `run` itself (the thing `main.rs` actually
+    /// spawns) drives that same method on its own rather than needing a
+    /// caller to do it.
+    #[tokio::test]
+    async fn run_polls_on_its_own_and_actually_drains_the_queue() {
+        let (url, recorder) = spawn_receiver(200).await;
+        let storage = Arc::new(InMemoryStorage::default());
+        let webhook = registered(&storage, &url, true).await;
+        storage
+            .enqueue_outbound_webhook_delivery(webhook.id, serde_json::json!({}))
+            .await
+            .expect("enqueue");
+
+        let sender = OutboundWebhookSender::with_allowlist(storage.clone(), allowlist_for(&url));
+        let handle = tokio::spawn(sender.run(std::time::Duration::from_millis(5)));
+
+        let mut drained = false;
+        for _ in 0..200 {
+            if storage
+                .list_outbound_webhook_deliveries(webhook.id)
+                .await
+                .expect("list")
+                .is_empty()
+            {
+                drained = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        handle.abort();
+
+        assert!(drained, "run() must eventually drain a pending delivery on its own, not only when a caller drives process_pending directly");
+        assert!(!recorder.requests.lock().unwrap().is_empty());
     }
 }
 
