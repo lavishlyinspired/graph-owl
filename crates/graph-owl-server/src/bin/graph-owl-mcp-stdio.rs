@@ -57,7 +57,8 @@ async fn main() {
     let catalog = Catalog::new(storage)
         .with_graph(graph.clone())
         .with_traversal(graph.clone())
-        .with_namespaces(graph);
+        .with_namespaces(graph.clone())
+        .with_predicates(graph);
 
     // **Explicit, resolved once, and closed by default.** Unlike HTTP's
     // per-request `Auth` extractor, stdio has no header to carry a

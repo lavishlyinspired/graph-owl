@@ -1,0 +1,36 @@
+# Invoices both sides report, where the tax differs.
+#
+# Unlike a missing invoice this is not a total loss of credit — it is a
+# discrepancy to reconcile, and the delta is what a reviewer needs to see.
+# **The delta is kept, never auto-resolved**: which side is right is a
+# judgement about somebody's books, not something a query may decide.
+#
+# **Every pattern is inside `GRAPH ?g`, and that is not optional.**
+# `POST /graph/import/rdf` lands a document in `graph:import:{source}`, never
+# the default graph — one predictable place a bad import can be dropped
+# wholesale. A query without a `GRAPH` clause therefore matches nothing at
+# all, silently, which reads exactly like "the reconciliation found no
+# problems". Found by running this against real loaded data and getting zero
+# rows where three scenarios were planted.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?number ?gstin ?claimed ?filed
+WHERE {
+  GRAPH ?register {
+    ?purchase a gst:PurchaseInvoice ;
+              gst:supplierGstin ?gstin ;
+              gst:invoiceNumber ?number ;
+              gst:taxAmount ?claimed .
+  }
+
+  GRAPH ?authority {
+    ?gstr2b a gst:Gstr2bInvoice ;
+            gst:supplierGstin ?gstin ;
+            gst:invoiceNumber ?number ;
+            gst:taxAmount ?filed .
+  }
+
+  FILTER (?claimed != ?filed)
+}
+ORDER BY ?number

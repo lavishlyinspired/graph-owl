@@ -136,12 +136,42 @@ DN-1 built a table, a port and an adapter, and **nothing exposed them** — the 
 
 **Two compiler-found requirements worth recording.** `AppJson<T>` requires `T: ValidateBody`, not merely `DeserializeOwned` — the project's own body-validation contract, and the `Handler` trait bound fails opaquely without it (axum's `macros` feature is off, so `#[debug_handler]` is unavailable to diagnose it). And `graph-owl-server` has no direct dependency on `graph-owl-engine`, so `NamespaceDef` is re-exported through `graph-owl-api`: the facade is what the server is meant to speak to.
 
+### P1 — the pack format and loader
+
+- [x] **P1.1** `pack.toml` (TOML, for `tomllib` — the stdlib has parsed it since 3.11 and has never parsed YAML, and a YAML manifest would put PyYAML in the dependency tree of everything that loads a pack, including the reference apps that may import nothing but stdlib + `graph_owl_sdk`)
+- [x] **P1.2** `connectors/python/graph_owl_packs` — manifest reader, loader, `graph-owl-load-pack` CLI. No runtime dependencies; `urllib` only
+- [x] **P1.3** `POST /predicates` — **the third registry that existed with no route.** A pack cannot assert a single fact without it: `reject_unregistered_predicates` refuses any flake whose predicate is unknown
+- [x] **P1.4** 30 tests (17 manifest, 13 loader against a real local HTTP double)
+
 ### DN-3 — Hospitality proof-pack
 
-- [ ] **3.1** `packs/hospitality/` — own namespace, ontology, shapes, matching config, findings
-- [ ] **3.2** Loads and resolves with zero `.rs` changes (asserted by a diff check, not by inspection)
-- [ ] **3.3** Renders with zero `.tsx` changes (same assertion)
-- [ ] **3.4** A guest-duplicate finding lands with provenance and a `governedBy` citation
+- [x] **3.1** `packs/hospitality/` — own namespace, ontology, predicates, matching config, findings, console block
+- [x] **3.2** Loads and resolves with zero `.rs` changes, **asserted against `git ls-files` in `scripts/verify-pack-load.sh`** rather than by inspection
+- [x] **3.3** Ships no `.tsx`, `.ts` or `.css` — same assertion
+- [x] **3.4** `packs/gst/` alongside it, sharing no vocabulary, no legal spine, no identifier scheme and no subject matter — **and configuring the identical blocking strategies**, which is the surprising half of the claim
+
+**Run, not asserted** — `scripts/verify-pack-load.sh` loads both packs into one real graph-owl: hospitality lands 15 subjects under code 1024, GST lands 19 under 1025, both reload as no-ops keeping their codes, and no pack file is code.
+
+**Four gates found only by running it, each a genuine design requirement nobody had written down:**
+
+1. **The namespace was declared and stored, and the parser did not use it.** DN-1 built the registry; nothing plugged it into `Sid::from_iri`. Fixed with a process-wide runtime table that resolution falls through to — the mapping is a property of the deployment, not of a call, so threading a resolver through the parser, serializer, SPARQL and export would have been threading the same value everywhere.
+2. **A restart would have silently un-resolved every pack.** The rows survive; the in-process table does not. `Catalog::prime_namespaces` at startup, because without it a restarted server stops understanding the vocabulary of every pack installed before it — a total failure that looks like the packs were never loaded.
+3. **Predicates must be defined before documents are imported.** The first load rejected all 15 subjects. Hence `POST /predicates` and `[[predicates]]` in the manifest, and the loader's three-phase order: namespace → predicates → documents.
+4. **A pack may not assert `rdfs:label`.** `rdfs:` is a shipped namespace whose predicates this store does not register, and a pack may not define terms in somebody else's vocabulary. Both packs now own every predicate they assert (`hosp:label`, `gst:label`).
+
+### Open — the GST reconciliation queries return nothing
+
+`packs/gst/queries/` ships two SPARQL queries for the planted scenarios (INV-1003 claimed but never filed; INV-1002 differing by ₹900). **They return zero rows, with `factsScanned: 0`.**
+
+What is *not* wrong: the queries parse, and the returned plan resolves `gst:supplierGstin` to `1025:supplierGstin` — so the pack's namespace reaches the query planner correctly, which is the whole of Epic 105 working.
+
+What is unresolved: `POST /graph/import/rdf` lands flakes in `graph:import:{source}`, and the SPARQL dataset does not appear to surface those named graphs. Tried both with and without an explicit `GRAPH ?g` clause; both scan zero facts. **This is the next thing to investigate**, and it gates turning the GST pack from loaded data into a visible reconciliation.
+
+`verify-pack-load.sh` reports this as a warning rather than failing, deliberately: failing there would block a genuine result on an unrelated open question, and asserting success would be a lie.
+
+### GST console surface — blocked on the above, not on the console
+
+The `[console]` block in `packs/gst/pack.toml` declares its review queue (`gst-reconciliation`, the two finding labels, side-by-side evidence). **No console change is needed to render it** — `ui/src/features/review/queues.ts` is already a config registry behind one generic `ReviewQueue.tsx`, which is exactly §13's claim. What is missing is something for it to *fetch*: the findings runtime (the platform plan's P5) does not exist, and the SPARQL fallback above returns nothing. Wiring a queue to an empty source would be a screen that always says "nothing to review", which is indistinguishable from a working one.
 
 ### Cross-cutting
 

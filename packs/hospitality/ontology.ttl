@@ -1,0 +1,19 @@
+@prefix hosp: <https://graph-owl.dev/packs/hospitality#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# **A pack asserts only predicates it owns and declared.** `rdfs:label` was
+# the first attempt and the import refused it: `rdfs:` is a shipped namespace
+# whose predicates this store does not register, and a pack may not define
+# terms in somebody else's vocabulary. `hosp:label` is the pack's own, listed
+# in pack.toml, and means exactly what this pack says it means.
+#
+# Found by running the loader against a real server, not by reading the code.
+
+hosp:Property   rdf:type hosp:Class ; hosp:label "Property" .
+hosp:Guest      rdf:type hosp:Class ; hosp:label "Guest" .
+hosp:Stay       rdf:type hosp:Class ; hosp:label "Stay" .
+
+hosp:guestPhone   rdf:type hosp:Property ; hosp:label "guest phone" .
+hosp:guestSurname rdf:type hosp:Property ; hosp:label "guest surname" .
+hosp:stayedAt     rdf:type hosp:Property ; hosp:label "stayed at" .
+hosp:bookedBy     rdf:type hosp:Property ; hosp:label "booked by" .

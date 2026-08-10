@@ -1,0 +1,40 @@
+# Invoices the purchase register claims that no supplier ever filed.
+#
+# **Section 16's condition, as a query.** Credit exists only where the supplier
+# actually filed the outward supply; an invoice absent from GSTR-2B therefore
+# has no credit to claim, and this is the most expensive finding in the pack.
+#
+# Matched on (GSTIN, invoice number) — the `normalized` blocking strategy
+# pack.toml configures, expressed here as the join it implies. A production
+# reconciliation runs the engine's blocking rather than a literal join; this
+# query is what makes the same answer reachable today, from the console's
+# existing workbench, with no findings runtime.
+#
+# **Every pattern is inside `GRAPH ?g`, and that is not optional.**
+# `POST /graph/import/rdf` lands a document in `graph:import:{source}`, never
+# the default graph — one predictable place a bad import can be dropped
+# wholesale. A query without a `GRAPH` clause therefore matches nothing at
+# all, silently, which reads exactly like "the reconciliation found no
+# problems". Found by running this against real loaded data and getting zero
+# rows where three scenarios were planted.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?invoice ?gstin ?number ?taxAmount
+WHERE {
+  GRAPH ?register {
+    ?invoice a gst:PurchaseInvoice ;
+             gst:supplierGstin ?gstin ;
+             gst:invoiceNumber ?number ;
+             gst:taxAmount ?taxAmount .
+  }
+
+  FILTER NOT EXISTS {
+    GRAPH ?filed_in {
+      ?filed a gst:Gstr2bInvoice ;
+             gst:supplierGstin ?gstin ;
+             gst:invoiceNumber ?number .
+    }
+  }
+}
+ORDER BY ?number

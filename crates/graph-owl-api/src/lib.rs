@@ -47,7 +47,7 @@ use graph_owl_engine::{NamespaceRegistry, TripleStore};
 // Re-exported so `graph-owl-server` can name the type its
 // `/namespaces` route returns without taking a direct dependency on
 // the engine port — the facade is what the server is meant to speak to.
-pub use graph_owl_engine::NamespaceDef;
+pub use graph_owl_engine::{NamespaceDef, PredicateDef};
 use graph_owl_events::{ChangeEvent, EventSink, EventSubject};
 use graph_owl_reasoning as reasoning;
 use graph_owl_resolution::bands::{ConfidenceBands, Decision, decide};
@@ -1178,6 +1178,12 @@ pub struct Catalog {
     /// what lets a domain pack bring its own IRIs without a code change, and a
     /// deployment that never installs a pack simply never populates it.
     namespaces: Option<Arc<dyn NamespaceRegistry>>,
+    /// The same backend seen through its predicate registry — Epic 105. A
+    /// fourth field for the same reason the third exists: defining a
+    /// vocabulary's *terms* is a separate contract from declaring the
+    /// vocabulary itself, and a pack needs both before it can assert a
+    /// single fact.
+    predicates: Option<Arc<dyn graph_owl_engine::PredicateRegistry>>,
     /// Whether ingested query text is persisted — Epic 28 decision 2.
     ///
     /// **Off by default, and that is a data-protection decision rather than a
@@ -1296,6 +1302,7 @@ impl Catalog {
             graph: None,
             traversal: None,
             namespaces: None,
+            predicates: None,
             events: None,
             decisions: Arc::new(DecisionCache::default()),
             shape_cache: Arc::new(Mutex::new(None)),
@@ -1432,6 +1439,17 @@ impl Catalog {
         self
     }
 
+    /// The predicate registry a domain pack defines its terms through —
+    /// Epic 105.
+    #[must_use]
+    pub fn with_predicates(
+        mut self,
+        predicates: Arc<dyn graph_owl_engine::PredicateRegistry>,
+    ) -> Self {
+        self.predicates = Some(predicates);
+        self
+    }
+
     /// Declare a vocabulary IRI, returning the code it resolves to.
     ///
     /// **The caller names an IRI, never a code**, and that is the decision
@@ -1482,6 +1500,11 @@ impl Catalog {
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
         if let Some(found) = existing.iter().find(|n| n.iri == iri) {
+            // Taught to this process even on the idempotent path: a second
+            // server instance, or one restarted since the row was written,
+            // reaches here rather than the allocation below and would
+            // otherwise never learn the namespace it just confirmed exists.
+            graph_owl_core::namespaces::register_process_namespace(found.code, &found.iri);
             return Ok(found.clone());
         }
 
@@ -1501,7 +1524,92 @@ impl Catalog {
                 e.to_string(),
             )])
         })?;
+        // **Only after the row is committed.** Teaching the process first
+        // would leave a namespace resolvable in memory that no restart could
+        // recover — flakes written against it would become unreadable the
+        // moment the server bounced.
+        graph_owl_core::namespaces::register_process_namespace(definition.code, &definition.iri);
         Ok(definition)
+    }
+
+    /// Define a predicate a pack asserts — Epic 105.
+    ///
+    /// **Declared, never inferred**, the same rule namespaces follow. The
+    /// import path refuses a flake whose predicate is not in the registry
+    /// (`reject_unregistered_predicates`), and auto-registering whatever a
+    /// document mentions would turn a typo into a permanent predicate that
+    /// every later document then matches — the graph would accept
+    /// `gst:invoiceNumbre` forever, silently, alongside the real one.
+    ///
+    /// Idempotent: re-defining an identical predicate succeeds, because
+    /// reloading a pack must be safe to repeat. Re-defining one with a
+    /// *different* shape is refused — flakes already stored against it would
+    /// not migrate, they would become unreadable.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no registry is configured. `Validation` if the registry
+    /// refuses it — a core predicate, or a conflicting redefinition.
+    pub async fn define_predicate(
+        &self,
+        definition: &graph_owl_engine::PredicateDef,
+    ) -> Result<(), CatalogError> {
+        let registry = self.predicates.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no predicate registry configured".to_string(),
+            ))
+        })?;
+
+        if let Some(existing) = registry
+            .lookup(definition.namespace, &definition.name)
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?
+        {
+            return if existing.value_type == definition.value_type
+                && existing.many == definition.many
+            {
+                Ok(())
+            } else {
+                Err(CatalogError::Validation(vec![FieldError::new(
+                    "name",
+                    FieldErrorCode::Value,
+                    format!(
+                        "`{}:{}` is already defined with a different shape — \
+                         flakes already stored against it would not migrate, \
+                         they would become unreadable",
+                        definition.namespace, definition.name
+                    ),
+                )]))
+            };
+        }
+
+        registry.define(definition).await.map_err(|e| {
+            CatalogError::Validation(vec![FieldError::new(
+                "name",
+                FieldErrorCode::Value,
+                e.to_string(),
+            )])
+        })
+    }
+
+    /// Teach this process every namespace already declared — Epic 105.
+    ///
+    /// Called once at startup. Without it a restarted server resolves nothing
+    /// a pack declared before the restart: the rows are there, but the RDF
+    /// parser, serializer and query paths all read the in-process table, so
+    /// every previously-loaded pack's own terms would stop resolving. That is
+    /// a silent, total failure of every pack installed before the last
+    /// restart, which makes this the least optional line in the epic.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no namespace registry is configured or the query fails.
+    pub async fn prime_namespaces(&self) -> Result<usize, CatalogError> {
+        let declared = self.namespaces().await?;
+        for namespace in &declared {
+            graph_owl_core::namespaces::register_process_namespace(namespace.code, &namespace.iri);
+        }
+        Ok(declared.len())
     }
 
     /// Every declared namespace, for building a resolver or showing an

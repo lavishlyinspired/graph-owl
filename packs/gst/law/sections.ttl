@@ -1,0 +1,15 @@
+@prefix gst: <https://graph-owl.dev/packs/gst#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# **The legal spine is data, not code.** A finding cites a section here; the
+# section is a graph subject a reviewer can open. Nothing about the citation is
+# compiled in — which is what lets an amendment be a pack update rather than a
+# release.
+#
+# The text is the section's own published subject matter, summarised. No
+# commentary or aggregator editorial content is reproduced
+# (`plans/00i-licensing.md`).
+
+gst:Section16 rdf:type gst:Section ;
+    gst:label "Section 16 — eligibility and conditions for input tax credit" ;
+    gst:comment "Credit is available only where the supplier has actually filed the outward supply and the recipient holds the invoice. An invoice absent from GSTR-2B therefore has no credit to claim." .

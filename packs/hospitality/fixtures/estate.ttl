@@ -1,0 +1,38 @@
+@prefix hosp: <https://graph-owl.dev/packs/hospitality#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# Two properties, three guests, three stays. **Guests G-1 and G-3 are the same
+# person**: one surname spelled by ear (Smith / Smyth), one phone written with
+# different spacing. That is what the `normalized` and `phonetic` blocking
+# strategies in pack.toml are configured to catch — the same two algorithms
+# the GST pack uses over invoice numbers and tax identifiers.
+
+hosp:property-riverside rdf:type hosp:Property ;
+    hosp:name "Riverside Inn" .
+
+hosp:property-harbour rdf:type hosp:Property ;
+    hosp:name "Harbour Lodge" .
+
+hosp:guest-1 rdf:type hosp:Guest ;
+    hosp:guestSurname "Smith" ;
+    hosp:guestPhone "+44 20 7946 0958" .
+
+hosp:guest-2 rdf:type hosp:Guest ;
+    hosp:guestSurname "Kowalski" ;
+    hosp:guestPhone "+44 20 7946 1234" .
+
+hosp:guest-3 rdf:type hosp:Guest ;
+    hosp:guestSurname "Smyth" ;
+    hosp:guestPhone "+44  20 7946 0958" .
+
+hosp:stay-1 rdf:type hosp:Stay ;
+    hosp:stayedAt hosp:property-riverside ;
+    hosp:bookedBy hosp:guest-1 .
+
+hosp:stay-2 rdf:type hosp:Stay ;
+    hosp:stayedAt hosp:property-harbour ;
+    hosp:bookedBy hosp:guest-2 .
+
+hosp:stay-3 rdf:type hosp:Stay ;
+    hosp:stayedAt hosp:property-harbour ;
+    hosp:bookedBy hosp:guest-3 .

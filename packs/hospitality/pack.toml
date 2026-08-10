@@ -1,0 +1,84 @@
+# Hospitality — **the domain-neutrality proof, not a product.**
+#
+# `plans/105-domain-neutrality.md` DN-3. The platform was designed against
+# seven Indian financial-compliance domains, and seven samples from one family
+# prove nothing about neutrality: they share vocabulary shape, a legal spine,
+# deadline arithmetic and government-identifier matching. A design can be
+# accidentally fitted to all seven and still be useless for a hotel.
+#
+# So this pack is deliberately unlike them. No statute, no filing deadline, no
+# government identifier, no reconciliation of two authorities' records — just
+# guests, properties and stays, matched on a phone number.
+#
+# **Its acceptance criterion is a diff**: this pack works with zero changes to
+# any `.rs` file and zero changes to any `.tsx` file. If it needs either, the
+# neutrality claim is false and the design gets corrected rather than the pack
+# special-cased.
+
+[pack]
+id = "hospitality"
+namespace = "https://graph-owl.dev/packs/hospitality#"
+prefix = "hosp"
+description = "Properties, guests and stays — the neutrality proof-pack."
+
+[[documents]]
+path = "ontology.ttl"
+source = "hospitality-ontology"
+
+[[documents]]
+path = "fixtures/estate.ttl"
+source = "hospitality-estate"
+
+# Blocking strategies name their ALGORITHM, never this domain. A `GuestPhoneKey`
+# would be the hardcoding `graph-owl-core::blocking_strategy` exists to remove.
+# Compare `packs/gst/pack.toml`, which uses the same strategies over completely
+# different fields — that identity is the proof.
+# **Every predicate the pack asserts, declared.** The import path refuses a
+# flake whose predicate is unregistered, which is what keeps this from becoming
+# an open-information graph nothing can query. Declared rather than inferred
+# from the documents: auto-registering whatever a file mentions would make a
+# typo a permanent predicate.
+#
+# `value_type` 0 is a reference to another subject, 1 is a string
+# (`graph_owl_core::flake::value_type`).
+[[predicates]]
+name = "label"
+
+[[predicates]]
+name = "name"
+
+[[predicates]]
+name = "guestPhone"
+
+[[predicates]]
+name = "guestSurname"
+
+[[predicates]]
+name = "stayedAt"
+value_type = 0
+
+[[predicates]]
+name = "bookedBy"
+value_type = 0
+
+[[matching.blocking]]
+strategy = "normalized"
+fields = ["hosp:guestPhone"]
+
+[[matching.blocking]]
+strategy = "phonetic"
+fields = ["hosp:guestSurname"]
+
+[[findings]]
+label = "hosp:DuplicateGuest"
+summary = "Two guest records that appear to be the same person"
+governed_by = "hosp:GuestRecordPolicy"
+
+[console]
+[[console.queues]]
+id = "hosp-duplicate-guests"
+label = "Duplicate guests"
+source = "findings"
+labels = ["hosp:DuplicateGuest"]
+actions = ["accept", "reject-with-reason", "defer"]
+evidence = "side-by-side"

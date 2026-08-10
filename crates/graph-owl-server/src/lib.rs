@@ -86,6 +86,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/graph/export/rdf", get(export_rdf))
         .route("/graph/import/rdf", post(import_rdf))
         .route("/namespaces", post(declare_namespace).get(list_namespaces))
+        .route("/predicates", post(define_predicate))
         .route("/graph/export/preview", get(export_preview))
         // Epic 42 Slice G: the text-first ontology editor. `preview` is the
         // fast, as-the-author-types path (parse only); `dry-run` is the
@@ -8039,6 +8040,64 @@ async fn declare_namespace(
     // same pack returns the existing code and has created nothing. A `201`
     // would claim otherwise on every reload.
     Ok((StatusCode::OK, Json(declared)))
+}
+
+impl ValidateBody for DefinePredicate {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DefinePredicate {
+    /// The namespace code the predicate belongs to — from `POST /namespaces`.
+    namespace: u16,
+    /// Its local name, without the prefix.
+    name: String,
+    /// Which `FlakeValue` variant its objects must be
+    /// (`graph_owl_core::flake::value_type`). Defaults to `String`, which is
+    /// what a pack's descriptive predicates overwhelmingly are.
+    value_type: Option<i16>,
+    /// `false` = at most one value per subject. Cardinality is a property of
+    /// the predicate rather than of the writer: leaving it to each caller
+    /// means the first one that forgets gives a subject two names with
+    /// nothing to say which is current.
+    many: Option<bool>,
+}
+
+/// Define a predicate a pack asserts — Epic 105.
+///
+/// The third registry that existed with no route. Importing a pack's ontology
+/// fails without this: `reject_unregistered_predicates` refuses any flake
+/// whose predicate is unknown, which is what stops an open-information graph
+/// nothing can query.
+///
+/// **Declared, never inferred.** Auto-registering whatever a document mentions
+/// would make a typo permanent — the graph would accept `gst:invoiceNumbre`
+/// forever, silently, beside the real predicate.
+async fn define_predicate(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<DefinePredicate>,
+) -> Result<StatusCode, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    catalog
+        .define_predicate(&graph_owl_api::PredicateDef {
+            namespace: payload.namespace,
+            name: payload.name,
+            value_type: payload
+                .value_type
+                .unwrap_or(graph_owl_core::flake::value_type::STRING),
+            many: payload.many.unwrap_or(false),
+            core: false,
+        })
+        .await?;
+    // `200` rather than `201`, for the same reason `/namespaces` does:
+    // defining is idempotent, so a pack reload has created nothing.
+    Ok(StatusCode::OK)
 }
 
 /// Every declared namespace.

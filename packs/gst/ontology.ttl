@@ -1,0 +1,27 @@
+@prefix gst: <https://graph-owl.dev/packs/gst#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# Terms taken from the published return formats, which are the specification
+# (`plans/00i-licensing.md` rule 2 — no implementation was read).
+#
+# **The pack owns every predicate it asserts**, including `gst:label`: a pack
+# may not define terms in a shipped vocabulary it does not own, and the import
+# path refuses one it has not registered.
+#
+# The two sides of a reconciliation are deliberately *different classes* rather
+# than one class with a `source` property: they come from different authorities
+# with different guarantees, and collapsing them would make "which side said
+# this" a filter rather than a type.
+
+gst:Supplier        rdf:type gst:Class ; gst:label "Supplier" .
+gst:PurchaseInvoice rdf:type gst:Class ; gst:label "Purchase invoice (taxpayer's register)" .
+gst:Gstr2bInvoice   rdf:type gst:Class ; gst:label "GSTR-2B invoice (as filed by the supplier)" .
+gst:Section         rdf:type gst:Class ; gst:label "Statutory section" .
+
+gst:supplierGstin rdf:type gst:Property ; gst:label "supplier GSTIN" .
+gst:invoiceNumber rdf:type gst:Property ; gst:label "invoice number" .
+gst:invoiceDate   rdf:type gst:Property ; gst:label "invoice date" .
+gst:taxableValue  rdf:type gst:Property ; gst:label "taxable value" .
+gst:taxAmount     rdf:type gst:Property ; gst:label "tax amount" .
+gst:period        rdf:type gst:Property ; gst:label "return period" .
+gst:governedBy    rdf:type gst:Property ; gst:label "governed by" .

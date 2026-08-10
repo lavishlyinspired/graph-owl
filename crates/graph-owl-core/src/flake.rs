@@ -159,7 +159,13 @@ pub fn namespace_iri(code: u16) -> Option<&'static str> {
         namespace::CUI => "https://uts.nlm.nih.gov/uts/umls/concept/",
         namespace::SNOMED_CT => "http://snomed.info/id/",
         namespace::RXNORM => "https://rxnav.nlm.nih.gov/REST/rxcui/",
-        _ => return None,
+        // **Falls through to what this deployment declared** — Epic 105.
+        // The shipped set is matched first and allocation-free; a runtime
+        // namespace costs one read-lock and only for codes the binary does
+        // not own. Before this, a domain could only have a vocabulary by
+        // adding a constant above, which is the per-domain hardcoding
+        // `plans/105-domain-neutrality.md` exists to end.
+        other => return crate::namespaces::process_namespace_iri(other),
     })
 }
 
@@ -204,6 +210,20 @@ impl Sid {
             iri.strip_prefix(base)
                 .map(|local| (base.len(), code, local))
         })
+        // **Plus whatever this deployment declared** — Epic 105. Chained
+        // rather than checked afterwards so longest-prefix still decides
+        // across the two sets together: a runtime namespace nested inside a
+        // shipped one (or the reverse) must resolve to the longer, and
+        // checking the shipped set first and only falling back would silently
+        // pick the shorter.
+        .chain(
+            crate::namespaces::process_namespaces()
+                .into_iter()
+                .filter_map(|(code, base)| {
+                    iri.strip_prefix(base)
+                        .map(|local| (base.len(), code, local))
+                }),
+        )
         .max_by_key(|(len, _, _)| *len)
         .map(|(_, code, local)| Sid::new(code, local))
     }

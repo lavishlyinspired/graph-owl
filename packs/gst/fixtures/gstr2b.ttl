@@ -1,0 +1,35 @@
+@prefix gst: <https://graph-owl.dev/packs/gst#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# What the suppliers actually filed. The authority's side of the
+# reconciliation, and the one that decides whether credit exists at all.
+
+# 1. Matches the register exactly.
+gst:2b-INV-1001 rdf:type gst:Gstr2bInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-1001" ;
+    gst:invoiceDate   "2026-07-04" ;
+    gst:taxableValue  "100000.00" ;
+    gst:taxAmount     "18000.00" ;
+    gst:period        "2026-07" .
+
+# 2. Same invoice, 900 less tax — the register claims 18,000.
+gst:2b-INV-1002 rdf:type gst:Gstr2bInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-1002" ;
+    gst:invoiceDate   "2026-07-09" ;
+    gst:taxableValue  "95000.00" ;
+    gst:taxAmount     "17100.00" ;
+    gst:period        "2026-07" .
+
+# 3. INV-1003 is deliberately absent. Nothing to see here is the finding.
+
+# 4. The correctly-spelled GSTIN, filed one day later than the register
+#    recorded it. Inside the 7-day window, so it reconciles.
+gst:2b-INV-1004 rdf:type gst:Gstr2bInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-1004" ;
+    gst:invoiceDate   "2026-07-22" ;
+    gst:taxableValue  "50000.00" ;
+    gst:taxAmount     "9000.00" ;
+    gst:period        "2026-07" .

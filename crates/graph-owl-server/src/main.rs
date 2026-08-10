@@ -109,7 +109,8 @@ async fn main() {
     let mut catalog = Catalog::new(storage.clone())
         .with_graph(graph.clone())
         .with_traversal(graph.clone())
-        .with_namespaces(graph)
+        .with_namespaces(graph.clone())
+        .with_predicates(graph)
         .with_federation_endpoints(federation_endpoints)
         .with_federation_timeout(federation_timeout)
         // Enqueues a delivery row per matching subscription; the sender
@@ -231,6 +232,27 @@ async fn main() {
             %bind, database = %where_from, authentication = "disabled",
             "graph-owl listening with authentication DISABLED — every request runs as \
              the system principal. Set OIDC_ISSUER (or GRAPH_OWL_JWT_SECRET) to secure it."
+        ),
+    }
+
+    // **Epic 105: teach this process the namespaces packs already declared.**
+    // The rows survive a restart; the in-process resolution table does not,
+    // and every RDF parse, serialization and query reads the table. Without
+    // this, a restarted server silently stops resolving the vocabulary of
+    // every pack installed before it — a total failure that looks like the
+    // packs were never loaded.
+    //
+    // A warning rather than a fatal: a deployment with no graph engine has no
+    // registry to prime, and that is a supported configuration rather than a
+    // misconfiguration.
+    match catalog.prime_namespaces().await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(namespaces = count, "restored runtime namespaces"),
+        // `{error:?}` — `CatalogError` implements `Debug`, not `Display`.
+        Err(error) => tracing::warn!(
+            error = ?error,
+            "could not restore runtime namespaces — any domain pack loaded \
+             earlier will not resolve until this is fixed"
         ),
     }
 

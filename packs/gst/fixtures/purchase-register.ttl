@@ -1,0 +1,47 @@
+@prefix gst: <https://graph-owl.dev/packs/gst#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# What the taxpayer's own books claim. Four invoices, and three of them are
+# planted scenarios — the fourth is the control that must NOT produce a
+# finding, because a reconciliation that flags everything is as useless as one
+# that flags nothing.
+
+# 1. Clean match. The control.
+gst:pr-INV-1001 rdf:type gst:PurchaseInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-1001" ;
+    gst:invoiceDate   "2026-07-04" ;
+    gst:taxableValue  "100000.00" ;
+    gst:taxAmount     "18000.00" ;
+    gst:period        "2026-07" .
+
+# 2. Tax mismatch: the supplier filed 17,100 against this 18,000.
+gst:pr-INV-1002 rdf:type gst:PurchaseInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-1002" ;
+    gst:invoiceDate   "2026-07-09" ;
+    gst:taxableValue  "100000.00" ;
+    gst:taxAmount     "18000.00" ;
+    gst:period        "2026-07" .
+
+# 3. Missing entirely — the supplier never filed it. Section 16 says there is
+#    no credit to claim, which is the most expensive finding in the pack.
+gst:pr-INV-1003 rdf:type gst:PurchaseInvoice ;
+    gst:supplierGstin "29AACCG0527D1Z8" ;
+    gst:invoiceNumber "INV-1003" ;
+    gst:invoiceDate   "2026-07-15" ;
+    gst:taxableValue  "250000.00" ;
+    gst:taxAmount     "45000.00" ;
+    gst:period        "2026-07" .
+
+# 4. Recorded a day apart from the supplier's filing, and with two characters
+#    of the GSTIN transposed. Neither an exact nor a normalized key matches
+#    it; the n-gram and date-window strategies are what find it, and it must
+#    reconcile rather than be reported missing.
+gst:pr-INV-1004 rdf:type gst:PurchaseInvoice ;
+    gst:supplierGstin "27AABCU9603R1MZ" ;
+    gst:invoiceNumber "INV-1004" ;
+    gst:invoiceDate   "2026-07-21" ;
+    gst:taxableValue  "50000.00" ;
+    gst:taxAmount     "9000.00" ;
+    gst:period        "2026-07" .

@@ -1,0 +1,219 @@
+"""Loading a pack, against a real local HTTP double.
+
+No mock: a real `http.server` on a real loopback port, the same "a real
+server, not a placeholder" discipline the OCR worker's endpoint client and CLI
+tests already use. What these pin is the *sequence* — declare the namespace,
+then import each document in order, with the right query parameters — because
+that sequence is the whole loader and every part of it is observable on the
+wire.
+
+`scripts/verify-pack-load.sh` runs the same packs against a real graph-owl.
+These run in milliseconds and catch the wiring; that one catches everything
+the wiring cannot.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+from graph_owl_packs import LoadError, load_pack
+
+PACKS = Path(__file__).resolve().parents[3] / "packs"
+
+
+def _handler(received: list[dict], fail_on: str | None):
+    class Scripted(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            parsed = urlparse(self.path)
+            length = int(self.headers.get("content-length", 0))
+            raw = self.rfile.read(length) if length else b""
+            received.append(
+                {
+                    "path": parsed.path,
+                    "query": {k: v[0] for k, v in parse_qs(parsed.query).items()},
+                    "raw": raw,
+                    "auth": self.headers.get("authorization"),
+                }
+            )
+
+            if fail_on and fail_on in parsed.path:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(b'{"detail":"deliberate"}')
+                return
+
+            if parsed.path == "/namespaces":
+                body = {"code": 1024, "iri": "x", "declaredBy": "y"}
+            else:
+                # One subject per document, so `landed` counts are checkable.
+                body = {"landed": ["gst:thing"], "skipped": [], "rejected": []}
+            encoded = json.dumps(body).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, *args):
+            pass
+
+    return Scripted
+
+
+@contextmanager
+def scripted_server(fail_on: str | None = None):
+    received: list[dict] = []
+    server = HTTPServer(("127.0.0.1", 0), _handler(received, fail_on))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", received
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+@pytest.mark.parametrize("pack", ["hospitality", "gst"])
+def test_a_pack_declares_its_namespace_before_importing_anything(pack):
+    # **Order is the property, not an implementation detail.** A document
+    # importing terms in a namespace the server has not been told about
+    # resolves to nothing — the exact failure Epic 105 was written to fix.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / pack, url)
+
+    # **Three phases, and the order of all three is load-bearing.** A
+    # document imported before its namespace is declared resolves to nothing;
+    # a document imported before its predicates are defined is rejected
+    # wholesale by `reject_unregistered_predicates`. Both were found by
+    # running this against a real server rather than by reading the code.
+    paths = [r["path"] for r in received]
+    assert paths[0] == "/namespaces", f"the vocabulary must be declared first, got {paths}"
+
+    first_import = paths.index("/graph/import/rdf")
+    assert all(p == "/predicates" for p in paths[1:first_import]), (
+        f"predicates must all be defined before the first import: {paths}"
+    )
+    assert all(p == "/graph/import/rdf" for p in paths[first_import:])
+
+
+@pytest.mark.parametrize("pack", ["hospitality", "gst"])
+def test_every_document_is_imported_under_its_own_source(pack):
+    with scripted_server() as (url, received):
+        result = load_pack(PACKS / pack, url)
+
+    sources = [
+        r["query"]["source"] for r in received if r["path"] == "/graph/import/rdf"
+    ]
+    assert len(sources) == len(set(sources)), "two documents sharing a source overwrite"
+    assert result.landed == len(sources)
+
+
+def test_the_declared_namespace_is_the_packs_own():
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "gst", url)
+
+    declared = json.loads(received[0]["raw"])
+    assert declared["iri"] == "https://graph-owl.dev/packs/gst#"
+    assert declared["declaredBy"] == "pack:gst", (
+        "provenance names the pack, so an operator can later tell where a "
+        "stray prefix came from"
+    )
+
+
+def test_the_two_packs_declare_different_namespaces():
+    # The neutrality property, observed on the wire rather than read out of
+    # the manifests.
+    with scripted_server() as (url, hospitality_calls):
+        load_pack(PACKS / "hospitality", url)
+    with scripted_server() as (url, gst_calls):
+        load_pack(PACKS / "gst", url)
+
+    assert (
+        json.loads(hospitality_calls[0]["raw"])["iri"]
+        != json.loads(gst_calls[0]["raw"])["iri"]
+    )
+
+
+def test_a_dry_run_asks_the_server_not_to_write():
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "gst", url, dry_run=True)
+
+    imports = [r for r in received if r["path"] == "/graph/import/rdf"]
+    assert imports, "there were no imports to check"
+    assert all(r["query"].get("dryRun") == "true" for r in imports)
+
+
+def test_a_real_run_does_not_ask_for_a_dry_one():
+    # The negative: a loader that always sent `dryRun` would pass every test
+    # above and never write anything.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "gst", url)
+
+    assert all(
+        "dryRun" not in r["query"]
+        for r in received
+        if r["path"] == "/graph/import/rdf"
+    )
+
+
+def test_a_token_reaches_every_call():
+    # A pack load is admin-only on both surfaces. A token that reached the
+    # namespace call but not the imports would half-load and fail confusingly.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "gst", url, token="secret-token")
+
+    assert received, "no calls were made"
+    assert all(r["auth"] == "Bearer secret-token" for r in received)
+
+
+def test_a_failing_namespace_declaration_stops_the_load():
+    # Nothing should be imported into a vocabulary the server does not know.
+    with scripted_server(fail_on="/namespaces") as (url, received):
+        with pytest.raises(LoadError, match="500"):
+            load_pack(PACKS / "gst", url)
+
+    assert len(received) == 1, "the load must stop at the failed declaration"
+
+
+def test_a_failing_import_is_an_error_rather_than_a_short_result():
+    # A partial load reported as success is the worst outcome available: the
+    # operator sees a result and believes the pack is installed.
+    with scripted_server(fail_on="/graph/import/rdf") as (url, _received):
+        with pytest.raises(LoadError, match="500"):
+            load_pack(PACKS / "gst", url)
+
+
+def test_a_missing_document_is_named_before_any_http_call_for_it(tmp_path):
+    directory = tmp_path / "broken"
+    directory.mkdir()
+    (directory / "pack.toml").write_text(
+        """
+[pack]
+id = "broken"
+namespace = "https://example.org/ns/broken#"
+prefix = "broken"
+
+[[documents]]
+path = "absent.ttl"
+source = "broken-absent"
+""",
+        encoding="utf-8",
+    )
+
+    with scripted_server() as (url, received):
+        with pytest.raises(LoadError, match="absent.ttl"):
+            load_pack(directory, url)
+
+    assert len(received) == 1, "only the namespace declaration should have happened"
+
+
+def test_an_unreachable_server_names_the_server():
+    # The message an operator sees when they typo'd `--server`, which is the
+    # single most likely failure of this command.
+    with pytest.raises(LoadError, match="unreachable"):
+        load_pack(PACKS / "gst", "http://127.0.0.1:1")

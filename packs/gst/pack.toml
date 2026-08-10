@@ -1,0 +1,130 @@
+# GST — purchase-register vs GSTR-2B reconciliation.
+#
+# The first *real* domain pack, and the one the platform was designed against
+# (`.claude/docs/referencePlans/markdown/CA-GST/18-gst-reconciliation-demo.md`).
+#
+# **Read this beside `packs/hospitality/pack.toml`.** The two share no
+# vocabulary, no legal spine, no identifier scheme and no subject matter — and
+# they configure the *same* blocking strategies, land through the same loader,
+# and render through the same console queue. That identity is the whole claim
+# of `plans/105-domain-neutrality.md`, and these two files are how it is
+# checked rather than asserted.
+#
+# Licensing: every term here is drawn from the published GST statute and
+# return formats, which are the specification. No implementation was read —
+# `plans/00i-licensing.md` rule 2.
+
+[pack]
+id = "gst"
+namespace = "https://graph-owl.dev/packs/gst#"
+prefix = "gst"
+description = "Input-tax-credit reconciliation: purchase register against GSTR-2B."
+
+[[documents]]
+path = "ontology.ttl"
+source = "gst-ontology"
+
+[[documents]]
+path = "law/sections.ttl"
+source = "gst-law"
+
+[[documents]]
+path = "fixtures/purchase-register.ttl"
+source = "gst-purchase-register"
+
+[[documents]]
+path = "fixtures/gstr2b.ttl"
+source = "gst-gstr2b"
+
+# **The identical strategies the hospitality pack uses, over different
+# fields.** `normalized` there matched a phone number; here it matches an
+# invoice number. `composite` pairs it with a date window, because two systems
+# rarely record the same invoice on the same day.
+# Every predicate the pack asserts. `value_type` 1 is a string — amounts are
+# strings here on purpose: a monetary value parsed into a float at the graph
+# boundary would lose the exactness a tax figure needs, and the reconciliation
+# compares them as decimals rather than as IEEE doubles.
+[[predicates]]
+name = "label"
+
+[[predicates]]
+name = "comment"
+
+[[predicates]]
+name = "supplierGstin"
+
+[[predicates]]
+name = "invoiceNumber"
+
+[[predicates]]
+name = "invoiceDate"
+
+[[predicates]]
+name = "taxableValue"
+
+[[predicates]]
+name = "taxAmount"
+
+[[predicates]]
+name = "period"
+
+[[predicates]]
+name = "governedBy"
+value_type = 0
+
+[[matching.blocking]]
+strategy = "normalized"
+fields = ["gst:supplierGstin", "gst:invoiceNumber"]
+
+[[matching.blocking]]
+strategy = "composite"
+
+[[matching.blocking.of]]
+strategy = "normalized"
+fields = ["gst:supplierGstin"]
+
+[[matching.blocking.of]]
+strategy = "date_window"
+fields = ["gst:invoiceDate"]
+days = 7
+
+# A transposed GSTIN is the classic data-entry error, and neither an exact nor
+# a normalized key can see through it — the two strings share no prefix. This
+# is the case `NGram` exists for.
+[[matching.blocking]]
+strategy = "ngram"
+fields = ["gst:supplierGstin"]
+n = 3
+
+[[findings]]
+label = "gst:MissingInGstr2b"
+summary = "An invoice claimed in the purchase register that the supplier never filed"
+governed_by = "gst:Section16"
+
+[[findings]]
+label = "gst:TaxAmountMismatch"
+summary = "Both sides report the invoice, and the tax differs"
+governed_by = "gst:Section16"
+
+# The reconciliation, runnable today. A findings runtime (the platform plan's
+# P5/P6) will turn these into persisted findings with provenance and a
+# `governedBy` citation; until it exists these are the same answers, reachable
+# from the console's existing workbench with no new route and no new component.
+[[queries]]
+name = "missing-in-gstr2b"
+path = "queries/missing-in-gstr2b.sparql"
+label = "Claimed but never filed (Section 16)"
+
+[[queries]]
+name = "tax-amount-mismatch"
+path = "queries/tax-amount-mismatch.sparql"
+label = "Tax amount differs between register and GSTR-2B"
+
+[console]
+[[console.queues]]
+id = "gst-reconciliation"
+label = "GST reconciliation"
+source = "findings"
+labels = ["gst:MissingInGstr2b", "gst:TaxAmountMismatch"]
+actions = ["accept", "reject-with-reason", "defer"]
+evidence = "side-by-side"

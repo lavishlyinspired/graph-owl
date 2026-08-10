@@ -27,8 +27,75 @@
 //! rather than a rewrite of the hot path.
 
 use std::collections::BTreeMap;
+use std::sync::RwLock;
 
 use crate::flake::{Sid, namespace, namespace_iri};
+
+/// Namespaces this *process* knows beyond the shipped set.
+///
+/// **Why a process-wide table rather than a resolver threaded through every
+/// call.** The namespace↔code mapping is a property of the deployment, not of
+/// a request: the RDF parser, the serializer, SPARQL, export and the triple
+/// store must all give the same answer, and threading one value through all
+/// of them would be threading the same value everywhere — which is what a
+/// process-wide table is. It is append-only and monotonic (a code is never
+/// reassigned), so there is no consistency hazard to manage: a reader either
+/// sees a namespace or does not yet, and never sees a *different* one.
+///
+/// **This is not I/O**, so `00e` dependency rule 4 still holds — the crate
+/// stays free of database and network dependencies. Loading the table *from*
+/// storage is the server's job at startup; this only holds what it was told.
+static RUNTIME: RwLock<Option<BTreeMap<u16, &'static str>>> = RwLock::new(None);
+
+/// Teach this process a namespace declared at runtime.
+///
+/// **The IRI is leaked deliberately, and the bound is what makes that fine.**
+/// [`namespace_iri`] returns `&'static str` and is called from every RDF
+/// serializer, parser and query path in the system; changing that signature
+/// would touch essentially every consumer of a `Sid`. Namespaces are capped at
+/// 64,511 by the `u16` code space, are never removed (a code is never
+/// reissued, because flakes written while it was live still carry it), and are
+/// registered once per process at startup — so the leak is bounded, tiny, and
+/// exactly as long-lived as the value genuinely is.
+///
+/// Idempotent: registering the same `(code, iri)` twice is a no-op, because a
+/// server that reloads its registry must be able to repeat this.
+///
+/// # Panics
+///
+/// Never in practice — only if the lock is poisoned by a panic in another
+/// thread while it was held, which for a registration of a string pair means
+/// the process is already failing.
+pub fn register_process_namespace(code: u16, iri: &str) {
+    let mut guard = RUNTIME.write().expect("namespace registry lock");
+    let table = guard.get_or_insert_with(BTreeMap::new);
+    if table.get(&code).is_some_and(|existing| *existing == iri) {
+        return;
+    }
+    table.insert(code, Box::leak(iri.to_string().into_boxed_str()));
+}
+
+/// The IRI a runtime-registered code stands for, if this process knows one.
+#[must_use]
+pub fn process_namespace_iri(code: u16) -> Option<&'static str> {
+    RUNTIME
+        .read()
+        .expect("namespace registry lock")
+        .as_ref()?
+        .get(&code)
+        .copied()
+}
+
+/// Every `(code, iri)` this process learned at runtime, for prefix matching.
+#[must_use]
+pub fn process_namespaces() -> Vec<(u16, &'static str)> {
+    RUNTIME
+        .read()
+        .expect("namespace registry lock")
+        .as_ref()
+        .map(|table| table.iter().map(|(&c, &i)| (c, i)).collect())
+        .unwrap_or_default()
+}
 
 /// Every vocabulary the binary ships with, in the order
 /// [`Sid::from_iri`](crate::flake::Sid::from_iri) scans them.

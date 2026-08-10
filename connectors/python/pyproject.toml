@@ -1,0 +1,27 @@
+[project]
+name = "graph-owl-packs"
+version = "0.1.0"
+description = "Load domain packs into graph-owl. The domain is data; this is the reader."
+# **3.11, for `tomllib`.** A pack manifest is TOML because the standard
+# library has parsed it since 3.11 and has never parsed YAML — and a YAML
+# manifest would put PyYAML in the dependency tree of everything that loads a
+# pack, including the reference applications, which may import nothing but the
+# standard library and `graph_owl_sdk` (Epic 36 Slice A).
+requires-python = ">=3.11"
+# **No runtime dependencies, on purpose.** The loader drives graph-owl's
+# public HTTP surface with `urllib`, the same decision `graph_owl_sdk` and the
+# OCR worker's endpoint client already make.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+graph-owl-load-pack = "graph_owl_packs.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["graph_owl_packs*"]
