@@ -164,7 +164,14 @@ def narrate(found: Answer, base_url: str, model: str, api_key: str | None) -> st
                 ),
             },
         ],
-        "max_tokens": 400,
+        # **Generous on purpose, and the number is measured.** A reasoning
+        # model spends this budget thinking before it writes anything, so a
+        # tight limit returns an empty `content` that looks exactly like a
+        # broken endpoint. On a real narration payload one free model used
+        # 1315 completion tokens and returned nothing under 800, while another
+        # answered in 152. 2000 covers both; a non-reasoning model simply
+        # stops early and is billed for what it used.
+        "max_tokens": 2000,
     }
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/chat/completions",
@@ -172,6 +179,12 @@ def narrate(found: Answer, base_url: str, model: str, api_key: str | None) -> st
         method="POST",
     )
     request.add_header("content-type", "application/json")
+    # **Named, because the default is blocked.** `urllib` sends
+    # `Python-urllib/3.x`, and at least one hosted endpoint sits behind an edge
+    # filter that rejects it with `403 error code: 1010` — a browser-signature
+    # ban that reads exactly like a bad credential and cost an investigation.
+    # The same request from `curl` succeeded, which is what isolated it.
+    request.add_header("user-agent", "graph-owl-gst-reconcile/0.1")
     if api_key:
         request.add_header("authorization", f"Bearer {api_key}")
     try:
@@ -183,9 +196,23 @@ def narrate(found: Answer, base_url: str, model: str, api_key: str | None) -> st
     except urllib.error.URLError as unreachable:
         raise AgentError(f"the model endpoint was unreachable: {unreachable.reason}") from unreachable
     try:
-        return body["choices"][0]["message"]["content"]
+        message = body["choices"][0]["message"]
     except (KeyError, IndexError) as unexpected:
         raise AgentError("the model endpoint returned no message") from unexpected
+
+    content = (message.get("content") or "").strip()
+    if content:
+        return content
+    # A reasoning model that ran out of budget mid-thought leaves `content`
+    # empty and its working in a sibling field. Reporting that as prose would
+    # put a model's private reasoning in front of a reviewer as though it were
+    # the explanation, so this is an error rather than a fallback.
+    if message.get("reasoning_content") or message.get("reasoning"):
+        raise AgentError(
+            "the model returned only reasoning and no answer — usually too "
+            "small a token budget for a reasoning model"
+        )
+    raise AgentError("the model endpoint returned an empty message")
 
 
 def build_parser() -> argparse.ArgumentParser:

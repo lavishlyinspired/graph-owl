@@ -212,3 +212,29 @@ def test_findings_refuses_a_server_that_does_not_return_a_list() -> None:
             findings(f"http://127.0.0.1:{server.server_port}", None)
     finally:
         server.shutdown()
+
+
+def test_a_reasoning_model_that_never_reached_an_answer_is_an_error() -> None:
+    """**Measured, not imagined.** Three of the four free models returned an
+    empty `content` with their working in `reasoning_content` when given too
+    small a token budget. Printing that as the explanation would put a model's
+    private chain-of-thought in front of a reviewer as though it were the
+    reasoning behind a compliance finding — which it is not, since the finding
+    was derived by rules before the model saw anything."""
+    endpoint = _Endpoint(
+        body={"choices": [{"message": {"content": "", "reasoning_content": "Let me think..."}}]}
+    )
+    try:
+        with pytest.raises(AgentError, match="only reasoning"):
+            narrate(answer(3, FINDINGS), endpoint.url, "any-model", "key")
+    finally:
+        endpoint.close()
+
+
+def test_an_empty_message_with_no_reasoning_is_a_plain_error() -> None:
+    endpoint = _Endpoint(body={"choices": [{"message": {"content": ""}}]})
+    try:
+        with pytest.raises(AgentError, match="empty message"):
+            narrate(answer(3, FINDINGS), endpoint.url, "any-model", "key")
+    finally:
+        endpoint.close()
