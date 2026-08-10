@@ -1041,18 +1041,41 @@ queue — arrives as **files**, and no Rust or TypeScript changes.
    nine predicates become registry terms, and 19 subjects land in named import
    graphs. Load `packs/hospitality` beside it and the two get **distinct codes,
    no shared vocabulary, and the same loader**.
-2. `graph-owl-reconcile packs/gst` — 2 rules evaluated, 3 findings opened, each
-   citing `gst:Section16` and carrying the triples it rests on.
+2. `graph-owl-reconcile packs/gst` — **all six rules** from the GST demo's own
+   findings table, 9 findings opened, each citing the provision it rests on and
+   carrying the triples behind it.
 3. **Run it again**: `opened: 0, alreadyOpen: 3`. Dismiss one with a reason,
    run a third time, and it stays dismissed.
 4. Console → Review → **Findings** — one queue, `pack` as a column, accept or
    dismiss-with-reason, the rule and evidence in the detail pane.
-5. `graph-owl-erpnext "Rescue Mission"` — a schema **invented at run time** in a
+5. **The one to actually show a CA**: INV-2001 and INV-2002 are both July 2020
+   invoices, one with a 5% value delta and one with 20%. Only the second is a
+   finding, and it cites Notification 75/2019-CT — because the cap in force
+   then was 10%, read from `law/rule-36-4.ttl` by traversal. The same 5% delta
+   on a 2026 invoice *is* a finding, citing 40/2021-CT. Same rule, same query,
+   different answers, because the law is data and the graph records when.
+6. `graph-owl-erpnext "Rescue Mission"` — a schema **invented at run time** in a
    live Frappe/ERPNext instance becomes a queryable vocabulary, `Link` fields
    resolving as real edges.
+7. `scripts/demo.sh --gst` does 1–4 in one command, additively, against the
+   already-running bank estate.
 
 ### Epic 105 — domain neutrality
-- [~] **105** **DN-1 through P5 shipped, 10 August 2026.** The blocker was never the pack format: it was that a namespace code could only be minted by editing `graph-owl-core`. `NamespaceResolver`/`RuntimeNamespaces` (codes 1024–65534), a `namespace_registry` table, `POST /namespaces`, `POST /predicates` and `POST /graph/import/rdf` close it; `scripts/check-namespace-neutrality.py` fails the build if a domain name reappears as a constant. **Two hardcodings were found by running real data through, not by reading**: the pack loaded but every SPARQL query returned zero rows, because `is_vocabulary_namespace` was a literal list of three medical namespaces — the same Epic 104 hardcoding in a second location, now generalized to `>= RUNTIME_START`. And `FILTER NOT EXISTS` reported **all four** invoices missing including two that match perfectly, because pushdown does not descend into it; the query is rewritten as `OPTIONAL` + `!BOUND` and the engine-side fix is named, not hidden. **P5's findings runtime shipped with a correction of its own**: the first index keyed `(pack, label, subject)` and was partial on `status = 'pending'`, so a dismissal came straight back on the next run over identical data — found by running the real reconciliation twice around a decision, fixed by putting a SHA-256 evidence digest in the identity (`V60`), which draws the line where it belongs: same conclusion from same facts is already decided, changed facts are a new situation. **Still open, recorded rather than assumed away**: pack facts are readable by any principal who can query at all (per-named-graph policy needs a policy model that does not exist yet); six of the seven planned packs are unwritten; and P2's remaining connectors, P3, P4 and P6–P12 are untouched — this is the spine, not the finished platform
+- [~] **105** **DN-1 through P5 shipped, 10 August 2026.** The blocker was never the pack format: it was that a namespace code could only be minted by editing `graph-owl-core`. `NamespaceResolver`/`RuntimeNamespaces` (codes 1024–65534), a `namespace_registry` table, `POST /namespaces`, `POST /predicates` and `POST /graph/import/rdf` close it; `scripts/check-namespace-neutrality.py` fails the build if a domain name reappears as a constant. **Two hardcodings were found by running real data through, not by reading**: the pack loaded but every SPARQL query returned zero rows, because `is_vocabulary_namespace` was a literal list of three medical namespaces — the same Epic 104 hardcoding in a second location, now generalized to `>= RUNTIME_START`. And `FILTER NOT EXISTS` reported **all four** invoices missing including two that match perfectly, because pushdown does not descend into it; the query is rewritten as `OPTIONAL` + `!BOUND` and the engine-side fix is named, not hidden. **P5's findings runtime shipped with a correction of its own**: the first index keyed `(pack, label, subject)` and was partial on `status = 'pending'`, so a dismissal came straight back on the next run over identical data — found by running the real reconciliation twice around a decision, fixed by putting a SHA-256 evidence digest in the identity (`V60`), which draws the line where it belongs: same conclusion from same facts is already decided, changed facts are a new situation. **The GST pack is complete against its own spec**: all six findings
+(`PotentialMismatch`, `AmountMismatch`, `ITCNotAvailable`, `Reversed`,
+`GstinTransposition`, `PaymentOverdue`), the dated Rule 36(4) spine resolved by
+traversal, purchases and payments as events with time anchors, 26 assertions in
+`scripts/verify-gst-reconciliation.sh` **each checked in both directions**, and
+a fifteen-question evaluation set with answer keys written before any agent
+exists. Two things SPARQL could not do were measured rather than assumed — the
+engine has no date support in expressions at all (`date > date` evaluates to
+unbound), and no notion of string similarity — so the query does the join and
+the runtime does the arithmetic, with both thresholds declared in the manifest.
+Writing the evaluation set found a real false-accusation bug: the 180-day rule
+flagged *every* unpaid invoice, including one six days old. **Still open,
+recorded rather than assumed away**: no reference agent app (`examples/gst-reconcile/`)
+and so no scored evaluation run; the live GSP/ERP connectors are fixture-mode
+only; pack facts are readable by any principal who can query at all (per-named-graph policy needs a policy model that does not exist yet); six of the seven planned packs are unwritten; and P2's remaining connectors, P3, P4 and P6–P12 are untouched — this is the spine, not the finished platform
 
 ### Console half
 - [x] **105** **One queue, every pack** — `findingsQueue.tsx` renders GST and hospitality identically; the difference lives in `pack.toml`. A `GstFindingsQueue.tsx` would have been the console's first per-domain hardcoding
