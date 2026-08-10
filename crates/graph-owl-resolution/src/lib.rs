@@ -8,4 +8,5 @@
 pub mod bands;
 pub mod mention;
 pub mod normalize;
+pub mod rule_match;
 pub mod score;
