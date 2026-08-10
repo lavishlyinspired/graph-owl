@@ -153,6 +153,54 @@ a failed fetch reported as a clean reconciliation would tell a taxpayer every
 claimed invoice is unmatched, or that nothing is wrong, depending on which side
 failed. Both are worse than an outright error.
 
+## 6a. A different product on the same account **does** authenticate
+
+The GSP issued a second credential set — 36 state-wise username/password pairs
+— for **e-Invoice and e-Way Bill**, which are separate products from GST
+returns. Tested, and the result reframes the blocker:
+
+```
+GET /ewaybillapi/v1.03/authenticate?email=&username=&password=
+  → {"irp":"NIC1","status_cd":"1","status_desc":"If authentication succeeds"}
+
+GET /ewaybillapi/v1.03/ewayapi/getgstindetails?GSTIN=…
+  → legal name, state code, taxpayer type REG, status ACT   ("EWAYBILL request succeeds")
+
+GET /ewaybillapi/v1.03/ewayapi/gethsndetailsbyhsncode?hsncode=1001
+  → "WHEAT AND MESLIN - Durum wheat"
+```
+
+**Authentication here is username + password, with no taxpayer OTP at all.**
+That is a fundamentally cheaper integration than GST returns, and it means the
+credential chain, the network path and the account are all sound — what fails
+on GST returns fails for a reason specific to GST returns.
+
+Three corrections this produced, each of which would have cost an afternoon:
+
+- The base URL is `apisandbox.whitebooks.in`, **not** `…/eway` — the latter
+  answers `No API configured for :/eway/ewaybillapi/…`. The credentials note's
+  per-product base URLs are wrong for this product too.
+- The e-Invoice/e-Way Bill GSTINs are **different subjects** from the GST-returns
+  ones (`33AAGCB1286Q003` against `33AAGCB1286Q1ZB`). Using one set for the
+  other product returns the same `AUTH4037`, tested both ways, which is easy to
+  misread as "the credentials are broken".
+- **The API requires the password as a URL query parameter.** That is the
+  provider's design, not a choice available to a caller, and it is worth
+  recording: query strings land in access logs, proxy logs and browser history.
+  A production deployment should treat any host that sees these URLs as holding
+  the credential.
+
+**What this does not do is unblock GSTR-2B.** e-Way Bill movement documents are
+not input-tax-credit evidence, and the reconciliation this pack performs needs
+the return. But it does mean a live GSP integration can be demonstrated today,
+and it narrows `AUTH4037` to the GST-returns product specifically — consistent
+with that product's card reading `Subscription: Not Started` while its sandbox
+credentials read `Enabled`.
+
+**e-Invoice is the one worth testing next**, because IRN data *is*
+invoice-level and could serve as a third evidence source beside the purchase
+register and GSTR-2B.
+
 ## 7. What is still unknown
 
 **Whether the sandbox returns realistic invoice-level `docdata.b2b` at all.**
