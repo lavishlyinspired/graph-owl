@@ -1,2 +1,0 @@
-[console_scripts]
-graph-owl-load-pack = graph_owl_packs.cli:main
