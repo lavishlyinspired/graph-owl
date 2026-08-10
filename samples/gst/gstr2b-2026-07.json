@@ -1,0 +1,108 @@
+{
+  "data": {
+    "data": {
+      "docdata": {
+        "b2b": [
+          {
+            "ctin": "27AABCU9603R1ZM",
+            "trdnm": "Umbrella Supplies Pvt Ltd",
+            "supprd": "072026",
+            "inv": [
+              {
+                "inum": "INV-1001",
+                "dt": "04-07-2026",
+                "txval": 100000.0,
+                "igst": 18000.0,
+                "cgst": 0,
+                "sgst": 0,
+                "cess": 0,
+                "itcavl": "Y",
+                "rev": "N",
+                "typ": "R",
+                "pos": "27"
+              },
+              {
+                "inum": "INV-1002",
+                "dt": "09-07-2026",
+                "txval": 95000.0,
+                "igst": 17100.0,
+                "cgst": 0,
+                "sgst": 0,
+                "cess": 0,
+                "itcavl": "Y",
+                "rev": "N",
+                "typ": "R",
+                "pos": "27"
+              },
+              {
+                "inum": "INV-1004",
+                "dt": "22-07-2026",
+                "txval": 50000.0,
+                "igst": 9000.0,
+                "cgst": 0,
+                "sgst": 0,
+                "cess": 0,
+                "itcavl": "Y",
+                "rev": "N",
+                "typ": "R",
+                "pos": "27"
+              },
+              {
+                "inum": "INV-1005",
+                "dt": "24-07-2026",
+                "txval": 40000.0,
+                "igst": 0,
+                "cgst": 3600.0,
+                "sgst": 3600.0,
+                "cess": 0,
+                "itcavl": "N",
+                "rev": "N",
+                "typ": "R",
+                "pos": "27"
+              },
+              {
+                "inum": "INV-1006",
+                "dt": "26-07-2026",
+                "txval": 60000.0,
+                "igst": 10800.0,
+                "cgst": 0,
+                "sgst": 0,
+                "cess": 0,
+                "itcavl": "Y",
+                "rev": "R",
+                "typ": "R",
+                "pos": "27"
+              },
+              {
+                "inum": "INV-2001",
+                "dt": "10-07-2020",
+                "txval": 95000.0,
+                "igst": 17100.0,
+                "cgst": 0,
+                "sgst": 0,
+                "cess": 0,
+                "itcavl": "Y",
+                "rev": "N",
+                "typ": "R",
+                "pos": "27"
+              },
+              {
+                "inum": "INV-2002",
+                "dt": "12-07-2020",
+                "txval": 80000.0,
+                "igst": 14400.0,
+                "cgst": 0,
+                "sgst": 0,
+                "cess": 0,
+                "itcavl": "Y",
+                "rev": "N",
+                "typ": "R",
+                "pos": "27"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

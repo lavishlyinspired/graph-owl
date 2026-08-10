@@ -244,6 +244,20 @@ if [ "${GST}" = true ]; then
     GST_TOKEN="${OIDC_ACCESS_TOKEN}"
   fi
 
+  # **Refuse early rather than 401 into a traceback.** When OIDC or --secure is
+  # active the pack load needs a bearer token; without one every call returns
+  # 401 and the JSON parse downstream fails with "Expecting value: line 1
+  # column 1", which points at Python rather than at the missing token.
+  if [ "${SECURE}" = false ] && [ "${OIDC_MODE}" = true ] && [ -z "${GST_TOKEN}" ]; then
+    printf "\n\033[1;31m✗ %s\033[0m\n" "Cannot load the GST pack: OIDC is active but no token was obtained"
+    echo "  The pack loader writes namespaces and predicates, which need a bearer token."
+    echo
+    echo "  Either set OIDC_CLIENT_ID/OIDC_CLIENT_SECRET in .env so the demo can fetch one,"
+    echo "  or run the demo without OIDC:"
+    echo "      OIDC_ISSUER= OIDC_AUDIENCE= ./scripts/demo.sh --gst"
+    exit 1
+  fi
+
   # Fixture mode is the *normal* path, not a degraded one. A live GSTR-2B
   # fetch needs a GSP account and credentials nobody has by default, and a
   # demo that cannot run without them is a demo nobody runs. Say so plainly
@@ -255,19 +269,23 @@ if [ "${GST}" = true ]; then
     echo "  (set GST_LIVE_SOURCE to point the connector at a real return)"
   fi
 
-  PYTHONPATH="${ROOT}/connectors/python" python3 -m graph_owl_packs.cli \
-    "${ROOT}/packs/gst" --server "http://localhost:${APP_PORT}" \
-    ${GST_TOKEN:+--token "${GST_TOKEN}"} \
-    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("  namespace", d["namespaceCode"], "·", d["landed"], "subjects ·", len(d["rejected"]), "rejected")'
+  if ! _loaded=$(PYTHONPATH="${ROOT}/connectors/python" python3 -m graph_owl_packs.cli \
+      "${ROOT}/packs/gst" --server "http://localhost:${APP_PORT}" \
+      ${GST_TOKEN:+--token "${GST_TOKEN}"}); then
+    die "the GST pack failed to load — see the error above"
+  fi
+  echo "${_loaded}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("  namespace", d["namespaceCode"], "·", d["landed"], "subjects ·", len(d["rejected"]), "rejected")'
 
   say "Running the reconciliation"
-  PYTHONPATH="${ROOT}/connectors/python" python3 -c '
+  if ! _ran=$(PYTHONPATH="${ROOT}/connectors/python" python3 -c '
 import sys
 from graph_owl_packs.cli import reconcile_main
 sys.exit(reconcile_main(sys.argv[1:]))' \
-    "${ROOT}/packs/gst" --server "http://localhost:${APP_PORT}" \
-    ${GST_TOKEN:+--token "${GST_TOKEN}"} \
-    | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ", d["rulesEvaluated"], "rules ·", d["opened"], "findings opened ·", d["alreadyOpen"], "already open")'
+      "${ROOT}/packs/gst" --server "http://localhost:${APP_PORT}" \
+      ${GST_TOKEN:+--token "${GST_TOKEN}"}); then
+    die "the reconciliation failed — see the error above"
+  fi
+  echo "${_ran}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ", d["rulesEvaluated"], "rules ·", d["opened"], "findings opened ·", d["alreadyOpen"], "already open")'
 
   echo
   echo "  Review them at http://localhost:${APP_PORT}/?section=review&kind=findings"
