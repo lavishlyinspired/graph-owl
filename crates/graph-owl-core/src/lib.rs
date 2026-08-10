@@ -42,6 +42,7 @@ pub mod entity_families;
 pub mod envelope;
 pub mod extraction;
 pub mod extraction_run;
+pub mod finding;
 pub mod flake;
 pub mod fqn;
 pub mod glossary;

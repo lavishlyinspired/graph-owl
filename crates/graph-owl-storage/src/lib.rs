@@ -4546,3 +4546,62 @@ pub struct DiscardedClaimRecord {
     pub confidence: f64,
     pub reason: String,
 }
+
+/// Findings — Epic 105 P5, the platform plan's §6.
+///
+/// **A separate trait rather than more methods on [`Storage`], for the same
+/// reason `TraversalEngine` is separate from `TripleStore`: storing a catalog
+/// and recording what a rule concluded are different contracts.** `Storage` is
+/// already large, and every implementor — including the in-memory double —
+/// would have to grow for a capability most of them have no opinion about.
+#[async_trait]
+pub trait FindingStore: Send + Sync {
+    /// Record a finding, or leave an identical pending one alone.
+    ///
+    /// **Idempotent on `(pack, label, subject)` while pending.** A
+    /// reconciliation re-run over an unchanged corpus must not double the
+    /// queue while a reviewer is working in it. Returns whether a row was
+    /// created, so a caller can report "12 findings, 3 new" rather than a
+    /// count that means nothing on the second run.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn record_finding(
+        &self,
+        finding: &graph_owl_core::finding::Finding,
+    ) -> Result<bool, StorageError>;
+
+    /// Findings, newest first, optionally narrowed to one pack and status.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn list_findings(
+        &self,
+        pack: Option<&str>,
+        status: Option<graph_owl_core::finding::FindingStatus>,
+    ) -> Result<Vec<graph_owl_core::finding::Finding>, StorageError>;
+
+    /// Record a reviewer's decision.
+    ///
+    /// `reason` is required when rejecting — the same rule Epic 17's merge
+    /// queue enforces, so the next run can tell "considered and dismissed"
+    /// from "not yet seen".
+    ///
+    /// Returns `false` when no such finding exists — `StorageError` has no
+    /// `NotFound` variant, and this crate's convention is to distinguish
+    /// "absent" by return value rather than by error (see [`UpdateOutcome`]).
+    /// A missing finding is a stale console tab, not a backend fault.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn decide_finding(
+        &self,
+        id: Uuid,
+        status: graph_owl_core::finding::FindingStatus,
+        decided_by: &str,
+        reason: Option<&str>,
+    ) -> Result<bool, StorageError>;
+}
