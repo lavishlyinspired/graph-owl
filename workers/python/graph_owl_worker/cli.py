@@ -16,6 +16,7 @@ from pathlib import Path
 
 from graph_owl_sdk import GraphOwlClient, GraphOwlError
 
+from .ocr import DEFAULT_DPI, DEFAULT_ENDPOINT, DEFAULT_MODEL
 from .parsers import ParserRegistry
 from .worker import Worker, catalog_subjects
 
@@ -48,6 +49,33 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="enable the PDF parser (needs the `pdf` extra installed)",
     )
+    parser.add_argument(
+        "--ocr",
+        action="store_true",
+        help="enable the OCR parser for images (needs the `ovis-ocr2` extra installed)",
+    )
+    parser.add_argument(
+        "--ocr-endpoint",
+        default=os.environ.get("GRAPH_OWL_OCR_ENDPOINT", DEFAULT_ENDPOINT),
+        help="OCR endpoint base URL (env: GRAPH_OWL_OCR_ENDPOINT)",
+    )
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("GRAPH_OWL_OCR_MODEL", DEFAULT_MODEL),
+        help="OCR model name sent to the endpoint (env: GRAPH_OWL_OCR_MODEL)",
+    )
+    parser.add_argument(
+        "--prompt-file",
+        type=Path,
+        default=None,
+        help="a text file whose contents replace the default OCR prompt",
+    )
+    parser.add_argument(
+        "--ocr-dpi",
+        type=int,
+        default=DEFAULT_DPI,
+        help="render resolution for scanned-PDF rasterization (default: %(default)s)",
+    )
     return parser
 
 
@@ -64,6 +92,36 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             registry.register(PdfParser())
+        except UnsupportedMediaType as missing:
+            print(str(missing), file=sys.stderr)
+            return EXIT_UNUSABLE
+
+    if args.ocr:
+        # Same deferred-construction discipline as --pdf above: a worker not
+        # asked for OCR never imports Pillow, and one asked for it without the
+        # extra installed is told exactly that rather than failing on the
+        # first image it meets.
+        from .ocr import OCR_PROMPT, EndpointOcrModel, OcrPdfParser, OvisOcrParser
+        from .parsers import UnsupportedMediaType
+
+        prompt = OCR_PROMPT
+        if args.prompt_file is not None:
+            try:
+                prompt = args.prompt_file.read_text(encoding="utf-8")
+            except OSError as unreadable:
+                print(
+                    f"could not read --prompt-file {args.prompt_file}: {unreadable}",
+                    file=sys.stderr,
+                )
+                return EXIT_UNUSABLE
+
+        model = EndpointOcrModel(endpoint=args.ocr_endpoint, model=args.model, prompt=prompt)
+        try:
+            registry.register(OvisOcrParser(model))
+            # Registered after --pdf's PdfParser above, and register() prepends
+            # — so a scanned PDF (no text layer for PdfParser to find) is OCR'd
+            # instead of silently extracting nothing.
+            registry.register(OcrPdfParser(model, dpi=args.ocr_dpi))
         except UnsupportedMediaType as missing:
             print(str(missing), file=sys.stderr)
             return EXIT_UNUSABLE

@@ -6,6 +6,7 @@ graph-owl, not here.
 """
 
 from .extract import MENTION_CONFIDENCE, ClaimExtractor, MentionExtractor, sentences
+from .ocr import EndpointOcrModel, OcrError, OcrModel, OcrPdfParser, OvisOcrParser
 from .parsers import (
     DocumentParser,
     ParseError,
@@ -22,7 +23,12 @@ __all__ = [
     "ClaimExtractor",
     "DocumentOutcome",
     "DocumentParser",
+    "EndpointOcrModel",
     "MentionExtractor",
+    "OcrError",
+    "OcrModel",
+    "OcrPdfParser",
+    "OvisOcrParser",
     "ParseError",
     "ParserRegistry",
     "PdfParser",

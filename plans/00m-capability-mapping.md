@@ -8,8 +8,8 @@
 
 | Status | Count | % |
 |--------|-------|---|
-| **COVERED** | 78 | 71% |
-| **PARTIALLY COVERED** | 16 | 15% |
+| **COVERED** | 79 | 72% |
+| **PARTIALLY COVERED** | 15 | 14% |
 | **NOT COVERED** | 16 | 15% |
 
 ---
@@ -21,7 +21,7 @@
 | 1 | Document Connectors | ✅ COVERED | Epic 15, 21 | `15-connectors.md`, `21-document-ingestion.md` |
 | 2 | File Format Parsers | 🟡 PARTIAL | Epic 15, 16, 21 | Markdown/PDF/CSV/JSONL/Parquet via adapters; no general-purpose parser library |
 | 3 | Web Crawling & Scraping | ❌ NOT COVERED | — | Out of scope (metadata-at-rest system) |
-| 4 | OCR & Layout Analysis | 🟡 PARTIAL | Epic 21 | Optional adapters behind `DocumentParser` port (cloud OCR, CLI adapter) |
+| 4 | OCR & Layout Analysis | ✅ COVERED | Epic 21 | `OvisOcrParser`/`OcrPdfParser` behind the `OcrModel` port, `--ocr` flag — `plans/21b-ovis-ocr2-document-parser.md` (10 August 2026) |
 | 5 | Information Extraction | ✅ COVERED | Epic 21 | `ClaimExtractor` port: entities, relationships, confidence, text spans |
 | 6 | Entity Recognition (NER) | 🟡 PARTIAL | Epic 21 | Exists only within `ClaimExtractor`; domain-constrained, not general NER |
 | 7 | Entity Linking | ✅ COVERED | Epic 17, 21 | Mention resolution delegated to `graph-owl-resolution` |
@@ -221,12 +221,13 @@
 
 ---
 
-## All 16 PARTIALLY COVERED items
+## All 15 PARTIALLY COVERED items
+
+*(Was 16 as of 28 July 2026; OCR & Layout Analysis moved to COVERED on 10 August 2026 — see Category 1 above.)*
 
 | # | Capability | What exists | What's missing |
 |---|-----------|-------------|----------------|
 | 2 | File Format Parsers | Markdown, PDF, CSV, JSONL, Parquet via adapters | No general-purpose parser library |
-| 4 | OCR & Layout Analysis | Optional adapters (cloud OCR, CLI) | Not built-in; requires external tools |
 | 6 | Entity Recognition (NER) | Domain-constrained extraction via `ClaimExtractor` | No standalone/general NER engine |
 | 13 | Prefix Manager | Compile-time + runtime prefix registry | No standalone service or client negotiation API |
 | 22 | Cache Manager | Two bounded caches (shapes, authz) | No general-purpose cache framework |

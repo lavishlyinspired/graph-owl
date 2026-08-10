@@ -19,11 +19,13 @@ dependencies = ["graph-owl-sdk"]
 # handles text and markdown with nothing extra installed — decision 4's
 # "no Python runtime is required for core operation", applied one level down.
 pdf = ["pypdf>=4"]
-# Image decode for OCR parsing. The model itself is a network endpoint (the
-# `OcrModel` seam), so the extra carries only the byte→PIL.Image half — the
-# same "opt-in format" discipline as `pdf`. Slice 2 adds the PDF rasterizer
-# (`pypdfium2`) here.
-ovis-ocr2 = ["Pillow>=10"]
+# Image decode for OCR parsing, plus the PDF rasterizer for OcrPdfParser
+# (Slice 3). The model itself is a network endpoint (the `OcrModel` seam), so
+# this extra carries only the byte→PIL.Image halves — the same "opt-in
+# format" discipline as `pdf`. `pypdfium2` checked against
+# plans/00l-build-vs-adopt.md's licence/maintenance gate on 10 August 2026
+# (BSD-3-Clause/Apache-2.0, actively maintained) before adding.
+ovis-ocr2 = ["Pillow>=10", "pypdfium2>=4"]
 dev = ["pytest>=8"]
 
 [project.scripts]

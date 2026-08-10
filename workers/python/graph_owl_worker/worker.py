@@ -23,6 +23,10 @@ MEDIA_TYPES = {
     ".markdown": "markdown",
     ".txt": "text",
     ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
 }
 
 

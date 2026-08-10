@@ -55,7 +55,8 @@ What a worker must do:
 ## python
 
 `workers/python` — the reference worker. Handles markdown and plain text with no
-optional dependency installed; PDF behind the `pdf` extra.
+optional dependency installed; PDF behind the `pdf` extra; OCR (images and
+scanned PDFs) behind the `ovis-ocr2` extra.
 
 ```bash
 pip install -e sdk/python -e "workers/python[pdf]"
@@ -71,3 +72,37 @@ inside graph-owl's *surface* band, so every claim waits for a human. A name
 matched in prose is evidence, not proof. It exists to make the pipeline testable
 for correctness rather than plausibility; an LLM extractor replaces that one
 class and nothing else.
+
+### OCR (`--ocr`)
+
+Parses `image/png`, `image/jpeg`, `image/webp`, and scanned PDFs (no text
+layer, or `--ocr` set alongside `--pdf` — OCR wins `application/pdf` in that
+case) through a vision model, via the same `ParsedDocument` pipeline as every
+other parser. Behind the `ovis-ocr2` extra (`Pillow` + `pypdfium2`, the PDF
+rasterizer — see `plans/00l-build-vs-adopt.md` for the licence/maintenance
+check).
+
+```bash
+pip install -e sdk/python -e "workers/python[ovis-ocr2]"
+graph-owl-worker ./scans --server http://localhost:8080 \
+    --ocr --ocr-endpoint http://localhost:8000 --model ATH-MaaS/OvisOCR2
+```
+
+**The model is never in this process.** `--ocr-endpoint` points at a served,
+OpenAI-compatible chat-completions endpoint (vLLM `serve`, SGLang, or a
+GGUF/llama.cpp server) — the worker sends `POST {endpoint}/v1/chat/completions`
+per page, image as a base64 data URL, and never loads weights or needs a GPU
+itself. A deployment that never sets `--ocr` runs no model service at all,
+same as `--pdf` needing nothing beyond `pypdf`.
+
+Flags: `--ocr-endpoint` (default `http://localhost:8000`), `--model` (default
+`ATH-MaaS/OvisOCR2`), `--prompt-file` (override the built-in transcription
+prompt), `--ocr-dpi` (rasterization resolution for scanned PDFs, default
+`200`).
+
+Like every other parser here, OCR only replaces *parsing* — extraction stays
+the same deterministic, rule-based `MentionExtractor`, at the same `0.6`
+surface-band confidence, subject to the same review. `scripts/verify-ocr-worker.sh`
+proves the whole path (a real committed PNG, a real committed textless PDF, a
+real Postgres and a real `graph-owl-server`) with **no GPU and no real
+model** — the served endpoint is a scripted stdlib `http.server` double.

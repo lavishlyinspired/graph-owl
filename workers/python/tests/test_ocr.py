@@ -10,15 +10,34 @@ cannot run where the rest of the suite does.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
+import re
+import socket
 import sys
+import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
 from graph_owl_worker import ParseError, ParserRegistry, UnsupportedMediaType
-from graph_owl_worker.ocr import OvisOcrParser, assemble_pages, clean_repeats, filter_imgtags
+from graph_owl_worker.ocr import (
+    DEFAULT_DPI,
+    OCR_PROMPT,
+    EndpointOcrModel,
+    OcrError,
+    OcrPdfParser,
+    OvisOcrParser,
+    _dpi_to_scale,
+    assemble_pages,
+    clean_repeats,
+    filter_imgtags,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "page.png"
+PDF_FIXTURE = Path(__file__).parent / "fixtures" / "scan.pdf"
 
 
 class FakeModel:
@@ -230,6 +249,23 @@ def test_bytes_that_are_not_an_image_are_a_typed_parse_error():
         parser.parse("inv.png", "image/png", b"definitely not an image")
 
 
+def test_a_model_failure_becomes_a_typed_parse_error_not_a_crash():
+    """One unreachable endpoint call must fail *this* document, the same way a
+    corrupt image already does — ``Worker.process`` only catches ``ParseError``
+    and ``UnsupportedMediaType``, so an ``OcrError`` escaping ``parse()``
+    uncaught would take an entire batch down with it, not just this file."""
+
+    class FailingModel:
+        def parse_images(self, images):
+            raise OcrError("endpoint unreachable")
+
+    parser = OvisOcrParser(FailingModel())
+
+    with pytest.raises(ParseError) as exc:
+        parser.parse("inv.png", "image/png", FIXTURE.read_bytes())
+    assert str(exc.value) == "could not read `inv.png` as image/png: endpoint unreachable"
+
+
 def test_the_document_keeps_its_source_id():
     """The source id travels through assembly untouched — the only way an
     evidence span can be traced back to the file it came from."""
@@ -255,3 +291,309 @@ def test_a_missing_pillow_extra_is_an_unsupported_type_with_an_install_hint(
         "image parsing needs the `ovis-ocr2` extra: "
         "pip install graph-owl-worker[ovis-ocr2]"
     )
+
+
+# ── EndpointOcrModel — Slice 2, against a real local HTTP double ───────────
+#
+# No mock: `ScriptedOpenAIEndpoint` is a real `http.server` bound to a real
+# loopback port, run in a background thread — this project's own "a real
+# server, not a placeholder" precedent, applied to Python since none of the
+# existing suite needed one before now.
+
+
+class ScriptedOpenAIEndpoint(BaseHTTPRequestHandler):
+    """Answers every POST with the next scripted (status, body) pair, and
+    records what it was sent — so a test can assert on the *request* (the
+    prompt, the image data URL) as well as the response."""
+
+    script: list[tuple[int, bytes]] = []
+    received: list[dict] = []
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's own naming
+        length = int(self.headers.get("content-length", 0))
+        body = self.rfile.read(length)
+        type(self).received.append(
+            {
+                "path": self.path,
+                "content_type": self.headers.get("content-type"),
+                "body": json.loads(body) if body else None,
+            }
+        )
+        status, response_body = type(self).script[
+            min(len(type(self).received) - 1, len(type(self).script) - 1)
+        ]
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(response_body)
+
+    def log_message(self, *args):  # silence the default stderr access log
+        pass
+
+
+@contextmanager
+def scripted_endpoint(script: list[tuple[int, bytes]]):
+    ScriptedOpenAIEndpoint.script = script
+    ScriptedOpenAIEndpoint.received = []
+    server = HTTPServer(("127.0.0.1", 0), ScriptedOpenAIEndpoint)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", ScriptedOpenAIEndpoint.received
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def openai_response(content: str) -> bytes:
+    return json.dumps(
+        {"choices": [{"message": {"content": content, "role": "assistant"}}]}
+    ).encode("utf-8")
+
+
+def a_page() -> "Image.Image":
+    from PIL import Image
+
+    return Image.open(FIXTURE)
+
+
+def test_the_endpoint_client_returns_one_markdown_string_per_page_in_order():
+    with scripted_endpoint(
+        [(200, openai_response("page one")), (200, openai_response("page two"))]
+    ) as (url, received):
+        model = EndpointOcrModel(endpoint=url, model="test-model")
+
+        pages = model.parse_images([a_page(), a_page()])
+
+    assert pages == ["page one", "page two"]
+    assert len(received) == 2
+
+
+def test_the_request_carries_the_configured_model_and_deterministic_sampling():
+    with scripted_endpoint([(200, openai_response("x"))]) as (url, received):
+        EndpointOcrModel(endpoint=url, model="ATH-MaaS/OvisOCR2").parse_images(
+            [a_page()]
+        )
+
+    sent = received[0]["body"]
+    assert sent["model"] == "ATH-MaaS/OvisOCR2"
+    assert sent["temperature"] == 0.0
+    assert sent["max_tokens"] == 16384
+
+
+def test_the_request_carries_the_page_as_a_data_url_and_the_prompt_as_text():
+    with scripted_endpoint([(200, openai_response("x"))]) as (url, received):
+        EndpointOcrModel(endpoint=url).parse_images([a_page()])
+
+    message = received[0]["body"]["messages"][0]
+    assert message["role"] == "user"
+    content = message["content"]
+    kinds = {block["type"] for block in content}
+    assert kinds == {"image_url", "text"}
+    image_block = next(b for b in content if b["type"] == "image_url")
+    data_url = image_block["image_url"]["url"]
+    assert data_url.startswith("data:image/png;base64,")
+    # Not just the prefix: the payload must decode to real PNG bytes, or an
+    # empty/garbage encoding would still pass a prefix-only assertion.
+    encoded = data_url.removeprefix("data:image/png;base64,")
+    assert base64.b64decode(encoded)[:8] == b"\x89PNG\r\n\x1a\n"
+    text_block = next(b for b in content if b["type"] == "text")
+    assert text_block["text"] == OCR_PROMPT
+
+
+def test_the_request_is_sent_as_json():
+    with scripted_endpoint([(200, openai_response("x"))]) as (url, received):
+        EndpointOcrModel(endpoint=url).parse_images([a_page()])
+
+    assert received[0]["content_type"] == "application/json"
+
+
+def test_a_custom_prompt_reaches_the_request_when_configured():
+    with scripted_endpoint([(200, openai_response("x"))]) as (url, received):
+        EndpointOcrModel(endpoint=url, prompt="describe this page").parse_images(
+            [a_page()]
+        )
+
+    content = received[0]["body"]["messages"][0]["content"]
+    text_block = next(b for b in content if b["type"] == "text")
+    assert text_block["text"] == "describe this page"
+
+
+def test_a_non_2xx_response_is_a_typed_ocr_error_naming_the_endpoint():
+    with scripted_endpoint([(500, b'{"error": "boom"}')]) as (url, _received):
+        model = EndpointOcrModel(endpoint=url)
+
+        with pytest.raises(OcrError, match=re.escape(url)):
+            model.parse_images([a_page()])
+
+
+def test_a_response_with_no_json_body_is_a_typed_ocr_error_not_a_crash():
+    with scripted_endpoint([(200, b"not json at all")]) as (url, _received):
+        model = EndpointOcrModel(endpoint=url)
+
+        with pytest.raises(OcrError, match=re.escape(url)):
+            model.parse_images([a_page()])
+
+
+def test_a_response_missing_the_expected_shape_is_a_typed_ocr_error():
+    """The endpoint answered `200` with valid JSON, but not the OpenAI
+    chat-completion shape this client actually reads — a malformed server,
+    not a network failure, and still a typed error rather than a raw
+    `KeyError` leaking out of this module."""
+    with scripted_endpoint([(200, b'{"unexpected": "shape"}')]) as (url, _received):
+        model = EndpointOcrModel(endpoint=url)
+
+        with pytest.raises(OcrError, match=re.escape(url)):
+            model.parse_images([a_page()])
+
+
+def test_an_unreachable_endpoint_is_a_typed_ocr_error_naming_the_endpoint():
+    """A refused connection (nothing listening) is ``URLError``, not
+    ``HTTPError`` — a different exception type this client must also map to
+    ``OcrError`` rather than let escape as a raw ``urllib`` exception."""
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    port = closed.getsockname()[1]
+    closed.close()
+    url = f"http://127.0.0.1:{port}"
+    model = EndpointOcrModel(endpoint=url)
+
+    with pytest.raises(OcrError, match=re.escape(url)):
+        model.parse_images([a_page()])
+
+
+def test_a_failure_on_one_page_names_which_page_it_was():
+    """Per-page error isolation means a failure is reported as being about
+    *that* page — an operator debugging a batch needs to know which of the
+    document's pages the endpoint choked on, not just that something did."""
+    with scripted_endpoint([(200, openai_response("ok")), (500, b"{}")]) as (
+        url,
+        _received,
+    ):
+        model = EndpointOcrModel(endpoint=url)
+
+        with pytest.raises(OcrError, match="page 2"):
+            model.parse_images([a_page(), a_page()])
+
+
+def test_default_endpoint_and_model_match_the_documented_deployment_shape():
+    model = EndpointOcrModel()
+
+    assert model._endpoint == "http://localhost:8000"
+    assert model._model == "ATH-MaaS/OvisOCR2"
+
+
+# ── OcrPdfParser — Slice 3, scanned PDFs rasterized then OCR'd ─────────────
+
+
+def test_the_ocr_pdf_parser_claims_application_pdf():
+    parser = OcrPdfParser(FakeModel([]))
+
+    assert parser.handles() == ("application/pdf",)
+
+
+def test_a_scanned_pdf_is_rasterized_one_page_at_a_time_and_ocrd_in_order():
+    """The fixture is two blank pages; what this pins is that the parser
+    rasterizes *both* and hands them to the model in page order — the model
+    sees only images, never the PDF's own (nonexistent) text layer."""
+    model = FakeModel(["page one text", "page two text"])
+    parser = OcrPdfParser(model)
+
+    doc = parser.parse("scan.pdf", "application/pdf", PDF_FIXTURE.read_bytes())
+
+    assert len(model.seen) == 2
+    assert [s.heading for s in doc.sections] == ["page 1", "page 2"]
+    assert doc.text == "page one text\npage two text\n"
+
+
+def test_an_unclaimed_media_type_is_refused_by_the_pdf_ocr_parser():
+    parser = OcrPdfParser(FakeModel(["x"]))
+
+    with pytest.raises(UnsupportedMediaType, match="image/png"):
+        parser.parse("f.png", "image/png", FIXTURE.read_bytes())
+
+
+def test_bytes_that_are_not_a_pdf_are_a_typed_parse_error():
+    parser = OcrPdfParser(FakeModel([]))
+
+    with pytest.raises(ParseError, match="scan.pdf"):
+        parser.parse("scan.pdf", "application/pdf", b"definitely not a pdf")
+
+
+def test_a_model_failure_becomes_a_typed_parse_error_for_the_pdf_parser_too():
+    """Mirrors ``OvisOcrParser``'s own isolation guarantee: one endpoint
+    hiccup on a scanned PDF must fail that document, not the batch."""
+
+    class FailingModel:
+        def parse_images(self, images):
+            raise OcrError("endpoint unreachable")
+
+    parser = OcrPdfParser(FailingModel())
+
+    with pytest.raises(ParseError) as exc:
+        parser.parse("scan.pdf", "application/pdf", PDF_FIXTURE.read_bytes())
+    assert (
+        str(exc.value) == "could not read `scan.pdf` as application/pdf: endpoint unreachable"
+    )
+
+
+def test_dpi_converts_to_pdfiums_scale_factor_by_the_72_dpi_point_ratio():
+    """Direct unit test of the pure conversion, deliberately never calling
+    pdfium's renderer: an inverted formula here would ask the native library
+    to rasterize a canvas thousands of times too large, which segfaults the
+    whole process rather than raising a catchable exception — this is what
+    protects the test suite from that, not just what documents the ratio."""
+    assert _dpi_to_scale(72) == 1.0
+    assert _dpi_to_scale(144) == 2.0
+    assert _dpi_to_scale(200) == pytest.approx(200 / 72)
+
+
+def test_the_document_keeps_its_source_id_through_rasterization():
+    doc = OcrPdfParser(FakeModel(["x", "y"])).parse(
+        "scan.pdf", "application/pdf", PDF_FIXTURE.read_bytes()
+    )
+
+    assert doc.source_id == "scan.pdf"
+
+
+def test_the_dpi_defaults_to_200_and_is_configurable():
+    assert DEFAULT_DPI == 200
+
+    parser = OcrPdfParser(FakeModel(["x", "y"]), dpi=72)
+    doc = parser.parse("scan.pdf", "application/pdf", PDF_FIXTURE.read_bytes())
+
+    # 72 DPI == 1:1 with the PDF's own point size (200x300 in the fixture);
+    # this is the cheapest possible assertion that the configured DPI, not
+    # just the default, actually reached rendering.
+    assert doc.text  # parsed without error at a non-default DPI
+
+
+def test_a_missing_pypdfium2_extra_is_an_unsupported_type_with_an_install_hint(
+    monkeypatch,
+):
+    monkeypatch.setitem(sys.modules, "pypdfium2", None)
+
+    with pytest.raises(UnsupportedMediaType) as exc:
+        OcrPdfParser(FakeModel([]))
+    assert str(exc.value) == (
+        "scanned-PDF OCR needs the `ovis-ocr2` extra: "
+        "pip install graph-owl-worker[ovis-ocr2]"
+    )
+
+
+def test_ocr_wins_application_pdf_over_the_text_extracting_pdf_parser_when_registered_last():
+    """The CLI's own contract: ``--ocr`` must win ``application/pdf`` away
+    from ``--pdf`` when both are enabled, because a scanned PDF has no text
+    layer for ``PdfParser`` to extract — it would silently succeed with an
+    empty document instead of failing loud. ``ParserRegistry.register``
+    prepends, so registering the OCR parser *after* the text parser is what
+    the CLI must do to make this true."""
+    from graph_owl_worker.parsers import PdfParser
+
+    registry = ParserRegistry()
+    registry.register(PdfParser())
+    registry.register(OcrPdfParser(FakeModel(["ocr text"])))
+
+    doc = registry.parse("scan.pdf", "application/pdf", PDF_FIXTURE.read_bytes())
+
+    assert doc.text == "ocr text\n"

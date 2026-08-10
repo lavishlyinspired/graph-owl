@@ -246,7 +246,7 @@ today both extractors emit only `description`.
 - **Coreference resolution within a document** → Epic 17 resolves mentions to entities; mention-to-mention chaining is a further step.
 - **Multilingual extraction** → single-language assumed.
 - **Table extraction from documents into entities** → the parser marks tables; turning a document table into catalog entities is a separate, riskier capability.
-- **Layout-model-based parsing** (vision models) → the port allows it; no adapter planned until accuracy on real documents justifies the dependency.
+- ~~**Layout-model-based parsing** (vision models) → the port allows it; no adapter planned until accuracy on real documents justifies the dependency.~~ **Crossed off, 10 August 2026.** OvisOCR2 (Apache-2.0, tops OmniDocBench v1.6) topping the accuracy bar this deferral named is the justification — built as `OvisOcrParser` + `OcrPdfParser` behind the `OcrModel` seam, an out-of-process served-endpoint client (`EndpointOcrModel`), gated by the `--ocr` flag and the `ovis-ocr2` extra. See `plans/21b-ovis-ocr2-document-parser.md`.
 
 ## Pre-PR quality gate
 

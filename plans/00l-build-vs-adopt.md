@@ -787,3 +787,27 @@ itself). The standard fix is the standard layout: `pyproject.toml` at
 `sdk/python/graph_owl_read_client/`, the actual package one level down at
 `sdk/python/graph_owl_read_client/src/graph_owl_read_client/`, and
 `[tool.setuptools.packages.find] where = ["src"]`.
+
+## `pypdfium2` — scanned-PDF rasterization for `OcrPdfParser` (Epic 21 follow-up, Slice 3)
+
+| Name | Licence | Newest version | Repository | Activity |
+|---|---|---|---|---|
+| `pypdfium2` | `BSD-3-Clause, Apache-2.0, dependency licenses` | 5.12.1 | github.com/pypdfium2-team/pypdfium2 | pushed 9 Aug 2026, 806 stars, not archived |
+
+Checked 10 August 2026. Both named licences are on the permissive
+allowlist; the third clause ("dependency licenses") refers to the bundled
+PDFium binary's own third-party components, which are the same Chromium
+`third_party` set PDFium always ships with — permissive throughout, not a
+copyleft dependency hiding behind the package's own licence field.
+Repository resolves and is active (pushed yesterday relative to this
+check). **Adopt** — this is exactly the "does it actually do the thing"
+case: `pypdfium2` renders a PDF page to a raster image via prebuilt
+PDFium bindings, which is what `OcrPdfParser` needs before handing a page
+to the vision-model seam `ocr.py` already built in Slice 1, and writing a
+PDF rasterizer from scratch is squarely the kind of already-solved,
+non-differentiating problem this document exists to keep off this
+project's plate. No spike: rasterization is not on a correctness or
+security path the way a parser or reasoner is — the property that matters
+is "produces a bitmap of the page," verified directly by the fixture PDF
+in `verify-ocr-worker.sh` (Slice 4), not by a multi-candidate corpus
+comparison.

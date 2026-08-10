@@ -62,4 +62,5 @@ __pycache__/
 /workers/python/*.egg-info/
 /workers/python/mutants/
 /workers/python/mutants.out
+/workers/python/.mutmut-cache
 .git/credentials

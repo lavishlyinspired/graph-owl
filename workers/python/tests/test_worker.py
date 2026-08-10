@@ -249,6 +249,19 @@ def test_an_unreadable_document_fails_that_document_not_the_run(tmp_path):
     assert [o.source_id for o in outcomes] == [str(good)]
 
 
+def test_image_extensions_route_to_the_media_types_the_ocr_parser_claims(tmp_path):
+    """The extension-to-media-type map decides whether a worker even attempts
+    a file; an image extension left out of it is silently skipped forever —
+    the same failure `.xyz` demonstrates above, just for a format that does
+    have a parser once `--ocr` is on."""
+    from graph_owl_worker.worker import MEDIA_TYPES
+
+    assert MEDIA_TYPES[".png"] == "image/png"
+    assert MEDIA_TYPES[".jpg"] == "image/jpeg"
+    assert MEDIA_TYPES[".jpeg"] == "image/jpeg"
+    assert MEDIA_TYPES[".webp"] == "image/webp"
+
+
 def test_an_unsupported_media_type_is_reported_as_a_failed_document(tmp_path):
     pdf = write(tmp_path, "scan.pdf", "%PDF-1.7 not really")
     client = RecordingClient()
