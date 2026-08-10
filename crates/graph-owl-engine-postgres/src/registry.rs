@@ -1,11 +1,18 @@
-//! The predicate registry, in Postgres.
+//! The predicate and namespace registries, in Postgres.
 //!
 //! Core predicates are seeded by migration rather than written at startup: a
 //! definition the application inserts is one an application bug can rewrite,
 //! and these are the predicates every stored flake already depends on.
+//!
+//! The namespace registry below is the sibling that lets a domain bring its
+//! own *vocabulary*, not just new predicates inside a vocabulary the binary
+//! already knew — see `plans/105-domain-neutrality.md`.
 
 use async_trait::async_trait;
-use graph_owl_engine::{PredicateDef, PredicateRegistry, RegistryError};
+use graph_owl_core::flake::namespace;
+use graph_owl_engine::{
+    NamespaceDef, NamespaceRegistry, PredicateDef, PredicateRegistry, RegistryError,
+};
 use sqlx::Row;
 
 use crate::PostgresTripleStore;
@@ -104,5 +111,111 @@ impl PredicateRegistry for PostgresTripleStore {
         .map_err(|e| RegistryError::Backend(e.to_string()))?;
 
         rows.iter().map(definition_from_row).collect()
+    }
+}
+
+fn namespace_from_row(row: &sqlx::postgres::PgRow) -> Result<NamespaceDef, RegistryError> {
+    let code: i32 = row.get("code");
+    Ok(NamespaceDef {
+        code: u16::try_from(code)
+            .map_err(|_| RegistryError::Backend(format!("namespace code {code} is outside u16")))?,
+        iri: row.get("iri"),
+        declared_by: row.get("declared_by"),
+    })
+}
+
+#[async_trait]
+impl NamespaceRegistry for PostgresTripleStore {
+    async fn declare(&self, definition: &NamespaceDef) -> Result<(), RegistryError> {
+        // Refused here rather than by the table's own CHECK, so the caller
+        // gets the reason ("that range belongs to the binary") instead of a
+        // constraint name. Reported as `CoreImmutable` because it is the same
+        // failure a core predicate redefinition is: flakes already written
+        // against `dsc:` or `rdf:` would not migrate, they would change
+        // meaning in place.
+        if definition.code < namespace::RUNTIME_START {
+            return Err(RegistryError::CoreImmutable {
+                namespace: definition.code,
+                name: definition.iri.clone(),
+            });
+        }
+
+        // Idempotent on an identical pair, because reloading a pack must be
+        // safe to repeat — a redeclaration that failed would make a restart a
+        // failure. Anything *else* sharing either half is a real conflict.
+        let existing = sqlx::query("SELECT code, iri, declared_by FROM namespaces WHERE code = $1")
+            .bind(i32::from(definition.code))
+            .fetch_optional(self.pool())
+            .await
+            .map_err(|e| RegistryError::Backend(e.to_string()))?;
+
+        if let Some(row) = existing.as_ref() {
+            let found = namespace_from_row(row)?;
+            return if found.iri == definition.iri {
+                Ok(())
+            } else {
+                Err(RegistryError::Duplicate {
+                    namespace: definition.code,
+                    name: found.iri,
+                })
+            };
+        }
+
+        let result =
+            sqlx::query("INSERT INTO namespaces (code, iri, declared_by) VALUES ($1, $2, $3)")
+                .bind(i32::from(definition.code))
+                .bind(&definition.iri)
+                .bind(&definition.declared_by)
+                .execute(self.pool())
+                .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            // Either a concurrent declarer took the code, or this IRI already
+            // has a different code — both are `Duplicate`, and both matter for
+            // the same reason: two codes for one IRI make resolution depend on
+            // load order.
+            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some(UNIQUE_VIOLATION) => {
+                Err(RegistryError::Duplicate {
+                    namespace: definition.code,
+                    name: definition.iri.clone(),
+                })
+            }
+            Err(e) => Err(RegistryError::Backend(e.to_string())),
+        }
+    }
+
+    async fn namespaces(&self) -> Result<Vec<NamespaceDef>, RegistryError> {
+        let rows = sqlx::query("SELECT code, iri, declared_by FROM namespaces ORDER BY code")
+            .fetch_all(self.pool())
+            .await
+            .map_err(|e| RegistryError::Backend(e.to_string()))?;
+
+        rows.iter().map(namespace_from_row).collect()
+    }
+
+    async fn next_code(&self) -> Result<u16, RegistryError> {
+        // `MAX + 1`, never "lowest gap". A code whose namespace was abandoned
+        // is still carried by every flake written while it was live, so
+        // reissuing it would silently repoint that history at a different
+        // vocabulary. Allocation is monotonic, exactly as `Sid`'s own doc
+        // comment already requires.
+        let row = sqlx::query("SELECT COALESCE(MAX(code), $1 - 1) + 1 AS next FROM namespaces")
+            .bind(i32::from(namespace::RUNTIME_START))
+            .fetch_one(self.pool())
+            .await
+            .map_err(|e| RegistryError::Backend(e.to_string()))?;
+
+        let next: i32 = row.get("next");
+        u16::try_from(next)
+            .ok()
+            .filter(|&c| c < namespace::NOT_FOUND)
+            .ok_or_else(|| {
+                RegistryError::Backend(format!(
+                    "the runtime namespace range is exhausted at {next}; \
+                     codes must stay below {}",
+                    namespace::NOT_FOUND
+                ))
+            })
     }
 }

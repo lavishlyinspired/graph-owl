@@ -321,6 +321,70 @@ pub trait PredicateRegistry: Send + Sync {
     async fn list(&self, namespace: Option<u16>) -> Result<Vec<PredicateDef>, RegistryError>;
 }
 
+/// A namespace a deployment declared, rather than one the binary ships.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceDef {
+    /// The stored half of a [`Sid`]. Always `>= namespace::RUNTIME_START`.
+    pub code: u16,
+    /// The IRI prefix the code stands for.
+    pub iri: String,
+    /// Which pack or operator declared it — provenance, not ownership. A
+    /// namespace outlives whatever introduced it, because its flakes stay
+    /// readable after that pack is removed.
+    pub declared_by: String,
+}
+
+/// Namespaces definable at runtime, so a domain can bring its own vocabulary
+/// without a release.
+///
+/// The sibling of [`PredicateRegistry`], and it closes that trait's own
+/// limitation: predicates were always runtime-definable, but only ever inside
+/// a namespace the binary already knew, because
+/// [`Sid::from_iri`](graph_owl_core::flake::Sid::from_iri) scans a fixed
+/// compile-time array. A vocabulary in any other namespace could not become a
+/// graph term at all — which is why three medical namespaces ended up as Rust
+/// constants in `graph-owl-core` rather than as rows.
+///
+/// **Declared, never inferred.** There is deliberately no "register whatever
+/// namespaces this document mentions" call: a malformed import would then mint
+/// namespaces silently, and a typo'd prefix would become a permanent code
+/// nobody chose.
+#[async_trait]
+pub trait NamespaceRegistry: Send + Sync {
+    /// Claim `code` for `iri`.
+    ///
+    /// Re-declaring an identical pair succeeds and changes nothing, because
+    /// reloading a pack must be safe to repeat.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::CoreImmutable`] if the code is below
+    /// `namespace::RUNTIME_START` — that range belongs to the binary, and the
+    /// same reasoning applies as to a core predicate: flakes already written
+    /// against it would not migrate, they would simply change meaning.
+    /// [`RegistryError::Duplicate`] if the code already means a different IRI,
+    /// or the IRI already has a different code.
+    async fn declare(&self, definition: &NamespaceDef) -> Result<(), RegistryError>;
+
+    /// Every declared namespace, for building a resolver at startup.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Backend`] if the query fails.
+    async fn namespaces(&self) -> Result<Vec<NamespaceDef>, RegistryError>;
+
+    /// The next free code at or above `namespace::RUNTIME_START`.
+    ///
+    /// Allocation is monotonic: a code, once assigned, is never handed out
+    /// again even if its namespace is later abandoned, because flakes carrying
+    /// it are still readable and would silently change meaning.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Backend`] if the query fails.
+    async fn next_code(&self) -> Result<u16, RegistryError>;
+}
+
 /// Rejects a flake whose subject, predicate, graph or reference object carries
 /// a namespace that was never set.
 ///

@@ -30,6 +30,7 @@
 
 pub mod archive;
 pub mod blocking;
+pub mod blocking_strategy;
 pub mod classification;
 pub mod collaboration;
 pub mod contract;
