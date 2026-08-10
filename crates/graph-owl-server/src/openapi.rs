@@ -256,6 +256,39 @@ const QUERY_PARAMS: &[(&str, &str, &[QueryParam])] = &[
     ("get", "/graph/export/jsonl", EXPORT_SCOPE_PARAMS),
     ("get", "/graph/export/json-graph", EXPORT_SCOPE_PARAMS),
     ("get", "/graph/export/preview", EXPORT_SCOPE_PARAMS),
+    (
+        "post",
+        "/graph/import/rdf",
+        &[
+            query_param(
+                "source",
+                true,
+                "string",
+                "Names the import graph this document lands in, and the unit a \
+                 later delete removes. 1–64 characters of letters, digits, `-` \
+                 or `_`",
+            ),
+            query_param(
+                "format",
+                true,
+                "string",
+                "turtle, jsonld, ntriples, or nquads",
+            ),
+            query_param(
+                "dryRun",
+                false,
+                "boolean",
+                "Parse, validate and check for duplicates, reporting what would \
+                 land without writing anything",
+            ),
+            query_param(
+                "base",
+                false,
+                "string",
+                "Base IRI for resolving relative IRIs in the document",
+            ),
+        ],
+    ),
 ];
 
 /// `?scope=`/`?asOf=` — shared by every export format and the preview
@@ -479,6 +512,15 @@ pub static ROUTES: &[Route] = &[
         "Count what an export would contain, without writing anything",
         None,
         Some("ExportPreview"),
+        200,
+        true,
+    ),
+    route(
+        "post",
+        "/graph/import/rdf",
+        "Import an RDF document into a named import graph (admin only)",
+        None,
+        None,
         200,
         true,
     ),

@@ -100,6 +100,22 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done and verified
 
 **Two real defects found while building it, both by the compiler and linter rather than by design.** `f64` is not `Eq`, and chasing that derive error surfaced that a **NaN or infinite bucket width passes every `<= 0.0` guard** (all NaN comparisons are false) while an infinite one divides every amount to zero — either way the entire corpus lands under one key, which is the single failure a blocking stage must never have. Separately, clippy flagged `as i64` on the bucket: it **saturates rather than failing**, so every amount past `i64::MAX` would collapse onto one key. Fixed by formatting the floored float instead of casting, which has no ceiling — and `+ 0.0` normalizes `-0.0`, without which `-0` and `0` are one bucket with two key strings (a *missed* match, and correspondingly harder to notice than a wrong one).
 
+### P0 — `POST /graph/import/rdf` (the platform plan's P0, unblocked by DN-1)
+
+- [x] **P0.1** The route, admin-gated, with `?source=`/`?format=`/`?dryRun=`/`?base=`
+- [x] **P0.2** `Class::Ingestion` admission entry — a pack load is exactly the burst that class sheds
+- [x] **P0.3** Committed OpenAPI contract regenerated (one path added, none removed) **with its query parameters** — Epic 36 finding 4 found the contract had no mechanism for documenting these at all, and a route a generated client cannot pass `source` to is a route it cannot call
+- [x] **P0.4** 9 integration tests: lands and names its subjects, re-import skips rather than duplicates, dry run writes nothing (proven by a real import *after* it still landing), unparsable body is a 400, every documented format accepted, non-admin refused as 404, a `source` that could forge a graph name refused, two sources land in their own graphs
+- [x] **P0.5** Mutation — **11 mutants, 0 missed** (10 caught, 1 unviable)
+
+**Three findings worth carrying.**
+
+- **`Catalog::import_rdf` was already complete and had no callers.** Parsing, SHACL validation before any write, per-subject transactionality, dedup, dry run — all shipped in Epic 9 Slice E, reachable from nothing. The only import path on the wire was the admin `/ontology-editor/save`, which edits *this catalog's own* ontology rather than landing a pack's. So P0 was a routing slice over a finished capability, exactly as the platform plan predicted, and the reason nothing could ship without it.
+- **The facade takes no principal**, unlike every other write method on `Catalog`. An import writes straight to a named graph, bypassing the asset-level authorization every other write path applies — so the admin gate has to live at the route, and if it did not exist this would be the one unauthenticated write in the system.
+- **A first version of the non-admin test asserted `404` and got `200`, which looked like a missing gate and was not.** `test_app` runs every caller as an admin; `authorization_fixture` + `asha` is the fixture every other admin-gate test in the crate already uses. Mixing both fixtures in one binary then exposed a latent fragility — `authorization_fixture` provisions `asha` with an *unasserted* HTTP call, so under parallelism the user is never created and the failure surfaces as an opaque foreign-key violation naming neither the call nor the reason. Serialised in `.config/nextest.toml` with that written down; the real fix (assert the provisioning call) belongs with whoever next touches `common/mod.rs`.
+
+**One refactor the route forced, and it was worth it.** `rdf_format_of` is now shared by import and export, so the two cannot drift into accepting different spellings — a document this server exported as `ntriples` and refused to import under the same word would be an absurd contract, and two independent `match`es is precisely how that happens. And `is_usable_import_source` was extracted as a free function so a unit test can reach it: the route around it is only reachable end-to-end, where a container-backed mutation run costs ~60s per mutant against ~0 for a pure predicate. The first attempt mutated the whole diff and **timed out after 10 minutes** — the same crate-placement argument `00e` makes, one level down.
+
 ### DN-3 — Hospitality proof-pack
 
 - [ ] **3.1** `packs/hospitality/` — own namespace, ontology, shapes, matching config, findings

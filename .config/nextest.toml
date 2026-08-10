@@ -47,6 +47,27 @@ test-group = 'containers'
 filter = 'binary(flake_roundtrip)'
 test-group = 'containers'
 
+# `graph_import` mixes both server fixtures in one binary — `test_app` for the
+# route's own behaviour and `authorization_fixture` for the admin gate, since
+# **`test_app` runs every caller as an admin** and cannot express "a non-admin
+# is refused" at all.
+#
+# Under parallelism that combination trips a latent fragility in
+# `authorization_fixture`: it provisions `asha` by making an unasserted
+# `GET /assets/stats` call and then grants a role by direct SQL. If that call
+# loses to contention the user is never created, and the failure surfaces
+# three statements later as an opaque foreign-key violation on `user_roles`
+# that names neither the call nor the reason. Verified both ways — 9/9 pass
+# serially, and the FK violation is reproducible in parallel.
+#
+# Serialised rather than papered over. The real fix is for the fixture to
+# assert its own provisioning call succeeded, so a future failure says what
+# actually went wrong; that belongs with whoever next touches `common/mod.rs`
+# rather than in a routing slice.
+[[profile.default.overrides]]
+filter = 'binary(graph_import)'
+test-group = 'containers'
+
 # The kill-and-restart test deliberately waits out a Kafka consumer-group
 # rebalance: dropping a consumer does not release its partitions until
 # `session.timeout.ms` (45s by default) expires, so its replacement can sit

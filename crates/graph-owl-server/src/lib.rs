@@ -84,6 +84,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/graph/export/jsonl", get(export_json_lines))
         .route("/graph/export/json-graph", get(export_json_graph))
         .route("/graph/export/rdf", get(export_rdf))
+        .route("/graph/import/rdf", post(import_rdf))
         .route("/graph/export/preview", get(export_preview))
         // Epic 42 Slice G: the text-first ontology editor. `preview` is the
         // fast, as-the-author-types path (parse only); `dry-run` is the
@@ -7954,6 +7955,119 @@ async fn export_preview(
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RdfImportQuery {
+    /// Names the import graph (`graph:import:{source}`) this document lands
+    /// in, and the unit [`Catalog::delete_import`] removes. Required, and
+    /// validated below — it is interpolated into a graph name.
+    source: String,
+    format: String,
+    dry_run: Option<bool>,
+    base: Option<String>,
+}
+
+/// Maps the four RDF format names this server accepts to their parser.
+///
+/// Shared by import and export so the two cannot drift into accepting
+/// different spellings — a document this server exported as `ntriples` and
+/// refused to import under the same word would be an absurd contract, and
+/// two independent `match`es is how that happens.
+fn rdf_format_of(name: &str) -> Result<graph_owl_rdf_io::RdfFormat, AppError> {
+    match name {
+        "turtle" => Ok(graph_owl_rdf_io::RdfFormat::Turtle),
+        "jsonld" => Ok(graph_owl_rdf_io::RdfFormat::JsonLd),
+        "ntriples" => Ok(graph_owl_rdf_io::RdfFormat::NTriples),
+        "nquads" => Ok(graph_owl_rdf_io::RdfFormat::NQuads),
+        other => Err(AppError::Validation(vec![FieldError::new(
+            "format",
+            FieldErrorCode::Value,
+            format!(
+                "`{other}` is not a supported RDF format — use turtle, jsonld, ntriples, \
+                 or nquads"
+            ),
+        )])),
+    }
+}
+
+/// Whether a `source` may name an import graph.
+///
+/// **The source is interpolated into a graph name** (`graph:import:{source}`),
+/// so it is validated before it can name one. A source containing `:` could
+/// address another import's graph — or `graph:shapes` — and land triples
+/// somewhere the caller never named and `delete_import` would never clean up.
+///
+/// An allowlist rather than a denylist of `:`, because the interesting
+/// failures here are the ones nobody enumerated; and 64 characters because a
+/// graph name is an identifier a human reads in a query, not a place to carry
+/// a payload.
+///
+/// A free function rather than inline in the handler so it is reachable from a
+/// unit test — the route around it is only reachable end-to-end, and a
+/// container-backed mutation run costs a minute per mutant where this costs
+/// none. `plans/00e` makes the same point about crate placement; this is the
+/// same argument one level down.
+fn is_usable_import_source(source: &str) -> bool {
+    !source.is_empty()
+        && source.len() <= 64
+        && source
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// **The route every domain pack is blocked on** — `plans/105-domain-neutrality.md`
+/// and the intelligence-platform plan's P0.
+///
+/// [`Catalog::import_rdf`] has been complete since Epic 9 Slice E — parsing,
+/// SHACL validation before anything is written, per-subject transactionality,
+/// dedup against the source's own import graph, dry run — and had **no
+/// callers**. The only import path that reached HTTP was the admin
+/// `/ontology-editor/save`, which exists to edit *this catalog's own*
+/// ontology, not to land a pack's vocabulary and data. So this is a routing
+/// slice over a finished capability.
+///
+/// **Admin-gated, and that decision lives here because it cannot live in the
+/// facade**: `import_rdf` takes no principal, unlike every other write method
+/// on `Catalog`. An import writes straight to a named graph, bypassing the
+/// asset-level authorization every other write path applies, so an ungated
+/// route would be the one unauthenticated write in the system. Refused as
+/// `404` rather than `403`, matching every other admin route — a `403`
+/// confirms the route exists to somebody probing for it.
+async fn import_rdf(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Query(query): Query<RdfImportQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<graph_owl_api::ImportOutcome>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+
+    let source = query.source.trim();
+    if !is_usable_import_source(source) {
+        return Err(AppError::Validation(vec![FieldError::new(
+            "source",
+            FieldErrorCode::Value,
+            "`source` names the import graph, so it must be 1–64 characters of \
+             letters, digits, `-` or `_` — anything else could address a graph \
+             this import does not own",
+        )]));
+    }
+
+    let format = rdf_format_of(&query.format)?;
+    Ok(Json(
+        catalog
+            .import_rdf(
+                source,
+                &body,
+                format,
+                query.base.as_deref(),
+                query.dry_run.unwrap_or(false),
+            )
+            .await?,
+    ))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RdfExportQuery {
     format: String,
     scope: Option<String>,
@@ -7972,24 +8086,21 @@ async fn export_rdf(
     Auth(principal): Auth,
     Query(query): Query<RdfExportQuery>,
 ) -> Result<axum::response::Response, AppError> {
-    let (format, content_type) = match query.format.as_str() {
-        "turtle" => (graph_owl_rdf_io::RdfFormat::Turtle, "text/turtle"),
-        "jsonld" => (graph_owl_rdf_io::RdfFormat::JsonLd, "application/ld+json"),
-        "ntriples" => (
-            graph_owl_rdf_io::RdfFormat::NTriples,
-            "application/n-triples",
-        ),
-        "nquads" => (graph_owl_rdf_io::RdfFormat::NQuads, "application/n-quads"),
-        other => {
-            return Err(AppError::Validation(vec![FieldError::new(
-                "format",
-                FieldErrorCode::Value,
-                format!(
-                    "`{other}` is not a supported RDF format — use turtle, jsonld, ntriples, \
-                     or nquads"
-                ),
-            )]));
-        }
+    // The format name is resolved by the shared mapper `import_rdf` also
+    // uses, so a document this server exported as `ntriples` can never be
+    // refused on import under the same word. The content type stays here,
+    // because only export has one.
+    let format = rdf_format_of(&query.format)?;
+    let content_type = match format {
+        graph_owl_rdf_io::RdfFormat::Turtle => "text/turtle",
+        graph_owl_rdf_io::RdfFormat::JsonLd => "application/ld+json",
+        graph_owl_rdf_io::RdfFormat::NTriples => "application/n-triples",
+        graph_owl_rdf_io::RdfFormat::NQuads => "application/n-quads",
+        // Unreachable: `rdf_format_of` returns only the four above. A
+        // catch-all rather than a panic because an unreachable arm that
+        // aborts the process is a worse failure than one that serves a
+        // generic content type.
+        _ => "application/octet-stream",
     };
     let as_of = resolve_export_as_of(&catalog, query.as_of.as_deref()).await?;
     let bytes = catalog
@@ -11885,5 +11996,48 @@ async fn mcp_endpoint(
     match graph_owl_mcp::jsonrpc::handle(&server, who, &request).await {
         Some(response) => (StatusCode::OK, Json(response)).into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod import_source_tests {
+    use super::is_usable_import_source;
+
+    #[test]
+    fn a_plain_identifier_is_usable() {
+        assert!(is_usable_import_source("gst"));
+        assert!(is_usable_import_source("pack-hospitality"));
+        assert!(is_usable_import_source("vendor_master_2026"));
+        assert!(is_usable_import_source("A1"));
+    }
+
+    #[test]
+    fn anything_that_could_address_another_graph_is_refused() {
+        // The whole point. `graph:import:{source}` is built by
+        // interpolation, so a `:` lets the caller name a graph they were
+        // never granted — `graph:shapes` above all, where a triple would
+        // change what every later import is validated against.
+        assert!(!is_usable_import_source("graph:shapes"));
+        assert!(!is_usable_import_source("with:colon"));
+        assert!(!is_usable_import_source("a/b"));
+        assert!(!is_usable_import_source("with space"));
+        assert!(!is_usable_import_source("dot.separated"));
+    }
+
+    #[test]
+    fn an_empty_source_is_refused() {
+        // `graph:import:` names a graph too — a shared one, which every
+        // caller who omitted the parameter would silently write into
+        // together.
+        assert!(!is_usable_import_source(""));
+    }
+
+    #[test]
+    fn the_length_boundary_is_inclusive_at_sixty_four() {
+        // Both sides, because a `<` where `<=` belongs rejects a legitimate
+        // 64-character source and nothing else — a bug nobody hits until
+        // somebody's naming convention is exactly that long.
+        assert!(is_usable_import_source(&"a".repeat(64)));
+        assert!(!is_usable_import_source(&"a".repeat(65)));
     }
 }

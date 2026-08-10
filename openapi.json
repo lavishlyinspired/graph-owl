@@ -6599,6 +6599,80 @@
         "summary": "Export the caller's authorized estate as RDF (turtle, jsonld, ntriples, or nquads)"
       }
     },
+    "/graph/import/rdf": {
+      "post": {
+        "operationId": "post_graph_import_rdf",
+        "parameters": [
+          {
+            "description": "Names the import graph this document lands in, and the unit a later delete removes. 1–64 characters of letters, digits, `-` or `_`",
+            "in": "query",
+            "name": "source",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "turtle, jsonld, ntriples, or nquads",
+            "in": "query",
+            "name": "format",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Parse, validate and check for duplicates, reporting what would land without writing anything",
+            "in": "query",
+            "name": "dryRun",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Base IRI for resolving relative IRIs in the document",
+            "in": "query",
+            "name": "base",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Import an RDF document into a named import graph (admin only)"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "At the concurrency limit for this path; refused rather than queued. `Retry-After` names the interval"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Import an RDF document into a named import graph (admin only)"
+      }
+    },
     "/graph/reconcile": {
       "post": {
         "operationId": "post_graph_reconcile",

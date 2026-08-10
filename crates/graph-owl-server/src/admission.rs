@@ -109,7 +109,14 @@ pub fn class_of(route: &str) -> Option<Class> {
         // deliberately absent, for the same reason the webhook polling
         // routes are — an operator must be able to register or inspect a
         // subscription while the server is shedding.
+        // `/graph/import/rdf` joins them (Epic 105 P0): it parses a whole
+        // document, validates every subject against the live shapes graph,
+        // and then holds a connection per accepted subject's write — the
+        // same shape as `/ingest/batch`, and the path a domain pack's entire
+        // ontology and fixture set arrives through. A pack load is precisely
+        // the burst this class exists to shed rather than queue.
         "/connectors/postgres/runs"
+        | "/graph/import/rdf"
         | "/graph/reconcile"
         | "/ingest/batch"
         | "/webhooks/receive/{path}"
@@ -550,6 +557,14 @@ mod tests {
                 Some(Class::Ingestion)
             );
             assert_eq!(class_of("/graph/reconcile"), Some(Class::Ingestion));
+            assert_eq!(class_of("/graph/import/rdf"), Some(Class::Ingestion));
+            assert_eq!(
+                class_of("/graph/export/rdf"),
+                None,
+                "export is a read and must not share the ingestion budget — the \
+                 two differ by one path segment, which is exactly how a pattern \
+                 that matched `/graph/` would go unnoticed"
+            );
         }
 
         /// Epic 18 Slice E: a webhook delivery holds a connection the same
