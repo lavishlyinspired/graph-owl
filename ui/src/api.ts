@@ -1266,6 +1266,18 @@ export const api = {
     query.set("offset", String(params.offset ?? 0));
     return request<{ data: DriftItem[]; total: number }>(`/drift?${query}`);
   },
+  /** Every vocabulary this deployment understands beyond the shipped set.
+   *  `declaredBy` carries `pack:<id>` for a pack-installed namespace, which is
+   *  how the console discovers which domain packs exist without a new route. */
+  namespaces: () => request<{ code: number; iri: string; declaredBy: string }[]>("/namespaces"),
+
+  /** Land an RDF document in a named import graph. Admin-gated server-side. */
+  importRdf: (source: string, turtle: string) =>
+    request<{ landed: number; skipped: number; rejected: { subject: string; reason: string }[] }>(
+      `/graph/import/rdf?source=${encodeURIComponent(source)}&format=turtle`,
+      { method: "POST", body: turtle, headers: { "content-type": "text/turtle" } },
+    ),
+
   findings: (params: { status?: string; pack?: string } = {}) => {
     const query = new URLSearchParams();
     if (params.status) query.set("status", params.status);
