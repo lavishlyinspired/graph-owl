@@ -254,6 +254,53 @@ data — is the correct behaviour rather than an obstacle to route around.
 So "try a different GSP" is answered: it changes the auth model, and it does not
 change the provisioning requirement.
 
+## 6c. How this is actually done in practice — and it is not the API
+
+Researched rather than assumed, because two providers blocking on the same
+capability suggested the premise was worth checking. The established
+reconciliation products support **two** acquisition paths, and the API is the
+*second* one:
+
+1. **The taxpayer downloads the GSTR-2B JSON from gst.gov.in and uploads it.**
+   This is the path every mainstream tool leads with — JSON and Excel import,
+   bulk multi-month consolidation, alongside the purchase register.
+2. **GSP API fetch**, which still requires the taxpayer to enable API access on
+   the portal for that application. It removes the manual step; it does not
+   remove the consent.
+
+**This reframes the whole blocker.** Everything measured above is about
+path 2 — the *optimisation*. Path 1 needs no GSP, no OTP, no subscription and
+no provisioning, because the taxpayer has already authenticated to the portal
+as themselves and exported their own data. It is not a workaround or a
+degraded mode; it is what the market actually runs on.
+
+And graph-owl already implements it. `graph-owl-gstr2b --from-file` takes a
+saved response, and `normalize` finds `docdata` wherever the wrapper puts it —
+verified against all three real nestings, which produce **identical Turtle**:
+
+| Shape | Source |
+|---|---|
+| `data.data.docdata` | GSP API response |
+| `data.docdata` | portal JSON download |
+| `docdata` | bare |
+
+So the acquisition tiers, honestly ordered by what is available today:
+
+| Tier | Needs | Status |
+|---|---|---|
+| **Portal JSON upload** | the taxpayer, once a month | **works now, no dependency** |
+| GSP API fetch | portal API access + a provisioned subscription | blocked, tickets open |
+| e-Invoice / e-Way Bill | api credentials only, no OTP | authenticates, invoice-level data available |
+
+**The product is not blocked.** A CA with a downloaded GSTR-2B JSON and a
+purchase register can run the full six-rule reconciliation today. What the API
+would add is removing one manual download a month — real convenience, and worth
+having, but not on the critical path to a working reconciliation.
+
+That is worth stating plainly because the last several days of investigation
+could easily read as "the integration does not work". The integration that
+matters works; the one that is blocked is a scheduling convenience.
+
 ## 7. What is still unknown
 
 **Whether the sandbox returns realistic invoice-level `docdata.b2b` at all.**
