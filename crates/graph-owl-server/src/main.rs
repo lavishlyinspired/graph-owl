@@ -108,7 +108,8 @@ async fn main() {
     let storage: Arc<dyn Storage> = Arc::new(storage);
     let mut catalog = Catalog::new(storage.clone())
         .with_graph(graph.clone())
-        .with_traversal(graph)
+        .with_traversal(graph.clone())
+        .with_namespaces(graph)
         .with_federation_endpoints(federation_endpoints)
         .with_federation_timeout(federation_timeout)
         // Enqueues a delivery row per matching subscription; the sender

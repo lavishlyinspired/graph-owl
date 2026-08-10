@@ -43,7 +43,11 @@ use graph_owl_core::{
     page::{Page, PageRequest},
     relationship_type::{EntityKind, RelationshipType, is_legal},
 };
-use graph_owl_engine::TripleStore;
+use graph_owl_engine::{NamespaceRegistry, TripleStore};
+// Re-exported so `graph-owl-server` can name the type its
+// `/namespaces` route returns without taking a direct dependency on
+// the engine port — the facade is what the server is meant to speak to.
+pub use graph_owl_engine::NamespaceDef;
 use graph_owl_events::{ChangeEvent, EventSink, EventSubject};
 use graph_owl_reasoning as reasoning;
 use graph_owl_resolution::bands::{ConfidenceBands, Decision, decide};
@@ -1167,6 +1171,13 @@ pub struct Catalog {
     /// are genuinely separate contracts — a backend could reasonably implement
     /// one and not the other.
     traversal: Option<Arc<dyn TraversalEngine>>,
+    /// The same backend seen through its namespace registry — Epic 105 DN-1.
+    ///
+    /// A third field for the same reason `traversal` is a second one:
+    /// declaring a vocabulary and storing flakes are separate contracts. It is
+    /// what lets a domain pack bring its own IRIs without a code change, and a
+    /// deployment that never installs a pack simply never populates it.
+    namespaces: Option<Arc<dyn NamespaceRegistry>>,
     /// Whether ingested query text is persisted — Epic 28 decision 2.
     ///
     /// **Off by default, and that is a data-protection decision rather than a
@@ -1284,6 +1295,7 @@ impl Catalog {
             storage,
             graph: None,
             traversal: None,
+            namespaces: None,
             events: None,
             decisions: Arc::new(DecisionCache::default()),
             shape_cache: Arc::new(Mutex::new(None)),
@@ -1410,6 +1422,104 @@ impl Catalog {
     pub fn with_traversal(mut self, traversal: Arc<dyn TraversalEngine>) -> Self {
         self.traversal = Some(traversal);
         self
+    }
+
+    /// The namespace registry a domain pack declares its vocabulary through —
+    /// Epic 105 DN-1.
+    #[must_use]
+    pub fn with_namespaces(mut self, namespaces: Arc<dyn NamespaceRegistry>) -> Self {
+        self.namespaces = Some(namespaces);
+        self
+    }
+
+    /// Declare a vocabulary IRI, returning the code it resolves to.
+    ///
+    /// **The caller names an IRI, never a code**, and that is the decision
+    /// that makes packs installable in any order. If a pack's manifest
+    /// carried a number, two packs installed on two deployments in different
+    /// orders would disagree about what `1024` means — and a `Sid` is stored
+    /// as a bare `(code, local)` pair, so that disagreement is unfixable
+    /// after the fact rather than a migration.
+    ///
+    /// **Idempotent by IRI**: declaring one already registered returns its
+    /// existing code rather than allocating a second, so re-installing a pack
+    /// is a no-op instead of an error. A pack is reloaded far more often than
+    /// it is first installed.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no namespace registry is configured. `Validation` if the
+    /// IRI is empty, or if the registry refuses the allocation — which at
+    /// this point means the runtime range is exhausted, since the caller
+    /// cannot choose a reserved code.
+    pub async fn declare_namespace(
+        &self,
+        iri: &str,
+        declared_by: &str,
+    ) -> Result<NamespaceDef, CatalogError> {
+        let registry = self.namespaces.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no namespace registry configured".to_string(),
+            ))
+        })?;
+
+        let iri = iri.trim();
+        if iri.is_empty() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "iri",
+                FieldErrorCode::Value,
+                "a namespace IRI must not be empty — an empty prefix matches \
+                 every IRI and would make resolution meaningless",
+            )]));
+        }
+
+        // Idempotence is checked here rather than left to the registry's own
+        // duplicate error, because "already declared" is the *success* case
+        // for a pack reload and reporting it as a conflict would make every
+        // second install fail.
+        let existing = registry
+            .namespaces()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        if let Some(found) = existing.iter().find(|n| n.iri == iri) {
+            return Ok(found.clone());
+        }
+
+        let code = registry
+            .next_code()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        let definition = NamespaceDef {
+            code,
+            iri: iri.to_string(),
+            declared_by: declared_by.to_string(),
+        };
+        registry.declare(&definition).await.map_err(|e| {
+            CatalogError::Validation(vec![FieldError::new(
+                "iri",
+                FieldErrorCode::Value,
+                e.to_string(),
+            )])
+        })?;
+        Ok(definition)
+    }
+
+    /// Every declared namespace, for building a resolver or showing an
+    /// operator what a pack brought.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no namespace registry is configured or the query fails.
+    pub async fn namespaces(&self) -> Result<Vec<NamespaceDef>, CatalogError> {
+        let registry = self.namespaces.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no namespace registry configured".to_string(),
+            ))
+        })?;
+        registry
+            .namespaces()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
     }
 
     /// The neighbourhood around an asset, as a graph.
@@ -37012,5 +37122,179 @@ mod alignment_confidence_and_confirmation_tests {
         assert_eq!(entry.source_detail.as_deref(), Some("embedding"));
         assert_eq!(entry.confidence, Some(0.62));
         assert_eq!(entry.lossy_reverse, Some(false));
+    }
+}
+
+#[cfg(test)]
+mod namespace_declaration_tests {
+    //! `Catalog::declare_namespace`'s own decisions — Epic 105 P0b.
+    //!
+    //! **These exist because a mutation run proved they had to.** The
+    //! idempotence check and the list were covered only by
+    //! `graph-owl-server/tests/namespaces.rs`, and `cargo mutants -p
+    //! graph-owl-api` runs *this* crate's tests — it never sees the server's
+    //! HTTP suite. So both survived, and the honest reading is not "`--lib`
+    //! blindness" but "this logic is unit-testable and was not unit-tested".
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use graph_owl_engine::{NamespaceDef, NamespaceRegistry, RegistryError};
+
+    use super::*;
+
+    /// The registry, in memory — enough to exercise every branch of
+    /// `declare_namespace` without a database.
+    #[derive(Default)]
+    struct FakeRegistry {
+        declared: Mutex<Vec<NamespaceDef>>,
+    }
+
+    #[async_trait]
+    impl NamespaceRegistry for FakeRegistry {
+        async fn declare(&self, definition: &NamespaceDef) -> Result<(), RegistryError> {
+            self.declared
+                .lock()
+                .expect("not poisoned")
+                .push(definition.clone());
+            Ok(())
+        }
+
+        async fn namespaces(&self) -> Result<Vec<NamespaceDef>, RegistryError> {
+            Ok(self.declared.lock().expect("not poisoned").clone())
+        }
+
+        async fn next_code(&self) -> Result<u16, RegistryError> {
+            let declared = self.declared.lock().expect("not poisoned");
+            Ok(u16::try_from(declared.len()).unwrap_or(0)
+                + graph_owl_core::flake::namespace::RUNTIME_START)
+        }
+    }
+
+    fn catalog_with(registry: Arc<FakeRegistry>) -> Catalog {
+        Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_namespaces(registry)
+    }
+
+    const HOSP: &str = "https://example.org/ns/hospitality#";
+    const AUTO: &str = "https://example.org/ns/automotive#";
+
+    #[tokio::test]
+    async fn a_new_vocabulary_is_allocated_the_next_free_code() {
+        let catalog = catalog_with(Arc::new(FakeRegistry::default()));
+
+        let declared = catalog
+            .declare_namespace(HOSP, "pack:hospitality")
+            .await
+            .expect("a fresh IRI is free");
+
+        assert_eq!(
+            declared.code,
+            graph_owl_core::flake::namespace::RUNTIME_START
+        );
+        assert_eq!(declared.iri, HOSP);
+        assert_eq!(declared.declared_by, "pack:hospitality");
+    }
+
+    #[tokio::test]
+    async fn re_declaring_an_iri_returns_the_existing_code_and_writes_nothing() {
+        // The idempotence check itself. Inverted (`!=` for `==`), a repeat
+        // declaration would allocate a *second* code for one IRI — so the
+        // pack's own terms would resolve to two different `Sid`s depending on
+        // when they were written, which no later validation could untangle.
+        let registry = Arc::new(FakeRegistry::default());
+        let catalog = catalog_with(registry.clone());
+
+        let first = catalog
+            .declare_namespace(HOSP, "pack")
+            .await
+            .expect("first");
+        let second = catalog
+            .declare_namespace(HOSP, "somebody-else")
+            .await
+            .expect("second");
+
+        assert_eq!(first.code, second.code);
+        assert_eq!(
+            registry.declared.lock().expect("not poisoned").len(),
+            1,
+            "the second declaration must not have written a row"
+        );
+        assert_eq!(
+            second.declared_by, "pack",
+            "and the original provenance stands — the first declarer is who \
+             brought it, not whoever asked again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_vocabulary_gets_a_different_code() {
+        // The negative half of idempotence: a check that returned the
+        // existing entry for *every* IRI would pass the test above and make
+        // every vocabulary collapse onto one code.
+        let catalog = catalog_with(Arc::new(FakeRegistry::default()));
+
+        let hosp = catalog.declare_namespace(HOSP, "pack").await.expect("hosp");
+        let auto = catalog.declare_namespace(AUTO, "pack").await.expect("auto");
+
+        assert_ne!(hosp.code, auto.code);
+        assert_eq!(auto.iri, AUTO);
+    }
+
+    #[tokio::test]
+    async fn an_empty_or_whitespace_iri_is_refused() {
+        let catalog = catalog_with(Arc::new(FakeRegistry::default()));
+
+        for blank in ["", "   ", "\t"] {
+            assert!(
+                catalog.declare_namespace(blank, "pack").await.is_err(),
+                "`{blank:?}` must be refused — an empty prefix matches every IRI"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_iri_is_trimmed_before_it_is_stored() {
+        // A manifest with a trailing newline must not create a namespace
+        // whose IRI silently differs from the one every document uses.
+        let catalog = catalog_with(Arc::new(FakeRegistry::default()));
+
+        let declared = catalog
+            .declare_namespace(&format!("  {HOSP}\n"), "pack")
+            .await
+            .expect("declare");
+
+        assert_eq!(declared.iri, HOSP);
+    }
+
+    #[tokio::test]
+    async fn the_list_reports_what_was_declared() {
+        // `namespaces()` returning an empty vec survived a mutation run: the
+        // only assertion against it was on a *fresh* registry, where empty is
+        // also the right answer.
+        let catalog = catalog_with(Arc::new(FakeRegistry::default()));
+        catalog.declare_namespace(HOSP, "pack").await.expect("hosp");
+        catalog.declare_namespace(AUTO, "pack").await.expect("auto");
+
+        let listed = catalog.namespaces().await.expect("list");
+
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|n| n.iri == HOSP));
+        assert!(listed.iter().any(|n| n.iri == AUTO));
+    }
+
+    #[tokio::test]
+    async fn a_catalog_with_no_registry_says_so_rather_than_pretending() {
+        // A deployment without a graph engine has no namespace registry
+        // either. Reporting "none declared" would be a lie that reads as a
+        // working empty system.
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ));
+
+        assert!(catalog.namespaces().await.is_err());
+        assert!(catalog.declare_namespace(HOSP, "pack").await.is_err());
     }
 }

@@ -116,6 +116,26 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done and verified
 
 **One refactor the route forced, and it was worth it.** `rdf_format_of` is now shared by import and export, so the two cannot drift into accepting different spellings — a document this server exported as `ntriples` and refused to import under the same word would be an absurd contract, and two independent `match`es is precisely how that happens. And `is_usable_import_source` was extracted as a free function so a unit test can reach it: the route around it is only reachable end-to-end, where a container-backed mutation run costs ~60s per mutant against ~0 for a pure predicate. The first attempt mutated the whole diff and **timed out after 10 minutes** — the same crate-placement argument `00e` makes, one level down.
 
+### P0b — `POST /namespaces` (the route DN-1 was missing)
+
+DN-1 built a table, a port and an adapter, and **nothing exposed them** — the same shape `Catalog::import_rdf` was in before P0. A capability nothing can reach is not a capability.
+
+- [x] **P0b.1** `Catalog::declare_namespace` / `Catalog::namespaces`, behind a third optional field (`namespaces`) beside `graph` and `traversal` — the precedent the `Catalog` already sets, and for the same stated reason: declaring a vocabulary and storing flakes are genuinely separate contracts
+- [x] **P0b.2** `POST /namespaces` (admin) and `GET /namespaces` (not admin — a prefix list is the vocabulary this deployment understands, which anyone writing a query needs; it carries no data)
+- [x] **P0b.3** Wired into all three composition roots — `main.rs`, the stdio binary, and the test harness. A route whose registry is `None` returns a 500 saying so, which is a worse failure than not shipping it
+- [x] **P0b.4** 8 integration tests; contract regenerated (one path added, none removed)
+- [x] **P0b.5** Mutation — **5 mutants, 0 missed** (2 caught, 3 unviable), after a real gap the first run exposed
+
+**The mutation run found something the tests genuinely missed, and the first explanation was wrong.** Two mutants survived: the idempotence check (`==` → `!=`) and `namespaces()` → `Ok(vec![])`. The tempting reading was `--lib` blindness — this project already records that `--lib` cannot see integration-only coverage. **That reading was wrong here**: `cargo mutants -p graph-owl-api` runs *`graph-owl-api`'s own* tests and would never have seen `graph-owl-server/tests/namespaces.rs` with or without `--lib`. The logic is pure, unit-testable, and simply was not unit-tested. Fixed with an in-memory `NamespaceRegistry` double and 7 unit tests — including the negative that matters most (a check returning the existing entry for *every* IRI would pass an idempotence test and collapse every vocabulary onto one code) and the "no registry configured" case, where reporting "none declared" would be a lie that reads as a working empty system.
+
+**The general lesson: before blaming a survivor on `--lib`, check which crate's test suite the mutation run actually invokes.** A survivor in crate A covered only by crate B's tests is not a tooling artifact — it is uncovered logic.
+
+**The load-bearing design decision: the caller names an IRI and never a code.** A pack manifest carrying a number would make two deployments that installed packs in different orders disagree about what `1024` means — and a `Sid` is stored as a bare `(code, local)` pair, so that disagreement is unfixable after the fact rather than a migration. `deny_unknown_fields` makes the point enforceable: a caller who sends `{"code": 5}` believing it chose one is told it did not, rather than silently getting an allocated code and a false belief about what its manifest controls.
+
+**Idempotent by IRI, and that is the normal case rather than the edge one.** A pack is reloaded far more often than it is first installed, so re-declaring returns the existing code. A conflict would make every second `demo.sh` run fail; a second allocation would make the pack's own IRIs resolve to two different `Sid`s depending on when they were written. Returns `200`, not `201` — a `201` would claim creation on every reload.
+
+**Two compiler-found requirements worth recording.** `AppJson<T>` requires `T: ValidateBody`, not merely `DeserializeOwned` — the project's own body-validation contract, and the `Handler` trait bound fails opaquely without it (axum's `macros` feature is off, so `#[debug_handler]` is unavailable to diagnose it). And `graph-owl-server` has no direct dependency on `graph-owl-engine`, so `NamespaceDef` is re-exported through `graph-owl-api`: the facade is what the server is meant to speak to.
+
 ### DN-3 — Hospitality proof-pack
 
 - [ ] **3.1** `packs/hospitality/` — own namespace, ontology, shapes, matching config, findings

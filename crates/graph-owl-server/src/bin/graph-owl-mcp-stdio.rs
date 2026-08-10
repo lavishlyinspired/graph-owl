@@ -56,7 +56,8 @@ async fn main() {
     let storage: Arc<dyn Storage> = Arc::new(storage);
     let catalog = Catalog::new(storage)
         .with_graph(graph.clone())
-        .with_traversal(graph);
+        .with_traversal(graph.clone())
+        .with_namespaces(graph);
 
     // **Explicit, resolved once, and closed by default.** Unlike HTTP's
     // per-request `Auth` extractor, stdio has no header to carry a

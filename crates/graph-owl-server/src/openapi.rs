@@ -526,6 +526,25 @@ pub static ROUTES: &[Route] = &[
     ),
     route(
         "post",
+        "/namespaces",
+        "Declare a vocabulary IRI and get the namespace code it resolves to \
+         (admin only; idempotent by IRI)",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/namespaces",
+        "Every vocabulary this deployment understands beyond the shipped set",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "post",
         "/sparql",
         "Run a SPARQL query",
         None,

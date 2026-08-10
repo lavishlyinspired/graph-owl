@@ -65,7 +65,7 @@ test-group = 'containers'
 # actually went wrong; that belongs with whoever next touches `common/mod.rs`
 # rather than in a routing slice.
 [[profile.default.overrides]]
-filter = 'binary(graph_import)'
+filter = 'binary(graph_import) or binary(namespaces)'
 test-group = 'containers'
 
 # The kill-and-restart test deliberately waits out a Kafka consumer-group

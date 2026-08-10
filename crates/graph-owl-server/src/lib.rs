@@ -85,6 +85,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/graph/export/json-graph", get(export_json_graph))
         .route("/graph/export/rdf", get(export_rdf))
         .route("/graph/import/rdf", post(import_rdf))
+        .route("/namespaces", post(declare_namespace).get(list_namespaces))
         .route("/graph/export/preview", get(export_preview))
         // Epic 42 Slice G: the text-first ontology editor. `preview` is the
         // fast, as-the-author-types path (parse only); `dry-run` is the
@@ -7986,6 +7987,70 @@ fn rdf_format_of(name: &str) -> Result<graph_owl_rdf_io::RdfFormat, AppError> {
             ),
         )])),
     }
+}
+
+impl ValidateBody for DeclareNamespace {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        // Nothing structural to add: `deny_unknown_fields` catches a
+        // misspelled key, and the one semantic rule — a non-empty IRI — is
+        // `Catalog::declare_namespace`'s own refusal, checked there because
+        // the registry is what actually has to reject it whether the caller
+        // arrived over HTTP or not.
+        Vec::new()
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeclareNamespace {
+    /// The vocabulary IRI prefix. **The caller never names a code** — see
+    /// [`Catalog::declare_namespace`] for why a pack manifest carrying a
+    /// number would make two deployments disagree about what it means.
+    iri: String,
+    /// Which pack or operator is asking. Provenance, not ownership.
+    declared_by: Option<String>,
+}
+
+/// Declare a vocabulary a domain pack brings with it — Epic 105 DN-1.
+///
+/// This is what turns the namespace registry from a table into a capability:
+/// a pack POSTs its IRI, gets a code, and its own terms become real graph
+/// subjects and predicates. Before it existed the only way for a domain to
+/// have a vocabulary was adding a constant to `graph-owl-core`, which is the
+/// per-domain hardcoding `plans/105-domain-neutrality.md` was written to end.
+///
+/// Admin-gated for the same reason `/graph/import/rdf` is: a namespace is
+/// permanent. A code, once assigned, is never reissued — every flake written
+/// while it was live still carries it — so an unprivileged caller who could
+/// mint them could exhaust the range or litter it irreversibly.
+async fn declare_namespace(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<DeclareNamespace>,
+) -> Result<(StatusCode, Json<graph_owl_api::NamespaceDef>), AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let declared_by = payload.declared_by.unwrap_or_else(|| principal.id.clone());
+    let declared = catalog
+        .declare_namespace(&payload.iri, &declared_by)
+        .await?;
+    // `200`, not `201`: declaring is idempotent by IRI, so a re-install of the
+    // same pack returns the existing code and has created nothing. A `201`
+    // would claim otherwise on every reload.
+    Ok((StatusCode::OK, Json(declared)))
+}
+
+/// Every declared namespace.
+///
+/// Not admin-gated: a namespace list is the vocabulary this deployment
+/// understands, which any caller writing a query needs in order to know what
+/// prefixes resolve. It carries no data, only the prefixes themselves.
+async fn list_namespaces(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+) -> Result<Json<Vec<graph_owl_api::NamespaceDef>>, AppError> {
+    Ok(Json(catalog.namespaces().await?))
 }
 
 /// Whether a `source` may name an import graph.

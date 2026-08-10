@@ -322,7 +322,13 @@ pub trait PredicateRegistry: Send + Sync {
 }
 
 /// A namespace a deployment declared, rather than one the binary ships.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `camelCase` on the wire like every other type this project serializes.
+/// Per-field `rename` rather than `rename_all_fields`, matching the fix
+/// `CertificationStatus` already carries — utoipa 5's schema derive does not
+/// read `rename_all_fields`, so a type that ever gains `ToSchema` would ship a
+/// contract saying `declared_by` while the wire says `declaredBy`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NamespaceDef {
     /// The stored half of a [`Sid`]. Always `>= namespace::RUNTIME_START`.
     pub code: u16,
@@ -331,6 +337,7 @@ pub struct NamespaceDef {
     /// Which pack or operator declared it — provenance, not ownership. A
     /// namespace outlives whatever introduced it, because its flakes stay
     /// readable after that pack is removed.
+    #[serde(rename = "declaredBy")]
     pub declared_by: String,
 }
 

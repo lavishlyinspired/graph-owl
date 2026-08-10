@@ -249,7 +249,8 @@ async fn build_catalog(secret: Option<&str>) -> (TestDb, String, Catalog) {
     let graph = Arc::new(graph);
     let catalog = Catalog::new(Arc::new(storage))
         .with_graph(graph.clone())
-        .with_traversal(graph);
+        .with_traversal(graph.clone())
+        .with_namespaces(graph);
 
     (database, connection_string, catalog)
 }

@@ -7379,6 +7379,56 @@
         "summary": "Prometheus exposition"
       }
     },
+    "/namespaces": {
+      "get": {
+        "operationId": "get_namespaces",
+        "responses": {
+          "200": {
+            "description": "Every vocabulary this deployment understands beyond the shipped set"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every vocabulary this deployment understands beyond the shipped set"
+      },
+      "post": {
+        "operationId": "post_namespaces",
+        "responses": {
+          "200": {
+            "description": "Declare a vocabulary IRI and get the namespace code it resolves to (admin only; idempotent by IRI)"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Declare a vocabulary IRI and get the namespace code it resolves to (admin only; idempotent by IRI)"
+      }
+    },
     "/ontology-packs": {
       "get": {
         "operationId": "get_ontology-packs",
