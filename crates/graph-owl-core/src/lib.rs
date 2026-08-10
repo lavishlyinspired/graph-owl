@@ -48,6 +48,7 @@ pub mod lifecycle;
 pub mod lineage;
 pub mod memory;
 pub mod metric;
+pub mod namespaces;
 pub mod ownership;
 pub mod page;
 pub mod projection;
