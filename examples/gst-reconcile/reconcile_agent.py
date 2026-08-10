@@ -128,7 +128,14 @@ def answer(question_number: int, rows: list[dict]) -> Answer:
     )
 
 
-def narrate(found: Answer, base_url: str, model: str, api_key: str | None) -> str:
+def narrate(
+    found: Answer,
+    base_url: str,
+    model: str,
+    api_key: str | None,
+    fallback_base_url: str | None = None,
+    fallback_model: str | None = None,
+) -> str:
     """Optionally ask a model to phrase an answer that is already complete.
 
     **The prompt states the constraint the architecture depends on**: the model
@@ -139,7 +146,33 @@ def narrate(found: Answer, base_url: str, model: str, api_key: str | None) -> st
 
     Any OpenAI-compatible endpoint. No vendor is named here; the deployment
     picks one through `LLM_API_BASE_URL`.
+
+    **A fallback model, because a reasoning model can stall.** Measured across
+    ten real narrations: one free reasoning model returned only its
+    chain-of-thought on 2 runs at a 2000-token budget, 0 at 4000, and 1 at
+    6000 — where it consumed the entire budget. It expands its thinking to fill
+    whatever it is given, so no ceiling makes it certain. A cheaper
+    non-reasoning model as second choice is more robust than a bigger number,
+    and it is only called when the first produced nothing.
     """
+    try:
+        return _complete(found, base_url, model, api_key)
+    except AgentError as first_failure:
+        if not (fallback_base_url and fallback_model):
+            raise
+        try:
+            return _complete(found, fallback_base_url, fallback_model, api_key)
+        except AgentError:
+            # **The *first* model's failure, explicitly.** A bare `raise` here
+            # re-raises the fallback's error instead, which reports a
+            # connection problem with the safety net rather than the reasoning
+            # stall that actually caused the narration to fail. Caught by the
+            # test that asserts which message surfaces.
+            raise first_failure from None
+
+
+def _complete(found: Answer, base_url: str, model: str, api_key: str | None) -> str:
+    """One completion against one endpoint."""
     payload = {
         "model": model,
         "messages": [
@@ -171,7 +204,12 @@ def narrate(found: Answer, base_url: str, model: str, api_key: str | None) -> st
         # 1315 completion tokens and returned nothing under 800, while another
         # answered in 152. 2000 covers both; a non-reasoning model simply
         # stops early and is billed for what it used.
-        "max_tokens": 2000,
+        # Measured across ten real narrations per budget: at 2000 a reasoning
+        # model returned only its chain-of-thought twice, at 4000 never, and
+        # at 6000 once — where it used the whole 6000. It expands to fill what
+        # it is given, so 4000 is the measured sweet spot rather than a
+        # guarantee, and `fallback_model` is what actually makes it reliable.
+        "max_tokens": 4000,
     }
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/chat/completions",
@@ -260,7 +298,17 @@ def main(argv: list[str] | None = None) -> int:
                 print("  (no LLM_API_BASE_URL/LLM_MODEL set — structured answer only)")
                 continue
             try:
-                print("  " + narrate(found, base_url, model, os.environ.get("LLM_API_KEY")))
+                print(
+                    "  "
+                    + narrate(
+                        found,
+                        base_url,
+                        model,
+                        os.environ.get("LLM_API_KEY"),
+                        fallback_base_url=os.environ.get("LLM_FALLBACK_BASE_URL", base_url),
+                        fallback_model=os.environ.get("LLM_FALLBACK_MODEL"),
+                    )
+                )
             except AgentError as failed:
                 # **The narration failing must not fail the answer.** The
                 # finding is derived and cited; prose is a presentation layer.

@@ -238,3 +238,58 @@ def test_an_empty_message_with_no_reasoning_is_a_plain_error() -> None:
             narrate(answer(3, FINDINGS), endpoint.url, "any-model", "key")
     finally:
         endpoint.close()
+
+
+def test_a_stalled_reasoning_model_falls_back_to_a_second_one() -> None:
+    """**Measured, and the reason a fallback exists at all.**
+
+    A reasoning model expands its thinking to fill whatever budget it is
+    given: `deepseek-v4-flash-free` returned only reasoning on 2 of 10 real
+    narrations at 2000 tokens, 0 of 10 at 4000, and 1 of 10 at 6000 — where it
+    consumed the entire 6000. No ceiling makes it certain, so the answer is a
+    second model rather than a bigger number.
+    """
+    stalled = _Endpoint(
+        body={"choices": [{"message": {"content": "", "reasoning_content": "thinking..."}}]}
+    )
+    working = _Endpoint(body={"choices": [{"message": {"content": "INV-1005 has no credit."}}]})
+    try:
+        text = narrate(
+            answer(3, FINDINGS), stalled.url, "reasoning-model", "key",
+            fallback_base_url=working.url, fallback_model="simpler-model",
+        )
+    finally:
+        stalled.close()
+        working.close()
+
+    assert "INV-1005" in text
+
+
+def test_a_fallback_is_not_used_when_the_first_model_answers() -> None:
+    """The fallback is insurance, not a second opinion — spending two calls on
+    every narration would double the cost for nothing."""
+    working = _Endpoint(body={"choices": [{"message": {"content": "first model"}}]})
+    unreachable = "http://127.0.0.1:1"
+    try:
+        text = narrate(
+            answer(3, FINDINGS), working.url, "m", "key",
+            fallback_base_url=unreachable, fallback_model="never-called",
+        )
+    finally:
+        working.close()
+
+    assert text == "first model"
+
+
+def test_both_models_failing_reports_the_original_failure() -> None:
+    """The first model's error is the one worth showing — the fallback's is a
+    detail about the safety net, not about what went wrong."""
+    stalled = _Endpoint(body={"choices": [{"message": {"content": "", "reasoning": "..."}}]})
+    try:
+        with pytest.raises(AgentError, match="only reasoning"):
+            narrate(
+                answer(3, FINDINGS), stalled.url, "m", "key",
+                fallback_base_url="http://127.0.0.1:1", fallback_model="also-broken",
+            )
+    finally:
+        stalled.close()
