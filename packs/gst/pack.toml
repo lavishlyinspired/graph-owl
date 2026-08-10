@@ -96,15 +96,41 @@ strategy = "ngram"
 fields = ["gst:supplierGstin"]
 n = 3
 
+# **A finding rule is a query plus a binding, and nothing else.** `query` names
+# a `[[queries]]` entry, `subject` names the variable holding the graph subject
+# the finding is about, and `evidence` says which predicate each remaining
+# binding came from.
+#
+# The evidence mapping is written out rather than inferred from the variable
+# name, because a variable is named for the reader of the query and a predicate
+# is named by the ontology — `?claimed` is not `gst:taxAmount`, and a runtime
+# that guessed would file evidence citing a predicate that does not exist.
+# A reviewer follows evidence back into the graph; evidence that cannot be
+# followed is worse than none.
 [[findings]]
 label = "gst:MissingInGstr2b"
 summary = "An invoice claimed in the purchase register that the supplier never filed"
 governed_by = "gst:Section16"
+query = "missing-in-gstr2b"
+subject = "invoice"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+]
 
 [[findings]]
 label = "gst:TaxAmountMismatch"
 summary = "Both sides report the invoice, and the tax differs"
 governed_by = "gst:Section16"
+query = "tax-amount-mismatch"
+subject = "purchase"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "claimed" },
+  { predicate = "gst:taxAmount", var = "filed" },
+]
 
 # The reconciliation, runnable today. A findings runtime (the platform plan's
 # P5/P6) will turn these into persisted findings with provenance and a

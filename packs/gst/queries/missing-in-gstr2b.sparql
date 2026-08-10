@@ -27,7 +27,7 @@
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
-SELECT ?number ?gstin ?taxAmount
+SELECT ?invoice ?number ?gstin ?taxAmount
 WHERE {
   GRAPH ?register {
     ?invoice a gst:PurchaseInvoice ;

@@ -76,6 +76,7 @@ class Manifest:
     documents: tuple[Document, ...] = ()
     matching: dict = field(default_factory=dict)
     findings: tuple[dict, ...] = ()
+    queries: tuple[dict, ...] = ()
     console: dict = field(default_factory=dict)
     predicates: tuple[Predicate, ...] = ()
 
@@ -157,6 +158,7 @@ class Manifest:
             documents=tuple(documents),
             matching=raw.get("matching", {}),
             findings=tuple(raw.get("findings", [])),
+            queries=tuple(raw.get("queries", [])),
             console=raw.get("console", {}),
             predicates=tuple(predicates),
         )

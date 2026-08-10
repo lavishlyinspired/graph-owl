@@ -170,5 +170,51 @@ def erpnext_main(argv: list[str] | None = None) -> int:
     sys.stdout.write("\n")
     return EXIT_OK
 
+
+def build_reconcile_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="graph-owl-reconcile",
+        description="Run a pack's finding rules and queue what they conclude.",
+    )
+    parser.add_argument("pack", type=Path, help="the pack directory (containing pack.toml)")
+    parser.add_argument(
+        "--server",
+        default=os.environ.get("GRAPH_OWL_SERVER", "http://localhost:8080"),
+        help="graph-owl base URL (env: GRAPH_OWL_SERVER)",
+    )
+    parser.add_argument("--token", default=os.environ.get("GRAPH_OWL_TOKEN"))
+    return parser
+
+
+def reconcile_main(argv: list[str] | None = None) -> int:
+    """`graph-owl-reconcile` — evaluate a pack's rules.
+
+    Exits `2` on an unevaluable rule rather than reporting a clean run: a
+    reconciliation that silently found nothing is what somebody files a return
+    on.
+    """
+    from .reconcile import ReconcileError, run_findings
+
+    args = build_reconcile_parser().parse_args(argv)
+    try:
+        result = run_findings(args.pack, args.server, args.token)
+    except (ManifestError, LoadError, ReconcileError) as failed:
+        print(str(failed), file=sys.stderr)
+        return EXIT_UNUSABLE
+
+    json.dump(
+        {
+            "pack": result.pack_id,
+            "rulesEvaluated": result.evaluated,
+            "found": result.found,
+            "opened": result.opened,
+            "alreadyOpen": result.already_open,
+        },
+        sys.stdout,
+    )
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())

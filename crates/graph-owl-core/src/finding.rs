@@ -70,7 +70,8 @@ impl std::error::Error for FindingError {}
 /// Deliberately the same three-state shape every other review queue in this
 /// system uses, because they are the same interaction: something proposes, a
 /// human decides, the decision is recorded with a reason.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FindingStatus {
     /// Nobody has decided yet.
     Pending,
@@ -110,7 +111,7 @@ impl FindingStatus {
 ///
 /// A subject/predicate/value triple rather than free text, so a reviewer can
 /// follow it back into the graph rather than read somebody's summary of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Evidence {
     /// The graph subject, in `Sid`'s own `{namespace}:{id}` wire form.
     pub subject: String,
@@ -121,7 +122,8 @@ pub struct Evidence {
 }
 
 /// What a rule concluded, and why.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Finding {
     /// Stable identity, so a decision can be recorded against it.
     pub id: Uuid,
@@ -206,11 +208,57 @@ impl Finding {
     /// values with different `id`s describing one problem, and a queue that
     /// showed both would grow without bound while a reviewer worked. Keyed on
     /// what makes the problem itself distinct — which pack concluded it, what
-    /// kind it is, and about what — so a second run of an unchanged corpus
-    /// updates nothing rather than duplicating everything.
+    /// kind it is, about what, and **on what evidence** — so a second run of
+    /// an unchanged corpus updates nothing rather than duplicating everything.
+    ///
+    /// **The evidence is part of the identity, and that was a correction.**
+    /// Keyed on `(pack, label, subject)` alone, a dismissal held only while
+    /// the finding stayed pending: the next scheduled run re-derived it over
+    /// the very same data and put it back in the queue. A reviewer who
+    /// dismisses a finding on Monday and sees it again on Tuesday, unchanged,
+    /// stops reading the queue — which costs more than the duplicate ever
+    /// would. Found by running the real GST reconciliation twice around a
+    /// decision.
+    ///
+    /// Including the evidence draws the line where it belongs: the *same*
+    /// conclusion from the *same* facts is the one already decided, and a
+    /// changed amount is genuinely a new situation the reviewer must see.
     #[must_use]
     pub fn dedup_key(&self) -> String {
-        format!("{}\u{1}{}\u{1}{}", self.pack, self.label, self.subject)
+        format!(
+            "{}\u{1}{}\u{1}{}\u{1}{}",
+            self.pack,
+            self.label,
+            self.subject,
+            self.evidence_digest()
+        )
+    }
+
+    /// A stable digest of the facts this finding rests on.
+    ///
+    /// Stored, so it must not depend on the Rust version or the platform —
+    /// `DefaultHasher` is explicitly not stable across either, and a digest
+    /// that changed under a toolchain upgrade would silently re-open every
+    /// decided finding in the estate.
+    ///
+    /// Order-sensitive on purpose: a rule's `evidence` list is written in the
+    /// manifest, so its order is a stated fact about the rule rather than an
+    /// accident, and re-ordering it is a change worth showing a reviewer.
+    #[must_use]
+    pub fn evidence_digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        for fact in &self.evidence {
+            // Length-prefixed rather than delimiter-joined: a delimiter that
+            // can occur inside a value lets two different evidence lists hash
+            // the same, which would hide a real change.
+            for part in [&fact.subject, &fact.predicate, &fact.value] {
+                hasher.update(part.len().to_le_bytes());
+                hasher.update(part.as_bytes());
+            }
+        }
+        format!("{:x}", hasher.finalize())
     }
 }
 
@@ -389,5 +437,165 @@ mod tests {
         assert_eq!(FindingStatus::parse("approved"), None);
         assert_eq!(FindingStatus::parse(""), None);
         assert_eq!(FindingStatus::parse("PENDING"), None);
+    }
+}
+
+#[cfg(test)]
+mod wire_shape_tests {
+    //! **The one assertion neither the domain nor the storage tests make.**
+    //!
+    //! `CLAUDE.md` records this exact trap: the domain tests compare Rust
+    //! values and the repository tests compare columns, so a field that goes
+    //! out in snake_case while every struct beside it is camelCase reaches the
+    //! console and is silently `undefined`. A finding whose `governedBy`
+    //! arrives as `governed_by` renders a citation-less finding, which is the
+    //! one thing this type refuses to construct.
+
+    use super::*;
+
+    #[test]
+    fn a_finding_serializes_in_the_wire_shape_the_console_reads() {
+        let finding = Finding::new(
+            "gst",
+            "gst:MissingInGstr2b",
+            "1025:inv-1",
+            "Claimed, never filed",
+            "gst:Section16",
+            vec![Evidence {
+                subject: "1025:inv-1".to_string(),
+                predicate: "1025:taxAmount".to_string(),
+                value: "45000.00".to_string(),
+            }],
+        )
+        .expect("valid");
+
+        let json = serde_json::to_value(&finding).expect("serializes");
+
+        assert!(json.get("governedBy").is_some(), "camelCase on the wire");
+        assert!(json.get("governed_by").is_none());
+        assert!(json.get("detectedAt").is_some());
+        assert!(json.get("decidedBy").is_some());
+        assert_eq!(json["status"], "pending", "the status is a lowercase name");
+        assert_eq!(
+            json["evidence"][0]["predicate"], "1025:taxAmount",
+            "evidence survives whole — a reviewer follows it back into the graph"
+        );
+    }
+
+    #[test]
+    fn a_status_round_trips_through_its_wire_name() {
+        for status in [
+            FindingStatus::Pending,
+            FindingStatus::Accepted,
+            FindingStatus::Rejected,
+        ] {
+            let json = serde_json::to_value(status).expect("serializes");
+            assert_eq!(
+                json.as_str(),
+                Some(status.as_str()),
+                "serde and `as_str` must agree — two spellings of the same \
+                 status would let a row be written that no filter matches"
+            );
+            let back: FindingStatus = serde_json::from_value(json).expect("deserializes");
+            assert_eq!(back, status);
+        }
+    }
+}
+
+#[cfg(test)]
+mod recurrence_tests {
+    //! **What counts as "the same problem" across runs.**
+    //!
+    //! Written after the real GST reconciliation was run twice around a
+    //! decision and the dismissed finding came straight back. The rule these
+    //! pin down: same conclusion from the same facts is already decided;
+    //! same conclusion from *changed* facts is a new situation.
+
+    use super::*;
+
+    fn with_evidence(value: &str) -> Finding {
+        Finding::new(
+            "gst",
+            "gst:TaxAmountMismatch",
+            "1025:inv-1",
+            "The tax differs",
+            "gst:Section16",
+            vec![Evidence {
+                subject: "1025:inv-1".to_string(),
+                predicate: "1025:taxAmount".to_string(),
+                value: value.to_string(),
+            }],
+        )
+        .expect("valid")
+    }
+
+    #[test]
+    fn the_same_conclusion_from_the_same_facts_is_the_same_finding() {
+        assert_eq!(
+            with_evidence("18000.00").dedup_key(),
+            with_evidence("18000.00").dedup_key(),
+            "a scheduled re-run over unchanged data must not resurrect a \
+             decision somebody already made"
+        );
+    }
+
+    #[test]
+    fn the_same_conclusion_from_changed_facts_is_a_new_finding() {
+        assert_ne!(
+            with_evidence("18000.00").dedup_key(),
+            with_evidence("17100.00").dedup_key(),
+            "the amount moved, so the reviewer's earlier judgement was about \
+             a different situation and they must see this one"
+        );
+    }
+
+    #[test]
+    fn evidence_that_differs_only_in_where_a_boundary_falls_still_differs() {
+        // The reason the digest is length-prefixed rather than joined with a
+        // delimiter: a delimiter that can occur inside a value lets two
+        // different evidence lists hash identically, and the second one would
+        // then be silently suppressed as "already decided".
+        let ab = Finding::new(
+            "p",
+            "l",
+            "s",
+            "y",
+            "g",
+            vec![Evidence {
+                subject: "a".to_string(),
+                predicate: "b".to_string(),
+                value: "c".to_string(),
+            }],
+        )
+        .expect("valid");
+        let joined = Finding::new(
+            "p",
+            "l",
+            "s",
+            "y",
+            "g",
+            vec![Evidence {
+                subject: "ab".to_string(),
+                predicate: String::new(),
+                value: "c".to_string(),
+            }],
+        )
+        .expect("valid");
+
+        assert_ne!(ab.evidence_digest(), joined.evidence_digest());
+    }
+
+    #[test]
+    fn a_digest_does_not_depend_on_anything_that_can_change_underneath_it() {
+        // A stored digest that moved under a toolchain upgrade would re-open
+        // every decided finding in the estate at once. Pinned to a literal so
+        // the test fails if the algorithm is ever swapped by accident.
+        let finding = with_evidence("18000.00");
+        assert_eq!(
+            finding.evidence_digest(),
+            "def523490a6d5b3dcadf77d8aab22189aa9a234dbbc3ca2c77b82bd3da5975b4",
+            "computed independently as SHA-256 over the length-prefixed \
+             fields, not read back off this implementation"
+        );
     }
 }

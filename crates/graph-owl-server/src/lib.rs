@@ -87,6 +87,8 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/graph/import/rdf", post(import_rdf))
         .route("/namespaces", post(declare_namespace).get(list_namespaces))
         .route("/predicates", post(define_predicate))
+        .route("/findings", get(list_findings).post(record_findings))
+        .route("/findings/{id}/decision", post(decide_finding))
         .route("/graph/export/preview", get(export_preview))
         // Epic 42 Slice G: the text-first ontology editor. `preview` is the
         // fast, as-the-author-types path (parse only); `dry-run` is the
@@ -8110,6 +8112,170 @@ async fn list_namespaces(
     Auth(_principal): Auth,
 ) -> Result<Json<Vec<graph_owl_api::NamespaceDef>>, AppError> {
     Ok(Json(catalog.namespaces().await?))
+}
+
+/// The findings queue — Epic 105 P5.
+///
+/// **One route for every domain.** A pack's reconciliation writes findings
+/// here, and the console's generic review queue reads them back scoped by
+/// `pack`. There is deliberately no `/gst/findings`: the moment a domain gets
+/// its own route, the next domain needs one too, and `plans/105` exists to
+/// stop exactly that.
+///
+/// Not admin-gated — reviewing findings is the job, and an operator who
+/// cannot see the queue cannot do it. What *is* gated is deciding, below.
+async fn list_findings(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Query(params): Query<ListFindings>,
+) -> Result<Json<Vec<graph_owl_core::finding::Finding>>, AppError> {
+    let status = match params.status.as_deref() {
+        None => None,
+        Some(raw) => Some(parse_finding_status(raw)?),
+    };
+    Ok(Json(
+        catalog
+            .list_findings(params.pack.as_deref(), status)
+            .await?,
+    ))
+}
+
+/// `?pack` and `?status` for [`list_findings`].
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ListFindings {
+    /// Narrow to one pack — what makes one queue serve every domain.
+    pack: Option<String>,
+    /// `pending`, `accepted` or `rejected`. Absent means all three.
+    status: Option<String>,
+}
+
+/// A status name from the wire.
+///
+/// Parsed here rather than by serde so an unknown value reaches the caller as
+/// a `400` naming the field and listing what is accepted — a deserialization
+/// failure on a query parameter would say only that the query string was
+/// wrong, which for a typo'd status is not enough to fix it.
+fn parse_finding_status(raw: &str) -> Result<graph_owl_core::finding::FindingStatus, AppError> {
+    use graph_owl_core::finding::FindingStatus;
+    match raw {
+        "pending" => Ok(FindingStatus::Pending),
+        "accepted" => Ok(FindingStatus::Accepted),
+        "rejected" => Ok(FindingStatus::Rejected),
+        _ => Err(AppError::Validation(vec![FieldError::new(
+            "status",
+            FieldErrorCode::Value,
+            "a finding status is pending, accepted or rejected",
+        )])),
+    }
+}
+
+impl ValidateBody for RecordFindings {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecordFindings {
+    /// What a reconciliation run concluded.
+    findings: Vec<RecordFinding>,
+}
+
+/// One finding on the wire. Deliberately *not* `Finding` itself: a client does
+/// not get to choose the id, the status or the detection time. It states what
+/// it concluded and what that rests on; the server decides the rest.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecordFinding {
+    pack: String,
+    label: String,
+    subject: String,
+    summary: String,
+    governed_by: String,
+    evidence: Vec<graph_owl_core::finding::Evidence>,
+}
+
+/// Record a reconciliation run's findings — Epic 105 P5.
+///
+/// **Admin-gated, and the reason is worth stating.** A finding is a compliance
+/// conclusion about somebody's data; a caller who could post one arbitrarily
+/// could manufacture an accusation. That is the same authority
+/// `/graph/import/rdf` already carries — it can write the facts a finding
+/// would cite — so this is not a new privilege, but it must not be a lesser
+/// one.
+///
+/// What keeps it honest is not the gate: it is that every finding carries
+/// `evidence` naming the triples it rests on, so a reviewer checks the
+/// conclusion against the graph rather than trusting whoever wrote it.
+async fn record_findings(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(payload): AppJson<RecordFindings>,
+) -> Result<Json<graph_owl_api::FindingRun>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+
+    let mut findings = Vec::with_capacity(payload.findings.len());
+    for (index, one) in payload.findings.into_iter().enumerate() {
+        findings.push(
+            graph_owl_core::finding::Finding::new(
+                one.pack,
+                one.label,
+                one.subject,
+                one.summary,
+                one.governed_by,
+                one.evidence,
+            )
+            .map_err(|failed| {
+                // Named by index, because a batch of two hundred that fails on
+                // one is otherwise a reconciliation nobody can debug.
+                AppError::Validation(vec![FieldError::new(
+                    format!("findings[{index}]"),
+                    FieldErrorCode::Value,
+                    failed.to_string(),
+                )])
+            })?,
+        );
+    }
+
+    Ok(Json(catalog.record_findings(&findings).await?))
+}
+
+impl ValidateBody for DecideFinding {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecideFinding {
+    /// `accepted` or `rejected`. `pending` is refused — it is the absence of a
+    /// decision rather than one of them.
+    status: String,
+    /// Why, required when dismissing. See [`Catalog::decide_finding`].
+    reason: Option<String>,
+}
+
+/// Accept or dismiss a finding — Epic 105 P5.
+///
+/// **The actor is the authenticated principal, never a field in the body.** A
+/// decision is an accountability record, and a body-supplied name would let
+/// any caller attribute their dismissal to somebody else.
+async fn decide_finding(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppJson(payload): AppJson<DecideFinding>,
+) -> Result<StatusCode, AppError> {
+    let status = parse_finding_status(&payload.status)?;
+    catalog
+        .decide_finding(id, status, &principal.id, payload.reason.as_deref())
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Whether a `source` may name an import graph.

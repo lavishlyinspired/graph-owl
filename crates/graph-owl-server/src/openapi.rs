@@ -100,6 +100,19 @@ const fn query_param(
 const QUERY_PARAMS: &[(&str, &str, &[QueryParam])] = &[
     (
         "get",
+        "/findings",
+        &[
+            query_param(
+                "pack",
+                false,
+                "string",
+                "Restrict to one pack's findings — what lets one queue serve every domain",
+            ),
+            query_param("status", false, "string", "pending, accepted or rejected"),
+        ],
+    ),
+    (
+        "get",
         "/assets",
         &[
             query_param("kind", false, "string", "Restrict to one asset kind"),
@@ -541,6 +554,35 @@ pub static ROUTES: &[Route] = &[
         None,
         None,
         200,
+        true,
+    ),
+    route(
+        "post",
+        "/findings",
+        "Record a reconciliation run's findings (admin only; idempotent while \
+         a matching finding is still pending)",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/findings",
+        "The reconciliation findings queue, optionally scoped to one pack and \
+         status",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "post",
+        "/findings/{id}/decision",
+        "Accept or dismiss a finding, recorded against the calling principal",
+        None,
+        None,
+        204,
         true,
     ),
     route(

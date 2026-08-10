@@ -106,8 +106,17 @@ async fn main() {
     // their own handle to storage, independent of whatever `Catalog` does
     // with its copy.
     let storage: Arc<dyn Storage> = Arc::new(storage);
+    // The findings queue is the same Postgres storage seen through a
+    // different port — a reconciliation writes findings, a reviewer decides
+    // them, and neither is a `Storage` concern.
+    let findings: Arc<dyn graph_owl_storage::FindingStore> = Arc::new(
+        graph_owl_storage_postgres::PostgresStorage::connect(&database_url)
+            .await
+            .expect("findings store should connect"),
+    );
     let mut catalog = Catalog::new(storage.clone())
         .with_graph(graph.clone())
+        .with_findings(findings)
         .with_traversal(graph.clone())
         .with_namespaces(graph.clone())
         .with_predicates(graph)

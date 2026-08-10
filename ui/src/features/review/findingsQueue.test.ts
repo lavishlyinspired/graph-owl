@@ -1,0 +1,102 @@
+/** The findings queue's own decisions — Epic 105 P5.
+ *
+ *  `ReviewQueue.tsx` is generic and already tested; what is worth pinning here
+ *  is the part this config owns: how a finding becomes a list row, and that
+ *  the row stays readable for the shapes a real pack produces. */
+
+import { describe, expect, it } from "vitest";
+import type { PackFinding } from "../../api";
+import { displayTerm, toQueueEntry } from "./findingsQueue";
+
+function getFinding(overrides: Partial<PackFinding> = {}): PackFinding {
+  return {
+    id: "b0a1c2d3-0000-4000-8000-000000000001",
+    pack: "gst",
+    label: "https://graph-owl.dev/packs/gst#MissingInGstr2b",
+    subject: "https://graph-owl.dev/packs/gst#pr-INV-1003",
+    summary: "An invoice claimed in the purchase register that the supplier never filed",
+    governedBy: "gst:Section16",
+    evidence: [
+      { subject: "s", predicate: "https://graph-owl.dev/packs/gst#taxAmount", value: "45000.00" },
+    ],
+    status: "pending",
+    detectedAt: "2026-08-10T09:00:00Z",
+    ...overrides,
+  };
+}
+
+describe("displayTerm", () => {
+  it("shows the local name so a reviewer reads a term rather than an IRI", () => {
+    expect(displayTerm("https://graph-owl.dev/packs/gst#MissingInGstr2b")).toBe(
+      "MissingInGstr2b",
+    );
+  });
+
+  it("takes the last separator, so a fragment wins over the path before it", () => {
+    expect(displayTerm("https://example.org/a/b#c")).toBe("c");
+  });
+
+  it("handles a slash-terminated vocabulary, which is as common as a hash one", () => {
+    expect(displayTerm("https://example.org/ns/InspectionOverdue")).toBe(
+      "InspectionOverdue",
+    );
+  });
+
+  it("falls back to the whole term rather than rendering a blank row", () => {
+    // A subject with no separator is unusual; a blank row in a review queue
+    // is unusable, and would look like a bug in the queue rather than in the
+    // data.
+    expect(displayTerm("bare")).toBe("bare");
+    expect(displayTerm("https://example.org/ns#")).toBe("https://example.org/ns#");
+  });
+});
+
+describe("toQueueEntry", () => {
+  it("leads with what kind of finding it is", () => {
+    expect(toQueueEntry(getFinding()).summary).toBe("MissingInGstr2b");
+  });
+
+  it("names the pack in the detail line, because one queue serves every pack", () => {
+    const entry = toQueueEntry(getFinding());
+
+    expect(entry.detail).toContain("gst");
+    expect(entry.detail).toContain("pr-INV-1003");
+    expect(entry.detail).toContain("never filed");
+  });
+
+  it("shows no decision summary while a finding is still pending", () => {
+    expect(toQueueEntry(getFinding()).decidedSummary).toBeUndefined();
+  });
+
+  it("names who decided once somebody has", () => {
+    const entry = toQueueEntry(
+      getFinding({ status: "rejected", decidedBy: "asha", reason: "filed late" }),
+    );
+
+    expect(entry.decidedSummary).toBe("rejected by asha");
+    expect(entry.reason).toBe("filed late");
+  });
+
+  it("survives a decided finding whose decider is absent", () => {
+    // Nullable on the wire, and a queue that rendered "rejected by null" would
+    // look like a data-integrity problem to the person reading it.
+    const entry = toQueueEntry(getFinding({ status: "accepted", decidedBy: null }));
+
+    expect(entry.decidedSummary).toBe("accepted");
+    expect(entry.reason).toBeUndefined();
+  });
+
+  it("renders a hospitality finding identically — the neutrality claim", () => {
+    const entry = toQueueEntry(
+      getFinding({
+        pack: "hospitality",
+        label: "https://example.org/hospitality#DuplicateGuest",
+        subject: "https://example.org/hospitality#guest-1",
+        summary: "Two records for one person",
+      }),
+    );
+
+    expect(entry.summary).toBe("DuplicateGuest");
+    expect(entry.detail).toContain("hospitality");
+  });
+});

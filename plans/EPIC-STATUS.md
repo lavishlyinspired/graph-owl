@@ -95,6 +95,7 @@ is the condition that index exists to catch.
 | **102** | 11 | [`102-read-write-partitions.md`](102-read-write-partitions.md) | **Shipped** | 3/3 | Epic 4 (the flake table), Epic 37a (the measurement) |
 | **103** | 11 | [`103-in-process-traversal.md`](103-in-process-traversal.md) | **Shipped** | 5/5 | Epic 7a (the `TraversalEngine` port), Epic 37a (the trigger) |
 | **104** | 12 | [`104-ontology-alignment.md`](104-ontology-alignment.md) | **Shipped** | 7/7 | Epic 33 (ontology packs — supplies the vocabularies), Epic 100 (profile detecti… |
+| **105** | — | [`105-domain-neutrality.md`](105-domain-neutrality.md) | In progress | 0/1 (+1 partial) | Epic 4 (flake model), Epic 9 (RDF I/O), Epic 17 (resolution), Epic 33 (ontology… |
 
 ## Tracked items, per epic
 
@@ -689,6 +690,10 @@ is the condition that index exists to catch.
 - [x] `POST /alignments` and `GET /alignments/review` — found and fixed 8 August 2026
 - [x] Console
 - [x] Console
+
+### Epic 105 — Domain Neutrality — one platform, any domain, no per-domain code
+
+- [~] **DN-1 through P5 shipped, 10 August 2026.** The blocker was never the pack format: it w
 
 ## Epics with slice marks and no plan file
 

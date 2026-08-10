@@ -1205,6 +1205,13 @@ pub struct Catalog {
     /// what lets a domain pack bring its own IRIs without a code change, and a
     /// deployment that never installs a pack simply never populates it.
     namespaces: Option<Arc<dyn NamespaceRegistry>>,
+    /// Where reconciliation findings queue for review — Epic 105 P5.
+    ///
+    /// A fifth optional field, and optional for a sharper reason than the
+    /// others: a deployment that installs no pack produces no findings, and a
+    /// findings table it never writes to is a table it should not have to
+    /// migrate. The console asks for the queue and is told there is none.
+    findings: Option<Arc<dyn graph_owl_storage::FindingStore>>,
     /// The same backend seen through its predicate registry — Epic 105. A
     /// fourth field for the same reason the third exists: defining a
     /// vocabulary's *terms* is a separate contract from declaring the
@@ -1329,6 +1336,7 @@ impl Catalog {
             graph: None,
             traversal: None,
             namespaces: None,
+            findings: None,
             predicates: None,
             events: None,
             decisions: Arc::new(DecisionCache::default()),
@@ -1464,6 +1472,126 @@ impl Catalog {
     pub fn with_namespaces(mut self, namespaces: Arc<dyn NamespaceRegistry>) -> Self {
         self.namespaces = Some(namespaces);
         self
+    }
+
+    /// The queue a pack's findings surface through — Epic 105 P5.
+    #[must_use]
+    pub fn with_findings(mut self, findings: Arc<dyn graph_owl_storage::FindingStore>) -> Self {
+        self.findings = Some(findings);
+        self
+    }
+
+    fn findings_store(&self) -> Result<&Arc<dyn graph_owl_storage::FindingStore>, CatalogError> {
+        self.findings.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no findings store configured".to_string(),
+            ))
+        })
+    }
+
+    /// Record a reconciliation run's findings, reporting new work separately
+    /// from work already queued — Epic 105 P5.
+    ///
+    /// **The split is the point.** A scheduled reconciliation runs against a
+    /// corpus that mostly has not changed, so a raw count is the same large
+    /// number every morning and stops being read. `opened` is what a reviewer
+    /// has not seen; `already_open` is what is still waiting on them.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::Storage`] if no findings store is configured, or the
+    /// write fails.
+    pub async fn record_findings(
+        &self,
+        findings: &[graph_owl_core::finding::Finding],
+    ) -> Result<FindingRun, CatalogError> {
+        let store = self.findings_store()?;
+
+        let mut run = FindingRun::default();
+        for finding in findings {
+            // Sequential rather than joined: the idempotence key is enforced
+            // by a unique index, so two concurrent writes of the same finding
+            // would have one of them fail rather than report `already_open`.
+            // A reconciliation is a background job — correct reporting is
+            // worth more here than the latency.
+            if store.record_finding(finding).await? {
+                run.opened += 1;
+            } else {
+                run.already_open += 1;
+            }
+        }
+        Ok(run)
+    }
+
+    /// The findings queue, newest first, optionally narrowed to one pack and
+    /// one status — Epic 105 P5.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::Storage`] if no findings store is configured, or the
+    /// read fails.
+    pub async fn list_findings(
+        &self,
+        pack: Option<&str>,
+        status: Option<graph_owl_core::finding::FindingStatus>,
+    ) -> Result<Vec<graph_owl_core::finding::Finding>, CatalogError> {
+        Ok(self.findings_store()?.list_findings(pack, status).await?)
+    }
+
+    /// Accept or dismiss a finding, on the record — Epic 105 P5.
+    ///
+    /// Three things are refused here rather than left to the table, because
+    /// each is the reviewer's mistake and reaches them as a `400` naming the
+    /// field instead of a `500`: an anonymous decision, a dismissal with no
+    /// reason, and a "decision" of `Pending`.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::Validation`] for any of those three,
+    /// [`CatalogError::NotFound`] if the finding is gone, and
+    /// [`CatalogError::Storage`] if no store is configured or the write fails.
+    pub async fn decide_finding(
+        &self,
+        id: Uuid,
+        status: graph_owl_core::finding::FindingStatus,
+        actor: &str,
+        reason: Option<&str>,
+    ) -> Result<(), CatalogError> {
+        use graph_owl_core::finding::FindingStatus;
+
+        let store = self.findings_store()?;
+
+        let actor = actor.trim();
+        if actor.is_empty() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "actor",
+                FieldErrorCode::Value,
+                "a decision must name who made it — a finding that leaves the \
+                 queue anonymously leaves nobody to ask why",
+            )]));
+        }
+        if status == FindingStatus::Pending {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "status",
+                FieldErrorCode::Value,
+                "pending is the absence of a decision, not one of them",
+            )]));
+        }
+        let reason = reason.map(str::trim).filter(|r| !r.is_empty());
+        if status == FindingStatus::Rejected && reason.is_none() {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "reason",
+                FieldErrorCode::Required,
+                "dismissing a finding needs a reason — it is what lets the \
+                 next run tell 'considered and dismissed' from 'not yet seen'",
+            )]));
+        }
+
+        if store.decide_finding(id, status, actor, reason).await? {
+            Ok(())
+        } else {
+            Err(CatalogError::NotFound)
+        }
     }
 
     /// The predicate registry a domain pack defines its terms through —
@@ -37432,4 +37560,287 @@ mod namespace_declaration_tests {
         assert!(catalog.namespaces().await.is_err());
         assert!(catalog.declare_namespace(HOSP, "pack").await.is_err());
     }
+}
+
+#[cfg(test)]
+mod finding_runtime_tests {
+    //! `Catalog`'s own decisions about findings — Epic 105 P5.
+    //!
+    //! The storage tests prove the table's invariants against a real database.
+    //! These prove the layer above it: that a re-run reports honestly, that a
+    //! decision carries an accountable actor, and that a rejection carries a
+    //! reason *before* the `CHECK` has to say so — because an error from a
+    //! database constraint reaches a reviewer as a 500, and this one is their
+    //! mistake to fix rather than the server's.
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use graph_owl_core::finding::{Evidence, Finding, FindingStatus};
+    use graph_owl_storage::FindingStore;
+
+    use super::*;
+
+    /// The findings table, in memory, with the one behaviour that matters:
+    /// idempotence on `(pack, label, subject)` while pending.
+    #[derive(Default)]
+    struct FakeFindings {
+        rows: Mutex<Vec<Finding>>,
+    }
+
+    #[async_trait]
+    impl FindingStore for FakeFindings {
+        async fn record_finding(&self, finding: &Finding) -> Result<bool, StorageError> {
+            let mut rows = self.rows.lock().expect("not poisoned");
+            let open = rows.iter().any(|r| {
+                r.status == FindingStatus::Pending && r.dedup_key() == finding.dedup_key()
+            });
+            if open {
+                return Ok(false);
+            }
+            rows.push(finding.clone());
+            Ok(true)
+        }
+
+        async fn list_findings(
+            &self,
+            pack: Option<&str>,
+            status: Option<FindingStatus>,
+        ) -> Result<Vec<Finding>, StorageError> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .filter(|r| pack.is_none_or(|p| r.pack == p))
+                .filter(|r| status.is_none_or(|s| r.status == s))
+                .cloned()
+                .collect())
+        }
+
+        async fn decide_finding(
+            &self,
+            id: Uuid,
+            status: FindingStatus,
+            actor: &str,
+            reason: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            let mut rows = self.rows.lock().expect("not poisoned");
+            let Some(row) = rows.iter_mut().find(|r| r.id == id) else {
+                return Ok(false);
+            };
+            row.status = status;
+            row.decided_by = Some(actor.to_string());
+            row.reason = reason.map(str::to_string);
+            Ok(true)
+        }
+    }
+
+    fn catalog_with(store: Arc<FakeFindings>) -> Catalog {
+        Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_findings(store)
+    }
+
+    fn finding(subject: &str) -> Finding {
+        Finding::new(
+            "gst",
+            "gst:MissingInGstr2b",
+            subject,
+            "Claimed in the register, never filed by the supplier",
+            "gst:Section16",
+            vec![Evidence {
+                subject: subject.to_string(),
+                predicate: "1025:taxAmount".to_string(),
+                value: "45000.00".to_string(),
+            }],
+        )
+        .expect("a complete finding")
+    }
+
+    #[tokio::test]
+    async fn a_run_reports_what_it_opened_separately_from_what_was_already_open() {
+        // **The number a reconciliation report is allowed to show.** A second
+        // run over an unchanged corpus that says "12 findings" reads as twelve
+        // new problems; the same run saying "12 open, 0 new" reads as nothing
+        // happened, which is the truth.
+        let catalog = catalog_with(Arc::new(FakeFindings::default()));
+        let batch = vec![finding("1025:inv-1"), finding("1025:inv-2")];
+
+        let first = catalog.record_findings(&batch).await.expect("first run");
+        let second = catalog.record_findings(&batch).await.expect("second run");
+
+        assert_eq!(first.opened, 2);
+        assert_eq!(first.already_open, 0);
+        assert_eq!(
+            second.opened, 0,
+            "a re-run over unchanged data opens nothing"
+        );
+        assert_eq!(second.already_open, 2);
+    }
+
+    #[tokio::test]
+    async fn an_empty_run_is_a_success_rather_than_an_error() {
+        // A reconciliation that finds nothing wrong is the outcome everyone
+        // wants. Reporting it as a failure would train an operator to ignore
+        // the failures that matter.
+        let catalog = catalog_with(Arc::new(FakeFindings::default()));
+
+        let summary = catalog.record_findings(&[]).await.expect("clean run");
+
+        assert_eq!(summary.opened, 0);
+        assert_eq!(summary.already_open, 0);
+    }
+
+    #[tokio::test]
+    async fn a_rejection_without_a_reason_is_refused_before_the_database_sees_it() {
+        let catalog = catalog_with(Arc::new(FakeFindings::default()));
+        let one = finding("1025:inv-1");
+        catalog.record_findings(&[one.clone()]).await.expect("open");
+
+        let refused = catalog
+            .decide_finding(one.id, FindingStatus::Rejected, "asha", None)
+            .await;
+
+        assert!(
+            matches!(refused, Err(CatalogError::Validation(_))),
+            "a missing reason is the reviewer's mistake, so it must reach them \
+             as a 400 naming the field — not as a constraint violation"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepting_a_finding_needs_no_reason() {
+        // The asymmetry is deliberate: accepting means "yes, this is a real
+        // problem", which the finding itself already explains. Dismissing one
+        // is the act that needs justifying, because it is what the next run
+        // has to tell apart from "nobody has looked yet".
+        let catalog = catalog_with(Arc::new(FakeFindings::default()));
+        let one = finding("1025:inv-1");
+        catalog.record_findings(&[one.clone()]).await.expect("open");
+
+        catalog
+            .decide_finding(one.id, FindingStatus::Accepted, "asha", None)
+            .await
+            .expect("accepting needs no reason");
+
+        let accepted = catalog
+            .list_findings(None, Some(FindingStatus::Accepted))
+            .await
+            .expect("list");
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].decided_by.as_deref(), Some("asha"));
+    }
+
+    #[tokio::test]
+    async fn a_decision_needs_a_named_actor() {
+        // An anonymous decision is worse than no decision: the finding leaves
+        // the queue and there is nobody to ask why.
+        let catalog = catalog_with(Arc::new(FakeFindings::default()));
+        let one = finding("1025:inv-1");
+        catalog.record_findings(&[one.clone()]).await.expect("open");
+
+        let refused = catalog
+            .decide_finding(one.id, FindingStatus::Accepted, "   ", None)
+            .await;
+
+        assert!(matches!(refused, Err(CatalogError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn a_finding_cannot_be_decided_back_to_pending() {
+        // `Pending` is the absence of a decision, not one of them. Allowing it
+        // would let a reviewer erase an accountable record by "deciding"
+        // undecided.
+        let catalog = catalog_with(Arc::new(FakeFindings::default()));
+        let one = finding("1025:inv-1");
+        catalog.record_findings(&[one.clone()]).await.expect("open");
+
+        let refused = catalog
+            .decide_finding(one.id, FindingStatus::Pending, "asha", None)
+            .await;
+
+        assert!(matches!(refused, Err(CatalogError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn deciding_a_finding_that_is_gone_is_not_found_rather_than_a_failure() {
+        let catalog = catalog_with(Arc::new(FakeFindings::default()));
+
+        let missing = catalog
+            .decide_finding(Uuid::new_v4(), FindingStatus::Accepted, "asha", None)
+            .await;
+
+        assert!(matches!(missing, Err(CatalogError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn one_queue_serves_every_pack() {
+        // The property the console depends on — and the whole reason findings
+        // are a generic runtime rather than a GST feature.
+        let catalog = catalog_with(Arc::new(FakeFindings::default()));
+        let hospitality = Finding::new(
+            "hospitality",
+            "hosp:DuplicateGuest",
+            "1024:guest-1",
+            "Two records for one person",
+            "hosp:GuestRecordPolicy",
+            vec![Evidence {
+                subject: "1024:guest-1".to_string(),
+                predicate: "1024:email".to_string(),
+                value: "a@example.org".to_string(),
+            }],
+        )
+        .expect("valid");
+        catalog
+            .record_findings(&[finding("1025:inv-1"), hospitality])
+            .await
+            .expect("both packs");
+
+        let gst = catalog.list_findings(Some("gst"), None).await.expect("gst");
+        let hosp = catalog
+            .list_findings(Some("hospitality"), None)
+            .await
+            .expect("hospitality");
+
+        assert_eq!(gst.len(), 1);
+        assert_eq!(hosp.len(), 1);
+        assert_eq!(gst[0].pack, "gst");
+    }
+
+    #[tokio::test]
+    async fn a_server_with_no_findings_store_says_so_rather_than_pretending() {
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ));
+
+        assert!(catalog.list_findings(None, None).await.is_err());
+        assert!(
+            catalog
+                .record_findings(&[finding("1025:inv-1")])
+                .await
+                .is_err()
+        );
+        assert!(
+            catalog
+                .decide_finding(Uuid::new_v4(), FindingStatus::Accepted, "asha", None)
+                .await
+                .is_err()
+        );
+    }
+}
+
+/// What one reconciliation run did — Epic 105 P5.
+///
+/// Two numbers rather than one, because a re-run over an unchanged corpus
+/// finds the same problems and a single count would report them as new every
+/// time. `opened` is what nobody has seen yet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingRun {
+    /// Findings this run put in the queue for the first time.
+    pub opened: usize,
+    /// Findings this run re-derived that a reviewer had already been shown.
+    pub already_open: usize,
 }

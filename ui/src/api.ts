@@ -312,6 +312,39 @@ export interface UpsertAlignmentRequest {
   lossyReverse?: boolean;
 }
 
+/** A reconciliation finding — Epic 105 P5.
+ *
+ *  **`PackFinding`, not `Finding`, because `Finding` is already taken** by
+ *  governance (`./governance/queue`), which is a different thing: a
+ *  severity-ranked policy violation the platform itself raises. This one is
+ *  what a *domain pack's* rules concluded, and it cites the pack's own law
+ *  rather than a platform policy. Two concepts that would be confusing to
+ *  merge and worse to name identically.
+ *
+ *  **Deliberately carries `pack` rather than being a GST type.** The console
+ *  has one findings queue serving every domain pack; a `GstFinding` here
+ *  would be the first per-domain hardcoding in the frontend, and the second
+ *  would follow within a release. */
+export interface PackFindingEvidence {
+  readonly subject: string;
+  readonly predicate: string;
+  readonly value: string;
+}
+
+export interface PackFinding {
+  readonly id: string;
+  readonly pack: string;
+  readonly label: string;
+  readonly subject: string;
+  readonly summary: string;
+  readonly governedBy: string;
+  readonly evidence: readonly PackFindingEvidence[];
+  readonly status: "pending" | "accepted" | "rejected";
+  readonly detectedAt: string;
+  readonly decidedBy?: string | null;
+  readonly reason?: string | null;
+}
+
 export interface DriftItem {
   id: string;
   assetId: string;
@@ -1233,6 +1266,18 @@ export const api = {
     query.set("offset", String(params.offset ?? 0));
     return request<{ data: DriftItem[]; total: number }>(`/drift?${query}`);
   },
+  findings: (params: { status?: string; pack?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.status) query.set("status", params.status);
+    if (params.pack) query.set("pack", params.pack);
+    const suffix = query.toString();
+    return request<PackFinding[]>(`/findings${suffix ? `?${suffix}` : ""}`);
+  },
+  decideFinding: (id: string, status: "accepted" | "rejected", reason?: string) =>
+    request<void>(`/findings/${id}/decision`, {
+      method: "POST",
+      body: JSON.stringify(reason ? { status, reason } : { status }),
+    }),
   applyDrift: (id: string) => request<DriftItem>(`/drift/${id}/apply`, { method: "POST" }),
   ignoreDrift: (id: string, reason: string) =>
     request<DriftItem>(`/drift/${id}/ignore`, {

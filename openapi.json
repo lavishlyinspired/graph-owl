@@ -5556,6 +5556,99 @@
         "summary": "Delete an extraction run and everything it produced"
       }
     },
+    "/findings": {
+      "get": {
+        "operationId": "get_findings",
+        "parameters": [
+          {
+            "description": "Restrict to one pack's findings — what lets one queue serve every domain",
+            "in": "query",
+            "name": "pack",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "pending, accepted or rejected",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The reconciliation findings queue, optionally scoped to one pack and status"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "The reconciliation findings queue, optionally scoped to one pack and status"
+      }
+    },
+    "/findings/{id}/decision": {
+      "post": {
+        "operationId": "post_findings__id__decision",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Accept or dismiss a finding, recorded against the calling principal"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Accept or dismiss a finding, recorded against the calling principal"
+      }
+    },
     "/glossaries": {
       "get": {
         "operationId": "get_glossaries",

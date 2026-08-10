@@ -133,10 +133,14 @@ async fn a_different_subject_or_label_is_a_different_finding() {
 }
 
 #[tokio::test]
-async fn a_decided_finding_no_longer_blocks_a_recurrence() {
-    // The partial index is `WHERE status = 'pending'` on purpose: a problem
-    // that was dismissed and then *recurs* is a new instance, not the same
-    // one still open, and a reviewer needs to see it again.
+async fn a_dismissal_survives_the_next_scheduled_run() {
+    // **The correction V60 exists for.** V59 keyed the index on
+    // `(pack, label, subject)` and made it partial on `status = 'pending'`,
+    // reasoning that a recurrence deserves to be seen again. Running the real
+    // GST reconciliation twice around a decision showed what that means: a
+    // finding dismissed with a reason came straight back on the next run over
+    // *identical* data. A reviewer who dismisses something on Monday and sees
+    // it unchanged on Tuesday stops reading the queue.
     let (storage, _db, _url) = store().await;
     let first = missing_invoice();
     storage.record_finding(&first).await.expect("record");
@@ -151,11 +155,53 @@ async fn a_decided_finding_no_longer_blocks_a_recurrence() {
         .expect("decide");
 
     assert!(
-        storage
+        !storage
             .record_finding(&missing_invoice())
             .await
-            .expect("recurrence"),
-        "the same problem recurring after a decision is a new finding"
+            .expect("re-run"),
+        "the same conclusion from the same facts is the one already decided"
+    );
+    assert_eq!(
+        storage.list_findings(None, None).await.expect("list").len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_dismissal_does_not_suppress_the_same_problem_on_changed_facts() {
+    // The other half, and the reason the digest is in the key rather than the
+    // dismissal simply being permanent: the amount moved, so the reviewer's
+    // earlier judgement was about a different situation.
+    let (storage, _db, _url) = store().await;
+    let first = missing_invoice();
+    storage.record_finding(&first).await.expect("record");
+    storage
+        .decide_finding(
+            first.id,
+            FindingStatus::Rejected,
+            "asha",
+            Some("supplier filed late"),
+        )
+        .await
+        .expect("decide");
+
+    let moved = Finding::new(
+        "gst",
+        "gst:MissingInGstr2b",
+        "1025:pr-INV-1003",
+        "Claimed in the register, never filed by the supplier",
+        "gst:Section16",
+        vec![Evidence {
+            subject: "1025:pr-INV-1003".to_string(),
+            predicate: "1025:taxAmount".to_string(),
+            value: "61000.00".to_string(),
+        }],
+    )
+    .expect("valid");
+
+    assert!(
+        storage.record_finding(&moved).await.expect("changed"),
+        "changed evidence is a new situation the reviewer must see"
     );
     assert_eq!(
         storage.list_findings(None, None).await.expect("list").len(),

@@ -15,7 +15,7 @@
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
-SELECT ?number ?gstin ?claimed ?filed
+SELECT ?purchase ?number ?gstin ?claimed ?filed
 WHERE {
   GRAPH ?register {
     ?purchase a gst:PurchaseInvoice ;

@@ -67,14 +67,16 @@ impl graph_owl_storage::FindingStore for PostgresStorage {
         )
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-        // `ON CONFLICT DO NOTHING` against the partial unique index: an
-        // identical *pending* finding is left exactly as it is, including any
-        // decision metadata a reviewer has started adding. `rows_affected`
-        // then distinguishes "new" from "already open" without a second query.
+        // `ON CONFLICT DO NOTHING` against the identity index, which spans
+        // the evidence digest and **every** status: an identical finding is
+        // left exactly as it is, whether a reviewer is still working on it or
+        // already decided it. `rows_affected` then distinguishes "new" from
+        // "already known" without a second query.
         let result = sqlx::query(
             "INSERT INTO findings
-                 (id, pack, label, subject, summary, governed_by, evidence, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+                 (id, pack, label, subject, summary, governed_by, evidence,
+                  status, evidence_digest)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
              ON CONFLICT DO NOTHING",
         )
         .bind(finding.id)
@@ -84,6 +86,7 @@ impl graph_owl_storage::FindingStore for PostgresStorage {
         .bind(&finding.summary)
         .bind(&finding.governed_by)
         .bind(&evidence)
+        .bind(finding.evidence_digest())
         .execute(self.pool())
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;

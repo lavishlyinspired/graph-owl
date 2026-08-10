@@ -241,6 +241,14 @@ async fn build_catalog(secret: Option<&str>) -> (TestDb, String, Catalog) {
     let storage = PostgresStorage::connect(&connection_string)
         .await
         .expect("failed to connect and migrate");
+    // A second handle on the same database, seen through the findings port —
+    // the composition root does the same, so the tests exercise the shape
+    // that ships rather than a convenient one.
+    let findings: Arc<dyn graph_owl_storage::FindingStore> = Arc::new(
+        PostgresStorage::connect(&connection_string)
+            .await
+            .expect("failed to connect the findings store"),
+    );
     // The graph engine, wired the same way the composition root wires it —
     // otherwise the tests would exercise a catalog shape that never ships.
     let graph = graph_owl_engine_postgres::PostgresTripleStore::connect(&connection_string)
@@ -248,6 +256,7 @@ async fn build_catalog(secret: Option<&str>) -> (TestDb, String, Catalog) {
         .expect("failed to connect the graph engine");
     let graph = Arc::new(graph);
     let catalog = Catalog::new(Arc::new(storage))
+        .with_findings(findings)
         .with_graph(graph.clone())
         .with_traversal(graph.clone())
         .with_namespaces(graph.clone())

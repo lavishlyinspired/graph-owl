@@ -17,10 +17,11 @@ import { extractionQueue } from "./extractionQueue";
 import { driftQueue } from "./driftQueue";
 import { proposalsQueue } from "./proposalsQueue";
 import { alignmentQueue } from "./alignmentQueue";
+import { findingsQueue } from "./findingsQueue";
 import type { QueueConfig } from "./queues";
 import { readParam, writeParam } from "../deepLink";
 
-type QueueKind = "resolution" | "extraction" | "drift" | "proposals" | "alignment";
+type QueueKind = "resolution" | "extraction" | "drift" | "proposals" | "alignment" | "findings";
 
 const KIND_OPTIONS: { readonly label: string; readonly value: QueueKind }[] = [
   { label: "Merge review", value: "resolution" },
@@ -28,6 +29,7 @@ const KIND_OPTIONS: { readonly label: string; readonly value: QueueKind }[] = [
   { label: "Drift", value: "drift" },
   { label: "Proposals", value: "proposals" },
   { label: "Alignments", value: "alignment" },
+  { label: "Findings", value: "findings" },
 ];
 
 function isQueueKind(value: string | null): value is QueueKind {
@@ -36,7 +38,8 @@ function isQueueKind(value: string | null): value is QueueKind {
     value === "extraction" ||
     value === "drift" ||
     value === "proposals" ||
-    value === "alignment"
+    value === "alignment" ||
+    value === "findings"
   );
 }
 
@@ -45,6 +48,7 @@ function configFor(kind: QueueKind): QueueConfig {
   if (kind === "drift") return driftQueue();
   if (kind === "proposals") return proposalsQueue();
   if (kind === "alignment") return alignmentQueue();
+  if (kind === "findings") return findingsQueue();
   return resolutionQueue();
 }
 
