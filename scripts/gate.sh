@@ -96,6 +96,16 @@ cargo fmt --all
 echo "==> wire casing"
 python3 scripts/check-wire-casing.py
 
+# --- 1c. Namespace neutrality (seconds, and it guards a shipped regression) -
+# Three medical namespaces reached `graph-owl-core` as Rust constants because,
+# at the time, a fixed compile-time array was the only way a domain could have
+# its own vocabulary. It no longer is (Epic 105: the `namespaces` table), so a
+# new constant here is one domain reintroduced into the crate every domain
+# shares. The check allows a genuinely general vocabulary through an explicit
+# allowlist edit — reviewed rather than assumed.
+echo "==> namespace neutrality"
+python3 scripts/check-namespace-neutrality.py
+
 # --- 2. Lint (changes nothing, but reads everything) ----------------------
 echo "==> clippy"
 cargo clippy "${SCOPE[@]}" --all-targets

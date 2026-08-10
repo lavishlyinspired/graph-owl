@@ -109,7 +109,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done and verified
 
 ### Cross-cutting
 
-- [ ] **X.1** A CI check asserting no namespace constant is added to `graph-owl-core` for a domain (the regression guard for the exact failure Epic 104 shipped)
+- [x] **X.1** `scripts/check-namespace-neutrality.py`, wired into `scripts/gate.sh`. **Verified in both directions rather than written**: a deliberately-added `namespace::HOSPITALITY` constant fails it with the constant named, and the tree passes clean at 18 constants. Carries its own negative guard too — if the allowlist names constants the source no longer has, the check reports *itself* as broken rather than silently matching nothing and passing whatever arrives. CUI/SNOMED_CT/RXNORM are allowlisted as **grandfathered, not endorsed**, with a comment saying so; a genuinely general vocabulary (a new W3C standard) passes by an explicit allowlist edit in the same commit, which is the reviewable act that was missing when the medical namespaces arrived
 - [ ] **X.2** `CLAUDE.md` gains the domain-entity-vs-catalog-asset distinction as a fifth conflated pair
 - [ ] **X.3** DEMOS.md checkbox + `EPIC-STATUS.md` regenerated
 
