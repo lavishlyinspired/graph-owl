@@ -20,17 +20,21 @@ use serde_json::{Value, json};
 
 /// The protocol version this server speaks.
 ///
-/// **Taken from `rust-mcp-schema` rather than written here**, and that is the
-/// whole reason the dependency exists. This was a hand-pinned `"2024-11-05"`
-/// and MCP had moved on three revisions without anything noticing — a string
-/// constant cannot tell you it has gone stale, and a client negotiating against
-/// a two-year-old version either refuses or silently degrades.
+/// **Taken from `rmcp` rather than written here**, and that is the whole
+/// reason the dependency exists. This was a hand-pinned `"2024-11-05"` and
+/// MCP had moved on three revisions without anything noticing — a string
+/// constant cannot tell you it has gone stale, and a client negotiating
+/// against a two-year-old version either refuses or silently degrades.
 ///
 /// Still **pinned rather than echoed**: echoing whatever a client asked for
 /// would claim conformance to a protocol this server has never seen.
+/// `LATEST`, not `STANDARD_HEADERS` (`rmcp`'s newest revision, 2026-07-28,
+/// gated on SEP-2243) — this server does not implement that revision's
+/// stateless-HTTP/MRTR/subscriptions surface, and advertising it would be
+/// the same false conformance claim the pin exists to prevent.
 #[must_use]
 pub fn protocol_version() -> String {
-    rust_mcp_schema::ProtocolVersion::latest().to_string()
+    rmcp::model::ProtocolVersion::LATEST.to_string()
 }
 
 /// JSON-RPC 2.0's reserved error codes.
@@ -468,10 +472,7 @@ mod tests {
     fn the_advertised_protocol_version_is_current() {
         let advertised = protocol_version();
 
-        assert_eq!(
-            advertised,
-            rust_mcp_schema::ProtocolVersion::latest().to_string()
-        );
+        assert_eq!(advertised, rmcp::model::ProtocolVersion::LATEST.to_string());
         assert_ne!(
             advertised, "2024-11-05",
             "the version this server pinned by hand before the schema crate \

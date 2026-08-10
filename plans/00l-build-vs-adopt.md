@@ -55,7 +55,8 @@ rejected by default** (`00i`).
 | `antlr4rust` | BSD-3-Clause on crates.io, `NOASSERTION` on GitHub | ANTLR4 runtime for Rust | **Reject** — repository unpushed since 2023-02-14, and the two licence claims disagree |
 | `antlr-rust-runtime` | BSD-3-Clause | Newer ANTLR4 Rust runtime | **Reject for now** — fresh (2026-08-01) but 2,439 downloads; too thin to put a query front end on |
 | `pest` | MIT / Apache-2.0 | PEG parser generator | **Fallback only** — 293M downloads, and the generation target *if every parser candidate fails the spike* |
-| `rust-mcp-sdk` | MIT | MCP server/client SDK over `rust-mcp-schema`; stdio, SSE and streamable-HTTP transports | **Spike, and it is a real candidate we did not check first.** v1.0.1, 43 versions, ~215k downloads, repository visible and pushed 2026-08-03. Epic 14's transport was hand-written before this check ran — see below |
+| `rust-mcp-sdk` | MIT | MCP server/client SDK over `rust-mcp-schema`; stdio, SSE and streamable-HTTP transports | **Spike, and it is a real candidate we did not check first.** v1.0.1, 43 versions, ~215k downloads, repository visible and pushed 2026-08-03. Epic 14's transport was hand-written before this check ran — see below. **Re-measured 9 August 2026: this was the wrong crate to have spiked** — a different, unrelated third-party crate of a confusingly similar name to `rmcp` below, which is the one `00j-language-boundaries.md` actually named. See the MCP section below |
+| `rmcp` | Apache-2.0 | **Official** Rust SDK for MCP, maintained by the `modelcontextprotocol` org itself — protocol types, macros, and every transport (stdio, child-process, streamable-HTTP, with optional OAuth) behind 27 independently-selectable feature flags | **Adopt, feature-gated to schema types plus stdio — see the MCP section below.** 3.1.2, updated 2026-08-07, 19.3M downloads, `github.com/modelcontextprotocol/rust-sdk`. This is the crate `00j-language-boundaries.md` (line 46) named as the reason MCP could stay Rust, described there as "at 1.x" — it is now at 3.x. The 4 August spike never checked it, checking `rust-mcp-sdk` instead |
 | `rust-igraph` | **GPL-2.0-or-later** | Graph algorithms: PageRank, centrality, WCC, cycle detection — everything Epic 38 wants | **Rejected on licence, and it is the clearest case for why licence is a gate rather than a score.** Copyleft: adopting it relicenses graph-owl. 175 downloads. Use `petgraph` |
 | `petgraph` | MIT / Apache-2.0 | Graph data structures and algorithms | **Adopt for Epic 38's arithmetic.** 451M downloads. The reified-edge objection does not bite: Epic 38 already specifies "pure algorithms over an in-memory projection the caller supplies", so the projection hides the two-hop encoding and `petgraph` sees an ordinary graph |
 | `sonyflake` / `snowflake` | MIT / Apache-2.0 | Distributed unique **id** generation | **Not applicable — a terminology collision.** A graph-owl *flake* is a fact tuple `{s, p, o, cx, t, op}` in the Datomic sense, not a Snowflake id. Recorded so the suggestion is not made a third time |
@@ -482,6 +483,81 @@ unserved — it is how most MCP clients actually connect, and `POST /mcp` reache
 none of them; the framing is newline-delimited JSON, so it does not need the SDK.
 
 *(The spike described here has now run; its result is the section above.)*
+
+### Re-measured 9 August 2026: the spike checked the wrong crate
+
+**The 4 August spike never checked the crate `00j-language-boundaries.md` (line
+46) actually named.** That document's whole argument for keeping MCP in Rust
+rests on "there is an official Rust SDK (`rmcp`), maintained by the Model
+Context Protocol organization... at 1.x." The spike above measured
+`rust-mcp-sdk` — a different, third-party crate with a confusingly similar
+name — and never measured `rmcp` at all. Recorded as the same class of process
+failure the section above already owns, not a new one: the rule is *search for
+an existing crate*, and this time the crate was already named in a standing
+document and still wasn't the one checked.
+
+**Measured against crates.io, 9 August 2026:**
+
+| | licence | version | updated | downloads | repository |
+|---|---|---|---|---|---|
+| `rmcp` | Apache-2.0 | **3.1.2** | 2026-08-07 (two days ago) | **19.3M** | `github.com/modelcontextprotocol/rust-sdk` — the official org |
+| `rust-mcp-schema` (currently adopted) | MIT | 0.10.3 | 2026-06-24 | 717k | third-party |
+| `rust-mcp-sdk` (the crate actually spiked on 4 August) | MIT | 1.0.1 | 2026-08-03 | 215k | third-party, unrelated to `rmcp` |
+
+`00j`'s "at 1.x" is stale — `rmcp` is at 3.x — but the update only strengthens
+its argument: still the reference implementation, still the official org, now
+with five more major versions of active maintenance behind it.
+
+**`rust-mcp-schema`, the crate actually adopted, is behind the deployed spec.**
+Its protocol-version ceiling is `2025-11-25` (`ProtocolVersion::latest()` in
+`graph-owl-mcp` resolves to this). MCP has a newer stable revision
+(2026-07-28) that `rust-mcp-schema` cannot express — stateless HTTP, expanded
+discovery, MRTR, and subscriptions. `rmcp`'s own test suite already exercises
+these by name (`test_mrtr_behavior`, `test_sep_2260_stream_routing`,
+`test_stateless_server_requests`, `test_streamable_http_stale_session`),
+which is direct evidence it tracks the spec where the currently-adopted crate
+does not.
+
+**The transport-ownership objection that rejected `rust-mcp-sdk` does not
+apply the same way to `rmcp`, because `rmcp` gates its transports behind
+independent feature flags rather than bundling them into one SDK.** Checked
+directly against its published `Cargo.toml`: with `default-features = false`
+and only `["macros", "schemars"]` selected, the only new dependencies are
+`pastey`, `rmcp-macros` and `schemars` — none of `reqwest`, `oauth2`,
+`jsonwebtoken`, or the `aws-lc-sys` weight the SDK spike flagged. That gives
+the same job `rust-mcp-schema` does today (typed protocol structs), from the
+crate that is both official and current.
+
+**It also gives the stdio transport this project is missing, without pulling
+in any HTTP-server feature.** `transport-io` (stdio) and
+`transport-child-process` sit behind their own flags, needing only
+`tokio/io-std` and `tokio-util/codec` — both already implied by this
+workspace's tokio usage. Enabling them does not enable `server-side-http` or
+`transport-streamable-http-server`, so nothing here competes with or replaces
+the existing axum-mounted `POST /mcp`; a stdio entry point would be a second,
+independent transport onto the same dispatch, not a rewrite of the first.
+
+**Revised decision: adopt `rmcp` (feature-gated to `macros` + `schemars` +
+`transport-io`), replacing `rust-mcp-schema`, and use it to add the missing
+stdio transport.** `POST /mcp` keeps its own hand-owned transport behind
+`Auth`, admission control and RFC 9457 rendering — that part of the 4 August
+conclusion still holds and is not reopened. Tracked as Epic 14 Slice H
+(`plans/14-mcp-activation.md`); **implemented 9 August 2026** — see that
+plan's own Slice H section for the full account.
+
+**One correction found only by compiling, not by reading the feature
+table**: `transport-io`'s `stdio()` function needs `transport-io` *and*
+one of `client`/`server` enabled — `schemars` alone does not reach it.
+`server` was added (it already implies `schemars`, so nothing here is
+redundant with the plan above) rather than `client`, since graph-owl is the
+MCP *server* gaining a second transport, not a client. The actual verified
+feature set: `["macros", "server", "transport-io"]` for `graph-owl-mcp`
+(schema types only), and `["server", "transport-io"]` for `graph-owl-server`
+(the new `graph-owl-mcp-stdio` binary, which needs the `stdio()` primitive
+but not `rmcp`'s own macros). Confirmed via `cargo check`: no new
+transitive dependency beyond what the `macros`/`schemars` measurement above
+already found — `server`'s own additions (`pastey`, `uuid`) were already
+covered.
 
 ### The openCypher TCK's own harness need — checked, blocked on scope rather than licence
 

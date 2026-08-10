@@ -24,14 +24,24 @@ serde_json.workspace = true
 chrono.workspace = true
 # The recall tool works with memory ids to mark which results are disputed.
 uuid.workspace = true
-# Epic 14: MCP's own types and protocol versions.
+# Epic 14 Slice H: MCP's own types, protocol versions, and the stdio
+# transport primitive.
 #
-# **The schema crate, not `rust-mcp-sdk`** — the spike in
-# `plans/00l-build-vs-adopt.md` measured the SDK at 205 transitive crates
-# (including `aws-lc-sys`, a large C crypto library) because it owns a
-# transport we do not want it to own. This is 15, all of which are already in
-# the tree, and it has three times the downloads.
-rust-mcp-schema = "0.10"
+# **`rmcp`, not `rust-mcp-schema`** — the 9 August 2026 re-measurement in
+# `plans/00l-build-vs-adopt.md` found the 4 August spike had checked the
+# wrong crate (`rust-mcp-sdk`, a different, unrelated third-party crate of a
+# confusingly similar name). `rmcp` is the *official* SDK
+# (`modelcontextprotocol` org), tracks a newer protocol revision than
+# `rust-mcp-schema` did, and gates its transports behind independent feature
+# flags — so `transport-io` (stdio) can be enabled without pulling in any of
+# the HTTP-server weight (`reqwest`, `oauth2`, `aws-lc-sys`) the original
+# `rust-mcp-sdk` spike rejected. `server` is required for `transport-io`'s
+# `stdio()` function to be reachable at all; it already implies `schemars`.
+rmcp = { version = "3", default-features = false, features = [
+    "macros",
+    "server",
+    "transport-io",
+] }
 
 [dev-dependencies]
 chrono.workspace = true

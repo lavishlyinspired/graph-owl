@@ -6,6 +6,7 @@ pub mod jwks;
 pub mod observability;
 pub mod openapi;
 pub mod rate_limit;
+pub mod stdio;
 pub mod streaming;
 
 use axum::{

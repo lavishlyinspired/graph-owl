@@ -2,8 +2,9 @@
 name = "graph-owl-server"
 version = "0.1.0"
 edition.workspace = true
-# Two binaries live here — the server and the contract generator — so `cargo
-# run -p graph-owl-server` is ambiguous without this.
+# Three binaries live here — the server, the contract generator, and Epic 14
+# Slice H's stdio MCP transport — so `cargo run -p graph-owl-server` is
+# ambiguous without this.
 default-run = "graph-owl-server"
 license.workspace = true
 description = "axum HTTP layer and composition root for graph-owl"
@@ -64,6 +65,15 @@ graph-owl-ui.workspace = true
 graph-owl-authz.workspace = true
 # Epic 14 + 32: the MCP surface, served over JSON-RPC at `POST /mcp`.
 graph-owl-mcp.workspace = true
+# Epic 14 Slice H: `transport-io`'s `stdio()` for the `graph-owl-mcp-stdio`
+# binary's real stdin/stdout handles — everything else about the transport
+# (framing, dispatch) is hand-owned in `stdio.rs`, matching `graph-owl-mcp`'s
+# own "schema types and the stdio primitive only, never the SDK's own
+# service framework" decision (`00l-build-vs-adopt.md`).
+rmcp = { version = "3", default-features = false, features = [
+    "server",
+    "transport-io",
+] }
 jsonwebtoken = "9"
 graph-owl-core.workspace = true
 graph-owl-storage.workspace = true
@@ -86,6 +96,10 @@ dotenvy.workspace = true
 utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
 
 [dev-dependencies]
+# `stdio.rs`'s own test fixture implements `graph_owl_mcp::ContextSource`,
+# which is `#[async_trait]` — needed here regardless of the `bolt` feature,
+# unlike the production dependency below which stays gated to it.
+async-trait.workspace = true
 chrono.workspace = true
 graph-owl-engine.workspace = true
 # Epic 37a: the scale-budget tests reuse Slice A's real corpus generator
