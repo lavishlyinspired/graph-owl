@@ -1273,7 +1273,7 @@ export const api = {
 
   /** Land an RDF document in a named import graph. Admin-gated server-side. */
   importRdf: (source: string, turtle: string) =>
-    request<{ landed: number; skipped: number; rejected: { subject: string; reason: string }[] }>(
+    request<{ landed: string[]; skipped: string[]; rejected: { subject: string; reason: string }[] }>(
       `/graph/import/rdf?source=${encodeURIComponent(source)}&format=turtle`,
       { method: "POST", body: turtle, headers: { "content-type": "text/turtle" } },
     ),

@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { packIdOf, surfacesFor } from "./packSurfaces";
+import { invoicePeriod } from "./PackImportPanel";
 
 describe("packIdOf", () => {
   it("recognises a pack-declared namespace", () => {
@@ -52,5 +53,26 @@ describe("surfacesFor", () => {
 
     expect(() => gst.imports[0]!.convert('{"error":"unauthorized"}')).toThrow(/docdata/);
     expect(() => gst.imports[0]!.convert("not json at all")).toThrow();
+  });
+});
+
+describe("invoicePeriod", () => {
+  it("reads the period out of the generated Turtle", () => {
+    expect(invoicePeriod('gst:period        "2026-07" .')).toBe("2026-07");
+  });
+
+  it("scopes the import source so a real upload cannot collide with the pack's own bundled demo fixture", () => {
+    // A sample and the pack's shipped `fixtures/gstr2b.ttl` can legitimately
+    // share invoice numbers (both this project's own test data), and the
+    // server's import is idempotent per subject *within one source name* — so
+    // without period-scoping, a real upload whose invoice numbers happened to
+    // match the demo fixture would silently skip as "already imported".
+    // Found exactly this way: a real upload landed 4 of 7 invoices with no
+    // visible explanation for the other 3.
+    expect(invoicePeriod('gst:period        "2020-07" .')).toBe("2020-07");
+  });
+
+  it("returns null for Turtle with no period, falling back to the pack-wide source", () => {
+    expect(invoicePeriod("gst:2b-X rdf:type gst:Gstr2bInvoice .")).toBeNull();
   });
 });
