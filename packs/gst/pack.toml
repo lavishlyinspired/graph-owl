@@ -82,6 +82,31 @@ name = "itcAvailable"
 [[predicates]]
 name = "reverseCharge"
 
+# The tax components the authority reports separately. The register carries one
+# figure and reconciliation compares that, but an intra-state supply reported as
+# inter-state is a real and common error the total alone hides completely — so
+# the components are kept as evidence a reviewer can act on.
+[[predicates]]
+name = "igst"
+
+[[predicates]]
+name = "cgst"
+
+[[predicates]]
+name = "sgst"
+
+[[predicates]]
+name = "cess"
+
+[[predicates]]
+name = "supplierName"
+
+[[predicates]]
+name = "invoiceType"
+
+[[predicates]]
+name = "placeOfSupply"
+
 [[predicates]]
 name = "effectiveFrom"
 

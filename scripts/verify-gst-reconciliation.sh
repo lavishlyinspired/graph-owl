@@ -26,7 +26,8 @@ FAIL=0
 
 cleanup() {
   [[ -n "${SERVER_PID:-}" ]] && kill "$SERVER_PID" 2>/dev/null || true
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  [[ -n "${LIVE_PID:-}" ]] && kill "$LIVE_PID" 2>/dev/null || true
+  docker rm -f "$CONTAINER" "$CONTAINER-live" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -155,6 +156,51 @@ curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/findings/$ID/decision" \
 THIRD=$(reconcile "$ROOT/packs/gst" --server "http://127.0.0.1:$PORT")
 check "the dismissed finding does not come back" \
   "$(echo "$THIRD" | python3 -c 'import json,sys; print(json.load(sys.stdin)["opened"])')" "0"
+
+echo
+echo "==> the rules cannot tell live-shaped data from a hand-written fixture"
+# **The claim the whole connector rests on.** The API-shaped response carries
+# DD-MM-YYYY dates and splits one invoice's tax into CGST/SGST — neither of
+# which the hand-written fixture does — and after normalization the six rules
+# must reach exactly the same conclusions. If they do not, the "develop
+# against fixtures, deploy against a GSP" split is a fiction.
+BEFORE=$(curl -sf "http://127.0.0.1:$PORT/findings?pack=gst" \
+  | python3 -c 'import json,sys; print(sorted((r["label"], r["subject"]) for r in json.load(sys.stdin)))')
+
+LIVE=$(mktemp -d)
+cp -r "$ROOT/packs/gst/." "$LIVE/"
+python3 -c "
+import sys
+from graph_owl_packs.cli import gstr2b_main
+sys.exit(gstr2b_main(sys.argv[1:]))" \
+  --from-file "$ROOT/packs/gst/fixtures/gstr2b-api-response.json" \
+  --out "$LIVE/fixtures/gstr2b.ttl" >/dev/null
+
+# A second server, so the comparison is against a clean graph rather than one
+# already holding the fixture's triples.
+docker rm -f "$CONTAINER-live" >/dev/null 2>&1 || true
+docker run -d --rm --name "$CONTAINER-live" \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=graphowl \
+  -p "$((PG_PORT + 1)):5432" postgres:18-alpine >/dev/null
+until docker exec "$CONTAINER-live" pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
+DATABASE_URL="postgres://postgres:postgres@localhost:$((PG_PORT + 1))/graphowl" \
+BIND_ADDR="127.0.0.1:$((PORT + 1))" OIDC_ISSUER= GRAPH_OWL_JWT_SECRET= \
+  cargo run -q -p graph-owl-server --bin graph-owl-server >/tmp/gst-verify-live.log 2>&1 &
+LIVE_PID=$!
+until curl -sf "http://127.0.0.1:$((PORT + 1))/health" >/dev/null 2>&1; do sleep 1; done
+
+python3 -m graph_owl_packs.cli "$LIVE" --server "http://127.0.0.1:$((PORT + 1))" >/dev/null
+python3 -c "
+import sys
+from graph_owl_packs.cli import reconcile_main
+sys.exit(reconcile_main(sys.argv[1:]))" "$LIVE" --server "http://127.0.0.1:$((PORT + 1))" >/dev/null
+AFTER=$(curl -sf "http://127.0.0.1:$((PORT + 1))/findings?pack=gst" \
+  | python3 -c 'import json,sys; print(sorted((r["label"], r["subject"]) for r in json.load(sys.stdin)))')
+kill "$LIVE_PID" 2>/dev/null || true
+docker rm -f "$CONTAINER-live" >/dev/null 2>&1 || true
+rm -rf "$LIVE"
+
+check "normalized GSTR-2B produces the identical finding set" "$AFTER" "$BEFORE"
 
 echo
 echo "==> the pack is files, not code"

@@ -216,5 +216,60 @@ def reconcile_main(argv: list[str] | None = None) -> int:
     return EXIT_OK
 
 
+def build_gstr2b_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="graph-owl-gstr2b",
+        description="Normalize a GSTR-2B return into the GST pack's vocabulary.",
+    )
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--from-file", type=Path, help="a saved GSTR-2B JSON response")
+    source.add_argument("--from-api", action="store_true", help="fetch from a GSP")
+    parser.add_argument("--gstin", help="required with --from-api")
+    parser.add_argument("--period", help="YYYY-MM; required with --from-api")
+    parser.add_argument(
+        "--gsp-url",
+        default=os.environ.get("GSP_API_BASE_URL"),
+        help="the GSP's base URL (env: GSP_API_BASE_URL) — no vendor is named "
+        "in this tool, so changing provider is configuration",
+    )
+    parser.add_argument("--gsp-key", default=os.environ.get("GSP_API_KEY"))
+    parser.add_argument("--out", type=Path, help="write Turtle here instead of stdout")
+    return parser
+
+
+def gstr2b_main(argv: list[str] | None = None) -> int:
+    """`graph-owl-gstr2b` — the authority's JSON, in the pack's terms.
+
+    Prints Turtle, so it composes with `graph-owl-load-pack` or with a plain
+    `POST /graph/import/rdf`. Keeping the fetch and the load separate means a
+    response can be inspected before anything lands in the graph.
+    """
+    from .gstr2b import Gstr2bError, fetch, from_file, normalize, to_turtle
+
+    args = build_gstr2b_parser().parse_args(argv)
+    try:
+        if args.from_api:
+            if not (args.gsp_url and args.gstin and args.period):
+                print(
+                    "--from-api needs --gsp-url (or GSP_API_BASE_URL), --gstin and --period",
+                    file=sys.stderr,
+                )
+                return EXIT_UNUSABLE
+            payload = fetch(args.gsp_url, args.gstin, args.period, api_key=args.gsp_key)
+        else:
+            payload = from_file(args.from_file)
+        turtle = to_turtle(normalize(payload))
+    except Gstr2bError as failed:
+        print(str(failed), file=sys.stderr)
+        return EXIT_UNUSABLE
+
+    if args.out:
+        args.out.write_text(turtle, encoding="utf-8")
+        print(str(args.out))
+    else:
+        sys.stdout.write(turtle)
+    return EXIT_OK
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())

@@ -20,6 +20,7 @@ dev = ["pytest>=8"]
 graph-owl-load-pack = "graph_owl_packs.cli:main"
 graph-owl-erpnext = "graph_owl_packs.cli:erpnext_main"
 graph-owl-reconcile = "graph_owl_packs.cli:reconcile_main"
+graph-owl-gstr2b = "graph_owl_packs.cli:gstr2b_main"
 
 [build-system]
 requires = ["setuptools>=68"]
