@@ -201,6 +201,59 @@ credentials read `Enabled`.
 invoice-level and could serve as a third evidence source beside the purchase
 register and GSTR-2B.
 
+## 6b. A second GSP, tested — and the pattern is now clear
+
+The obvious response to one provider blocking is to try another. Done, with a
+second GSP's free-trial credentials:
+
+```
+POST https://api.sandbox.co.in/authenticate   (x-api-key, x-api-secret)
+  → 200, a JWT access token, immediately
+```
+
+**No OTP, no taxpayer consent, no provisioning wait.** Where the first provider
+needs a taxpayer to approve an OTP before anything, this one issues an
+application token from an API key in one call. That difference alone is worth
+knowing when choosing a provider.
+
+But GSTR-2B is blocked here too, differently, and the two failures together are
+the actual finding:
+
+| Key | Host | GSTR-2B result |
+|---|---|---|
+| live | `api.sandbox.co.in` | `403 Insufficient privilege` |
+| test | `api.sandbox.co.in` | `403 Use production API key for production environment` |
+| test | `test-api.sandbox.co.in` | **`200`** — but see below |
+
+The test key against the test host is the only combination that returns `200`,
+and the two 403s are worth reading carefully: they are *different* messages, and
+the second one names its own fix. A test key is scoped to a test host; pointing
+it at production is a configuration error the API states plainly.
+
+**The `200` is a canned mock, not a return.** The body is GSTR-**3B**-shaped —
+`tx_pmt`, `sup_details`, `itc_elg`, `intr_ltfee` — carries a GSTIN and period
+nobody asked for (`24ABKCS2033B1ZV`, `112024`), and is **byte-identical at 3433
+bytes across every period and every `file_number`** tested. There is no
+`docdata`, no `b2b`, no `ctin`. The path was right; the environment simply
+serves a fixed sample.
+
+That last check is the one that mattered. A `200` with plausible tax figures is
+exactly the kind of response a connector would happily normalize and a
+reconciliation would happily run against, producing findings about a taxpayer
+who does not exist. **Requesting two different periods and comparing byte counts
+took one command and turned an apparent success into a known mock.**
+
+### What both providers agree on
+
+Two independent GSPs, two different failure modes, one conclusion: **GSTR-2B
+return data is a provisioned, paid capability everywhere.** Free tiers give
+authentication, public registry lookups and mock responses. They do not give
+another taxpayer's return, which — given the return *is* that taxpayer's private
+data — is the correct behaviour rather than an obstacle to route around.
+
+So "try a different GSP" is answered: it changes the auth model, and it does not
+change the provisioning requirement.
+
 ## 7. What is still unknown
 
 **Whether the sandbox returns realistic invoice-level `docdata.b2b` at all.**
