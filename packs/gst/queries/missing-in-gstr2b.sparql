@@ -1,26 +1,33 @@
-# Invoices the purchase register claims that no supplier ever filed.
+# Invoices the purchase register claims that the GSTR-2B does not match.
 #
 # **Section 16's condition, as a query.** Credit exists only where the supplier
-# actually filed the outward supply; an invoice absent from GSTR-2B therefore
-# has no credit to claim, and this is the most expensive finding in the pack.
+# actually filed the outward supply; an invoice absent from GSTR-2B has no
+# credit to claim, and this is the most expensive finding in the pack.
 #
-# Matched on (GSTIN, invoice number) — the `normalized` blocking strategy
-# pack.toml configures, expressed here as the join it implies. A production
-# reconciliation runs the engine's blocking rather than a literal join; this
-# query is what makes the same answer reachable today, from the console's
-# existing workbench, with no findings runtime.
+# **`OPTIONAL` + `!BOUND`, not `FILTER NOT EXISTS`.** Both are valid SPARQL and
+# only one works here: the pushdown planner does not walk into `NOT EXISTS`, so
+# the GSTR-2B facts were never loaded into the dataset and the filter was
+# trivially true for every invoice — all four came back "missing", including
+# two that match perfectly. Found by running it against real data. Fixing
+# pushdown to descend into `NOT EXISTS` is the engine-side follow-up; this form
+# is correct today.
 #
-# **Every pattern is inside `GRAPH ?g`, and that is not optional.**
-# `POST /graph/import/rdf` lands a document in `graph:import:{source}`, never
-# the default graph — one predictable place a bad import can be dropped
-# wholesale. A query without a `GRAPH` clause therefore matches nothing at
-# all, silently, which reads exactly like "the reconciliation found no
-# problems". Found by running this against real loaded data and getting zero
-# rows where three scenarios were planted.
+# **Every pattern is inside `GRAPH ?g`.** `POST /graph/import/rdf` lands a
+# document in `graph:import:{source}`, never the default graph, so a query
+# without a `GRAPH` clause matches nothing at all — silently, which reads
+# exactly like "the reconciliation found no problems".
+#
+# **What this query cannot do, and the pack says so.** It joins on an *exact*
+# GSTIN and invoice number. INV-1004's GSTIN is transposed by two characters,
+# so this reports it as unmatched even though the supplier did file it. That is
+# not a bug in the query — it is the reason `pack.toml` configures an `ngram`
+# blocking strategy, which sees through a transposition where an exact join
+# cannot. The difference between these two answers is the argument for the
+# fusion engine.
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
-SELECT ?invoice ?gstin ?number ?taxAmount
+SELECT ?number ?gstin ?taxAmount
 WHERE {
   GRAPH ?register {
     ?invoice a gst:PurchaseInvoice ;
@@ -28,13 +35,13 @@ WHERE {
              gst:invoiceNumber ?number ;
              gst:taxAmount ?taxAmount .
   }
-
-  FILTER NOT EXISTS {
-    GRAPH ?filed_in {
+  OPTIONAL {
+    GRAPH ?authority {
       ?filed a gst:Gstr2bInvoice ;
              gst:supplierGstin ?gstin ;
              gst:invoiceNumber ?number .
     }
   }
+  FILTER (!BOUND(?filed))
 }
 ORDER BY ?number

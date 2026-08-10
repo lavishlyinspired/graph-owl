@@ -863,6 +863,33 @@ fn is_vocabulary_namespace(namespace_code: u16) -> bool {
             | graph_owl_core::flake::namespace::SNOMED_CT
             | graph_owl_core::flake::namespace::RXNORM
     )
+    // **Every runtime-declared namespace too** — Epic 105.
+    //
+    // This list was three hardcoded medical namespaces, which is the *same*
+    // per-domain hardcoding `plans/105-domain-neutrality.md` removed from
+    // `graph-owl-core`, living a second time in the authorization filter. A
+    // domain pack declares its vocabulary at runtime and gets a code at or
+    // above `RUNTIME_START`; without this every fact it lands is filtered out
+    // of SPARQL, because `scope_facts` otherwise admits only subjects that are
+    // *catalog assets* — and a pack's subjects (an invoice, a guest, a
+    // statutory section) are graph subjects with no asset row, by design.
+    //
+    // Found by loading the GST pack and getting zero rows from a query whose
+    // plan resolved perfectly. The generalization is the same argument that
+    // already admitted CUI and SNOMED: a declared vocabulary is not asset
+    // data, so asset-level visibility is the wrong question to ask of it.
+    //
+    // **The limitation this leaves, stated plainly: a pack's facts are
+    // readable by any principal who can query.** That matches how the three
+    // medical namespaces are already treated (a SNOMED-coded fact is clinical
+    // data and is admitted the same way), so this is consistent with the
+    // system's existing posture rather than a new weakening — but it is not
+    // the right long-term answer for a pack carrying real invoices. Per-named-
+    // graph policy, so access to `graph:import:{source}` is a policy decision
+    // rather than a namespace one, is the follow-up; it needs a policy model
+    // that does not exist yet and is a deliberate design decision rather than
+    // something to infer here.
+        || namespace_code >= graph_owl_core::flake::namespace::RUNTIME_START
 }
 
 /// Keep only the facts this principal may see, up to the budget.

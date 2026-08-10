@@ -159,15 +159,17 @@ DN-1 built a table, a port and an adapter, and **nothing exposed them** — the 
 3. **Predicates must be defined before documents are imported.** The first load rejected all 15 subjects. Hence `POST /predicates` and `[[predicates]]` in the manifest, and the loader's three-phase order: namespace → predicates → documents.
 4. **A pack may not assert `rdfs:label`.** `rdfs:` is a shipped namespace whose predicates this store does not register, and a pack may not define terms in somebody else's vocabulary. Both packs now own every predicate they assert (`hosp:label`, `gst:label`).
 
-### Open — the GST reconciliation queries return nothing
+### Closed — the GST reconciliation is visible
 
-`packs/gst/queries/` ships two SPARQL queries for the planted scenarios (INV-1003 claimed but never filed; INV-1002 differing by ₹900). **They return zero rows, with `factsScanned: 0`.**
+`packs/gst/queries/` returns the planted scenarios against a real server, asserted in `verify-pack-load.sh`: **INV-1003** never filed, **INV-1004** unmatched, **INV-1002** claiming ₹18,000 against ₹17,100 filed, and INV-1001 correctly producing nothing. Three defects stood between "loaded data" and "visible reconciliation", and none was findable by reading:
 
-What is *not* wrong: the queries parse, and the returned plan resolves `gst:supplierGstin` to `1025:supplierGstin` — so the pack's namespace reaches the query planner correctly, which is the whole of Epic 105 working.
+1. **The same per-domain hardcoding, in a second place.** `scope_facts` admits a flake only when its subject is a visible catalog *asset* — or when `is_vocabulary_namespace` says so, and that was **a hardcoded list of exactly three medical namespaces** (CUI, SNOMED_CT, RXNORM). The identical Epic 104 hardcoding this epic removed from `graph-owl-core`, living again in the authorization filter. A pack's subjects are graph subjects with no asset row *by design* (DN-3's boundary), so every pack fact was filtered out of SPARQL. Generalized to any runtime-declared namespace — the same argument that already admitted a SNOMED-coded clinical fact.
+2. **Pushdown does not descend into `FILTER NOT EXISTS`.** The GSTR-2B facts were never loaded, so the filter was trivially true and *all four* invoices reported as missing — including the two that match perfectly. The queries use `OPTIONAL` + `!BOUND` instead, which pushdown does handle. **Teaching pushdown to walk `NOT EXISTS` is the engine-side follow-up**; a query that silently reports every row as unmatched is a bad failure to leave reachable.
+3. **Every pattern must be inside `GRAPH ?g`.** Imports land in `graph:import:{source}`, never the default graph, so a query without a `GRAPH` clause matches nothing — silently, which reads exactly like "the reconciliation found no problems".
 
-What is unresolved: `POST /graph/import/rdf` lands flakes in `graph:import:{source}`, and the SPARQL dataset does not appear to surface those named graphs. Tried both with and without an explicit `GRAPH ?g` clause; both scan zero facts. **This is the next thing to investigate**, and it gates turning the GST pack from loaded data into a visible reconciliation.
+**INV-1004 is a true finding about the method, not a bug.** Its GSTIN is transposed by two characters, so an exact join cannot pair it even though the supplier filed it. That is why `pack.toml` configures an `ngram` strategy, and the gap between these two answers is the concrete argument for the fusion engine.
 
-`verify-pack-load.sh` reports this as a warning rather than failing, deliberately: failing there would block a genuine result on an unrelated open question, and asserting success would be a lie.
+**The authorization limitation this leaves, stated plainly**: a pack's facts are now readable by any principal who can query. That matches how the three medical namespaces were already treated, so it is consistent with the system's existing posture rather than a new weakening — but it is not right for a pack carrying real invoices. **Per-named-graph policy**, so access to `graph:import:{source}` is a policy decision rather than a namespace one, is the follow-up. It needs a policy model that does not exist and is a deliberate design decision, not something to infer.
 
 ### GST console surface — blocked on the above, not on the console
 

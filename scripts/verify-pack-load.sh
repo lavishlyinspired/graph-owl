@@ -114,40 +114,38 @@ done
 python3 - <<'PYCHECK'
 import json, sys
 
-# **A known gap, reported rather than asserted — and the distinction matters.**
-# The queries are correct SPARQL against the pack's own vocabulary (the plan
-# in the response resolves `gst:supplierGstin` to `1025:supplierGstin`, so
-# namespace resolution is working end to end). What they return is nothing,
-# with `factsScanned: 0`: `POST /graph/import/rdf` lands flakes in
-# `graph:import:{source}`, and the SPARQL dataset does not appear to include
-# those named graphs — with or without an explicit `GRAPH` clause, both of
-# which were tried.
-#
-# Left as a warning rather than a hard failure so the rest of this proof —
-# which does pass — stays runnable, and recorded in
-# `plans/105-domain-neutrality.md` as the next thing to investigate. Failing
-# here would block a genuine result on an unrelated open question; asserting
-# success would be a lie.
-def rows(name):
+def result(name):
     body = json.load(open(f"/tmp/gst-{name}-result.json"))
     # `rows`/`variables`, not SPARQL-JSON `results.bindings` — this server's
-    # own shape, and the first version of this check read the wrong one.
-    return body.get("rows", []), body.get("factsScanned")
+    # own shape, and the first version of this check read the wrong one and
+    # reported zero rows for a query that was working.
+    return body.get("rows", []), body.get("factsScanned", 0)
 
-missing, scanned_missing = rows("missing-in-gstr2b")
-mismatch, _ = rows("tax-amount-mismatch")
+missing, scanned = result("missing-in-gstr2b")
+mismatch, _ = result("tax-amount-mismatch")
 
-if missing or mismatch:
-    print(f"ok: reconciliation returned {len(missing)} missing, {len(mismatch)} mismatched")
-else:
-    print(
-        "KNOWN GAP: the pack's reconciliation queries return nothing "
-        f"(factsScanned={scanned_missing}). The queries parse and resolve the "
-        "pack's namespace correctly; the SPARQL dataset does not surface the "
-        "`graph:import:*` named graphs the importer writes to. See "
-        "plans/105-domain-neutrality.md.",
-        file=sys.stderr,
-    )
+def field(row, key):
+    return (row.get(key) or "").strip('"<>')
+
+assert scanned > 0, (
+    "the reconciliation scanned no facts at all. `scope_facts` admits a flake "
+    "only when its subject is a visible catalog *asset* or its namespace is a "
+    "declared vocabulary — a pack's subjects are neither assets nor, before "
+    "Epic 105, recognised vocabularies."
+)
+
+unmatched = sorted(field(r, "number") for r in missing)
+assert unmatched == ["INV-1003", "INV-1004"], (
+    f"expected INV-1003 (never filed) and INV-1004 (transposed GSTIN), got {unmatched}"
+)
+
+deltas = {field(r, "number"): (field(r, "claimed"), field(r, "filed")) for r in mismatch}
+assert deltas == {"INV-1002": ("18000.00", "17100.00")}, deltas
+
+print("ok: INV-1003 never filed; INV-1004 unmatched on an exact join (its GSTIN "
+      "is transposed — the `ngram` strategy is what would pair it, which is the "
+      "argument for the fusion engine); INV-1002 claims 18000.00 against "
+      "17100.00 filed; INV-1001 correctly produces nothing")
 PYCHECK
 
 echo "==> the acceptance criterion: no pack needed Rust or TypeScript"
