@@ -183,10 +183,26 @@ def _passes_span(rule: dict, row: dict, label: str) -> bool:
         )
 
     if end_var not in row:
-        # Both readings are legitimate, so the rule states which it means: an
-        # absent second event can be the whole problem (an invoice nobody
-        # paid), or it can mean the process has not reached that step yet.
-        return str(span.get("when_missing", "ignore")) == "finding"
+        missing = str(span.get("when_missing", "ignore"))
+        if missing == "finding":
+            return True
+        if missing != "elapsed":
+            return False
+        # **`elapsed` is the reading this rule usually wants**, and treating
+        # every absent second event as a finding was a real defect: an invoice
+        # issued yesterday and not yet paid is not overdue, and flagging it
+        # fills the queue with accusations about data that is simply not due.
+        # Measuring from the first event to the reconciliation date separates
+        # "not yet due" from "overdue".
+        #
+        # `as_of` rather than "now" because a statutory reconciliation is run
+        # as of a filing date — and because a fixture judged against the
+        # wall clock silently changes meaning as the calendar moves.
+        as_of = span.get("as_of")
+        judged_on = _as_date(str(as_of), label) if as_of else date.today()
+        return (judged_on - _as_date(_term(str(row[start_var])), label)).days > int(
+            span.get("exceeds_days", 0)
+        )
 
     start = _as_date(_term(str(row[start_var])), label)
     end = _as_date(_term(str(row[end_var])), label)

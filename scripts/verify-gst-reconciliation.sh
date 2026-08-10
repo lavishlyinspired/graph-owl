@@ -129,8 +129,12 @@ echo
 echo "==> Section 16(2)(d): the 180-day span between two events"
 check "INV-1003, paid after 240 days, is a finding" "$(count gst:PaymentOverdue INV-1003)" "1"
 # The case a "days to pay" column cannot express: no payment row, so no delta.
-check "INV-1006, never paid at all, is a finding"   "$(count gst:PaymentOverdue INV-1006)" "1"
+check "INV-2002, unpaid for six years, is a finding" "$(count gst:PaymentOverdue INV-2002)" "1"
 check "INV-1001, paid after 20 days, is not"        "$(count gst:PaymentOverdue INV-1001)" "0"
+# And the correction that "unpaid" is not the same as "overdue": flagging an
+# invoice that is simply not due yet is a false accusation, and is what
+# `when_missing = "finding"` used to do to every one of them.
+check "INV-1006, unpaid but only six days old, is NOT" "$(count gst:PaymentOverdue INV-1006)" "0"
 
 echo
 echo "==> a re-run over unchanged data opens nothing"

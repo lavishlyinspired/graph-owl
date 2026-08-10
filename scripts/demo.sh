@@ -5,6 +5,7 @@
 #   ./scripts/demo.sh          light  — no auth, everything visible
 #   ./scripts/demo.sh --secure        — HS256 JWT, with the two-principal policy
 #   ./scripts/demo.sh          OIDC auto-detected from .env (no flag needed)
+#   ./scripts/demo.sh --gst           — plus the GST pack, loaded and reconciled
 #   ./scripts/demo.sh --stop          — tear it all down
 set -euo pipefail
 
@@ -28,11 +29,13 @@ stop() {
 }
 
 SECURE=false
+GST=false
 case "${1:-}" in
   --stop) stop ;;
   --secure) SECURE=true ;;
+  --gst) GST=true ;;
   "") ;;
-  *) die "unknown option: $1 (expected --secure or --stop)" ;;
+  *) die "unknown option: $1 (expected --secure, --gst or --stop)" ;;
 esac
 
 # Auto-detect OIDC from .env (the server loads it the same way at startup).
@@ -222,6 +225,52 @@ elif [ "${SECURE}" = true ]; then
   echo "  Tokens:"
   echo "    root: $(token root)"
   echo "    asha: $(token asha)"
+fi
+
+# The GST pack — Epic 105. Deliberately the *last* step and deliberately
+# additive: the bank estate above is untouched, the pack brings its own
+# namespace, and nothing about the server changed to accept it. That is the
+# demonstration, so it runs against the same binary that was already up.
+if [ "${GST}" = true ]; then
+  say "Loading the GST pack"
+  if ! command -v python3 >/dev/null 2>&1; then
+    die "python3 is needed to load a pack (the loader is stdlib-only, no install)"
+  fi
+
+  GST_TOKEN=""
+  if [ "${SECURE}" = true ]; then
+    GST_TOKEN="$(token root)"
+  elif [ "${OIDC_MODE}" = true ]; then
+    GST_TOKEN="${OIDC_ACCESS_TOKEN}"
+  fi
+
+  # Fixture mode is the *normal* path, not a degraded one. A live GSTR-2B
+  # fetch needs a GSP account and credentials nobody has by default, and a
+  # demo that cannot run without them is a demo nobody runs. Say so plainly
+  # rather than failing or pretending the numbers are live.
+  if [ -n "${GST_LIVE_SOURCE:-}" ]; then
+    echo "  live source configured: ${GST_LIVE_SOURCE}"
+  else
+    echo "  fixture mode — the register and GSTR-2B come from packs/gst/fixtures/"
+    echo "  (set GST_LIVE_SOURCE to point the connector at a real return)"
+  fi
+
+  PYTHONPATH="${ROOT}/connectors/python" python3 -m graph_owl_packs.cli \
+    "${ROOT}/packs/gst" --server "http://localhost:${APP_PORT}" \
+    ${GST_TOKEN:+--token "${GST_TOKEN}"} \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("  namespace", d["namespaceCode"], "·", d["landed"], "subjects ·", len(d["rejected"]), "rejected")'
+
+  say "Running the reconciliation"
+  PYTHONPATH="${ROOT}/connectors/python" python3 -c '
+import sys
+from graph_owl_packs.cli import reconcile_main
+sys.exit(reconcile_main(sys.argv[1:]))' \
+    "${ROOT}/packs/gst" --server "http://localhost:${APP_PORT}" \
+    ${GST_TOKEN:+--token "${GST_TOKEN}"} \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ", d["rulesEvaluated"], "rules ·", d["opened"], "findings opened ·", d["alreadyOpen"], "already open")'
+
+  echo
+  echo "  Review them at http://localhost:${APP_PORT}/?section=review&kind=findings"
 fi
 
 cat <<EOF

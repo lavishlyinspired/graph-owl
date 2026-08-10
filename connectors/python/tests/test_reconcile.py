@@ -493,3 +493,80 @@ def test_a_date_the_runner_cannot_read_fails_loudly(span_pack: Path) -> None:
             run_findings(span_pack, server.url)
     finally:
         server.close()
+
+
+def _span_pack_with(tmp_path: Path, when_missing: str, as_of: str | None = None) -> Path:
+    (tmp_path / "queries").mkdir(exist_ok=True)
+    (tmp_path / "queries" / "unpaid.sparql").write_text("SELECT ?a ?start ?end WHERE { ?a a x:P }\n")
+    as_of_line = f'as_of = "{as_of}"' if as_of else ""
+    (tmp_path / "pack.toml").write_text(
+        f"""
+[pack]
+id = "maritime"
+namespace = "https://example.org/maritime#"
+prefix = "mar"
+
+[[queries]]
+name = "unpaid"
+path = "queries/unpaid.sparql"
+label = "Overdue"
+
+[[findings]]
+label = "mar:CertificateLapsed"
+summary = "s"
+governed_by = "mar:SafetyCode3"
+query = "unpaid"
+subject = "a"
+evidence = [{{ predicate = "mar:issuedAt", var = "start" }}]
+
+[findings.span]
+from = "start"
+to = "end"
+exceeds_days = 180
+when_missing = "{when_missing}"
+{as_of_line}
+"""
+    )
+    return tmp_path
+
+
+def test_an_absent_second_event_can_be_judged_on_elapsed_time(tmp_path: Path) -> None:
+    """**The correction `when_missing = "finding"` needed.**
+
+    Treating every missing second event as a finding flags an invoice issued
+    yesterday as overdue — a false accusation on data that is simply not due
+    yet, and the fastest way to fill a queue with noise. `elapsed` measures
+    from the first event to the reconciliation date instead, so "not yet due"
+    and "overdue" stop being the same answer.
+    """
+    pack = _span_pack_with(tmp_path, "elapsed", as_of="2026-08-01")
+    server = _Server(
+        rows=[
+            {"a": "<x:old>", "start": '"2020-07-12"'},   # years past
+            {"a": "<x:fresh>", "start": '"2026-07-26"'},  # six days
+        ],
+        columns=["a", "start", "end"],
+    )
+    try:
+        run_findings(pack, server.url)
+    finally:
+        server.close()
+
+    assert [f["subject"] for f in server.recorded] == ["x:old"]
+
+
+def test_as_of_makes_an_elapsed_rule_deterministic(tmp_path: Path) -> None:
+    """A statutory reconciliation is run *as of* a filing date, not "now".
+
+    Without it a fixture silently changes meaning as the calendar moves — the
+    "not yet due" case here becomes overdue in January 2027, which would turn
+    a passing test into a failing one on a date nobody chose.
+    """
+    pack = _span_pack_with(tmp_path, "elapsed", as_of="2027-06-01")
+    server = _Server(rows=[{"a": "<x:fresh>", "start": '"2026-07-26"'}], columns=["a", "start", "end"])
+    try:
+        run_findings(pack, server.url)
+    finally:
+        server.close()
+
+    assert len(server.recorded) == 1, "the same row, judged from a later date, is overdue"

@@ -237,10 +237,18 @@ right = "filedGstin"
 at_least = 0.40
 at_most = 0.999
 
-# The 180-day condition, as a span between two events. `when_missing =
-# "finding"` because an invoice with no payment event at all is exactly what
-# the section exists for — and is the case a "days to pay" column cannot
-# express, since there is no second date to subtract from.
+# The 180-day condition, as a span between two events.
+#
+# `when_missing = "elapsed"`, not `"finding"`. Treating every unpaid invoice
+# as overdue was a real defect caught while writing `eval/questions.md`: an
+# invoice issued last week and not yet paid is not in breach, and flagging it
+# fills the queue with accusations about data that is simply not due. Elapsed
+# time from the purchase is what the section actually turns on.
+#
+# `as_of` because a statutory reconciliation is run as of a filing date rather
+# than "now" — and because a fixture judged against the wall clock silently
+# changes meaning as the calendar moves, which would turn a passing test into
+# a failing one on a date nobody chose.
 [[findings]]
 label = "gst:PaymentOverdue"
 summary = "Credit taken on an invoice not paid within 180 days of its date"
@@ -258,7 +266,8 @@ evidence = [
 from = "purchasedAt"
 to = "paidAt"
 exceeds_days = 180
-when_missing = "finding"
+when_missing = "elapsed"
+as_of = "2026-08-01"
 
 # The same answers, reachable from the console workbench with no new route.
 [[queries]]

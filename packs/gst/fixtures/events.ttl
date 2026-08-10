@@ -12,7 +12,8 @@
 #
 #   INV-1001  paid after 20 days     → within the condition, no finding
 #   INV-1003  paid after 240 days    → paid, but too late
-#   INV-1006  never paid at all      → nothing to compare against
+#   INV-1006  unpaid, 6 days old      → not yet due, and not a finding
+#   INV-2002  unpaid, six years old    → overdue by absence
 #
 # The unpaid one is the case a "payment date minus invoice date" column cannot
 # express at all: there is no payment row, so there is no delta, so a
@@ -46,3 +47,8 @@ gst:purchase-INV-1006 rdf:type gst:PurchaseEvent ;
     gst:onInvoice  gst:pr-INV-1006 ;
     gst:atTime     "2026-07-26" ;
     gst:amount     "70800.00" .
+
+gst:purchase-INV-2002 rdf:type gst:PurchaseEvent ;
+    gst:onInvoice  gst:pr-INV-2002 ;
+    gst:atTime     "2020-07-12" ;
+    gst:amount     "118000.00" .
