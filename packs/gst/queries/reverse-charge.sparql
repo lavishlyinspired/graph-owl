@@ -1,0 +1,26 @@
+# A matched invoice the authority flags as reverse-charge.
+#
+# The tax on a reverse-charge supply is payable by the recipient, so treating
+# the supplier's line as ordinary input credit double-counts it. Like
+# `itc-not-available`, this is a finding on an invoice where every number
+# agrees — which is the point: matching is necessary and not sufficient.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?purchase ?number ?gstin ?taxAmount ?reverseCharge
+WHERE {
+  GRAPH ?register {
+    ?purchase a gst:PurchaseInvoice ;
+              gst:supplierGstin ?gstin ;
+              gst:invoiceNumber ?number ;
+              gst:taxAmount     ?taxAmount .
+  }
+  GRAPH ?authority {
+    ?filed a gst:Gstr2bInvoice ;
+           gst:supplierGstin ?gstin ;
+           gst:invoiceNumber ?number ;
+           gst:reverseCharge ?reverseCharge .
+  }
+  FILTER (?reverseCharge = "R")
+}
+ORDER BY ?number

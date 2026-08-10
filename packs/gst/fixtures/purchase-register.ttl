@@ -1,12 +1,28 @@
+# The taxpayer's own purchase register — what they claim.
+#
+# **Eight invoices, planted so that each finding rule has both a case that
+# fires and a case that must not.** A fixture where every row is a problem
+# proves only that a rule matches everything; the clean rows are what prove it
+# discriminates.
+#
+#   INV-1001  matches GSTR-2B exactly                     → nothing
+#   INV-1002  tax and taxable value both differ           → AmountMismatch
+#   INV-1003  never filed by the supplier                 → PotentialMismatch
+#   INV-1004  GSTIN transposed (…1ZM vs …1MZ)             → GstinTransposition
+#   INV-1005  filed, but credit reported unavailable      → ITCNotAvailable
+#   INV-1006  filed, but flagged as reverse-charge        → Reversed
+#   INV-2001  2020 invoice, 5% delta, cap was 10%         → nothing
+#   INV-2002  2020 invoice, 20% delta, cap was 10%        → AmountMismatch
+#
+# The last two are the ones worth reading twice. Same rule, same query,
+# different answer — because `law/rule-36-4.ttl` says the cap in force in
+# July 2020 was 10% and the cap in force in July 2026 is nil. If the
+# percentage were a constant in the query, INV-2001 would be a false finding
+# and a reviewer would be dismissing a compliant invoice every month.
+
 @prefix gst: <https://graph-owl.dev/packs/gst#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 
-# What the taxpayer's own books claim. Four invoices, and three of them are
-# planted scenarios — the fourth is the control that must NOT produce a
-# finding, because a reconciliation that flags everything is as useless as one
-# that flags nothing.
-
-# 1. Clean match. The control.
 gst:pr-INV-1001 rdf:type gst:PurchaseInvoice ;
     gst:supplierGstin "27AABCU9603R1ZM" ;
     gst:invoiceNumber "INV-1001" ;
@@ -15,7 +31,6 @@ gst:pr-INV-1001 rdf:type gst:PurchaseInvoice ;
     gst:taxAmount     "18000.00" ;
     gst:period        "2026-07" .
 
-# 2. Tax mismatch: the supplier filed 17,100 against this 18,000.
 gst:pr-INV-1002 rdf:type gst:PurchaseInvoice ;
     gst:supplierGstin "27AABCU9603R1ZM" ;
     gst:invoiceNumber "INV-1002" ;
@@ -24,8 +39,6 @@ gst:pr-INV-1002 rdf:type gst:PurchaseInvoice ;
     gst:taxAmount     "18000.00" ;
     gst:period        "2026-07" .
 
-# 3. Missing entirely — the supplier never filed it. Section 16 says there is
-#    no credit to claim, which is the most expensive finding in the pack.
 gst:pr-INV-1003 rdf:type gst:PurchaseInvoice ;
     gst:supplierGstin "29AACCG0527D1Z8" ;
     gst:invoiceNumber "INV-1003" ;
@@ -34,10 +47,7 @@ gst:pr-INV-1003 rdf:type gst:PurchaseInvoice ;
     gst:taxAmount     "45000.00" ;
     gst:period        "2026-07" .
 
-# 4. Recorded a day apart from the supplier's filing, and with two characters
-#    of the GSTIN transposed. Neither an exact nor a normalized key matches
-#    it; the n-gram and date-window strategies are what find it, and it must
-#    reconcile rather than be reported missing.
+# The two characters at the end are swapped against what the supplier filed.
 gst:pr-INV-1004 rdf:type gst:PurchaseInvoice ;
     gst:supplierGstin "27AABCU9603R1MZ" ;
     gst:invoiceNumber "INV-1004" ;
@@ -45,3 +55,35 @@ gst:pr-INV-1004 rdf:type gst:PurchaseInvoice ;
     gst:taxableValue  "50000.00" ;
     gst:taxAmount     "9000.00" ;
     gst:period        "2026-07" .
+
+gst:pr-INV-1005 rdf:type gst:PurchaseInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-1005" ;
+    gst:invoiceDate   "2026-07-24" ;
+    gst:taxableValue  "40000.00" ;
+    gst:taxAmount     "7200.00" ;
+    gst:period        "2026-07" .
+
+gst:pr-INV-1006 rdf:type gst:PurchaseInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-1006" ;
+    gst:invoiceDate   "2026-07-26" ;
+    gst:taxableValue  "60000.00" ;
+    gst:taxAmount     "10800.00" ;
+    gst:period        "2026-07" .
+
+gst:pr-INV-2001 rdf:type gst:PurchaseInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-2001" ;
+    gst:invoiceDate   "2020-07-10" ;
+    gst:taxableValue  "100000.00" ;
+    gst:taxAmount     "18000.00" ;
+    gst:period        "2020-07" .
+
+gst:pr-INV-2002 rdf:type gst:PurchaseInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-2002" ;
+    gst:invoiceDate   "2020-07-12" ;
+    gst:taxableValue  "100000.00" ;
+    gst:taxAmount     "18000.00" ;
+    gst:period        "2020-07" .

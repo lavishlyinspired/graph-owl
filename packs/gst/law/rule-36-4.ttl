@@ -1,0 +1,47 @@
+# Rule 36(4), CGST Rules 2017 — the provisional-credit cap, as dated facts.
+#
+# **The whole point of this file is that the percentage is not in the code.**
+# A provision is an entity with `gst:effectiveFrom` and `gst:citation`, and
+# `queries/amount-mismatch.sparql` resolves "which cap applied on this invoice
+# date" by traversal — finding the provision in force and reading its cap.
+# Amending the law is adding a subject here; it is not a code change, not a
+# config constant, and not a threshold anybody has to remember to update.
+#
+# That also makes the answer *auditable*: a finding cites the notification it
+# was judged under, so a reviewer can check the reasoning against the statute
+# rather than against a number somebody typed.
+#
+# Source: the published CGST Rules and the notifications named below. Statute
+# is the specification (`plans/00i-licensing.md` rule 2); no implementation of
+# anybody's tax software was consulted.
+
+@prefix gst: <https://graph-owl.dev/packs/gst#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+gst:Rule36-4-2019 rdf:type gst:Provision ;
+    gst:label         "Rule 36(4) — 20% provisional credit cap" ;
+    gst:effectiveFrom "2019-10-09" ;
+    gst:capPercent    "20" ;
+    gst:citation      "Notification 49/2019-CT" .
+
+gst:Rule36-4-2020 rdf:type gst:Provision ;
+    gst:label         "Rule 36(4) — 10% provisional credit cap" ;
+    gst:effectiveFrom "2020-01-01" ;
+    gst:capPercent    "10" ;
+    gst:citation      "Notification 75/2019-CT" .
+
+gst:Rule36-4-2021 rdf:type gst:Provision ;
+    gst:label         "Rule 36(4) — 5% provisional credit cap" ;
+    gst:effectiveFrom "2021-01-01" ;
+    gst:capPercent    "5" ;
+    gst:citation      "Notification 94/2020-CT" .
+
+# From 2022 the cap is nil: credit must match GSTR-2B in full, which is why a
+# 2026 invoice with any delta at all is a finding while a 2020 one with a 5%
+# delta is not. The same rule, the same query, a different answer — because
+# the law changed and the graph records when.
+gst:Rule36-4-2022 rdf:type gst:Provision ;
+    gst:label         "Rule 36(4) — no provisional credit; full GSTR-2B matching" ;
+    gst:effectiveFrom "2022-01-01" ;
+    gst:capPercent    "0" ;
+    gst:citation      "Notification 40/2021-CT" .

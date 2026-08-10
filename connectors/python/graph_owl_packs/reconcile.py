@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from .loader import LoadError, _request
@@ -61,6 +62,137 @@ def _term(value: str) -> str:
     if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
         return value[1:-1]
     return value
+
+
+def _trigrams(value: str, n: int) -> set[str]:
+    """The n-grams of a value, padded so short strings still have some.
+
+    Padding matters at this length: an 15-character identifier has 13 trigrams
+    and a 3-character one has exactly 1, so without padding the shortest
+    values compare as all-or-nothing.
+    """
+    padded = f"{'\x02' * (n - 1)}{value}{'\x03' * (n - 1)}"
+    return {padded[i : i + n] for i in range(len(padded) - n + 1)}
+
+
+def similarity(left: str, right: str, strategy: str, n: int) -> float:
+    """How alike two values are, on 0.0–1.0.
+
+    **Jaccard over n-grams, which is what makes a transposition visible.** Two
+    identifiers with a pair of characters swapped share almost every n-gram
+    but differ in a few, where an exact comparison sees only "not equal" and a
+    prefix comparison sees only the part before the swap.
+
+    `exact` is offered too, and is not pointless: it lets a rule express
+    "these must be identical" through the same mechanism rather than through a
+    second one.
+
+    # Raises
+
+    `ReconcileError` for a strategy this runtime does not implement — a
+    misspelled strategy that silently scored 0.0 would drop every row and
+    report a clean run.
+    """
+    if strategy == "exact":
+        return 1.0 if left == right else 0.0
+    if strategy != "ngram":
+        raise ReconcileError(
+            f"unknown similarity strategy '{strategy}' — a rule that silently "
+            f"scored nothing would report a clean reconciliation"
+        )
+    if n < 1:
+        raise ReconcileError("an n-gram size must be at least 1")
+    if left == right:
+        # Short-circuited so identical values are exactly 1.0 rather than
+        # 1.0-within-floating-point, which an `at_most` bound would then
+        # sometimes admit and sometimes not.
+        return 1.0
+
+    a, b = _trigrams(left, n), _trigrams(right, n)
+    union = a | b
+    return len(a & b) / len(union) if union else 0.0
+
+
+def _passes_similarity(rule: dict, row: dict, label: str) -> bool:
+    """Whether a row survives its rule's similarity band, if it has one."""
+    band = rule.get("similarity")
+    if not band:
+        return True
+
+    for side in ("left", "right"):
+        variable = str(band.get(side, ""))
+        if variable not in row:
+            raise ReconcileError(
+                f"rule '{label}' compares similarity on variable "
+                f"'{variable}', which the query does not bind"
+            )
+
+    score = similarity(
+        _term(str(row[str(band["left"])])),
+        _term(str(row[str(band["right"])])),
+        str(band.get("strategy", "ngram")),
+        int(band.get("n", 3)),
+    )
+    # A band rather than a single threshold. The upper bound is the
+    # load-bearing half: without it, every *correctly* matched pair scores 1.0
+    # and is reported as a suspected typo, which is the finding that makes a
+    # reviewer stop trusting the queue.
+    return float(band.get("at_least", 0.0)) <= score <= float(band.get("at_most", 1.0))
+
+
+def _as_date(value: str, label: str) -> date:
+    """An ISO-8601 date, or a loud failure.
+
+    **Never silently treated as absent.** A malformed date quietly becoming
+    "no second event" would turn a data-quality problem into a fabricated
+    compliance finding — the worst direction for this system to be wrong in,
+    because the finding looks exactly like a real one.
+    """
+    try:
+        return date.fromisoformat(value)
+    except ValueError as unreadable:
+        raise ReconcileError(
+            f"rule '{label}' compares dates, and '{value}' is not an ISO-8601 "
+            f"date — a date the runtime cannot read must not be guessed at"
+        ) from unreadable
+
+
+def _passes_span(rule: dict, row: dict, label: str) -> bool:
+    """Whether a row survives its rule's time-span condition, if it has one.
+
+    **Why this is here and not in the query.** Measured against the real
+    engine: `xsd:date` subtraction, `date + duration`, and even `date > date`
+    all evaluate to unbound — it has no date support in expressions. ISO-8601
+    *strings* compare correctly, since their lexicographic order is their
+    chronological order, which is enough for "which provision was in force"
+    but not for "how many days apart". A day count needs calendar arithmetic.
+
+    So the query does the join and the runtime does the arithmetic — the same
+    split as `_passes_similarity`, for the same reason: each layer does what
+    it is actually good at.
+    """
+    span = rule.get("span")
+    if not span:
+        return True
+
+    start_var, end_var = str(span.get("from", "")), str(span.get("to", ""))
+    if start_var not in row:
+        raise ReconcileError(
+            f"rule '{label}' measures a span from variable '{start_var}', "
+            f"which the query does not bind"
+        )
+
+    if end_var not in row:
+        # Both readings are legitimate, so the rule states which it means: an
+        # absent second event can be the whole problem (an invoice nobody
+        # paid), or it can mean the process has not reached that step yet.
+        return str(span.get("when_missing", "ignore")) == "finding"
+
+    start = _as_date(_term(str(row[start_var])), label)
+    end = _as_date(_term(str(row[end_var])), label)
+    # Strictly greater: "within 180 days" includes the 180th, and a rule that
+    # fired on it would accuse a taxpayer on the last day they were compliant.
+    return (end - start).days > int(span.get("exceeds_days", 0))
 
 
 def _query_text(manifest: Manifest, name: str) -> str:
@@ -149,7 +281,12 @@ def _rows_to_findings(
     rows: list[dict],
 ) -> list[dict]:
     built = []
+    label = str(rule.get("label", ""))
     for row in rows:
+        if not _passes_similarity(rule, row, label):
+            continue
+        if not _passes_span(rule, row, label):
+            continue
         if subject_var not in row:
             raise ReconcileError(
                 f"rule '{rule.get('label')}' names subject variable "
@@ -172,7 +309,7 @@ def _rows_to_findings(
         built.append(
             {
                 "pack": manifest.id,
-                "label": str(rule.get("label", "")),
+                "label": label,
                 "subject": subject,
                 "summary": str(rule.get("summary", "")),
                 "governedBy": str(rule.get("governed_by", "")),
@@ -182,4 +319,10 @@ def _rows_to_findings(
     return built
 
 
-__all__ = ["ReconcileError", "ReconcileResult", "run_findings", "ManifestError"]
+__all__ = [
+    "ReconcileError",
+    "ReconcileResult",
+    "run_findings",
+    "similarity",
+    "ManifestError",
+]

@@ -1,0 +1,43 @@
+# Section 16(2)(d): invoices and the payment against them, if there was one.
+#
+# **This query deliberately does not apply the 180-day test.** Measured
+# against the real engine, `xsd:date` subtraction, `date + duration` and even
+# `date > date` all evaluate to unbound — it has no date support in
+# expressions at all. ISO-8601 strings compare correctly (their lexicographic
+# order is their chronological order), which is enough for
+# `amount-mismatch.sparql`'s "which provision was in force" but not for "how
+# many days apart".
+#
+# So the query returns the two anchors and the rule's `[findings.span]` band
+# in `pack.toml` applies the threshold, with real calendar arithmetic. Same
+# split as the transposition rule: the join is what a query language is good
+# at, the arithmetic is what it is not.
+#
+# **The payment is `OPTIONAL` and its absence is a finding**, declared by the
+# rule's `when_missing = "finding"`. An invoice nobody ever paid has no delta
+# to threshold, so a model that stored "days to pay" as a column would report
+# nothing wrong about the worst case the section exists for.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?purchase ?number ?gstin ?purchasedAt ?paidAt
+WHERE {
+  GRAPH ?register {
+    ?invoice a gst:PurchaseInvoice ;
+             gst:supplierGstin ?gstin ;
+             gst:invoiceNumber ?number .
+  }
+  GRAPH ?events {
+    ?purchase a gst:PurchaseEvent ;
+              gst:onInvoice ?invoice ;
+              gst:atTime    ?purchasedAt .
+  }
+  OPTIONAL {
+    GRAPH ?paidIn {
+      ?payment a gst:PaymentEvent ;
+               gst:onInvoice ?invoice ;
+               gst:atTime    ?paidAt .
+    }
+  }
+}
+ORDER BY ?number

@@ -1,0 +1,26 @@
+# A matched invoice the authority reports as carrying no usable credit.
+#
+# Worth separating from a mismatch: the numbers agree, the supplier filed, and
+# there is still nothing to claim — most often a blocked credit under Section
+# 17(5). A reconciliation that only compared amounts would report this invoice
+# as perfectly fine, and the taxpayer would claim credit they do not have.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?purchase ?number ?gstin ?taxAmount ?itcAvailable
+WHERE {
+  GRAPH ?register {
+    ?purchase a gst:PurchaseInvoice ;
+              gst:supplierGstin ?gstin ;
+              gst:invoiceNumber ?number ;
+              gst:taxAmount     ?taxAmount .
+  }
+  GRAPH ?authority {
+    ?filed a gst:Gstr2bInvoice ;
+           gst:supplierGstin ?gstin ;
+           gst:invoiceNumber ?number ;
+           gst:itcAvailable  ?itcAvailable .
+  }
+  FILTER (?itcAvailable != "Y")
+}
+ORDER BY ?number

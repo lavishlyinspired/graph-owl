@@ -1,0 +1,67 @@
+# A matched pair whose values disagree by more than the law allowed *at the
+# time of the invoice*.
+#
+# **The cap is read from the graph, never written here.** The inner pattern
+# finds the `gst:Provision` in force on the invoice date — the one whose
+# `effectiveFrom` is the latest that is still on or before it — and the filter
+# compares the delta against that provision's own `capPercent`. Amending the
+# law is adding a subject to `law/rule-36-4.ttl`.
+#
+# It is also what makes the finding auditable: the citation travels with the
+# row, so a reviewer sees which notification the judgement was made under
+# rather than having to trust a threshold.
+#
+# **"Latest in force" is expressed as `OPTIONAL` + `!BOUND`**, not as
+# `FILTER NOT EXISTS` — the pushdown planner does not descend into
+# `NOT EXISTS`, so the provisions would never be loaded into the dataset and
+# the guard would be trivially true for every one of them. That failure is
+# silent and looks like a clean result, which is why it is written this way
+# and why the reason is recorded here rather than in a commit message.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+SELECT ?purchase ?number ?gstin ?claimed ?filed ?capPercent ?citation
+WHERE {
+  GRAPH ?register {
+    ?purchase a gst:PurchaseInvoice ;
+              gst:supplierGstin ?gstin ;
+              gst:invoiceNumber ?number ;
+              gst:invoiceDate   ?date ;
+              gst:taxableValue  ?claimed .
+  }
+
+  GRAPH ?authority {
+    ?filedLine a gst:Gstr2bInvoice ;
+               gst:supplierGstin ?gstin ;
+               gst:invoiceNumber ?number ;
+               gst:taxableValue  ?filed .
+  }
+
+  # The provision in force on the invoice date.
+  GRAPH ?law {
+    ?provision a gst:Provision ;
+               gst:effectiveFrom ?from ;
+               gst:capPercent    ?capPercent ;
+               gst:citation      ?citation .
+  }
+  FILTER (?from <= ?date)
+
+  # …and no later one that had also taken effect by then.
+  OPTIONAL {
+    GRAPH ?laterLaw {
+      ?later a gst:Provision ;
+             gst:effectiveFrom ?laterFrom .
+    }
+    FILTER (?laterFrom <= ?date && ?laterFrom > ?from)
+  }
+  FILTER (!BOUND(?later))
+
+  # The delta, against the cap that provision sets. A nil cap (2022 onward)
+  # makes any disagreement a finding; a 10% cap tolerates a small one.
+  FILTER (
+    ABS(xsd:decimal(?claimed) - xsd:decimal(?filed))
+      > xsd:decimal(?claimed) * xsd:decimal(?capPercent) / 100
+  )
+}
+ORDER BY ?number

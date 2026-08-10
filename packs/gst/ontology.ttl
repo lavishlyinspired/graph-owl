@@ -1,22 +1,30 @@
+# The GST domain, as terms.
+#
+# Every one of these is a *runtime* term: the namespace is allocated by
+# `POST /namespaces` and each predicate registered by `POST /predicates`, so
+# nothing here required a line of Rust. That is the claim
+# `plans/105-domain-neutrality.md` exists to make checkable — read this beside
+# `packs/hospitality/ontology.ttl`, which shares none of it and loads through
+# exactly the same path.
+#
+# Authored from the published statute and return formats, which are the
+# specification (`plans/00i-licensing.md` rule 2).
+
 @prefix gst: <https://graph-owl.dev/packs/gst#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-
-# Terms taken from the published return formats, which are the specification
-# (`plans/00i-licensing.md` rule 2 — no implementation was read).
-#
-# **The pack owns every predicate it asserts**, including `gst:label`: a pack
-# may not define terms in a shipped vocabulary it does not own, and the import
-# path refuses one it has not registered.
-#
-# The two sides of a reconciliation are deliberately *different classes* rather
-# than one class with a `source` property: they come from different authorities
-# with different guarantees, and collapsing them would make "which side said
-# this" a filter rather than a type.
 
 gst:Supplier        rdf:type gst:Class ; gst:label "Supplier" .
 gst:PurchaseInvoice rdf:type gst:Class ; gst:label "Purchase invoice (taxpayer's register)" .
 gst:Gstr2bInvoice   rdf:type gst:Class ; gst:label "GSTR-2B invoice (as filed by the supplier)" .
 gst:Section         rdf:type gst:Class ; gst:label "Statutory section" .
+gst:Provision       rdf:type gst:Class ; gst:label "Dated provision (a rule in force between two dates)" .
+gst:Policy          rdf:type gst:Class ; gst:label "Matching policy (this pack's own judgement, not statute)" .
+
+# Events, because two of the six conditions are about *when* rather than
+# *what*. An invoice is a record; a purchase and a payment are things that
+# happened, each with its own time anchor.
+gst:PurchaseEvent   rdf:type gst:Class ; gst:label "Purchase event" .
+gst:PaymentEvent    rdf:type gst:Class ; gst:label "Payment event" .
 
 gst:supplierGstin rdf:type gst:Property ; gst:label "supplier GSTIN" .
 gst:invoiceNumber rdf:type gst:Property ; gst:label "invoice number" .
@@ -24,4 +32,16 @@ gst:invoiceDate   rdf:type gst:Property ; gst:label "invoice date" .
 gst:taxableValue  rdf:type gst:Property ; gst:label "taxable value" .
 gst:taxAmount     rdf:type gst:Property ; gst:label "tax amount" .
 gst:period        rdf:type gst:Property ; gst:label "return period" .
+gst:itcAvailable  rdf:type gst:Property ; gst:label "input tax credit available (as reported in GSTR-2B)" .
+gst:reverseCharge rdf:type gst:Property ; gst:label "reverse-charge flag (as reported in GSTR-2B)" .
 gst:governedBy    rdf:type gst:Property ; gst:label "governed by" .
+
+# The provision vocabulary — what makes the law queryable rather than encoded.
+gst:effectiveFrom rdf:type gst:Property ; gst:label "effective from" .
+gst:capPercent    rdf:type gst:Property ; gst:label "provisional credit cap (percent)" .
+gst:citation      rdf:type gst:Property ; gst:label "citation" .
+
+# Event vocabulary.
+gst:onInvoice     rdf:type gst:Property ; gst:label "on invoice" .
+gst:atTime        rdf:type gst:Property ; gst:label "at time" .
+gst:amount        rdf:type gst:Property ; gst:label "amount" .

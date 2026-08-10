@@ -29,6 +29,14 @@ path = "law/sections.ttl"
 source = "gst-law"
 
 [[documents]]
+path = "law/rule-36-4.ttl"
+source = "gst-law-rule-36-4"
+
+[[documents]]
+path = "fixtures/events.ttl"
+source = "gst-events"
+
+[[documents]]
 path = "fixtures/purchase-register.ttl"
 source = "gst-purchase-register"
 
@@ -69,6 +77,33 @@ name = "taxAmount"
 name = "period"
 
 [[predicates]]
+name = "itcAvailable"
+
+[[predicates]]
+name = "reverseCharge"
+
+[[predicates]]
+name = "effectiveFrom"
+
+[[predicates]]
+name = "capPercent"
+
+[[predicates]]
+name = "citation"
+
+# `onInvoice` points at another subject rather than carrying a value — the
+# edge that makes an event traversable back to what it happened to.
+[[predicates]]
+name = "onInvoice"
+value_type = 0
+
+[[predicates]]
+name = "atTime"
+
+[[predicates]]
+name = "amount"
+
+[[predicates]]
 name = "governedBy"
 value_type = 0
 
@@ -106,11 +141,17 @@ n = 3
 # is named by the ontology — `?claimed` is not `gst:taxAmount`, and a runtime
 # that guessed would file evidence citing a predicate that does not exist.
 # A reviewer follows evidence back into the graph; evidence that cannot be
-# followed is worse than none.
+# followed is worse than none, because it looks checkable and is not.
+#
+# Two rules carry an extra band — `[findings.similarity]` and `[findings.span]`
+# — for the two things SPARQL cannot do here. Both are declared in the manifest
+# rather than hidden in the runtime, so the thresholds are visible to whoever
+# has to defend a finding.
+
 [[findings]]
-label = "gst:MissingInGstr2b"
+label = "gst:PotentialMismatch"
 summary = "An invoice claimed in the purchase register that the supplier never filed"
-governed_by = "gst:Section16"
+governed_by = "gst:Section16-2-aa"
 query = "missing-in-gstr2b"
 subject = "invoice"
 evidence = [
@@ -119,38 +160,149 @@ evidence = [
   { predicate = "gst:taxAmount", var = "taxAmount" },
 ]
 
+# The delta is judged against the cap in force **on the invoice date**, read
+# from `law/rule-36-4.ttl` by traversal. The citation is projected into the
+# evidence so a reviewer sees which notification the judgement was made under
+# — a finding that cannot name its authority is not defensible.
 [[findings]]
-label = "gst:TaxAmountMismatch"
-summary = "Both sides report the invoice, and the tax differs"
-governed_by = "gst:Section16"
-query = "tax-amount-mismatch"
+label = "gst:AmountMismatch"
+summary = "Both sides report the invoice, and the values differ by more than the cap then in force allowed"
+governed_by = "gst:Rule36-4"
+query = "amount-mismatch"
 subject = "purchase"
 evidence = [
   { predicate = "gst:supplierGstin", var = "gstin" },
   { predicate = "gst:invoiceNumber", var = "number" },
-  { predicate = "gst:taxAmount", var = "claimed" },
-  { predicate = "gst:taxAmount", var = "filed" },
+  { predicate = "gst:taxableValue", var = "claimed" },
+  { predicate = "gst:taxableValue", var = "filed" },
+  { predicate = "gst:capPercent", var = "capPercent" },
+  { predicate = "gst:citation", var = "citation" },
 ]
 
-# The reconciliation, runnable today. A findings runtime (the platform plan's
-# P5/P6) will turn these into persisted findings with provenance and a
-# `governedBy` citation; until it exists these are the same answers, reachable
-# from the console's existing workbench with no new route and no new component.
+# Both of the next two are findings on invoices where **every number agrees**
+# — which is the point. Matching is necessary and not sufficient, and a
+# reconciliation that stopped at amounts would pass both of these silently.
+[[findings]]
+label = "gst:ITCNotAvailable"
+summary = "The invoice matches, and the authority reports the credit as unavailable"
+governed_by = "gst:Section17-5"
+query = "itc-not-available"
+subject = "purchase"
+evidence = [
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+  { predicate = "gst:itcAvailable", var = "itcAvailable" },
+]
+
+[[findings]]
+label = "gst:Reversed"
+summary = "The invoice matches, and the authority flags it as reverse-charge"
+governed_by = "gst:Section16-2-aa"
+query = "reverse-charge"
+subject = "purchase"
+evidence = [
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+  { predicate = "gst:reverseCharge", var = "reverseCharge" },
+]
+
+# **Surfaced, never auto-merged.** An erroneous merge silently attributes one
+# supplier's invoice to another and is far harder to detect afterwards than
+# the work of reviewing a candidate. The band is measured against this pack's
+# own fixture, not chosen by feel: the planted transposition scores 0.619 at
+# n=3 and the nearest genuinely different supplier scores 0.065, so 0.40 sits
+# in the middle of the widest available gap.
+#
+# `at_most` is the load-bearing half. Without it every *correctly* matched
+# invoice scores 1.0 and is reported as a suspected typo — the finding that
+# would make a reviewer stop trusting the queue on day one.
+[[findings]]
+label = "gst:GstinTransposition"
+summary = "Same invoice number and period on both sides under near-identical GSTINs — probably a keying error"
+governed_by = "gst:MatchingPolicy"
+query = "gstin-transposition"
+subject = "purchase"
+evidence = [
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:supplierGstin", var = "claimedGstin" },
+  { predicate = "gst:supplierGstin", var = "filedGstin" },
+  { predicate = "gst:period", var = "period" },
+]
+
+[findings.similarity]
+strategy = "ngram"
+n = 3
+left = "claimedGstin"
+right = "filedGstin"
+at_least = 0.40
+at_most = 0.999
+
+# The 180-day condition, as a span between two events. `when_missing =
+# "finding"` because an invoice with no payment event at all is exactly what
+# the section exists for — and is the case a "days to pay" column cannot
+# express, since there is no second date to subtract from.
+[[findings]]
+label = "gst:PaymentOverdue"
+summary = "Credit taken on an invoice not paid within 180 days of its date"
+governed_by = "gst:Section16-2-d"
+query = "payment-overdue"
+subject = "purchase"
+evidence = [
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:atTime", var = "purchasedAt" },
+  { predicate = "gst:atTime", var = "paidAt" },
+]
+
+[findings.span]
+from = "purchasedAt"
+to = "paidAt"
+exceeds_days = 180
+when_missing = "finding"
+
+# The same answers, reachable from the console workbench with no new route.
 [[queries]]
 name = "missing-in-gstr2b"
 path = "queries/missing-in-gstr2b.sparql"
-label = "Claimed but never filed (Section 16)"
+label = "Claimed but never filed (Section 16(2)(aa))"
 
 [[queries]]
-name = "tax-amount-mismatch"
-path = "queries/tax-amount-mismatch.sparql"
-label = "Tax amount differs between register and GSTR-2B"
+name = "amount-mismatch"
+path = "queries/amount-mismatch.sparql"
+label = "Values differ by more than the cap then in force (Rule 36(4))"
+
+[[queries]]
+name = "itc-not-available"
+path = "queries/itc-not-available.sparql"
+label = "Matched, but no credit available (Section 17(5))"
+
+[[queries]]
+name = "reverse-charge"
+path = "queries/reverse-charge.sparql"
+label = "Matched, but flagged reverse-charge"
+
+[[queries]]
+name = "gstin-transposition"
+path = "queries/gstin-transposition.sparql"
+label = "Near-identical GSTIN on the same invoice number"
+
+[[queries]]
+name = "payment-overdue"
+path = "queries/payment-overdue.sparql"
+label = "Unpaid past 180 days (Section 16(2)(d))"
 
 [console]
 [[console.queues]]
 id = "gst-reconciliation"
 label = "GST reconciliation"
 source = "findings"
-labels = ["gst:MissingInGstr2b", "gst:TaxAmountMismatch"]
+labels = [
+  "gst:PotentialMismatch",
+  "gst:AmountMismatch",
+  "gst:ITCNotAvailable",
+  "gst:Reversed",
+  "gst:GstinTransposition",
+  "gst:PaymentOverdue",
+]
 actions = ["accept", "reject-with-reason", "defer"]
 evidence = "side-by-side"

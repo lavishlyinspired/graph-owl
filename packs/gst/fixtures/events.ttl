@@ -1,0 +1,48 @@
+# Purchases and payments as **events with time anchors**, not dates flattened
+# onto an invoice row.
+#
+# Section 16(2)(d) is a condition on a *span*: credit must be reversed where
+# the recipient has not paid the supplier within 180 days of the invoice. A
+# span needs two anchored points, so a purchase and a payment are each a
+# first-class subject with its own time — which is also what lets a later
+# question ("show me everything that happened to this invoice") be a
+# traversal rather than a schema change.
+#
+# Three planted cases, and two of them must produce nothing:
+#
+#   INV-1001  paid after 20 days     → within the condition, no finding
+#   INV-1003  paid after 240 days    → paid, but too late
+#   INV-1006  never paid at all      → nothing to compare against
+#
+# The unpaid one is the case a "payment date minus invoice date" column cannot
+# express at all: there is no payment row, so there is no delta, so a
+# column-shaped model reports nothing wrong. Modelling payment as an event
+# that may simply not exist is what makes its absence answerable.
+
+@prefix gst: <https://graph-owl.dev/packs/gst#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+gst:purchase-INV-1001 rdf:type gst:PurchaseEvent ;
+    gst:onInvoice  gst:pr-INV-1001 ;
+    gst:atTime     "2026-07-04" ;
+    gst:amount     "118000.00" .
+
+gst:payment-INV-1001 rdf:type gst:PaymentEvent ;
+    gst:onInvoice  gst:pr-INV-1001 ;
+    gst:atTime     "2026-07-24" ;
+    gst:amount     "118000.00" .
+
+gst:purchase-INV-1003 rdf:type gst:PurchaseEvent ;
+    gst:onInvoice  gst:pr-INV-1003 ;
+    gst:atTime     "2026-07-15" ;
+    gst:amount     "295000.00" .
+
+gst:payment-INV-1003 rdf:type gst:PaymentEvent ;
+    gst:onInvoice  gst:pr-INV-1003 ;
+    gst:atTime     "2027-03-12" ;
+    gst:amount     "295000.00" .
+
+gst:purchase-INV-1006 rdf:type gst:PurchaseEvent ;
+    gst:onInvoice  gst:pr-INV-1006 ;
+    gst:atTime     "2026-07-26" ;
+    gst:amount     "70800.00" .

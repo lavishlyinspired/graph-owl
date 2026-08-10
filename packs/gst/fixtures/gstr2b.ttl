@@ -1,35 +1,84 @@
+# GSTR-2B — what the suppliers actually filed, as the authority reports it.
+#
+# INV-1003 is deliberately absent: that is scenario 3, and its absence is the
+# finding. INV-1004 is present under the *correct* GSTIN, which is what makes
+# the transposition detectable at all — the pair exists, only the identifier
+# disagrees.
+#
+# `itcAvailable` and `reverseCharge` are reported per line by the authority
+# and are not derivable from the taxpayer's own register, which is exactly why
+# they are worth reconciling: a perfectly matched invoice can still carry no
+# usable credit.
+
 @prefix gst: <https://graph-owl.dev/packs/gst#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 
-# What the suppliers actually filed. The authority's side of the
-# reconciliation, and the one that decides whether credit exists at all.
-
-# 1. Matches the register exactly.
 gst:2b-INV-1001 rdf:type gst:Gstr2bInvoice ;
     gst:supplierGstin "27AABCU9603R1ZM" ;
     gst:invoiceNumber "INV-1001" ;
     gst:invoiceDate   "2026-07-04" ;
     gst:taxableValue  "100000.00" ;
     gst:taxAmount     "18000.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "N" ;
     gst:period        "2026-07" .
 
-# 2. Same invoice, 900 less tax — the register claims 18,000.
 gst:2b-INV-1002 rdf:type gst:Gstr2bInvoice ;
     gst:supplierGstin "27AABCU9603R1ZM" ;
     gst:invoiceNumber "INV-1002" ;
     gst:invoiceDate   "2026-07-09" ;
     gst:taxableValue  "95000.00" ;
     gst:taxAmount     "17100.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "N" ;
     gst:period        "2026-07" .
 
-# 3. INV-1003 is deliberately absent. Nothing to see here is the finding.
-
-# 4. The correctly-spelled GSTIN, filed one day later than the register
-#    recorded it. Inside the 7-day window, so it reconciles.
 gst:2b-INV-1004 rdf:type gst:Gstr2bInvoice ;
     gst:supplierGstin "27AABCU9603R1ZM" ;
     gst:invoiceNumber "INV-1004" ;
     gst:invoiceDate   "2026-07-22" ;
     gst:taxableValue  "50000.00" ;
     gst:taxAmount     "9000.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "N" ;
     gst:period        "2026-07" .
+
+gst:2b-INV-1005 rdf:type gst:Gstr2bInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-1005" ;
+    gst:invoiceDate   "2026-07-24" ;
+    gst:taxableValue  "40000.00" ;
+    gst:taxAmount     "7200.00" ;
+    gst:itcAvailable  "N" ;
+    gst:reverseCharge "N" ;
+    gst:period        "2026-07" .
+
+gst:2b-INV-1006 rdf:type gst:Gstr2bInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-1006" ;
+    gst:invoiceDate   "2026-07-26" ;
+    gst:taxableValue  "60000.00" ;
+    gst:taxAmount     "10800.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "R" ;
+    gst:period        "2026-07" .
+
+gst:2b-INV-2001 rdf:type gst:Gstr2bInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-2001" ;
+    gst:invoiceDate   "2020-07-10" ;
+    gst:taxableValue  "95000.00" ;
+    gst:taxAmount     "17100.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "N" ;
+    gst:period        "2020-07" .
+
+gst:2b-INV-2002 rdf:type gst:Gstr2bInvoice ;
+    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:invoiceNumber "INV-2002" ;
+    gst:invoiceDate   "2020-07-12" ;
+    gst:taxableValue  "80000.00" ;
+    gst:taxAmount     "14400.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "N" ;
+    gst:period        "2020-07" .

@@ -225,3 +225,271 @@ prefix = "mar"
 
     assert result.evaluated == 0
     assert result.found == 0
+
+
+@pytest.fixture
+def similarity_pack(tmp_path: Path) -> Path:
+    """A rule that keeps only rows whose two bindings are *nearly* equal.
+
+    The domain-neutral shape of "one digit was transposed": a plain join finds
+    candidate pairs, and a similarity threshold separates a typo from two
+    genuinely different values that happen to collide on the other fields.
+    """
+    (tmp_path / "queries").mkdir()
+    (tmp_path / "queries" / "pairs.sparql").write_text("SELECT ?a ?left ?right WHERE { ?a a x:P }\n")
+    (tmp_path / "pack.toml").write_text(
+        """
+[pack]
+id = "maritime"
+namespace = "https://example.org/maritime#"
+prefix = "mar"
+
+[[queries]]
+name = "pairs"
+path = "queries/pairs.sparql"
+label = "Candidate pairs"
+
+[[findings]]
+label = "mar:CallSignTransposition"
+summary = "Two records whose call signs differ by what looks like a typo"
+governed_by = "mar:IdentityPolicy"
+query = "pairs"
+subject = "a"
+evidence = [
+  { predicate = "mar:callSign", var = "left" },
+  { predicate = "mar:reportedCallSign", var = "right" },
+]
+
+[findings.similarity]
+strategy = "ngram"
+n = 3
+left = "left"
+right = "right"
+at_least = 0.4
+at_most = 0.999
+"""
+    )
+    return tmp_path
+
+
+def test_only_near_identical_rows_become_findings(similarity_pack: Path) -> None:
+    server = _Server(
+        rows=[
+            # A transposition: two characters swapped. Similar, not identical.
+            {"a": "<x:1>", "left": '"GBRX1234ZZ"', "right": '"GBRX1234ZR"'},
+            # Genuinely different values that collided on the join.
+            {"a": "<x:2>", "left": '"GBRX1234ZZ"', "right": '"QQQQ9999AA"'},
+        ],
+        columns=["a", "left", "right"],
+    )
+    try:
+        run_findings(similarity_pack, server.url)
+    finally:
+        server.close()
+
+    assert [f["subject"] for f in server.recorded] == ["x:1"]
+
+
+def test_an_exact_match_is_not_a_transposition(similarity_pack: Path) -> None:
+    """**The upper bound is the load-bearing half.** Identical values are the
+    matched pair, not a near-miss — without `at_most` every correctly matched
+    record would be reported as a suspected typo, which is the finding that
+    makes a reviewer stop trusting the queue."""
+    server = _Server(
+        rows=[{"a": "<x:1>", "left": '"GBRX1234ZZ"', "right": '"GBRX1234ZZ"'}],
+        columns=["a", "left", "right"],
+    )
+    try:
+        run_findings(similarity_pack, server.url)
+    finally:
+        server.close()
+
+    assert server.recorded == []
+
+
+def test_a_similarity_rule_naming_a_variable_the_query_does_not_bind_fails_loudly(
+    similarity_pack: Path,
+) -> None:
+    server = _Server(rows=[{"a": "<x:1>", "left": '"AAA"'}], columns=["a", "left"])
+    try:
+        with pytest.raises(ReconcileError, match="right"):
+            run_findings(similarity_pack, server.url)
+    finally:
+        server.close()
+
+
+@pytest.fixture
+def span_pack(tmp_path: Path) -> Path:
+    """A rule about the time between two events.
+
+    **Why this is a runtime filter and not a `FILTER` in the query.** Measured
+    against the real engine: `xsd:date` subtraction, `date + duration`, and
+    even `date > date` all evaluate to unbound — it has no date support in
+    expressions. ISO-8601 *strings* compare correctly (lexicographic order is
+    chronological order), which is enough for "which provision was in force"
+    but not for "how many days apart". A day count needs real calendar
+    arithmetic, so the runner does it.
+    """
+    (tmp_path / "queries").mkdir()
+    (tmp_path / "queries" / "unpaid.sparql").write_text(
+        "SELECT ?a ?start ?end WHERE { ?a a x:P }\n"
+    )
+    (tmp_path / "pack.toml").write_text(
+        """
+[pack]
+id = "maritime"
+namespace = "https://example.org/maritime#"
+prefix = "mar"
+
+[[queries]]
+name = "unpaid"
+path = "queries/unpaid.sparql"
+label = "Overdue"
+
+[[findings]]
+label = "mar:CertificateLapsed"
+summary = "More than 180 days between the two events"
+governed_by = "mar:SafetyCode3"
+query = "unpaid"
+subject = "a"
+evidence = [
+  { predicate = "mar:issuedAt", var = "start" },
+  { predicate = "mar:renewedAt", var = "end" },
+]
+
+[findings.span]
+from = "start"
+to = "end"
+exceeds_days = 180
+when_missing = "finding"
+"""
+    )
+    return tmp_path
+
+
+def test_a_span_longer_than_the_limit_is_a_finding(span_pack: Path) -> None:
+    server = _Server(
+        rows=[{"a": "<x:1>", "start": '"2026-07-15"', "end": '"2027-03-12"'}],
+        columns=["a", "start", "end"],
+    )
+    try:
+        run_findings(span_pack, server.url)
+    finally:
+        server.close()
+
+    assert [f["subject"] for f in server.recorded] == ["x:1"]
+
+
+def test_a_span_inside_the_limit_is_not(span_pack: Path) -> None:
+    server = _Server(
+        rows=[{"a": "<x:1>", "start": '"2026-07-04"', "end": '"2026-07-24"'}],
+        columns=["a", "start", "end"],
+    )
+    try:
+        run_findings(span_pack, server.url)
+    finally:
+        server.close()
+
+    assert server.recorded == []
+
+
+def test_exactly_the_limit_is_inside_it(span_pack: Path) -> None:
+    """**A boundary a statute cares about.** "Within 180 days" includes the
+    180th; a rule that fired on it would accuse a compliant taxpayer on the
+    last day they were still compliant."""
+    server = _Server(
+        rows=[{"a": "<x:1>", "start": '"2026-01-01"', "end": '"2026-06-30"'}],
+        columns=["a", "start", "end"],
+    )
+    try:
+        run_findings(span_pack, server.url)
+    finally:
+        server.close()
+
+    assert server.recorded == [], "2026-01-01 to 2026-06-30 is exactly 180 days"
+
+
+def test_one_day_past_the_limit_is_outside_it(span_pack: Path) -> None:
+    server = _Server(
+        rows=[{"a": "<x:1>", "start": '"2026-01-01"', "end": '"2026-07-01"'}],
+        columns=["a", "start", "end"],
+    )
+    try:
+        run_findings(span_pack, server.url)
+    finally:
+        server.close()
+
+    assert len(server.recorded) == 1, "181 days"
+
+
+def test_a_missing_end_is_a_finding_when_the_rule_says_so(span_pack: Path) -> None:
+    """**The case a "days elapsed" column cannot express at all.** There is no
+    second event, so there is no delta to threshold — and an invoice nobody
+    ever paid is precisely what the rule exists to catch."""
+    server = _Server(rows=[{"a": "<x:1>", "start": '"2026-07-26"'}], columns=["a", "start", "end"])
+    try:
+        run_findings(span_pack, server.url)
+    finally:
+        server.close()
+
+    assert len(server.recorded) == 1
+    assert server.recorded[0]["evidence"] == [
+        {"subject": "x:1", "predicate": "mar:issuedAt", "value": "2026-07-26"}
+    ], "and it carries what it does have, so a reviewer sees which case it is"
+
+
+def test_a_missing_end_is_ignored_when_the_rule_says_that_instead(tmp_path: Path) -> None:
+    """`when_missing` is stated per rule rather than assumed, because both
+    readings are legitimate: an absent second event can be the whole problem,
+    or it can simply mean the process has not reached that step yet."""
+    (tmp_path / "queries").mkdir()
+    (tmp_path / "queries" / "unpaid.sparql").write_text("SELECT ?a ?start ?end WHERE { ?a a x:P }\n")
+    (tmp_path / "pack.toml").write_text(
+        """
+[pack]
+id = "maritime"
+namespace = "https://example.org/maritime#"
+prefix = "mar"
+
+[[queries]]
+name = "unpaid"
+path = "queries/unpaid.sparql"
+label = "Overdue"
+
+[[findings]]
+label = "mar:CertificateLapsed"
+summary = "s"
+governed_by = "mar:SafetyCode3"
+query = "unpaid"
+subject = "a"
+evidence = [{ predicate = "mar:issuedAt", var = "start" }]
+
+[findings.span]
+from = "start"
+to = "end"
+exceeds_days = 180
+when_missing = "ignore"
+"""
+    )
+    server = _Server(rows=[{"a": "<x:1>", "start": '"2026-07-26"'}], columns=["a", "start", "end"])
+    try:
+        run_findings(tmp_path, server.url)
+    finally:
+        server.close()
+
+    assert server.recorded == []
+
+
+def test_a_date_the_runner_cannot_read_fails_loudly(span_pack: Path) -> None:
+    """Not silently treated as missing — a malformed date that quietly became
+    "no second event" would turn a data-quality problem into a fabricated
+    compliance finding."""
+    server = _Server(
+        rows=[{"a": "<x:1>", "start": '"15/07/2026"', "end": '"2027-03-12"'}],
+        columns=["a", "start", "end"],
+    )
+    try:
+        with pytest.raises(ReconcileError, match="15/07/2026"):
+            run_findings(span_pack, server.url)
+    finally:
+        server.close()

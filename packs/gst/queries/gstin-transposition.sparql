@@ -1,0 +1,36 @@
+# Candidate pairs: the same invoice number and period on both sides, under
+# *different* GSTINs.
+#
+# **This query deliberately over-fetches.** It cannot tell a transposed digit
+# from two unrelated suppliers who happen to have used the same invoice
+# number — SPARQL has no notion of how alike two strings are. It returns every
+# candidate, and the rule's `[findings.similarity]` band in `pack.toml` keeps
+# only the near-identical ones, using the same n-gram strategy the pack
+# already configures for blocking.
+#
+# That split is deliberate rather than a workaround: the join is the part a
+# query language is good at, and the similarity is the part it is not. Putting
+# the threshold in the manifest also means it is visible and adjustable
+# without touching a query — and it is measured, not guessed. Against this
+# fixture the transposition scores 0.619 and the nearest genuinely different
+# supplier scores 0.065.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?purchase ?number ?claimedGstin ?filedGstin ?period
+WHERE {
+  GRAPH ?register {
+    ?purchase a gst:PurchaseInvoice ;
+              gst:supplierGstin ?claimedGstin ;
+              gst:invoiceNumber ?number ;
+              gst:period        ?period .
+  }
+  GRAPH ?authority {
+    ?filed a gst:Gstr2bInvoice ;
+           gst:supplierGstin ?filedGstin ;
+           gst:invoiceNumber ?number ;
+           gst:period        ?period .
+  }
+  FILTER (?claimedGstin != ?filedGstin)
+}
+ORDER BY ?number
