@@ -788,6 +788,27 @@ itself). The standard fix is the standard layout: `pyproject.toml` at
 `sdk/python/graph_owl_read_client/src/graph_owl_read_client/`, and
 `[tool.setuptools.packages.find] where = ["src"]`.
 
+## ERPNext / Frappe — the first live-source connector (Epic 105 P2)
+
+| Name | Licence | Role | Activity (checked 10 Aug 2026) |
+|---|---|---|---|
+| `frappe/frappe` | **MIT** | The framework: DocType metadata, the `/api/resource` REST surface | pushed 10 Aug 2026, 10.5k★ |
+| `frappe/frappe_docker` | **MIT** | Official container images and compose files | pushed 9 Aug 2026, 2.5k★ |
+| `frappe/erpnext` | **GPL-3.0** | The application: accounting, inventory, sales | pushed 10 Aug 2026, 37.9k★ |
+| `resilient-tech/india-compliance` | **GPL-3.0** | Where GST actually lives — **not** core ERPNext | pushed 10 Aug 2026, 262★ |
+
+**Adopt as a connector target. The copyleft gate is not engaged, and it is worth being precise about why**, because this document's own rule rejected `rust-igraph` for exactly the licence ERPNext carries.
+
+- **No linking and no vendoring.** graph-owl speaks HTTP to a separately-deployed ERPNext. GPL-3.0's copyleft attaches to derivative works, not to a program that talks to one over a socket. This project already has that shape twice: the OCR model endpoint (`plans/21b`) and the `whelk-rs` EL sidecar.
+- **The surface actually depended on is Frappe's, which is MIT** — the `/api/resource` convention and the DocType metadata endpoints are framework, not application.
+- **`cargo deny` is untouched.** No Rust dependency changes; the permissive-only allowlist stays exactly as it is.
+
+**The rule that keeps it that way, and it must not be relaxed: never vendor a doctype definition, schema file or fixture derived from ERPNext into this repository.** The connector *discovers* the schema from a live instance at run time. That is the licence-safe path and also the better engineering — a vendored schema drifts from the instance it claims to describe, silently.
+
+**Why this target rather than a fixture pack.** `packs/hospitality` and `packs/gst` were written by this project, so they fit the platform by construction — weak evidence for domain neutrality. A connector that reads DocType metadata proves the platform accepts a schema **nobody designed for it**, which is the strongest available test of `plans/105-domain-neutrality.md`'s claim.
+
+**Kept out of CI.** The `frappe_docker` stack is MariaDB + Redis + web + worker + scheduler, and first-site creation is slow. The fixture-based GST pack stays the CI path (fast, deterministic, no ERP); ERPNext is the live-source demo — the same split the OCR worker already draws between a scripted endpoint and a real model.
+
 ## `pypdfium2` — scanned-PDF rasterization for `OcrPdfParser` (Epic 21 follow-up, Slice 3)
 
 | Name | Licence | Newest version | Repository | Activity |

@@ -159,6 +159,18 @@ DN-1 built a table, a port and an adapter, and **nothing exposed them** — the 
 3. **Predicates must be defined before documents are imported.** The first load rejected all 15 subjects. Hence `POST /predicates` and `[[predicates]]` in the manifest, and the loader's three-phase order: namespace → predicates → documents.
 4. **A pack may not assert `rdfs:label`.** `rdfs:` is a shipped namespace whose predicates this store does not register, and a pack may not define terms in somebody else's vocabulary. Both packs now own every predicate they assert (`hosp:label`, `gst:label`).
 
+### P2 — the discovering connector, and the strongest neutrality evidence so far
+
+`packs/hospitality` and `packs/gst` are weak evidence in one specific way: **this project wrote them**, so they fit the platform by construction. `connectors/python/graph_owl_packs/erpnext.py` reads a schema from a live Frappe/ERPNext instance and derives the vocabulary from what the instance reports — no mapping table, no per-doctype branch, nothing named after accounting.
+
+**Proven end to end against a real graph-owl**: a DocType invented in the test (`Rescue Mission` — deliberately not an invoice) became 6 landed subjects under namespace 1024 with 4 discovered predicates, and answered a SPARQL query. Its `Link` field resolved as a **real edge** (`<…#MV_Resolute>`, a subject reference rather than a string), with two missions pointing at one vessel — traversable structure derived entirely from metadata.
+
+It drives exactly the three routes this epic built: `POST /namespaces` → `POST /predicates` (all of them, before any document — the ordering the pack loader learned by running) → `POST /graph/import/rdf`.
+
+**Licensing, recorded in `plans/00l-build-vs-adopt.md`.** ERPNext is GPL-3.0 and `india-compliance` (where GST actually lives — *not* core ERPNext) is too; `frappe` and `frappe_docker` are MIT. The copyleft gate is not engaged because graph-owl never links and never vendors — it speaks HTTP to a separate process, the same shape as the OCR model endpoint and the whelk-rs sidecar, and the surface actually used is Frappe's MIT one. **The rule that keeps it that way: never vendor a doctype definition or fixture derived from ERPNext.** Discovery at run time is both licence-safe and better engineering — a vendored schema drifts silently.
+
+Design decisions worth keeping: layout fieldtypes (section breaks, HTML) are **dropped rather than imported and ignored**, because a predicate defined for a section break is a permanent registry entry meaning nothing; every non-`Link` value lands as a **string**, because a currency parsed to a float at the graph boundary loses the exactness a monetary figure needs and a date parsed to an instant invents a timezone the source never stated; and an absent or empty value is **omitted rather than written blank**, because "not recorded" and "recorded as blank" are different facts and a graph that cannot tell them apart cannot answer a question about missing data — which is most of what a reconciliation asks.
+
 ### Closed — the GST reconciliation is visible
 
 `packs/gst/queries/` returns the planted scenarios against a real server, asserted in `verify-pack-load.sh`: **INV-1003** never filed, **INV-1004** unmatched, **INV-1002** claiming ₹18,000 against ₹17,100 filed, and INV-1001 correctly producing nothing. Three defects stood between "loaded data" and "visible reconciliation", and none was findable by reading:

@@ -90,5 +90,85 @@ def main(argv: list[str] | None = None) -> int:
     return EXIT_OK
 
 
+
+def build_erpnext_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="graph-owl-erpnext",
+        description="Discover a Frappe/ERPNext DocType and land it in graph-owl.",
+    )
+    parser.add_argument(
+        "doctype",
+        nargs="+",
+        help='DocType names, e.g. "Sales Invoice" "Item". Any DocType — the '
+        "connector reads the schema from the instance and knows no domain.",
+    )
+    parser.add_argument(
+        "--erpnext",
+        default=os.environ.get("ERPNEXT_URL", "http://localhost:8080"),
+        help="ERPNext base URL (env: ERPNEXT_URL)",
+    )
+    parser.add_argument("--api-key", default=os.environ.get("ERPNEXT_API_KEY"))
+    parser.add_argument("--api-secret", default=os.environ.get("ERPNEXT_API_SECRET"))
+    parser.add_argument(
+        "--server",
+        default=os.environ.get("GRAPH_OWL_SERVER", "http://localhost:8081"),
+        help="graph-owl base URL (env: GRAPH_OWL_SERVER)",
+    )
+    parser.add_argument("--token", default=os.environ.get("GRAPH_OWL_TOKEN"))
+    parser.add_argument("--limit", type=int, default=100, help="records per DocType")
+    parser.add_argument("--dry-run", action="store_true")
+    return parser
+
+
+def erpnext_main(argv: list[str] | None = None) -> int:
+    """`graph-owl-erpnext` — sync one or more DocTypes.
+
+    **Each DocType is synced independently and a failure stops the run.** A
+    partial sync reported as success is the worst outcome available: the
+    operator sees a result and believes the estate is loaded.
+    """
+    from .erpnext import ErpnextClient, ErpnextError, sync_doctype
+    from .loader import LoadError
+
+    args = build_erpnext_parser().parse_args(argv)
+    client = ErpnextClient(args.erpnext, args.api_key, args.api_secret)
+
+    results = []
+    for doctype in args.doctype:
+        try:
+            results.append(
+                sync_doctype(
+                    client,
+                    doctype,
+                    args.server,
+                    token=args.token,
+                    limit=args.limit,
+                    dry_run=args.dry_run,
+                )
+            )
+        except (ErpnextError, LoadError) as failed:
+            print(f"{doctype}: {failed}", file=sys.stderr)
+            return EXIT_UNUSABLE
+
+    json.dump(
+        {
+            "doctypes": [
+                {
+                    "doctype": r.doctype,
+                    "namespaceCode": r.namespace_code,
+                    "predicates": r.predicates,
+                    "landed": r.landed,
+                    "skipped": r.skipped,
+                }
+                for r in results
+            ],
+            "landed": sum(r.landed for r in results),
+            "skipped": sum(r.skipped for r in results),
+        },
+        sys.stdout,
+    )
+    sys.stdout.write("\n")
+    return EXIT_OK
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())

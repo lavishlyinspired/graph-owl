@@ -8,16 +8,21 @@ claim `plans/105-domain-neutrality.md` exists to make true and
 `packs/hospitality/` exists to test.
 """
 
+from .erpnext import ErpnextClient, ErpnextError, SyncResult, sync_doctype
 from .loader import DocumentResult, LoadError, LoadResult, load_pack
 from .manifest import Document, Manifest, ManifestError, Predicate
 
 __all__ = [
     "Document",
+    "ErpnextClient",
+    "ErpnextError",
     "DocumentResult",
     "LoadError",
     "LoadResult",
     "Manifest",
     "ManifestError",
     "Predicate",
+    "SyncResult",
+    "sync_doctype",
     "load_pack",
 ]
