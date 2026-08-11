@@ -1108,7 +1108,31 @@ every open `PaymentOverdue`-shaped row, and the console's new **Obligations**
 route renders it — checked before building, not assumed: the platform doc's
 full P8 needs a temporal graph engine (§7) that does not exist, so this is
 the due-date half of the one obligation GST already has, not the general
-law/rules runtime. **Still open,
+law/rules runtime. **P8's §7 temporal-engine prerequisite closed to its real
+minimal form, 11 August 2026** (`105i`): `graph_owl_resolution::temporal::in_force_at`
+generalizes `amount-mismatch.sparql`'s own string-comparison trick — which
+provision was in force on an invoice date — into a Rust primitive proven
+against GST's own `rule-36-4.ttl` fixture *and* against a domain with no
+relationship to GST at all (a freight rate card), the same two-proof
+discipline the hospitality proof-pack already established. Date-window
+*traversal* (the graph walk itself filtered by validity, not just resolving
+already-fetched rows) is named as a real, separate, still-open gap rather
+than folded into "done." **P9's query planner (§8) characterized as already
+built, 11 August 2026** (`105j`): the pushdown planner, the shared SPARQL/Cypher
+algebra (Epic 7b/7c), and `Catalog`'s existing `sparql`/`cypher`/`asset_subgraph`
+entry points already are the planner the doc describes; the only missing
+piece is routing an abstract tool request to one of them, which is
+definitionally P10's job (the tools don't exist yet to route). **P9's
+GraphRAG retrieval (§10) gained a real assembly primitive**:
+`Catalog::graph_context` generalizes the walk-plus-provenance shape
+`finding_evidence_graph` already had beyond a finding's own subject to any
+seed — proven against a non-GST asset fixture. Mutation testing on it found
+something worth recording rather than a gap: cargo-mutants generated exactly
+one candidate mutant (whole-function replacement) and it was unviable,
+because `GraphContext`/`GraphContextNode` deliberately have no `Default` for
+a mutant to fall back to — the same property that made every earlier
+survivor this session possible (`TriplePattern`, `Flake`, `Asset` all derive
+`Default`) is precisely what this new code does not have. **Still open,
 recorded rather than assumed away**: no reference agent app (`examples/gst-reconcile/`)
 and so no scored evaluation run; the live GSP/ERP connectors are fixture-mode
 only; pack facts are readable by any principal who can query at all (per-named-graph policy needs a policy model that does not exist yet); six of the seven planned packs are unwritten; and P2's remaining connectors, P3, P4, the rest of P8 (temporal engine, generalization beyond GST), P9's

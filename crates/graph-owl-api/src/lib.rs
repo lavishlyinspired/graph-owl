@@ -1352,6 +1352,39 @@ fn findings_from_rows(
     Ok(built)
 }
 
+/// A walked neighbourhood with per-node provenance assembled — Epic 105
+/// P9's GraphRAG-retrieval half (`plans/105j-graph-context.md`, the
+/// platform plan's §10). Generic over any seed `Sid`, unlike
+/// `finding_evidence_graph`'s own subgraph, which is scoped to a finding's
+/// subject specifically.
+///
+/// **Not wired to an HTTP route yet, deliberately.** `Sid`/`EdgeRef` have
+/// no `Serialize` impl — every existing route that renders a graph
+/// (`GET /findings/{id}/evidence-graph`) builds its own `json!()` by hand
+/// at the HTTP boundary rather than deriving one, and a wire shape for
+/// this type belongs with whichever real caller (an MCP tool, Epic 105
+/// P10) first needs one, not invented ahead of it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphContext {
+    /// Every node the walk reached, each with its own provenance.
+    pub nodes: Vec<GraphContextNode>,
+    /// Every edge the walk followed to reach them.
+    pub edges: Vec<graph_owl_traversal::EdgeRef>,
+    /// Whether the walk hit its bounds before exhausting the neighbourhood.
+    pub truncated: bool,
+}
+
+/// One node in a [`GraphContext`], with the source document(s) that
+/// asserted its own flakes already resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphContextNode {
+    /// The node's own identity.
+    pub id: Sid,
+    /// Which source document(s) asserted this node's own flakes — see
+    /// [`Catalog::node_sources`], which computes this per node.
+    pub sources: Vec<String>,
+}
+
 /// A single anchor-plus-period obligation, computed forward rather than
 /// only checked backward — Epic 105 P8's first real slice
 /// (`plans/105h-obligation-calendar.md`). Reuses `[findings.span]` rather
@@ -2429,6 +2462,65 @@ impl Catalog {
             )
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// A walked neighbourhood with each node's provenance already
+    /// assembled — Epic 105 P9's GraphRAG-retrieval half
+    /// (`plans/105j-graph-context.md`, the platform plan's §10). The same
+    /// walk-plus-provenance shape [`finding_evidence_graph`] answers for a
+    /// finding's own subject, generalized to *any* seed — an asset, an
+    /// entity a future connector lands, anything already in the graph —
+    /// and assembled once in Rust rather than once per HTTP handler that
+    /// happens to need it.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no traversal engine is configured, or the walk fails.
+    /// A per-node provenance lookup that fails degrades to an empty source
+    /// list rather than failing the whole call — the same posture the
+    /// `GET /findings/{id}/evidence-graph` route already takes, now moved
+    /// into `Catalog` itself.
+    ///
+    /// [`finding_evidence_graph`]: Self::finding_evidence_graph
+    pub async fn graph_context(
+        &self,
+        seed: Sid,
+        direction: Direction,
+        bounds: Bounds,
+    ) -> Result<GraphContext, CatalogError> {
+        let traversal = self.traversal.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no traversal engine configured".to_string(),
+            ))
+        })?;
+
+        let subgraph = traversal
+            .subgraph(
+                &[seed],
+                direction,
+                bounds,
+                &EdgeFilter {
+                    relationship_types: None,
+                    as_of: None,
+                },
+            )
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let mut nodes = Vec::with_capacity(subgraph.nodes.len());
+        for id in &subgraph.nodes {
+            let sources = self.node_sources(id).await.unwrap_or_default();
+            nodes.push(GraphContextNode {
+                id: id.clone(),
+                sources,
+            });
+        }
+
+        Ok(GraphContext {
+            nodes,
+            edges: subgraph.edges,
+            truncated: subgraph.truncated,
+        })
     }
 
     /// Every source document that asserted one of this subject's own flakes
@@ -39668,6 +39760,279 @@ mod node_sources_tests {
             catalog.node_sources(&Sid::dsc("anything")).await.is_err(),
             "a missing graph engine must be a named error, not an empty answer \
              indistinguishable from 'this node genuinely has no sources'"
+        );
+    }
+}
+
+#[cfg(test)]
+mod graph_context_tests {
+    //! `Catalog::graph_context` — Epic 105 P9's GraphRAG-retrieval half
+    //! (`plans/105j-graph-context.md`), the platform plan's §10: "k-hop
+    //! expansion, path retrieval, subgraph filtering... provenance
+    //! preservation... are Rust, assembling the existing traversal/
+    //! query/search primitives." `finding_evidence_graph` already walks a
+    //! seed and `node_sources` already resolves per-node provenance — this
+    //! is the same assembly generalized to *any* seed `Sid`, not only a
+    //! finding's own subject, and done once in Rust rather than once per
+    //! HTTP handler.
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid};
+    use graph_owl_traversal::{
+        Direction, EdgeFilter, EdgeRef, Subgraph, TraversalEngine, TraversalError,
+    };
+
+    use super::projection_isolation_tests::RecordingGraph;
+    use super::*;
+
+    struct FakeTraversal {
+        seen_seeds: Mutex<Vec<Sid>>,
+        answer: Subgraph,
+    }
+
+    #[async_trait]
+    impl TraversalEngine for FakeTraversal {
+        async fn neighbours(
+            &self,
+            _start: &Sid,
+            _direction: Direction,
+            _bounds: graph_owl_traversal::Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<graph_owl_traversal::TraversalResult, TraversalError> {
+            unreachable!("not exercised by these tests")
+        }
+
+        async fn subgraph(
+            &self,
+            seeds: &[Sid],
+            _direction: Direction,
+            _bounds: graph_owl_traversal::Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<Subgraph, TraversalError> {
+            self.seen_seeds
+                .lock()
+                .expect("not poisoned")
+                .extend(seeds.iter().cloned());
+            Ok(self.answer.clone())
+        }
+
+        async fn shortest_path(
+            &self,
+            _from: &Sid,
+            _to: &Sid,
+            _direction: Direction,
+            _bounds: graph_owl_traversal::Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<Option<graph_owl_traversal::Path>, TraversalError> {
+            unreachable!("not exercised by these tests")
+        }
+
+        async fn all_paths(
+            &self,
+            _from: &Sid,
+            _to: &Sid,
+            _direction: Direction,
+            _bounds: graph_owl_traversal::Bounds,
+            _max_paths: usize,
+            _filter: &EdgeFilter,
+        ) -> Result<graph_owl_traversal::PathSet, TraversalError> {
+            unreachable!("not exercised by these tests")
+        }
+
+        async fn detect_cycles(
+            &self,
+            _start: &Sid,
+            _bounds: graph_owl_traversal::Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<Vec<graph_owl_traversal::Cycle>, TraversalError> {
+            unreachable!("not exercised by these tests")
+        }
+    }
+
+    fn imported(source: &str) -> Sid {
+        Sid::dsc(format!("graph:import:{source}"))
+    }
+
+    fn catalog_with(traversal: Arc<FakeTraversal>, graph: Arc<RecordingGraph>) -> Catalog {
+        Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_traversal(traversal)
+        .with_graph(graph)
+    }
+
+    #[tokio::test]
+    async fn walks_from_any_seed_not_only_a_finding_s_subject() {
+        let seed = Sid::dsc("asset-warehouse-7");
+        let neighbour = Sid::dsc("asset-region-west");
+        let traversal = Arc::new(FakeTraversal {
+            seen_seeds: Mutex::new(Vec::new()),
+            answer: Subgraph {
+                nodes: vec![seed.clone(), neighbour.clone()],
+                edges: vec![EdgeRef {
+                    from: seed.clone(),
+                    to: neighbour.clone(),
+                    relationship: "locatedIn".to_string(),
+                    derived: false,
+                }],
+                truncated: false,
+                truncation_reason: None,
+            },
+        });
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&[Flake {
+                s: seed.clone(),
+                p: Sid::new(graph_owl_core::flake::namespace::RDFS, "label"),
+                o: FlakeValue::String("Warehouse 7".to_string()),
+                cx: Some(imported("erp-facilities")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+
+        let catalog = catalog_with(traversal.clone(), graph);
+        let context = catalog
+            .graph_context(
+                seed.clone(),
+                Direction::Both,
+                graph_owl_traversal::Bounds::default(),
+            )
+            .await
+            .expect("ok");
+
+        assert_eq!(
+            traversal
+                .seen_seeds
+                .lock()
+                .expect("not poisoned")
+                .as_slice(),
+            &[seed.clone()],
+            "the exact seed passed in, not a finding's resolved subject"
+        );
+        assert_eq!(context.nodes.len(), 2, "{context:?}");
+        assert_eq!(
+            context.edges,
+            vec![EdgeRef {
+                from: seed.clone(),
+                to: neighbour.clone(),
+                relationship: "locatedIn".to_string(),
+                derived: false,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn each_node_carries_its_own_provenance_assembled_in_rust() {
+        let seed = Sid::dsc("asset-warehouse-7");
+        let traversal = Arc::new(FakeTraversal {
+            seen_seeds: Mutex::new(Vec::new()),
+            answer: Subgraph {
+                nodes: vec![seed.clone()],
+                edges: vec![],
+                truncated: false,
+                truncation_reason: None,
+            },
+        });
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&[Flake {
+                s: seed.clone(),
+                p: Sid::new(graph_owl_core::flake::namespace::RDFS, "label"),
+                o: FlakeValue::String("Warehouse 7".to_string()),
+                cx: Some(imported("erp-facilities")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+
+        let catalog = catalog_with(traversal, graph);
+        let context = catalog
+            .graph_context(
+                seed.clone(),
+                Direction::Both,
+                graph_owl_traversal::Bounds::default(),
+            )
+            .await
+            .expect("ok");
+
+        assert_eq!(context.nodes.len(), 1, "{context:?}");
+        assert_eq!(context.nodes[0].id, seed);
+        assert_eq!(context.nodes[0].sources, vec!["erp-facilities".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_node_with_no_flakes_of_its_own_reports_empty_sources_not_an_error() {
+        let seed = Sid::dsc("asset-orphan");
+        let traversal = Arc::new(FakeTraversal {
+            seen_seeds: Mutex::new(Vec::new()),
+            answer: Subgraph {
+                nodes: vec![seed.clone()],
+                edges: vec![],
+                truncated: false,
+                truncation_reason: None,
+            },
+        });
+        let catalog = catalog_with(traversal, RecordingGraph::working());
+
+        let context = catalog
+            .graph_context(
+                seed.clone(),
+                Direction::Both,
+                graph_owl_traversal::Bounds::default(),
+            )
+            .await
+            .expect("ok");
+
+        assert_eq!(context.nodes[0].sources, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn truncation_survives_the_assembly() {
+        let seed = Sid::dsc("asset-warehouse-7");
+        let traversal = Arc::new(FakeTraversal {
+            seen_seeds: Mutex::new(Vec::new()),
+            answer: Subgraph {
+                nodes: vec![seed.clone()],
+                edges: vec![],
+                truncated: true,
+                truncation_reason: None,
+            },
+        });
+        let catalog = catalog_with(traversal, RecordingGraph::working());
+
+        let context = catalog
+            .graph_context(
+                seed,
+                Direction::Both,
+                graph_owl_traversal::Bounds::default(),
+            )
+            .await
+            .expect("ok");
+
+        assert!(context.truncated, "{context:?}");
+    }
+
+    #[tokio::test]
+    async fn a_catalog_with_no_traversal_engine_says_so_rather_than_pretending() {
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_graph(RecordingGraph::working());
+
+        assert!(
+            catalog
+                .graph_context(
+                    Sid::dsc("anything"),
+                    Direction::Both,
+                    graph_owl_traversal::Bounds::default()
+                )
+                .await
+                .is_err()
         );
     }
 }
