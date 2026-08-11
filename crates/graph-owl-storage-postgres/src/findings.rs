@@ -94,6 +94,20 @@ impl graph_owl_storage::FindingStore for PostgresStorage {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn get_finding(&self, id: Uuid) -> Result<Option<Finding>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, pack, label, subject, summary, governed_by, evidence,
+                    status, detected_at, decided_by, reason
+             FROM findings WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
+
+        row.as_ref().map(finding_from_row).transpose()
+    }
+
     async fn list_findings(
         &self,
         pack: Option<&str>,

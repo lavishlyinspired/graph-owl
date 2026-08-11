@@ -4572,6 +4572,20 @@ pub trait FindingStore: Send + Sync {
         finding: &graph_owl_core::finding::Finding,
     ) -> Result<bool, StorageError>;
 
+    /// One finding by id — Epic 105 P7.
+    ///
+    /// `None` rather than an error when absent, the same convention
+    /// [`Self::decide_finding`]'s `false` return already uses: a missing
+    /// finding is a stale console tab, not a backend fault.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_finding(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::finding::Finding>, StorageError>;
+
     /// Findings, newest first, optionally narrowed to one pack and status.
     ///
     /// # Errors

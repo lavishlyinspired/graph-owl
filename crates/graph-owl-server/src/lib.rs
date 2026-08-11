@@ -89,6 +89,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/predicates", post(define_predicate))
         .route("/findings", get(list_findings).post(record_findings))
         .route("/findings/{id}/decision", post(decide_finding))
+        .route("/findings/{id}/evidence-graph", get(finding_evidence_graph))
         .route(
             "/packs/{pack}/finding-rules",
             post(declare_finding_rules).get(list_finding_rules),
@@ -8387,6 +8388,84 @@ async fn decide_finding(
         .decide_finding(id, status, &principal.id, payload.reason.as_deref())
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `?hops`, `?direction`, `?maxNodes` for [`finding_evidence_graph`]. A
+/// narrower struct than [`SubgraphQuery`] rather than a shared one: a finding
+/// has no meaningful `asOf` (it is already a point-in-time conclusion), and
+/// `deny_unknown_fields` turning a stray `asOf` into a `400` is more honest
+/// than silently accepting and ignoring a parameter that looks like it filters.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EvidenceGraphQuery {
+    hops: Option<usize>,
+    direction: Option<String>,
+    max_nodes: Option<usize>,
+}
+
+/// The subgraph around a finding's own subject — Epic 105 P7, the traversal
+/// half (`plans/105e-evidence-chain-walk.md`).
+///
+/// **Not admin-gated**, same visibility rule as [`list_findings`]: a finding
+/// is queue data a reviewer needs to see to do the job, and this is a second
+/// view onto the same finding, not a new privilege.
+///
+/// A node here is any traversal-reachable subject, not necessarily a catalog
+/// asset — a finding's subject belongs to whichever pack raised it — so
+/// unlike [`asset_graph`] nodes carry their resolved IRI where one exists
+/// rather than an asset name, and are otherwise a bare namespaced id.
+async fn finding_evidence_graph(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<EvidenceGraphQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let direction = match query.direction.as_deref() {
+        None | Some("both") => graph_owl_traversal::Direction::Both,
+        Some("outgoing") => graph_owl_traversal::Direction::Outgoing,
+        Some("incoming") => graph_owl_traversal::Direction::Incoming,
+        Some(other) => {
+            return Err(AppError::Validation(vec![FieldError::new(
+                "direction",
+                FieldErrorCode::Type,
+                format!("`{other}` is not one of: outgoing, incoming, both"),
+            )]));
+        }
+    };
+
+    let defaults = graph_owl_traversal::Bounds::default();
+    let bounds = graph_owl_traversal::Bounds {
+        // Capped server-side, same caps as `asset_graph` — the bound exists
+        // to protect the server, not to be polite to the client.
+        max_hops: query.hops.unwrap_or(defaults.max_hops).min(6),
+        max_nodes: query.max_nodes.unwrap_or(defaults.max_nodes).min(1_000),
+    };
+
+    let graph = catalog
+        .finding_evidence_graph(id, direction, bounds)
+        .await?;
+
+    let nodes = graph
+        .nodes
+        .iter()
+        .map(|sid| {
+            json!({
+                "id": sid.id,
+                "iri": sid.to_iri(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Json(json!({
+        "nodes": nodes,
+        "edges": graph.edges.iter().map(|e| json!({
+            "from": e.from.id,
+            "to": e.to.id,
+            "relationship": e.relationship,
+            "derived": e.derived,
+        })).collect::<Vec<_>>(),
+        "truncated": graph.truncated,
+    })))
 }
 
 /// Whether a `source` may name an import graph.

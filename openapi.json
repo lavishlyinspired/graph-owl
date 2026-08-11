@@ -5673,6 +5673,53 @@
         "summary": "Accept or dismiss a finding, recorded against the calling principal"
       }
     },
+    "/findings/{id}/evidence-graph": {
+      "get": {
+        "operationId": "get_findings__id__evidence-graph",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The subgraph reachable from a finding's own subject — nodes and edges computed by traversal, not the rule's flat evidence list"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or not visible to this principal"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "The subgraph reachable from a finding's own subject — nodes and edges computed by traversal, not the rule's flat evidence list"
+      }
+    },
     "/glossaries": {
       "get": {
         "operationId": "get_glossaries",

@@ -8,7 +8,7 @@
 mod common;
 
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
-use graph_owl_engine::TripleStore;
+use graph_owl_engine::{PredicateDef, PredicateRegistry, TripleStore};
 use graph_owl_engine_postgres::PostgresTripleStore;
 use graph_owl_traversal::{Bounds, Direction, EdgeFilter, TraversalEngine};
 
@@ -1013,6 +1013,210 @@ async fn a_dag_has_no_cycles() {
         .await
         .expect("walk");
     assert!(cycles.is_empty(), "a diamond is not a cycle: {cycles:?}");
+}
+
+// ---- namespace-scoped nodes — Epic 105e's own bugfix ----
+//
+// Every test above uses `node()`, which is `Sid::dsc(id)` — every caller
+// this engine ever had (`asset_subgraph`) only ever fed it DSC-scoped
+// catalog assets. Epic 105e's `finding_evidence_graph` is the first caller
+// to pass a domain pack's own node, and it found the walk silently empty:
+// the direct-reference branch only ever recognised `namespace_p = DSC`, and
+// every reconstructed `Sid` was hardcoded back to `namespace::DSC`
+// regardless of what it actually was.
+
+/// A node in a namespace that is neither DSC nor a shipped one — what a
+/// domain pack's own instance data actually looks like.
+fn pack_node(id: &str) -> Sid {
+    Sid::new(2048, id)
+}
+
+/// A namespace outside DSC is only writable once its predicates are
+/// declared (`reject_unregistered_predicates`) — unlike `dsc:fromEntity`
+/// and friends, which `V3__predicate_registry.sql` seeds so every DSC-only
+/// test above never needed this.
+async fn register_pack_predicate(store: &PostgresTripleStore, namespace: u16, name: &str) {
+    store
+        .define(&PredicateDef {
+            namespace,
+            name: name.to_string(),
+            value_type: 0,
+            many: false,
+            core: false,
+        })
+        .await
+        .expect("declare predicate");
+}
+
+#[tokio::test]
+async fn a_direct_reference_in_a_domain_pack_s_own_namespace_is_an_edge_too() {
+    let (store, _container) = store().await;
+    register_pack_predicate(&store, 2048, "issuedBy").await;
+    store
+        .assert_flakes(&[Flake::assert(
+            pack_node("invoice-1"),
+            Sid::new(2048, "issuedBy"),
+            FlakeValue::Ref(pack_node("supplier-1")),
+            1,
+        )])
+        .await
+        .expect("write");
+
+    let result = store
+        .neighbours(
+            &pack_node("invoice-1"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 2,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(
+        distance_of(&result, "supplier-1"),
+        Some(1),
+        "a domain pack's own Ref-valued predicate must be walkable, not just \
+         dsc:parentTable/dsc:owner and friends: {result:?}"
+    );
+}
+
+/// The reconstructed node must carry the namespace it actually came from,
+/// not a namespace hardcoded to whatever the *first* caller happened to use.
+#[tokio::test]
+async fn a_reconstructed_node_carries_its_own_namespace_not_a_hardcoded_one() {
+    let (store, _container) = store().await;
+    register_pack_predicate(&store, 2048, "issuedBy").await;
+    store
+        .assert_flakes(&[Flake::assert(
+            pack_node("invoice-1"),
+            Sid::new(2048, "issuedBy"),
+            FlakeValue::Ref(pack_node("supplier-1")),
+            1,
+        )])
+        .await
+        .expect("write");
+
+    let graph = store
+        .subgraph(
+            &[pack_node("invoice-1")],
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 1,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("subgraph");
+
+    let supplier = graph
+        .nodes
+        .iter()
+        .find(|n| n.id == "supplier-1")
+        .expect("supplier reachable");
+    assert_eq!(
+        supplier.namespace_code, 2048,
+        "the node must keep the namespace it was written in: {graph:?}"
+    );
+    let seed = graph
+        .nodes
+        .iter()
+        .find(|n| n.id == "invoice-1")
+        .expect("seed present");
+    assert_eq!(seed.namespace_code, 2048, "the seed itself too: {graph:?}");
+}
+
+/// The same local id in two different namespaces must stay two different
+/// nodes. Before this fix the recursive CTE carried only the bare local
+/// name as node identity, so this was a silent merge, not a walkable
+/// distinction.
+#[tokio::test]
+async fn two_namespaces_sharing_a_local_id_stay_distinct_nodes() {
+    let (store, _container) = store().await;
+    register_pack_predicate(&store, 2048, "issuedBy").await;
+    register_pack_predicate(&store, 3072, "issuedBy").await;
+    store
+        .assert_flakes(&[
+            Flake::assert(
+                pack_node("shared"),
+                Sid::new(2048, "issuedBy"),
+                FlakeValue::Ref(pack_node("only-in-2048")),
+                1,
+            ),
+            Flake::assert(
+                Sid::new(3072, "shared"),
+                Sid::new(3072, "issuedBy"),
+                FlakeValue::Ref(Sid::new(3072, "only-in-3072")),
+                1,
+            ),
+        ])
+        .await
+        .expect("write");
+
+    let result = store
+        .neighbours(
+            &pack_node("shared"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 2,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(
+        distance_of(&result, "only-in-2048"),
+        Some(1),
+        "got {result:?}"
+    );
+    assert!(
+        !result.reached.iter().any(|r| r.node.id == "only-in-3072"),
+        "a different namespace's node with the same local id must not leak \
+         into this walk: {result:?}"
+    );
+}
+
+/// `rdf:type` and friends stay excluded from the walk even though they are
+/// `value_type = 0` (`Ref`) — a data graph should not flood into class nodes
+/// just because direct references are no longer restricted to DSC. The old
+/// `namespace_p = DSC` filter kept this out by accident (`rdf:type`'s own
+/// namespace is RDF, not DSC); the fix keeps it out on purpose.
+#[tokio::test]
+async fn rdf_type_is_still_not_walked_as_an_edge() {
+    let (store, _container) = store().await;
+    store
+        .assert_flakes(&[Flake::assert(
+            pack_node("invoice-1"),
+            Sid::new(namespace::RDF, "type"),
+            FlakeValue::Ref(Sid::dsc("PurchaseInvoice")),
+            1,
+        )])
+        .await
+        .expect("write");
+
+    let result = store
+        .neighbours(
+            &pack_node("invoice-1"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 2,
+                max_nodes: 200,
+            },
+            &EdgeFilter::default(),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(
+        result.reached.len(),
+        1,
+        "only the seed itself — rdf:type must not become a traversal edge: {result:?}"
+    );
 }
 
 /// A table that feeds itself through a recursive view. Length 1, and real.

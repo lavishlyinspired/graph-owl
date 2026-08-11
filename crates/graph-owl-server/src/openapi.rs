@@ -586,6 +586,16 @@ pub static ROUTES: &[Route] = &[
         true,
     ),
     route(
+        "get",
+        "/findings/{id}/evidence-graph",
+        "The subgraph reachable from a finding's own subject — nodes and \
+         edges computed by traversal, not the rule's flat evidence list",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
         "post",
         "/packs/{pack}/finding-rules",
         "Register a pack's [[findings]] rules for the native reconcile \

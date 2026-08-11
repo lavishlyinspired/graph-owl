@@ -76,16 +76,29 @@ fn push_logical_edges(builder: &mut QueryBuilder<'_, sqlx::Postgres>, filter: &E
     // removing the self-join does. Found via Epic 103's own honest
     // performance measurement, not this epic's own code — recorded here
     // because that is where the query lives.
+    //
+    // **`from_id`/`to_id` carry their namespace with them, as `'ns:id'`
+    // text** — Epic 105e. A bare `sid_s`/`value_ref_id` is only unique
+    // *within* one namespace, and every node this engine had ever walked
+    // before Epic 105e was `dsc:`-scoped, which hid that a Postgres text
+    // column has no way to tell two namespaces' identically-named subjects
+    // apart. [`composite_id`] and [`decode_composite`] are the encode/decode
+    // pair; `GROUP BY namespace_s, sid_s` (not `sid_s` alone) closes the same
+    // gap for the reified branch's own subject grouping.
     builder.push(
         ", edges AS (
             SELECT
-                MAX(value_ref_id) FILTER (WHERE sid_p = '",
+                MAX(value_ref_ns) FILTER (WHERE sid_p = '",
     );
+    builder.push(FROM_ENTITY);
+    builder.push("')::text || ':' || MAX(value_ref_id) FILTER (WHERE sid_p = '");
     builder.push(FROM_ENTITY);
     builder.push(
         "') AS from_id,
-                MAX(value_ref_id) FILTER (WHERE sid_p = '",
+                MAX(value_ref_ns) FILTER (WHERE sid_p = '",
     );
+    builder.push(TO_ENTITY);
+    builder.push("')::text || ':' || MAX(value_ref_id) FILTER (WHERE sid_p = '");
     builder.push(TO_ENTITY);
     builder.push(
         "') AS to_id,
@@ -116,7 +129,7 @@ fn push_logical_edges(builder: &mut QueryBuilder<'_, sqlx::Postgres>, filter: &E
     builder.push(REL_TYPE);
     builder.push(
         "')
-            GROUP BY sid_s
+            GROUP BY namespace_s, sid_s
             HAVING MAX(value_ref_id) FILTER (WHERE sid_p = '",
     );
     builder.push(FROM_ENTITY);
@@ -128,7 +141,9 @@ fn push_logical_edges(builder: &mut QueryBuilder<'_, sqlx::Postgres>, filter: &E
     builder.push(
         "') IS NOT NULL
           UNION ALL
-            SELECT d.sid_s AS from_id, d.value_ref_id AS to_id, d.sid_p AS rel_type,
+            SELECT d.namespace_s::text || ':' || d.sid_s AS from_id,
+                   d.value_ref_ns::text || ':' || d.value_ref_id AS to_id,
+                   d.sid_p AS rel_type,
                    (d.cx_id = 'graph:reasoning') AS derived
             FROM live d
             WHERE d.value_type = 0
@@ -139,10 +154,27 @@ fn push_logical_edges(builder: &mut QueryBuilder<'_, sqlx::Postgres>, filter: &E
     builder.push(TO_ENTITY);
     builder.push(
         "')
-              AND d.namespace_p = ",
+              -- **Not `namespace_p = DSC` any more** — Epic 105e. That
+              -- allowlist-of-one meant a domain pack's own Ref-valued
+              -- predicate (`gst:issuedBy`) was silently invisible to every
+              -- traversal, found only once `finding_evidence_graph` became
+              -- the first caller to ever seed a walk from a non-catalog
+              -- node. The excluded four are the ontology/schema
+              -- vocabularies: walking `rdf:type` or `rdfs:subClassOf` would
+              -- flood a data-subject's neighbourhood with its own class and
+              -- shape nodes, which is a different question
+              -- (`graph-owl-ontology`/`graph-owl-reasoning`'s own territory)
+              -- from \"what is this entity connected to\".
+              AND d.namespace_p NOT IN (",
     );
-    builder.push_bind(i32::from(namespace::DSC));
-    builder.push(")");
+    builder.push_bind(i32::from(namespace::RDF));
+    builder.push(", ");
+    builder.push_bind(i32::from(namespace::RDFS));
+    builder.push(", ");
+    builder.push_bind(i32::from(namespace::OWL));
+    builder.push(", ");
+    builder.push_bind(i32::from(namespace::SHACL));
+    builder.push("))");
 
     if let Some(types) = &filter.relationship_types {
         // Applied to the edge set, before the walk — filtering after the walk
@@ -155,7 +187,31 @@ fn push_logical_edges(builder: &mut QueryBuilder<'_, sqlx::Postgres>, filter: &E
     }
 }
 
+/// Encodes a `Sid` as the composite text key the recursive CTE carries as
+/// node identity throughout `frontier`/`directed` — see [`push_logical_edges`]
+/// for why a bare local id is not enough.
+fn composite_id(sid: &Sid) -> String {
+    format!("{}:{}", sid.namespace_code, sid.id)
+}
+
+/// The inverse of [`composite_id`]. The namespace code is always written
+/// first and is strictly numeric, so splitting on the first `:` is safe even
+/// when the local id itself contains one.
+fn decode_composite(text: &str) -> Result<Sid, TraversalError> {
+    let (ns, id) = text
+        .split_once(':')
+        .ok_or_else(|| TraversalError::Backend(format!("`{text}` is not a namespaced node id")))?;
+    let namespace_code: u16 = ns.parse().map_err(|_| {
+        TraversalError::Backend(format!("`{text}` has a non-numeric namespace prefix"))
+    })?;
+    Ok(Sid::new(namespace_code, id))
+}
+
 /// The recursive frontier itself.
+///
+/// `seeds` are already [`composite_id`]-encoded — this function only ever
+/// treats a node id as opaque text, matching what `edges`' `from_id`/`to_id`
+/// carry, so it does not need to know that itself.
 fn push_frontier(
     builder: &mut QueryBuilder<'_, sqlx::Postgres>,
     seeds: &[String],
@@ -209,7 +265,7 @@ impl TraversalEngine for PostgresTripleStore {
         bounds: Bounds,
         filter: &EdgeFilter,
     ) -> Result<TraversalResult, TraversalError> {
-        let seeds = vec![start.id.clone()];
+        let seeds = vec![composite_id(start)];
         let mut builder = QueryBuilder::new("WITH RECURSIVE ");
         push_live_flakes(&mut builder, filter.as_of);
         push_logical_edges(&mut builder, filter);
@@ -234,11 +290,13 @@ impl TraversalEngine for PostgresTripleStore {
         let mut reached: Vec<Reached> = rows
             .iter()
             .take(bounds.max_nodes)
-            .map(|row| Reached {
-                node: Sid::new(namespace::DSC, row.get::<String, _>("node_id")),
-                distance: usize::try_from(row.get::<i32, _>("depth")).unwrap_or(0),
+            .map(|row| {
+                Ok(Reached {
+                    node: decode_composite(&row.get::<String, _>("node_id"))?,
+                    distance: usize::try_from(row.get::<i32, _>("depth")).unwrap_or(0),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, TraversalError>>()?;
         // Nearest first: a truncated list should keep what is most relevant,
         // and the caller reads it top-down.
         reached.sort_by_key(|r| r.distance);
@@ -274,7 +332,7 @@ impl TraversalEngine for PostgresTripleStore {
         push_logical_edges(&mut builder, filter);
         push_frontier(
             &mut builder,
-            std::slice::from_ref(&from.id),
+            &[composite_id(from)],
             direction,
             bounds.max_hops,
         );
@@ -283,7 +341,7 @@ impl TraversalEngine for PostgresTripleStore {
         // run — a tiebreak left to the planner is a result that changes
         // between calls for no reason the caller can see.
         builder.push(" SELECT path, depth FROM frontier WHERE node_id = ");
-        builder.push_bind(to.id.clone());
+        builder.push_bind(composite_id(to));
         builder.push(" ORDER BY depth, path LIMIT 1");
 
         let row = builder
@@ -292,16 +350,17 @@ impl TraversalEngine for PostgresTripleStore {
             .await
             .map_err(|e| TraversalError::Backend(e.to_string()))?;
 
-        Ok(row.map(|row| {
+        row.map(|row| {
             let path: Vec<String> = row.get("path");
-            Path {
+            Ok(Path {
                 length: path.len().saturating_sub(1),
                 nodes: path
                     .into_iter()
-                    .map(|id| Sid::new(namespace::DSC, id))
-                    .collect(),
-            }
-        }))
+                    .map(|id| decode_composite(&id))
+                    .collect::<Result<Vec<_>, TraversalError>>()?,
+            })
+        })
+        .transpose()
     }
 
     async fn all_paths(
@@ -318,12 +377,12 @@ impl TraversalEngine for PostgresTripleStore {
         push_logical_edges(&mut builder, filter);
         push_frontier(
             &mut builder,
-            std::slice::from_ref(&from.id),
+            &[composite_id(from)],
             direction,
             bounds.max_hops,
         );
         builder.push(" SELECT path, depth FROM frontier WHERE node_id = ");
-        builder.push_bind(to.id.clone());
+        builder.push_bind(composite_id(to));
         builder.push(" ORDER BY depth, path LIMIT ");
         // One past the cap, so hitting it is distinguishable from landing on it.
         builder.push_bind(i64::try_from(max_paths.saturating_add(1)).unwrap_or(i64::MAX));
@@ -340,15 +399,15 @@ impl TraversalEngine for PostgresTripleStore {
             .take(max_paths)
             .map(|row| {
                 let path: Vec<String> = row.get("path");
-                Path {
+                Ok(Path {
                     length: path.len().saturating_sub(1),
                     nodes: path
                         .into_iter()
-                        .map(|id| Sid::new(namespace::DSC, id))
-                        .collect(),
-                }
+                        .map(|id| decode_composite(&id))
+                        .collect::<Result<Vec<_>, TraversalError>>()?,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, TraversalError>>()?;
 
         Ok(PathSet {
             paths,
@@ -376,7 +435,7 @@ impl TraversalEngine for PostgresTripleStore {
         // — which would report every connected pair as a two-node cycle.
         push_frontier(
             &mut builder,
-            std::slice::from_ref(&start.id),
+            &[composite_id(start)],
             Direction::Outgoing,
             bounds.max_hops,
         );
@@ -404,8 +463,8 @@ impl TraversalEngine for PostgresTripleStore {
             };
             let loop_nodes: Vec<Sid> = path[entry..]
                 .iter()
-                .map(|id| Sid::new(namespace::DSC, id.clone()))
-                .collect();
+                .map(|id| decode_composite(id))
+                .collect::<Result<Vec<_>, TraversalError>>()?;
             let cycle = Cycle::normalised(loop_nodes);
             if !cycles.contains(&cycle) {
                 cycles.push(cycle);
@@ -424,7 +483,7 @@ impl TraversalEngine for PostgresTripleStore {
         if seeds.is_empty() {
             return Ok(Subgraph::default());
         }
-        let seed_ids: Vec<String> = seeds.iter().map(|s| s.id.clone()).collect();
+        let seed_ids: Vec<String> = seeds.iter().map(composite_id).collect();
 
         let mut builder = QueryBuilder::new("WITH RECURSIVE ");
         push_live_flakes(&mut builder, filter.as_of);
@@ -457,15 +516,15 @@ impl TraversalEngine for PostgresTripleStore {
         for row in &rows {
             let from = row.get::<String, _>("node_id");
             let depth = usize::try_from(row.get::<i32, _>("depth")).unwrap_or(0);
-            let node = Sid::new(namespace::DSC, from.clone());
+            let node = decode_composite(&from)?;
             if !nodes.contains(&node) {
                 nodes.push(node.clone());
                 depths.push(depth);
             }
             if let Some(to) = row.get::<Option<String>, _>("to_id") {
                 let edge = EdgeRef {
-                    from: Sid::new(namespace::DSC, from),
-                    to: Sid::new(namespace::DSC, to),
+                    from: decode_composite(&from)?,
+                    to: decode_composite(&to)?,
                     relationship: row.get::<String, _>("rel_type"),
                     // `unwrap_or(false)` reads the safe way round: an edge whose
                     // provenance could not be read is shown as asserted, which

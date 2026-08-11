@@ -2221,6 +2221,61 @@ impl Catalog {
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
     }
 
+    /// The subgraph around a finding's own subject — Epic 105 P7, the
+    /// traversal half (`plans/105e-evidence-chain-walk.md`). A finding's
+    /// `evidence` field is a flat list authored at rule-writing time; this
+    /// walks the graph the finding actually points at, at answer time, which
+    /// is what lets a client see support the rule's author never named.
+    ///
+    /// Unlike [`asset_subgraph`], a finding's subject is not necessarily
+    /// `dsc:`-namespaced — it belongs to whichever pack raised the finding —
+    /// so the seed is resolved via [`Sid::from_iri`], which already walks the
+    /// process-wide runtime namespace table rather than only the static ones.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if no such finding exists. `Storage` if no findings store
+    /// or no traversal engine is configured, or if the finding's subject is
+    /// not in any namespace this deployment has registered.
+    ///
+    /// [`asset_subgraph`]: Self::asset_subgraph
+    /// [`Sid::from_iri`]: graph_owl_core::flake::Sid::from_iri
+    pub async fn finding_evidence_graph(
+        &self,
+        id: Uuid,
+        direction: Direction,
+        bounds: Bounds,
+    ) -> Result<Subgraph, CatalogError> {
+        let store = self.findings_store()?;
+        let finding = store.get_finding(id).await?.ok_or(CatalogError::NotFound)?;
+
+        let seed = graph_owl_core::flake::Sid::from_iri(&finding.subject).ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(format!(
+                "finding {id}'s subject `{}` is not in a namespace this deployment resolves",
+                finding.subject
+            )))
+        })?;
+
+        let traversal = self.traversal.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no traversal engine configured".to_string(),
+            ))
+        })?;
+
+        traversal
+            .subgraph(
+                &[seed],
+                direction,
+                bounds,
+                &EdgeFilter {
+                    relationship_types: None,
+                    as_of: None,
+                },
+            )
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
     /// Project a relationship into the graph, or withdraw it.
     ///
     /// Same failure isolation as [`project`]: an edge that fails to reach the
@@ -38455,6 +38510,16 @@ mod finding_runtime_tests {
             Ok(true)
         }
 
+        async fn get_finding(&self, id: Uuid) -> Result<Option<Finding>, StorageError> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .find(|r| r.id == id)
+                .cloned())
+        }
+
         async fn list_findings(
             &self,
             pack: Option<&str>,
@@ -38678,6 +38743,287 @@ mod finding_runtime_tests {
         assert!(
             catalog
                 .decide_finding(Uuid::new_v4(), FindingStatus::Accepted, "asha", None)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod finding_evidence_graph_tests {
+    //! `Catalog::finding_evidence_graph` — Epic 105 P7, the traversal half
+    //! (`plans/105e-evidence-chain-walk.md`). What the flat rule-authored
+    //! evidence list in `pack.toml` cannot give: a subgraph computed at
+    //! answer time from the finding's subject outward, over whatever the
+    //! graph actually contains right now.
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use graph_owl_core::finding::{Evidence, Finding, FindingStatus};
+    use graph_owl_core::flake::Sid;
+    use graph_owl_storage::FindingStore;
+    use graph_owl_traversal::{Direction, EdgeFilter, Subgraph, TraversalEngine, TraversalError};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct FakeFindings {
+        rows: Mutex<Vec<Finding>>,
+    }
+
+    #[async_trait]
+    impl FindingStore for FakeFindings {
+        async fn record_finding(&self, finding: &Finding) -> Result<bool, StorageError> {
+            self.rows
+                .lock()
+                .expect("not poisoned")
+                .push(finding.clone());
+            Ok(true)
+        }
+        async fn get_finding(&self, id: Uuid) -> Result<Option<Finding>, StorageError> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .find(|r| r.id == id)
+                .cloned())
+        }
+        async fn list_findings(
+            &self,
+            _pack: Option<&str>,
+            _status: Option<FindingStatus>,
+        ) -> Result<Vec<Finding>, StorageError> {
+            Ok(self.rows.lock().expect("not poisoned").clone())
+        }
+        async fn decide_finding(
+            &self,
+            _id: Uuid,
+            _status: FindingStatus,
+            _actor: &str,
+            _reason: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unreachable!("not exercised by these tests")
+        }
+    }
+
+    /// Records the seed it was asked to walk from, so a test can assert the
+    /// finding's subject was actually resolved and passed through — the one
+    /// genuinely new step this slice adds over `asset_subgraph`'s precedent.
+    struct FakeTraversal {
+        seen_seeds: Mutex<Vec<Sid>>,
+        answer: Subgraph,
+    }
+
+    #[async_trait]
+    impl TraversalEngine for FakeTraversal {
+        async fn neighbours(
+            &self,
+            _start: &Sid,
+            _direction: Direction,
+            _bounds: graph_owl_traversal::Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<graph_owl_traversal::TraversalResult, TraversalError> {
+            unreachable!("not exercised by these tests")
+        }
+
+        async fn subgraph(
+            &self,
+            seeds: &[Sid],
+            _direction: Direction,
+            _bounds: graph_owl_traversal::Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<Subgraph, TraversalError> {
+            self.seen_seeds
+                .lock()
+                .expect("not poisoned")
+                .extend(seeds.iter().cloned());
+            Ok(self.answer.clone())
+        }
+
+        async fn shortest_path(
+            &self,
+            _from: &Sid,
+            _to: &Sid,
+            _direction: Direction,
+            _bounds: graph_owl_traversal::Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<Option<graph_owl_traversal::Path>, TraversalError> {
+            unreachable!("not exercised by these tests")
+        }
+
+        async fn all_paths(
+            &self,
+            _from: &Sid,
+            _to: &Sid,
+            _direction: Direction,
+            _bounds: graph_owl_traversal::Bounds,
+            _max_paths: usize,
+            _filter: &EdgeFilter,
+        ) -> Result<graph_owl_traversal::PathSet, TraversalError> {
+            unreachable!("not exercised by these tests")
+        }
+
+        async fn detect_cycles(
+            &self,
+            _start: &Sid,
+            _bounds: graph_owl_traversal::Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<Vec<graph_owl_traversal::Cycle>, TraversalError> {
+            unreachable!("not exercised by these tests")
+        }
+    }
+
+    fn finding_with_subject(subject: &str) -> Finding {
+        Finding::new(
+            "gst",
+            "gst:PotentialMismatch",
+            subject,
+            "Claimed in the register, never filed by the supplier",
+            "gst:Section16",
+            vec![Evidence {
+                subject: subject.to_string(),
+                predicate: "gst:invoiceNumber".to_string(),
+                value: "INV-1003".to_string(),
+            }],
+        )
+        .expect("a complete finding")
+    }
+
+    /// Mirrors what pack loading does at startup (`Catalog::register_pack`,
+    /// around line 1963) — a finding's subject only resolves via
+    /// `Sid::from_iri` once its pack's namespace has been taught to this
+    /// process. Idempotent, so every test calling this is safe to run
+    /// concurrently with the others.
+    fn register_test_gst_namespace() {
+        graph_owl_core::namespaces::register_process_namespace(
+            graph_owl_core::flake::namespace::RUNTIME_START,
+            "https://graph-owl.dev/packs/gst#",
+        );
+    }
+
+    fn catalog_with(findings: Arc<FakeFindings>, traversal: Arc<FakeTraversal>) -> Catalog {
+        Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_findings(findings)
+        .with_traversal(traversal)
+    }
+
+    #[tokio::test]
+    async fn a_missing_finding_is_not_found() {
+        let findings = Arc::new(FakeFindings::default());
+        let traversal = Arc::new(FakeTraversal {
+            seen_seeds: Mutex::new(Vec::new()),
+            answer: Subgraph::default(),
+        });
+        let catalog = catalog_with(findings, traversal);
+
+        let error = catalog
+            .finding_evidence_graph(
+                Uuid::new_v4(),
+                Direction::Both,
+                graph_owl_traversal::Bounds::default(),
+            )
+            .await
+            .expect_err("no such finding");
+        assert!(matches!(error, CatalogError::NotFound), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn the_finding_s_subject_is_resolved_and_used_as_the_traversal_seed() {
+        register_test_gst_namespace();
+        let findings = Arc::new(FakeFindings::default());
+        let target = finding_with_subject("https://graph-owl.dev/packs/gst#pr-INV-1003");
+        let id = target.id;
+        findings.record_finding(&target).await.expect("seed");
+
+        let traversal = Arc::new(FakeTraversal {
+            seen_seeds: Mutex::new(Vec::new()),
+            answer: Subgraph::default(),
+        });
+        let catalog = catalog_with(findings, Arc::clone(&traversal));
+
+        catalog
+            .finding_evidence_graph(id, Direction::Both, graph_owl_traversal::Bounds::default())
+            .await
+            .expect("ok");
+
+        let seeds = traversal.seen_seeds.lock().expect("not poisoned");
+        assert_eq!(seeds.len(), 1, "{seeds:?}");
+        assert_eq!(
+            seeds[0].id, "pr-INV-1003",
+            "the local name must survive resolution: {seeds:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_traversal_result_is_returned_as_is() {
+        register_test_gst_namespace();
+        let findings = Arc::new(FakeFindings::default());
+        let target = finding_with_subject("https://graph-owl.dev/packs/gst#pr-INV-1003");
+        let id = target.id;
+        findings.record_finding(&target).await.expect("seed");
+
+        let expected = Subgraph {
+            nodes: vec![Sid::dsc("something")],
+            edges: Vec::new(),
+            truncated: false,
+            truncation_reason: None,
+        };
+        let traversal = Arc::new(FakeTraversal {
+            seen_seeds: Mutex::new(Vec::new()),
+            answer: expected.clone(),
+        });
+        let catalog = catalog_with(findings, traversal);
+
+        let result = catalog
+            .finding_evidence_graph(id, Direction::Both, graph_owl_traversal::Bounds::default())
+            .await
+            .expect("ok");
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn a_subject_in_an_unregistered_namespace_is_a_named_error_not_a_panic() {
+        // A finding whose subject was never in a namespace this process has
+        // resolved (e.g. a stale row from a pack that was since removed) —
+        // Sid::from_iri returning None must surface as an error, not a panic
+        // that takes the whole request down with it.
+        let findings = Arc::new(FakeFindings::default());
+        let target = finding_with_subject("https://example.org/never-registered#thing");
+        let id = target.id;
+        findings.record_finding(&target).await.expect("seed");
+
+        let traversal = Arc::new(FakeTraversal {
+            seen_seeds: Mutex::new(Vec::new()),
+            answer: Subgraph::default(),
+        });
+        let catalog = catalog_with(findings, traversal);
+
+        let error = catalog
+            .finding_evidence_graph(id, Direction::Both, graph_owl_traversal::Bounds::default())
+            .await
+            .expect_err("an unresolvable subject must be refused");
+        assert!(matches!(error, CatalogError::Storage(_)), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_catalog_with_no_traversal_engine_says_so_rather_than_pretending() {
+        let findings = Arc::new(FakeFindings::default());
+        let target = finding_with_subject("https://graph-owl.dev/packs/gst#pr-INV-1003");
+        let id = target.id;
+        findings.record_finding(&target).await.expect("seed");
+
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_findings(findings);
+
+        assert!(
+            catalog
+                .finding_evidence_graph(id, Direction::Both, graph_owl_traversal::Bounds::default())
                 .await
                 .is_err()
         );
