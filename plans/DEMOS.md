@@ -1072,13 +1072,41 @@ engine has no date support in expressions at all (`date > date` evaluates to
 unbound), and no notion of string similarity — so the query does the join and
 the runtime does the arithmetic, with both thresholds declared in the manifest.
 Writing the evaluation set found a real false-accusation bug: the 180-day rule
-flagged *every* unpaid invoice, including one six days old. **Still open,
+flagged *every* unpaid invoice, including one six days old. **P6 (fusion)
+characterized rather than rebuilt, 11 August 2026**: the platform plan's
+fusion primitives (candidate generation, blocking, scoring, decision) are
+`105b`'s native reconcile engine under different names — `[findings.similarity]`
+is the blocking/scoring band, the SPARQL join is candidate generation, the
+finding itself is the fused decision. **P7's traversal half shipped 10 August
+2026** (`105e`) — `Catalog::finding_evidence_graph`, a real Postgres
+traversal bug found and fixed along the way (every reconstructed `Sid` was
+hardcoded to the `dsc` namespace, silently hiding every domain-pack predicate
+from traversal). **P7's interpretation half shipped 11 August 2026** (`105g`,
+both slices): every evidence-graph node now reports which source document
+asserted it (`Catalog::node_sources`), and `GstinTransposition` — the one GST
+finding whose whole premise is a missing edge — surfaces the unlinked second
+Supplier by resolving it by value (`Catalog::near_miss_node`, a new
+`[findings.similarity].resolveBy` pack-config field) rather than pretending a
+generic "missing-hop" mechanism was needed for all six findings, when five of
+them compute their own gaps at finding-creation time. Two real bugs found
+along the way, not anticipated in either plan: a `var` field silently dropped
+on write (caught only by the real-Postgres test, not the fake-graph unit
+tests), and a mutation-testing survivor traceable to `HashMap`-ordered fake
+results making "which of two seeded flakes wins" nondeterministic. **P9's
+aggregation half characterized, 11 August 2026**: `SUM`/`COUNT`/`AVG`/`GROUP
+BY`/`DISTINCT` already work end to end through the adopted `spareval`
+evaluator — five characterization tests against the platform plan's own
+worked example (three invoices at ₹100/₹200/₹300 summing to ₹600) all pass
+against the *existing* code, confirming the plan's own claim that this was
+"probably not work at all" rather than an unbuilt gap. **Still open,
 recorded rather than assumed away**: no reference agent app (`examples/gst-reconcile/`)
 and so no scored evaluation run; the live GSP/ERP connectors are fixture-mode
-only; pack facts are readable by any principal who can query at all (per-named-graph policy needs a policy model that does not exist yet); six of the seven planned packs are unwritten; and P2's remaining connectors, P3, P4 and P6–P12 are untouched — this is the spine, not the finished platform
+only; pack facts are readable by any principal who can query at all (per-named-graph policy needs a policy model that does not exist yet); six of the seven planned packs are unwritten; and P2's remaining connectors, P3, P4, P8, P9's
+query-planner/GraphRAG/hybrid-search thirds, P10, P11 and P12 are untouched — this is the spine, not the finished platform
 
 ### Console half
 - [x] **105** **One queue, every pack** — `findingsQueue.tsx` renders GST and hospitality identically; the difference lives in `pack.toml`. A `GstFindingsQueue.tsx` would have been the console's first per-domain hardcoding
+- [x] **105e/105g** **Evidence graph, rendered** — a real Cytoscape-rendered picture plus a raw triples table (extracted `GraphCanvas` out of `App.tsx` for reuse), each node's source document(s) shown as tags, and — for `GstinTransposition` specifically — a "Possible match — not linked" section naming the second Supplier candidate, deliberately not drawn as a graph edge
 
 ---
 

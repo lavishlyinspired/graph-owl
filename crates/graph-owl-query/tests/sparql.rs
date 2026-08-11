@@ -258,3 +258,156 @@ fn a_malformed_query_is_a_parse_error_not_a_panic() {
             .is_err()
     );
 }
+
+/// SQL/SPARQL aggregation — Epic 105 P9's own sizing (the platform plan's
+/// §9): "aggregations are probably not work at all," since `spareval`
+/// evaluates `SUM`/`COUNT`/`AVG`/`GROUP BY`/`DISTINCT` *above* the
+/// [`spareval::QueryableDataset`] this crate implements. These are
+/// characterization tests, not an implementation — each one either proves
+/// the claim or names exactly what is missing.
+mod aggregations {
+    use super::*;
+
+    /// The numeric value out of a typed literal term (`"600"^^<...#integer>`)
+    /// — `values()`'s own `trim_matches('"')` only strips a bare string
+    /// literal's quotes, not the `^^<datatype>` suffix a typed numeric term
+    /// always carries.
+    fn numeric(term: &str) -> f64 {
+        term.split("\"^^")
+            .next()
+            .expect("a typed literal")
+            .trim_start_matches('"')
+            .parse()
+            .unwrap_or_else(|e| panic!("{term:?} did not parse as a number: {e}"))
+    }
+
+    fn invoices() -> Vec<Flake> {
+        vec![
+            flake("inv1", "type", FlakeValue::String("invoice".into())),
+            flake("inv1", "amount", FlakeValue::Int(100)),
+            flake("inv1", "vendor", FlakeValue::Ref(Sid::dsc("acme"))),
+            flake("inv2", "type", FlakeValue::String("invoice".into())),
+            flake("inv2", "amount", FlakeValue::Int(200)),
+            flake("inv2", "vendor", FlakeValue::Ref(Sid::dsc("acme"))),
+            flake("inv3", "type", FlakeValue::String("invoice".into())),
+            flake("inv3", "amount", FlakeValue::Int(300)),
+            flake("inv3", "vendor", FlakeValue::Ref(Sid::dsc("globex"))),
+        ]
+    }
+
+    /// The platform plan's own worked example, verbatim: "three invoices at
+    /// ₹100/₹200/₹300 must `SUM` to ₹600."
+    #[test]
+    fn sum_totals_across_matched_rows() {
+        let rows = solutions(
+            &invoices(),
+            &format!(
+                "SELECT (SUM(?amount) AS ?total) WHERE {{
+                   ?i <{DSC}type> \"invoice\" .
+                   ?i <{DSC}amount> ?amount
+                 }}"
+            ),
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            numeric(&values(&rows, "total")[0]),
+            600.0,
+            "100 + 200 + 300, over xsd:integer terms, not string concatenation: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn count_answers_how_many_not_the_rows_themselves() {
+        let rows = solutions(
+            &invoices(),
+            &format!("SELECT (COUNT(?i) AS ?n) WHERE {{ ?i <{DSC}type> \"invoice\" }}"),
+        );
+        assert_eq!(numeric(&values(&rows, "n")[0]), 3.0, "{rows:?}");
+    }
+
+    #[test]
+    fn avg_divides_the_sum_by_the_count() {
+        let rows = solutions(
+            &invoices(),
+            &format!(
+                "SELECT (AVG(?amount) AS ?mean) WHERE {{
+                   ?i <{DSC}type> \"invoice\" .
+                   ?i <{DSC}amount> ?amount
+                 }}"
+            ),
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let mean = numeric(&values(&rows, "mean")[0]);
+        assert!((mean - 200.0).abs() < f64::EPSILON, "{mean}");
+    }
+
+    /// One `SUM` per vendor, not one `SUM` over everything — the case a
+    /// non-grouped aggregate cannot express and the reason `GROUP BY`
+    /// matters on its own, not merely as `SUM`'s syntax.
+    #[test]
+    fn group_by_partitions_the_aggregate_per_key() {
+        let rows = solutions(
+            &invoices(),
+            &format!(
+                "SELECT ?vendor (SUM(?amount) AS ?total) WHERE {{
+                   ?i <{DSC}type> \"invoice\" .
+                   ?i <{DSC}amount> ?amount .
+                   ?i <{DSC}vendor> ?vendor
+                 }}
+                 GROUP BY ?vendor"
+            ),
+        );
+        assert_eq!(rows.len(), 2, "one row per vendor: {rows:?}");
+        let by_vendor: std::collections::BTreeMap<String, f64> = rows
+            .iter()
+            .map(|row| {
+                let vendor = row
+                    .iter()
+                    .find(|(name, _)| name == "vendor")
+                    .map(|(_, v)| v.clone())
+                    .expect("vendor bound");
+                let total = row
+                    .iter()
+                    .find(|(name, _)| name == "total")
+                    .map(|(_, v)| numeric(v))
+                    .expect("total bound");
+                (vendor, total)
+            })
+            .collect();
+        // Both vendors happen to total 300 — 100+200 for acme, the lone 300
+        // for globex — which would also be true of a `GROUP BY` that
+        // silently ignored the grouping key and summed everything into one
+        // bucket, *if* that bucket then leaked into two identical rows. The
+        // row count assertion above is what actually rules that out; this
+        // pins the per-vendor values so a regression that changes either
+        // sum is still caught.
+        assert_eq!(
+            by_vendor.get(&format!("<{DSC}acme>")),
+            Some(&300.0),
+            "acme's two invoices: 100 + 200: {by_vendor:?}"
+        );
+        assert_eq!(
+            by_vendor.get(&format!("<{DSC}globex>")),
+            Some(&300.0),
+            "globex's one invoice: {by_vendor:?}"
+        );
+    }
+
+    #[test]
+    fn distinct_collapses_duplicate_rows() {
+        let rows = solutions(
+            &invoices(),
+            &format!(
+                "SELECT DISTINCT ?vendor WHERE {{
+                   ?i <{DSC}type> \"invoice\" .
+                   ?i <{DSC}vendor> ?vendor
+                 }}"
+            ),
+        );
+        assert_eq!(
+            rows.len(),
+            2,
+            "three invoices, two vendors, DISTINCT must not return three rows: {rows:?}"
+        );
+    }
+}
