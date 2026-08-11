@@ -22,7 +22,13 @@
 
 import { Space, Tag, Typography } from "antd";
 import type { CSSProperties } from "react";
-import { api, type EvidenceGraph, type EvidenceGraphEdge, type PackFinding } from "../../api";
+import {
+  api,
+  type EvidenceGraph,
+  type EvidenceGraphEdge,
+  type EvidenceGraphNode,
+  type PackFinding,
+} from "../../api";
 import type { Picture } from "../../graph/cytoscape";
 import { GraphCanvas } from "../../graph/GraphCanvas";
 import { palette } from "../../theme";
@@ -50,6 +56,8 @@ const COPY = {
   evidenceGraphSeedOnly: "Nothing else in the graph connects to this yet.",
   evidenceGraphTruncated: "Truncated — only part of the neighbourhood is shown.",
   evidenceGraphArrow: "—",
+  sourcesLabel: "Sources",
+  sourcesEmpty: "no source recorded",
   triplesLabel: "Triples",
   predicateLabel: "Predicate",
   objectLabel: "Object",
@@ -119,6 +127,14 @@ export function evidenceGraphIsJustTheSeed(graph: EvidenceGraph): boolean {
  *  whole in one call, unlike the asset explorer's click-to-reveal picture —
  *  marking a node `expandable` here would draw a ring promising an
  *  interaction nothing behind it honours. */
+/** A node's own resolved IRI, read the way a reviewer reads any other term
+ *  in this file — falling back to the bare id when the namespace never
+ *  resolved. Shared between the rendered picture and the sources list below
+ *  it, so both name the same node the same way. */
+function nodeLabel(node: EvidenceGraphNode): string {
+  return node.iri ? displayTerm(node.iri) : node.id;
+}
+
 export function evidencePicture(finding: PackFinding, graph: EvidenceGraph): Picture {
   const seedId = displayTerm(finding.subject);
   const nodeIds = graph.nodes.map((node) => node.id);
@@ -126,7 +142,7 @@ export function evidencePicture(finding: PackFinding, graph: EvidenceGraph): Pic
     seedId,
     nodes: graph.nodes.map((node) => ({
       id: node.id,
-      name: node.iri ? displayTerm(node.iri) : node.id,
+      name: nodeLabel(node),
       kind: null,
     })),
     edges: graph.edges,
@@ -136,6 +152,21 @@ export function evidencePicture(finding: PackFinding, graph: EvidenceGraph): Pic
     // carries the mark.
     truncatedAt: graph.truncated ? [seedId] : [],
   };
+}
+
+/** Which source document(s) asserted each node's own flakes — Epic 105 P7's
+ *  provenance half (`plans/105g-evidence-provenance-and-near-miss.md`). The
+ *  API has already deduplicated per node; this only adds the same display
+ *  name the canvas and the triples table already use, so a reviewer reads
+ *  one name for one node everywhere on the page. */
+export function evidenceNodeSources(
+  graph: EvidenceGraph,
+): { id: string; name: string; sources: readonly string[] }[] {
+  return graph.nodes.map((node) => ({
+    id: node.id,
+    name: nodeLabel(node),
+    sources: node.sources,
+  }));
 }
 
 /** One row per edge — a finding's evidence graph, as the triples it actually
@@ -295,6 +326,26 @@ export function findingsQueue(): QueueConfig {
                       <Text type="secondary">{COPY.evidenceGraphTruncated}</Text>
                     </div>
                   )}
+                  <div style={{ marginTop: 8 }}>
+                    <Text strong>{COPY.sourcesLabel}</Text>
+                    {evidenceNodeSources(graph).map((row) => (
+                      <div key={row.id}>
+                        <Text type="secondary">
+                          {row.name}
+                          {COPY.separator}
+                          {row.sources.length > 0 ? (
+                            row.sources.map((source, index) => (
+                              <Tag key={source} style={{ marginLeft: index === 0 ? 6 : 0 }}>
+                                {source}
+                              </Tag>
+                            ))
+                          ) : (
+                            <Text type="secondary">{COPY.sourcesEmpty}</Text>
+                          )}
+                        </Text>
+                      </div>
+                    ))}
+                  </div>
                   <div style={{ marginTop: 8 }}>
                     <Text strong>{COPY.triplesLabel}</Text>
                     <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>

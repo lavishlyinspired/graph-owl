@@ -8445,16 +8445,20 @@ async fn finding_evidence_graph(
         .finding_evidence_graph(id, direction, bounds)
         .await?;
 
-    let nodes = graph
-        .nodes
-        .iter()
-        .map(|sid| {
-            json!({
-                "id": sid.id,
-                "iri": sid.to_iri(),
-            })
-        })
-        .collect::<Vec<_>>();
+    // One call per node — the same shape `asset_graph` already resolves
+    // node metadata in, and the node count is the same server-side-capped
+    // budget that keeps that loop bounded here too. A source lookup that
+    // fails must not take the whole picture down; it degrades to "sources
+    // unknown for this node" rather than a 500 over a provenance question.
+    let mut nodes = Vec::with_capacity(graph.nodes.len());
+    for sid in &graph.nodes {
+        let sources = catalog.node_sources(sid).await.unwrap_or_default();
+        nodes.push(json!({
+            "id": sid.id,
+            "iri": sid.to_iri(),
+            "sources": sources,
+        }));
+    }
 
     Ok(Json(json!({
         "nodes": nodes,

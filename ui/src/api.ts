@@ -355,6 +355,12 @@ export interface PackFinding {
 export interface EvidenceGraphNode {
   readonly id: string;
   readonly iri: string | null;
+  /** Which source document(s) asserted this node's own flakes — Epic 105
+   *  P7's provenance half. Empty when the node has no subject-position
+   *  flakes of its own from any named import (referenced only as another
+   *  subject's edge target), never absent — an empty array is a real
+   *  answer, not a missing field. */
+  readonly sources: readonly string[];
 }
 
 export interface EvidenceGraphEdge {

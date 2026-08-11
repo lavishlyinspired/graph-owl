@@ -2276,6 +2276,58 @@ impl Catalog {
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
     }
 
+    /// Every source document that asserted one of this subject's own flakes
+    /// — Epic 105 P7's provenance half
+    /// (`plans/105g-evidence-provenance-and-near-miss.md`). An evidence
+    /// graph shows *what* is connected; this answers *which document said
+    /// so*, one node at a time — a reviewer can see `supplier-...` in a
+    /// finding's evidence graph but not, without this, whether the purchase
+    /// register or GSTR-2B is the one claiming it.
+    ///
+    /// A flake with no named graph (`cx: None`, the default graph) is not a
+    /// source in the sense a reviewer means the word, and contributes
+    /// nothing — a subject asserted only there reports no sources, not a
+    /// blank one.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured, or the read fails.
+    pub async fn node_sources(&self, sid: &Sid) -> Result<Vec<String>, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let flakes = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                s: Some(sid.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let mut sources: Vec<String> = Vec::new();
+        for flake in &flakes {
+            let Some(cx) = &flake.cx else { continue };
+            // The inverse of `Self::import_graph` — every import lands
+            // under this prefix, so stripping it is what turns the graph
+            // name back into the `source` a pack's `[[documents]]` entry
+            // named. A context outside that convention (`graph:reasoning`,
+            // say) has nothing to strip and is reported as-is rather than
+            // silently dropped.
+            let name = cx
+                .id
+                .strip_prefix("graph:import:")
+                .unwrap_or(&cx.id)
+                .to_string();
+            if !sources.contains(&name) {
+                sources.push(name);
+            }
+        }
+        Ok(sources)
+    }
+
     /// Project a relationship into the graph, or withdraw it.
     ///
     /// Same failure isolation as [`project`]: an edge that fails to reach the
@@ -39026,6 +39078,176 @@ mod finding_evidence_graph_tests {
                 .finding_evidence_graph(id, Direction::Both, graph_owl_traversal::Bounds::default())
                 .await
                 .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod node_sources_tests {
+    //! `Catalog::node_sources` — Epic 105 P7's provenance half
+    //! (`plans/105g-evidence-provenance-and-near-miss.md`). Which source
+    //! document asserted a subject's own flakes — the piece the evidence
+    //! graph did not carry when it shipped: a reviewer could see
+    //! `supplier-29AACCG0527D1Z8` but not which side claims it.
+
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+
+    use super::projection_isolation_tests::RecordingGraph;
+    use super::*;
+
+    fn imported(source: &str) -> Sid {
+        Sid::dsc(format!("graph:import:{source}"))
+    }
+
+    #[tokio::test]
+    async fn a_node_asserted_by_one_import_reports_that_one_source() {
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&[
+                Flake {
+                    s: Sid::dsc("pr-INV-1003"),
+                    p: Sid::new(namespace::RDF, "type"),
+                    o: FlakeValue::Ref(Sid::dsc("PurchaseInvoice")),
+                    cx: Some(imported("gst-purchase-register")),
+                    t: 1,
+                    op: true,
+                },
+                // An unrelated subject from a different import — proves the
+                // query is actually scoped to the one subject asked about,
+                // not every flake in the graph. Without this, deleting the
+                // `s:` field from the pattern is invisible: the fake would
+                // have nothing else to wrongly include.
+                Flake {
+                    s: Sid::dsc("some-other-subject"),
+                    p: Sid::new(namespace::RDF, "type"),
+                    o: FlakeValue::Ref(Sid::dsc("Gstr2bInvoice")),
+                    cx: Some(imported("gst-gstr2b")),
+                    t: 1,
+                    op: true,
+                },
+            ])
+            .await
+            .expect("seed");
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_graph(graph);
+
+        let sources = catalog
+            .node_sources(&Sid::dsc("pr-INV-1003"))
+            .await
+            .expect("ok");
+        assert_eq!(
+            sources,
+            vec!["gst-purchase-register".to_string()],
+            "an unrelated subject's own source must not leak in"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_node_asserted_by_two_imports_reports_both_deduplicated() {
+        let graph = RecordingGraph::working();
+        let subject = Sid::dsc("supplier-29AACCG0527D1Z8");
+        graph
+            .assert_flakes(&[
+                Flake {
+                    s: subject.clone(),
+                    p: Sid::dsc("supplierGstin"),
+                    o: FlakeValue::String("29AACCG0527D1Z8".to_string()),
+                    cx: Some(imported("gst-purchase-register")),
+                    t: 1,
+                    op: true,
+                },
+                Flake {
+                    s: subject.clone(),
+                    p: Sid::dsc("supplierGstin"),
+                    o: FlakeValue::String("29AACCG0527D1Z8".to_string()),
+                    cx: Some(imported("gst-gstr2b")),
+                    t: 2,
+                    op: true,
+                },
+                // A second flake from the same import as the first — proves
+                // the result is deduplicated, not just "as many sources as
+                // flakes".
+                Flake {
+                    s: subject.clone(),
+                    p: Sid::new(namespace::RDF, "type"),
+                    o: FlakeValue::Ref(Sid::dsc("Supplier")),
+                    cx: Some(imported("gst-purchase-register")),
+                    t: 1,
+                    op: true,
+                },
+            ])
+            .await
+            .expect("seed");
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_graph(graph);
+
+        let mut sources = catalog.node_sources(&subject).await.expect("ok");
+        sources.sort();
+        assert_eq!(
+            sources,
+            vec![
+                "gst-gstr2b".to_string(),
+                "gst-purchase-register".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_node_with_no_flakes_reports_an_empty_list_not_an_error() {
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_graph(graph);
+
+        let sources = catalog
+            .node_sources(&Sid::dsc("never-asserted"))
+            .await
+            .expect("an absent subject is not an error");
+        assert!(sources.is_empty(), "{sources:?}");
+    }
+
+    #[tokio::test]
+    async fn a_flake_with_no_named_graph_contributes_no_source() {
+        // `cx: None` is the default graph — not an import, and not a source a
+        // reviewer would recognise. It must not surface as a source named
+        // "" or crash the collection.
+        let graph = RecordingGraph::working();
+        let subject = Sid::dsc("some-subject");
+        graph
+            .assert_flakes(&[Flake {
+                s: subject.clone(),
+                p: Sid::new(namespace::RDF, "type"),
+                o: FlakeValue::Ref(Sid::dsc("Thing")),
+                cx: None,
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_graph(graph);
+
+        let sources = catalog.node_sources(&subject).await.expect("ok");
+        assert!(sources.is_empty(), "{sources:?}");
+    }
+
+    #[tokio::test]
+    async fn a_catalog_with_no_graph_engine_says_so_rather_than_pretending() {
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ));
+
+        assert!(
+            catalog.node_sources(&Sid::dsc("anything")).await.is_err(),
+            "a missing graph engine must be a named error, not an empty answer \
+             indistinguishable from 'this node genuinely has no sources'"
         );
     }
 }

@@ -228,6 +228,100 @@ async fn a_finding_s_evidence_graph_reaches_the_supplier_node_its_issuedby_edge_
         "the issuedBy edge itself must be in the walk, not just both endpoints \
          independently: {edges:?}"
     );
+
+    // Epic 105 P7's provenance half (`plans/105g-...`) — the invoice was
+    // asserted by exactly one document.
+    let invoice_node = nodes
+        .iter()
+        .find(|n| n["id"] == "p-INV-1003")
+        .expect("invoice node present");
+    assert_eq!(
+        invoice_node["sources"],
+        serde_json::json!(["gst-purchase-register"]),
+        "{invoice_node:?}"
+    );
+}
+
+/// The two-source case `plans/105g-evidence-provenance-and-near-miss.md`
+/// names explicitly: a `gst:Supplier` referenced from both the purchase
+/// register and GSTR-2B must report both, over a real Postgres-backed
+/// `query_pattern` — `graph-owl-api`'s own `node_sources_tests` prove the
+/// dedup logic against a fake; this proves the real flake table actually
+/// carries two distinct `cx` values for one subject once two documents
+/// land, and that both survive the round trip through the HTTP layer.
+#[tokio::test]
+async fn a_supplier_claimed_by_both_sides_reports_both_sources() {
+    let (app, _db, _url) = test_app().await;
+    seed_invoice_with_a_real_supplier_node(&app).await;
+
+    // Matches `packs/gst/fixtures/gstr2b.ttl`'s own convention exactly: the
+    // supplier's own `rdf:type` fact is redeclared on the GSTR-2B side too
+    // (idempotent — re-asserting an identical flake is a no-op), not just
+    // referenced as the object of `issuedBy`. Without this the supplier has
+    // no subject-position flakes of its own from this document at all, and
+    // `node_sources` — which asks "what document said something *about*
+    // this entity", not "what document merely pointed at it" — correctly
+    // would not count it as a source. Real GST data does this for exactly
+    // this reason.
+    let filed = r#"
+        @prefix gst: <https://graph-owl.dev/packs/gst#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+        gst:supplier-29AACCG0527D1Z8 rdf:type gst:Supplier .
+
+        gst:2b-INV-1001 rdf:type gst:Gstr2bInvoice ;
+            gst:issuedBy gst:supplier-29AACCG0527D1Z8 ;
+            gst:invoiceNumber "INV-1001" .
+    "#;
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/graph/import/rdf?source=gst-gstr2b&format=turtle",
+        "text/turtle",
+        filed.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    register_and_run_missing_in_gstr2b(&app).await;
+
+    let (_, findings) = call(
+        &app,
+        "GET",
+        "/findings?pack=gst",
+        "application/json",
+        String::new(),
+    )
+    .await;
+    let id = findings[0]["id"].as_str().expect("finding id");
+
+    let (status, graph) = call(
+        &app,
+        "GET",
+        &format!("/findings/{id}/evidence-graph"),
+        "application/json",
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+
+    let nodes = graph["nodes"].as_array().expect("nodes array");
+    let supplier_node = nodes
+        .iter()
+        .find(|n| n["id"] == "supplier-29AACCG0527D1Z8")
+        .expect("supplier node present");
+    let mut sources: Vec<&str> = supplier_node["sources"]
+        .as_array()
+        .expect("sources array")
+        .iter()
+        .map(|v| v.as_str().expect("source is a string"))
+        .collect();
+    sources.sort_unstable();
+    assert_eq!(
+        sources,
+        vec!["gst-gstr2b", "gst-purchase-register"],
+        "{supplier_node:?}"
+    );
 }
 
 #[tokio::test]

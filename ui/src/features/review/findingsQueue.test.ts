@@ -10,6 +10,7 @@ import {
   describeEvidenceEdge,
   displayTerm,
   evidenceGraphIsJustTheSeed,
+  evidenceNodeSources,
   evidencePicture,
   evidenceTriples,
   toQueueEntry,
@@ -138,7 +139,7 @@ describe("describeEvidenceEdge", () => {
 describe("evidenceGraphIsJustTheSeed", () => {
   it("is true when the walk found nothing beyond the finding's own subject", () => {
     const graph: EvidenceGraph = {
-      nodes: [{ id: "pr-INV-1003", iri: null }],
+      nodes: [{ id: "pr-INV-1003", iri: null, sources: [] }],
       edges: [],
       truncated: false,
     };
@@ -148,8 +149,8 @@ describe("evidenceGraphIsJustTheSeed", () => {
   it("is false once the walk reaches a second node", () => {
     const graph: EvidenceGraph = {
       nodes: [
-        { id: "pr-INV-1003", iri: null },
-        { id: "supplier-29AACCG0527D1Z8", iri: null },
+        { id: "pr-INV-1003", iri: null, sources: ["gst-purchase-register"] },
+        { id: "supplier-29AACCG0527D1Z8", iri: null, sources: [] },
       ],
       edges: [getEdge()],
       truncated: false,
@@ -166,10 +167,15 @@ describe("evidenceGraphIsJustTheSeed", () => {
 describe("evidencePicture", () => {
   const graph: EvidenceGraph = {
     nodes: [
-      { id: "pr-INV-1003", iri: "https://graph-owl.dev/packs/gst#pr-INV-1003" },
+      {
+        id: "pr-INV-1003",
+        iri: "https://graph-owl.dev/packs/gst#pr-INV-1003",
+        sources: ["gst-purchase-register"],
+      },
       {
         id: "supplier-29AACCG0527D1Z8",
         iri: "https://graph-owl.dev/packs/gst#supplier-29AACCG0527D1Z8",
+        sources: ["gst-purchase-register", "gst-gstr2b"],
       },
     ],
     edges: [getEdge()],
@@ -191,7 +197,7 @@ describe("evidencePicture", () => {
 
   it("falls back to the bare id when a node's namespace never resolved to an IRI", () => {
     const unresolved: EvidenceGraph = {
-      nodes: [{ id: "pr-INV-1003", iri: null }],
+      nodes: [{ id: "pr-INV-1003", iri: null, sources: [] }],
       edges: [],
       truncated: false,
     };
@@ -219,6 +225,68 @@ describe("evidencePicture", () => {
   it("marks nothing as truncated when the walk completed", () => {
     const picture = evidencePicture(getFinding(), graph);
     expect(picture.truncatedAt).toEqual([]);
+  });
+});
+
+describe("evidenceNodeSources", () => {
+  it("names each node by its resolved local part, alongside its source", () => {
+    const graph: EvidenceGraph = {
+      nodes: [
+        {
+          id: "pr-INV-1003",
+          iri: "https://graph-owl.dev/packs/gst#pr-INV-1003",
+          sources: ["gst-purchase-register"],
+        },
+      ],
+      edges: [],
+      truncated: false,
+    };
+    expect(evidenceNodeSources(graph)).toEqual([
+      { id: "pr-INV-1003", name: "pr-INV-1003", sources: ["gst-purchase-register"] },
+    ]);
+  });
+
+  it("carries every source through for a node claimed by more than one document", () => {
+    // Epic 105 P7's provenance half — this is the case a reviewer actually
+    // needs the list for: a Supplier the purchase register and GSTR-2B both
+    // assert, not the common single-source case.
+    const graph: EvidenceGraph = {
+      nodes: [
+        {
+          id: "supplier-29AACCG0527D1Z8",
+          iri: null,
+          sources: ["gst-purchase-register", "gst-gstr2b"],
+        },
+      ],
+      edges: [],
+      truncated: false,
+    };
+    expect(evidenceNodeSources(graph)[0]?.sources).toEqual([
+      "gst-purchase-register",
+      "gst-gstr2b",
+    ]);
+  });
+
+  it("falls back to the bare id when a node's namespace never resolved to an IRI", () => {
+    const graph: EvidenceGraph = {
+      nodes: [{ id: "pr-INV-1003", iri: null, sources: [] }],
+      edges: [],
+      truncated: false,
+    };
+    expect(evidenceNodeSources(graph)[0]?.name).toBe("pr-INV-1003");
+  });
+
+  it("reports an empty source list as empty, not absent — a real answer, not a missing field", () => {
+    const graph: EvidenceGraph = {
+      nodes: [{ id: "pr-INV-1003", iri: null, sources: [] }],
+      edges: [],
+      truncated: false,
+    };
+    expect(evidenceNodeSources(graph)[0]?.sources).toEqual([]);
+  });
+
+  it("is empty for a graph with no nodes", () => {
+    expect(evidenceNodeSources({ nodes: [], edges: [], truncated: false })).toEqual([]);
   });
 });
 
