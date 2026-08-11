@@ -67,6 +67,7 @@ fn finding(pack: &str, label: &str, subject: &str) -> Finding {
             subject: subject.to_string(),
             predicate: "1025:taxAmount".to_string(),
             value: "45000.00".to_string(),
+            var: None,
         }],
     )
     .expect("a complete finding")

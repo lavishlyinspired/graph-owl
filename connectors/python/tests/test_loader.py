@@ -250,6 +250,12 @@ def test_similarity_and_span_bands_are_translated_to_camel_case():
     assert transposition["similarity"]["atLeast"] == pytest.approx(0.40)
     assert transposition["similarity"]["atMost"] == pytest.approx(0.999)
     assert "at_least" not in transposition["similarity"]
+    # Epic 105 P7's near-miss half (`plans/105g-...`) — the one field in this
+    # band that resolves a subject rather than merely comparing a string, so
+    # it carries a full IRI rather than the pack's usual curie shorthand.
+    assert transposition["similarity"]["resolveBy"] == (
+        "https://graph-owl.dev/packs/gst#supplierGstin"
+    )
 
     overdue = next(r for r in rules if r["label"] == "gst:PaymentOverdue")
     assert overdue["span"]["exceedsDays"] == 180

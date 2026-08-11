@@ -8460,6 +8460,30 @@ async fn finding_evidence_graph(
         }));
     }
 
+    // Epic 105 P7's near-miss half (`plans/105g-...`) — a candidate the walk
+    // has no edge to by design (`GstinTransposition`'s whole premise), so it
+    // cannot appear in `nodes` above no matter how the traversal bounds are
+    // widened. `unwrap_or(None)` for the same reason `node_sources` degrades
+    // rather than fails: a near-miss lookup is additive to the picture, not
+    // a dependency of it. Already-reached is excluded rather than duplicated
+    // — a node the walk *did* find is not a near miss, it is just a node.
+    let near_miss = catalog
+        .near_miss_node(id)
+        .await
+        .unwrap_or(None)
+        .filter(|sid| !graph.nodes.contains(sid));
+    let near_miss = match near_miss {
+        Some(sid) => {
+            let sources = catalog.node_sources(&sid).await.unwrap_or_default();
+            Some(json!({
+                "id": sid.id,
+                "iri": sid.to_iri(),
+                "sources": sources,
+            }))
+        }
+        None => None,
+    };
+
     Ok(Json(json!({
         "nodes": nodes,
         "edges": graph.edges.iter().map(|e| json!({
@@ -8469,6 +8493,7 @@ async fn finding_evidence_graph(
             "derived": e.derived,
         })).collect::<Vec<_>>(),
         "truncated": graph.truncated,
+        "nearMiss": near_miss,
     })))
 }
 

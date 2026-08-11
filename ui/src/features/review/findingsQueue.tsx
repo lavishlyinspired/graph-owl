@@ -58,6 +58,9 @@ const COPY = {
   evidenceGraphArrow: "—",
   sourcesLabel: "Sources",
   sourcesEmpty: "no source recorded",
+  nearMissLabel: "Possible match — not linked",
+  nearMissHint:
+    "A near-identical candidate this rule found by value, not by a graph edge. No link exists between it and the finding's own subject — that absence is the finding.",
   triplesLabel: "Triples",
   predicateLabel: "Predicate",
   objectLabel: "Object",
@@ -169,6 +172,24 @@ export function evidenceNodeSources(
   }));
 }
 
+/** The second candidate a rule's similarity band suspects is the same
+ *  entity as this finding's own subject — Epic 105 P7's near-miss half
+ *  (`plans/105g-evidence-provenance-and-near-miss.md`). `null` for every
+ *  finding whose rule names none, which is most of them; a near-miss is
+ *  specific to a rule suspecting two subjects are one entity and not yet
+ *  linked. Named the same way every other node on this page is, via the
+ *  shared `nodeLabel`. */
+export function evidenceNearMiss(
+  graph: EvidenceGraph,
+): { id: string; name: string; sources: readonly string[] } | null {
+  if (!graph.nearMiss) return null;
+  return {
+    id: graph.nearMiss.id,
+    name: nodeLabel(graph.nearMiss),
+    sources: graph.nearMiss.sources,
+  };
+}
+
 /** One row per edge — a finding's evidence graph, as the triples it actually
  *  is. `{from, relationship, to}` on the wire *is* `{subject, predicate,
  *  object}`; this just names it the way a reader who wants to see raw
@@ -271,6 +292,7 @@ export function findingsQueue(): QueueConfig {
       // already carries the finding's citation, and this section is an
       // addition to it, not a dependency of it.
       const graph = await api.findingEvidenceGraph(entry.id).catch(() => null);
+      const nearMiss = graph ? evidenceNearMiss(graph) : null;
       return (
         <Space direction="vertical" size="small" style={{ width: "100%" }}>
           <div>
@@ -346,6 +368,29 @@ export function findingsQueue(): QueueConfig {
                       </div>
                     ))}
                   </div>
+                  {nearMiss && (
+                    <div style={{ marginTop: 8 }}>
+                      <Text strong>{COPY.nearMissLabel}</Text>
+                      <div>
+                        <Text type="secondary">{COPY.nearMissHint}</Text>
+                      </div>
+                      <div>
+                        <Text type="secondary">
+                          {nearMiss.name}
+                          {COPY.separator}
+                          {nearMiss.sources.length > 0 ? (
+                            nearMiss.sources.map((source, index) => (
+                              <Tag key={source} style={{ marginLeft: index === 0 ? 6 : 0 }}>
+                                {source}
+                              </Tag>
+                            ))
+                          ) : (
+                            <Text type="secondary">{COPY.sourcesEmpty}</Text>
+                          )}
+                        </Text>
+                      </div>
+                    </div>
+                  )}
                   <div style={{ marginTop: 8 }}>
                     <Text strong>{COPY.triplesLabel}</Text>
                     <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>

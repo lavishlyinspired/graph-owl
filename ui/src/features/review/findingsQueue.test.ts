@@ -10,6 +10,7 @@ import {
   describeEvidenceEdge,
   displayTerm,
   evidenceGraphIsJustTheSeed,
+  evidenceNearMiss,
   evidenceNodeSources,
   evidencePicture,
   evidenceTriples,
@@ -22,10 +23,15 @@ function getFinding(overrides: Partial<PackFinding> = {}): PackFinding {
     pack: "gst",
     label: "https://graph-owl.dev/packs/gst#MissingInGstr2b",
     subject: "https://graph-owl.dev/packs/gst#pr-INV-1003",
-    summary: "An invoice claimed in the purchase register that the supplier never filed",
+    summary:
+      "An invoice claimed in the purchase register that the supplier never filed",
     governedBy: "gst:Section16",
     evidence: [
-      { subject: "s", predicate: "https://graph-owl.dev/packs/gst#taxAmount", value: "45000.00" },
+      {
+        subject: "s",
+        predicate: "https://graph-owl.dev/packs/gst#taxAmount",
+        value: "45000.00",
+      },
     ],
     status: "pending",
     detectedAt: "2026-08-10T09:00:00Z",
@@ -55,7 +61,9 @@ describe("displayTerm", () => {
     // is unusable, and would look like a bug in the queue rather than in the
     // data.
     expect(displayTerm("bare")).toBe("bare");
-    expect(displayTerm("https://example.org/ns#")).toBe("https://example.org/ns#");
+    expect(displayTerm("https://example.org/ns#")).toBe(
+      "https://example.org/ns#",
+    );
   });
 });
 
@@ -78,7 +86,11 @@ describe("toQueueEntry", () => {
 
   it("names who decided once somebody has", () => {
     const entry = toQueueEntry(
-      getFinding({ status: "rejected", decidedBy: "asha", reason: "filed late" }),
+      getFinding({
+        status: "rejected",
+        decidedBy: "asha",
+        reason: "filed late",
+      }),
     );
 
     expect(entry.decidedSummary).toBe("rejected by asha");
@@ -88,7 +100,9 @@ describe("toQueueEntry", () => {
   it("survives a decided finding whose decider is absent", () => {
     // Nullable on the wire, and a queue that rendered "rejected by null" would
     // look like a data-integrity problem to the person reading it.
-    const entry = toQueueEntry(getFinding({ status: "accepted", decidedBy: null }));
+    const entry = toQueueEntry(
+      getFinding({ status: "accepted", decidedBy: null }),
+    );
 
     expect(entry.decidedSummary).toBe("accepted");
     expect(entry.reason).toBeUndefined();
@@ -109,7 +123,9 @@ describe("toQueueEntry", () => {
   });
 });
 
-function getEdge(overrides: Partial<EvidenceGraphEdge> = {}): EvidenceGraphEdge {
+function getEdge(
+  overrides: Partial<EvidenceGraphEdge> = {},
+): EvidenceGraphEdge {
   return {
     from: "https://graph-owl.dev/packs/gst#pr-INV-1003",
     to: "https://graph-owl.dev/packs/gst#supplier-29AACCG0527D1Z8",
@@ -142,6 +158,7 @@ describe("evidenceGraphIsJustTheSeed", () => {
       nodes: [{ id: "pr-INV-1003", iri: null, sources: [] }],
       edges: [],
       truncated: false,
+      nearMiss: null,
     };
     expect(evidenceGraphIsJustTheSeed(graph)).toBe(true);
   });
@@ -154,12 +171,18 @@ describe("evidenceGraphIsJustTheSeed", () => {
       ],
       edges: [getEdge()],
       truncated: false,
+      nearMiss: null,
     };
     expect(evidenceGraphIsJustTheSeed(graph)).toBe(false);
   });
 
   it("is true for an empty graph too — a finding whose subject failed to resolve", () => {
-    const graph: EvidenceGraph = { nodes: [], edges: [], truncated: false };
+    const graph: EvidenceGraph = {
+      nodes: [],
+      edges: [],
+      truncated: false,
+      nearMiss: null,
+    };
     expect(evidenceGraphIsJustTheSeed(graph)).toBe(true);
   });
 });
@@ -180,6 +203,7 @@ describe("evidencePicture", () => {
     ],
     edges: [getEdge()],
     truncated: false,
+    nearMiss: null,
   };
 
   it("seeds the picture at the finding's own subject, by local name", () => {
@@ -191,7 +215,11 @@ describe("evidencePicture", () => {
     const picture = evidencePicture(getFinding(), graph);
     expect(picture.nodes).toEqual([
       { id: "pr-INV-1003", name: "pr-INV-1003", kind: null },
-      { id: "supplier-29AACCG0527D1Z8", name: "supplier-29AACCG0527D1Z8", kind: null },
+      {
+        id: "supplier-29AACCG0527D1Z8",
+        name: "supplier-29AACCG0527D1Z8",
+        kind: null,
+      },
     ]);
   });
 
@@ -200,9 +228,12 @@ describe("evidencePicture", () => {
       nodes: [{ id: "pr-INV-1003", iri: null, sources: [] }],
       edges: [],
       truncated: false,
+      nearMiss: null,
     };
     const picture = evidencePicture(getFinding(), unresolved);
-    expect(picture.nodes).toEqual([{ id: "pr-INV-1003", name: "pr-INV-1003", kind: null }]);
+    expect(picture.nodes).toEqual([
+      { id: "pr-INV-1003", name: "pr-INV-1003", kind: null },
+    ]);
   });
 
   it("carries the edges through unchanged — GraphEdge and EvidenceGraphEdge already share a shape", () => {
@@ -214,11 +245,18 @@ describe("evidencePicture", () => {
     // The evidence graph is fetched whole in one call; a `.expandable` ring
     // on any node would promise a click that does nothing.
     const picture = evidencePicture(getFinding(), graph);
-    expect(picture.expanded).toEqual(["pr-INV-1003", "supplier-29AACCG0527D1Z8"]);
+    expect(picture.expanded).toEqual([
+      "pr-INV-1003",
+      "supplier-29AACCG0527D1Z8",
+    ]);
   });
 
   it("marks the seed as truncated when the walk hit its budget", () => {
-    const picture = evidencePicture(getFinding(), { ...graph, truncated: true });
+    const picture = evidencePicture(getFinding(), {
+      ...graph,
+      truncated: true,
+      nearMiss: null,
+    });
     expect(picture.truncatedAt).toEqual(["pr-INV-1003"]);
   });
 
@@ -240,9 +278,14 @@ describe("evidenceNodeSources", () => {
       ],
       edges: [],
       truncated: false,
+      nearMiss: null,
     };
     expect(evidenceNodeSources(graph)).toEqual([
-      { id: "pr-INV-1003", name: "pr-INV-1003", sources: ["gst-purchase-register"] },
+      {
+        id: "pr-INV-1003",
+        name: "pr-INV-1003",
+        sources: ["gst-purchase-register"],
+      },
     ]);
   });
 
@@ -260,6 +303,7 @@ describe("evidenceNodeSources", () => {
       ],
       edges: [],
       truncated: false,
+      nearMiss: null,
     };
     expect(evidenceNodeSources(graph)[0]?.sources).toEqual([
       "gst-purchase-register",
@@ -272,6 +316,7 @@ describe("evidenceNodeSources", () => {
       nodes: [{ id: "pr-INV-1003", iri: null, sources: [] }],
       edges: [],
       truncated: false,
+      nearMiss: null,
     };
     expect(evidenceNodeSources(graph)[0]?.name).toBe("pr-INV-1003");
   });
@@ -281,12 +326,54 @@ describe("evidenceNodeSources", () => {
       nodes: [{ id: "pr-INV-1003", iri: null, sources: [] }],
       edges: [],
       truncated: false,
+      nearMiss: null,
     };
     expect(evidenceNodeSources(graph)[0]?.sources).toEqual([]);
   });
 
   it("is empty for a graph with no nodes", () => {
-    expect(evidenceNodeSources({ nodes: [], edges: [], truncated: false })).toEqual([]);
+    expect(
+      evidenceNodeSources({
+        nodes: [],
+        edges: [],
+        truncated: false,
+        nearMiss: null,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("evidenceNearMiss", () => {
+  it("names the candidate by its resolved local part, alongside its source", () => {
+    // Epic 105 P7's near-miss half — the second Supplier a rule like
+    // GstinTransposition suspects is the same entity, resolved by value
+    // rather than reached by traversal.
+    const graph: EvidenceGraph = {
+      nodes: [],
+      edges: [],
+      truncated: false,
+      nearMiss: {
+        id: "supplier-27AABCU9603R1ZM",
+        iri: "https://graph-owl.dev/packs/gst#supplier-27AABCU9603R1ZM",
+        sources: ["gst-gstr2b"],
+      },
+    };
+    expect(evidenceNearMiss(graph)).toEqual({
+      id: "supplier-27AABCU9603R1ZM",
+      name: "supplier-27AABCU9603R1ZM",
+      sources: ["gst-gstr2b"],
+    });
+  });
+
+  it("is null when the finding's rule has no near-miss candidate", () => {
+    // The common case — most findings have no similarity band at all.
+    const graph: EvidenceGraph = {
+      nodes: [],
+      edges: [],
+      truncated: false,
+      nearMiss: null,
+    };
+    expect(evidenceNearMiss(graph)).toBeNull();
   });
 });
 
@@ -296,6 +383,7 @@ describe("evidenceTriples", () => {
       nodes: [],
       edges: [getEdge({ derived: true })],
       truncated: false,
+      nearMiss: null,
     };
     expect(evidenceTriples(graph)).toEqual([
       {
@@ -308,12 +396,24 @@ describe("evidenceTriples", () => {
   });
 
   it("defaults derived to false when the server did not send it", () => {
-    const graph: EvidenceGraph = { nodes: [], edges: [getEdge()], truncated: false };
+    const graph: EvidenceGraph = {
+      nodes: [],
+      edges: [getEdge()],
+      truncated: false,
+      nearMiss: null,
+    };
     const [row] = evidenceTriples(graph);
     expect(row?.derived).toBe(false);
   });
 
   it("is empty for a graph with no edges", () => {
-    expect(evidenceTriples({ nodes: [], edges: [], truncated: false })).toEqual([]);
+    expect(
+      evidenceTriples({
+        nodes: [],
+        edges: [],
+        truncated: false,
+        nearMiss: null,
+      }),
+    ).toEqual([]);
   });
 });

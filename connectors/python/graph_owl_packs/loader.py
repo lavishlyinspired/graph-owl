@@ -305,6 +305,7 @@ def _register_finding_rules(base: str, manifest: Manifest, token: str | None) ->
                         "right": "right",
                         "at_least": "atLeast",
                         "at_most": "atMost",
+                        "resolve_by": "resolveBy",
                     },
                 ),
                 "span": _camel_case_band(

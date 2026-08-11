@@ -119,6 +119,20 @@ pub struct Evidence {
     pub predicate: String,
     /// Its value, rendered.
     pub value: String,
+    /// The rule's own query variable this value was bound from
+    /// (`"filedGstin"`), when the rule that produced this finding named one.
+    ///
+    /// **Needed because `predicate` alone cannot disambiguate.** A rule can
+    /// bind the same predicate to two different variables — `gst:supplierGstin`
+    /// as both `claimedGstin` and `filedGstin` in `GstinTransposition` — and
+    /// both entries then carry `subject`/`predicate` values that are
+    /// identical, differing only in `value`. Anything that needs to recover
+    /// *which* bound value a rule's own config refers to by name (Epic 105
+    /// P7's near-miss linking, `plans/105g-...`) has no way to do that from
+    /// `subject`+`predicate` alone. `None` for evidence built before this
+    /// field existed, or for a rule with no named variables to carry.
+    #[serde(default)]
+    pub var: Option<String>,
 }
 
 /// What a rule concluded, and why.
@@ -271,6 +285,7 @@ mod tests {
             subject: "1025:pr-INV-1003".to_string(),
             predicate: "1025:taxAmount".to_string(),
             value: "45000.00".to_string(),
+            var: None,
         }]
     }
 
@@ -465,6 +480,7 @@ mod wire_shape_tests {
                 subject: "1025:inv-1".to_string(),
                 predicate: "1025:taxAmount".to_string(),
                 value: "45000.00".to_string(),
+                var: None,
             }],
         )
         .expect("valid");
@@ -524,6 +540,7 @@ mod recurrence_tests {
                 subject: "1025:inv-1".to_string(),
                 predicate: "1025:taxAmount".to_string(),
                 value: value.to_string(),
+                var: None,
             }],
         )
         .expect("valid")
@@ -565,6 +582,7 @@ mod recurrence_tests {
                 subject: "a".to_string(),
                 predicate: "b".to_string(),
                 value: "c".to_string(),
+                var: None,
             }],
         )
         .expect("valid");
@@ -578,6 +596,7 @@ mod recurrence_tests {
                 subject: "ab".to_string(),
                 predicate: String::new(),
                 value: "c".to_string(),
+                var: None,
             }],
         )
         .expect("valid");

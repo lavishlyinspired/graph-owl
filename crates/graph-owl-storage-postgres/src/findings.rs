@@ -25,6 +25,7 @@ fn finding_from_row(row: &sqlx::postgres::PgRow) -> Result<Finding, StorageError
                     subject: item["subject"].as_str().unwrap_or_default().to_string(),
                     predicate: item["predicate"].as_str().unwrap_or_default().to_string(),
                     value: item["value"].as_str().unwrap_or_default().to_string(),
+                    var: item["var"].as_str().map(str::to_string),
                 })
                 .collect()
         })
@@ -61,6 +62,7 @@ impl graph_owl_storage::FindingStore for PostgresStorage {
                         "subject": e.subject,
                         "predicate": e.predicate,
                         "value": e.value,
+                        "var": e.var,
                     })
                 })
                 .collect::<Vec<_>>(),

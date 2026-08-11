@@ -374,6 +374,14 @@ export interface EvidenceGraph {
   readonly nodes: readonly EvidenceGraphNode[];
   readonly edges: readonly EvidenceGraphEdge[];
   readonly truncated: boolean;
+  /** Epic 105 P7's near-miss half — the second candidate a rule's
+   *  similarity band suspects is the same entity as this finding's own
+   *  subject, resolved by value rather than by traversal, because the
+   *  missing edge between them is the entire premise of a rule like
+   *  `GstinTransposition`. `null` for every finding whose rule has no such
+   *  candidate — most of them, since near-miss linking is specific to a
+   *  rule suspecting two subjects are one entity. */
+  readonly nearMiss: EvidenceGraphNode | null;
 }
 
 export interface DriftItem {

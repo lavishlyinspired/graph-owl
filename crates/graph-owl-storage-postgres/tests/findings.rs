@@ -24,6 +24,12 @@ fn evidence() -> Vec<Evidence> {
         subject: "1025:pr-INV-1003".to_string(),
         predicate: "1025:taxAmount".to_string(),
         value: "45000.00".to_string(),
+        // Not `None` — a real bug slipped through here once: the write path
+        // hand-built `{subject, predicate, value}` and silently dropped
+        // `var`, and reading a stored row with no `var` key back as `None`
+        // is indistinguishable from a genuinely-absent `var`. Only a
+        // `Some(...)` value proves the round trip.
+        var: Some("taxAmount".to_string()),
     }]
 }
 
@@ -195,6 +201,7 @@ async fn a_dismissal_does_not_suppress_the_same_problem_on_changed_facts() {
             subject: "1025:pr-INV-1003".to_string(),
             predicate: "1025:taxAmount".to_string(),
             value: "61000.00".to_string(),
+            var: None,
         }],
     )
     .expect("valid");

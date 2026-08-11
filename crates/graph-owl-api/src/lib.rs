@@ -1141,6 +1141,22 @@ struct SimilarityRuleConfig {
     right: String,
     at_least: f64,
     at_most: f64,
+    /// The predicate to resolve `right`'s bound value against, for a rule
+    /// whose whole premise is that two subjects *should* be one entity and
+    /// are not yet linked (`gst:GstinTransposition` — Epic 105 P7's
+    /// near-miss half, `plans/105g-evidence-provenance-and-near-miss.md`).
+    ///
+    /// **A full IRI, not a curie, unlike every other predicate string this
+    /// pack config carries.** `evidence[].predicate` and this band's own
+    /// `left`/`right` are compared as bare strings (`passes_similarity_band`,
+    /// `bare_term`) and never need a `Sid` — but `resolve_by` feeds
+    /// [`graph_owl_core::flake::Sid::from_iri`] directly, to run a real
+    /// graph query, so it is the one field here that has to resolve rather
+    /// than merely compare. Absent for every rule with no near-miss subject
+    /// to find — most similarity bands (deduplication, blocking) have
+    /// nothing here to resolve.
+    #[serde(default)]
+    resolve_by: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1315,6 +1331,7 @@ fn findings_from_rows(
                         subject: subject.clone(),
                         predicate: binding.predicate.clone(),
                         value: bare_term(value).to_string(),
+                        var: Some(binding.var.clone()),
                     })
             })
             .collect();
@@ -2326,6 +2343,78 @@ impl Catalog {
             }
         }
         Ok(sources)
+    }
+
+    /// The second candidate a rule's `[findings.similarity]` band suspects
+    /// is the same entity as this finding's own subject, resolved by value
+    /// rather than reached by traversal — Epic 105 P7's near-miss half
+    /// (`plans/105g-evidence-provenance-and-near-miss.md`).
+    ///
+    /// **`None`, not an error, whenever there is nothing to resolve.** Most
+    /// rules have no similarity band at all, and a similarity band with no
+    /// `resolveBy` (deduplication, blocking) has nothing new to add here —
+    /// near-miss linking is additive to the evidence graph, never a
+    /// dependency of it. The one genuine error is a *malformed* similarity
+    /// band, because that is a broken rule rather than an absent feature.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if no such finding exists. `Storage` if no findings store,
+    /// finding-rule registry or graph engine is configured, or a read
+    /// fails. `Validation` if the finding's rule has a similarity band that
+    /// does not parse.
+    pub async fn near_miss_node(&self, id: Uuid) -> Result<Option<Sid>, CatalogError> {
+        let store = self.findings_store()?;
+        let finding = store.get_finding(id).await?.ok_or(CatalogError::NotFound)?;
+
+        let registry = self.finding_rules.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no finding-rule registry configured".to_string(),
+            ))
+        })?;
+        let rules = registry
+            .for_pack(&finding.pack)
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        let Some(rule) = rules.into_iter().find(|r| r.label == finding.label) else {
+            return Ok(None);
+        };
+        let Some(json) = &rule.similarity else {
+            return Ok(None);
+        };
+        let config: SimilarityRuleConfig = serde_json::from_value(json.clone())
+            .map_err(|e| rule_error(&rule, format!("its similarity band is malformed: {e}")))?;
+        let Some(resolve_by) = &config.resolve_by else {
+            return Ok(None);
+        };
+        let Some(predicate) = graph_owl_core::flake::Sid::from_iri(resolve_by) else {
+            return Ok(None);
+        };
+
+        let Some(value) = finding
+            .evidence
+            .iter()
+            .find(|e| e.var.as_deref() == Some(config.right.as_str()))
+            .map(|e| e.value.clone())
+        else {
+            return Ok(None);
+        };
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+        let flakes = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                p: Some(predicate),
+                o: Some(graph_owl_core::flake::FlakeValue::String(value)),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        Ok(flakes.into_iter().next().map(|flake| flake.s))
     }
 
     /// Project a relationship into the graph, or withdraw it.
@@ -38313,6 +38402,26 @@ mod findings_from_rows_tests {
     }
 
     #[test]
+    fn each_evidence_entry_carries_the_rule_s_own_variable_name() {
+        // Epic 105 P7's near-miss half (`plans/105g-...`) has to recover
+        // *which* bound value a rule's `[findings.similarity]` band names by
+        // variable — and `subject`+`predicate` cannot do that alone when two
+        // bindings share a predicate, exactly as `claimedGstin`/`filedGstin`
+        // both bind `gst:supplierGstin` in the real GstinTransposition rule.
+        let rows = vec![row(&[
+            ("invoice", "<https://graph-owl.dev/packs/gst#2b-INV-1001>"),
+            ("number", "\"INV-1001\""),
+        ])];
+        let rule = rule(vec![EvidenceBinding {
+            predicate: "gst:invoiceNumber".to_string(),
+            var: "number".to_string(),
+        }]);
+
+        let findings = findings_from_rows(&rule, &rows).expect("no bands, nothing to fail");
+        assert_eq!(findings[0].evidence[0].var.as_deref(), Some("number"));
+    }
+
+    #[test]
     fn zero_rows_produces_zero_findings_without_error() {
         let rule = rule(vec![]);
         assert_eq!(
@@ -38624,6 +38733,7 @@ mod finding_runtime_tests {
                 subject: subject.to_string(),
                 predicate: "1025:taxAmount".to_string(),
                 value: "45000.00".to_string(),
+                var: None,
             }],
         )
         .expect("a complete finding")
@@ -38760,6 +38870,7 @@ mod finding_runtime_tests {
                 subject: "1024:guest-1".to_string(),
                 predicate: "1024:email".to_string(),
                 value: "a@example.org".to_string(),
+                var: None,
             }],
         )
         .expect("valid");
@@ -38938,6 +39049,7 @@ mod finding_evidence_graph_tests {
                 subject: subject.to_string(),
                 predicate: "gst:invoiceNumber".to_string(),
                 value: "INV-1003".to_string(),
+                var: None,
             }],
         )
         .expect("a complete finding")
@@ -39249,6 +39361,417 @@ mod node_sources_tests {
             "a missing graph engine must be a named error, not an empty answer \
              indistinguishable from 'this node genuinely has no sources'"
         );
+    }
+}
+
+#[cfg(test)]
+mod near_miss_node_tests {
+    //! `Catalog::near_miss_node` — Epic 105 P7's near-miss half
+    //! (`plans/105g-evidence-provenance-and-near-miss.md` Slice 2). The
+    //! traversal walk from a `GstinTransposition` finding's own subject has
+    //! no edge to the supplier its `filedGstin` evidence names — that
+    //! missing edge is the entire premise of the rule — so this resolves
+    //! the second candidate by value instead of by walking.
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use graph_owl_core::finding::{Evidence, Finding, FindingStatus};
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+    use graph_owl_engine::{EvidenceBinding, FindingRuleDef, FindingRuleRegistry, RegistryError};
+    use graph_owl_storage::FindingStore;
+
+    use super::projection_isolation_tests::RecordingGraph;
+    use super::*;
+
+    fn register_test_gst_namespace() {
+        graph_owl_core::namespaces::register_process_namespace(
+            graph_owl_core::flake::namespace::RUNTIME_START,
+            "https://graph-owl.dev/packs/gst#",
+        );
+    }
+
+    #[derive(Default)]
+    struct FakeFindings {
+        rows: Mutex<Vec<Finding>>,
+    }
+
+    #[async_trait]
+    impl FindingStore for FakeFindings {
+        async fn record_finding(&self, finding: &Finding) -> Result<bool, StorageError> {
+            self.rows
+                .lock()
+                .expect("not poisoned")
+                .push(finding.clone());
+            Ok(true)
+        }
+        async fn get_finding(&self, id: Uuid) -> Result<Option<Finding>, StorageError> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .find(|r| r.id == id)
+                .cloned())
+        }
+        async fn list_findings(
+            &self,
+            _pack: Option<&str>,
+            _status: Option<FindingStatus>,
+        ) -> Result<Vec<Finding>, StorageError> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn decide_finding(
+            &self,
+            _id: Uuid,
+            _status: FindingStatus,
+            _actor: &str,
+            _reason: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unreachable!("not exercised by these tests")
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeFindingRuleRegistry {
+        rules: Mutex<Vec<FindingRuleDef>>,
+    }
+
+    #[async_trait]
+    impl FindingRuleRegistry for FakeFindingRuleRegistry {
+        async fn declare(&self, rule: &FindingRuleDef) -> Result<(), RegistryError> {
+            self.rules.lock().expect("not poisoned").push(rule.clone());
+            Ok(())
+        }
+        async fn for_pack(&self, pack: &str) -> Result<Vec<FindingRuleDef>, RegistryError> {
+            Ok(self
+                .rules
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .filter(|r| r.pack == pack)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn gstin_transposition_rule(similarity: serde_json::Value) -> FindingRuleDef {
+        FindingRuleDef {
+            pack: "gst".to_string(),
+            label: "gst:GstinTransposition".to_string(),
+            summary: "probably a keying error".to_string(),
+            governed_by: "gst:MatchingPolicy".to_string(),
+            query: "SELECT ?purchase {}".to_string(),
+            subject_var: "purchase".to_string(),
+            evidence: vec![
+                EvidenceBinding {
+                    predicate: "gst:supplierGstin".to_string(),
+                    var: "claimedGstin".to_string(),
+                },
+                EvidenceBinding {
+                    predicate: "gst:supplierGstin".to_string(),
+                    var: "filedGstin".to_string(),
+                },
+            ],
+            similarity: Some(similarity),
+            span: None,
+        }
+    }
+
+    fn transposition_finding() -> Finding {
+        Finding::new(
+            "gst",
+            "gst:GstinTransposition",
+            "https://graph-owl.dev/packs/gst#pr-INV-1004",
+            "Same invoice number and period on both sides under near-identical GSTINs",
+            "gst:MatchingPolicy",
+            vec![
+                Evidence {
+                    subject: "https://graph-owl.dev/packs/gst#pr-INV-1004".to_string(),
+                    predicate: "gst:supplierGstin".to_string(),
+                    value: "27AABCU9603R1MZ".to_string(),
+                    var: Some("claimedGstin".to_string()),
+                },
+                Evidence {
+                    subject: "https://graph-owl.dev/packs/gst#pr-INV-1004".to_string(),
+                    predicate: "gst:supplierGstin".to_string(),
+                    value: "27AABCU9603R1ZM".to_string(),
+                    var: Some("filedGstin".to_string()),
+                },
+            ],
+        )
+        .expect("a complete finding")
+    }
+
+    fn catalog_with(
+        findings: Arc<FakeFindings>,
+        rules: Arc<FakeFindingRuleRegistry>,
+        graph: Arc<RecordingGraph>,
+    ) -> Catalog {
+        Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_findings(findings)
+        .with_finding_rules(rules)
+        .with_graph(graph)
+    }
+
+    #[tokio::test]
+    async fn resolves_the_second_supplier_by_its_filed_gstin_value() {
+        register_test_gst_namespace();
+        let findings = Arc::new(FakeFindings::default());
+        let finding = transposition_finding();
+        findings
+            .rows
+            .lock()
+            .expect("not poisoned")
+            .push(finding.clone());
+
+        let rules = Arc::new(FakeFindingRuleRegistry::default());
+        rules
+            .declare(&gstin_transposition_rule(serde_json::json!({
+                "strategy": "ngram",
+                "n": 3,
+                "left": "claimedGstin",
+                "right": "filedGstin",
+                "atLeast": 0.40,
+                "atMost": 0.999,
+                "resolveBy": "https://graph-owl.dev/packs/gst#supplierGstin",
+            })))
+            .await
+            .expect("declare");
+
+        let graph = RecordingGraph::working();
+        let filed_supplier = Sid::dsc("supplier-27AABCU9603R1ZM");
+        let supplier_gstin = Sid::from_iri("https://graph-owl.dev/packs/gst#supplierGstin")
+            .expect("registered namespace");
+        graph
+            .assert_flakes(&[Flake {
+                s: filed_supplier.clone(),
+                p: supplier_gstin.clone(),
+                o: FlakeValue::String("27AABCU9603R1ZM".to_string()),
+                cx: Some(Sid::dsc("graph:import:gst-gstr2b")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+
+        let catalog = catalog_with(findings, rules, graph);
+        let near_miss = catalog
+            .near_miss_node(finding.id)
+            .await
+            .expect("ok")
+            .expect("a near-miss candidate exists");
+
+        assert_eq!(near_miss, filed_supplier);
+    }
+
+    /// Isolates the predicate filter — `RecordingGraph::resolve` groups
+    /// matches through a `HashMap`, so a scenario with *two* candidate
+    /// flakes cannot deterministically prove which filter picked the
+    /// survivor; only a scenario with exactly one candidate, that candidate
+    /// wrong, can.
+    #[tokio::test]
+    async fn a_flake_with_the_right_value_but_the_wrong_predicate_is_not_a_candidate() {
+        register_test_gst_namespace();
+        let findings = Arc::new(FakeFindings::default());
+        let finding = transposition_finding();
+        findings
+            .rows
+            .lock()
+            .expect("not poisoned")
+            .push(finding.clone());
+
+        let rules = Arc::new(FakeFindingRuleRegistry::default());
+        rules
+            .declare(&gstin_transposition_rule(serde_json::json!({
+                "strategy": "ngram",
+                "n": 3,
+                "left": "claimedGstin",
+                "right": "filedGstin",
+                "atLeast": 0.40,
+                "atMost": 0.999,
+                "resolveBy": "https://graph-owl.dev/packs/gst#supplierGstin",
+            })))
+            .await
+            .expect("declare");
+
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&[Flake {
+                s: Sid::dsc("some-other-subject"),
+                p: Sid::new(namespace::RDFS, "label"),
+                o: FlakeValue::String("27AABCU9603R1ZM".to_string()),
+                cx: Some(Sid::dsc("graph:import:gst-gstr2b")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+
+        let catalog = catalog_with(findings, rules, graph);
+        assert_eq!(
+            catalog.near_miss_node(finding.id).await.expect("ok"),
+            None,
+            "a value match on the wrong predicate must not count as a candidate"
+        );
+    }
+
+    /// The companion to the predicate isolation above, for the value filter.
+    #[tokio::test]
+    async fn a_flake_with_the_right_predicate_but_the_wrong_value_is_not_a_candidate() {
+        register_test_gst_namespace();
+        let findings = Arc::new(FakeFindings::default());
+        let finding = transposition_finding();
+        findings
+            .rows
+            .lock()
+            .expect("not poisoned")
+            .push(finding.clone());
+
+        let rules = Arc::new(FakeFindingRuleRegistry::default());
+        rules
+            .declare(&gstin_transposition_rule(serde_json::json!({
+                "strategy": "ngram",
+                "n": 3,
+                "left": "claimedGstin",
+                "right": "filedGstin",
+                "atLeast": 0.40,
+                "atMost": 0.999,
+                "resolveBy": "https://graph-owl.dev/packs/gst#supplierGstin",
+            })))
+            .await
+            .expect("declare");
+
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&[Flake {
+                // The claimed-side supplier's own GSTIN — right predicate,
+                // wrong value (`claimedGstin`'s, not `filedGstin`'s).
+                s: Sid::dsc("supplier-27AABCU9603R1MZ"),
+                p: Sid::from_iri("https://graph-owl.dev/packs/gst#supplierGstin")
+                    .expect("registered namespace"),
+                o: FlakeValue::String("27AABCU9603R1MZ".to_string()),
+                cx: Some(Sid::dsc("graph:import:gst-purchase-register")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+
+        let catalog = catalog_with(findings, rules, graph);
+        assert_eq!(
+            catalog.near_miss_node(finding.id).await.expect("ok"),
+            None,
+            "a predicate match on the wrong value must not count as a candidate"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_finding_whose_rule_has_no_similarity_band_reports_no_near_miss() {
+        let findings = Arc::new(FakeFindings::default());
+        // `PotentialMismatch` has no `[findings.similarity]` at all — most
+        // findings never will, since a near-miss is specific to a rule
+        // suspecting two subjects are one entity.
+        let finding = Finding::new(
+            "gst",
+            "gst:PotentialMismatch",
+            "https://graph-owl.dev/packs/gst#pr-INV-1003",
+            "Claimed in the register, never filed by the supplier",
+            "gst:Section16",
+            vec![Evidence {
+                subject: "https://graph-owl.dev/packs/gst#pr-INV-1003".to_string(),
+                predicate: "gst:invoiceNumber".to_string(),
+                value: "INV-1003".to_string(),
+                var: Some("number".to_string()),
+            }],
+        )
+        .expect("a complete finding");
+        findings
+            .rows
+            .lock()
+            .expect("not poisoned")
+            .push(finding.clone());
+
+        let rules = Arc::new(FakeFindingRuleRegistry::default());
+        rules
+            .declare(&FindingRuleDef {
+                pack: "gst".to_string(),
+                label: "gst:PotentialMismatch".to_string(),
+                summary: "claimed but never filed".to_string(),
+                governed_by: "gst:Section16".to_string(),
+                query: "SELECT ?invoice {}".to_string(),
+                subject_var: "invoice".to_string(),
+                evidence: vec![],
+                similarity: None,
+                span: None,
+            })
+            .await
+            .expect("declare");
+
+        let catalog = catalog_with(findings, rules, RecordingGraph::working());
+        assert_eq!(catalog.near_miss_node(finding.id).await.expect("ok"), None);
+    }
+
+    #[tokio::test]
+    async fn a_similarity_band_with_no_resolve_by_reports_no_near_miss() {
+        // Deduplication/blocking bands (the common case) have nothing to
+        // resolve — only a rule that explicitly names `resolveBy` does.
+        let findings = Arc::new(FakeFindings::default());
+        let finding = transposition_finding();
+        findings
+            .rows
+            .lock()
+            .expect("not poisoned")
+            .push(finding.clone());
+
+        let rules = Arc::new(FakeFindingRuleRegistry::default());
+        rules
+            .declare(&gstin_transposition_rule(serde_json::json!({
+                "strategy": "ngram",
+                "n": 3,
+                "left": "claimedGstin",
+                "right": "filedGstin",
+                "atLeast": 0.40,
+                "atMost": 0.999,
+            })))
+            .await
+            .expect("declare");
+
+        let catalog = catalog_with(findings, rules, RecordingGraph::working());
+        assert_eq!(catalog.near_miss_node(finding.id).await.expect("ok"), None);
+    }
+
+    #[tokio::test]
+    async fn no_matching_subject_in_the_graph_reports_no_near_miss_not_an_error() {
+        register_test_gst_namespace();
+        let findings = Arc::new(FakeFindings::default());
+        let finding = transposition_finding();
+        findings
+            .rows
+            .lock()
+            .expect("not poisoned")
+            .push(finding.clone());
+
+        let rules = Arc::new(FakeFindingRuleRegistry::default());
+        rules
+            .declare(&gstin_transposition_rule(serde_json::json!({
+                "strategy": "ngram",
+                "n": 3,
+                "left": "claimedGstin",
+                "right": "filedGstin",
+                "atLeast": 0.40,
+                "atMost": 0.999,
+                "resolveBy": "https://graph-owl.dev/packs/gst#supplierGstin",
+            })))
+            .await
+            .expect("declare");
+
+        // The graph has nothing at all — a candidate that was never
+        // ingested is exactly as absent as one that does not exist.
+        let catalog = catalog_with(findings, rules, RecordingGraph::working());
+        assert_eq!(catalog.near_miss_node(finding.id).await.expect("ok"), None);
     }
 }
 

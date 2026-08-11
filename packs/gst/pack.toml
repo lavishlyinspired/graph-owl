@@ -282,6 +282,15 @@ left = "claimedGstin"
 right = "filedGstin"
 at_least = 0.40
 at_most = 0.999
+# Epic 105 P7's near-miss half (plans/105g-evidence-provenance-and-near-miss.md).
+# The traversal walk from this finding's own subject has no edge to the
+# supplier `right`'s GSTIN actually belongs to — that missing edge is the
+# entire premise of this rule — so the second Supplier is resolved by value
+# instead: the graph subject whose own gst:supplierGstin equals `right`'s
+# bound value. A full IRI, not the pack's usual curie shorthand, because this
+# is the one field in this band that runs a real graph query rather than
+# comparing two strings.
+resolve_by = "https://graph-owl.dev/packs/gst#supplierGstin"
 
 # The 180-day condition, as a span between two events.
 #

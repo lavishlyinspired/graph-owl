@@ -368,3 +368,231 @@ async fn an_unsupported_direction_is_a_400_naming_the_field() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body.to_string().contains("direction"), "{body}");
 }
+
+/// `packs/gst/queries/gstin-transposition.sparql`'s own text, verbatim —
+/// matching `MISSING_IN_GSTR2B`'s precedent above.
+const GSTIN_TRANSPOSITION: &str = r"
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?purchase ?number ?claimedGstin ?filedGstin ?period
+WHERE {
+  GRAPH ?register {
+    ?purchase a gst:PurchaseInvoice ;
+              gst:issuedBy ?supplier ;
+              gst:invoiceNumber ?number ;
+              gst:period        ?period .
+    ?supplier gst:supplierGstin ?claimedGstin .
+  }
+  GRAPH ?authority {
+    ?filed a gst:Gstr2bInvoice ;
+           gst:issuedBy ?filedSupplier ;
+           gst:invoiceNumber ?number ;
+           gst:period        ?period .
+    ?filedSupplier gst:supplierGstin ?filedGstin .
+  }
+  FILTER (?claimedGstin != ?filedGstin)
+}
+ORDER BY ?number
+";
+
+/// Epic 105 P7's near-miss half (`plans/105g-evidence-provenance-and-near-miss.md`
+/// Slice 2) — the shape `packs/gst/fixtures/{purchase-register,gstr2b}.ttl`
+/// plant for `GstinTransposition`: the claimed and filed sides are two
+/// distinct `gst:Supplier` subjects, deliberately never linked by an edge.
+async fn seed_transposition_scenario(app: &axum::Router) {
+    let (status, _) = json(
+        app,
+        "POST",
+        "/namespaces",
+        serde_json::json!({"iri": "https://graph-owl.dev/packs/gst#"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "namespace declare");
+
+    for (name, value_type) in [
+        ("supplierGstin", 1),
+        ("invoiceNumber", 1),
+        ("period", 1),
+        ("issuedBy", 0),
+    ] {
+        let (status, body) = json(
+            app,
+            "POST",
+            "/predicates",
+            serde_json::json!({"namespace": 1024, "name": name, "valueType": value_type, "many": false}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "predicate {name}: {body}");
+    }
+
+    let purchase_register = r#"
+        @prefix gst: <https://graph-owl.dev/packs/gst#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+        gst:supplier-27AABCU9603R1MZ rdf:type gst:Supplier ;
+            gst:supplierGstin "27AABCU9603R1MZ" .
+
+        gst:pr-INV-1004 rdf:type gst:PurchaseInvoice ;
+            gst:issuedBy      gst:supplier-27AABCU9603R1MZ ;
+            gst:invoiceNumber "INV-1004" ;
+            gst:period        "2026-07" .
+    "#;
+    let (status, body) = call(
+        app,
+        "POST",
+        "/graph/import/rdf?source=gst-purchase-register&format=turtle",
+        "text/turtle",
+        purchase_register.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "import: {body}");
+
+    let gstr2b = r#"
+        @prefix gst: <https://graph-owl.dev/packs/gst#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+        gst:supplier-27AABCU9603R1ZM rdf:type gst:Supplier ;
+            gst:supplierGstin "27AABCU9603R1ZM" .
+
+        gst:2b-INV-1004 rdf:type gst:Gstr2bInvoice ;
+            gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+            gst:invoiceNumber "INV-1004" ;
+            gst:period        "2026-07" .
+    "#;
+    let (status, body) = call(
+        app,
+        "POST",
+        "/graph/import/rdf?source=gst-gstr2b&format=turtle",
+        "text/turtle",
+        gstr2b.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "import: {body}");
+}
+
+async fn register_and_run_gstin_transposition(app: &axum::Router) -> serde_json::Value {
+    let (status, body) = json(
+        app,
+        "POST",
+        "/packs/gst/finding-rules",
+        serde_json::json!({
+            "rules": [{
+                "label": "gst:GstinTransposition",
+                "summary": "Same invoice number and period on both sides under near-identical GSTINs",
+                "governedBy": "gst:MatchingPolicy",
+                "query": GSTIN_TRANSPOSITION,
+                "subjectVar": "purchase",
+                "evidence": [
+                    {"predicate": "gst:invoiceNumber", "var": "number"},
+                    {"predicate": "gst:supplierGstin", "var": "claimedGstin"},
+                    {"predicate": "gst:supplierGstin", "var": "filedGstin"},
+                    {"predicate": "gst:period", "var": "period"},
+                ],
+                "similarity": {
+                    "strategy": "ngram",
+                    "n": 3,
+                    "left": "claimedGstin",
+                    "right": "filedGstin",
+                    "atLeast": 0.40,
+                    "atMost": 0.999,
+                    "resolveBy": "https://graph-owl.dev/packs/gst#supplierGstin",
+                },
+            }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "register rule: {body}");
+
+    let (status, outcome) =
+        json(app, "POST", "/packs/gst/reconcile", serde_json::Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{outcome}");
+    assert_eq!(outcome["opened"], 1, "{outcome}");
+    outcome
+}
+
+#[tokio::test]
+async fn a_gstin_transposition_s_evidence_graph_names_the_unlinked_second_supplier() {
+    let (app, _db, _url) = test_app().await;
+    seed_transposition_scenario(&app).await;
+    register_and_run_gstin_transposition(&app).await;
+
+    let (status, findings) = call(
+        &app,
+        "GET",
+        "/findings?pack=gst",
+        "application/json",
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let findings = findings.as_array().expect("array");
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let id = findings[0]["id"].as_str().expect("finding id");
+
+    let (status, graph) = call(
+        &app,
+        "GET",
+        &format!("/findings/{id}/evidence-graph"),
+        "application/json",
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+
+    let nodes = graph["nodes"].as_array().expect("nodes array");
+    assert!(
+        nodes.iter().all(|n| n["id"] != "supplier-27AABCU9603R1ZM"),
+        "the filed-side supplier must not be reachable by the walk — the \
+         entire premise of this finding is that no edge connects the two \
+         suppliers: {nodes:?}"
+    );
+    assert!(
+        nodes.iter().any(|n| n["id"] == "supplier-27AABCU9603R1MZ"),
+        "the claimed-side supplier is reached normally, by its own \
+         issuedBy edge: {nodes:?}"
+    );
+
+    let near_miss = &graph["nearMiss"];
+    assert_eq!(
+        near_miss["id"], "supplier-27AABCU9603R1ZM",
+        "the second candidate, resolved by its filed GSTIN value rather \
+         than by traversal: {graph}"
+    );
+    assert_eq!(
+        near_miss["sources"],
+        serde_json::json!(["gst-gstr2b"]),
+        "{near_miss:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_finding_whose_rule_has_no_similarity_band_reports_no_near_miss_field() {
+    let (app, _db, _url) = test_app().await;
+    seed_invoice_with_a_real_supplier_node(&app).await;
+    register_and_run_missing_in_gstr2b(&app).await;
+
+    let (_, findings) = call(
+        &app,
+        "GET",
+        "/findings?pack=gst",
+        "application/json",
+        String::new(),
+    )
+    .await;
+    let id = findings[0]["id"].as_str().expect("finding id");
+
+    let (status, graph) = call(
+        &app,
+        "GET",
+        &format!("/findings/{id}/evidence-graph"),
+        "application/json",
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+    assert!(
+        graph["nearMiss"].is_null(),
+        "a rule with no similarity band has no near-miss candidate to \
+         report: {graph}"
+    );
+}
