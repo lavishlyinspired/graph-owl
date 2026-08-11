@@ -10,3 +10,4 @@ pub mod mention;
 pub mod normalize;
 pub mod rule_match;
 pub mod score;
+pub mod temporal;

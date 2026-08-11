@@ -832,3 +832,19 @@ security path the way a parser or reasoner is — the property that matters
 is "produces a bitmap of the page," verified directly by the fixture PDF
 in `verify-ocr-worker.sh` (Slice 4), not by a multi-candidate corpus
 comparison.
+
+## Temporal validity-period resolution — Epic 105 P8's temporal engine (§7)
+
+Checked 11 August 2026, before writing `graph-owl-resolution::temporal`.
+Searched crates.io for `chronoutil`, `temporal-rs` and a handful of
+`*-interval`/`*-validity` names: nothing exists at the scale this needs —
+"given N candidate `[effectiveFrom, effectiveTo)` windows, which one is in
+force at date X" is too small and too shaped by this project's own flake
+model (windows come from graph queries, not typed Rust structs handed in)
+to be a reusable library concern. The closest general-purpose crates
+(`chronoutil`, calendar/duration helpers) solve date arithmetic, which
+`chrono` — already a workspace dependency — already provides; nothing
+solves the *resolution* question. **Build** — the same conclusion
+`passes_span`/`SimilarityBand` already reached for span conditions, and for
+the same reason: a five-line resolution rule over already-parsed dates does
+not clear the bar for an external dependency.
