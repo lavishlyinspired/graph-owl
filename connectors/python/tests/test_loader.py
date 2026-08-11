@@ -52,6 +52,16 @@ def _handler(received: list[dict], fail_on: str | None):
                 body = {"code": 1024, "iri": "x", "declaredBy": "y"}
             elif parsed.path.endswith("/finding-rules"):
                 body = {}
+            elif parsed.path == "/ontology-packs":
+                self.send_response(201)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"id": "9d1f...", "packId": "gst", "version": "1"}).encode(
+                        "utf-8"
+                    )
+                )
+                return
             else:
                 # One subject per document, so `landed` counts are checkable.
                 body = {"landed": ["gst:thing"], "skipped": [], "rejected": []}
@@ -88,20 +98,25 @@ def test_a_pack_declares_its_namespace_before_importing_anything(pack):
     with scripted_server() as (url, received):
         load_pack(PACKS / pack, url)
 
-    # **Four phases, and the order of all of them is load-bearing.** A
+    # **Five phases, and the order of all of them is load-bearing.** A
     # document imported before its namespace is declared resolves to nothing;
     # a document imported before its predicates are defined is rejected
     # wholesale by `reject_unregistered_predicates`; a finding rule declared
     # before its documents load would point at a graph that was never
     # populated. Found by running this against a real server, not by reading
-    # the code.
+    # the code. The glossary import (Epic 33 `OntologyPack`, present only for
+    # a pack that declares one) is independent of the flake-import predicate
+    # registry, so it is placed with the rest of vocabulary setup — after
+    # predicates, before any document lands.
     paths = [r["path"] for r in received]
     assert paths[0] == "/namespaces", f"the vocabulary must be declared first, got {paths}"
 
     first_import = paths.index("/graph/import/rdf")
-    assert all(p == "/predicates" for p in paths[1:first_import]), (
-        f"predicates must all be defined before the first import: {paths}"
+    vocabulary_calls = paths[1:first_import]
+    assert all(p in ("/predicates", "/ontology-packs") for p in vocabulary_calls), (
+        f"predicates and the glossary must all be defined before the first import: {paths}"
     )
+    assert vocabulary_calls.count("/ontology-packs") <= 1, paths
 
     imports = [p for p in paths[first_import:] if p == "/graph/import/rdf"]
     after_imports = paths[first_import + len(imports) :]
@@ -109,6 +124,34 @@ def test_a_pack_declares_its_namespace_before_importing_anything(pack):
     assert after_imports in ([], [f"/packs/{pack}/finding-rules"]), (
         f"only one call, and only finding-rules, may follow the last import: {paths}"
     )
+
+
+def test_a_pack_with_a_glossary_registers_it_as_an_ontology_pack():
+    # Epic 33 already owns pack vocabulary lifecycle (versioning, licence,
+    # overrides) — a domain pack's glossary is an `OntologyPack`, not a
+    # parallel mechanism (the platform doc's decision 10). Without this call
+    # the pack's terms are flakes a reviewer can query but never see in the
+    # console's Vocabulary browser, which reads `GET /ontology-packs`.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "gst", url)
+
+    calls = [r for r in received if r["path"] == "/ontology-packs"]
+    assert len(calls) == 1, f"exactly one glossary import, got {received}"
+    assert calls[0]["query"]["packId"] == "gst"
+    assert calls[0]["query"]["licenceKind"] == "permissive"
+    assert b"skos:prefLabel" in calls[0]["raw"], (
+        "the glossary file itself, as the request body — not a path to it"
+    )
+
+
+def test_a_pack_with_no_glossary_table_registers_none():
+    # Hospitality has no `[glossary]` — optional, not a silent no-op that
+    # would be indistinguishable from a bug if every pack were expected to
+    # have one.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "hospitality", url)
+
+    assert not any(r["path"] == "/ontology-packs" for r in received), received
 
 
 @pytest.mark.parametrize("pack", ["hospitality", "gst"])

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -158,6 +159,16 @@ def load_pack(
             ).encode("utf-8"),
         )
 
+    # **The glossary, if the pack has one, before any document lands.**
+    # `POST /ontology-packs` registers the pack's SKOS terms as an Epic 33
+    # `OntologyPack` — the mechanism the console's Vocabulary browser already
+    # reads (`GET /ontology-packs`). It is independent of the predicate
+    # registry above (Epic 33's storage is its own tables), so ordering
+    # relative to it does not matter for correctness; it is placed here
+    # because it is still vocabulary setup, not data.
+    if manifest.glossary and not dry_run:
+        _register_glossary(base, manifest, token)
+
     results: list[DocumentResult] = []
     for document in manifest.documents:
         path = directory / document.path
@@ -199,6 +210,39 @@ def load_pack(
         pack_id=manifest.id,
         namespace_code=int(declared["code"]),
         documents=results,
+    )
+
+
+def _register_glossary(base: str, manifest: Manifest, token: str | None) -> None:
+    glossary = manifest.glossary
+    assert glossary is not None  # checked by the caller
+
+    path = manifest.directory / str(glossary["path"])
+    if not path.is_file():
+        raise LoadError(
+            f"{manifest.id}: `glossary.path` names `{glossary['path']}`, which does not exist"
+        )
+
+    params = {
+        "packId": manifest.id,
+        "version": str(glossary["version"]),
+        "sourceUrl": str(glossary["source_url"]),
+        "licenceKind": str(glossary["licence_kind"]),
+        "licenceName": str(glossary["licence_name"]),
+    }
+    if "licence_notice" in glossary:
+        params["licenceNotice"] = str(glossary["licence_notice"])
+    if "licence_contact" in glossary:
+        params["licenceContact"] = str(glossary["licence_contact"])
+    if glossary.get("acknowledge_licence"):
+        params["acknowledgeLicence"] = "true"
+
+    _request(
+        f"{base}/ontology-packs?{urllib.parse.urlencode(params)}",
+        method="POST",
+        token=token,
+        body=path.read_bytes(),
+        content_type="text/turtle",
     )
 
 

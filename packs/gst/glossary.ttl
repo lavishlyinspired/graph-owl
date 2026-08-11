@@ -1,0 +1,121 @@
+# The GST pack's browsable glossary — Epic 33 `OntologyPack`, registered by
+# the loader via `POST /ontology-packs` so the console's Vocabulary browser
+# can show these terms the same way it already shows any other pack's.
+#
+# **Every label and definition here is copied from this pack's own already-
+# written prose** — `ontology.ttl`'s `gst:label` values, `law/*.ttl`'s
+# `gst:comment` values, and `pack.toml`'s finding `summary` fields — not
+# newly authored and not drawn from any external source. That keeps this
+# file inside the same rule the rest of the pack already follows
+# (`plans/00i-licensing.md` rule 2): the statute is the specification, and
+# nothing here restates it in new words.
+#
+# SKOS, not OWL — this is the human-facing glossary view of the same terms
+# `ontology.ttl` declares as classes and properties for the graph engine.
+# Two views of one vocabulary, not two vocabularies.
+
+@prefix gst: <https://graph-owl.dev/packs/gst#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+gst:GstReconciliation rdf:type skos:Concept ;
+    skos:prefLabel "GST reconciliation" ;
+    skos:definition "Input-tax-credit reconciliation: purchase register against GSTR-2B." .
+
+# ---- entities ----
+
+gst:Supplier rdf:type skos:Concept ;
+    skos:prefLabel "Supplier" ;
+    skos:broader gst:GstReconciliation .
+
+gst:PurchaseInvoice rdf:type skos:Concept ;
+    skos:prefLabel "Purchase invoice (taxpayer's register)" ;
+    skos:broader gst:GstReconciliation .
+
+gst:Gstr2bInvoice rdf:type skos:Concept ;
+    skos:prefLabel "GSTR-2B invoice (as filed by the supplier)" ;
+    skos:broader gst:GstReconciliation .
+
+# ---- findings ----
+
+gst:PotentialMismatch rdf:type skos:Concept ;
+    skos:prefLabel "Potential mismatch" ;
+    skos:definition "An invoice claimed in the purchase register that the supplier never filed" ;
+    skos:broader gst:GstReconciliation .
+
+gst:AmountMismatch rdf:type skos:Concept ;
+    skos:prefLabel "Amount mismatch" ;
+    skos:definition "Both sides report the invoice, and the values differ by more than the cap then in force allowed" ;
+    skos:broader gst:GstReconciliation .
+
+gst:ITCNotAvailable rdf:type skos:Concept ;
+    skos:prefLabel "ITC not available" ;
+    skos:definition "The invoice matches, and the authority reports the credit as unavailable" ;
+    skos:broader gst:GstReconciliation .
+
+gst:Reversed rdf:type skos:Concept ;
+    skos:prefLabel "Reversed" ;
+    skos:definition "The invoice matches, and the authority flags it as reverse-charge" ;
+    skos:broader gst:GstReconciliation .
+
+gst:GstinTransposition rdf:type skos:Concept ;
+    skos:prefLabel "GSTIN transposition" ;
+    skos:definition "Same invoice number and period on both sides under near-identical GSTINs — probably a keying error" ;
+    skos:broader gst:GstReconciliation .
+
+gst:PaymentOverdue rdf:type skos:Concept ;
+    skos:prefLabel "Payment overdue" ;
+    skos:definition "Credit taken on an invoice not paid within 180 days of its date" ;
+    skos:broader gst:GstReconciliation .
+
+# ---- legal spine ----
+
+gst:Section16 rdf:type skos:Concept ;
+    skos:prefLabel "Section 16 — eligibility and conditions for input tax credit" ;
+    skos:definition "Credit is available only where the supplier has actually filed the outward supply and the recipient holds the invoice. An invoice absent from GSTR-2B therefore has no credit to claim." ;
+    skos:broader gst:GstReconciliation .
+
+gst:Section16-2-aa rdf:type skos:Concept ;
+    skos:prefLabel "Section 16(2)(aa) — the supplier must have furnished the details" ;
+    skos:definition "Credit is available only where the supplier furnished the outward-supply details and they are communicated to the recipient. This is the statutory basis for matching against GSTR-2B rather than against the taxpayer's own register alone." ;
+    skos:broader gst:Section16 .
+
+gst:Section16-2-d rdf:type skos:Concept ;
+    skos:prefLabel "Section 16(2)(d) — payment to the supplier within 180 days" ;
+    skos:definition "Where the recipient has not paid the supplier the value of the supply together with the tax within 180 days of the invoice date, the credit taken must be reversed." ;
+    skos:broader gst:Section16 .
+
+gst:Section17-5 rdf:type skos:Concept ;
+    skos:prefLabel "Section 17(5) — blocked credits" ;
+    skos:definition "Certain inward supplies carry no input tax credit regardless of matching. A GSTR-2B line may therefore report credit as unavailable even where the invoice matches perfectly." ;
+    skos:broader gst:GstReconciliation .
+
+gst:MatchingPolicy rdf:type skos:Concept ;
+    skos:prefLabel "Identity matching policy — near-identical GSTIN" ;
+    skos:definition "Where two records agree on invoice number and period but their GSTINs differ by what looks like a transposition, the pair is surfaced for a human decision and never merged automatically." ;
+    skos:broader gst:GstReconciliation .
+
+gst:Rule36-4 rdf:type skos:Concept ;
+    skos:prefLabel "Rule 36(4), CGST Rules 2017 — the provisional-credit cap" ;
+    skos:definition "The percentage is not a code constant: a provision is an entity with an effective date and a citation, and reconciliation resolves which cap applied on an invoice's own date by traversal." ;
+    skos:broader gst:GstReconciliation .
+
+gst:Rule36-4-2019 rdf:type skos:Concept ;
+    skos:prefLabel "Rule 36(4) — 20% provisional credit cap" ;
+    skos:definition "In force from 2019-10-09, Notification 49/2019-CT." ;
+    skos:broader gst:Rule36-4 .
+
+gst:Rule36-4-2020 rdf:type skos:Concept ;
+    skos:prefLabel "Rule 36(4) — 10% provisional credit cap" ;
+    skos:definition "In force from 2020-01-01, Notification 75/2019-CT." ;
+    skos:broader gst:Rule36-4 .
+
+gst:Rule36-4-2021 rdf:type skos:Concept ;
+    skos:prefLabel "Rule 36(4) — 5% provisional credit cap" ;
+    skos:definition "In force from 2021-01-01, Notification 94/2020-CT." ;
+    skos:broader gst:Rule36-4 .
+
+gst:Rule36-4-2022 rdf:type skos:Concept ;
+    skos:prefLabel "Rule 36(4) — no provisional credit; full GSTR-2B matching" ;
+    skos:definition "In force from 2022-01-01, Notification 40/2021-CT." ;
+    skos:broader gst:Rule36-4 .

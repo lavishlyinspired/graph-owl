@@ -20,6 +20,19 @@ namespace = "https://graph-owl.dev/packs/gst#"
 prefix = "gst"
 description = "Input-tax-credit reconciliation: purchase register against GSTR-2B."
 
+# Registered as an Epic 33 `OntologyPack` (the platform doc's decision 10: a
+# domain pack's vocabulary half *is* an OntologyPack, not a parallel
+# mechanism) so the console's Vocabulary browser shows these terms the same
+# way it shows any other pack's. `permissive` because every term is derived
+# from the published statute and return formats, which are the specification
+# — nothing here is a third party's proprietary vocabulary.
+[glossary]
+path = "glossary.ttl"
+version = "1"
+source_url = "packs/gst/glossary.ttl"
+licence_kind = "permissive"
+licence_name = "Public domain — Government of India GST statute and return specification"
+
 [[documents]]
 path = "ontology.ttl"
 source = "gst-ontology"

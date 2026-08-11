@@ -79,6 +79,11 @@ class Manifest:
     queries: tuple[dict, ...] = ()
     console: dict = field(default_factory=dict)
     predicates: tuple[Predicate, ...] = ()
+    glossary: dict | None = None
+    """The `[glossary]` table, if present — a SKOS document registered as an
+    Epic 33 `OntologyPack` so the console's Vocabulary browser can show the
+    pack's terms. Optional: a pack with no glossary registers none, rather
+    than every pack being expected to have one."""
 
     @staticmethod
     def load(directory: Path) -> "Manifest":
@@ -149,6 +154,24 @@ class Manifest:
                 )
             )
 
+        glossary = raw.get("glossary")
+        if glossary is not None:
+            if not isinstance(glossary, dict):
+                raise ManifestError(f"{path}: `[glossary]` must be a table")
+            for required in ("path", "version", "source_url", "licence_kind", "licence_name"):
+                if not isinstance(glossary.get(required), str) or not glossary[required].strip():
+                    raise ManifestError(
+                        f"{path}: `glossary.{required}` is required and must be a non-empty string"
+                    )
+            # Same containment rule as `[[documents]]`, for the same reason —
+            # the check must fail on the declaration, not on the read.
+            candidate = Path(glossary["path"])
+            if candidate.is_absolute() or ".." in candidate.parts:
+                raise ManifestError(
+                    f"{path}: `glossary.path` must stay inside the pack "
+                    f"directory, got `{glossary['path']}`"
+                )
+
         return Manifest(
             id=pack["id"],
             namespace=pack["namespace"],
@@ -161,4 +184,5 @@ class Manifest:
             queries=tuple(raw.get("queries", [])),
             console=raw.get("console", {}),
             predicates=tuple(predicates),
+            glossary=glossary,
         )
