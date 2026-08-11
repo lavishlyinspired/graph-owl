@@ -598,6 +598,16 @@ pub struct SearchResults {
 }
 
 /// Bindings from a graph query.
+///
+/// `factsScanned`/`plan`/`variables`/`qlRewrite`/`refusedAxioms`/
+/// `alignmentsUsed` mirror [`graph_owl_api::SparqlOutcome`]'s own fields —
+/// `/sparql` has rendered them since Epic 99/101/104 shipped
+/// (`graph_owl_server`'s `query_outcome_json`); `query_graph` dropped all
+/// but `rows`/`truncated` on the floor. Found reviewing a live trace where
+/// `SELECT ?s ?p ?o { ?s gst:governedBy ?o }` returned zero rows with no way
+/// to tell "the predicate is genuinely never asserted" from "the graph that
+/// would hold it was never scanned" (`plans/106-agent-trace-hygiene.md`
+/// Slice 2) — both looked identical without this.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryAnswer {
@@ -607,6 +617,34 @@ pub struct QueryAnswer {
     /// when it happened** — partial results presented as complete is the one
     /// outcome this crate refuses everywhere.
     pub truncated: bool,
+    /// How many facts the query actually scanned.
+    pub facts_scanned: usize,
+    /// **What the engine decided to read**, one entry per scan — the single
+    /// number that explains a slow query, or an empty result that looked
+    /// like "no such fact" when it was really "never scanned". See
+    /// [`graph_owl_api::SparqlOutcome::plan`]'s own doc comment for what a
+    /// single unbound entry means.
+    pub plan: Vec<String>,
+    /// The variables the query projected, in the order it named them.
+    pub variables: Vec<String>,
+    /// The OWL 2 QL rewrite this query underwent, as `/sparql` renders it
+    /// (`expandedQuery`/`branches`) — built as a `serde_json::Value` rather
+    /// than a typed field so this crate does not need a `Serialize` impl on
+    /// `graph_owl_api::QlRewrite`, which nothing else needs. **Absent, not
+    /// null, when nothing rewrote** — silence is the signal that there is
+    /// nothing to explain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ql_rewrite: Option<serde_json::Value>,
+    /// A `TBox` construct QL could not express, rendered the same way
+    /// `/sparql` does (`class`/`construct`). **Absent when empty** — the
+    /// overwhelming majority of queries touch no such construct at all.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refused_axioms: Vec<serde_json::Value>,
+    /// Alignments (Epic 104) this query's scoped facts crossed, rendered the
+    /// same shape `/sparql`'s `alignment_entry_json` produces. **Absent when
+    /// empty** — most queries cross no alignment predicate at all.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub alignments_used: Vec<serde_json::Value>,
 }
 
 /// Why a graph query did not run.
@@ -1304,6 +1342,32 @@ pub async fn call_within(
                 // are opposite statements, and an agent that conflates them
                 // fills the silence.
                 Ok(Some(memories)) => Outcome::Recalled(memories),
+                // **A pack subject gets an honest reason, not the ambiguous
+                // absent-or-denied text.** `recall` resolves `fqn` through
+                // the catalog's own assets table, which a pack subject (an
+                // invoice, a statutory provision) has no row in by design —
+                // `plans/105-domain-neutrality.md`. That miss is not "does
+                // not exist"; it is "was never eligible to be a catalog
+                // asset in the first place", checkable from the FQN alone
+                // (no database round trip, no information disclosed about
+                // whether it actually holds data) via
+                // `Sid::is_runtime_pack_namespace`. A genuinely absent or
+                // denied *catalog* asset still gets the ambiguous
+                // `NotFound` below — this branch narrows, it does not
+                // replace it (`plans/106-agent-trace-hygiene.md` Slice 3a,
+                // decision D1: memory stays asset-scoped by design; the fix
+                // here is telling the agent that plainly instead of letting
+                // it read the ambiguity as "maybe denied, keep retrying").
+                Ok(None)
+                    if graph_owl_core::flake::Sid::from_iri(fqn)
+                        .is_some_and(|sid| sid.is_runtime_pack_namespace()) =>
+                {
+                    Outcome::Unsupported(
+                        "memory is scoped to catalog assets; pack entities are queried via \
+                         query_graph"
+                            .to_string(),
+                    )
+                }
                 Ok(None) => Outcome::NotFound,
                 Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
             }
@@ -2261,6 +2325,7 @@ mod tests {
                         .collect(),
                 ],
                 truncated: false,
+                ..QueryAnswer::default()
             }))
         }
 
@@ -2712,6 +2777,62 @@ mod tests {
 
                 assert_eq!(outcome, Outcome::NotFound, "{fqn}");
             }
+        }
+
+        // **The trace-review finding** (`plans/105-mcp-tool-visibility-
+        // divergence.md`, `plans/106-agent-trace-hygiene.md` Slice 3a): a
+        // pack subject has no `assets` row by design, so `recall` misses it
+        // the same way a genuinely absent or denied catalog asset does —
+        // but it is neither. This test's fixed namespace registration is
+        // idempotent (`register_process_namespace`'s own doc comment), so
+        // it is safe alongside other tests in this binary sharing the
+        // process-wide registry.
+        #[tokio::test]
+        async fn a_pack_subject_gets_an_asset_scope_reason_not_the_ambiguous_not_found() {
+            graph_owl_core::namespaces::register_process_namespace(
+                graph_owl_core::flake::namespace::RUNTIME_START + 9000,
+                "https://graph-owl-mcp-test.example/pack#",
+            );
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                RECALL_MEMORY,
+                &recall_args(
+                    "https://graph-owl-mcp-test.example/pack#purchase-INV-1006",
+                    None,
+                ),
+            )
+            .await;
+
+            let Outcome::Unsupported(reason) = outcome else {
+                panic!("expected Unsupported, got {outcome:?}");
+            };
+            assert!(reason.contains("query_graph"), "{reason}");
+        }
+
+        // **The negative that makes the case above about the namespace, not
+        // about a bare `Ok(None)`.** A catalog-asset-shaped FQN that
+        // genuinely misses must keep the ambiguous `NotFound` — reusing
+        // `Unsupported` for every miss would blur the exact absent-or-
+        // denied property `Outcome::NotFound`'s own doc comment names.
+        #[tokio::test]
+        async fn a_catalog_shaped_miss_still_gets_the_ambiguous_not_found() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                RECALL_MEMORY,
+                &recall_args(
+                    "https://graph-owl.dev/ns/catalog#warehouse.nonexistent",
+                    None,
+                ),
+            )
+            .await;
+
+            assert_eq!(outcome, Outcome::NotFound);
         }
 
         #[tokio::test]

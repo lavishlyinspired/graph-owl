@@ -121,8 +121,13 @@ async fn a_client_can_negotiate_and_discover_the_tools() {
         .collect();
     assert_eq!(
         names.len(),
-        13,
-        "seven read tools and six write tools: {names:?}"
+        21,
+        // 13 at Epic 14's own count (7 read + 6 write), plus the 8
+        // intelligence tools Epic 105 P10 added (traverse, find_evidence,
+        // explain, reconcile, analytics, run_rule, resolve_entity,
+        // calculate_risk) — this assertion had drifted stale since P10
+        // shipped, caught fixing an unrelated 106 slice.
+        "{names:?}"
     );
     assert!(names.contains(&"get_asset_context"), "{names:?}");
     assert!(names.contains(&"record_memory"), "{names:?}");
@@ -337,4 +342,45 @@ async fn a_malformed_body_is_a_protocol_error_at_http_200() {
         .expect("body");
     let body: Value = serde_json::from_slice(&bytes).expect("a JSON-RPC document");
     assert_eq!(body["error"]["code"], -32700, "{body}");
+}
+
+/// **The trace-review finding** (`plans/106-agent-trace-hygiene.md` Slice 2,
+/// `plans/105-mcp-tool-visibility-divergence.md`): a live agent asked
+/// `SELECT ?s ?p ?o { ?s gst:governedBy ?o }` over `query_graph`, got zero
+/// rows, and had no way to tell "the predicate is genuinely never asserted"
+/// apart from "the graph that would hold it was never scanned" — both look
+/// identical without `factsScanned`/`plan` on the wire. `QueryAnswer`
+/// previously carried only `rows`/`truncated`; this proves the same
+/// diagnostics `/sparql` already renders (`query_outcome_json`) now reach
+/// `query_graph` too.
+#[tokio::test]
+async fn query_graph_reports_what_it_scanned_and_planned() {
+    let (app, _container, _) = test_app().await;
+
+    let response = rpc(
+        &app,
+        "tools/call",
+        json!({
+            "name": "query_graph",
+            "arguments": { "query": "SELECT ?s ?p ?o WHERE { ?s ?p ?o }" }
+        }),
+    )
+    .await;
+
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let answer = payload(&response);
+    assert!(answer["factsScanned"].is_u64(), "{answer}");
+    // No pattern position could be bound, so pushdown falls back to a whole
+    // scan — `describe_scan`'s own rendering of an all-unbound
+    // `TriplePattern`, not the `?s ?p ?o` shorthand a reader might expect.
+    assert_eq!(answer["plan"], json!(["? ? ?"]), "{answer}");
+    assert_eq!(answer["variables"], json!(["s", "p", "o"]), "{answer}");
+    // Silence is the signal: nothing rewrote this query, no axiom was
+    // refused, and no alignment was crossed, so all three are absent from
+    // the wire entirely — the overwhelming-majority case every one of
+    // `SparqlOutcome`'s own doc comments names, not present-and-empty.
+    let object = answer.as_object().unwrap();
+    assert!(!object.contains_key("qlRewrite"), "{answer}");
+    assert!(!object.contains_key("refusedAxioms"), "{answer}");
+    assert!(!object.contains_key("alignmentsUsed"), "{answer}");
 }

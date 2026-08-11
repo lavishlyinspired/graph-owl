@@ -23,6 +23,11 @@ graph-owl-traversal.workspace = true
 # Epic 105 P10: `explain()`'s `Explanation`/`Chain`/`Budget` types — the
 # same ones `Catalog::explain_fact` already takes and returns.
 graph-owl-reasoning = { path = "../graph-owl-reasoning", version = "0.1.0" }
+# 106 Slice 2: `query_graph`'s diagnostics render `SparqlOutcome.
+# refused_axioms`, whose `ForbiddenConstruct` variants this crate matches on
+# directly (`graph-owl-server`'s own `forbidden_construct_name` is the
+# precedent this mirrors) — needs the type in scope, not just field access.
+graph-owl-reasoning-ql = { path = "../graph-owl-reasoning-ql", version = "0.1.0" }
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

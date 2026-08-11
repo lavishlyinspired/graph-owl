@@ -111,6 +111,64 @@ fn instant(asset: &graph_owl_core::Asset, key: &str) -> Option<chrono::DateTime<
         .map(|t| t.with_timezone(&chrono::Utc))
 }
 
+/// [`graph_owl_api::QlRewrite`] rendered the same shape `graph-owl-server`'s
+/// `query_outcome_json` already does — same key names, so an agent reading
+/// both `/sparql` and `query_graph` sees one convention, not two.
+fn ql_rewrite_json(rewrite: &graph_owl_api::QlRewrite) -> serde_json::Value {
+    serde_json::json!({
+        "expandedQuery": rewrite.expanded_query,
+        "branches": rewrite.branches.iter().map(|branch| serde_json::json!({
+            "class": branch.class.to_string(),
+            "subclassOf": branch.subclass_of.to_string(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// [`graph_owl_reasoning_ql::RefusedAxiom`] rendered the same shape
+/// `graph-owl-server`'s `query_outcome_json` already does.
+fn refused_axiom_json(refused: &graph_owl_reasoning_ql::RefusedAxiom) -> serde_json::Value {
+    serde_json::json!({
+        "class": refused.class.to_string(),
+        "construct": forbidden_construct_name(refused.construct),
+    })
+}
+
+/// `graph_owl_reasoning_ql::ForbiddenConstruct` has no `Serialize` impl,
+/// mirroring `graph-owl-server`'s own `forbidden_construct_name` — matched
+/// by hand rather than derived so the wire name stays checkable against the
+/// enum's variants directly, in one place, on both surfaces that render it.
+fn forbidden_construct_name(construct: graph_owl_reasoning_ql::ForbiddenConstruct) -> &'static str {
+    use graph_owl_reasoning_ql::ForbiddenConstruct::{
+        Cardinality, FunctionalProperty, HasKey, InverseFunctionalProperty, PropertyChain,
+        TransitiveProperty,
+    };
+    match construct {
+        PropertyChain => "propertyChain",
+        TransitiveProperty => "transitiveProperty",
+        FunctionalProperty => "functionalProperty",
+        InverseFunctionalProperty => "inverseFunctionalProperty",
+        HasKey => "hasKey",
+        Cardinality => "cardinality",
+    }
+}
+
+/// [`graph_owl_api::AlignmentReviewEntry`] rendered the same shape
+/// `graph-owl-server`'s own `alignment_entry_json` already does — the
+/// review queue and a query result's alignment attribution, and now this
+/// tool, cannot drift apart field by field.
+fn alignment_entry_json(entry: &graph_owl_api::AlignmentReviewEntry) -> serde_json::Value {
+    serde_json::json!({
+        "subject": entry.subject.to_string(),
+        "left": entry.left.as_ref().map(ToString::to_string),
+        "right": entry.right.as_ref().map(ToString::to_string),
+        "predicate": entry.predicate,
+        "sourceKind": entry.source_kind,
+        "sourceDetail": entry.source_detail,
+        "confidence": entry.confidence,
+        "lossyReverse": entry.lossy_reverse,
+    })
+}
+
 /// What the catalog holds about an asset, without deciding anything.
 ///
 /// Every field is read as an `Option` and handed on as one. **No defaults
@@ -513,6 +571,20 @@ impl ContextSource for CatalogContext {
             Ok(outcome) => Ok(Ok(crate::QueryAnswer {
                 rows: outcome.rows,
                 truncated: outcome.truncated,
+                facts_scanned: outcome.facts_scanned,
+                plan: outcome.plan,
+                variables: outcome.variables,
+                ql_rewrite: outcome.ql_rewrite.as_ref().map(ql_rewrite_json),
+                refused_axioms: outcome
+                    .refused_axioms
+                    .iter()
+                    .map(refused_axiom_json)
+                    .collect(),
+                alignments_used: outcome
+                    .alignments_used
+                    .iter()
+                    .map(alignment_entry_json)
+                    .collect(),
             })),
             // **A query problem is an answer about the query, not a failure to
             // run it.** `Validation` is what the parser rejects; anything else

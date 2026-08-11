@@ -1618,6 +1618,7 @@ dependencies = [
  "graph-owl-authz",
  "graph-owl-core",
  "graph-owl-reasoning",
+ "graph-owl-reasoning-ql",
  "graph-owl-storage",
  "graph-owl-traversal",
  "rmcp",

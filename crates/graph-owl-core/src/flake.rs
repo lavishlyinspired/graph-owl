@@ -227,6 +227,22 @@ impl Sid {
         .max_by_key(|(len, _, _)| *len)
         .map(|(_, code, local)| Sid::new(code, local))
     }
+
+    /// Whether this identifier belongs to a runtime-registered (pack)
+    /// vocabulary rather than one of the fixed namespaces the binary ships
+    /// with — the same test `graph_owl_api`'s own (private)
+    /// `is_runtime_pack_namespace` applies to a bare namespace code,
+    /// exposed here on `Sid` directly so a caller holding only an IRI can
+    /// answer "is this a pack subject" via [`Self::from_iri`] with no
+    /// database round trip: a pack subject (an invoice, a statutory
+    /// provision) has no `assets` row by design
+    /// (`plans/105-domain-neutrality.md`), so a lookup miss against the
+    /// catalog does not mean "does not exist" — it may mean "was never
+    /// eligible to be a catalog asset in the first place."
+    #[must_use]
+    pub fn is_runtime_pack_namespace(&self) -> bool {
+        self.namespace_code >= namespace::RUNTIME_START
+    }
 }
 
 /// The object position of a flake.
@@ -685,6 +701,24 @@ mod namespace_tests {
     fn runtime_allocation_starts_above_the_reserved_ranges() {
         assert_eq!(namespace::RUNTIME_START, 1024);
         const { assert!(namespace::RUNTIME_START < namespace::NOT_FOUND) };
+    }
+
+    #[test]
+    fn a_sid_in_a_runtime_pack_namespace_reports_itself_as_one() {
+        assert!(
+            Sid::new(namespace::RUNTIME_START, "purchase-INV-1006").is_runtime_pack_namespace()
+        );
+        assert!(Sid::new(namespace::RUNTIME_START + 500, "x").is_runtime_pack_namespace());
+    }
+
+    /// **The negative case.** Every fixed, binary-shipped namespace —
+    /// `dsc` (catalog assets themselves) most of all — must not read as a
+    /// pack namespace, or a genuine catalog asset would be misdiagnosed as
+    /// out-of-scope for memory/investigations.
+    #[test]
+    fn a_sid_in_a_fixed_namespace_does_not() {
+        assert!(!Sid::dsc("finance.salaries").is_runtime_pack_namespace());
+        assert!(!Sid::new(namespace::RUNTIME_START - 1, "x").is_runtime_pack_namespace());
     }
 
     /// `Sid` renders as `code:id`, and the code stays a number.
