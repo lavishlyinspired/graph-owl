@@ -1478,12 +1478,33 @@ version of the test hadn't applied it to its own query. Mutation-clean:
 `--lib`-scoped script (that function has no unit-test caller, only
 integration ones) — 10/10 caught once scoped correctly.
 
-Still open: the live GSP/ERP connectors are fixture-mode only; six of the
-seven planned packs are unwritten (deliberately not attempted — DN-3's
-hospitality pack already carries the domain-neutrality proof, and
-inventing regulatory content for six more domains without real source
-material was assessed and declined); and P2's remaining connectors, P3,
-P4 are untouched — this is the spine, not the finished platform
+**GSP/ERP connectors: real code against published specs, already proven —
+both the connector and the "why not live this session" story predate this
+paragraph.** `connectors/python/graph_owl_packs/gstr2b.py` and `erpnext.py`
+are real HTTP clients (`urllib.request`, no mocked transport) against
+field names taken from a real Postman collection and a live sandbox, not
+recall — normalized through a pure `normalize()`/`to_turtle()` pipeline
+so a fixture and a live response are interchangeable to the six finding
+rules. 37 tests pass. `105a-gstr2b-provider-behaviour.md` is the record of
+an earlier live-sandbox investigation this same day: two independent GSPs
+tested, and GSTR-2B API access turned out to be a **provisioned, paid
+capability at both** (`AUTH4037` / a byte-identical canned mock) — not a
+connector defect. The practical acquisition path the market actually
+runs on, and what this connector already implements, is the taxpayer's
+own portal JSON download fed through `from_file()`; the GSP API fetch
+path is a scheduling convenience on top of that, still blocked
+externally, not a missing capability. This session deliberately did not
+repeat that live testing — asked directly, given `gstcreds.md`/`.env`
+also being pointed at, and the answer was "format reference only," so
+`fetch()`'s real HTTP path stays unexercised against a live host this
+session, same as before.
+
+Still open: six of the seven planned packs are unwritten (deliberately
+not attempted — DN-3's hospitality pack already carries the
+domain-neutrality proof, and inventing regulatory content for six more
+domains without real source material was assessed and declined); and
+P2's remaining connectors, P3, P4 are untouched — this is the spine, not
+the finished platform
 
 ### Console half
 - [x] **105** **One queue, every pack** — `findingsQueue.tsx` renders GST and hospitality identically; the difference lives in `pack.toml`. A `GstFindingsQueue.tsx` would have been the console's first per-domain hardcoding
