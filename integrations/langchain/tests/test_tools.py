@@ -6,6 +6,9 @@ was not declared).
 
 import json
 
+import pytest
+
+from graph_owl_langchain._core.client import GraphOwlConnectionError
 from graph_owl_langchain._core.principal import Principal
 from graph_owl_langchain.tools import GraphOwlToolkit
 
@@ -51,8 +54,9 @@ class _FakeResponse:
         return False
 
 
-def _manifest_opener(manifest, call_results=None):
+def _manifest_opener(manifest, call_results=None, error_results=None):
     call_results = call_results or {}
+    error_results = error_results or {}
 
     def opener(request):
         payload = json.loads(request.data)
@@ -62,14 +66,19 @@ def _manifest_opener(manifest, call_results=None):
             return _FakeResponse(json.dumps(envelope).encode("utf-8"))
         # tools/call
         name = payload["params"]["name"]
-        result_payload = call_results.get(name, {})
+        if name in error_results:
+            result_payload = {"error": error_results[name], "kind": "refused"}
+            is_error = True
+        else:
+            result_payload = call_results.get(name, {})
+            is_error = False
         body = json.dumps(
             {
                 "jsonrpc": "2.0",
                 "id": payload["id"],
                 "result": {
                     "content": [{"type": "text", "text": json.dumps(result_payload)}],
-                    "isError": False,
+                    "isError": is_error,
                 },
             }
         )
@@ -148,6 +157,78 @@ def test_invoking_a_toolkit_tool_calls_the_matching_mcp_tool():
     by_name = {tool.name: tool for tool in toolkit.tools()}
     result = by_name["search_assets"].invoke({"query": "orders"})
     assert json.loads(result) == {"hits": ["ok"]}
+
+
+def test_a_refused_tool_call_returns_an_error_string_instead_of_raising():
+    """**Found running the LangGraph agent live against a real model**: the
+    model called `recall_memory` for a subject that does not exist, the
+    server correctly answered `isError: true` ("no such entity, or it is
+    not visible to you"), and `GraphOwlClient.call_tool` raised
+    `GraphOwlToolError` exactly as its own contract promises
+    (`test_client.py`'s own suite covers that). But nothing here caught
+    it, so the exception propagated straight through LangGraph's tool
+    node and crashed the whole investigation instead of giving the model
+    something to reason about and route around — the entire point of a
+    ReAct loop that decides "which tool to call next based on what the
+    last one returned" (`gst_investigation_agent.py`'s own docstring).
+    A refused tool call is not a transport failure; it is exactly the
+    kind of outcome an exploratory agent must be able to see and adapt
+    to, the same way a human investigator reads "not found" and tries a
+    different angle rather than aborting."""
+    toolkit = GraphOwlToolkit(
+        endpoint="https://graph-owl.internal",
+        principal=Principal(token=SECRET),
+        opener=_manifest_opener(
+            MANIFEST,
+            error_results={"get_asset_context": "no such entity, or it is not visible to you"},
+        ),
+    )
+    by_name = {tool.name: tool for tool in toolkit.tools()}
+
+    result = by_name["get_asset_context"].invoke({"fullyQualifiedName": "does.not.exist"})
+
+    assert json.loads(result) == {"error": "no such entity, or it is not visible to you"}
+
+
+def test_a_successful_call_is_unaffected_by_the_error_handling_added_above():
+    """The refusal path must not change what a normal result looks like —
+    a mutant that made every call go through the error branch would still
+    pass the refusal test above but silently break every working tool
+    call."""
+    toolkit = GraphOwlToolkit(
+        endpoint="https://graph-owl.internal",
+        principal=Principal(token=SECRET),
+        opener=_manifest_opener(MANIFEST, call_results={"search_assets": {"hits": ["ok"]}}),
+    )
+    by_name = {tool.name: tool for tool in toolkit.tools()}
+
+    result = by_name["search_assets"].invoke({"query": "orders"})
+
+    assert json.loads(result) == {"hits": ["ok"]}
+
+
+def test_an_unreachable_server_still_raises_rather_than_becoming_a_tool_result():
+    """The catch added above is scoped to `GraphOwlToolError` specifically,
+    not `Exception` broadly — a transport failure is not something a
+    different tool choice can route around, unlike a refused call, and
+    swallowing it into `{"error": ...}` would let an agent quietly
+    hallucinate onward believing it received a real, empty-ish answer
+    from a server it never actually reached."""
+
+    def opener(request):
+        payload = json.loads(request.data)
+        if payload["method"] == "tools/list":
+            envelope = {"jsonrpc": "2.0", "id": payload["id"], "result": {"tools": MANIFEST}}
+            return _FakeResponse(json.dumps(envelope).encode("utf-8"))
+        raise OSError("connection refused")  # tools/call never reaches the server
+
+    toolkit = GraphOwlToolkit(
+        endpoint="https://graph-owl.internal", principal=Principal(token=SECRET), opener=opener
+    )
+    by_name = {tool.name: tool for tool in toolkit.tools()}
+
+    with pytest.raises(GraphOwlConnectionError):
+        by_name["search_assets"].invoke({"query": "orders"})
 
 
 def test_no_composite_tool_exists_the_exposed_set_never_exceeds_the_manifest():

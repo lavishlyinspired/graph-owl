@@ -25,7 +25,7 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 
-from graph_owl_langchain._core.client import GraphOwlClient
+from graph_owl_langchain._core.client import GraphOwlClient, GraphOwlToolError
 from graph_owl_langchain._core.principal import Principal
 
 
@@ -55,7 +55,22 @@ class GraphOwlToolkit:
         client = self._client
 
         def _call(**kwargs: Any) -> str:
-            result = client.call_tool(name, kwargs)
+            # `GraphOwlToolError` means the call *reached* the server and
+            # the tool refused, found nothing, or hit an unavailable
+            # backend (`GraphOwlClient.call_tool`'s own doc: `isError`,
+            # not a JSON-RPC-level failure) — a legitimate, recoverable
+            # outcome an exploratory agent must see and route around, not
+            # a reason to abort the whole investigation. Left uncaught
+            # before this: LangGraph's tool node does not catch a generic
+            # `RuntimeError`, so a single refused tool call — a normal
+            # "not found" — crashed the entire run instead of becoming
+            # the model's next observation. `GraphOwlConnectionError` is
+            # deliberately not caught here: an unreachable server is not
+            # something a different tool choice can route around.
+            try:
+                result = client.call_tool(name, kwargs)
+            except GraphOwlToolError as refused:
+                return json.dumps({"error": refused.message})
             return json.dumps(result)
 
         return StructuredTool.from_function(

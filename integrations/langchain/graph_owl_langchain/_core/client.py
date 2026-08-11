@@ -38,6 +38,11 @@ class GraphOwlToolError(RuntimeError):
     def __init__(self, tool: str, message: str) -> None:
         super().__init__(f"tool {tool!r} failed: {message}")
         self.tool = tool
+        #: The tool's own reason, undecorated — `str(self)` carries the
+        #: `tool 'x' failed:` prefix for a human reading a log; a caller
+        #: that hands this back to a model as a tool result (`tools.py`'s
+        #: `_call`) wants the raw reason, not a sentence about itself.
+        self.message = message
 
 
 class GraphOwlClient:
