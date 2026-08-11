@@ -1346,16 +1346,52 @@ unviable, 0 missed anywhere). All eight platform-doc intelligence tools —
 `traverse`, `find_evidence`, `explain`, `reconcile`, `analytics`,
 `run_rule`, `resolve_entity`, `calculate_risk` — are now shipped,
 mutation-tested, and proven against a real adapter.
-**Still open, recorded
-rather than assumed away**: no reference agent app
-(`examples/gst-reconcile/`) and so no scored evaluation run; the live
-GSP/ERP connectors are fixture-mode only; pack facts are readable by any
-principal who can query at all (per-named-graph policy needs a policy model
-that does not exist yet); six of the seven planned packs are unwritten; and
-P2's remaining connectors, P3, P4, the rest of P8 (temporal engine,
-generalization beyond GST), P9's GraphRAG/hybrid-search remaining thirds
-(P10 is now complete — all eight tools shipped), P11 and P12 are
-untouched — this is the spine, not the finished platform
+**P11's first agent shipped, 11 August 2026** (`105s`,
+`integrations/langchain/examples/gst_investigation_agent.py`): a real
+LangGraph `create_agent` tool-calling loop over `GraphOwlToolkit`'s full
+P10 surface, answering evaluation question 14 ("which invoices would
+become compliant if paid today?") — a question no existing reference
+script covers, since `reconcile_agent.py`'s `QUESTION_LABELS` table only
+routes 1-5 and the eval set's own "Running it" section says outright
+"there is no agent yet" for 12-15. **Placement was the real question**:
+`graph_owl_langchain`'s own `pyproject.toml` says "never a chain, an
+agent, or a runtime," and `00j`/the roadmap's refusal table say the same
+about a shipped agent runtime — asked the user rather than routing around
+either, and the answer was to build it with LangChain/LangGraph in Python,
+placed outside what ships (`integrations/langchain/examples/`, sibling to
+`tests/`, excluded by `packages.find`'s `graph_owl_langchain*` scope and
+untouched by `scripts/check-examples-purity.py`, which only scans the
+top-level `examples/` tree). Floors bumped to the current major generation
+(`langchain-core>=1.5`, `langgraph>=1.2`, plus a new `langchain>=1.3`)
+because the API this agent uses, `langchain.agents.create_agent`, replaces
+`create_react_agent` (deprecated as of LangGraph v1.0) — Epic 43's own
+existing test was left on the old API rather than migrated, since it still
+passes and that migration is unrelated scope. `investigate()` is a
+three-line pass-through (`create_agent(model, tools,
+system_prompt=SYSTEM_PROMPT).invoke(...)`), proven by two scripted-model
+tests matching `test_langgraph_integration.py`'s own established pattern:
+the full `resolve_entity` → `calculate_risk` → answer path with real P10
+wire shapes, and that `SYSTEM_PROMPT` actually reaches the model's first
+call (`create_agent` does not carry the system message in its returned
+state, checked directly before writing the assertion). No mutmut report —
+tried it, and it doesn't fit: mutmut resolves a mutant's module key from
+the file's repo-relative path, but the test imports the script as a bare
+top-level module via `sys.path.insert`, the same convention
+`reconcile_agent.py`'s and `triage.py`'s own tests already use because
+neither script belongs to an installable package; neither of those two
+scripts has ever had mutmut run against it either.
+**Still open, recorded rather than assumed away**: P11's agent answers
+one question end-to-end, not all fifteen — P12 (the eval harness) is
+unbuilt, so today's evaluation is this one worked example plus
+`reconcile_agent.py`'s deterministic five and
+`scripts/verify-gst-reconciliation.sh`'s hand-scripted assertions for 6-11,
+not an automated score; the live GSP/ERP connectors are fixture-mode only;
+pack facts are readable by any principal who can query at all
+(per-named-graph policy needs a policy model that does not exist yet); six
+of the seven planned packs are unwritten; and P2's remaining connectors,
+P3, P4, the rest of P8 (temporal engine, generalization beyond GST), P9's
+GraphRAG/hybrid-search remaining thirds are untouched — this is the spine,
+not the finished platform
 
 ### Console half
 - [x] **105** **One queue, every pack** — `findingsQueue.tsx` renders GST and hospitality identically; the difference lives in `pack.toml`. A `GstFindingsQueue.tsx` would have been the console's first per-domain hardcoding

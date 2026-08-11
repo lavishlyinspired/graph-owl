@@ -12,8 +12,16 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-langchain = ["langchain-core>=0.2"]
-langgraph = ["langgraph>=0.2"]
+langchain = ["langchain-core>=1.5"]
+# `langchain` (the umbrella package, not `langchain-core`) is here rather
+# than under the `langchain` extra above because the only thing that needs
+# it is `langchain.agents.create_agent` — an agent-graph constructor, which
+# is a langgraph concern even though the import path crosses packages.
+# Floors bumped to the current major generation 11 August 2026: PyPI's
+# `create_react_agent` (the API `test_langgraph_integration.py` still
+# uses) is deprecated as of LangGraph v1.0 in favour of `create_agent`,
+# which the new P11 investigation agent uses instead.
+langgraph = ["langgraph>=1.2", "langchain>=1.3"]
 # `dev` pulls in both framework extras rather than just the test tooling:
 # the suite exercises GraphOwlRetriever, GraphOwlToolkit and
 # GraphOwlCheckpointer directly (not only `_core`), so a `pip install
@@ -26,8 +34,9 @@ dev = [
     "mutmut>=3",
     "ruff>=0.6",
     "mypy>=1.10",
-    "langchain-core>=0.2",
-    "langgraph>=0.2",
+    "langchain-core>=1.5",
+    "langgraph>=1.2",
+    "langchain>=1.3",
 ]
 
 [build-system]

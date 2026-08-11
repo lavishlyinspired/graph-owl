@@ -848,3 +848,38 @@ solves the *resolution* question. **Build** — the same conclusion
 `passes_span`/`SimilarityBand` already reached for span conditions, and for
 the same reason: a five-line resolution rule over already-parsed dates does
 not clear the bar for an external dependency.
+
+## `langchain` (umbrella) + `langchain-openai` — Epic 105 P11's investigation agent
+
+| Name | Licence | Newest version | Repository | Activity |
+|---|---|---|---|---|
+| `langchain-core` | MIT | 1.5.3 | github.com/langchain-ai/langchain | active, already adopted (Epic 43) |
+| `langgraph` | MIT | 1.2.10 | github.com/langchain-ai/langgraph | active, already adopted (Epic 43) |
+| `langchain` | MIT | 1.3.14 | github.com/langchain-ai/langchain | active |
+| `langchain-openai` | MIT | 1.4.3 | github.com/langchain-ai/langchain | active |
+
+Checked 11 August 2026, by direct user instruction to use the latest
+LangChain/LangGraph for P11's reference agent. All four MIT, same
+`langchain-ai` org, repositories resolve and are readable. **Adopt** —
+writing a ReAct tool-calling loop or an OpenAI-compatible chat-model client
+from scratch is exactly the already-solved, non-differentiating problem
+this document exists to keep off this project's plate, and doing so would
+also duplicate what Epic 43 already chose to depend on.
+
+`langchain-core`/`langgraph` were already adopted at Epic 43; this entry
+is the re-check the "every epic, every slice" rule calls for, and it
+surfaced a real change: `langgraph.prebuilt.create_react_agent` (what
+Epic 43's own `test_langgraph_integration.py` uses) is deprecated as of
+LangGraph v1.0 in favour of `langchain.agents.create_agent`, which pulls
+in the `langchain` umbrella package as a new dependency. P11's agent uses
+the new, non-deprecated API; Epic 43's existing test was left alone
+(already-shipped, already-tested, and the deprecation is a warning, not a
+failure — migrating it is a separate, unrelated refactor this slice did
+not need to make).
+
+`langchain-openai` is not added to `pyproject.toml`'s package extras: it
+is only `examples/gst_investigation_agent.py`'s own real-usage dependency
+(imported lazily, only inside `build_chat_model()`), not something
+`graph_owl_langchain` itself, or its test suite, needs — the same
+reasoning `reconcile_agent.py`'s stdlib-only design already established
+for its own optional narration path.
