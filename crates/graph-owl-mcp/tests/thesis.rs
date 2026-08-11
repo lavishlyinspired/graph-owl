@@ -292,6 +292,17 @@ impl ContextSource for Seeded {
         self.record("reconcile");
         Ok(None)
     }
+
+    async fn analytics(
+        &self,
+        _principal: &str,
+        _fqn: &str,
+        _direction: Direction,
+        _max_hops: u32,
+    ) -> Result<Option<graph_owl_mcp::AnalyticsContext>, SourceError> {
+        self.record("analytics");
+        Ok(None)
+    }
 }
 
 fn about(fqn: &str) -> serde_json::Value {

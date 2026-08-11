@@ -210,6 +210,15 @@ mod tests {
         ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError> {
             Ok(None)
         }
+        async fn analytics(
+            &self,
+            _: &str,
+            _: &str,
+            _: Direction,
+            _: u32,
+        ) -> Result<Option<graph_owl_mcp::AnalyticsContext>, SourceError> {
+            Ok(None)
+        }
     }
 
     fn read_only() -> graph_owl_mcp::jsonrpc::Server<'static> {

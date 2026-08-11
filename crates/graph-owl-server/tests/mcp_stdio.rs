@@ -154,6 +154,57 @@ async fn traverse_reaches_the_real_catalog_through_the_real_adapter() {
     assert!(!context.truncated, "{context:?}");
 }
 
+/// **Epic 105 P10's `analytics()` tool, against the real adapter** — the
+/// same reason `traverse_reaches_the_real_catalog_through_the_real_adapter`
+/// exists: `CatalogContext::analytics` really does call the pre-existing
+/// `Catalog::asset_analytics` and really does convert its `AssetAnalytics`
+/// into an `AnalyticsContext`, which the unit-level `Fixture` double never
+/// touches.
+///
+/// **The same lone-asset constraint as `traverse`'s own test, for the
+/// identical reason** (no relationship-creation path exists to seed a
+/// multi-node fixture with — see that test's doc comment). A lone,
+/// edgeless asset still proves the real path: `asset_analytics` reports it
+/// with zero degree in both directions and as its own one-member orphan
+/// component, which is exactly what a projection with no edges must
+/// produce and what the `Ok(None)`/`Ok(Some(Default::default()))` mutants
+/// a `--lib`-only run cannot see would otherwise slip past.
+#[tokio::test]
+async fn analytics_reaches_the_real_catalog_through_the_real_adapter() {
+    let (catalog, _container, _url) = common::test_catalog().await;
+    let fqn = seeded_asset(&catalog).await;
+    // The node id on the wire is the walked graph subject's own raw id —
+    // a UUID for a catalog asset, matching `TraversalNode.id`'s identical
+    // `sid.id.clone()` convention (`traverse`'s own real-adapter test
+    // above never asserts the exact string, only the count; this one
+    // does, so it has to fetch the real id rather than compare against
+    // the FQN it seeded with).
+    let asset_id = catalog
+        .get_asset_by_fqn(&fqn)
+        .await
+        .expect("lookup")
+        .expect("seeded")
+        .id
+        .to_string();
+
+    let principal = Principal::system();
+    let reads = CatalogContext::new(catalog, principal.clone());
+
+    let context = reads
+        .analytics(&principal.id, &fqn, graph_owl_mcp::Direction::Upstream, 2)
+        .await
+        .expect("no source error")
+        .expect("the seeded asset is visible to the system principal");
+
+    assert_eq!(context.nodes.len(), 1, "{context:?}");
+    assert_eq!(context.nodes[0].id, asset_id, "{context:?}");
+    assert_eq!(context.nodes[0].in_degree, 0.0, "{context:?}");
+    assert_eq!(context.nodes[0].out_degree, 0.0, "{context:?}");
+    assert_eq!(context.orphans, vec![asset_id], "{context:?}");
+    assert!(context.edge_types.is_empty(), "{context:?}");
+    assert!(!context.truncated, "{context:?}");
+}
+
 /// A real local `/embeddings`-style receiver isn't needed here — this is
 /// the actual compiled `graph-owl-mcp-stdio` binary, spawned as a real
 /// subprocess with real stdin/stdout pipes, matching this project's

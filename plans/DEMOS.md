@@ -1215,6 +1215,39 @@ codebase could exercise: every existing HTTP test resolves to
 `Principal::system()` in open mode regardless of which subject a bearer
 token claims, so this is the first proof that a genuinely non-admin
 caller is refused. Zero open gaps.
+**P10's fifth intelligence tool shipped, 11 August 2026** (`105o`):
+`analytics()` — degree centrality, connected components and orphan
+detection over the same bounded, already-authorized neighbourhood
+`traverse()` walks, built by explicit user instruction rather than left
+deferred. The apparent tension with Epic 38's own "never run analytics
+live over the whole graph per request" is resolved, not overridden: `00e`'s
+"purity boundary" text already distinguishes a bounded walk from an
+unbounded whole-graph computation as "a real operational distinction," so
+scoping to `asset_subgraph`'s own already-bounded, already-authorized
+walk satisfies both the architecture and the instruction at once.
+`PageRank` is deliberately excluded — its meaning is whole-graph-relative
+by construction (Epic 38 decision 6's own "on probation" caution), and a
+number computed over an arbitrary bounded neighbourhood would look like
+PageRank without meaning what PageRank means. Two real bugs surfaced
+before shipping, not after: a mutation run on the `Catalog`-layer unit
+test found the per-node flake fetch's `s: Some(sid)` scoping was
+unobservable with too few seeded flakes (fixed by seeding a flake
+belonging to a node outside the walked set, which the fix must now
+exclude); and the real-Postgres adapter test's first run failed because
+the wire node id was assumed to be the asset's FQN when it is actually
+the graph subject's raw id (a UUID) — matching, not diverging from,
+`TraversalNode`'s own pre-existing convention, which the two tools now
+share so an agent can correlate degree data back to a walk it already has.
+Mutation testing on the dispatch/wire code came back clean (0 missed,
+after closing the one gap `TraversalContext::shorten_detail` already
+proved was the shape of: a permanently-`false` lever whose flip to `true`
+is absorbed by `budget::fit`'s own no-progress check, closed by asserting
+the same contract directly rather than through the dispatcher). Mutation
+testing on the real adapter, proven against a new real-Postgres test,
+found the identical structural gap `105k` already recorded and did not
+close for `traverse` — no asset-to-asset relationship-creation path
+exists in this codebase to build a multi-hop fixture with — inherited
+rather than reintroduced.
 **Still open, recorded
 rather than assumed away**: no reference agent app
 (`examples/gst-reconcile/`) and so no scored evaluation run; the live
@@ -1223,7 +1256,8 @@ principal who can query at all (per-named-graph policy needs a policy model
 that does not exist yet); six of the seven planned packs are unwritten; and
 P2's remaining connectors, P3, P4, the rest of P8 (temporal engine,
 generalization beyond GST), P9's GraphRAG/hybrid-search remaining thirds,
-P10's other four tools, P11 and P12 are untouched — this is the spine, not
+P10's remaining three tools (`run_rule`, `resolve_entity`,
+`calculate_risk`), P11 and P12 are untouched — this is the spine, not
 the finished platform
 
 ### Console half

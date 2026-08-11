@@ -1371,6 +1371,7 @@ dependencies = [
  "bytes",
  "chrono",
  "ed25519-dalek",
+ "graph-owl-analytics",
  "graph-owl-authz",
  "graph-owl-connectors",
  "graph-owl-constraint",

@@ -242,6 +242,35 @@ pub trait ContextSource: Send + Sync {
         principal: &str,
         pack: &str,
     ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError>;
+
+    /// Degree centrality, connected components and orphan detection over
+    /// the same bounded neighbourhood [`Self::traverse`] walks — Epic 105
+    /// P10's fifth intelligence tool, wrapping
+    /// [`graph_owl_api::Catalog::asset_analytics`]. The platform doc names
+    /// this a remaining P9 primitive; it is built here rather than left
+    /// unbuilt because it answers a question `traverse` cannot — not just
+    /// *what* is connected, but *how* connected — over exactly the
+    /// neighbourhood an agent already walked, never the whole graph (see
+    /// `asset_analytics`'s own doc comment for why that scoping is not
+    /// optional).
+    ///
+    /// **Scoped to catalog assets, for the identical reason `traverse`
+    /// is**: `asset_subgraph` (which this reuses) checks the caller's
+    /// visibility before walking; a pack-domain subject has no such policy
+    /// model yet.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached. `Ok(None)`
+    /// covers "no such asset" **and** "not visible to this principal",
+    /// matching every other tool on this trait.
+    async fn analytics(
+        &self,
+        principal: &str,
+        fqn: &str,
+        direction: Direction,
+        max_hops: u32,
+    ) -> Result<Option<AnalyticsContext>, SourceError>;
 }
 
 /// A bounded walk's answer, as an agent receives it — Epic 105 P10's
@@ -314,6 +343,43 @@ pub struct EvidenceNode {
     pub iri: Option<String>,
     #[serde(default)]
     pub sources: Vec<String>,
+}
+
+/// Structural analytics over a bounded asset neighbourhood, as an agent
+/// receives it — Epic 105 P10's `analytics()` tool.
+///
+/// **Each node self-describes its own degree** (`NodeAnalytics`) rather
+/// than three parallel arrays index-aligned to `nodes` the way
+/// [`graph_owl_api::AssetAnalytics`] stores them internally — an agent
+/// reading this JSON should never have to zip three lists back together
+/// by position to answer "how connected is this one node", the same
+/// "build the wire shape by hand" convention [`FactExplanation`]'s own doc
+/// comment describes.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsContext {
+    pub nodes: Vec<NodeAnalytics>,
+    /// Node ids (matching [`NodeAnalytics::id`]) whose neighbourhood-local
+    /// component has exactly one member — connected to nothing else *in
+    /// this bounded walk*, not a claim about the whole graph.
+    pub orphans: Vec<String>,
+    /// Which predicates were counted as graph structure, as full IRIs —
+    /// derived from the walked nodes' own flakes, never a pack-specific
+    /// name hard-coded here (see `asset_analytics`'s own doc comment).
+    pub edge_types: Vec<String>,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<budget::TruncationReason>,
+}
+
+/// One node's degree within the walked neighbourhood.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeAnalytics {
+    pub id: String,
+    pub in_degree: f64,
+    pub out_degree: f64,
 }
 
 /// Why a fact holds, as an agent receives it — Epic 105 P10's `explain()`
@@ -548,6 +614,9 @@ pub enum Outcome {
     /// A pack's rules ran and their findings were recorded — Epic 105
     /// P10's `reconcile()`.
     Reconciled(Box<graph_owl_api::ReconcileOutcome>),
+    /// Degree/component structure over a bounded neighbourhood — Epic 105
+    /// P10's `analytics()`.
+    Analyzed(Box<AnalyticsContext>),
     /// A write landed or became a proposal — Epic 32.
     Wrote(Box<write::WriteReceipt>),
     /// **An agent write was refused, readably.**
@@ -632,6 +701,10 @@ pub const EXPLAIN: &str = "explain";
 /// Run a pack's registered rules and record what they conclude — Epic
 /// 105 P10's fourth intelligence tool.
 pub const RECONCILE: &str = "reconcile";
+
+/// Degree centrality, components and orphans over a bounded neighbourhood
+/// — Epic 105 P10's fifth intelligence tool.
+pub const ANALYTICS: &str = "analytics";
 
 /// The most hops an agent may ask `traverse` to walk.
 ///
@@ -918,6 +991,36 @@ pub fn tools() -> Vec<ToolDeclaration> {
                     },
                 },
                 "required": ["pack"],
+                "additionalProperties": false,
+            }),
+        },
+        ToolDeclaration {
+            name: ANALYTICS,
+            description: "Measure how connected a catalog asset's bounded neighbourhood is: \
+                      each node's in/out degree, which nodes are orphaned (connected to \
+                      nothing else within the walk), and which predicates were counted as \
+                      structure. Use after `traverse` to quantify a neighbourhood it already \
+                      showed you, not as a substitute for it.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "fullyQualifiedName": {
+                        "type": "string",
+                        "description": "The asset whose neighbourhood to measure.",
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["upstream", "downstream"],
+                        "description": "Defaults to upstream.",
+                    },
+                    "maxHops": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": i64::from(MAX_TRAVERSE_HOPS),
+                        "description": "Defaults to 2, capped at 6.",
+                    }
+                },
+                "required": ["fullyQualifiedName"],
                 "additionalProperties": false,
             }),
         },
@@ -1211,6 +1314,32 @@ pub async fn call_within(
             }
         }
 
+        ANALYTICS => {
+            let fqn = match required_fqn(arguments) {
+                Ok(fqn) => fqn,
+                Err(problem) => return problem,
+            };
+            let direction = match direction_of(arguments) {
+                Ok(direction) => direction,
+                Err(problem) => return problem,
+            };
+            let max_hops = match traverse_hops(arguments) {
+                Ok(max_hops) => max_hops,
+                Err(problem) => return problem,
+            };
+            match source.analytics(principal, fqn, direction, max_hops).await {
+                Ok(Some(mut context)) => {
+                    if let Some(reason) = budget::fit(&mut context, limit) {
+                        context.truncated = true;
+                        context.truncation_reason = Some(reason);
+                    }
+                    Outcome::Analyzed(Box::new(context))
+                }
+                Ok(None) => Outcome::NotFound,
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
         _ => Outcome::BadRequest(format!("no tool named `{tool}`")),
     }
 }
@@ -1497,6 +1626,40 @@ impl budget::Fits for EvidenceContext {
             return true;
         }
         false
+    }
+
+    fn render(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+impl budget::Fits for AnalyticsContext {
+    fn shorten_detail(&mut self) -> bool {
+        false
+    }
+
+    /// `edgeTypes` then `orphans` — metadata about the walk, not the
+    /// per-node answer itself, so both are cheaper to lose than a node's
+    /// own degree count. The same "related lists before entities" ordering
+    /// [`TraversalContext::shorten_relations`] uses.
+    fn shorten_relations(&mut self) -> bool {
+        if self.edge_types.pop().is_some() {
+            return true;
+        }
+        self.orphans.pop().is_some()
+    }
+
+    /// **Removes the dropped node's own orphan flag too**, so a truncated
+    /// answer never names an orphan the agent was given no degree for —
+    /// the same dangling-reference invariant
+    /// [`TraversalContext::drop_entities`] enforces for edges.
+    fn drop_entities(&mut self) -> bool {
+        let Some(dropped) = self.nodes.pop() else {
+            return false;
+        };
+        self.orphans.retain(|id| *id != dropped.id);
+        self.truncated = true;
+        true
     }
 
     fn render(&self) -> serde_json::Value {
@@ -1962,6 +2125,53 @@ mod tests {
             }
             Ok(None)
         }
+
+        async fn analytics(
+            &self,
+            principal: &str,
+            fqn: &str,
+            direction: Direction,
+            max_hops: u32,
+        ) -> Result<Option<AnalyticsContext>, SourceError> {
+            self.asked.lock().expect("lock").push((
+                principal.to_string(),
+                format!("analytics:{fqn}:{direction:?}:{max_hops}"),
+            ));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            // Same pair `traverse` uses, so a test can check the two tools
+            // answer about the identical neighbourhood.
+            if principal == "alice" && fqn == "warehouse.orders" {
+                return Ok(Some(AnalyticsContext {
+                    nodes: vec![
+                        NodeAnalytics {
+                            id: "warehouse.orders".into(),
+                            in_degree: 0.0,
+                            out_degree: 1.0,
+                        },
+                        NodeAnalytics {
+                            id: "warehouse.customers".into(),
+                            in_degree: 1.0,
+                            out_degree: 0.0,
+                        },
+                        // Reached by the walk but connected to nothing in
+                        // it — proves `orphans` names a real third node
+                        // rather than always being empty.
+                        NodeAnalytics {
+                            id: "warehouse.staging_orders".into(),
+                            in_degree: 0.0,
+                            out_degree: 0.0,
+                        },
+                    ],
+                    orphans: vec!["warehouse.staging_orders".into()],
+                    edge_types: vec!["https://graph-owl.dev/ns#references".into()],
+                    truncated: false,
+                    truncation_reason: None,
+                }));
+            }
+            Ok(None)
+        }
     }
 
     /// A trust summary for a context whose trust is not what is under test.
@@ -2288,9 +2498,10 @@ mod tests {
                     FIND_EVIDENCE,
                     EXPLAIN,
                     RECONCILE,
+                    ANALYTICS,
                 ],
                 "the seven read capabilities Epic 14 promises, plus Epic 105 P10's \
-                 first four intelligence tools, and no others — a tool that appears \
+                 first five intelligence tools, and no others — a tool that appears \
                  here without a dispatch arm teaches an agent to distrust the \
                  manifest, and one that dispatches without appearing here is a \
                  capability no agent will ever find"
@@ -3647,6 +3858,218 @@ mod tests {
             .await;
 
             assert!(matches!(outcome, Outcome::Reconciled(_)), "{outcome:?}");
+        }
+    }
+
+    /// Epic 105 P10 — `analytics()`, the platform doc's fifth intelligence
+    /// tool: degree/component structure over the same bounded
+    /// neighbourhood `traverse` walks.
+    mod the_analytics_tool {
+        use super::*;
+        use crate::budget::Fits;
+
+        #[tokio::test]
+        async fn reports_degree_and_orphans_for_the_walked_neighbourhood() {
+            let source = Fixture::working();
+
+            let outcome = call(&source, Some("alice"), ANALYTICS, &args("warehouse.orders")).await;
+
+            let Outcome::Analyzed(context) = outcome else {
+                panic!("expected Analyzed, got {outcome:?}");
+            };
+            assert_eq!(context.nodes.len(), 3, "{context:?}");
+            assert_eq!(
+                context.orphans,
+                vec!["warehouse.staging_orders".to_string()],
+                "{context:?}"
+            );
+            assert_eq!(
+                context.edge_types,
+                vec!["https://graph-owl.dev/ns#references".to_string()],
+                "{context:?}"
+            );
+            assert!(!context.truncated, "{context:?}");
+        }
+
+        /// **Absent and denied, indistinguishable** — the same property
+        /// every other tool on this trait holds, proven here the same way
+        /// `traverse`'s own test proves it: the fixture would answer for
+        /// `alice`, so a `NotFound` for anyone else must come from the
+        /// dispatcher discarding the distinction, not from having nothing
+        /// to discard.
+        #[tokio::test]
+        async fn an_asset_the_caller_cannot_see_is_not_found_not_refused() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("mallory"),
+                ANALYTICS,
+                &args("warehouse.orders"),
+            )
+            .await;
+
+            assert_eq!(outcome, Outcome::NotFound);
+        }
+
+        #[tokio::test]
+        async fn an_unauthenticated_caller_learns_nothing() {
+            let source = Fixture::working();
+
+            let outcome = call(&source, None, ANALYTICS, &args("warehouse.orders")).await;
+
+            assert_eq!(outcome, Outcome::Unauthenticated);
+        }
+
+        #[tokio::test]
+        async fn a_call_with_no_asset_is_a_bad_request() {
+            let source = Fixture::working();
+
+            let outcome = call(&source, Some("alice"), ANALYTICS, &serde_json::json!({})).await;
+
+            assert!(matches!(outcome, Outcome::BadRequest(_)), "{outcome:?}");
+        }
+
+        /// **`edgeTypes` and `orphans` shrink before a node is dropped** —
+        /// the same "related lists before entities" ordering `traverse`'s
+        /// own budget test proves, measured off this fixture's own answer
+        /// rather than a hand-picked number.
+        #[tokio::test]
+        async fn an_analytics_answer_over_budget_loses_edge_types_and_orphans_before_nodes() {
+            let source = Fixture::working();
+            let max_tokens = {
+                let probe = AnalyticsContext {
+                    nodes: vec![
+                        NodeAnalytics {
+                            id: "warehouse.orders".to_string(),
+                            in_degree: 0.0,
+                            out_degree: 1.0,
+                        },
+                        NodeAnalytics {
+                            id: "warehouse.customers".to_string(),
+                            in_degree: 1.0,
+                            out_degree: 0.0,
+                        },
+                        NodeAnalytics {
+                            id: "warehouse.staging_orders".to_string(),
+                            in_degree: 0.0,
+                            out_degree: 0.0,
+                        },
+                    ],
+                    orphans: Vec::new(),
+                    edge_types: Vec::new(),
+                    truncated: false,
+                    truncation_reason: None,
+                };
+                budget::estimate_tokens(&probe.render())
+            };
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                ANALYTICS,
+                &args("warehouse.orders"),
+                budget::TokenBudget { max_tokens },
+            )
+            .await;
+
+            let Outcome::Analyzed(context) = outcome else {
+                panic!("expected Analyzed, got {outcome:?}");
+            };
+            assert_eq!(context.nodes.len(), 3, "every node survives: {context:?}");
+            assert!(context.edge_types.is_empty(), "{context:?}");
+            assert!(context.orphans.is_empty(), "{context:?}");
+            assert_eq!(
+                context.truncation_reason,
+                Some(budget::TruncationReason::RelationsShortened)
+            );
+        }
+
+        /// And once `edgeTypes`/`orphans` are both gone, a budget still too
+        /// small drops nodes too — the last-resort rung, reached here
+        /// through `analytics` specifically.
+        #[tokio::test]
+        async fn an_analytics_budget_too_small_for_relations_alone_drops_nodes_too() {
+            let source = Fixture::working();
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                ANALYTICS,
+                &args("warehouse.orders"),
+                budget::TokenBudget { max_tokens: 0 },
+            )
+            .await;
+
+            let Outcome::Analyzed(context) = outcome else {
+                panic!("expected Analyzed, got {outcome:?}");
+            };
+            assert!(context.nodes.len() < 3, "{context:?}");
+            assert!(context.truncated, "{context:?}");
+            assert_eq!(
+                context.truncation_reason,
+                Some(budget::TruncationReason::EntitiesDropped)
+            );
+        }
+
+        /// **`shorten_detail` is called directly, not through
+        /// `budget::fit`** — the same reason
+        /// `TraversalContext::shorten_detail_never_claims_progress` calls
+        /// it directly: `AnalyticsContext` has no prose to shorten, so the
+        /// method is a permanent `false`, and `fit`'s own shrink-check
+        /// absorbs a mutant that flips it to `true` (nothing changes
+        /// either way, so the ladder's next rung runs identically in both
+        /// cases). Unobservable through the dispatcher by construction,
+        /// not a gap in the dispatcher tests above.
+        #[test]
+        fn shorten_detail_never_claims_progress() {
+            let mut context = AnalyticsContext {
+                nodes: vec![NodeAnalytics {
+                    id: "a".to_string(),
+                    in_degree: 0.0,
+                    out_degree: 0.0,
+                }],
+                orphans: Vec::new(),
+                edge_types: Vec::new(),
+                truncated: false,
+                truncation_reason: None,
+            };
+
+            assert!(!context.shorten_detail());
+        }
+
+        /// **Dropping a node removes its own orphan flag too** — a
+        /// truncated answer must never name an orphan the agent was given
+        /// no degree for, the same dangling-reference invariant
+        /// `TraversalContext::drop_entities` enforces for edges.
+        #[test]
+        fn dropping_the_orphan_node_removes_it_from_the_orphan_list_too() {
+            let mut context = AnalyticsContext {
+                nodes: vec![
+                    NodeAnalytics {
+                        id: "warehouse.orders".to_string(),
+                        in_degree: 0.0,
+                        out_degree: 1.0,
+                    },
+                    NodeAnalytics {
+                        id: "warehouse.staging_orders".to_string(),
+                        in_degree: 0.0,
+                        out_degree: 0.0,
+                    },
+                ],
+                orphans: vec!["warehouse.staging_orders".to_string()],
+                edge_types: Vec::new(),
+                truncated: false,
+                truncation_reason: None,
+            };
+
+            assert!(context.drop_entities());
+
+            assert_eq!(context.nodes.len(), 1, "{context:?}");
+            assert!(
+                context.orphans.is_empty(),
+                "the dropped node's own orphan flag must not survive it: {context:?}"
+            );
         }
     }
 

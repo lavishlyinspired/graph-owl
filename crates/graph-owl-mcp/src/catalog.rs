@@ -729,6 +729,77 @@ impl ContextSource for CatalogContext {
             Err(error) => Err(unavailable(&error)),
         }
     }
+
+    async fn analytics(
+        &self,
+        principal: &str,
+        fqn: &str,
+        direction: crate::Direction,
+        max_hops: u32,
+    ) -> Result<Option<crate::AnalyticsContext>, SourceError> {
+        let who = self.authenticated(principal)?;
+
+        let Some(asset) = self
+            .catalog
+            .get_asset_by_fqn(fqn)
+            .await
+            .map_err(|e| unavailable(&e))?
+        else {
+            return Ok(None);
+        };
+
+        // Same mapping `traverse` uses — see its own comment for why
+        // `Upstream`/`Downstream` name which edges the walk follows.
+        let mapped = match direction {
+            crate::Direction::Upstream => graph_owl_traversal::Direction::Incoming,
+            crate::Direction::Downstream => graph_owl_traversal::Direction::Outgoing,
+        };
+        let bounds = graph_owl_traversal::Bounds {
+            max_hops: max_hops as usize,
+            ..graph_owl_traversal::Bounds::default()
+        };
+
+        // `asset_analytics` checks the caller's visibility internally (via
+        // `asset_subgraph`, `00b` decision 7) — a `NotFound` from it covers
+        // "no such asset" **and** "not visible to this principal", matching
+        // `traverse`'s own posture.
+        let analytics = match self
+            .catalog
+            .asset_analytics(&who, asset.id, mapped, bounds)
+            .await
+        {
+            Ok(analytics) => analytics,
+            Err(CatalogError::NotFound) => return Ok(None),
+            Err(error) => return Err(unavailable(&error)),
+        };
+
+        Ok(Some(crate::AnalyticsContext {
+            nodes: analytics
+                .nodes
+                .iter()
+                .zip(analytics.in_degree.iter())
+                .zip(analytics.out_degree.iter())
+                .map(|((sid, &in_degree), &out_degree)| crate::NodeAnalytics {
+                    id: sid.id.clone(),
+                    in_degree,
+                    out_degree,
+                })
+                .collect(),
+            orphans: analytics.orphans.iter().map(|sid| sid.id.clone()).collect(),
+            // Full IRI when the namespace resolves to one, the bare id
+            // otherwise — never dropped, matching `EvidenceNode.iri`'s own
+            // "degrade, don't discard" posture for an unresolvable `Sid`.
+            edge_types: analytics
+                .edge_types
+                .iter()
+                .map(|sid| sid.to_iri().unwrap_or_else(|| sid.id.clone()))
+                .collect(),
+            truncated: analytics.truncated,
+            truncation_reason: analytics
+                .truncated
+                .then_some(budget::TruncationReason::DepthReached),
+        }))
+    }
 }
 
 impl CatalogContext {

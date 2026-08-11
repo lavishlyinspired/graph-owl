@@ -1385,6 +1385,38 @@ pub struct GraphContextNode {
     pub sources: Vec<String>,
 }
 
+/// Structural analytics over a bounded asset neighbourhood — Epic 105
+/// P10's `analytics()` tool (`plans/105o-analytics-tool.md`). See
+/// [`Catalog::asset_analytics`] for why this is scoped to a bounded walk
+/// rather than the whole graph, and why `PageRank` is not among the
+/// fields.
+///
+/// `nodes[i]` is `in_degree[i]`/`out_degree[i]`'s own subject — the same
+/// index alignment [`graph_owl_analytics::Degree::node`] already uses, so
+/// nothing here duplicates a `Sid` per measurement the way a `Vec<(Sid,
+/// f64)>` would.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssetAnalytics {
+    /// Every node the underlying walk reached, in projection order.
+    pub nodes: Vec<Sid>,
+    /// `nodes[i]`'s in-degree — how many edges point at it.
+    pub in_degree: Vec<f64>,
+    /// `nodes[i]`'s out-degree — how many edges it points from.
+    pub out_degree: Vec<f64>,
+    /// Nodes whose weakly-connected component, under `edge_types`, has
+    /// exactly one member — connected to nothing else in this
+    /// neighbourhood, the same reading [`graph_owl_analytics::Components::orphans`]
+    /// already gives.
+    pub orphans: Vec<Sid>,
+    /// Which predicates were counted as graph structure — every one whose
+    /// object was a reference among the walked nodes' own flakes, derived
+    /// rather than pack-specific.
+    pub edge_types: Vec<Sid>,
+    /// Whether the underlying walk hit its bounds before exhausting the
+    /// neighbourhood.
+    pub truncated: bool,
+}
+
 /// A single anchor-plus-period obligation, computed forward rather than
 /// only checked backward — Epic 105 P8's first real slice
 /// (`plans/105h-obligation-calendar.md`). Reuses `[findings.span]` rather
@@ -2407,6 +2439,122 @@ impl Catalog {
             )
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// Degree centrality, connected components and orphan detection over
+    /// the bounded neighbourhood [`asset_subgraph`] already walks — Epic
+    /// 105 P10's `analytics()` tool, the platform doc's remaining P9
+    /// primitive stated as "needed for traversal and analysis" rather than
+    /// left unbuilt.
+    ///
+    /// **Deliberately bounded, never whole-graph** — the `00e`/`38`
+    /// "purity boundary" decision: `graph-owl-analytics` computes over a
+    /// caller-supplied projection and never touches storage itself, and
+    /// Epic 38's own decision 2 forbids running it live over the whole
+    /// graph on a synchronous request. This method reuses the *same*
+    /// already-authorized, already-bounded walk `asset_subgraph` performs
+    /// — the projection this builds can never exceed that walk's own node
+    /// cap, so the question this answers is always "how connected is this
+    /// neighbourhood", never "how connected is the whole graph".
+    ///
+    /// **`PageRank` is deliberately not included.** Its meaning depends on
+    /// whole-graph scope — Epic 38's own decision 6 already has it "on
+    /// probation" pending a bake-off against usage signals that was never
+    /// run — and computing it over an arbitrary bounded neighbourhood
+    /// would produce a number shaped like `PageRank` without meaning what
+    /// `PageRank` means. Degree centrality and connected components do not
+    /// have that problem: both answer meaningful questions about a
+    /// neighbourhood on its own terms.
+    ///
+    /// **`edge_types` is derived, not asserted.** Every predicate whose
+    /// object is a reference (`FlakeValue::Ref`) among the walked nodes'
+    /// own flakes counts as graph structure — the same domain-neutral
+    /// reading `asset_subgraph`'s own unfiltered `EdgeFilter` already
+    /// uses, rather than a pack-specific relationship name hard-coded
+    /// here.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the asset does not exist or the caller may not see
+    /// it. `Storage` if no traversal or graph engine is configured, or the
+    /// projection's own node/edge budget — derived from `bounds.max_nodes`
+    /// itself, never invented — is exceeded, which cannot happen for an
+    /// in-bounds walk.
+    pub async fn asset_analytics(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        direction: Direction,
+        bounds: Bounds,
+    ) -> Result<AssetAnalytics, CatalogError> {
+        let subgraph = self
+            .asset_subgraph(principal, id, direction, bounds, None)
+            .await?;
+
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        // One bounded fetch per node, matching `node_sources`'s own
+        // established pattern — the node set is already capped at
+        // `bounds.max_nodes` by the walk above, so this fan-out is bounded
+        // by construction, not by hope.
+        let mut flakes = Vec::new();
+        for sid in &subgraph.nodes {
+            let node_flakes = graph
+                .query_pattern(&TriplePattern {
+                    s: Some(sid.clone()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            flakes.extend(node_flakes);
+        }
+
+        let edge_types: Vec<Sid> = flakes
+            .iter()
+            .filter(|f| f.op && matches!(f.o, FlakeValue::Ref(_)))
+            .map(|f| f.p.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        // The mathematical ceiling on directed edges among a node set this
+        // size — never invented, always derivable from the same
+        // `max_nodes` the walk itself already enforces, so an in-bounds
+        // walk can never be refused here.
+        let budget = graph_owl_analytics::AnalyticsBudget {
+            max_nodes: bounds.max_nodes,
+            max_edges: bounds.max_nodes.saturating_mul(bounds.max_nodes),
+            max_iterations: 1,
+        };
+        let projection =
+            graph_owl_analytics::project(&subgraph.nodes, &flakes, &edge_types, &budget)
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let in_degree =
+            graph_owl_analytics::degree_centrality(&projection, graph_owl_analytics::Direction::In);
+        let out_degree = graph_owl_analytics::degree_centrality(
+            &projection,
+            graph_owl_analytics::Direction::Out,
+        );
+        let components = graph_owl_analytics::connected_components(&projection);
+        let orphans: Vec<Sid> = components
+            .orphans()
+            .into_iter()
+            .map(|node_id| projection.nodes[node_id].clone())
+            .collect();
+
+        Ok(AssetAnalytics {
+            nodes: projection.nodes.clone(),
+            in_degree: in_degree.into_iter().map(|d| d.value).collect(),
+            out_degree: out_degree.into_iter().map(|d| d.value).collect(),
+            orphans,
+            edge_types,
+            truncated: subgraph.truncated,
+        })
     }
 
     /// The subgraph around a finding's own subject — Epic 105 P7, the
@@ -40034,6 +40182,230 @@ mod graph_context_tests {
                 .await
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod asset_analytics_tests {
+    //! `Catalog::asset_analytics` — Epic 105 P10's `analytics()` tool
+    //! (`plans/105o-analytics-tool.md`), computed over the same bounded,
+    //! already-authorized neighbourhood [`Catalog::asset_subgraph`] itself
+    //! walks. `RecordingGraph` resolves flakes through the real port
+    //! contract (`projection_isolation_tests`'s own doc comment), so the
+    //! degree/component counts below are proven against real projected
+    //! data — not a canned answer that could pass no matter what
+    //! `graph_owl_analytics::project` actually computed.
+
+    use async_trait::async_trait;
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+    use graph_owl_traversal::{
+        Direction, EdgeFilter, EdgeRef, Subgraph, TraversalEngine, TraversalError,
+    };
+
+    use super::projection_isolation_tests::RecordingGraph;
+    use super::*;
+
+    struct FakeTraversal {
+        answer: Subgraph,
+    }
+
+    #[async_trait]
+    impl TraversalEngine for FakeTraversal {
+        async fn neighbours(
+            &self,
+            _start: &Sid,
+            _direction: Direction,
+            _bounds: graph_owl_traversal::Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<graph_owl_traversal::TraversalResult, TraversalError> {
+            unreachable!("not exercised by these tests")
+        }
+
+        async fn subgraph(
+            &self,
+            _seeds: &[Sid],
+            _direction: Direction,
+            _bounds: graph_owl_traversal::Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<Subgraph, TraversalError> {
+            Ok(self.answer.clone())
+        }
+
+        async fn shortest_path(
+            &self,
+            _from: &Sid,
+            _to: &Sid,
+            _direction: Direction,
+            _bounds: graph_owl_traversal::Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<Option<graph_owl_traversal::Path>, TraversalError> {
+            unreachable!("not exercised by these tests")
+        }
+
+        async fn all_paths(
+            &self,
+            _from: &Sid,
+            _to: &Sid,
+            _direction: Direction,
+            _bounds: graph_owl_traversal::Bounds,
+            _max_paths: usize,
+            _filter: &EdgeFilter,
+        ) -> Result<graph_owl_traversal::PathSet, TraversalError> {
+            unreachable!("not exercised by these tests")
+        }
+
+        async fn detect_cycles(
+            &self,
+            _start: &Sid,
+            _bounds: graph_owl_traversal::Bounds,
+            _filter: &EdgeFilter,
+        ) -> Result<Vec<graph_owl_traversal::Cycle>, TraversalError> {
+            unreachable!("not exercised by these tests")
+        }
+    }
+
+    fn imported(source: &str) -> Sid {
+        Sid::dsc(format!("graph:import:{source}"))
+    }
+
+    fn asset_req(kind: AssetKind, name: &str) -> UpsertAsset {
+        UpsertAsset {
+            kind,
+            name: name.to_string(),
+            parent_id: None,
+            description: None,
+            properties: None,
+            extension: None,
+        }
+    }
+
+    /// A real asset row (so [`Catalog::get_asset_for`], called internally
+    /// by `asset_subgraph`, has something to authorize) paired with a
+    /// traversal double that answers with `answer` regardless of the seed
+    /// `asset_subgraph` derives from the asset's own id — matching
+    /// `graph_context_tests`'s own precedent that a canned `Subgraph`'s
+    /// nodes need not relate to the seed that requested them.
+    async fn seeded_catalog(answer: Subgraph, graph: Arc<RecordingGraph>) -> (Catalog, Uuid) {
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_traversal(Arc::new(FakeTraversal { answer }))
+        .with_graph(graph);
+
+        let asset = catalog
+            .upsert_asset(&Principal::system(), asset_req(AssetKind::Service, "svc"))
+            .await
+            .expect("seed asset");
+        (catalog, asset.id)
+    }
+
+    #[tokio::test]
+    async fn degree_and_components_reflect_the_walked_neighbourhood_s_real_edges() {
+        let root = Sid::dsc("asset-central");
+        let neighbour = Sid::dsc("asset-neighbour");
+        let orphan = Sid::dsc("asset-orphan");
+        let depends_on = Sid::new(namespace::DSC, "dependsOn");
+
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&[
+                Flake {
+                    s: root.clone(),
+                    p: depends_on.clone(),
+                    o: FlakeValue::Ref(neighbour.clone()),
+                    cx: Some(imported("erp")),
+                    t: 1,
+                    op: true,
+                },
+                Flake {
+                    s: orphan.clone(),
+                    p: Sid::new(namespace::RDFS, "label"),
+                    o: FlakeValue::String("Orphan Asset".to_string()),
+                    cx: Some(imported("erp")),
+                    t: 1,
+                    op: true,
+                },
+                // Not one of the three walked nodes. Proves the per-node
+                // fetch is scoped by `s` rather than a blanket scan: an
+                // unscoped query would pull this edge in on every
+                // iteration and leak two nodes outside the authorized
+                // walk into the projection.
+                Flake {
+                    s: Sid::dsc("asset-outsider"),
+                    p: Sid::new(namespace::DSC, "mentions"),
+                    o: FlakeValue::Ref(Sid::dsc("asset-elsewhere")),
+                    cx: Some(imported("erp")),
+                    t: 1,
+                    op: true,
+                },
+            ])
+            .await
+            .expect("seed");
+
+        let answer = Subgraph {
+            nodes: vec![root.clone(), neighbour.clone(), orphan.clone()],
+            edges: vec![EdgeRef {
+                from: root.clone(),
+                to: neighbour.clone(),
+                relationship: "dependsOn".to_string(),
+                derived: false,
+            }],
+            truncated: false,
+            truncation_reason: None,
+        };
+        let (catalog, asset_id) = seeded_catalog(answer, graph).await;
+
+        let analytics = catalog
+            .asset_analytics(
+                &Principal::system(),
+                asset_id,
+                Direction::Both,
+                graph_owl_traversal::Bounds::default(),
+            )
+            .await
+            .expect("ok");
+
+        assert_eq!(
+            analytics.nodes,
+            vec![root.clone(), neighbour.clone(), orphan.clone()],
+            "sorted-Sid projection order: {analytics:?}"
+        );
+        assert_eq!(analytics.in_degree, vec![0.0, 1.0, 0.0], "{analytics:?}");
+        assert_eq!(analytics.out_degree, vec![1.0, 0.0, 0.0], "{analytics:?}");
+        assert_eq!(
+            analytics.orphans,
+            vec![orphan.clone()],
+            "root and neighbour share a component; orphan does not: {analytics:?}"
+        );
+        assert_eq!(analytics.edge_types, vec![depends_on], "{analytics:?}");
+        assert!(!analytics.truncated, "{analytics:?}");
+    }
+
+    #[tokio::test]
+    async fn refuses_an_asset_that_does_not_exist() {
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_traversal(Arc::new(FakeTraversal {
+            answer: Subgraph {
+                nodes: vec![],
+                edges: vec![],
+                truncated: false,
+                truncation_reason: None,
+            },
+        }))
+        .with_graph(RecordingGraph::working());
+
+        let result = catalog
+            .asset_analytics(
+                &Principal::system(),
+                Uuid::new_v4(),
+                Direction::Both,
+                graph_owl_traversal::Bounds::default(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(CatalogError::NotFound)), "{result:?}");
     }
 }
 

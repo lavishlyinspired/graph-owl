@@ -28,6 +28,11 @@ graph-owl-resolution = { path = "../graph-owl-resolution", version = "0.1.0" }
 graph-owl-rdf-io = { path = "../graph-owl-rdf-io", version = "0.1.0" }
 graph-owl-lpg-io = { path = "../graph-owl-lpg-io", version = "0.1.0" }
 graph-owl-search = { path = "../graph-owl-search", version = "0.1.0" }
+# Epic 105 P10: the `analytics()` MCP tool assembles this pure, zero-I/O
+# crate's algorithms (Epic 38) over a bounded, already-authorized
+# neighbourhood — the "purity boundary" `00e` documents (a caller with I/O
+# builds the projection, this crate only computes over it).
+graph-owl-analytics = { path = "../graph-owl-analytics", version = "0.1.0" }
 spareval = "0.2"
 spargebra = "0.4"
 sparesults = "0.3"

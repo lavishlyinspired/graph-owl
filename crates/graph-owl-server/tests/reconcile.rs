@@ -237,7 +237,10 @@ async fn reconcile_admits_an_admin_and_refuses_a_non_admin_through_the_real_adap
     let refused = graph_owl_mcp::ContextSource::reconcile(&contractor_reads, &contractor.id, "gst")
         .await
         .expect("no source error");
-    assert!(refused.is_none(), "a non-admin must be refused: {refused:?}");
+    assert!(
+        refused.is_none(),
+        "a non-admin must be refused: {refused:?}"
+    );
 }
 
 /// A second run over the same unmatched invoice must not double the queue —
