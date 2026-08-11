@@ -11,7 +11,8 @@
 use async_trait::async_trait;
 use graph_owl_core::flake::namespace;
 use graph_owl_engine::{
-    NamespaceDef, NamespaceRegistry, PredicateDef, PredicateRegistry, RegistryError,
+    EvidenceBinding, FindingRuleDef, FindingRuleRegistry, NamespaceDef, NamespaceRegistry,
+    PredicateDef, PredicateRegistry, RegistryError,
 };
 use sqlx::Row;
 
@@ -217,5 +218,73 @@ impl NamespaceRegistry for PostgresTripleStore {
                     namespace::NOT_FOUND
                 ))
             })
+    }
+}
+
+fn finding_rule_from_row(row: &sqlx::postgres::PgRow) -> Result<FindingRuleDef, RegistryError> {
+    let evidence: serde_json::Value = row.get("evidence");
+    let evidence: Vec<EvidenceBinding> = serde_json::from_value(evidence).map_err(|e| {
+        RegistryError::Backend(format!("stored evidence is not the expected shape: {e}"))
+    })?;
+    Ok(FindingRuleDef {
+        pack: row.get("pack"),
+        label: row.get("label"),
+        summary: row.get("summary"),
+        governed_by: row.get("governed_by"),
+        query: row.get("query"),
+        subject_var: row.get("subject_var"),
+        evidence,
+        similarity: row.get("similarity"),
+        span: row.get("span"),
+    })
+}
+
+#[async_trait]
+impl FindingRuleRegistry for PostgresTripleStore {
+    async fn declare(&self, rule: &FindingRuleDef) -> Result<(), RegistryError> {
+        let evidence = serde_json::to_value(&rule.evidence).map_err(|e| {
+            RegistryError::Backend(format!("evidence could not be serialized: {e}"))
+        })?;
+
+        sqlx::query(
+            "INSERT INTO finding_rules
+                (pack, label, summary, governed_by, query, subject_var, evidence, similarity, span)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (pack, label) DO UPDATE SET
+                summary     = EXCLUDED.summary,
+                governed_by = EXCLUDED.governed_by,
+                query       = EXCLUDED.query,
+                subject_var = EXCLUDED.subject_var,
+                evidence    = EXCLUDED.evidence,
+                similarity  = EXCLUDED.similarity,
+                span        = EXCLUDED.span",
+        )
+        .bind(&rule.pack)
+        .bind(&rule.label)
+        .bind(&rule.summary)
+        .bind(&rule.governed_by)
+        .bind(&rule.query)
+        .bind(&rule.subject_var)
+        .bind(evidence)
+        .bind(&rule.similarity)
+        .bind(&rule.span)
+        .execute(self.pool())
+        .await
+        .map_err(|e| RegistryError::Backend(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn for_pack(&self, pack: &str) -> Result<Vec<FindingRuleDef>, RegistryError> {
+        let rows = sqlx::query(
+            "SELECT pack, label, summary, governed_by, query, subject_var, evidence, similarity, span
+             FROM finding_rules WHERE pack = $1 ORDER BY label",
+        )
+        .bind(pack)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| RegistryError::Backend(e.to_string()))?;
+
+        rows.iter().map(finding_rule_from_row).collect()
     }
 }

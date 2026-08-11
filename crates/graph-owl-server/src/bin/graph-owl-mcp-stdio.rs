@@ -58,7 +58,8 @@ async fn main() {
         .with_graph(graph.clone())
         .with_traversal(graph.clone())
         .with_namespaces(graph.clone())
-        .with_predicates(graph);
+        .with_predicates(graph.clone())
+        .with_finding_rules(graph);
 
     // **Explicit, resolved once, and closed by default.** Unlike HTTP's
     // per-request `Auth` extractor, stdio has no header to carry a

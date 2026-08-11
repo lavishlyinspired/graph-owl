@@ -392,6 +392,77 @@ pub trait NamespaceRegistry: Send + Sync {
     async fn next_code(&self) -> Result<u16, RegistryError>;
 }
 
+/// One evidence binding a finding rule extracts from its query — Epic 105
+/// P5b (`plans/105b-native-reconcile-engine.md`).
+///
+/// `predicate` is written out rather than inferred from `var`, because a
+/// SPARQL variable is named for whoever reads the query and a predicate is
+/// named by the ontology — a runtime that guessed would file evidence citing
+/// a predicate that does not exist.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceBinding {
+    pub predicate: String,
+    pub var: String,
+}
+
+/// A pack's `[[findings]]` rule, registered so the native reconcile engine
+/// can evaluate it without parsing a pack manifest itself — the same posture
+/// [`NamespaceRegistry`] and [`PredicateRegistry`] already take toward pack
+/// configuration.
+///
+/// **`query` carries the SPARQL text, not a file path.** The pack loader
+/// reads `packs/<id>/queries/<name>.sparql` at install time and inlines it
+/// here; this registry, like its two siblings, never touches the filesystem
+/// or a manifest.
+///
+/// **`similarity` and `span` stay opaque JSON rather than typed fields.**
+/// They are pack-authored configuration, evaluated only at reconcile time by
+/// `graph_owl_resolution::rule_match`, which is where their real shape
+/// belongs — typing them a second time here would be a second definition
+/// that could drift from the one that actually runs it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingRuleDef {
+    pub pack: String,
+    pub label: String,
+    pub summary: String,
+    pub governed_by: String,
+    pub query: String,
+    pub subject_var: String,
+    pub evidence: Vec<EvidenceBinding>,
+    pub similarity: Option<serde_json::Value>,
+    pub span: Option<serde_json::Value>,
+}
+
+/// Finding rules definable at runtime, so a pack's reconciliation logic
+/// lives as registered configuration rather than a manifest the engine has
+/// to parse.
+///
+/// **Upsert on `(pack, label)`, not idempotent-or-reject like
+/// [`NamespaceRegistry`]/[`PredicateRegistry`].** A finding rule carries no
+/// stored artifact that a changed query would invalidate — unlike a
+/// namespace code or a predicate's value type, nothing else in the graph is
+/// keyed to a rule's current text. So reloading a pack whose author edited a
+/// query is a normal update, not a conflict.
+#[async_trait]
+pub trait FindingRuleRegistry: Send + Sync {
+    /// Register a rule, replacing any existing rule with the same
+    /// `(pack, label)`.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Backend`] if the write fails.
+    async fn declare(&self, rule: &FindingRuleDef) -> Result<(), RegistryError>;
+
+    /// Every rule registered for one pack, for a reconcile run to evaluate.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Backend`] if the query fails.
+    async fn for_pack(&self, pack: &str) -> Result<Vec<FindingRuleDef>, RegistryError>;
+}
+
 /// Rejects a flake whose subject, predicate, graph or reference object carries
 /// a namespace that was never set.
 ///

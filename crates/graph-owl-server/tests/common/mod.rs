@@ -260,7 +260,8 @@ async fn build_catalog(secret: Option<&str>) -> (TestDb, String, Catalog) {
         .with_graph(graph.clone())
         .with_traversal(graph.clone())
         .with_namespaces(graph.clone())
-        .with_predicates(graph);
+        .with_predicates(graph.clone())
+        .with_finding_rules(graph);
 
     (database, connection_string, catalog)
 }

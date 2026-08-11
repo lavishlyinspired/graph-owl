@@ -48,27 +48,27 @@ Python pack loader (unchanged 3-phase order, +1 phase)
 
 ## Slices
 
-### Slice A — pure comparison primitives (`graph-owl-resolution::rule_match`)
+### Slice A — pure comparison primitives (`graph-owl-resolution::rule_match`) — ✅ done, committed `f5ed990`
 
-- [ ] RED: `ngram_similarity("exact", a, a) == 1.0`; two values differing by one transposed pair score identically to `reconcile.py`'s own fixture numbers (0.619 / 0.065 from `pack.toml`'s own comment) — pinning the port to the same manifest thresholds already tuned against real data
-- [ ] RED: `at_least`/`at_most` band is inclusive at both ends; unknown strategy is a named error, never a silent 0.0
-- [ ] RED: `passes_span` — exact two-event case (`end - start > exceeds_days`, strictly greater, 180-day boundary itself does not fire); `when_missing: "elapsed"` measures from `as_of` when given, else "today" — but "today" cannot be asserted equal in a test, so assert only that an explicit `as_of` is used when present and that the function requires one or the other explicitly documented; `when_missing: "finding"` always passes; default `when_missing` (absent) does not fire
-- [ ] RED: malformed ISO-8601 date is a named error, never treated as "no second event"
-- [ ] Implement `ngram_similarity`, `passes_span_days`, error type
-- [ ] MUTATE — `--file`, since this is a new file; expect boundary mutants on `>=`/`<=` and `>` in the day comparison, the padding length, and the `when_missing` match arms
-- [ ] KILL MUTANTS
+- [x] RED: `ngram_similarity("exact", a, a) == 1.0`; two values differing by one transposed pair score identically to `reconcile.py`'s own fixture numbers (0.619 confirmed exactly against the pack's real GSTINs) — pinning the port to the same manifest thresholds already tuned against real data
+- [x] RED: `at_least`/`at_most` band is inclusive at both ends; unknown strategy is a named error, never a silent 0.0
+- [x] RED: `passes_span` — exact two-event case, strictly greater, 180-day boundary does not fire; `when_missing: elapsed`/`finding`/`ignore` all covered
+- [x] RED: malformed ISO-8601 date is a named error, never treated as "no second event"
+- [x] Implement `similarity`, `passes_similarity`, `passes_span`, `RuleMatchError`
+- [x] MUTATE — `--file`; 46/46 mutants (38 caught, 7 unviable, 0 missed) after one fix round
+- [x] KILL MUTANTS — Display-renders-nothing, and two off-by-one guards (n=1 boundary, ngrams underflow guard)
 
-### Slice B — finding-rule registry (mirrors DN-1's namespace registry exactly)
+### Slice B — finding-rule registry (mirrors DN-1's namespace registry exactly) — ✅ done, uncommitted
 
-- [ ] RED (port, in-memory double first): declaring a rule for a pack that has none returns it in `finding_rules(pack)`; re-declaring an identical rule is idempotent; a rule naming an unknown pack is not itself validated (packs are Python's concern, not this registry's)
-- [ ] `FindingRuleRegistry` port trait in `graph-owl-engine` (`declare`, `for_pack`) — mirrors `NamespaceRegistry` shape exactly
-- [ ] Migration `V61__finding_rules.sql`: `(pack, label)` unique, columns for `summary`, `governed_by`, `subject_var`, `query_text`, `evidence` (jsonb), `similarity` (nullable jsonb), `span` (nullable jsonb)
-- [ ] Postgres adapter implementing the port
-- [ ] `Catalog::declare_finding_rule` / `Catalog::finding_rules(pack)` — third optional field on `Catalog`, the same precedent `namespaces`/`traversal` already set
-- [ ] `POST /packs/{id}/finding-rules` (admin) + `GET /packs/{id}/finding-rules` (admin — these are rule definitions, not data; same sensitivity tier as `POST /predicates`)
-- [ ] Wired into all three composition roots (`main.rs`, stdio binary, test harness) — the P0b lesson: an unwired registry 500s with a message saying so, never silently `None`
-- [ ] Integration tests against real Postgres (idempotent re-declare on reload; a rule persists across a fresh resolver build, i.e. survives what DN-3's finding 2 called "a restart would silently un-resolve every pack")
-- [ ] Contract regenerated; mutation run on the port logic
+- [x] RED (Catalog level, in-memory `FakeFindingRuleRegistry` double): declaring a rule for a pack that has none returns it in `finding_rules(pack)`; a rule is scoped to its own pack; redeclaring the same `(pack, label)` replaces rather than duplicates; a catalog with no registry configured says so
+- [x] `FindingRuleRegistry` port trait in `graph-owl-engine` (`declare`, `for_pack`) — mirrors `NamespaceRegistry` shape; `FindingRuleDef`/`EvidenceBinding` types, `similarity`/`span` kept as opaque `serde_json::Value` (typed only where `graph_owl_resolution::rule_match` actually evaluates them)
+- [x] Migration `V15__finding_rules.sql` (in `graph-owl-engine-postgres`, not V61 — that number was `graph-owl-storage-postgres`'s own separate sequence): `(pack, label)` primary key, `evidence`/`similarity`/`span` as jsonb
+- [x] Postgres adapter (`crates/graph-owl-engine-postgres/src/registry.rs`) — **upsert on conflict, deliberately not idempotent-or-reject**: unlike a namespace code or predicate value-type, a rule's query text has nothing stored against it that a change would invalidate, so redeclaring must replace
+- [x] `Catalog::declare_finding_rule` / `Catalog::finding_rules(pack)` — sixth optional field on `Catalog`, same precedent `namespaces`/`predicates` already set
+- [x] Wired into all three composition roots (`main.rs`, `bin/graph-owl-mcp-stdio.rs`, `tests/common/mod.rs`)
+- [x] 6 integration tests against real Postgres: read-back, per-pack scoping, upsert-replaces (not duplicates), empty pack, similarity/span JSON round-trip, `None` bands stay `None` not JSON `null`
+- [ ] `POST /packs/{id}/finding-rules` (admin) HTTP route + OpenAPI contract regen — **deferred to Slice C**, since the route is only needed once the Python loader (Slice D) has something to call; the registry itself is fully usable via `Catalog` today
+- [ ] Mutation run on the adapter/orchestration logic — pending, done together with Slice C's orchestration
 
 ### Slice C — `POST /packs/{id}/reconcile`
 

@@ -1218,6 +1218,14 @@ pub struct Catalog {
     /// vocabulary itself, and a pack needs both before it can assert a
     /// single fact.
     predicates: Option<Arc<dyn graph_owl_engine::PredicateRegistry>>,
+    /// The same backend seen through its finding-rule registry — Epic 105
+    /// P5b (`plans/105b-native-reconcile-engine.md`).
+    ///
+    /// A sixth optional field for the same reason `namespaces` and
+    /// `predicates` are: registering a pack's reconciliation rules is a
+    /// separate contract from declaring its vocabulary, and a deployment
+    /// that installs no pack never populates it.
+    finding_rules: Option<Arc<dyn graph_owl_engine::FindingRuleRegistry>>,
     /// Whether ingested query text is persisted — Epic 28 decision 2.
     ///
     /// **Off by default, and that is a data-protection decision rather than a
@@ -1338,6 +1346,7 @@ impl Catalog {
             namespaces: None,
             findings: None,
             predicates: None,
+            finding_rules: None,
             events: None,
             decisions: Arc::new(DecisionCache::default()),
             shape_cache: Arc::new(Mutex::new(None)),
@@ -1605,6 +1614,17 @@ impl Catalog {
         self
     }
 
+    /// The registry a domain pack's `[[findings]]` rules are declared
+    /// through — Epic 105 P5b.
+    #[must_use]
+    pub fn with_finding_rules(
+        mut self,
+        finding_rules: Arc<dyn graph_owl_engine::FindingRuleRegistry>,
+    ) -> Self {
+        self.finding_rules = Some(finding_rules);
+        self
+    }
+
     /// Declare a vocabulary IRI, returning the code it resolves to.
     ///
     /// **The caller names an IRI, never a code**, and that is the decision
@@ -1781,6 +1801,56 @@ impl Catalog {
         })?;
         registry
             .namespaces()
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// Register a pack's `[[findings]]` rule — Epic 105 P5b
+    /// (`plans/105b-native-reconcile-engine.md`).
+    ///
+    /// **Upsert, not idempotent-or-reject.** Unlike a namespace code or a
+    /// predicate's value type, nothing else in the graph is keyed to a
+    /// rule's current query text — so redeclaring `(pack, label)` with an
+    /// edited query is a normal reload, not a conflict the caller must
+    /// resolve.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no finding-rule registry is configured, or the write
+    /// fails.
+    pub async fn declare_finding_rule(
+        &self,
+        rule: &graph_owl_engine::FindingRuleDef,
+    ) -> Result<(), CatalogError> {
+        let registry = self.finding_rules.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no finding-rule registry configured".to_string(),
+            ))
+        })?;
+        registry
+            .declare(rule)
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// Every finding rule registered for one pack, for a reconcile run to
+    /// evaluate — Epic 105 P5b.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no finding-rule registry is configured or the query
+    /// fails.
+    pub async fn finding_rules(
+        &self,
+        pack: &str,
+    ) -> Result<Vec<graph_owl_engine::FindingRuleDef>, CatalogError> {
+        let registry = self.finding_rules.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no finding-rule registry configured".to_string(),
+            ))
+        })?;
+        registry
+            .for_pack(pack)
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
     }
@@ -37559,6 +37629,145 @@ mod namespace_declaration_tests {
 
         assert!(catalog.namespaces().await.is_err());
         assert!(catalog.declare_namespace(HOSP, "pack").await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod finding_rule_declaration_tests {
+    //! `Catalog::declare_finding_rule`/`Catalog::finding_rules` — Epic 105
+    //! P5b (`plans/105b-native-reconcile-engine.md`).
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use graph_owl_engine::{EvidenceBinding, FindingRuleDef, FindingRuleRegistry, RegistryError};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct FakeFindingRuleRegistry {
+        declared: Mutex<Vec<FindingRuleDef>>,
+    }
+
+    #[async_trait]
+    impl FindingRuleRegistry for FakeFindingRuleRegistry {
+        async fn declare(&self, rule: &FindingRuleDef) -> Result<(), RegistryError> {
+            let mut declared = self.declared.lock().expect("not poisoned");
+            declared
+                .retain(|existing| !(existing.pack == rule.pack && existing.label == rule.label));
+            declared.push(rule.clone());
+            Ok(())
+        }
+
+        async fn for_pack(&self, pack: &str) -> Result<Vec<FindingRuleDef>, RegistryError> {
+            Ok(self
+                .declared
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .filter(|r| r.pack == pack)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn catalog_with(registry: Arc<FakeFindingRuleRegistry>) -> Catalog {
+        Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_finding_rules(registry)
+    }
+
+    fn rule(pack: &str, label: &str, query: &str) -> FindingRuleDef {
+        FindingRuleDef {
+            pack: pack.to_string(),
+            label: label.to_string(),
+            summary: "a test rule".to_string(),
+            governed_by: "gst:Section16-2-aa".to_string(),
+            query: query.to_string(),
+            subject_var: "invoice".to_string(),
+            evidence: vec![EvidenceBinding {
+                predicate: "gst:invoiceNumber".to_string(),
+                var: "number".to_string(),
+            }],
+            similarity: None,
+            span: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_declared_rule_is_returned_for_its_own_pack() {
+        let catalog = catalog_with(Arc::new(FakeFindingRuleRegistry::default()));
+
+        catalog
+            .declare_finding_rule(&rule("gst", "gst:PotentialMismatch", "SELECT ?invoice {}"))
+            .await
+            .expect("declaring a fresh rule succeeds");
+
+        let rules = catalog.finding_rules("gst").await.expect("list");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].label, "gst:PotentialMismatch");
+    }
+
+    #[tokio::test]
+    async fn a_rule_is_scoped_to_its_own_pack() {
+        let registry = Arc::new(FakeFindingRuleRegistry::default());
+        let catalog = catalog_with(registry);
+
+        catalog
+            .declare_finding_rule(&rule("gst", "gst:PotentialMismatch", "SELECT ?invoice {}"))
+            .await
+            .expect("declare gst rule");
+        catalog
+            .declare_finding_rule(&rule("hospitality", "hosp:DuplicateGuest", "SELECT ?g {}"))
+            .await
+            .expect("declare hospitality rule");
+
+        let gst_rules = catalog.finding_rules("gst").await.expect("list");
+        assert_eq!(gst_rules.len(), 1);
+        assert_eq!(gst_rules[0].pack, "gst");
+    }
+
+    #[tokio::test]
+    async fn redeclaring_the_same_label_replaces_it_rather_than_duplicating() {
+        // Upsert, not idempotent-or-reject: a finding rule carries no stored
+        // artifact a changed query would invalidate, unlike a namespace code
+        // or a predicate's value type, so reloading a pack whose author
+        // edited a rule must update it in place.
+        let registry = Arc::new(FakeFindingRuleRegistry::default());
+        let catalog = catalog_with(registry);
+
+        catalog
+            .declare_finding_rule(&rule("gst", "gst:PotentialMismatch", "SELECT ?invoice {}"))
+            .await
+            .expect("first declare");
+        catalog
+            .declare_finding_rule(&rule(
+                "gst",
+                "gst:PotentialMismatch",
+                "SELECT ?invoice { ?invoice a gst:PurchaseInvoice }",
+            ))
+            .await
+            .expect("redeclare with an edited query");
+
+        let rules = catalog.finding_rules("gst").await.expect("list");
+        assert_eq!(rules.len(), 1, "redeclaring must replace, not duplicate");
+        assert!(rules[0].query.contains("PurchaseInvoice"));
+    }
+
+    #[tokio::test]
+    async fn a_catalog_with_no_registry_says_so_rather_than_pretending() {
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ));
+
+        assert!(catalog.finding_rules("gst").await.is_err());
+        assert!(
+            catalog
+                .declare_finding_rule(&rule("gst", "gst:PotentialMismatch", "SELECT ?invoice {}"))
+                .await
+                .is_err()
+        );
     }
 }
 

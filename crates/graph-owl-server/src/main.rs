@@ -119,7 +119,8 @@ async fn main() {
         .with_findings(findings)
         .with_traversal(graph.clone())
         .with_namespaces(graph.clone())
-        .with_predicates(graph)
+        .with_predicates(graph.clone())
+        .with_finding_rules(graph)
         .with_federation_endpoints(federation_endpoints)
         .with_federation_timeout(federation_timeout)
         // Enqueues a delivery row per matching subscription; the sender
