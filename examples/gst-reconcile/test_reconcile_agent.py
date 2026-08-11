@@ -107,6 +107,63 @@ def test_the_clean_invoice_appears_in_no_answer_at_all() -> None:
     assert not any("INV-1001" in s for s in every)
 
 
+def test_question_6_answers_the_clean_invoice_with_no_finding_of_any_kind() -> None:
+    """Key: 'Yes — matched, credit available, not reverse-charge, paid in 20
+    days. No finding of any kind.' A system biased toward finding problems
+    would invent one; the correct structured answer names nothing."""
+    assert subjects(6) == []
+
+
+def test_question_7_answers_the_within_cap_delta_as_no_finding() -> None:
+    """Key: 'No. The invoice is dated July 2020, when Rule 36(4) allowed a
+    10% provisional cap.' INV-2001's 5% delta must not appear as an
+    AmountMismatch — the identical delta on a 2026 invoice *is* a finding,
+    so this is the load-bearing negative the cap resolution exists for."""
+    assert subjects(7) == []
+
+
+def test_question_8_names_only_the_invoice_over_its_own_periods_cap() -> None:
+    """Key: same rule, same period, different magnitude — INV-2002's 20%
+    delta is a finding against the 10% cap; INV-2001's 5% is not, even
+    though the question asks about both."""
+    assert subjects(8) == ["pr-INV-2002"]
+
+
+def test_question_9_answers_that_a_perfect_match_still_has_no_credit() -> None:
+    """Key: 'No. Matching is necessary, not sufficient.' Same finding as
+    question 3, reached by asking about the invoice directly rather than
+    the class of invoices — the two must agree, or the routing table is
+    quietly encoding two different answers for one finding."""
+    assert subjects(9) == subjects(3) == ["pr-INV-1005"]
+
+
+def test_question_10_answers_that_the_unpaid_invoice_is_not_yet_a_problem() -> None:
+    """Key: 'No payment event exists for it — and it is not a problem: the
+    invoice is six days old and the 180 days have not elapsed.' Absence of
+    a PaymentOverdue finding is the correct answer, not absence of data."""
+    assert subjects(10) == []
+
+
+def test_question_11_surfaces_the_unresolved_transposition_rather_than_choosing() -> None:
+    """Key: 'Unresolved, deliberately... the pack surfaces the pair rather
+    than choosing.' An answer that silently picked one GSTIN would have
+    performed the merge the matching policy forbids."""
+    assert subjects(11) == ["pr-INV-1004"]
+
+
+def test_a_subject_with_no_recognisable_invoice_number_is_refused() -> None:
+    """A candidate-scoped question (7-10) filters findings by invoice
+    number extracted from the subject's local name. A subject this cannot
+    place must not silently fall out of every candidate filter, which
+    would read as 'not a finding' for the wrong reason."""
+    malformed = [
+        {"label": "gst:AmountMismatch", "subject": "https://graph-owl.dev/packs/gst#pr-not-an-invoice",
+         "governedBy": "gst:Rule36-4", "evidence": []},
+    ]
+    with pytest.raises(AgentError, match="invoice number"):
+        answer(7, malformed)
+
+
 def test_a_question_outside_the_covered_set_fails_rather_than_answering_nothing() -> None:
     """An empty answer scores as "found nothing", which is a *wrong* answer
     rather than an absent one — and would quietly inflate a recall score."""

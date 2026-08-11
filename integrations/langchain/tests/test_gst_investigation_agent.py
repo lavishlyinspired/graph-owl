@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -28,7 +29,13 @@ from graph_owl_langchain.tools import GraphOwlToolkit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
 
-from gst_investigation_agent import SYSTEM_PROMPT, investigate  # noqa: E402
+from gst_investigation_agent import (  # noqa: E402
+    SCORED_QUESTIONS,
+    SYSTEM_PROMPT,
+    AgentError,
+    investigate,
+    score_investigation,
+)
 
 SECRET = "sk-super-secret-token-value"
 
@@ -220,6 +227,64 @@ def test_the_agent_names_only_the_invoice_still_inside_its_window():
     assert json.loads(tool_messages[0].content) == RESOLVE_ENTITY_RESULT
     assert json.loads(tool_messages[1].content) == CALCULATE_RISK_RESULT
     assert "INV-1006" in answer
+
+
+def test_score_investigation_scores_a_correct_narration_as_exact():
+    """P12's own missing piece: questions 13 and 15 have no fixed-table
+    answer (`reconcile_agent.py`'s `QUESTIONS` docstring names exactly
+    why), so nothing could score them until a real investigation *and* a
+    scoring convention for its prose both existed. This proves the two
+    compose correctly, with a scripted model standing in for a real one —
+    the same "proves the wiring, not a model's reasoning" posture every
+    other test in this file already takes."""
+    model = _ScriptedToolCallingModel(
+        steps=[
+            AIMessage(
+                content="INV-1004 is genuinely something else: the supplier "
+                "did file it, under a transposed GSTIN."
+            )
+        ]
+    )
+
+    narration, score = score_investigation(model, _toolkit_tools(), 13)
+
+    assert "INV-1004" in narration
+    assert score.exact
+
+
+def test_score_investigation_scores_an_incomplete_narration_honestly():
+    """Question 15 expects five invoices; a narration that names only one
+    must score partial recall, not be rounded up to correct — the same
+    property `score_finding`'s own false-negative test already
+    establishes, exercised here through a real investigation call."""
+    model = _ScriptedToolCallingModel(
+        steps=[AIMessage(content="INV-1003 is at risk for ₹45,000.")]
+    )
+
+    _, score = score_investigation(model, _toolkit_tools(), 15)
+
+    assert score.precision == 1.0
+    assert score.recall == 1.0 / 5
+
+
+def test_score_investigation_refuses_a_question_number_it_does_not_cover():
+    """Question 12's own absence from `SCORED_QUESTIONS` is deliberate —
+    its answer key names no invoice, so the invoice-mention scoring
+    convention cannot honestly score it (`SCORED_QUESTIONS`'s own doc
+    comment). Silently returning a score of 0 would misreport a genuine
+    scope boundary as a failed answer."""
+    model = _ScriptedToolCallingModel(steps=[AIMessage(content="10%, Notification 75/2019-CT.")])
+
+    with pytest.raises(AgentError, match="12"):
+        score_investigation(model, _toolkit_tools(), 12)
+
+
+def test_scored_questions_matches_the_answer_key_verbatim():
+    """`SCORED_QUESTIONS`'s own text must be the question `questions.md`
+    actually asks — a paraphrase would investigate something subtly
+    different from what the key was derived against."""
+    text, _ = SCORED_QUESTIONS[13]
+    assert text == "Is INV-1004 genuinely missing from GSTR-2B, or is something else going on?"
 
 
 def test_investigate_threads_the_system_prompt_into_every_model_call():

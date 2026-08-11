@@ -23,21 +23,120 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
-#: Which finding label answers which evaluation question. This is the whole
-#: "routing" layer, and it is a table rather than a model call on purpose: a
-#: question about missing invoices must not be able to return an answer about
-#: reverse charge because a model was feeling creative.
-QUESTION_LABELS = {
-    1: ("gst:PotentialMismatch", "Claimed in the register, never filed by the supplier"),
-    2: ("gst:AmountMismatch", "Values disagree by more than the cap then in force"),
-    3: ("gst:ITCNotAvailable", "Matched, and the authority reports no credit available"),
-    4: ("gst:Reversed", "Matched, and flagged reverse-charge"),
-    5: ("gst:PaymentOverdue", "Unpaid past 180 days of the invoice date"),
+#: Every finding label the GST pack's six rules can produce — used by the
+#: discrimination questions (6, 10) that ask "is there a finding of *any*
+#: kind" rather than one specific kind.
+ALL_LABELS = (
+    "gst:PotentialMismatch",
+    "gst:AmountMismatch",
+    "gst:ITCNotAvailable",
+    "gst:Reversed",
+    "gst:GstinTransposition",
+    "gst:PaymentOverdue",
+)
+
+_INVOICE_NUMBER = re.compile(r"INV-\d+$")
+
+
+def _invoice_number(local: str) -> str:
+    """The trailing `INV-\\d+` a subject's local name carries.
+
+    Different finding kinds prefix the same invoice differently
+    (`pr-INV-1003` for a register-sourced finding, `purchase-INV-1003` for
+    a payment one), so a candidate filter matches on this suffix rather
+    than the whole local name. Raising rather than skipping a subject this
+    cannot place: a candidate-scoped question (7-10) would otherwise read
+    an unrecognisable subject as simply "not a match," which is silent
+    data loss dressed up as a correct negative answer.
+    """
+    found = _INVOICE_NUMBER.search(local)
+    if not found:
+        raise AgentError(
+            f"'{local}' carries no recognisable invoice number — a "
+            f"candidate-scoped question cannot tell whether this is the "
+            f"invoice it is asking about"
+        )
+    return found.group(0)
+
+
+@dataclass(frozen=True)
+class QuestionSpec:
+    """One evaluation question's routing: which labels answer it, and
+    which invoices it is actually asking about.
+
+    `candidates=None` means every invoice carrying one of `labels` is in
+    scope — the shape questions 1-5 and 11 need. A non-empty `candidates`
+    narrows to specific invoices — questions 6-10 ask about *one* named
+    invoice ("is INV-1001 compliant"), and question 8 asks about two at
+    once specifically to test whether the same rule is applied to both
+    correctly rather than pattern-matched.
+    """
+
+    text: str
+    labels: tuple[str, ...]
+    candidates: tuple[str, ...] | None = None
+
+
+#: Which finding label(s) answer which evaluation question. This is the
+#: whole "routing" layer, and it is a table rather than a model call on
+#: purpose: a question about missing invoices must not be able to return
+#: an answer about reverse charge because a model was feeling creative.
+#:
+#: **Questions 12, 13 and 15 are deliberately absent.** Each needs either
+#: dynamic tool selection (12: which provision was in force requires a
+#: traversal decision no fixed label captures; 13 needs the exact-match
+#: failure and the similarity candidate joined, which is the free-form
+#: investigator's job) or a citation *choice* this table must not make
+#: silently: question 15's own key cites INV-1004 under the matching
+#: policy alone, not also under `PotentialMismatch` — the transposition
+#: finding supersedes the potential-mismatch one for that invoice, and a
+#: label filter has no way to know that without guessing. All three are
+#: answered by `gst_investigation_agent.py`'s real tool-calling loop
+#: (Epic 105 P11), not by widening this table to something it would get
+#: wrong with confidence.
+QUESTIONS: dict[int, QuestionSpec] = {
+    1: QuestionSpec(
+        "Claimed in the register, never filed by the supplier",
+        ("gst:PotentialMismatch",),
+    ),
+    2: QuestionSpec(
+        "Values disagree by more than the cap then in force",
+        ("gst:AmountMismatch",),
+    ),
+    3: QuestionSpec(
+        "Matched, and the authority reports no credit available",
+        ("gst:ITCNotAvailable",),
+    ),
+    4: QuestionSpec("Matched, and flagged reverse-charge", ("gst:Reversed",)),
+    5: QuestionSpec("Unpaid past 180 days of the invoice date", ("gst:PaymentOverdue",)),
+    6: QuestionSpec("Is INV-1001 compliant?", ALL_LABELS, candidates=("INV-1001",)),
+    7: QuestionSpec(
+        "Is INV-2001's 5% value difference a problem?",
+        ("gst:AmountMismatch",),
+        candidates=("INV-2001",),
+    ),
+    8: QuestionSpec(
+        "Why is INV-2002 a finding when INV-2001 is not, given both are July 2020?",
+        ("gst:AmountMismatch",),
+        candidates=("INV-2001", "INV-2002"),
+    ),
+    9: QuestionSpec(
+        "INV-1005 matches GSTR-2B exactly. Can the credit be claimed?",
+        ("gst:ITCNotAvailable",),
+        candidates=("INV-1005",),
+    ),
+    10: QuestionSpec(
+        "Has INV-1006 been paid, and is that a problem?",
+        ("gst:PaymentOverdue",),
+        candidates=("INV-1006",),
+    ),
+    11: QuestionSpec("Which supplier does INV-1004 belong to?", ("gst:GstinTransposition",)),
 }
 
 
@@ -100,28 +199,46 @@ def local_name(term: str) -> str:
 def answer(question_number: int, rows: list[dict]) -> Answer:
     """One evaluation question, answered from the findings.
 
+    An empty result is a legitimate, correct answer for a discrimination
+    question (6, 7, 10) — "no finding of this kind exists for this
+    invoice" — not a missing one; only a question number outside
+    `QUESTIONS` raises, per this docstring's own `Raises` section.
+
     # Raises
 
-    `AgentError` for a question this file does not cover — silently returning
-    an empty answer would score as "found nothing", which is a *wrong* answer
-    rather than a missing one.
+    `AgentError` for a question this file does not cover — silently
+    returning an empty answer would score as "found nothing", which is a
+    *wrong* answer rather than a missing one. Also raised if a matched
+    finding's subject carries no recognisable invoice number, for a
+    candidate-scoped question (`_invoice_number`'s own doc comment).
     """
-    if question_number not in QUESTION_LABELS:
+    if question_number not in QUESTIONS:
         raise AgentError(
             f"question {question_number} is not one this example answers "
-            f"(it covers {sorted(QUESTION_LABELS)}) — returning nothing would "
+            f"(it covers {sorted(QUESTIONS)}) — returning nothing would "
             f"score as a wrong answer rather than an absent one"
         )
 
-    label, question = QUESTION_LABELS[question_number]
+    spec = QUESTIONS[question_number]
     # Sorted by subject, not left in the order the server returned. `/findings`
     # is newest-first, so two runs over the same data can print the same answer
     # in different orders — which reads as instability to anyone diffing a
     # report, and makes a test that pins an order pass against a recorded
     # fixture while differing against a live server.
-    matching = sorted((r for r in rows if r["label"] == label), key=lambda r: r["subject"])
+    matching = sorted(
+        (
+            r
+            for r in rows
+            if r["label"] in spec.labels
+            and (
+                spec.candidates is None
+                or _invoice_number(local_name(r["subject"])) in spec.candidates
+            )
+        ),
+        key=lambda r: r["subject"],
+    )
     return Answer(
-        question=question,
+        question=spec.text,
         subjects=[local_name(r["subject"]) for r in matching],
         citations=[r["governedBy"] for r in matching],
         evidence=[{"subject": local_name(r["subject"]), "facts": r["evidence"]} for r in matching],
@@ -258,7 +375,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="reconcile_agent",
         description="Answer GST reconciliation questions from derived findings.",
     )
-    parser.add_argument("--question", type=int, help=f"one of {sorted(QUESTION_LABELS)}")
+    parser.add_argument("--question", type=int, help=f"one of {sorted(QUESTIONS)}")
     parser.add_argument("--all", action="store_true", help="answer every covered question")
     parser.add_argument(
         "--server", default=os.environ.get("GRAPH_OWL_SERVER", "http://localhost:8080")
@@ -281,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         rows = findings(args.server, args.token)
-        wanted = sorted(QUESTION_LABELS) if args.all else [args.question]
+        wanted = sorted(QUESTIONS) if args.all else [args.question]
         answers = [answer(number, rows) for number in wanted]
     except AgentError as failed:
         print(str(failed), file=sys.stderr)

@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from eval_scoring import FindingScore, score_finding, wilson_interval  # noqa: E402
+from eval_scoring import FindingScore, score_finding, score_narration, wilson_interval  # noqa: E402
 from reconcile_agent import answer  # noqa: E402
 from test_reconcile_agent import FINDINGS  # noqa: E402
 
@@ -107,16 +107,75 @@ def test_more_samples_at_the_same_proportion_narrows_the_interval():
     assert (narrow_hi - narrow_lo) < (wide_hi - wide_lo)
 
 
+def test_score_narration_extracts_a_single_mention():
+    text = "The invoice at risk is INV-2001, filed under Notification 75/2019-CT."
+    assert score_narration(text, ["INV-2001"]).exact
+
+
+def test_score_narration_does_not_match_a_number_that_merely_starts_with_the_key():
+    """`INV-100` must not score as a match for `INV-1003` — a prefix
+    coincidence is not the same invoice, and a looser match would inflate
+    recall on a wrong answer."""
+    score = score_narration("See INV-100 for details.", ["INV-1003"])
+    assert score.precision == 0.0
+
+
+def test_score_narration_finds_every_distinct_invoice_named():
+    text = "Both INV-1002 and INV-2002 disagree with GSTR-2B."
+    score = score_narration(text, ["INV-1002", "INV-2002"])
+    assert score.exact
+
+
+def test_score_narration_cannot_tell_a_ruled_out_invoice_from_a_named_one():
+    """A known, deliberate limitation, stated as a test rather than found
+    later by a wrong-looking score: mention extraction has no negation
+    awareness, so prose that names an invoice specifically to rule it out
+    ("...but not INV-2001") is scored as though it claimed a finding for
+    it. `questions.md`'s own question 8 is written exactly this way — the
+    discrimination is the point of the question, and a narration answering
+    it well is expected to mention the invoice it is ruling out. This
+    documents the honest cost of a text-mention proxy rather than
+    building sentence-level negation parsing to chase an exact score."""
+    text = "INV-2002 is a finding under the 10% cap; INV-2001 is not, since its 5% delta is within it."
+    score = score_narration(text, ["INV-2002"])
+
+    assert not score.exact
+    assert score.recall == 1.0
+    assert score.precision < 1.0
+
+
+def test_score_narration_repeating_a_mention_gives_no_extra_credit():
+    text = "INV-1005 has no credit. To repeat: INV-1005 has no usable credit."
+    assert score_narration(text, ["INV-1005"]).exact
+
+
+def test_score_narration_of_prose_naming_no_invoice_matches_an_empty_key():
+    assert score_narration("Nothing here is a compliance finding.", []).exact
+
+
 def test_every_deterministic_answer_reconcile_agent_produces_scores_exact():
     """The scoring machinery applied to a real system's real output, not
     only to synthetic cases — `FINDINGS` is `test_reconcile_agent.py`'s
-    own fixture, taken from a real run."""
+    own fixture, taken from a real run.
+
+    Questions 6, 7 and 10 expect an **empty** key — `questions.md`'s own
+    "No" answers — which `score_finding`'s empty/empty case
+    (`test_correctly_reporting_nothing_is_an_exact_match`, above) already
+    established scores `.exact`, not as a special case here but as the
+    same machinery applied to a real negative.
+    """
     key = {
         1: ["pr-INV-1003", "pr-INV-1004"],
         2: ["pr-INV-1002", "pr-INV-2002"],
         3: ["pr-INV-1005"],
         4: ["pr-INV-1006"],
         5: ["purchase-INV-1003", "purchase-INV-2002"],
+        6: [],
+        7: [],
+        8: ["pr-INV-2002"],
+        9: ["pr-INV-1005"],
+        10: [],
+        11: ["pr-INV-1004"],
     }
     scores = [
         score_finding(answer(number, FINDINGS).subjects, expected)
@@ -125,4 +184,4 @@ def test_every_deterministic_answer_reconcile_agent_produces_scores_exact():
     assert all(score.exact for score in scores), scores
 
     lower, _ = wilson_interval(len(scores), len(scores))
-    assert lower > 0.0, "five of five correct is still an informative lower bound"
+    assert lower > 0.0, "eleven of eleven correct is still an informative lower bound"

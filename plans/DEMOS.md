@@ -1410,16 +1410,32 @@ this project has hit before, applied one step further — verify, and when
 the source doesn't cooperate, derive instead of guessing. No mutmut
 report, for the identical structural reason `105s` already hit and this
 slice didn't need to rediscover.
-**Still open, recorded rather than assumed away**: questions 6-13 and 15
-have no automated score; P11's agent answers one question end-to-end
-against a scripted model, not a live one, and is not itself what produced
-the five scored answers above (those come from `reconcile_agent.py`'s
-deterministic P9 layer) — P12 does not yet score an agent's own free-text
-output at all, only a structured system's. Today's evaluation is one
-worked agent example (P11, Q14) plus `reconcile_agent.py`'s scored
-deterministic five and `scripts/verify-gst-reconciliation.sh`'s
-hand-scripted assertions for 6-11 — not yet a single automated report
-across all fifteen.
+**Extended to 6-11, 13 and 15, 11 August 2026** (`105z`,
+`plans/105z-eval-scoring-discrimination.md`) — a correction to the "ten of
+fifteen" pessimism above as much as an extension: checked properly
+against the answer key, six of those ten (6-11) turned out to score
+exactly the same way 1-5 already do, just with the routing table widened
+from `(label, text)` to `(text, labels, candidates)` so a question can
+ask about one named invoice ("is INV-1001 compliant") rather than every
+invoice carrying one label. `reconcile_agent.py` now answers and scores
+eleven questions deterministically, all exact against
+`test_reconcile_agent.py`'s own real fixture. A new `score_narration()`
+(`eval_scoring.py`) extracts invoice mentions from free prose and scores
+them the same way, closing the "no scoring convention" gap for 13 and
+15 — proven against a scripted model
+(`gst_investigation_agent.py --score-all`, wired but not run live), with
+one limitation stated as a test rather than discovered later: mention
+extraction has no negation awareness, so a narration that names an
+invoice specifically to rule it out (question 8's own shape) scores as a
+false positive. **Question 12 stays genuinely unscored** — its key names
+no invoice at all (a rate and a notification number), so the
+invoice-mention convention has nothing honest to check it against; a
+citation-matching convention is real, separate work. Today's evaluation
+is `reconcile_agent.py`'s eleven deterministic, scored answers plus P11's
+worked agent example (Q14) and the wired-but-unrun 13/15 scoring path —
+twelve of fifteen questions now have a real automated score, one (12) is
+a stated, deliberate gap, and two (12's own citation form aside) await a
+live model key.
 **P8's date-window traversal shipped, 11 August 2026** (`105u`): the third
 gap `105i` named and deliberately did not attempt — the graph walk itself
 filtered to entities valid at a date, not only resolving already-fetched

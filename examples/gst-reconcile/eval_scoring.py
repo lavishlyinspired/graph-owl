@@ -12,7 +12,13 @@ Python.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
+
+#: An invoice number as `questions.md`'s own subjects are named
+#: (`INV-1003`), matched as a whole word so `INV-100` does not also match
+#: inside `INV-1003`.
+_INVOICE_MENTION = re.compile(r"\bINV-\d+\b")
 
 
 @dataclass(frozen=True)
@@ -60,6 +66,38 @@ def score_finding(predicted: list[str], expected: list[str]) -> FindingScore:
         precision=len(hits) / len(predicted_set),
         recall=len(hits) / len(expected_set),
     )
+
+
+def score_narration(text: str, expected: list[str]) -> FindingScore:
+    """Score free-form prose against an expected invoice-number key.
+
+    **The scoring convention questions 12, 13 and 15 needed and did not
+    have.** Those three are answered by a free-form tool-calling agent
+    (`gst_investigation_agent.py`, Epic 105 P11), not a fixed table — the
+    investigator decides which tool to call next, so there is no
+    structured `subjects` list to compare the way `score_finding` does
+    for questions 1-11. This extracts every invoice number the answer
+    text *mentions* and scores that set exactly the same way, so a
+    narrated answer is held to the same "names the right invoices and no
+    others" standard `questions.md` states once, rather than a separate,
+    looser one for prose.
+
+    A mention counts once even if the text repeats it (`score_finding`'s
+    own set-based reading, unchanged here — narrating the reasoning
+    naturally re-mentions an invoice without meaning extra credit).
+
+    **Known limitation, accepted rather than solved**: this has no
+    negation awareness. Prose that names an invoice specifically to rule
+    it out ("...but not INV-2001") is scored as a false positive, the
+    same as if it had claimed a finding for it. Question 8 is written
+    exactly this way — a good narration mentions the invoice it is ruling
+    out — so this systematically under-scores discrimination answers by
+    one false positive rather than never. Sentence-level negation parsing
+    would fix it and is a materially larger, separate undertaking; the
+    honest cost is documented rather than hidden behind a looser match.
+    """
+    mentioned = _INVOICE_MENTION.findall(text)
+    return score_finding(mentioned, expected)
 
 
 def wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
