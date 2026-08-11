@@ -313,6 +313,16 @@ impl ContextSource for Seeded {
         self.record("run_rule");
         Ok(None)
     }
+
+    async fn resolve_entity(
+        &self,
+        _principal: &str,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<graph_owl_mcp::ResolvedEntityContext, SourceError> {
+        self.record("resolve_entity");
+        Ok(graph_owl_mcp::ResolvedEntityContext::default())
+    }
 }
 
 fn about(fqn: &str) -> serde_json::Value {

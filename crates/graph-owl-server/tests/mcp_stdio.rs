@@ -205,6 +205,37 @@ async fn analytics_reaches_the_real_catalog_through_the_real_adapter() {
     assert!(!context.truncated, "{context:?}");
 }
 
+/// **Epic 105 P10's `resolve_entity()` tool, against the real adapter.**
+/// `CatalogContext::resolve_entity` really does call the pre-existing
+/// `Catalog::resolve_entity` — full-text candidate retrieval through
+/// `search_assets_for`, then re-scored by a real trigram similarity —
+/// rather than the unit-level `Fixture` double's canned two-candidate
+/// answer.
+#[tokio::test]
+async fn resolve_entity_reaches_the_real_catalog_through_the_real_adapter() {
+    let (catalog, _container, _url) = common::test_catalog().await;
+    let fqn = seeded_asset(&catalog).await;
+
+    let principal = Principal::system();
+    let reads = CatalogContext::new(catalog, principal.clone());
+
+    let context = reads
+        .resolve_entity(&principal.id, "warehouse", 10)
+        .await
+        .expect("no source error");
+
+    assert_eq!(context.candidates.len(), 1, "{context:?}");
+    assert_eq!(
+        context.candidates[0].fully_qualified_name, fqn,
+        "{context:?}"
+    );
+    assert_eq!(
+        context.candidates[0].score, 1.0,
+        "an exact match on the query scores 1.0: {context:?}"
+    );
+    assert!(!context.truncated, "{context:?}");
+}
+
 /// A real local `/embeddings`-style receiver isn't needed here — this is
 /// the actual compiled `graph-owl-mcp-stdio` binary, spawned as a real
 /// subprocess with real stdin/stdout pipes, matching this project's

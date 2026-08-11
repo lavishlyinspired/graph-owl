@@ -1417,6 +1417,18 @@ pub struct AssetAnalytics {
     pub truncated: bool,
 }
 
+/// One catalog asset [`Catalog::resolve_entity`] considered, with how
+/// closely its name matched the query — see that method's own doc
+/// comment for why the score is a similarity metric rather than a
+/// full-text relevance rank.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedEntity {
+    /// The candidate asset.
+    pub asset: Asset,
+    /// `0.0..=1.0`, sorted descending across the returned list.
+    pub score: f64,
+}
+
 /// A single anchor-plus-period obligation, computed forward rather than
 /// only checked backward — Epic 105 P8's first real slice
 /// (`plans/105h-obligation-calendar.md`). Reuses `[findings.span]` rather
@@ -9573,6 +9585,107 @@ impl Catalog {
             .storage
             .search_assets_visible(query, filter, page, &predicate)
             .await?)
+    }
+
+    /// Rank catalog assets by how closely their name matches a free-text
+    /// candidate — Epic 105 P10's `resolve_entity()` tool, the platform
+    /// doc's entity-linking primitive. An agent that has a name or id
+    /// from unstructured text and needs to know which real catalog asset
+    /// it refers to gets back real assets with a normalized similarity
+    /// score, which is the question full-text relevance ranking does not
+    /// answer — `search_assets`'s own ranking says "what mentions this
+    /// text", not "how alike is this asset's name to that text".
+    ///
+    /// **Reuses [`search_assets_for`] for candidate retrieval** — the
+    /// identical policy-filtered, bounded search the `search_assets` MCP
+    /// tool already serves — rather than a second search index, then
+    /// re-scores each hit with
+    /// [`graph_owl_resolution::rule_match::similarity`].
+    ///
+    /// **Trigram n-grams (`n = 3`), not a chosen-for-this-tool number.**
+    /// Three is the standard n-gram size for short-identifier fuzzy
+    /// matching — the same default Postgres's own `pg_trgm` extension
+    /// uses, on the same storage engine this project runs on — and the
+    /// padding `graph_owl_resolution::rule_match::ngrams` already applies
+    /// keeps it from degrading on short values (its own doc comment:
+    /// unpadded, a 3-character value has exactly one trigram, comparing
+    /// as all-or-nothing).
+    ///
+    /// **Scoped to catalog assets, for the identical reason `traverse`/
+    /// `analytics` are**: a pack-domain subject has no policy model yet.
+    ///
+    /// # Errors
+    ///
+    /// `Validation` if `limit` is zero or exceeds the page size cap —
+    /// [`PageRequestError`] mapped the same way `graph-owl-server`'s own
+    /// `AppError` conversion does, since a caller here deserves the same
+    /// field-named diagnosis an HTTP caller gets. `Storage` if the search
+    /// fails.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: the `n = 3` above is a fixed literal, which is
+    /// the one input [`RuleMatchError::InvalidNGramSize`] can ever fire
+    /// on, and every produced score is a finite `0.0..=1.0` ratio, which
+    /// can never fail `partial_cmp` the way `NaN` would.
+    ///
+    /// [`PageRequestError`]: graph_owl_core::page::PageRequestError
+    /// [`RuleMatchError::InvalidNGramSize`]: graph_owl_resolution::rule_match::RuleMatchError::InvalidNGramSize
+    pub async fn resolve_entity(
+        &self,
+        principal: &Principal,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ResolvedEntity>, CatalogError> {
+        let field_error = |error: graph_owl_core::page::PageRequestError| match error {
+            graph_owl_core::page::PageRequestError::LimitTooLarge { requested, max } => {
+                FieldError::new(
+                    "limit",
+                    FieldErrorCode::Value,
+                    format!("`limit` must be at most {max}, got {requested}"),
+                )
+            }
+            graph_owl_core::page::PageRequestError::LimitZero => FieldError::new(
+                "limit",
+                FieldErrorCode::Value,
+                "`limit` must be at least 1".to_string(),
+            ),
+            graph_owl_core::page::PageRequestError::MalformedCursor => {
+                unreachable!("this method never passes a cursor")
+            }
+        };
+        let page = self
+            .search_assets_for(
+                principal,
+                query,
+                &graph_owl_storage::AssetFilter::default(),
+                &PageRequest::new(Some(limit), None)
+                    .map_err(|e| CatalogError::Validation(vec![field_error(e)]))?,
+            )
+            .await?;
+
+        let mut scored: Vec<ResolvedEntity> = page
+            .data
+            .into_iter()
+            .map(|hit| {
+                let score = graph_owl_resolution::rule_match::similarity(
+                    query,
+                    &hit.asset.fully_qualified_name,
+                    &graph_owl_resolution::rule_match::SimilarityStrategy::NGram { n: 3 },
+                )
+                .expect("n = 3 is always a valid n-gram size");
+                ResolvedEntity {
+                    asset: hit.asset,
+                    score,
+                }
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .expect("a similarity score is never NaN")
+        });
+        Ok(scored)
     }
 
     /// Turn `extension.<name>[.gte|.lte]=<text>` pairs into typed filters.
@@ -40758,6 +40871,116 @@ mod run_rule_tests {
         assert_eq!(outcome.evaluated, 1, "{outcome:?}");
         assert_eq!(outcome.found, 0, "{outcome:?}");
         assert_eq!(outcome.opened, 0, "{outcome:?}");
+    }
+}
+
+#[cfg(test)]
+mod resolve_entity_tests {
+    //! `Catalog::resolve_entity` — Epic 105 P10's `resolve_entity()` tool
+    //! (`plans/105q-resolve-entity-tool.md`), the platform doc's
+    //! entity-linking primitive: candidates from the existing full-text
+    //! search, re-ranked by a real trigram similarity score rather than
+    //! left in search's own relevance order.
+
+    use super::*;
+
+    fn asset_req(name: &str) -> UpsertAsset {
+        UpsertAsset {
+            kind: AssetKind::Service,
+            name: name.to_string(),
+            parent_id: None,
+            description: None,
+            properties: None,
+            extension: None,
+        }
+    }
+
+    /// **The score is a real computed trigram similarity, not search's own
+    /// rank position** — hand-derived, not read off a passing assertion:
+    /// padded trigrams of `"ord"` are `{⌐⌐o, ⌐or, ord, rd⌐, d⌐⌐}` (5, using
+    /// `⌐` for the two padding characters); `"orders"` shares exactly
+    /// `{⌐⌐o, ⌐or, ord}` (union 10, score `0.3`); `"coordination"` shares
+    /// only `{ord}` (14 trigrams of its own, union 18, score `1/18 ≈
+    /// 0.0556`). `"customers"` shares the query substring with neither and
+    /// must not appear at all — the same "and Z does not" the surviving-
+    /// mutant discipline in this project's own `CLAUDE.md` asks for.
+    #[tokio::test]
+    async fn ranks_the_closer_match_first_by_a_real_computed_score() {
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ));
+        catalog
+            .upsert_asset(&Principal::system(), asset_req("orders"))
+            .await
+            .expect("orders");
+        catalog
+            .upsert_asset(&Principal::system(), asset_req("coordination"))
+            .await
+            .expect("coordination");
+        catalog
+            .upsert_asset(&Principal::system(), asset_req("customers"))
+            .await
+            .expect("customers");
+
+        let ranked = catalog
+            .resolve_entity(&Principal::system(), "ord", 10)
+            .await
+            .expect("ok");
+
+        assert_eq!(ranked.len(), 2, "{ranked:?}");
+        assert_eq!(ranked[0].asset.fully_qualified_name, "orders");
+        assert!(
+            (ranked[0].score - 0.3).abs() < 1e-9,
+            "hand-derived score: {:?}",
+            ranked[0].score
+        );
+        assert_eq!(ranked[1].asset.fully_qualified_name, "coordination");
+        assert!(
+            (ranked[1].score - 1.0 / 18.0).abs() < 1e-9,
+            "hand-derived score: {:?}",
+            ranked[1].score
+        );
+        assert!(
+            !ranked
+                .iter()
+                .any(|r| r.asset.fully_qualified_name == "customers"),
+            "an asset sharing no substring with the query must not appear: {ranked:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exact_match_scores_one() {
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ));
+        catalog
+            .upsert_asset(&Principal::system(), asset_req("widgets"))
+            .await
+            .expect("widgets");
+
+        let ranked = catalog
+            .resolve_entity(&Principal::system(), "widgets", 10)
+            .await
+            .expect("ok");
+
+        assert_eq!(ranked.len(), 1, "{ranked:?}");
+        assert_eq!(ranked[0].score, 1.0, "{ranked:?}");
+    }
+
+    #[tokio::test]
+    async fn a_zero_limit_is_a_validation_error_not_an_empty_answer() {
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ));
+
+        let result = catalog
+            .resolve_entity(&Principal::system(), "anything", 0)
+            .await;
+
+        assert!(
+            matches!(result, Err(CatalogError::Validation(_))),
+            "{result:?}"
+        );
     }
 }
 

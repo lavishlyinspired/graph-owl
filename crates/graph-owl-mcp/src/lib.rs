@@ -300,6 +300,32 @@ pub trait ContextSource: Send + Sync {
         pack: &str,
         label: &str,
     ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError>;
+
+    /// Rank catalog assets by how closely their name matches a free-text
+    /// candidate — Epic 105 P10's seventh intelligence tool, the platform
+    /// doc's entity-linking primitive, wrapping
+    /// [`graph_owl_api::Catalog::resolve_entity`]. An agent that has a
+    /// name or id from unstructured text and needs to know which real
+    /// catalog asset it refers to gets back real assets with a
+    /// normalized similarity score, not `search`'s own relevance
+    /// ranking — a different question ("what mentions this text" versus
+    /// "how alike is this asset's name to that text").
+    ///
+    /// **No not-found here, matching [`Self::search`] exactly**: a query
+    /// that resolves to nothing is a real, complete answer, and this tool
+    /// inherits `search_assets`'s own already-open, policy-filtered
+    /// posture rather than inventing a stricter one for the same
+    /// underlying search.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached.
+    async fn resolve_entity(
+        &self,
+        principal: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<ResolvedEntityContext, SourceError>;
 }
 
 /// A bounded walk's answer, as an agent receives it — Epic 105 P10's
@@ -409,6 +435,33 @@ pub struct NodeAnalytics {
     pub id: String,
     pub in_degree: f64,
     pub out_degree: f64,
+}
+
+/// Ranked entity-resolution candidates, as an agent receives them — Epic
+/// 105 P10's `resolve_entity()` tool.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedEntityContext {
+    /// Sorted by [`ResolvedCandidate::score`], descending.
+    pub candidates: Vec<ResolvedCandidate>,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<budget::TruncationReason>,
+}
+
+/// One candidate [`Catalog::resolve_entity`] considered.
+///
+/// [`Catalog::resolve_entity`]: graph_owl_api::Catalog::resolve_entity
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedCandidate {
+    pub fully_qualified_name: String,
+    pub kind: String,
+    /// `0.0..=1.0` — see [`graph_owl_api::Catalog::resolve_entity`]'s own
+    /// doc comment for why this is a similarity score, not a rank
+    /// position.
+    pub score: f64,
 }
 
 /// Why a fact holds, as an agent receives it — Epic 105 P10's `explain()`
@@ -649,6 +702,13 @@ pub enum Outcome {
     /// Degree/component structure over a bounded neighbourhood — Epic 105
     /// P10's `analytics()`.
     Analyzed(Box<AnalyticsContext>),
+    /// Ranked entity-resolution candidates — Epic 105 P10's
+    /// `resolve_entity()`. **Empty is a real answer**, the same reading
+    /// `Outcome::Searched` already gives `search`: "nothing matched" and
+    /// "no such thing to match against" are different statements, and
+    /// this tool never distinguishes the second from the first because
+    /// nothing here needs to.
+    EntityResolved(Box<ResolvedEntityContext>),
     /// A write landed or became a proposal — Epic 32.
     Wrote(Box<write::WriteReceipt>),
     /// **An agent write was refused, readably.**
@@ -741,6 +801,10 @@ pub const ANALYTICS: &str = "analytics";
 /// Evaluate one named rule and record what it concludes — Epic 105 P10's
 /// sixth intelligence tool.
 pub const RUN_RULE: &str = "run_rule";
+
+/// Rank catalog assets by name similarity to a free-text candidate — Epic
+/// 105 P10's seventh intelligence tool.
+pub const RESOLVE_ENTITY: &str = "resolve_entity";
 
 /// The most hops an agent may ask `traverse` to walk.
 ///
@@ -1082,6 +1146,32 @@ pub fn tools() -> Vec<ToolDeclaration> {
                 "additionalProperties": false,
             }),
         },
+        ToolDeclaration {
+            name: RESOLVE_ENTITY,
+            description: "Given a name or id from unstructured text, find which real catalog \
+                      assets it most likely refers to. Each candidate carries a similarity \
+                      score (0 to 1), not a relevance rank — use this to link a mention to a \
+                      real entity, not to browse the catalog (that is what `search_assets` is \
+                      for).",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The name or id to resolve.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_SEARCH_LIMIT,
+                        "description": "How many candidates to return. Defaults to 25, \
+                                        capped at 100.",
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false,
+            }),
+        },
     ]
 }
 
@@ -1414,6 +1504,27 @@ pub async fn call_within(
             }
         }
 
+        RESOLVE_ENTITY => {
+            let query = match required_text(arguments, "query") {
+                Ok(query) => query,
+                Err(problem) => return problem,
+            };
+            let how_many = match search_limit(arguments) {
+                Ok(how_many) => how_many,
+                Err(problem) => return problem,
+            };
+            match source.resolve_entity(principal, query, how_many).await {
+                Ok(mut context) => {
+                    if let Some(reason) = budget::fit(&mut context, limit) {
+                        context.truncated = true;
+                        context.truncation_reason = Some(reason);
+                    }
+                    Outcome::EntityResolved(Box::new(context))
+                }
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
         _ => Outcome::BadRequest(format!("no tool named `{tool}`")),
     }
 }
@@ -1732,6 +1843,37 @@ impl budget::Fits for AnalyticsContext {
             return false;
         };
         self.orphans.retain(|id| *id != dropped.id);
+        self.truncated = true;
+        true
+    }
+
+    fn render(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+impl budget::Fits for ResolvedEntityContext {
+    /// Every field on a candidate is essential — there is no prose to
+    /// shorten independently of the candidate itself.
+    fn shorten_detail(&mut self) -> bool {
+        false
+    }
+
+    /// A candidate list has no second tier, the same shape
+    /// `SearchResults::shorten_relations` already has for the identical
+    /// reason: every entry here is an entity, not a relation onto one.
+    fn shorten_relations(&mut self) -> bool {
+        false
+    }
+
+    /// Drop from the tail — sorted by score descending, so this drops the
+    /// **least** similar candidates first, the same "ranking decides
+    /// truncation order" reading `SearchResults::drop_entities` gives its
+    /// own hit list.
+    fn drop_entities(&mut self) -> bool {
+        if self.candidates.pop().is_none() {
+            return false;
+        }
         self.truncated = true;
         true
     }
@@ -2275,6 +2417,42 @@ mod tests {
             }
             Ok(None)
         }
+
+        async fn resolve_entity(
+            &self,
+            principal: &str,
+            query: &str,
+            limit: usize,
+        ) -> Result<ResolvedEntityContext, SourceError> {
+            self.asked.lock().expect("lock").push((
+                principal.to_string(),
+                format!("resolve_entity:{query}:{limit}"),
+            ));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            if principal != "alice" || query != "orders" {
+                return Ok(ResolvedEntityContext::default());
+            }
+            // Two real, distinct scores — proves the dispatcher passes the
+            // real ranking through rather than an arbitrary order.
+            Ok(ResolvedEntityContext {
+                candidates: vec![
+                    ResolvedCandidate {
+                        fully_qualified_name: "warehouse.orders".into(),
+                        kind: "table".into(),
+                        score: 1.0,
+                    },
+                    ResolvedCandidate {
+                        fully_qualified_name: "warehouse.orders_archive".into(),
+                        kind: "table".into(),
+                        score: 0.7,
+                    },
+                ],
+                truncated: false,
+                truncation_reason: None,
+            })
+        }
     }
 
     /// A trust summary for a context whose trust is not what is under test.
@@ -2603,9 +2781,10 @@ mod tests {
                     RECONCILE,
                     ANALYTICS,
                     RUN_RULE,
+                    RESOLVE_ENTITY,
                 ],
                 "the seven read capabilities Epic 14 promises, plus Epic 105 P10's \
-                 first six intelligence tools, and no others — a tool that appears \
+                 first seven intelligence tools, and no others — a tool that appears \
                  here without a dispatch arm teaches an agent to distrust the \
                  manifest, and one that dispatches without appearing here is a \
                  capability no agent will ever find"
@@ -4294,6 +4473,160 @@ mod tests {
             .await;
 
             assert!(matches!(outcome, Outcome::Reconciled(_)), "{outcome:?}");
+        }
+    }
+
+    /// Epic 105 P10 — `resolve_entity()`, the platform doc's entity-linking
+    /// primitive and the seventh intelligence tool.
+    mod the_resolve_entity_tool {
+        use super::*;
+        use crate::budget::Fits;
+
+        fn query_args(query: &str) -> serde_json::Value {
+            serde_json::json!({ "query": query })
+        }
+
+        #[tokio::test]
+        async fn returns_ranked_candidates_with_real_scores() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                RESOLVE_ENTITY,
+                &query_args("orders"),
+            )
+            .await;
+
+            let Outcome::EntityResolved(context) = outcome else {
+                panic!("expected EntityResolved, got {outcome:?}");
+            };
+            assert_eq!(context.candidates.len(), 2, "{context:?}");
+            assert_eq!(
+                context.candidates[0].fully_qualified_name,
+                "warehouse.orders"
+            );
+            assert_eq!(context.candidates[0].score, 1.0, "{context:?}");
+            assert_eq!(
+                context.candidates[1].fully_qualified_name,
+                "warehouse.orders_archive"
+            );
+            assert_eq!(context.candidates[1].score, 0.7, "{context:?}");
+        }
+
+        /// **No not-found here, matching `search` exactly**: a query that
+        /// resolves to nothing is a real, complete answer, not an absence
+        /// to distinguish from a denial.
+        #[tokio::test]
+        async fn no_match_is_a_real_empty_answer_not_not_found() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                RESOLVE_ENTITY,
+                &query_args("nothing-like-this-exists"),
+            )
+            .await;
+
+            let Outcome::EntityResolved(context) = outcome else {
+                panic!("expected EntityResolved, got {outcome:?}");
+            };
+            assert!(context.candidates.is_empty(), "{context:?}");
+        }
+
+        #[tokio::test]
+        async fn an_unauthenticated_caller_learns_nothing() {
+            let source = Fixture::working();
+
+            let outcome = call(&source, None, RESOLVE_ENTITY, &query_args("orders")).await;
+
+            assert_eq!(outcome, Outcome::Unauthenticated);
+        }
+
+        #[tokio::test]
+        async fn a_call_with_no_query_is_a_bad_request() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                RESOLVE_ENTITY,
+                &serde_json::json!({}),
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::BadRequest(_)), "{outcome:?}");
+        }
+
+        /// **The lower-scored candidate is dropped before the higher-scored
+        /// one** — measured off the fixture's own two-candidate answer,
+        /// not a hand-picked budget.
+        #[tokio::test]
+        async fn an_over_budget_answer_drops_the_lower_scored_candidate_first() {
+            let source = Fixture::working();
+            let max_tokens = {
+                let probe = ResolvedEntityContext {
+                    candidates: vec![ResolvedCandidate {
+                        fully_qualified_name: "warehouse.orders".to_string(),
+                        kind: "table".to_string(),
+                        score: 1.0,
+                    }],
+                    truncated: false,
+                    truncation_reason: None,
+                };
+                budget::estimate_tokens(&probe.render())
+            };
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                RESOLVE_ENTITY,
+                &query_args("orders"),
+                budget::TokenBudget { max_tokens },
+            )
+            .await;
+
+            let Outcome::EntityResolved(context) = outcome else {
+                panic!("expected EntityResolved, got {outcome:?}");
+            };
+            assert_eq!(context.candidates.len(), 1, "{context:?}");
+            assert_eq!(
+                context.candidates[0].fully_qualified_name, "warehouse.orders",
+                "the higher-scored candidate must survive: {context:?}"
+            );
+            assert!(context.truncated, "{context:?}");
+            assert_eq!(
+                context.truncation_reason,
+                Some(budget::TruncationReason::EntitiesDropped)
+            );
+        }
+
+        /// **`shorten_detail`/`shorten_relations` are called directly, not
+        /// through `budget::fit`** — the same reason
+        /// `TraversalContext::shorten_detail_never_claims_progress` and
+        /// `AnalyticsContext::shorten_detail_never_claims_progress` call
+        /// theirs directly: `ResolvedEntityContext` has no prose and no
+        /// second tier below its candidate list, so both are permanent
+        /// `false`, and `fit`'s own shrink-check absorbs a mutant that
+        /// flips either to `true` (nothing changes either way, so the
+        /// ladder's next rung runs identically in both cases).
+        /// Unobservable through the dispatcher by construction, not a gap
+        /// in the dispatcher tests above.
+        #[test]
+        fn neither_lever_above_entities_ever_claims_progress() {
+            let mut context = ResolvedEntityContext {
+                candidates: vec![ResolvedCandidate {
+                    fully_qualified_name: "a".to_string(),
+                    kind: "table".to_string(),
+                    score: 1.0,
+                }],
+                truncated: false,
+                truncation_reason: None,
+            };
+
+            assert!(!context.shorten_detail());
+            assert!(!context.shorten_relations());
         }
     }
 

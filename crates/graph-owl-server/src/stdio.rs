@@ -227,6 +227,14 @@ mod tests {
         ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError> {
             Ok(None)
         }
+        async fn resolve_entity(
+            &self,
+            _: &str,
+            _: &str,
+            _: usize,
+        ) -> Result<graph_owl_mcp::ResolvedEntityContext, SourceError> {
+            Ok(graph_owl_mcp::ResolvedEntityContext::default())
+        }
     }
 
     fn read_only() -> graph_owl_mcp::jsonrpc::Server<'static> {

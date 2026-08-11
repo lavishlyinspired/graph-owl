@@ -1280,6 +1280,38 @@ against `reconcile.rs`'s own GST fixture: 3 mutants, 2 caught, 1 unviable,
 0 missed) — every unviable mutant the same `Ok(Some(Default::default()))`
 shape every P10 tool has hit, because `ReconcileOutcome` derives no
 `Default` by `105b`'s own deliberate choice.
+**P10's seventh intelligence tool shipped, 11 August 2026** (`105q`):
+`resolve_entity()` — the platform doc's entity-linking primitive, and the
+first P10 tool with no existing Catalog method to wrap. The design
+question answered before any code: full-text search
+(`search_assets_for`, already the `search_assets` tool) already exists,
+so what does this add? Answer: a normalized similarity score, not a
+relevance rank — "what mentions this text" and "how alike is this asset's
+name to that text" are different questions, and only the second gives an
+agent a number it can threshold on. Retrieves candidates through the
+identical policy-filtered `search_assets_for` call `search` already uses
+(no second search index), then re-scores each hit with
+`graph_owl_resolution::rule_match::similarity` (trigrams, `n = 3` — the
+same default Postgres's own `pg_trgm` extension uses on the storage
+engine this project already runs on, not a number chosen for this tool).
+No `Option` wrapper on the trait method, matching `search`'s own
+signature exactly: an empty result is a real, complete answer. A new wire
+type (`ResolvedEntityContext`/`ResolvedCandidate`) rather than reusing
+`SearchHit`, which carries a trust summary entity resolution has no use
+for. The RED test hand-derived the expected trigram similarity for two
+real candidates before running anything (`orders` shares 3 of 10 possible
+trigrams with the query `"ord"`, score `0.3`; `coordination` shares 1 of
+18, score `1/18 ≈ 0.0556`) and a third seeded asset sharing no substring
+with the query was asserted absent — all three passed on the first run,
+confirming the hand-derived math rather than the code being what was
+tested. Mutation testing came back clean at all three layers (`lib.rs`: 9
+mutants, 7 caught, 2 unviable, 0 missed, after closing the same
+permanently-`false`-lever gap `TraversalContext`/`AnalyticsContext`
+already established for `shorten_detail`, this time for two levers at
+once; `Catalog::resolve_entity`: 2 mutants, 1 caught, 1 unviable, 0
+missed; the real adapter: 1 mutant, 1 caught, 0 missed — fewer candidates
+than every other P10 tool because this one has no admin gate to mutate,
+matching `search`'s own open posture).
 **Still open, recorded
 rather than assumed away**: no reference agent app
 (`examples/gst-reconcile/`) and so no scored evaluation run; the live
@@ -1288,8 +1320,8 @@ principal who can query at all (per-named-graph policy needs a policy model
 that does not exist yet); six of the seven planned packs are unwritten; and
 P2's remaining connectors, P3, P4, the rest of P8 (temporal engine,
 generalization beyond GST), P9's GraphRAG/hybrid-search remaining thirds,
-P10's remaining two tools (`resolve_entity`,
-`calculate_risk`), P11 and P12 are untouched — this is the spine, not
+P10's remaining tool (`calculate_risk`),
+P11 and P12 are untouched — this is the spine, not
 the finished platform
 
 ### Console half

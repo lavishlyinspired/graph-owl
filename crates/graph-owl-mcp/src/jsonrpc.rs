@@ -277,6 +277,9 @@ fn render(outcome: crate::Outcome) -> Value {
         Outcome::Analyzed(context) => {
             (serde_json::to_value(*context).unwrap_or(Value::Null), false)
         }
+        Outcome::EntityResolved(context) => {
+            (serde_json::to_value(*context).unwrap_or(Value::Null), false)
+        }
         Outcome::Wrote(receipt) => (serde_json::to_value(*receipt).unwrap_or(Value::Null), false),
 
         // **Absent and denied are one answer**, and the text says so without
@@ -462,6 +465,14 @@ mod tests {
             _: &str,
         ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError> {
             Ok(None)
+        }
+        async fn resolve_entity(
+            &self,
+            _: &str,
+            _: &str,
+            _: usize,
+        ) -> Result<crate::ResolvedEntityContext, SourceError> {
+            Ok(crate::ResolvedEntityContext::default())
         }
     }
 
@@ -746,7 +757,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
 
-        assert_eq!(names.len(), 13, "the thirteen read tools: {names:?}");
+        assert_eq!(names.len(), 14, "the fourteen read tools: {names:?}");
         assert!(!names.iter().any(|name| crate::write::is_write_tool(name)));
     }
 
@@ -765,7 +776,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
 
-        assert_eq!(names.len(), 19, "thirteen read plus six write: {names:?}");
+        assert_eq!(names.len(), 20, "fourteen read plus six write: {names:?}");
         assert!(names.contains(&crate::write::RECORD_MEMORY));
     }
 

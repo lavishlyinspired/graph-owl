@@ -822,6 +822,34 @@ impl ContextSource for CatalogContext {
             Err(error) => Err(unavailable(&error)),
         }
     }
+
+    async fn resolve_entity(
+        &self,
+        principal: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<crate::ResolvedEntityContext, SourceError> {
+        let who = self.authenticated(principal)?;
+
+        let ranked = self
+            .catalog
+            .resolve_entity(&who, query, limit)
+            .await
+            .map_err(|e| unavailable(&e))?;
+
+        Ok(crate::ResolvedEntityContext {
+            candidates: ranked
+                .into_iter()
+                .map(|resolved| crate::ResolvedCandidate {
+                    fully_qualified_name: resolved.asset.fully_qualified_name,
+                    kind: resolved.asset.kind.to_string(),
+                    score: resolved.score,
+                })
+                .collect(),
+            truncated: false,
+            truncation_reason: None,
+        })
+    }
 }
 
 impl CatalogContext {
