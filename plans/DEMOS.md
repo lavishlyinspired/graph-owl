@@ -1380,8 +1380,42 @@ top-level module via `sys.path.insert`, the same convention
 `reconcile_agent.py`'s and `triage.py`'s own tests already use because
 neither script belongs to an installable package; neither of those two
 scripts has ever had mutmut run against it either.
-**Still open, recorded rather than assumed away**: P11's agent answers
-one question end-to-end, not all fifteen — P12 (the eval harness) is
+**P12's scoring math shipped, 11 August 2026** (`105t`,
+`examples/gst-reconcile/eval_scoring.py`): finding-level precision/recall
+and a Wilson interval, matching `questions.md`'s own "Scoring" section
+exactly rather than approximating it — `score_finding` is a set
+comparison (duplicate invoice names get no extra credit, per the eval
+set's own worked example) and `wilson_interval` uses the closed-form
+Wilson formula (accurate at small `n`, unlike the normal approximation),
+with `z = 1.96` documented as the standard 95% constant rather than a
+number invented for this system. **Scoped to what has a real,
+machine-checkable answer today**: ten of the fifteen questions (6-13, 15)
+don't reduce to a subject-list comparison — some are yes/no, some ask
+"why," one wants a citation — so scoring them would mean inventing a
+convention `questions.md` never states; this slice scores
+`reconcile_agent.py`'s five deterministic answers against the hand-derived
+key instead, and leaves the rest recorded as unscored rather than silently
+approximated. Every one of the five scores exact, computed from
+`test_reconcile_agent.py`'s own real fixture, not a synthetic one. The
+Wilson-interval tests are three properties **hand-derived by algebra**,
+not pulled from a fetched or half-remembered example — a first attempt
+reached for a reference numeric example from Wikipedia's own Wilson-score
+article and got back garbled math markup with no worked example at all
+(a second source 403'd); deriving three exact boundary identities
+(`successes == n` → upper bound exactly `1.0`; `successes == 0` → lower
+bound exactly `0.0`; `successes == n/2` → midpoint exactly `0.5`) turned
+out to be more rigorous than trusting a recalled example would have been,
+and is the same "verify external formats via real web research" discipline
+this project has hit before, applied one step further — verify, and when
+the source doesn't cooperate, derive instead of guessing. No mutmut
+report, for the identical structural reason `105s` already hit and this
+slice didn't need to rediscover.
+**Still open, recorded rather than assumed away**: questions 6-13 and 15
+have no automated score; P11's agent answers one question end-to-end
+against a scripted model, not a live one, and is not itself what produced
+the five scored answers above (those come from `reconcile_agent.py`'s
+deterministic P9 layer) — P12 does not yet score an agent's own free-text
+output at all, only a structured system's;
 unbuilt, so today's evaluation is this one worked example plus
 `reconcile_agent.py`'s deterministic five and
 `scripts/verify-gst-reconciliation.sh`'s hand-scripted assertions for 6-11,
