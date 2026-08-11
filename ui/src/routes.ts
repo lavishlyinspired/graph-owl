@@ -25,6 +25,7 @@ export const ROUTES = [
   "workbench",
   "vocabulary",
   "review",
+  "obligations",
   "connectors",
   "admin",
 ] as const;

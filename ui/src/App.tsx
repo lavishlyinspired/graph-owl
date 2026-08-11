@@ -52,6 +52,7 @@ import type { DataNode } from "antd/es/tree";
 import ApartmentOutlined from "@ant-design/icons/es/icons/ApartmentOutlined";
 import ArrowLeftOutlined from "@ant-design/icons/es/icons/ArrowLeftOutlined";
 import BookOutlined from "@ant-design/icons/es/icons/BookOutlined";
+import CalendarOutlined from "@ant-design/icons/es/icons/CalendarOutlined";
 import BulbOutlined from "@ant-design/icons/es/icons/BulbOutlined";
 import DownloadOutlined from "@ant-design/icons/es/icons/DownloadOutlined";
 import CheckCircleFilled from "@ant-design/icons/es/icons/CheckCircleFilled";
@@ -102,6 +103,7 @@ import {
 } from "./trust/TrustComponents";
 import { VocabularySection } from "./features/vocabulary/VocabularySection";
 import { ReviewSection } from "./features/review/ReviewSection";
+import { ObligationCalendar } from "./features/obligations/obligationCalendar";
 import { PackImportPanel } from "./features/packs/PackImportPanel";
 import { KnowledgeGraphToggle } from "./features/knowledge/KnowledgeGraphToggle";
 import { AgentActivityPanel } from "./features/agents/AgentActivityPanel";
@@ -174,6 +176,7 @@ type Section =
   | "workbench"
   | "vocabulary"
   | "review"
+  | "obligations"
   | "admin";
 
 const KIND_ICON: Record<AssetKind, React.ReactNode> = {
@@ -4345,6 +4348,7 @@ function AppShell() {
                   { key: "workbench", icon: <ThunderboltOutlined />, label: "Workbench" },
                   { key: "vocabulary", icon: <BookOutlined />, label: "Vocabulary" },
                   { key: "review", icon: <MergeOutlined />, label: "Review" },
+                  { key: "obligations", icon: <CalendarOutlined />, label: "Obligations" },
                   { key: "connectors", icon: <PlusOutlined />, label: "Connectors" },
                   { key: "admin", icon: <TeamOutlined />, label: "Admin" },
                 ]}
@@ -4415,6 +4419,8 @@ function AppShell() {
                 <VocabularySection />
               ) : section === "review" ? (
                 <ReviewSection />
+              ) : section === "obligations" ? (
+                <ObligationCalendar />
               ) : section === "connectors" ? (
                 <ConnectorsPage onDone={refresh} colors={colors} />
               ) : section === "admin" ? (

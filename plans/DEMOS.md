@@ -1098,15 +1098,26 @@ BY`/`DISTINCT` already work end to end through the adopted `spareval`
 evaluator — five characterization tests against the platform plan's own
 worked example (three invoices at ₹100/₹200/₹300 summing to ₹600) all pass
 against the *existing* code, confirming the plan's own claim that this was
-"probably not work at all" rather than an unbuilt gap. **Still open,
+"probably not work at all" rather than an unbuilt gap. **P8's first real
+slice and F4 both shipped, 11 August 2026** (`105h`): "Event → Legal Rule →
+Obligation → Due Date → Risk" turns out to be `[findings.span]` read forward
+instead of only backward — `passes_span` already computed
+`(judged_on - start).num_days() > exceeds_days` as a boolean and silently
+discarded the due date itself. `Catalog::obligation_calendar` computes it for
+every open `PaymentOverdue`-shaped row, and the console's new **Obligations**
+route renders it — checked before building, not assumed: the platform doc's
+full P8 needs a temporal graph engine (§7) that does not exist, so this is
+the due-date half of the one obligation GST already has, not the general
+law/rules runtime. **Still open,
 recorded rather than assumed away**: no reference agent app (`examples/gst-reconcile/`)
 and so no scored evaluation run; the live GSP/ERP connectors are fixture-mode
-only; pack facts are readable by any principal who can query at all (per-named-graph policy needs a policy model that does not exist yet); six of the seven planned packs are unwritten; and P2's remaining connectors, P3, P4, P8, P9's
+only; pack facts are readable by any principal who can query at all (per-named-graph policy needs a policy model that does not exist yet); six of the seven planned packs are unwritten; and P2's remaining connectors, P3, P4, the rest of P8 (temporal engine, generalization beyond GST), P9's
 query-planner/GraphRAG/hybrid-search thirds, P10, P11 and P12 are untouched — this is the spine, not the finished platform
 
 ### Console half
 - [x] **105** **One queue, every pack** — `findingsQueue.tsx` renders GST and hospitality identically; the difference lives in `pack.toml`. A `GstFindingsQueue.tsx` would have been the console's first per-domain hardcoding
 - [x] **105e/105g** **Evidence graph, rendered** — a real Cytoscape-rendered picture plus a raw triples table (extracted `GraphCanvas` out of `App.tsx` for reuse), each node's source document(s) shown as tags, and — for `GstinTransposition` specifically — a "Possible match — not linked" section naming the second Supplier candidate, deliberately not drawn as a graph edge
+- [x] **105h / F4** **Obligation calendar — the console's ninth route** — due date first, a colored status tag on the derived "Due" column that the asserted "Anchor" column never carries, `?pack=`/`?window=` deep links
 
 ---
 

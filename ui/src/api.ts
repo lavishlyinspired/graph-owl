@@ -345,6 +345,22 @@ export interface PackFinding {
   readonly reason?: string | null;
 }
 
+/** One open obligation — Epic 105 P8's first real slice
+ *  (`GET /packs/{pack}/obligations`, `plans/105h-obligation-calendar.md`).
+ *  `anchor` is asserted (the event date a document actually recorded);
+ *  `due` is derived (`anchor` plus the rule's period) — the console must
+ *  never render the two identically, the same distinction `00f`
+ *  non-negotiable 4 already requires of every computed value elsewhere. */
+export interface Obligation {
+  readonly pack: string;
+  readonly label: string;
+  readonly subject: string;
+  readonly governedBy: string;
+  readonly anchor: string;
+  readonly due: string;
+  readonly daysRemaining: number;
+}
+
 /** A node in a finding's evidence graph — Epic 105 P7
  *  (`GET /findings/{id}/evidence-graph`).
  *
@@ -1332,6 +1348,8 @@ export const api = {
     const suffix = query.toString();
     return request<PackFinding[]>(`/findings${suffix ? `?${suffix}` : ""}`);
   },
+  obligationCalendar: (pack: string) =>
+    request<Obligation[]>(`/packs/${encodeURIComponent(pack)}/obligations`),
   decideFinding: (id: string, status: "accepted" | "rejected", reason?: string) =>
     request<void>(`/findings/${id}/decision`, {
       method: "POST",

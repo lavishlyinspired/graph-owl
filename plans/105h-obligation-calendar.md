@@ -90,13 +90,28 @@ test would fail.
 explained above), real-Postgres integration test proving the computed due
 date, `fmt`/`clippy` clean on touched crates.
 
+## Slice 2 — F4, the console route
+
+**Shipped 11 August 2026**, same session. `ui/src/features/obligations/obligationCalendar.tsx`:
+`GET /packs/{pack}/obligations` rendered as a table, `?pack=` (default `gst`)
+and `?window=` deep links, `due` (derived) carrying a colored status tag
+`anchor` (asserted) never does — `00f` non-negotiable 4, the same rule
+`findingsQueue.tsx` already applies to a reasoner-derived edge. Pure logic
+(`obligationStatus`, `withinWindow`) unit-tested (8 tests); the 30-day
+"due soon" horizon is a display threshold with no pack-config field yet, not
+a business rule any finding depends on — stated as such rather than left
+unexplained. Registered as the ninth top-level route
+(`routes.ts`/`routes.structural.test.ts` both updated, budget 9 of 30).
+Verified live against the real GST demo data: `purchase-INV-2002` (a 2020
+invoice) shows 2041 days overdue in red; `purchase-INV-1006` shows 164 days
+remaining, not yet due; `purchase-INV-1003` (paid, per the earlier
+`PaymentOverdue` finding) correctly does not appear — discharged, whether
+paid on time or late.
+
 ## What this deliberately does not do
 
 - No new pack-config table. `[findings.span]` already names anchor, period
   and discharge event; Slice 1 reads it, it does not extend it.
-- No console surface yet (F4, "Obligation calendar," the one new route the
-  platform doc names) — this slice is the data the calendar would read, not
-  the calendar itself. F4 remains open.
 - No generalization to ROC, litigation, or any domain without a real fixture
   — GST's `PaymentOverdue` is the only rule this was built and proven
   against.
@@ -104,3 +119,6 @@ date, `fmt`/`clippy` clean on touched crates.
   arithmetic in Rust (`chrono::NaiveDate` addition), the same way
   `passes_span` already does — not a graph-level primitive, and not claimed
   to be one.
+- No pack picker in the console — `?pack=` deep-links to any pack, but
+  there is no UI control to switch packs yet (that is F1's "Pack management
+  admin tab" territory, not F4's).
