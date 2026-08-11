@@ -164,6 +164,63 @@ with dates. **This row says what the engine is for. Those two say what it does.*
 
 The last one matters most. The temptation in an AI-adjacent product is to grow into the agent runtime. Holding that line is what keeps this composable.
 
+## A pack-level example: the GST pack vs. a reconciliation tool
+
+Added 12 August 2026, prompted by a comparison against a real, focused
+GSTR-2B-vs-purchase-register reconciliation product (GST Reconcile:
+browser-local Excel matching, 21 deterministic rules, per-supplier
+ITC-at-risk ranking). Worth recording because the comparison is easy to
+state wrong in either direction — as "graph-owl also reconciles GST", or
+as "graph-owl is a GST product" — and both are false for reasons that
+follow directly from decisions already made elsewhere in this document.
+
+**graph-owl is not a GST product.** The GST pack (`packs/gst/`) is one of
+two proof packs for the domain-neutrality claim in `plans/00l-build-vs-
+adopt.md` and `plans/105-domain-neutrality.md` — hospitality is the
+other, deliberately unrelated domain, built to the same pack shape to
+prove nothing GST-specific leaked into the engine. A reconciliation tool
+built *for* GST can specialize its whole data model around GSTR-2B and a
+purchase register. graph-owl's engine cannot do that without breaking
+the thing DN-3 exists to prove.
+
+**Within that constraint, the honest differentiation is findings vs.
+matches, not "better matching."** A dedicated reconciliation tool's core
+loop — row-level matching, explainable match reasons, supplier-level
+risk ranking — is a genuinely good product shape, already built, and not
+a gap graph-owl should try to out-build with more matching rules. What
+the flake model, retract-not-delete history, and reasoning-as-overlay
+(the four structural positions above) make possible instead is carrying
+a match forward into *why*: `Catalog::reconcile_pack`'s findings already
+carry `governed_by`/`evidence`/a rule id, and `finding_evidence_graph`
+renders the graph that produced a conclusion — not a spreadsheet cell
+that says "mismatch."
+
+| | A reconciliation tool | The GST pack, via graph-owl's engine |
+|---|---|---|
+| Core question | Does this invoice match? | What happened, why, what's the evidence, what's next |
+| Match reason | Row-level rule that fired | A finding with `governedBy`, evidence, and a rendered derivation graph |
+| History | One reconciliation run | Retract-not-delete — every past run stays queryable |
+| Cross-source reasoning | Two files (PR, 2B) | Whatever a pack's own connectors land in the graph — evidence chains span sources by construction, not by a purpose-built join |
+
+**A real, currently-open gap this comparison surfaces honestly: filing
+period is not a first-class entity.** `plans/00c-domain-model.md` has no
+`FilingPeriod`/similar concept today — every GST fact is a flake with a
+transaction time `t`, not an entity a query can traverse from ("show me
+everything that changed between April and May"). That is a genuine,
+previously-unnamed gap, not something this note should paper over by
+claiming month-to-month reasoning already works. Scoped as its own epic
+via story-splitting — see the roadmap for where it lands — rather than
+asserted here as already true.
+
+**What this note deliberately does not do**: propose repositioning
+graph-owl *as* "a GST compliance operating system." That framing treats
+one proof pack as the product, which is exactly the domain-neutrality
+discipline this document's own scope section (and `00l`/`105-domain-
+neutrality.md`) exists to prevent. If GST-specific packaging (a
+vertical product built *on* graph-owl, sold to CAs) is ever a real
+decision, it is a separate, explicit positioning call — not an implicit
+one that falls out of building a better demo pack.
+
 ## How to read this alongside the roadmap
 
 `plans/ROADMAP.md` marks differentiator epics with ★. Those are the reason the product exists; cutting one is a positioning decision, not a scope decision.
