@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use graph_owl_core::flake::namespace;
 use graph_owl_engine::{
     EvidenceBinding, FindingRuleDef, FindingRuleRegistry, NamespaceDef, NamespaceRegistry,
-    PredicateDef, PredicateRegistry, RegistryError,
+    PackQueryDef, PackQueryRegistry, PredicateDef, PredicateRegistry, RegistryError,
 };
 use sqlx::Row;
 
@@ -286,5 +286,35 @@ impl FindingRuleRegistry for PostgresTripleStore {
         .map_err(|e| RegistryError::Backend(e.to_string()))?;
 
         rows.iter().map(finding_rule_from_row).collect()
+    }
+}
+
+#[async_trait]
+impl PackQueryRegistry for PostgresTripleStore {
+    async fn declare_query(&self, def: &PackQueryDef) -> Result<(), RegistryError> {
+        sqlx::query(
+            "INSERT INTO pack_queries (pack, name, query)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (pack, name) DO UPDATE SET query = EXCLUDED.query",
+        )
+        .bind(&def.pack)
+        .bind(&def.name)
+        .bind(&def.query)
+        .execute(self.pool())
+        .await
+        .map_err(|e| RegistryError::Backend(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn pack_query(&self, pack: &str, name: &str) -> Result<Option<String>, RegistryError> {
+        let row = sqlx::query("SELECT query FROM pack_queries WHERE pack = $1 AND name = $2")
+            .bind(pack)
+            .bind(name)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(|e| RegistryError::Backend(e.to_string()))?;
+
+        Ok(row.map(|r| r.get("query")))
     }
 }

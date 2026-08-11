@@ -47,7 +47,9 @@ use graph_owl_engine::{NamespaceRegistry, TripleStore};
 // Re-exported so `graph-owl-server` can name the type its
 // `/namespaces` route returns without taking a direct dependency on
 // the engine port — the facade is what the server is meant to speak to.
-pub use graph_owl_engine::{EvidenceBinding, FindingRuleDef, NamespaceDef, PredicateDef};
+pub use graph_owl_engine::{
+    EvidenceBinding, FindingRuleDef, NamespaceDef, PackQueryDef, PredicateDef,
+};
 use graph_owl_events::{ChangeEvent, EventSink, EventSubject};
 use graph_owl_reasoning as reasoning;
 use graph_owl_resolution::bands::{ConfidenceBands, Decision, decide};
@@ -1358,6 +1360,223 @@ fn passes_span_condition(
         .map_err(|e| rule_error(rule, e))
 }
 
+/// Every `{{name}}` placeholder `query` declares, in the order first seen.
+fn placeholder_names(query: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = query;
+    while let Some(start) = rest.find("{{") {
+        let after_open = &rest[start + 2..];
+        let Some(end) = after_open.find("}}") else {
+            break;
+        };
+        let name = after_open[..end].to_string();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+        rest = &after_open[end + 2..];
+    }
+    names
+}
+
+/// A bound value safe to place inside the `<...>` a query author's own
+/// `VALUES ?var { <{{name}}> }` clause already provides.
+///
+/// **Matches SPARQL 1.1's own `IRIREF` production**
+/// (`[130] IRIREF ::= '<' ([^<>"{}|^`\]-[#x00-#x20])* '>'`), not a
+/// tighter, invented set — `#` is deliberately *not* forbidden here: it is
+/// an ordinary character inside an `IRIREF` (a comment only starts a `#`
+/// outside one), and this project's own namespace IRIs use it
+/// universally (`https://graph-owl.dev/ns/catalog#`), so rejecting it
+/// would refuse every real subject this mechanism exists to bind.
+fn is_safe_iri(value: &str) -> bool {
+    !value.is_empty()
+        && !value.chars().any(|c| {
+            matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\') || (c as u32) <= 0x20
+        })
+}
+
+/// Substitutes `query`'s own `{{name}}` placeholders with their bound
+/// value — syntax-level only, never string-concatenation of an arbitrary
+/// bound term into an arbitrary query position. A pack query author places
+/// each placeholder inside a `VALUES ?var { <{{name}}> }` clause of their
+/// own choosing (`packs/gst/queries/provision-in-force.sparql` is the
+/// worked example); this function only ever replaces the text between the
+/// double braces, so a caller-supplied binding can only ever affect what
+/// is already inside the author's own `<...>` — it cannot introduce a new
+/// clause, comment out a filter, or add a second `VALUES` binding no
+/// matter what value is supplied, as long as that value passes
+/// [`is_safe_iri`].
+///
+/// # Errors
+///
+/// `Validation` if `bindings` names a placeholder the query does not
+/// declare, the query declares a placeholder `bindings` does not supply,
+/// or a supplied value is not a bare, safe IRI.
+fn substitute_pack_query_bindings(
+    query: &str,
+    bindings: &std::collections::BTreeMap<String, String>,
+) -> Result<String, CatalogError> {
+    let declared = placeholder_names(query);
+
+    for name in bindings.keys() {
+        if !declared.contains(name) {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "bindings",
+                FieldErrorCode::Value,
+                format!("this query declares no `{{{{{name}}}}}` placeholder"),
+            )]));
+        }
+    }
+    for name in &declared {
+        let Some(value) = bindings.get(name) else {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "bindings",
+                FieldErrorCode::Value,
+                format!("this query requires a `{name}` binding"),
+            )]));
+        };
+        if !is_safe_iri(value) {
+            return Err(CatalogError::Validation(vec![FieldError::new(
+                "bindings",
+                FieldErrorCode::Value,
+                format!(
+                    "`{name}` must be a non-empty IRIREF-safe IRI — no `<`, `>`, `\"`, `{{`, \
+                     `}}`, `|`, `^`, backtick, backslash, or whitespace/control characters"
+                ),
+            )]));
+        }
+    }
+
+    let mut substituted = query.to_string();
+    for (name, value) in bindings {
+        substituted = substituted.replace(&format!("{{{{{name}}}}}"), value);
+    }
+    Ok(substituted)
+}
+
+#[cfg(test)]
+mod pack_query_substitution_tests {
+    //! `substitute_pack_query_bindings`'s own decisions — Epic 105 P106
+    //! Slice 4a. Pure and I/O-free, so these run without a database.
+
+    use super::*;
+
+    fn bindings(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_declared_placeholder_is_substituted_with_its_bound_value() {
+        let query = "SELECT ?p WHERE { VALUES ?invoice { <{{invoice}}> } ?invoice ?p ?o }";
+
+        let substituted = substitute_pack_query_bindings(
+            query,
+            &bindings(&[(
+                "invoice",
+                "https://graph-owl.dev/packs/gst#purchase-INV-2001",
+            )]),
+        )
+        .expect("a matching binding substitutes");
+
+        assert_eq!(
+            substituted,
+            "SELECT ?p WHERE { VALUES ?invoice { <https://graph-owl.dev/packs/gst#purchase-INV-2001> } ?invoice ?p ?o }"
+        );
+        assert!(!substituted.contains("{{"), "{substituted}");
+    }
+
+    /// Two placeholders, so a mutant that only ever substitutes the first
+    /// (or overwrites one with the other) fails.
+    #[test]
+    fn multiple_placeholders_each_take_their_own_value() {
+        let query = "ASK { <{{a}}> ?p <{{b}}> }";
+
+        let substituted =
+            substitute_pack_query_bindings(query, &bindings(&[("a", "urn:one"), ("b", "urn:two")]))
+                .expect("both bindings supplied");
+
+        assert_eq!(substituted, "ASK { <urn:one> ?p <urn:two> }");
+    }
+
+    /// **Adjacent placeholders, no separating text** — a scan that walks
+    /// past the closing `}}` by `end * 2` characters instead of `end + 2`
+    /// happens to agree with the correct offset only when the placeholder
+    /// name is exactly 2 characters, so every other-length name (here,
+    /// `invoice`, 7 characters) skips into the middle of the very next
+    /// `{{`, drops it from `declared`, and refuses a legitimate binding as
+    /// though the query never named it.
+    #[test]
+    fn placeholders_with_no_separating_text_are_both_declared() {
+        let query = "ASK { <{{invoice}}{{other}}> }";
+
+        let substituted = substitute_pack_query_bindings(
+            query,
+            &bindings(&[("invoice", "urn:one"), ("other", "urn:two")]),
+        )
+        .expect("both adjacent placeholders are declared");
+
+        assert_eq!(substituted, "ASK { <urn:oneurn:two> }");
+    }
+
+    /// **The negative that makes the positive case about validation, not
+    /// just about `HashMap::get` returning `None`.** A binding naming a
+    /// placeholder the query never declared must be refused, not silently
+    /// ignored — an agent that mistyped a binding name deserves to know,
+    /// not to get an answer to a slightly different question.
+    #[test]
+    fn a_binding_naming_an_undeclared_placeholder_is_refused() {
+        let query = "ASK { <{{invoice}}> ?p ?o }";
+
+        let err = substitute_pack_query_bindings(query, &bindings(&[("wrong", "urn:x")]))
+            .expect_err("`wrong` is not declared");
+
+        assert!(matches!(err, CatalogError::Validation(_)), "{err:?}");
+    }
+
+    /// The complementary negative: every placeholder the query declares
+    /// must be supplied, or the substituted text still contains a bare
+    /// `{{name}}` that would fail to parse as SPARQL with a confusing
+    /// error instead of a clear one.
+    #[test]
+    fn a_missing_binding_for_a_declared_placeholder_is_refused() {
+        let query = "ASK { <{{invoice}}> ?p ?o }";
+
+        let err = substitute_pack_query_bindings(query, &bindings(&[]))
+            .expect_err("`invoice` was never supplied");
+
+        assert!(matches!(err, CatalogError::Validation(_)), "{err:?}");
+    }
+
+    /// **The injection-safety case.** A value carrying `>` could close the
+    /// author's own `<...>` early and let the rest of the value land as
+    /// free-standing query syntax — this is exactly the shape a caller
+    /// must never be able to produce.
+    #[test]
+    fn a_value_that_could_break_out_of_the_angle_brackets_is_refused() {
+        let query = "ASK { <{{invoice}}> ?p ?o }";
+
+        for unsafe_value in ["urn:x> } FILTER(true) #", "urn:x\"", "urn:x y", ""] {
+            let err =
+                substitute_pack_query_bindings(query, &bindings(&[("invoice", unsafe_value)]))
+                    .expect_err(&format!("{unsafe_value:?} must be refused"));
+            assert!(matches!(err, CatalogError::Validation(_)), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn a_query_with_no_placeholders_and_no_bindings_passes_through_unchanged() {
+        let query = "SELECT ?s WHERE { ?s a <urn:Thing> }";
+
+        let substituted =
+            substitute_pack_query_bindings(query, &bindings(&[])).expect("nothing to bind");
+
+        assert_eq!(substituted, query);
+    }
+}
+
 /// Turn one rule's already-fetched SPARQL rows into findings — Epic 105
 /// P5b, the pure half of [`Catalog::reconcile_pack`]. No I/O: the query has
 /// already run, and this only filters and shapes what it returned. Mirrors
@@ -1788,6 +2007,12 @@ pub struct Catalog {
     /// separate contract from declaring its vocabulary, and a deployment
     /// that installs no pack never populates it.
     finding_rules: Option<Arc<dyn graph_owl_engine::FindingRuleRegistry>>,
+    /// A pack's `[[queries]]` — named, parameterized lookups callable by
+    /// name with runtime bindings, distinct from `finding_rules` above:
+    /// a finding rule always runs and reports what it detects, a named
+    /// query answers one caller-supplied question — Epic 105 P106 Slice
+    /// 4a (`plans/106-agent-trace-hygiene.md`).
+    pack_queries: Option<Arc<dyn graph_owl_engine::PackQueryRegistry>>,
     /// Whether ingested query text is persisted — Epic 28 decision 2.
     ///
     /// **Off by default, and that is a data-protection decision rather than a
@@ -1909,6 +2134,7 @@ impl Catalog {
             findings: None,
             predicates: None,
             finding_rules: None,
+            pack_queries: None,
             events: None,
             decisions: Arc::new(DecisionCache::default()),
             shape_cache: Arc::new(Mutex::new(None)),
@@ -2184,6 +2410,17 @@ impl Catalog {
         finding_rules: Arc<dyn graph_owl_engine::FindingRuleRegistry>,
     ) -> Self {
         self.finding_rules = Some(finding_rules);
+        self
+    }
+
+    /// The registry a domain pack's `[[queries]]` are declared through —
+    /// Epic 105 P106 Slice 4a.
+    #[must_use]
+    pub fn with_pack_queries(
+        mut self,
+        pack_queries: Arc<dyn graph_owl_engine::PackQueryRegistry>,
+    ) -> Self {
+        self.pack_queries = Some(pack_queries);
         self
     }
 
@@ -2532,6 +2769,71 @@ impl Catalog {
             opened: recorded.opened,
             already_open: recorded.already_open,
         })
+    }
+
+    /// Register a pack's `[[queries]]` entry — Epic 105 P106 Slice 4a
+    /// (`plans/106-agent-trace-hygiene.md`).
+    ///
+    /// **Upsert, not idempotent-or-reject**, for the identical reason
+    /// [`declare_finding_rule`] is: nothing else in the graph is keyed to
+    /// a query's current text.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no pack-query registry is configured, or the write
+    /// fails.
+    ///
+    /// [`declare_finding_rule`]: Self::declare_finding_rule
+    pub async fn declare_pack_query(
+        &self,
+        def: &graph_owl_engine::PackQueryDef,
+    ) -> Result<(), CatalogError> {
+        let registry = self.pack_queries.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no pack-query registry configured".to_string(),
+            ))
+        })?;
+        registry
+            .declare_query(def)
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// Run one of a pack's registered `[[queries]]` by name, with
+    /// caller-supplied bindings — Epic 105 P106 Slice 4b's `run_pack_query`
+    /// MCP tool. Goes through [`Catalog::sparql`] — the same function
+    /// `/sparql` and the `query_graph` MCP tool's own adapter both call —
+    /// so this answer carries the identical `factsScanned`/`plan`
+    /// diagnostics (Slice 2) for free.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no pack-query registry is configured or the query
+    /// fails to parse or execute. `NotFound` if the pack has no query with
+    /// that name. `Validation` if `bindings` does not exactly match the
+    /// query's own declared placeholders, or a bound value is not a bare
+    /// IRI — see [`substitute_pack_query_bindings`].
+    pub async fn run_pack_query(
+        &self,
+        principal: &Principal,
+        pack: &str,
+        name: &str,
+        bindings: &std::collections::BTreeMap<String, String>,
+    ) -> Result<SparqlOutcome, CatalogError> {
+        let registry = self.pack_queries.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no pack-query registry configured".to_string(),
+            ))
+        })?;
+        let query = registry
+            .pack_query(pack, name)
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?
+            .ok_or(CatalogError::NotFound)?;
+
+        let substituted = substitute_pack_query_bindings(&query, bindings)?;
+        self.sparql(principal, &substituted, None, SparqlBudget::default())
+            .await
     }
 
     /// Every open obligation a pack's span-configured rules can see right

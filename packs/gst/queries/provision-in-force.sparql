@@ -1,0 +1,50 @@
+# The `gst:Provision` in force on one invoice's own date — a direct lookup,
+# not a detector. `amount-mismatch.sparql` derives the identical "latest
+# effectiveFrom on or before the date" answer as one step inside a larger
+# comparison; this exists because an agent investigating a single invoice
+# needs that same answer on its own, addressable by name with the invoice
+# as the only input (Epic 105 P106 Slice 4a,
+# `plans/106-agent-trace-hygiene.md`) — before this, the only way to reach
+# it was `query_graph` free-hand SPARQL, rediscovering the same
+# `OPTIONAL` + `!BOUND` idiom `amount-mismatch.sparql`'s own comment
+# already explains once.
+#
+# **`{{invoice}}` is the one caller-supplied value, and it is bound through
+# `VALUES`, never concatenated into the query text.** The substitution that
+# fills it in (`Catalog::run_pack_query`) only ever replaces the text
+# between the double braces, and only after checking it is a bare,
+# syntax-safe IRI — so the worst a caller can do is name an invoice that
+# does not exist, never rewrite the query itself.
+#
+# **"Latest in force" is `OPTIONAL` + `!BOUND`, not `FILTER NOT EXISTS`**,
+# for the identical reason `amount-mismatch.sparql`'s own comment gives:
+# the pushdown planner does not descend into `NOT EXISTS`, so the
+# provisions would never be loaded and the guard would be trivially true
+# for every one of them.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?provision ?capPercent ?citation ?effectiveFrom
+WHERE {
+  GRAPH ?register {
+    VALUES ?invoice { <{{invoice}}> }
+    ?invoice gst:invoiceDate ?date .
+  }
+
+  GRAPH ?law {
+    ?provision a gst:Provision ;
+               gst:effectiveFrom ?effectiveFrom ;
+               gst:capPercent    ?capPercent ;
+               gst:citation      ?citation .
+  }
+  FILTER (?effectiveFrom <= ?date)
+
+  OPTIONAL {
+    GRAPH ?laterLaw {
+      ?later a gst:Provision ;
+             gst:effectiveFrom ?laterFrom .
+    }
+    FILTER (?laterFrom <= ?date && ?laterFrom > ?effectiveFrom)
+  }
+  FILTER (!BOUND(?later))
+}

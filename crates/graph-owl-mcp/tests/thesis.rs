@@ -229,6 +229,17 @@ impl ContextSource for Seeded {
         Ok(Ok(QueryAnswer::default()))
     }
 
+    async fn run_pack_query(
+        &self,
+        _principal: &str,
+        _pack: &str,
+        _name: &str,
+        _bindings: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Result<Option<QueryAnswer>, QueryFault>, SourceError> {
+        self.record("run_pack_query");
+        Ok(Ok(None))
+    }
+
     async fn traverse(
         &self,
         principal: &str,

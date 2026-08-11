@@ -301,6 +301,37 @@ pub trait ContextSource: Send + Sync {
         label: &str,
     ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError>;
 
+    /// Run one of a pack's registered `[[queries]]` by name, with
+    /// caller-supplied bindings — Epic 105 P106 Slice 4b (`plans/
+    /// 106-agent-trace-hygiene.md`), the parameterized-lookup counterpart
+    /// to [`Self::query_graph`]: a named query answers one bound question
+    /// (`provision-in-force` on one invoice) rather than accepting
+    /// free-hand SPARQL. Unlike [`Self::run_rule`], **not admin-gated** —
+    /// a named query is a read, the same posture `query_graph` already
+    /// has, not a write that lands a finding.
+    ///
+    /// **Three outcomes, not two, because two questions are genuinely
+    /// different: "does a query by this name exist" and "were the
+    /// bindings supplied for it valid."** The outer `Result` is
+    /// [`SourceError`] only when the catalog could not be reached; the
+    /// middle is [`QueryFault`] when the bindings themselves are the
+    /// caller's mistake (an undeclared placeholder, a missing one, or an
+    /// unsafe value); the inner `Option` is `None` when no query is
+    /// registered under that name for that pack — indistinguishable from
+    /// denied, for the same reason [`Outcome::NotFound`] exists everywhere
+    /// else on this trait.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached.
+    async fn run_pack_query(
+        &self,
+        principal: &str,
+        pack: &str,
+        name: &str,
+        bindings: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Result<Option<QueryAnswer>, QueryFault>, SourceError>;
+
     /// Rank catalog assets by how closely their name matches a free-text
     /// candidate — Epic 105 P10's seventh intelligence tool, the platform
     /// doc's entity-linking primitive, wrapping
@@ -882,6 +913,10 @@ pub const RESOLVE_ENTITY: &str = "resolve_entity";
 /// and last intelligence tool.
 pub const CALCULATE_RISK: &str = "calculate_risk";
 
+/// Run one of a pack's registered `[[queries]]` by name, with
+/// caller-supplied bindings — Epic 105 P106 Slice 4b.
+pub const RUN_PACK_QUERY: &str = "run_pack_query";
+
 /// The most hops an agent may ask `traverse` to walk.
 ///
 /// Six, matching `GET /findings/{id}/evidence-graph`'s own server-side cap
@@ -1266,6 +1301,35 @@ pub fn tools() -> Vec<ToolDeclaration> {
                     },
                 },
                 "required": ["pack", "subject"],
+                "additionalProperties": false,
+            }),
+        },
+        ToolDeclaration {
+            name: RUN_PACK_QUERY,
+            description: "Run one of a pack's registered named queries — a bound lookup \
+                      (e.g. \"which provision is in force on this invoice's own date\"), \
+                      not free-hand SPARQL. Prefer this over `query_graph` when a pack \
+                      declares a query shaped for your question; it already carries the \
+                      right joins and the right idiom for \"as of\" comparisons.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pack": {
+                        "type": "string",
+                        "description": "The pack the query belongs to, e.g. \"gst\".",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "The query's own name, e.g. \"provision-in-force\".",
+                    },
+                    "bindings": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "One IRI per placeholder the query declares, e.g. \
+                                  {\"invoice\": \"https://graph-owl.dev/packs/gst#purchase-INV-2001\"}.",
+                    },
+                },
+                "required": ["pack", "query"],
                 "additionalProperties": false,
             }),
         },
@@ -1663,6 +1727,40 @@ pub async fn call_within(
             }
         }
 
+        RUN_PACK_QUERY => {
+            let pack = match required_text(arguments, "pack") {
+                Ok(pack) => pack,
+                Err(problem) => return problem,
+            };
+            let name = match required_text(arguments, "query") {
+                Ok(name) => name,
+                Err(problem) => return problem,
+            };
+            let bindings = match bindings_of(arguments) {
+                Ok(bindings) => bindings,
+                Err(problem) => return problem,
+            };
+            match source
+                .run_pack_query(principal, pack, name, &bindings)
+                .await
+            {
+                Ok(Ok(Some(mut answer))) => {
+                    if budget::fit(&mut answer, limit).is_some() {
+                        answer.truncated = true;
+                    }
+                    Outcome::Bindings(Box::new(answer))
+                }
+                Ok(Ok(None)) => Outcome::NotFound,
+                // The bindings were the caller's mistake, matching
+                // `query_graph`'s own `QueryFault::Malformed` reading of a
+                // query it cannot run as asked.
+                Ok(Err(QueryFault::Malformed(detail) | QueryFault::Unsupported(detail))) => {
+                    Outcome::BadRequest(detail)
+                }
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
         _ => Outcome::BadRequest(format!("no tool named `{tool}`")),
     }
 }
@@ -1713,6 +1811,29 @@ fn optional_text<'a>(arguments: &'a serde_json::Value, field: &str) -> Result<&'
         Some(_) => Err(Outcome::BadRequest(format!(
             "`{field}`, when given, must be a string"
         ))),
+    }
+}
+
+/// `run_pack_query`'s own `bindings` argument: an object of string to
+/// string, defaulting to empty when absent — a query with no placeholders
+/// is a legitimate call, not a missing argument.
+fn bindings_of(
+    arguments: &serde_json::Value,
+) -> Result<std::collections::BTreeMap<String, String>, Outcome> {
+    match arguments.get("bindings") {
+        None | Some(serde_json::Value::Null) => Ok(std::collections::BTreeMap::new()),
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .map(|(key, value)| match value.as_str() {
+                Some(text) => Ok((key.clone(), text.to_string())),
+                None => Err(Outcome::BadRequest(format!(
+                    "`bindings.{key}` must be a string"
+                ))),
+            })
+            .collect(),
+        Some(_) => Err(Outcome::BadRequest(
+            "`bindings`, when given, must be an object".to_string(),
+        )),
     }
 }
 
@@ -2327,6 +2448,39 @@ mod tests {
                 truncated: false,
                 ..QueryAnswer::default()
             }))
+        }
+
+        async fn run_pack_query(
+            &self,
+            principal: &str,
+            pack: &str,
+            name: &str,
+            bindings: &std::collections::BTreeMap<String, String>,
+        ) -> Result<Result<Option<QueryAnswer>, QueryFault>, SourceError> {
+            self.asked.lock().expect("lock").push((
+                principal.to_string(),
+                format!("run_pack_query:{pack}:{name}:{bindings:?}"),
+            ));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            if pack != "gst" || name != "provision-in-force" {
+                return Ok(Ok(None));
+            }
+            if !bindings.contains_key("invoice") {
+                return Ok(Err(QueryFault::Malformed(
+                    "this query requires an `invoice` binding".into(),
+                )));
+            }
+            Ok(Ok(Some(QueryAnswer {
+                rows: vec![
+                    [("capPercent".to_string(), "\"10\"".to_string())]
+                        .into_iter()
+                        .collect(),
+                ],
+                truncated: false,
+                ..QueryAnswer::default()
+            })))
         }
 
         async fn traverse(
@@ -3011,12 +3165,14 @@ mod tests {
                     RUN_RULE,
                     RESOLVE_ENTITY,
                     CALCULATE_RISK,
+                    RUN_PACK_QUERY,
                 ],
                 "the seven read capabilities Epic 14 promises, plus all eight of Epic \
-                 105 P10's intelligence tools, and no others — a tool that appears \
-                 here without a dispatch arm teaches an agent to distrust the \
-                 manifest, and one that dispatches without appearing here is a \
-                 capability no agent will ever find"
+                 105 P10's intelligence tools, plus Epic 105 P106 Slice 4b's \
+                 run_pack_query, and no others — a tool that appears here without a \
+                 dispatch arm teaches an agent to distrust the manifest, and one that \
+                 dispatches without appearing here is a capability no agent will ever \
+                 find"
             );
         }
 
@@ -4702,6 +4858,128 @@ mod tests {
             .await;
 
             assert!(matches!(outcome, Outcome::Reconciled(_)), "{outcome:?}");
+        }
+    }
+
+    /// Epic 105 P106 Slice 4b — `run_pack_query()`, the parameterized-lookup
+    /// counterpart to `query_graph`.
+    mod the_run_pack_query_tool {
+        use super::*;
+
+        fn query_args(pack: &str, query: &str, bindings: &serde_json::Value) -> serde_json::Value {
+            serde_json::json!({ "pack": pack, "query": query, "bindings": bindings })
+        }
+
+        #[tokio::test]
+        async fn a_registered_query_run_with_its_binding_returns_the_bound_answer() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                RUN_PACK_QUERY,
+                &query_args(
+                    "gst",
+                    "provision-in-force",
+                    &serde_json::json!({"invoice": "https://graph-owl.dev/packs/gst#purchase-INV-2001"}),
+                ),
+            )
+            .await;
+
+            let Outcome::Bindings(answer) = outcome else {
+                panic!("expected Bindings, got {outcome:?}");
+            };
+            assert_eq!(answer.rows.len(), 1, "{answer:?}");
+        }
+
+        /// **Not admin-gated**, unlike `run_rule` — a named query is a
+        /// read, the same posture `query_graph` already has.
+        #[tokio::test]
+        async fn a_non_admin_principal_still_gets_an_answer() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("mallory"),
+                RUN_PACK_QUERY,
+                &query_args(
+                    "gst",
+                    "provision-in-force",
+                    &serde_json::json!({"invoice": "https://graph-owl.dev/packs/gst#purchase-INV-2001"}),
+                ),
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::Bindings(_)), "{outcome:?}");
+        }
+
+        #[tokio::test]
+        async fn an_unauthenticated_caller_learns_nothing() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                None,
+                RUN_PACK_QUERY,
+                &query_args("gst", "provision-in-force", &serde_json::json!({})),
+            )
+            .await;
+
+            assert_eq!(outcome, Outcome::Unauthenticated);
+        }
+
+        /// **Absent, matching every other tool's "do not disclose what
+        /// exists" reading** — no query registered under that name reads
+        /// exactly like `run_rule`'s own unknown-rule case.
+        #[tokio::test]
+        async fn an_unregistered_query_name_is_not_found() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                RUN_PACK_QUERY,
+                &query_args("gst", "no-such-query", &serde_json::json!({})),
+            )
+            .await;
+
+            assert_eq!(outcome, Outcome::NotFound);
+        }
+
+        /// **The negative that proves the query name is checked, not just
+        /// the bindings** — a real query name, a missing binding: distinct
+        /// from `an_unregistered_query_name_is_not_found` above, and a
+        /// `BadRequest`, not the ambiguous `NotFound`, matching Slice 4a's
+        /// own acceptance criterion that a bad binding is a validation
+        /// error, not a 500 (nor a silent "not found").
+        #[tokio::test]
+        async fn a_registered_query_missing_its_required_binding_is_a_bad_request() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                RUN_PACK_QUERY,
+                &query_args("gst", "provision-in-force", &serde_json::json!({})),
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::BadRequest(_)), "{outcome:?}");
+        }
+
+        #[tokio::test]
+        async fn a_call_with_no_query_name_is_a_bad_request() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                RUN_PACK_QUERY,
+                &serde_json::json!({ "pack": "gst" }),
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::BadRequest(_)), "{outcome:?}");
         }
     }
 

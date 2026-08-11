@@ -94,6 +94,11 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             "/packs/{pack}/finding-rules",
             post(declare_finding_rules).get(list_finding_rules),
         )
+        .route("/packs/{pack}/queries", post(declare_pack_queries))
+        .route(
+            "/packs/{pack}/queries/{name}/run",
+            post(run_pack_query_route),
+        )
         .route("/packs/{pack}/reconcile", post(reconcile_pack))
         .route("/packs/{pack}/obligations", get(obligation_calendar))
         .route("/graph/export/preview", get(export_preview))
@@ -8209,6 +8214,85 @@ async fn list_finding_rules(
         return Err(AppError::NotFound);
     }
     Ok(Json(catalog.finding_rules(&pack).await?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PackQueryInput {
+    name: String,
+    query: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeclarePackQueries {
+    queries: Vec<PackQueryInput>,
+}
+
+impl ValidateBody for DeclarePackQueries {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Register a pack's `[[queries]]` — Epic 105 P106 Slice 4a (`plans/
+/// 106-agent-trace-hygiene.md`), the named-query counterpart to
+/// `/packs/{pack}/finding-rules`: every `[[queries]]` entry, not only the
+/// ones a `[[findings]]` rule happens to reference, so a query meant to be
+/// invoked directly (`provision-in-force`, bound to a caller-supplied
+/// subject) is reachable by name even though no finding rule points at it.
+async fn declare_pack_queries(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(pack): Path<String>,
+    AppJson(payload): AppJson<DeclarePackQueries>,
+) -> Result<StatusCode, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    for query in payload.queries {
+        catalog
+            .declare_pack_query(&graph_owl_api::PackQueryDef {
+                pack: pack.clone(),
+                name: query.name,
+                query: query.query,
+            })
+            .await?;
+    }
+    // `200`, not `201`: declaring is upsert, matching `/finding-rules`.
+    Ok(StatusCode::OK)
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RunPackQuery {
+    #[serde(default)]
+    bindings: std::collections::BTreeMap<String, String>,
+}
+
+impl ValidateBody for RunPackQuery {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+/// Run one of a pack's registered `[[queries]]` by name, with
+/// caller-supplied bindings — Epic 105 P106 Slice 4b's `run_pack_query`
+/// MCP tool wraps this route rather than a `Catalog` method directly, the
+/// same posture `traverse`/`explain` already take. Not admin-gated: a
+/// named query answers the same kind of question `/sparql` already does
+/// for any authenticated caller, scoped by the same policy `Catalog::sparql`
+/// already enforces.
+async fn run_pack_query_route(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path((pack, name)): Path<(String, String)>,
+    AppJson(payload): AppJson<RunPackQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let outcome = catalog
+        .run_pack_query(&principal, &pack, &name, &payload.bindings)
+        .await?;
+    Ok(Json(query_outcome_json(&outcome)))
 }
 
 /// Evaluate a pack's registered rules and record what they conclude — Epic

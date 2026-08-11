@@ -111,6 +111,47 @@ fn instant(asset: &graph_owl_core::Asset, key: &str) -> Option<chrono::DateTime<
         .map(|t| t.with_timezone(&chrono::Utc))
 }
 
+/// [`graph_owl_api::SparqlOutcome`] rendered as [`crate::QueryAnswer`] —
+/// shared by `query_graph` and `run_pack_query` so the two tools cannot
+/// drift apart field by field, matching every other shared render helper
+/// in this file.
+fn query_answer_from(outcome: graph_owl_api::SparqlOutcome) -> crate::QueryAnswer {
+    crate::QueryAnswer {
+        rows: outcome.rows,
+        truncated: outcome.truncated,
+        facts_scanned: outcome.facts_scanned,
+        plan: outcome.plan,
+        variables: outcome.variables,
+        ql_rewrite: outcome.ql_rewrite.as_ref().map(ql_rewrite_json),
+        refused_axioms: outcome
+            .refused_axioms
+            .iter()
+            .map(refused_axiom_json)
+            .collect(),
+        alignments_used: outcome
+            .alignments_used
+            .iter()
+            .map(alignment_entry_json)
+            .collect(),
+    }
+}
+
+/// A [`CatalogError::Validation`]'s field errors, joined into one
+/// [`crate::QueryFault::Malformed`] detail — shared by `query_graph` and
+/// `run_pack_query`, whose bindings-validation failures render the
+/// identical way a malformed query's parse errors do.
+fn validation_as_query_fault(
+    problems: &[graph_owl_api::validation::FieldError],
+) -> crate::QueryFault {
+    crate::QueryFault::Malformed(
+        problems
+            .iter()
+            .map(|problem| problem.detail.clone())
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
 /// [`graph_owl_api::QlRewrite`] rendered the same shape `graph-owl-server`'s
 /// `query_outcome_json` already does — same key names, so an agent reading
 /// both `/sparql` and `query_graph` sees one convention, not two.
@@ -568,35 +609,44 @@ impl ContextSource for CatalogContext {
             .sparql(&who, query, None, graph_owl_api::SparqlBudget::default())
             .await
         {
-            Ok(outcome) => Ok(Ok(crate::QueryAnswer {
-                rows: outcome.rows,
-                truncated: outcome.truncated,
-                facts_scanned: outcome.facts_scanned,
-                plan: outcome.plan,
-                variables: outcome.variables,
-                ql_rewrite: outcome.ql_rewrite.as_ref().map(ql_rewrite_json),
-                refused_axioms: outcome
-                    .refused_axioms
-                    .iter()
-                    .map(refused_axiom_json)
-                    .collect(),
-                alignments_used: outcome
-                    .alignments_used
-                    .iter()
-                    .map(alignment_entry_json)
-                    .collect(),
-            })),
+            Ok(outcome) => Ok(Ok(query_answer_from(outcome))),
             // **A query problem is an answer about the query, not a failure to
             // run it.** `Validation` is what the parser rejects; anything else
             // is the engine failing, which the agent must not read as "your
             // query was wrong".
-            Err(CatalogError::Validation(problems)) => Ok(Err(crate::QueryFault::Malformed(
-                problems
-                    .iter()
-                    .map(|problem| problem.detail.clone())
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            ))),
+            Err(CatalogError::Validation(problems)) => {
+                Ok(Err(validation_as_query_fault(&problems)))
+            }
+            Err(error) => Err(unavailable(&error)),
+        }
+    }
+
+    async fn run_pack_query(
+        &self,
+        principal: &str,
+        pack: &str,
+        name: &str,
+        bindings: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Result<Option<crate::QueryAnswer>, crate::QueryFault>, SourceError> {
+        let who = self.authenticated(principal)?;
+
+        // Not admin-gated, matching `query_graph`'s own posture — see the
+        // trait doc comment for why: a named query is a read, the same as
+        // free-hand SPARQL, not a write like `run_rule`/`reconcile`.
+        match self
+            .catalog
+            .run_pack_query(&who, pack, name, bindings)
+            .await
+        {
+            Ok(outcome) => Ok(Ok(Some(query_answer_from(outcome)))),
+            Err(CatalogError::NotFound) => Ok(Ok(None)),
+            // The bindings themselves were the caller's mistake — an
+            // undeclared placeholder, a missing one, or an unsafe value —
+            // distinct from `NotFound` (no query registered under that
+            // name at all).
+            Err(CatalogError::Validation(problems)) => {
+                Ok(Err(validation_as_query_fault(&problems)))
+            }
             Err(error) => Err(unavailable(&error)),
         }
     }

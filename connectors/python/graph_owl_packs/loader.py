@@ -206,6 +206,16 @@ def load_pack(
     if manifest.findings:
         _register_finding_rules(base, manifest, token)
 
+    # **Every [[queries]] entry, not only the ones a [[findings]] rule
+    # references.** `_register_finding_rules` above only ever registers a
+    # query as a side effect of the rule pointing at it — a query meant to
+    # be invoked directly (`provision-in-force`, bound to a caller-supplied
+    # subject rather than run unconditionally) has no rule pointing at it
+    # at all, so it would otherwise never reach the server. Epic 105 P106
+    # Slice 4a.
+    if manifest.queries:
+        _register_pack_queries(base, manifest, token)
+
     return LoadResult(
         pack_id=manifest.id,
         namespace_code=int(declared["code"]),
@@ -329,4 +339,20 @@ def _register_finding_rules(base: str, manifest: Manifest, token: str | None) ->
         method="POST",
         token=token,
         body=json.dumps({"rules": rules}).encode("utf-8"),
+    )
+
+
+def _register_pack_queries(base: str, manifest: Manifest, token: str | None) -> None:
+    queries = [
+        {"name": str(query["name"]), "query": _query_text(manifest, str(query["name"]))}
+        for query in manifest.queries
+    ]
+    if not queries:
+        return
+
+    _request(
+        f"{base}/packs/{manifest.id}/queries",
+        method="POST",
+        token=token,
+        body=json.dumps({"queries": queries}).encode("utf-8"),
     )

@@ -463,6 +463,47 @@ pub trait FindingRuleRegistry: Send + Sync {
     async fn for_pack(&self, pack: &str) -> Result<Vec<FindingRuleDef>, RegistryError>;
 }
 
+/// A pack's `[[queries]]` entry, registered so it can be invoked by name
+/// with runtime bindings — Epic 105 P106 Slice 4a (`plans/
+/// 106-agent-trace-hygiene.md`). The fourth sibling in this registry
+/// shape, deliberately smaller than [`FindingRuleDef`]: a named query is a
+/// neutral lookup, not a detector, so it carries none of a finding's
+/// `summary`/`governed_by`/`subject_var`/`evidence` — reusing that shape
+/// here would force those columns to mean nothing for every row of this
+/// kind.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackQueryDef {
+    pub pack: String,
+    pub name: String,
+    pub query: String,
+}
+
+/// Named, parameterized queries definable at runtime — a pack's `query`
+/// text, addressable by `(pack, name)` without the server ever reading a
+/// pack manifest.
+///
+/// **Upsert on `(pack, name)`**, for the identical reason
+/// [`FindingRuleRegistry`] upserts on `(pack, label)`: nothing else in the
+/// graph is keyed to a query's current text.
+#[async_trait]
+pub trait PackQueryRegistry: Send + Sync {
+    /// Register a query, replacing any existing one with the same
+    /// `(pack, name)`.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Backend`] if the write fails.
+    async fn declare_query(&self, def: &PackQueryDef) -> Result<(), RegistryError>;
+
+    /// The query text registered for `(pack, name)`, if any.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::Backend`] if the query fails.
+    async fn pack_query(&self, pack: &str, name: &str) -> Result<Option<String>, RegistryError>;
+}
+
 /// Rejects a flake whose subject, predicate, graph or reference object carries
 /// a namespace that was never set.
 ///

@@ -177,6 +177,18 @@ mod tests {
         {
             Ok(Ok(graph_owl_mcp::QueryAnswer::default()))
         }
+        async fn run_pack_query(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &std::collections::BTreeMap<String, String>,
+        ) -> Result<
+            Result<Option<graph_owl_mcp::QueryAnswer>, graph_owl_mcp::QueryFault>,
+            SourceError,
+        > {
+            Ok(Ok(None))
+        }
         async fn traverse(
             &self,
             _: &str,

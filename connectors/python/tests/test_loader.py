@@ -50,7 +50,7 @@ def _handler(received: list[dict], fail_on: str | None):
 
             if parsed.path == "/namespaces":
                 body = {"code": 1024, "iri": "x", "declaredBy": "y"}
-            elif parsed.path.endswith("/finding-rules"):
+            elif parsed.path.endswith("/finding-rules") or parsed.path.endswith("/queries"):
                 body = {}
             elif parsed.path == "/ontology-packs":
                 self.send_response(201)
@@ -98,16 +98,22 @@ def test_a_pack_declares_its_namespace_before_importing_anything(pack):
     with scripted_server() as (url, received):
         load_pack(PACKS / pack, url)
 
-    # **Five phases, and the order of all of them is load-bearing.** A
+    # **Six phases, and the order of all of them is load-bearing.** A
     # document imported before its namespace is declared resolves to nothing;
     # a document imported before its predicates are defined is rejected
-    # wholesale by `reject_unregistered_predicates`; a finding rule declared
-    # before its documents load would point at a graph that was never
-    # populated. Found by running this against a real server, not by reading
-    # the code. The glossary import (Epic 33 `OntologyPack`, present only for
-    # a pack that declares one) is independent of the flake-import predicate
-    # registry, so it is placed with the rest of vocabulary setup — after
-    # predicates, before any document lands.
+    # wholesale by `reject_unregistered_predicates`; a finding rule or a
+    # named query declared before its documents load would point at a graph
+    # that was never populated. Found by running this against a real
+    # server, not by reading the code. The glossary import (Epic 33
+    # `OntologyPack`, present only for a pack that declares one) is
+    # independent of the flake-import predicate registry, so it is placed
+    # with the rest of vocabulary setup — after predicates, before any
+    # document lands. `/packs/{pack}/queries` is the sixth phase (Epic 105
+    # P106 Slice 4a) — every `[[queries]]` entry, registered after finding
+    # rules for the identical reason finding rules come after documents:
+    # nothing downstream depends on the order between the two, but a query
+    # registered before its own documents load would name a graph never
+    # populated.
     paths = [r["path"] for r in received]
     assert paths[0] == "/namespaces", f"the vocabulary must be declared first, got {paths}"
 
@@ -121,8 +127,14 @@ def test_a_pack_declares_its_namespace_before_importing_anything(pack):
     imports = [p for p in paths[first_import:] if p == "/graph/import/rdf"]
     after_imports = paths[first_import + len(imports) :]
     assert paths[first_import : first_import + len(imports)] == imports
-    assert after_imports in ([], [f"/packs/{pack}/finding-rules"]), (
-        f"only one call, and only finding-rules, may follow the last import: {paths}"
+    possible_tails = [
+        [],
+        [f"/packs/{pack}/finding-rules"],
+        [f"/packs/{pack}/queries"],
+        [f"/packs/{pack}/finding-rules", f"/packs/{pack}/queries"],
+    ]
+    assert after_imports in possible_tails, (
+        f"only finding-rules and/or queries, in that order, may follow the last import: {paths}"
     )
 
 
@@ -214,6 +226,39 @@ def test_gst_registers_all_six_finding_rules_in_one_call():
     }
 
 
+def test_gst_registers_its_query_not_referenced_by_any_finding_rule():
+    # Epic 105 P106 Slice 4a: `provision-in-force` has no `[[findings]]`
+    # rule pointing at it — it exists to be invoked directly, by name, with
+    # a caller-supplied binding (`run_pack_query`). Without this call it
+    # would never reach the server at all, since `_register_finding_rules`
+    # only ever registers a query as a side effect of a rule referencing it.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "gst", url)
+
+    calls = [r for r in received if r["path"] == "/packs/gst/queries"]
+    assert len(calls) == 1, f"one batched call, not one per query: {received}"
+
+    queries = json.loads(calls[0]["raw"])["queries"]
+    names = {q["name"] for q in queries}
+    assert "provision-in-force" in names, (
+        f"the one query with no referencing finding rule: {names}"
+    )
+    provision_in_force = next(q for q in queries if q["name"] == "provision-in-force")
+    assert "PREFIX gst:" in provision_in_force["query"]
+    assert "{{invoice}}" in provision_in_force["query"], (
+        "the real query text from provision-in-force.sparql, not a stand-in"
+    )
+
+
+def test_hospitality_registers_no_queries():
+    # The negative that makes the positive case above about *this* pack's
+    # own `[[queries]]`, not about every pack always sending the call.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "hospitality", url)
+
+    assert not any(r["path"].endswith("/queries") for r in received), received
+
+
 def test_the_query_text_is_inlined_not_a_path():
     # The whole point of registering rules server-side: the native engine
     # never reads a `.sparql` file, so the loader must have read it already.
@@ -287,7 +332,12 @@ def test_finding_rules_are_registered_only_after_every_document_lands():
     paths = [r["path"] for r in received]
     rule_call = paths.index("/packs/gst/finding-rules")
     assert all(p != "/packs/gst/finding-rules" for p in paths[:rule_call]), paths
-    assert rule_call == len(paths) - 1, "the finding-rules call is the very last one"
+    # `/packs/gst/queries` (Epic 105 P106 Slice 4a) is the only call that may
+    # follow — every `[[queries]]` entry, registered after finding rules,
+    # not before any document.
+    assert paths[rule_call + 1 :] == ["/packs/gst/queries"], (
+        f"only queries may follow finding-rules: {paths}"
+    )
 
 
 def test_a_dry_run_asks_the_server_not_to_write():

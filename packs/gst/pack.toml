@@ -355,6 +355,13 @@ name = "payment-overdue"
 path = "queries/payment-overdue.sparql"
 label = "Unpaid past 180 days (Section 16(2)(d))"
 
+# Not referenced by any [[findings]] rule — a direct lookup for the
+# run_pack_query MCP tool, not a detector. Epic 105 P106 Slice 4a.
+[[queries]]
+name = "provision-in-force"
+path = "queries/provision-in-force.sparql"
+label = "The Rule 36(4)/Section 16(2)(aa) provision in force on one invoice's own date"
+
 [console]
 [[console.queues]]
 id = "gst-reconciliation"

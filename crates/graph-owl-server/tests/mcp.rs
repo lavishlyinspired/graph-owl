@@ -121,12 +121,11 @@ async fn a_client_can_negotiate_and_discover_the_tools() {
         .collect();
     assert_eq!(
         names.len(),
-        21,
+        22,
         // 13 at Epic 14's own count (7 read + 6 write), plus the 8
         // intelligence tools Epic 105 P10 added (traverse, find_evidence,
         // explain, reconcile, analytics, run_rule, resolve_entity,
-        // calculate_risk) — this assertion had drifted stale since P10
-        // shipped, caught fixing an unrelated 106 slice.
+        // calculate_risk), plus Epic 105 P106 Slice 4b's run_pack_query.
         "{names:?}"
     );
     assert!(names.contains(&"get_asset_context"), "{names:?}");
@@ -383,4 +382,128 @@ async fn query_graph_reports_what_it_scanned_and_planned() {
     assert!(!object.contains_key("qlRewrite"), "{answer}");
     assert!(!object.contains_key("refusedAxioms"), "{answer}");
     assert!(!object.contains_key("alignmentsUsed"), "{answer}");
+}
+
+/// **The full stack, end to end**: `POST /packs/{pack}/queries` registers
+/// a named query the same way the Python pack loader does (Epic 105 P106
+/// Slice 4a), and `run_pack_query`'s MCP tool (Slice 4b) invokes it by
+/// name over the wire with a caller-supplied binding — proving the
+/// registry, `Catalog::run_pack_query`'s substitution, and the MCP
+/// dispatch all agree on the same query.
+#[tokio::test]
+async fn run_pack_query_answers_a_registered_query_over_mcp() {
+    let (app, _container, _) = test_app().await;
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/namespaces",
+        Some(json!({ "iri": "https://graph-owl.dev/packs/run-pack-query-test#" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/predicates",
+        Some(json!({"namespace": 1024, "name": "status", "valueType": 1, "many": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let turtle = r#"
+        @prefix rpq: <https://graph-owl.dev/packs/run-pack-query-test#> .
+
+        rpq:subject-one rpq:status "open" .
+    "#;
+    let import_request = Request::builder()
+        .method("POST")
+        .uri("/graph/import/rdf?source=run-pack-query-test&format=turtle")
+        .header("content-type", "text/turtle")
+        .body(Body::from(turtle))
+        .expect("request should build");
+    let import_response = app
+        .clone()
+        .oneshot(import_request)
+        .await
+        .expect("request should be handled");
+    assert_eq!(
+        import_response.status(),
+        StatusCode::OK,
+        "{import_response:?}"
+    );
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/packs/run-pack-query-test/queries",
+        Some(json!({
+            "queries": [{
+                "name": "status-of",
+                "query": "SELECT ?status WHERE { GRAPH ?g { \
+                           VALUES ?subject { <{{subject}}> } \
+                           ?subject <https://graph-owl.dev/packs/run-pack-query-test#status> ?status } }",
+            }],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let response = rpc(
+        &app,
+        "tools/call",
+        json!({
+            "name": "run_pack_query",
+            "arguments": {
+                "pack": "run-pack-query-test",
+                "query": "status-of",
+                "bindings": {
+                    "subject": "https://graph-owl.dev/packs/run-pack-query-test#subject-one",
+                },
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let answer = payload(&response);
+    let rows = answer["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 1, "{answer}");
+    assert_eq!(rows[0]["status"], "\"open\"", "{answer}");
+}
+
+/// A binding for a placeholder the query does not declare is the caller's
+/// mistake, over MCP too — matching Slice 4a's own acceptance criterion
+/// that this is a validation error, not a `500`.
+#[tokio::test]
+async fn run_pack_query_reports_an_unknown_binding_as_a_tool_error_not_a_transport_error() {
+    let (app, _container, _) = test_app().await;
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/packs/gst-run-pack-query-negative/queries",
+        Some(json!({
+            "queries": [{"name": "q", "query": "ASK { <{{a}}> ?p ?o }"}],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let response = rpc(
+        &app,
+        "tools/call",
+        json!({
+            "name": "run_pack_query",
+            "arguments": {
+                "pack": "gst-run-pack-query-negative",
+                "query": "q",
+                "bindings": {"wrongName": "urn:x"},
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(response["result"]["isError"], true, "{response}");
 }

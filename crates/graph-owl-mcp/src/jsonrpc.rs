@@ -420,6 +420,15 @@ mod tests {
         ) -> Result<Result<crate::QueryAnswer, crate::QueryFault>, SourceError> {
             Ok(Ok(crate::QueryAnswer::default()))
         }
+        async fn run_pack_query(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &std::collections::BTreeMap<String, String>,
+        ) -> Result<Result<Option<crate::QueryAnswer>, crate::QueryFault>, SourceError> {
+            Ok(Ok(None))
+        }
         async fn traverse(
             &self,
             _: &str,
@@ -769,7 +778,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
 
-        assert_eq!(names.len(), 15, "the fifteen read tools: {names:?}");
+        assert_eq!(names.len(), 16, "the sixteen read tools: {names:?}");
         assert!(!names.iter().any(|name| crate::write::is_write_tool(name)));
     }
 
@@ -788,7 +797,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
 
-        assert_eq!(names.len(), 21, "fifteen read plus six write: {names:?}");
+        assert_eq!(names.len(), 22, "sixteen read plus six write: {names:?}");
         assert!(names.contains(&crate::write::RECORD_MEMORY));
     }
 
