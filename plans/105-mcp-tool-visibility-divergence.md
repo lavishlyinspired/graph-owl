@@ -1,13 +1,38 @@
 # Investigation: pack-subject visibility divergence across MCP tools
 
-**Branch**: main. **Status**: investigated 11 August 2026, not yet fixed —
-recorded deliberately rather than patched under time pressure. Triggered
-by a live LangSmith trace review (`019ff1cb-...`): `query_graph` (SPARQL)
-read `pr-INV-2001`'s data fine as `Principal::system()`; `recall_memory`,
-`explain`, `run_rule`, and `find_evidence` all refused the same subject
-with variants of `"no such entity, or it is not visible to you"` in the
-same run. That reads, on its face, like one authorization bug. It is not
-— three separate root causes, one shared error string.
+**Branch**: main. **Status**: investigated 11 August 2026; the three
+follow-ups this doc named are now resolved by `plans/106-agent-trace-
+hygiene.md`, shipped 12 August 2026. **D1 (root cause 1) = kept
+asset-scoped by design** (Slice 3a, `5e07c23`): `recall_memory`/
+`record_investigation` still resolve via `get_asset_by_fqn` and still
+refuse a pack subject for every principal — that refusal now carries an
+honest per-tool reason ("memory is scoped to catalog assets; pack
+entities are queried via query_graph") instead of the generic visibility
+string, and `SYSTEM_PROMPT` steers the agent away from trying. The
+harder product questions this doc raised (pack-reload survival,
+cross-pack collision, SPARQL-readability of a pack-subject memory) were
+never in scope for that decision and remain genuinely open if this ever
+needs revisiting. **D2 (root cause 2) = explain extended** (Slice 3b,
+`0dfbfcd`): `explain_fact` now resolves a subject's own source graph(s)
+and widens `Budget.include_graphs` before reasoning, so a pack fact
+explains instead of reporting `NotFound` for a fact the reasoner was
+never shown — bounded to the subject's own graphs, explicitly excluding
+`graph:reasoning` (a regression the slice's own test caught: a subject
+with a prior conclusion would otherwise feed it back in as if asserted).
+**D3, not diagnosed here but the concrete fix for the trace's actual
+failed question** (Slices 4a+4b, `c67f29e`): `gst:governedBy` had no
+queryable edge at all, which is why the agent fell back to in-context
+arithmetic for the trace's cap percentage. `run_pack_query` plus a
+registered `provision-in-force` query makes that answerable from the
+graph. `run_rule` and `find_evidence` were confirmed not bugs and
+untouched, as this doc originally concluded.
+
+Triggered by a live LangSmith trace review (`019ff1cb-...`): `query_graph`
+(SPARQL) read `pr-INV-2001`'s data fine as `Principal::system()`;
+`recall_memory`, `explain`, `run_rule`, and `find_evidence` all refused
+the same subject with variants of `"no such entity, or it is not visible
+to you"` in the same run. That reads, on its face, like one authorization
+bug. It is not — three separate root causes, one shared error string.
 
 ## Root cause 1 — real, confirmed: an asset-only visibility gate
 

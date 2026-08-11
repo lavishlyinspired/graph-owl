@@ -1,6 +1,10 @@
 # Plan: 106 — agent trace hygiene (GST trace `019ff1cb-3960-7e21-8c1a-01c7fa06316a` follow-ups)
 
-**Status**: plan. **Branch**: main, commit directly.
+**Status**: shipped, 12 August 2026. All four slices landed: Slice 1
+(`b70535c`), Slices 2+3a (`5e07c23`), Slice 3b (`0dfbfcd`), Slices 4a+4b
+(`c67f29e`). `plans/105-mcp-tool-visibility-divergence.md`'s status
+updated to match: D1 kept asset-scoped, D2 explain extended, D3 shipped
+as `run_pack_query`. **Branch**: main, commit directly.
 **Trigger**: review of a live LangSmith trace of the GST investigation agent surfaced four
 independent gaps. `plans/105-mcp-tool-visibility-divergence.md` already dissected the
 visibility thread — this plan executes its stated follow-ups under its "do not bundle" rule.
