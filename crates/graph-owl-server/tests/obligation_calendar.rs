@@ -13,7 +13,8 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use common::{test_app, token};
+use common::{test_app, test_catalog, token};
+use graph_owl_core::Principal;
 use tower::ServiceExt;
 
 const PAYMENT_OVERDUE: &str = r"
@@ -235,4 +236,50 @@ async fn a_pack_with_no_span_configured_rules_reports_an_empty_calendar() {
     .await;
     assert_eq!(status, StatusCode::OK, "{obligations}");
     assert_eq!(obligations.as_array().expect("array").len(), 0);
+}
+
+/// **Epic 105 P10's `calculate_risk()` tool, against the real adapter.**
+/// `CatalogContext::calculate_risk` really does call the pre-existing
+/// `Catalog::calculate_risk`, which narrows `Catalog::obligation_calendar`
+/// (the same computation `GET /packs/{pack}/obligations` above already
+/// proves) to one subject — not the unit-level `Fixture` double in
+/// `graph-owl-mcp`'s own tests, which never touches the real adapter.
+#[tokio::test]
+async fn calculate_risk_reports_one_subject_s_real_days_remaining() {
+    let (catalog, _db, _url) = test_catalog().await;
+    let app = graph_owl_server::app(catalog.clone());
+    seed_one_unpaid_purchase(&app).await;
+    register_payment_overdue_rule(&app).await;
+
+    let principal = Principal::system();
+    let reads = graph_owl_mcp::catalog::CatalogContext::new(catalog, principal.clone());
+
+    let risk = graph_owl_mcp::ContextSource::calculate_risk(
+        &reads,
+        &principal.id,
+        "gst",
+        "https://graph-owl.dev/packs/gst#purchase-INV-1003",
+    )
+    .await
+    .expect("no source error");
+
+    assert_eq!(risk.len(), 1, "{risk:?}");
+    assert_eq!(risk[0].label, "gst:PaymentOverdue");
+    assert!(
+        risk[0].days_remaining < 0,
+        "as of the rule's own as_of, this is already overdue: {:?}",
+        risk[0]
+    );
+
+    // A subject not seeded here gets a real, empty answer — proving the
+    // filter, not a coincidence of there being only one obligation open.
+    let unrelated = graph_owl_mcp::ContextSource::calculate_risk(
+        &reads,
+        &principal.id,
+        "gst",
+        "https://graph-owl.dev/packs/gst#no-such-purchase",
+    )
+    .await
+    .expect("no source error");
+    assert!(unrelated.is_empty(), "{unrelated:?}");
 }

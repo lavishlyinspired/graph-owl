@@ -850,6 +850,20 @@ impl ContextSource for CatalogContext {
             truncation_reason: None,
         })
     }
+
+    async fn calculate_risk(
+        &self,
+        principal: &str,
+        pack: &str,
+        subject: &str,
+    ) -> Result<Vec<graph_owl_api::Obligation>, SourceError> {
+        let who = self.authenticated(principal)?;
+
+        self.catalog
+            .calculate_risk(&who, pack, subject)
+            .await
+            .map_err(|e| unavailable(&e))
+    }
 }
 
 impl CatalogContext {

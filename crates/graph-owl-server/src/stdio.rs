@@ -235,6 +235,14 @@ mod tests {
         ) -> Result<graph_owl_mcp::ResolvedEntityContext, SourceError> {
             Ok(graph_owl_mcp::ResolvedEntityContext::default())
         }
+        async fn calculate_risk(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<graph_owl_api::Obligation>, SourceError> {
+            Ok(Vec::new())
+        }
     }
 
     fn read_only() -> graph_owl_mcp::jsonrpc::Server<'static> {

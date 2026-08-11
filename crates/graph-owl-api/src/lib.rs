@@ -2461,6 +2461,49 @@ impl Catalog {
         Ok(all)
     }
 
+    /// Every open obligation for one graph subject — Epic 105 P10's
+    /// `calculate_risk()` tool (`plans/105r-calculate-risk-tool.md`),
+    /// narrowing [`obligation_calendar`] from every open obligation a
+    /// pack's rules track to the one subject an agent is asking about.
+    ///
+    /// **No risk score is computed here, deliberately.** The only
+    /// non-invented signal this system has is
+    /// [`Obligation::days_remaining`] — negative once overdue, calendar
+    /// arithmetic with nothing weighted or invented. A single numeric
+    /// "risk score" would need a severity/probability/impact weighting
+    /// this system has no basis for (`00i` rule 4: every magic number
+    /// needs a stated reason, and none exists for turning "12 days
+    /// overdue" into "risk: 73"). The obligation calendar's own console
+    /// "due soon" bucket is explicitly documented as a *display*
+    /// threshold with no pack-config backing
+    /// (`obligationCalendar.tsx`: "there is no pack-config field for it
+    /// yet, so it is a display threshold, not a business rule any finding
+    /// depends on") — reusing it here would smuggle a UI convenience into
+    /// a computed answer this tool hands an agent as fact.
+    ///
+    /// **Empty is a real, complete answer**, the same reading `search`
+    /// gives an empty hit list: nothing here distinguishes "this subject
+    /// has no open obligations" from "this subject does not exist",
+    /// because pack-domain subjects (unlike catalog assets) have no
+    /// identity check to run — `obligation_calendar`'s own rows come
+    /// straight from SPARQL bindings, never an asset lookup.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no finding-rule registry is configured or a rule's
+    /// query fails to parse or execute.
+    ///
+    /// [`obligation_calendar`]: Self::obligation_calendar
+    pub async fn calculate_risk(
+        &self,
+        principal: &Principal,
+        pack: &str,
+        subject: &str,
+    ) -> Result<Vec<Obligation>, CatalogError> {
+        let all = self.obligation_calendar(principal, pack).await?;
+        Ok(all.into_iter().filter(|o| o.subject == subject).collect())
+    }
+
     /// The neighbourhood around an asset, as a graph.
     ///
     /// # Errors
@@ -40981,6 +41024,196 @@ mod resolve_entity_tests {
             matches!(result, Err(CatalogError::Validation(_))),
             "{result:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod calculate_risk_tests {
+    //! `Catalog::calculate_risk` — Epic 105 P10's `calculate_risk()` tool
+    //! (`plans/105r-calculate-risk-tool.md`), narrowing `obligation_calendar`
+    //! from every open obligation a pack's rules track to the one subject
+    //! an agent asked about. See `Catalog::calculate_risk`'s own doc
+    //! comment for why this reports the real, unweighted
+    //! `days_remaining` rather than inventing a risk score.
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+    use graph_owl_engine::{EvidenceBinding, FindingRuleDef, FindingRuleRegistry, RegistryError};
+
+    use super::projection_isolation_tests::RecordingGraph;
+    use super::*;
+
+    #[derive(Default)]
+    struct FakeFindingRuleRegistry {
+        declared: Mutex<Vec<FindingRuleDef>>,
+    }
+
+    #[async_trait]
+    impl FindingRuleRegistry for FakeFindingRuleRegistry {
+        async fn declare(&self, rule: &FindingRuleDef) -> Result<(), RegistryError> {
+            self.declared
+                .lock()
+                .expect("not poisoned")
+                .push(rule.clone());
+            Ok(())
+        }
+
+        async fn for_pack(&self, pack: &str) -> Result<Vec<FindingRuleDef>, RegistryError> {
+            Ok(self
+                .declared
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .filter(|r| r.pack == pack)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn payment_overdue_rule() -> FindingRuleDef {
+        FindingRuleDef {
+            pack: "gst".to_string(),
+            label: "gst:PaymentOverdue".to_string(),
+            summary: "Credit taken on an invoice not paid within 180 days".to_string(),
+            governed_by: "gst:Section16-2-d".to_string(),
+            query: "SELECT ?purchase ?purchasedAt WHERE { \
+                     ?purchase <https://graph-owl.dev/ns/catalog#purchasedAt> ?purchasedAt }"
+                .to_string(),
+            subject_var: "purchase".to_string(),
+            evidence: vec![EvidenceBinding {
+                predicate: "https://graph-owl.dev/ns/catalog#purchasedAt".to_string(),
+                var: "purchasedAt".to_string(),
+            }],
+            similarity: None,
+            span: Some(serde_json::json!({
+                "from": "purchasedAt", "to": "paidAt", "exceedsDays": 180,
+            })),
+        }
+    }
+
+    fn asset_req(name: &str) -> UpsertAsset {
+        UpsertAsset {
+            kind: AssetKind::Service,
+            name: name.to_string(),
+            parent_id: None,
+            description: None,
+            properties: None,
+            extension: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_only_the_named_subject_s_own_obligation() {
+        let rules = Arc::new(FakeFindingRuleRegistry::default());
+        rules
+            .declare(&payment_overdue_rule())
+            .await
+            .expect("declare");
+
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_finding_rules(rules)
+        .with_graph(graph.clone());
+
+        // Real asset rows, not hand-picked `Sid`s — `Catalog::sparql`
+        // scopes every scan to real storage rows (`scoped_facts`), the
+        // same trap `run_rule_tests` already documents having to route
+        // around.
+        let overdue = catalog
+            .upsert_asset(&Principal::system(), asset_req("purchase-overdue"))
+            .await
+            .expect("seed overdue purchase");
+        let not_due = catalog
+            .upsert_asset(&Principal::system(), asset_req("purchase-not-due"))
+            .await
+            .expect("seed future purchase");
+
+        graph
+            .assert_flakes(&[
+                // Far enough in the past that 180 days have elapsed no
+                // matter when this test runs.
+                Flake {
+                    s: Sid::new(namespace::DSC, overdue.id.to_string()),
+                    p: Sid::new(namespace::DSC, "purchasedAt"),
+                    o: FlakeValue::String("2020-01-01".to_string()),
+                    cx: None,
+                    t: 1,
+                    op: true,
+                },
+                // Far enough in the future that it never becomes overdue
+                // during any real test run — proves the filter excludes
+                // it from the *other* subject's own risk answer.
+                Flake {
+                    s: Sid::new(namespace::DSC, not_due.id.to_string()),
+                    p: Sid::new(namespace::DSC, "purchasedAt"),
+                    o: FlakeValue::String("2030-01-01".to_string()),
+                    cx: None,
+                    t: 1,
+                    op: true,
+                },
+            ])
+            .await
+            .expect("seed");
+
+        let overdue_iri = Sid::new(namespace::DSC, overdue.id.to_string())
+            .to_iri()
+            .expect("dsc resolves");
+        let not_due_iri = Sid::new(namespace::DSC, not_due.id.to_string())
+            .to_iri()
+            .expect("dsc resolves");
+
+        let overdue_risk = catalog
+            .calculate_risk(&Principal::system(), "gst", &overdue_iri)
+            .await
+            .expect("ok");
+        assert_eq!(overdue_risk.len(), 1, "{overdue_risk:?}");
+        assert_eq!(overdue_risk[0].subject, overdue_iri);
+        assert!(
+            overdue_risk[0].days_remaining < 0,
+            "180 days after 2020-01-01 is long past: {:?}",
+            overdue_risk[0]
+        );
+
+        let not_due_risk = catalog
+            .calculate_risk(&Principal::system(), "gst", &not_due_iri)
+            .await
+            .expect("ok");
+        assert_eq!(not_due_risk.len(), 1, "{not_due_risk:?}");
+        assert_eq!(not_due_risk[0].subject, not_due_iri);
+        assert!(
+            not_due_risk[0].days_remaining > 0,
+            "180 days after 2030-01-01 is nowhere near yet: {:?}",
+            not_due_risk[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_subject_is_a_real_empty_answer_not_an_error() {
+        let rules = Arc::new(FakeFindingRuleRegistry::default());
+        rules
+            .declare(&payment_overdue_rule())
+            .await
+            .expect("declare");
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_finding_rules(rules)
+        .with_graph(RecordingGraph::working());
+
+        let risk = catalog
+            .calculate_risk(
+                &Principal::system(),
+                "gst",
+                "https://graph-owl.dev/no-such-subject",
+            )
+            .await
+            .expect("ok");
+
+        assert!(risk.is_empty(), "{risk:?}");
     }
 }
 

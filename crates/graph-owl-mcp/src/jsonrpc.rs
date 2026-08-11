@@ -280,6 +280,10 @@ fn render(outcome: crate::Outcome) -> Value {
         Outcome::EntityResolved(context) => {
             (serde_json::to_value(*context).unwrap_or(Value::Null), false)
         }
+        Outcome::RiskCalculated(obligations) => (
+            json!({ "obligations": obligations, "count": obligations.len() }),
+            false,
+        ),
         Outcome::Wrote(receipt) => (serde_json::to_value(*receipt).unwrap_or(Value::Null), false),
 
         // **Absent and denied are one answer**, and the text says so without
@@ -473,6 +477,14 @@ mod tests {
             _: usize,
         ) -> Result<crate::ResolvedEntityContext, SourceError> {
             Ok(crate::ResolvedEntityContext::default())
+        }
+        async fn calculate_risk(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<graph_owl_api::Obligation>, SourceError> {
+            Ok(Vec::new())
         }
     }
 
@@ -757,7 +769,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
 
-        assert_eq!(names.len(), 14, "the fourteen read tools: {names:?}");
+        assert_eq!(names.len(), 15, "the fifteen read tools: {names:?}");
         assert!(!names.iter().any(|name| crate::write::is_write_tool(name)));
     }
 
@@ -776,7 +788,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
 
-        assert_eq!(names.len(), 20, "fourteen read plus six write: {names:?}");
+        assert_eq!(names.len(), 21, "fifteen read plus six write: {names:?}");
         assert!(names.contains(&crate::write::RECORD_MEMORY));
     }
 

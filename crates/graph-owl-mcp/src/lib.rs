@@ -326,6 +326,33 @@ pub trait ContextSource: Send + Sync {
         query: &str,
         limit: usize,
     ) -> Result<ResolvedEntityContext, SourceError>;
+
+    /// Every open obligation for one graph subject — Epic 105 P10's eighth
+    /// and last intelligence tool, wrapping
+    /// [`graph_owl_api::Catalog::calculate_risk`], which narrows
+    /// `obligation_calendar` (P8/F4's own console route) from every open
+    /// obligation a pack tracks to the one subject an agent is asking
+    /// about.
+    ///
+    /// **No risk score.** Only the real, unweighted
+    /// `days_remaining` — negative once overdue — is reported; see
+    /// `Catalog::calculate_risk`'s own doc comment for why a single
+    /// numeric score is not computed here.
+    ///
+    /// **No not-found, matching [`Self::resolve_entity`] and
+    /// [`Self::search`]**: pack-domain subjects have no identity check to
+    /// run, so "no open obligations" and "this subject does not exist"
+    /// are the same real, empty answer.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached.
+    async fn calculate_risk(
+        &self,
+        principal: &str,
+        pack: &str,
+        subject: &str,
+    ) -> Result<Vec<graph_owl_api::Obligation>, SourceError>;
 }
 
 /// A bounded walk's answer, as an agent receives it — Epic 105 P10's
@@ -709,6 +736,13 @@ pub enum Outcome {
     /// this tool never distinguishes the second from the first because
     /// nothing here needs to.
     EntityResolved(Box<ResolvedEntityContext>),
+    /// Every open obligation for one graph subject — Epic 105 P10's
+    /// `calculate_risk()`. **Empty is a real answer**, for the identical
+    /// reason `Outcome::EntityResolved` above is: pack-domain subjects
+    /// have no identity check to run, so "nothing open" and "no such
+    /// subject" are the same real answer, not two this tool needs to
+    /// tell apart.
+    RiskCalculated(Vec<graph_owl_api::Obligation>),
     /// A write landed or became a proposal — Epic 32.
     Wrote(Box<write::WriteReceipt>),
     /// **An agent write was refused, readably.**
@@ -805,6 +839,10 @@ pub const RUN_RULE: &str = "run_rule";
 /// Rank catalog assets by name similarity to a free-text candidate — Epic
 /// 105 P10's seventh intelligence tool.
 pub const RESOLVE_ENTITY: &str = "resolve_entity";
+
+/// Every open obligation for one graph subject — Epic 105 P10's eighth
+/// and last intelligence tool.
+pub const CALCULATE_RISK: &str = "calculate_risk";
 
 /// The most hops an agent may ask `traverse` to walk.
 ///
@@ -1172,6 +1210,27 @@ pub fn tools() -> Vec<ToolDeclaration> {
                 "additionalProperties": false,
             }),
         },
+        ToolDeclaration {
+            name: CALCULATE_RISK,
+            description: "Every open obligation for one subject — a due date and how many \
+                      days remain (negative once overdue). No invented risk score: this \
+                      reports the real, unweighted number a pack's own rules compute.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pack": {
+                        "type": "string",
+                        "description": "The pack whose obligations to check, e.g. \"gst\".",
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "The subject to check, as an IRI.",
+                    },
+                },
+                "required": ["pack", "subject"],
+                "additionalProperties": false,
+            }),
+        },
     ]
 }
 
@@ -1521,6 +1580,21 @@ pub async fn call_within(
                     }
                     Outcome::EntityResolved(Box::new(context))
                 }
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
+        CALCULATE_RISK => {
+            let pack = match required_text(arguments, "pack") {
+                Ok(pack) => pack,
+                Err(problem) => return problem,
+            };
+            let subject = match required_text(arguments, "subject") {
+                Ok(subject) => subject,
+                Err(problem) => return problem,
+            };
+            match source.calculate_risk(principal, pack, subject).await {
+                Ok(obligations) => Outcome::RiskCalculated(obligations),
                 Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
             }
         }
@@ -2453,6 +2527,39 @@ mod tests {
                 truncation_reason: None,
             })
         }
+
+        async fn calculate_risk(
+            &self,
+            principal: &str,
+            pack: &str,
+            subject: &str,
+        ) -> Result<Vec<graph_owl_api::Obligation>, SourceError> {
+            self.asked.lock().expect("lock").push((
+                principal.to_string(),
+                format!("calculate_risk:{pack}:{subject}"),
+            ));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            if principal != "alice" || pack != "gst" {
+                return Ok(Vec::new());
+            }
+            // Two real subjects known to this fixture, so a test can prove
+            // the answer is scoped to the one asked about, not the whole
+            // pack.
+            if subject == "https://graph-owl.dev/packs/gst#p-INV-1003" {
+                return Ok(vec![graph_owl_api::Obligation {
+                    pack: pack.to_string(),
+                    label: "gst:PaymentOverdue".into(),
+                    subject: subject.to_string(),
+                    governed_by: "gst:Section16-2-d".into(),
+                    anchor: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+                    due: chrono::NaiveDate::from_ymd_opt(2026, 6, 30).expect("valid date"),
+                    days_remaining: -30,
+                }]);
+            }
+            Ok(Vec::new())
+        }
     }
 
     /// A trust summary for a context whose trust is not what is under test.
@@ -2782,9 +2889,10 @@ mod tests {
                     ANALYTICS,
                     RUN_RULE,
                     RESOLVE_ENTITY,
+                    CALCULATE_RISK,
                 ],
-                "the seven read capabilities Epic 14 promises, plus Epic 105 P10's \
-                 first seven intelligence tools, and no others — a tool that appears \
+                "the seven read capabilities Epic 14 promises, plus all eight of Epic \
+                 105 P10's intelligence tools, and no others — a tool that appears \
                  here without a dispatch arm teaches an agent to distrust the \
                  manifest, and one that dispatches without appearing here is a \
                  capability no agent will ever find"
@@ -4627,6 +4735,91 @@ mod tests {
 
             assert!(!context.shorten_detail());
             assert!(!context.shorten_relations());
+        }
+    }
+
+    /// Epic 105 P10 — `calculate_risk()`, the platform doc's eighth and
+    /// last intelligence tool.
+    mod the_calculate_risk_tool {
+        use super::*;
+
+        fn risk_args(pack: &str, subject: &str) -> serde_json::Value {
+            serde_json::json!({ "pack": pack, "subject": subject })
+        }
+
+        #[tokio::test]
+        async fn reports_the_real_unweighted_days_remaining() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                CALCULATE_RISK,
+                &risk_args("gst", "https://graph-owl.dev/packs/gst#p-INV-1003"),
+            )
+            .await;
+
+            let Outcome::RiskCalculated(obligations) = outcome else {
+                panic!("expected RiskCalculated, got {outcome:?}");
+            };
+            assert_eq!(obligations.len(), 1, "{obligations:?}");
+            assert_eq!(obligations[0].label, "gst:PaymentOverdue");
+            assert_eq!(
+                obligations[0].days_remaining, -30,
+                "the real number, not an invented score: {:?}",
+                obligations[0]
+            );
+        }
+
+        /// **No not-found, matching `resolve_entity`/`search`**: a
+        /// subject with nothing open is a real, complete answer — empty,
+        /// not an error and not distinguished from "does not exist".
+        #[tokio::test]
+        async fn a_subject_with_nothing_open_is_a_real_empty_answer() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                CALCULATE_RISK,
+                &risk_args("gst", "https://graph-owl.dev/packs/gst#p-INV-9999"),
+            )
+            .await;
+
+            let Outcome::RiskCalculated(obligations) = outcome else {
+                panic!("expected RiskCalculated, got {outcome:?}");
+            };
+            assert!(obligations.is_empty(), "{obligations:?}");
+        }
+
+        #[tokio::test]
+        async fn an_unauthenticated_caller_learns_nothing() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                None,
+                CALCULATE_RISK,
+                &risk_args("gst", "https://graph-owl.dev/packs/gst#p-INV-1003"),
+            )
+            .await;
+
+            assert_eq!(outcome, Outcome::Unauthenticated);
+        }
+
+        #[tokio::test]
+        async fn a_call_with_no_subject_is_a_bad_request() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                CALCULATE_RISK,
+                &serde_json::json!({ "pack": "gst" }),
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::BadRequest(_)), "{outcome:?}");
         }
     }
 

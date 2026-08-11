@@ -1312,6 +1312,40 @@ once; `Catalog::resolve_entity`: 2 mutants, 1 caught, 1 unviable, 0
 missed; the real adapter: 1 mutant, 1 caught, 0 missed — fewer candidates
 than every other P10 tool because this one has no admin gate to mutate,
 matching `search`'s own open posture).
+**P10's eighth and last intelligence tool shipped, 11 August 2026**
+(`105r`): `calculate_risk()` — completing Epic 105 P10. The scope
+question answered before any code: the only existing "risk" concept
+anywhere in this codebase is the obligation calendar's own
+`DUE_SOON_HORIZON_DAYS = 30` display bucket, and that constant's own
+comment already says what it is — "there is no pack-config field for it
+yet, so it is a display threshold, not a business rule any finding
+depends on." Building an agent tool on top of it would hand a UI
+convenience to an agent as computed fact. Resolved by refusing to invent
+a score: the only non-invented signal this system has is
+`Obligation::days_remaining` (real calendar arithmetic, already computed
+by `obligation_calendar`, P8/F4), so `calculate_risk()` is a filter over
+that existing computation — narrowed to one subject, nothing
+synthesized. Open, not admin-gated (unlike `reconcile`/`run_rule`): this
+only reads, so it inherits `search`/`resolve_entity`'s posture rather
+than a write-triggered gate. No `Option` wrapper, no new wire type
+(`Obligation` reused directly, matching `Outcome::Recalled`'s own bare
+`Vec<T>` shape with no `budget::Fits` impl), no not-found (pack-domain
+subjects have no identity check to run, so "nothing open" and "no such
+subject" are one real, empty answer). The Catalog-layer RED test reused
+`run_rule_tests`'s own fixture shape exactly (real asset rows, `cx: None`
+flakes) with two subjects seeded far enough in the past and future that
+the test is deterministic regardless of when it runs, proving both the
+overdue subject's negative `days_remaining` and that the *other*
+subject's own answer excludes it. Mutation testing came back clean at all
+three layers (`lib.rs`: 4 mutants, 2 caught, 2 unviable — both on
+pre-existing generic dispatch machinery incidentally in the diff's line
+range, not `calculate_risk`-specific; `Catalog::calculate_risk`: 3
+mutants, 2 caught, 1 unviable; the real adapter, proven against
+`obligation_calendar.rs`'s own GST fixture: 2 mutants, 1 caught, 1
+unviable, 0 missed anywhere). All eight platform-doc intelligence tools —
+`traverse`, `find_evidence`, `explain`, `reconcile`, `analytics`,
+`run_rule`, `resolve_entity`, `calculate_risk` — are now shipped,
+mutation-tested, and proven against a real adapter.
 **Still open, recorded
 rather than assumed away**: no reference agent app
 (`examples/gst-reconcile/`) and so no scored evaluation run; the live
@@ -1319,10 +1353,9 @@ GSP/ERP connectors are fixture-mode only; pack facts are readable by any
 principal who can query at all (per-named-graph policy needs a policy model
 that does not exist yet); six of the seven planned packs are unwritten; and
 P2's remaining connectors, P3, P4, the rest of P8 (temporal engine,
-generalization beyond GST), P9's GraphRAG/hybrid-search remaining thirds,
-P10's remaining tool (`calculate_risk`),
-P11 and P12 are untouched — this is the spine, not
-the finished platform
+generalization beyond GST), P9's GraphRAG/hybrid-search remaining thirds
+(P10 is now complete — all eight tools shipped), P11 and P12 are
+untouched — this is the spine, not the finished platform
 
 ### Console half
 - [x] **105** **One queue, every pack** — `findingsQueue.tsx` renders GST and hospitality identically; the difference lives in `pack.toml`. A `GstFindingsQueue.tsx` would have been the console's first per-domain hardcoding
