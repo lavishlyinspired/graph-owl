@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>graph-owl chat playground (local dev tool)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; display: flex; height: 100vh; }
+  #sidebar { width: 280px; border-right: 1px solid #8884; overflow-y: auto; padding: 0.5rem; box-sizing: border-box; }
+  #main { flex: 1; display: flex; flex-direction: column; padding: 1rem; box-sizing: border-box; min-width: 0; }
+  .thread-item { padding: 0.5rem; border-radius: 6px; cursor: pointer; margin-bottom: 0.25rem; font-size: 0.85rem; }
+  .thread-item:hover { background: #8882; }
+  .thread-item.active { background: #4a90e222; border: 1px solid #4a90e2; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.4rem; }
+  .status-running { background: #f5a623; animation: pulse 1s infinite; }
+  .status-done { background: #7ed321; }
+  .status-error { background: #d0021b; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  #transcript { flex: 1; overflow-y: auto; white-space: pre-wrap; line-height: 1.5; padding: 0.5rem; }
+  #composer { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+  #question-input { flex: 1; padding: 0.6rem; font-size: 1rem; }
+  #ask-button { padding: 0.6rem 1.2rem; font-size: 1rem; cursor: pointer; }
+  .empty-state { color: #888; padding: 1rem; }
+  h1 { font-size: 1rem; margin: 0.5rem; }
+</style>
+</head>
+<body>
+  <div id="sidebar">
+    <h1>Questions</h1>
+    <div id="thread-list"></div>
+  </div>
+  <div id="main">
+    <div id="transcript"><div class="empty-state">Ask a question below. You can ask another one immediately — it runs alongside this one, not after it.</div></div>
+    <div id="composer">
+      <input id="question-input" type="text" placeholder="Ask graph-owl's investigation agent..." />
+      <button id="ask-button">Ask</button>
+    </div>
+  </div>
+
+<script>
+// Server config: same-origin by default, or set window.GRAPH_OWL_CHAT_SERVER
+// before this script runs to point at a different host/port.
+const SERVER = window.GRAPH_OWL_CHAT_SERVER || "http://localhost:8899";
+
+// Every thread this browser tab has asked about, keyed by threadId.
+// Each entry keeps its own EventSource open regardless of which thread is
+// currently displayed — this is what makes "ask a new question while the
+// first is still running" actually true rather than a UI illusion: the
+// first thread's connection is never closed or paused when a second one
+// opens.
+const threads = new Map(); // threadId -> { question, status, text, source }
+let activeThreadId = null;
+
+const threadListEl = document.getElementById("thread-list");
+const transcriptEl = document.getElementById("transcript");
+const inputEl = document.getElementById("question-input");
+const askButton = document.getElementById("ask-button");
+
+function renderSidebar() {
+  threadListEl.innerHTML = "";
+  for (const [id, t] of threads) {
+    const item = document.createElement("div");
+    item.className = "thread-item" + (id === activeThreadId ? " active" : "");
+    const dot = document.createElement("span");
+    dot.className = "status-dot status-" + t.status;
+    item.appendChild(dot);
+    item.appendChild(document.createTextNode(t.question));
+    item.onclick = () => selectThread(id);
+    threadListEl.appendChild(item);
+  }
+}
+
+function renderTranscript() {
+  const t = activeThreadId ? threads.get(activeThreadId) : null;
+  if (!t) {
+    transcriptEl.innerHTML = '<div class="empty-state">Ask a question below.</div>';
+    return;
+  }
+  transcriptEl.textContent = t.text || (t.status === "running" ? "..." : "");
+  if (t.status === "error") {
+    transcriptEl.textContent += "\n\n[error: " + t.error + "]";
+  }
+}
+
+function selectThread(id) {
+  activeThreadId = id;
+  renderSidebar();
+  renderTranscript();
+}
+
+async function askQuestion(question) {
+  const resp = await fetch(SERVER + "/questions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ question }),
+  });
+  if (!resp.ok) {
+    alert("failed to submit question: " + resp.status);
+    return;
+  }
+  const { threadId } = await resp.json();
+  const thread = { question, status: "running", text: "", error: null, source: null };
+  threads.set(threadId, thread);
+  selectThread(threadId);
+
+  // Opening this connection does NOT block the input below — the user
+  // can type and submit another question immediately, and this
+  // EventSource keeps delivering this thread's own events independently.
+  const source = new EventSource(SERVER + "/questions/" + threadId + "/stream");
+  thread.source = source;
+  source.onmessage = (event) => {
+    const payload = JSON.parse(event.data);
+    if (payload.kind === "message") {
+      thread.text = payload.text; // server sends the accumulated text
+    } else if (payload.kind === "done") {
+      thread.status = payload.status;
+      thread.error = payload.error;
+      source.close();
+    }
+    if (activeThreadId === threadId) renderTranscript();
+    renderSidebar();
+  };
+  source.onerror = () => {
+    if (thread.status === "running") {
+      thread.status = "error";
+      thread.error = "connection lost";
+      renderSidebar();
+      if (activeThreadId === threadId) renderTranscript();
+    }
+    source.close();
+  };
+}
+
+askButton.onclick = () => {
+  const question = inputEl.value.trim();
+  if (!question) return;
+  inputEl.value = "";
+  askQuestion(question);
+};
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") askButton.click();
+});
+</script>
+</body>
+</html>
