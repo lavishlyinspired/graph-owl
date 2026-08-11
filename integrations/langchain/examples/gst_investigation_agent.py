@@ -113,12 +113,23 @@ SCORED_QUESTIONS: dict[int, tuple[str, list[str]]] = {
     ),
 }
 
-#: The one piece of domain knowledge no tool schema states on its own:
-#: `Catalog::obligations_from_rows`'s own doc comment establishes that a
-#: row whose discharging event is already bound never appears in
-#: `calculate_risk`'s output — so every obligation it reports is, by
-#: construction, unpaid, and the only judgment left is the sign of how
-#: many days remain.
+#: Two pieces of domain knowledge no tool schema states on its own.
+#:
+#: **The second paragraph exists because a real trace measured its
+#: absence directly.** A live run (LangSmith trace `019ff1cb-...`, 11
+#: August 2026) spent its first ~7 of 28 turns calling `search_assets`
+#: and `resolve_entity` with every rephrasing of "provisional credit
+#: cap"/"notification"/"invoice" before ever trying `query_graph` — those
+#: tools only cover the catalog-asset hierarchy (`graph-owl-core`'s
+#: service/database/schema/table/column tree), and a domain pack's own
+#: subjects (an invoice, a statutory provision) are graph subjects with
+#: no asset row, by design (`plans/105-domain-neutrality.md`). The model
+#: had no way to know that distinction existed, so it rediscovered it by
+#: exhaustive dead-end search — seven wasted turns is seven avoidable
+#: rounds of the full message history being re-sent, which is where a
+#: `1.52M`-token investigation actually goes. Stating the split up front
+#: is the cheap fix; message-history trimming would be the expensive one,
+#: and is not attempted here — see `investigate`'s own doc comment.
 SYSTEM_PROMPT = (
     "You investigate GST reconciliation questions using graph-owl's tools. "
     "Call tools to gather evidence before answering; never state a finding "
@@ -129,27 +140,72 @@ SYSTEM_PROMPT = (
     "paying today would make that invoice compliant. Negative means the "
     "window already closed — the breach already happened, and paying now "
     "does not undo it. Never call an invoice 'compliant if paid today' "
-    "when its daysRemaining is negative."
+    "when its daysRemaining is negative. "
+    "Two separate data worlds exist, and picking the wrong one wastes many "
+    "turns: `search_assets`/`resolve_entity` only find catalog assets "
+    "(services, databases, tables, columns) — never a domain pack's own "
+    "data (an invoice, a statutory provision, a GSTIN). For a GST "
+    "question, go straight to `query_graph` (SPARQL) instead of searching "
+    "for asset names first; only fall back to asset search if the "
+    "question is genuinely about catalogued infrastructure rather than "
+    "pack data."
 )
+
+#: A safety bound, not a tuning knob: this project's own standing rule is
+#: that a loop reacting to a failure must state explicitly what makes it
+#: terminate (`CLAUDE.md`'s build/test-loop section, written after two
+#: unbounded-loop incidents in unrelated crates). A ReAct loop with no
+#: cap can, in principle, keep calling tools forever on a model that
+#: never decides it is done. Set generously above the 28-turn real
+#: investigation the prompt fix above is meant to shorten — this bounds
+#: worst-case cost without constraining a legitimate multi-hop one.
+DEFAULT_RECURSION_LIMIT = 40
 
 
 class AgentError(RuntimeError):
     """The model endpoint could not be reached or was not configured."""
 
 
-def investigate(model: BaseChatModel, tools: list[Any], question: str) -> str:
+def investigate(
+    model: BaseChatModel,
+    tools: list[Any],
+    question: str,
+    recursion_limit: int = DEFAULT_RECURSION_LIMIT,
+) -> str:
     """Run one question through a real tool-calling loop and return the
     final message's text.
 
-    This is the entire LangGraph-specific surface: `create_agent` already
-    is the investigation (model -> tool -> model until it stops calling
-    tools), so there is nothing to add beyond wiring `SYSTEM_PROMPT` in
-    and reading the last message back out — matching Decision 8
-    ("framework-agnostic core, thin framework shims") already on record
-    for Epic 43.
+    This is almost the entire LangGraph-specific surface: `create_agent`
+    already is the investigation (model -> tool -> model until it stops
+    calling tools), so there is little to add beyond wiring `SYSTEM_PROMPT`
+    in, capping how long the loop may run, and reading the last message
+    back out — matching Decision 8 ("framework-agnostic core, thin
+    framework shims") already on record for Epic 43.
+
+    **Deliberately not attempted here**: trimming the message history
+    LangGraph resends every turn. `DEFAULT_RECURSION_LIMIT` bounds *how
+    many* turns can run; it does not shrink what each turn costs, which
+    is the larger share of a long investigation's token bill (a real
+    trace: prompt size grew ~38K to ~40K tokens turn over turn as history
+    accumulated). A pre-model hook that drops or summarizes old tool
+    results would address that directly, and is real, separate,
+    higher-risk work — trimming the wrong message (the one piece of
+    evidence a later turn's conclusion depends on) would make an
+    investigation confidently wrong rather than merely slow, which is a
+    worse failure than the one being fixed.
+
+    # Raises
+
+    `langgraph.errors.GraphRecursionError` if the model has not stopped
+    calling tools after `recursion_limit` steps — surfaced, not
+    swallowed, since silently returning a partial answer at the cap
+    would look like a real conclusion rather than an unfinished one.
     """
     agent = create_agent(model, tools, system_prompt=SYSTEM_PROMPT)
-    result = agent.invoke({"messages": [("user", question)]})
+    result = agent.invoke(
+        {"messages": [("user", question)]},
+        config={"recursion_limit": recursion_limit},
+    )
     return result["messages"][-1].content
 
 

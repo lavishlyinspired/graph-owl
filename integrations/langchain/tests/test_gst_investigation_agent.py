@@ -23,6 +23,7 @@ import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langgraph.errors import GraphRecursionError
 
 from graph_owl_langchain._core.principal import Principal
 from graph_owl_langchain.tools import GraphOwlToolkit
@@ -301,3 +302,54 @@ def test_investigate_threads_the_system_prompt_into_every_model_call():
     first_call = model.calls[0]
     assert first_call[0].type == "system"
     assert first_call[0].content == SYSTEM_PROMPT
+
+
+def test_system_prompt_steers_toward_query_graph_for_pack_data():
+    """**Found by measuring a real trace, not by inspection.** A live
+    investigation (LangSmith trace `019ff1cb-...`, 11 August 2026) spent
+    7 of its 28 turns calling `search_assets`/`resolve_entity` with every
+    rephrasing of the question before ever trying `query_graph` — those
+    tools only cover the catalog-asset hierarchy, and a domain pack's own
+    data (an invoice, a statutory provision) has no asset row by design.
+    The prompt must name that split explicitly, or the model keeps
+    rediscovering it by expensive trial and error — each wasted turn
+    re-sends the entire accumulated message history, which is most of
+    where a long investigation's token cost actually goes."""
+    assert "search_assets" in SYSTEM_PROMPT
+    assert "query_graph" in SYSTEM_PROMPT
+
+
+class _NeverStopsCallingToolsModel(BaseChatModel):
+    """A model that always calls a tool and never produces a plain
+    answer — the shape of a genuinely stuck investigation, standing in
+    for whatever real failure (a confused free-tier model, a tool loop)
+    would otherwise run unbounded."""
+
+    def _generate(
+        self, messages: list[BaseMessage], stop: list[str] | None = None, **kwargs: Any
+    ) -> ChatResult:
+        message = AIMessage(
+            content="",
+            tool_calls=[{"name": "search_assets", "args": {"query": "x"}, "id": "call-loop"}],
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    @property
+    def _llm_type(self) -> str:
+        return "never-stops-model"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "_NeverStopsCallingToolsModel":
+        return self
+
+
+def test_a_model_that_never_stops_calling_tools_is_bounded_not_left_running():
+    """The safety net `DEFAULT_RECURSION_LIMIT` exists for: a model that
+    never decides it is done must fail loudly at a bound, not run
+    indefinitely accumulating tool calls and token cost. `search_assets`
+    always finds no candidates for `"x"` under this fixture's manifest
+    result set (empty), so the model has genuinely nothing to converge
+    on — the same shape a real stuck investigation takes."""
+    model = _NeverStopsCallingToolsModel()
+
+    with pytest.raises(GraphRecursionError):
+        investigate(model, _toolkit_tools(), "anything", recursion_limit=3)
