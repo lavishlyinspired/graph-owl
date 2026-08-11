@@ -1278,6 +1278,14 @@ export const api = {
       { method: "POST", body: turtle, headers: { "content-type": "text/turtle" } },
     ),
 
+  /** Evaluate a pack's registered rules and record what they conclude —
+   *  Epic 105 P5b. The native reconcile engine; no CLI involved. */
+  reconcilePack: (pack: string) =>
+    request<{ pack: string; evaluated: number; found: number; opened: number; alreadyOpen: number }>(
+      `/packs/${encodeURIComponent(pack)}/reconcile`,
+      { method: "POST" },
+    ),
+
   findings: (params: { status?: string; pack?: string } = {}) => {
     const query = new URLSearchParams();
     if (params.status) query.set("status", params.status);

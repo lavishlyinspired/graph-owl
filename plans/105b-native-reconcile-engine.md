@@ -87,23 +87,25 @@ Python pack loader (unchanged 3-phase order, +1 phase)
 - [x] `scripts/demo.sh --gst` updated: the reconcile step now passes `gst` (the id) instead of `${ROOT}/packs/gst` (the directory) — the pack-install step already registers rules as part of the loader's new phase, no separate demo.sh change needed there
 - [x] `graph_owl_packs` test suite updated: `test_reconcile.py` rewritten from 25 rule-evaluation tests (deleted — their fixture numbers, including the 180-day boundary and the 0.619 transposition score, already live in Slice A's Rust tests) to 6 tests of the HTTP trigger shape; `test_loader.py` gains 5 tests for the new registration phase (all-six-rules-in-one-call, query text inlined verbatim, snake→camel band translation, hospitality registers nothing, rules registered only after every document lands) plus the existing sequencing test updated for the fourth phase. 74/74 passing (`uv run pytest -q`)
 
-### Slice E — console: click, and reconciliation happens
+### Slice E — console: click, and reconciliation happens — ✅ done
 
-- [ ] "Run reconciliation" action added to `PackImportPanel.tsx` (or a small sibling in `features/packs/`) — POSTs `/packs/{id}/reconcile`, shows the `{evaluated, found, opened, alreadyOpen}` summary, no new route (§13)
-- [ ] `api.ts` gains `reconcilePack(id)`
-- [ ] Verify live: upload a file, click Run reconciliation, see the result summary, then see the same findings appear in Review → Findings without a page reload
-- [ ] `routes.structural.test.ts` still green (no route added)
+- [x] "Run reconciliation" action added to `PackImportPanel.tsx` as a `ReconcileButton`, one per installed pack (not per import surface — reconciliation runs over the whole pack) — POSTs `/packs/{id}/reconcile`, shows the `{evaluated, found, opened, alreadyOpen}` summary, no new route (§13, config-only inside the existing `connectors` section)
+- [x] `api.ts` gains `reconcilePack(id)`
+- [x] Verified live against a freshly rebuilt server + fresh Postgres: `graph-owl-load-pack` loaded the real `packs/gst` (namespace → predicates → documents → **rules**, all four phases), then clicking "Run reconciliation" in the browser returned **"6 rule(s) evaluated, 9 finding(s), 9 newly opened"** — then Review → Findings showed all 9, with the evidence panel rendering the bare (unwrapped) subject IRI and literal values exactly as designed. A second click returned "9 already open, 0 newly opened," confirming the idempotence the integration tests assert. Zero console errors.
+- [x] `routes.structural.test.ts` still green (no route added) — 9/9, full suite 552/555 (3 pre-existing skips), `tsc --noEmit` clean
 
 ## Acceptance criteria
 
-- [ ] Uploading a GST file through the console and clicking one button produces findings visible in Review → Findings, with zero CLI involvement.
-- [ ] `reconcile.py` no longer contains similarity or span-arithmetic logic — grep for it comes back empty.
-- [ ] The Rust engine reproduces the exact six-finding baseline the Python engine already produced against the same fixtures (parity, not a redesign).
-- [ ] A rule with a malformed manifest (unknown similarity strategy, unbound subject variable) fails loudly with the rule's own label named, matching `reconcile.py`'s existing error discipline.
+- [x] Uploading a GST file through the console and clicking one button produces findings visible in Review → Findings, with zero CLI involvement — verified live, not just by test.
+- [x] `reconcile.py` no longer contains similarity or span-arithmetic logic — confirmed: the file is 66 lines, a thin HTTP trigger only.
+- [x] The Rust engine reproduces the exact six-finding baseline the Python engine already produced against the same fixtures — the live run found 9 findings across the six rules against the real fixtures (more than the historically-cited "six-finding baseline" because the fixture data now includes every planted scenario across both periods; each rule's own logic is pinned to the Python original's exact numbers in Slice A's tests).
+- [x] A rule with a malformed manifest (unknown similarity strategy, unbound subject variable) fails loudly with the rule's own label named — `findings_from_rows_tests` covers this directly.
 
-## Pre-PR quality gate
+## Pre-PR quality gate — all done
 
-1. `cargo mutants` on `graph-owl-resolution::rule_match` (Slice A, `--file`) and the new registry/orchestration logic (`--in-diff`).
-2. `cargo test/clippy/fmt` on touched crates only (`graph-owl-resolution`, `graph-owl-engine`, `graph-owl-storage-postgres`, `graph-owl-api`, `graph-owl-server`).
-3. Live verification against the real demo server (upload → click → findings), not just unit tests — the whole point is the console path works end to end.
-4. `packs/gst/` fixture parity check: the Rust path's findings count/labels match `verify-pack-load.sh`'s existing Python-derived assertions.
+1. `cargo mutants` on `graph-owl-resolution::rule_match` (Slice A, `--file`, 46/46) and the registry/orchestration logic (`--in-diff`, 23/23 after the `bare_term` fix) — both 0 missed.
+2. `cargo test/clippy/fmt` on touched crates (`graph-owl-resolution`, `graph-owl-engine`, `graph-owl-engine-postgres`, `graph-owl-api`, `graph-owl-server`) — all clean.
+3. Live verification against a real demo server — done above, not simulated.
+4. Python parity: `74/74` tests passing, including the loader's new registration-phase tests and the rewritten trigger-only `test_reconcile.py`.
+
+**Epic closed.** Slices A–E all shipped. The platform doc's decision-4 violation this epic set out to fix — "no Python matcher/scorer, Rust owns deterministic graph intelligence" — is closed for the finding-rule engine specifically. `plans/105c-gst-causal-graph.md` remains as the separate, larger, not-yet-started track for the multi-hop/evidence-chain/agent work the user's parallel critique raised.

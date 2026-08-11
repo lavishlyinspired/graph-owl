@@ -12,8 +12,8 @@
  *  conversion and the server keeps taking RDF from everyone. */
 
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Card, Empty, Space, Tag, Typography, Upload, message } from "antd";
-import { InboxOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Empty, Space, Tag, Typography, Upload, message } from "antd";
+import { InboxOutlined, SyncOutlined } from "@ant-design/icons";
 import type { UploadFile } from "antd/es/upload/interface";
 import { api } from "../../api";
 import { surfacesFor, type PackImportSurface, type PackSurfaces } from "./packSurfaces";
@@ -31,6 +31,9 @@ const COPY = {
   choose: "Choose a file",
   importing: "Importing…",
   unreadable: "That file could not be read",
+  reconcile: "Run reconciliation",
+  reconciling: "Reconciling…",
+  reconcileFailed: "Reconciliation could not be triggered",
 };
 
 /** The first `gst:period "..."`-shaped literal in the converted Turtle, used
@@ -138,6 +141,62 @@ function ImportSurface({ packId, surface }: { packId: string; surface: PackImpor
   );
 }
 
+/** The last step of the pipeline: uploading and registering land facts and
+ *  rules, but nothing evaluates them until this is clicked. `Catalog::
+ *  reconcile_pack` (Epic 105 P5b) does the work; this button is the whole
+ *  of what reaches it — no polling, no separate "did it finish" check,
+ *  because the request itself only returns once the run is done. */
+function ReconcileButton({ packId }: { packId: string }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{
+    evaluated: number;
+    found: number;
+    opened: number;
+    alreadyOpen: number;
+  } | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const run = useCallback(async () => {
+    setBusy(true);
+    setResult(null);
+    setFailure(null);
+    try {
+      const outcome = await api.reconcilePack(packId);
+      setResult(outcome);
+      message.success(
+        outcome.found === 0
+          ? "Reconciliation ran — no rule matched."
+          : `${outcome.found} finding(s) — see Review.`,
+      );
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : COPY.reconcileFailed);
+    } finally {
+      setBusy(false);
+    }
+  }, [packId]);
+
+  return (
+    <Space direction="vertical" size="small" style={{ width: "100%" }}>
+      <Button icon={<SyncOutlined spin={busy} />} loading={busy} onClick={() => void run()}>
+        {busy ? COPY.reconciling : COPY.reconcile}
+      </Button>
+      {result && (
+        <Alert
+          type={result.found === 0 ? "info" : "success"}
+          showIcon
+          message={
+            `${result.evaluated} rule(s) evaluated, ${result.found} finding(s)` +
+            (result.opened ? `, ${result.opened} newly opened` : "") +
+            (result.alreadyOpen ? `, ${result.alreadyOpen} already open` : "") +
+            "."
+          }
+        />
+      )}
+      {failure && <Alert type="error" showIcon message={failure} />}
+    </Space>
+  );
+}
+
 export function PackImportPanel() {
   const [packs, setPacks] = useState<readonly PackSurfaces[] | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -181,6 +240,14 @@ export function PackImportPanel() {
             {pack.imports.map((surface) => (
               <ImportSurface key={surface.key} packId={pack.packId} surface={surface} />
             ))}
+            <Card size="small" title="Reconciliation" style={{ marginBottom: 12 }}>
+              <Paragraph type="secondary" style={{ marginBottom: 12 }}>
+                Evaluates every rule this pack has registered against what has
+                landed so far. Uploading a file does not do this by itself —
+                run it after an upload to see findings in Review.
+              </Paragraph>
+              <ReconcileButton packId={pack.packId} />
+            </Card>
           </div>
         ))
       )}
