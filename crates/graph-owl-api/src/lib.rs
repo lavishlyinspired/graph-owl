@@ -1506,11 +1506,20 @@ pub struct LinkedEntity {
     /// The literal value that matched, so a caller can tell *why* this
     /// subject was suggested — not only that it was.
     pub matched_value: String,
-    /// `0.0..=1.0`, sorted descending across the returned list. The best
-    /// match across all of a subject's own literal properties, not one row
-    /// per property — a caller wants one seed per candidate entity, the
-    /// same "one candidate, not one row per matching field" shape
-    /// [`Catalog::resolve_entity`] already has.
+    /// The best lexical-similarity term across all of a subject's own
+    /// literal properties, not one row per property — a caller wants one
+    /// seed per candidate entity, the same "one candidate, not one row per
+    /// matching field" shape [`Catalog::resolve_entity`] already has.
+    pub lexical: f64,
+    /// How connected this subject is in the graph, `None` when no
+    /// traversal engine is configured — hybrid search's graph signal
+    /// (`plans/105x-hybrid-search.md`). Honestly `None`, not `Some(0.0)`,
+    /// matching [`graph_owl_core::recall::Candidate::semantic`]'s own
+    /// "measured vs never measured" distinction.
+    pub graph: Option<f64>,
+    /// **The decomposition is the explanation** — [`graph_owl_core::hybrid::fuse`]'s
+    /// own doc comment states why: a ranking nobody can audit is a ranking
+    /// nobody should act on.
     pub score: f64,
 }
 
@@ -9955,9 +9964,13 @@ impl Catalog {
             )
             .await?;
 
-        // Best match per subject, not one row per matching literal — see
-        // `LinkedEntity::score`'s own doc comment for why.
-        let mut best: std::collections::HashMap<Sid, LinkedEntity> =
+        // Best *lexical* match per subject, not one row per matching
+        // literal — a caller wants one seed per candidate entity, the same
+        // "one candidate, not one row per matching field" shape
+        // `resolve_entity` already has. `(matched_value, lexical)`, not the
+        // full `LinkedEntity` yet: the graph term is filled in afterward,
+        // once per surviving subject rather than once per literal row.
+        let mut best: std::collections::HashMap<Sid, (String, f64)> =
             std::collections::HashMap::new();
         for row in outcome.rows {
             let (Some(subject_term), Some(value_term)) = (row.get("s"), row.get("v")) else {
@@ -9968,34 +9981,48 @@ impl Catalog {
                 continue;
             };
             let matched_value = bare_term(value_term).to_string();
-            let score = graph_owl_resolution::rule_match::similarity(
+            let lexical = graph_owl_resolution::rule_match::similarity(
                 query,
                 &matched_value,
                 &graph_owl_resolution::rule_match::SimilarityStrategy::NGram { n: 3 },
             )
             .expect("n = 3 is always a valid n-gram size");
 
-            best.entry(subject.clone())
+            best.entry(subject)
                 // Strictly `>`: on a tie the first-seen literal keeps the
-                // slot. Arbitrary, and deliberately so — the returned
-                // `score` is identical either way, so no caller-observable
-                // behaviour depends on which literal string wins a tie,
-                // only that one wins consistently rather than depending on
-                // fetch order.
+                // slot. Arbitrary, and deliberately so — the fused `score`
+                // depends on `lexical`, which is identical either way, so
+                // no caller-observable behaviour depends on which literal
+                // string wins a tie, only that one wins consistently
+                // rather than depending on fetch order.
                 .and_modify(|existing| {
-                    if score > existing.score {
-                        existing.matched_value.clone_from(&matched_value);
-                        existing.score = score;
+                    if lexical > existing.1 {
+                        *existing = (matched_value.clone(), lexical);
                     }
                 })
-                .or_insert(LinkedEntity {
-                    subject,
-                    matched_value,
-                    score,
-                });
+                .or_insert((matched_value, lexical));
         }
 
-        let mut scored: Vec<LinkedEntity> = best.into_values().collect();
+        // Hybrid-search fusion — Epic 105 P9's other named gap
+        // (`plans/105x-hybrid-search.md`): lexical similarity alone cannot
+        // distinguish two textually-similar candidates by how connected
+        // each actually is in the graph. No embedding exists for a graph
+        // subject in general (only memories have one, Epic 31), so
+        // `semantic` stays honestly `None` throughout.
+        let weights = graph_owl_core::hybrid::HybridWeights::default();
+        let mut scored = Vec::with_capacity(best.len());
+        for (subject, (matched_value, lexical)) in best {
+            let graph = self.link_entity_graph_signal(&subject).await;
+            let fused = graph_owl_core::hybrid::fuse(lexical, None, graph, &weights);
+            scored.push(LinkedEntity {
+                subject,
+                matched_value,
+                lexical: fused.lexical,
+                graph: fused.graph,
+                score: fused.total,
+            });
+        }
+
         scored.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -10003,6 +10030,29 @@ impl Catalog {
         });
         scored.truncate(limit);
         Ok(scored)
+    }
+
+    /// How connected `subject` is within one hop, `0.0..=1.0`, `None` when
+    /// no traversal engine is configured — the same honesty
+    /// [`graph_owl_core::recall::Candidate::semantic`] already established
+    /// for a signal that may simply never have been measured.
+    ///
+    /// The seed itself is excluded from the count (every node trivially
+    /// "reaches itself"), and a traversal failure degrades to `None` rather
+    /// than failing the whole call — the same posture
+    /// [`Self::node_sources`]'s own per-node lookup already takes.
+    async fn link_entity_graph_signal(&self, subject: &Sid) -> Option<f64> {
+        let traversal = self.traversal.as_ref()?;
+        let bounds = Bounds {
+            max_hops: 1,
+            max_nodes: 200,
+        };
+        let result = traversal
+            .neighbours(subject, Direction::Both, bounds, &EdgeFilter::default())
+            .await
+            .ok()?;
+        let others = result.reached.len().saturating_sub(1);
+        Some((others as f64 / f64::from(u32::try_from(bounds.max_nodes - 1).unwrap_or(1))).min(1.0))
     }
 
     /// Turn `extension.<name>[.gte|.lte]=<text>` pairs into typed filters.
@@ -26528,6 +26578,171 @@ mod projection_isolation_tests {
             matches[0].score, 1.0,
             "the exact match wins: {candidates:?}"
         );
+    }
+
+    /// Hybrid-search fusion — Epic 105 P9's other named gap
+    /// (`plans/105x-hybrid-search.md`): two subjects with the *identical*
+    /// literal value (so lexical similarity alone cannot distinguish them)
+    /// must still be ranked, by how connected each actually is in the
+    /// graph — proven with the real
+    /// `graph_owl_traversal_memory::InMemoryTraversalEngine`, the same
+    /// adapter `the_real_in_memory_adapter_still_respects_the_access_predicate_per_principal`
+    /// already uses, not a faked traversal result.
+    #[tokio::test]
+    async fn link_entity_ranks_the_better_connected_subject_first_on_a_lexical_tie() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+
+        let connected = catalog_asset_sid(&storage, &graph, "connected-invoice").await;
+        let isolated = catalog_asset_sid(&storage, &graph, "isolated-invoice").await;
+        let neighbour = catalog_asset_sid(&storage, &graph, "neighbouring-asset").await;
+
+        // Both candidates name the identical value — lexical similarity to
+        // the query is exactly equal by construction.
+        for subject in [&connected, &isolated] {
+            graph
+                .assert_flakes(&[Flake::assert(
+                    subject.clone(),
+                    Sid::dsc("invoiceNumber"),
+                    FlakeValue::String("INV-1003".to_string()),
+                    1,
+                )])
+                .await
+                .expect("seed the tied literal");
+        }
+        // Only `connected` has a real edge.
+        graph
+            .assert_flakes(&[
+                Flake::assert(
+                    Sid::dsc("rel-connected-neighbour"),
+                    Sid::dsc("fromEntity"),
+                    FlakeValue::Ref(connected.clone()),
+                    1,
+                ),
+                Flake::assert(
+                    Sid::dsc("rel-connected-neighbour"),
+                    Sid::dsc("toEntity"),
+                    FlakeValue::Ref(neighbour),
+                    1,
+                ),
+                Flake::assert(
+                    Sid::dsc("rel-connected-neighbour"),
+                    Sid::dsc("relType"),
+                    FlakeValue::String("feeds".to_string()),
+                    1,
+                ),
+            ])
+            .await
+            .expect("seed the edge");
+
+        let traversal: Arc<dyn TraversalEngine> =
+            Arc::new(graph_owl_traversal_memory::InMemoryTraversalEngine::new(
+                graph.clone() as Arc<dyn TripleStore>,
+            ));
+        let catalog = Catalog::new(storage)
+            .with_graph(graph as Arc<dyn TripleStore>)
+            .with_traversal(traversal);
+
+        let candidates = catalog
+            .link_entity(&Principal::system(), "INV-1003", 10)
+            .await
+            .expect("link");
+
+        let connected_rank = candidates
+            .iter()
+            .position(|c| c.subject == connected)
+            .expect("connected candidate present");
+        let isolated_rank = candidates
+            .iter()
+            .position(|c| c.subject == isolated)
+            .expect("isolated candidate present");
+
+        assert!(
+            connected_rank < isolated_rank,
+            "the connected subject must rank first despite an equal lexical score: {candidates:?}"
+        );
+        assert!(
+            candidates[connected_rank].graph.expect("measured") > 0.0,
+            "{candidates:?}"
+        );
+        assert_eq!(
+            candidates[isolated_rank].graph,
+            Some(0.0),
+            "measured and disconnected, not unmeasured: {candidates:?}"
+        );
+    }
+
+    /// **Pins the graph term's exact arithmetic**, not only its sign. The
+    /// ranking test above only distinguishes zero from non-zero — a
+    /// mutation run against it found that `/`, `*` and `%`, or `-` and `+`,
+    /// all leave that assertion passing. Three real neighbours out of a
+    /// 200-node budget must read as exactly `3 / (200 - 1)`, hand-derived
+    /// before this test was written, not "some positive number."
+    #[tokio::test]
+    async fn link_entity_graph_signal_is_the_exact_reached_fraction() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+
+        let hub = catalog_asset_sid(&storage, &graph, "hub-asset").await;
+        for i in 0..3 {
+            let neighbour = catalog_asset_sid(&storage, &graph, &format!("spoke-{i}")).await;
+            graph
+                .assert_flakes(&[
+                    Flake::assert(
+                        Sid::dsc(format!("rel-hub-spoke-{i}")),
+                        Sid::dsc("fromEntity"),
+                        FlakeValue::Ref(hub.clone()),
+                        1,
+                    ),
+                    Flake::assert(
+                        Sid::dsc(format!("rel-hub-spoke-{i}")),
+                        Sid::dsc("toEntity"),
+                        FlakeValue::Ref(neighbour),
+                        1,
+                    ),
+                    Flake::assert(
+                        Sid::dsc(format!("rel-hub-spoke-{i}")),
+                        Sid::dsc("relType"),
+                        FlakeValue::String("feeds".to_string()),
+                        1,
+                    ),
+                ])
+                .await
+                .expect("seed one spoke edge");
+        }
+
+        let traversal: Arc<dyn TraversalEngine> =
+            Arc::new(graph_owl_traversal_memory::InMemoryTraversalEngine::new(
+                graph.clone() as Arc<dyn TripleStore>,
+            ));
+        let catalog = Catalog::new(storage)
+            .with_graph(graph as Arc<dyn TripleStore>)
+            .with_traversal(traversal);
+
+        let signal = catalog
+            .link_entity_graph_signal(&hub)
+            .await
+            .expect("measured");
+
+        assert!(
+            (signal - 3.0 / 199.0).abs() < 1e-9,
+            "3 reached out of a 200-node budget (excluding the seed itself): {signal}"
+        );
+    }
+
+    /// A real asset's own graph subject, seeded once and reused across the
+    /// hybrid-fusion test above.
+    async fn catalog_asset_sid(
+        storage: &Arc<InMemoryStorage>,
+        graph: &Arc<RecordingGraph>,
+        name: &str,
+    ) -> Sid {
+        let asset = Catalog::new(storage.clone())
+            .with_graph(graph.clone() as Arc<dyn TripleStore>)
+            .upsert_asset(&Principal::system(), service(name))
+            .await
+            .expect("create");
+        graph_owl_core::projection::entity_sid(asset.id)
     }
 
     /// **The RED test, Epic 94 Slice D / decision 7's own stated

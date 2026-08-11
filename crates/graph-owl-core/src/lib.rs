@@ -46,6 +46,7 @@ pub mod finding;
 pub mod flake;
 pub mod fqn;
 pub mod glossary;
+pub mod hybrid;
 pub mod lifecycle;
 pub mod lineage;
 pub mod memory;
