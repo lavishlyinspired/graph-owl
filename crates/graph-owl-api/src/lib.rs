@@ -1393,6 +1393,25 @@ fn is_safe_iri(value: &str) -> bool {
         && !value.chars().any(|c| {
             matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\') || (c as u32) <= 0x20
         })
+        && has_iri_scheme(value)
+}
+
+/// A leading `scheme ":"`, per RFC 3986 §3.1 (`ALPHA *( ALPHA / DIGIT / "+"
+/// / "-" / "." )`). Every real binding this system supplies is an absolute
+/// IRI (`https://...`, `urn:...`); a value with no scheme is a caller's bare
+/// literal, not a term, and [`is_safe_iri`] must reject it rather than let
+/// it substitute as a syntactically-legal-but-meaningless relative IRI
+/// reference.
+fn has_iri_scheme(value: &str) -> bool {
+    let Some(colon) = value.find(':') else {
+        return false;
+    };
+    let (scheme, _) = value.split_at(colon);
+    !scheme.is_empty()
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 /// Substitutes `query`'s own `{{name}}` placeholders with their bound
@@ -1562,6 +1581,46 @@ mod pack_query_substitution_tests {
             let err =
                 substitute_pack_query_bindings(query, &bindings(&[("invoice", unsafe_value)]))
                     .expect_err(&format!("{unsafe_value:?} must be refused"));
+            assert!(matches!(err, CatalogError::Validation(_)), "{err:?}");
+        }
+    }
+
+    /// **A bare literal is not an IRI, even though it contains none of
+    /// [`is_safe_iri`]'s forbidden characters.** `"INV-2001"` would
+    /// substitute cleanly into `<INV-2001>` — a syntactically legal
+    /// *relative* IRI reference, and almost never what a caller means: every
+    /// real binding this system ever supplies is an absolute IRI with a
+    /// scheme (`https://...`, `urn:...`). Accepting a schemeless value would
+    /// turn a caller's mistake (passing an invoice's bare display id instead
+    /// of its canonical subject IRI) into a query that silently runs and
+    /// returns nothing, rather than a validation error naming the mistake.
+    #[test]
+    fn a_bare_literal_with_no_scheme_is_refused_not_silently_wrapped() {
+        let query = "ASK { <{{invoice}}> ?p ?o }";
+
+        for literal in ["INV-2001", "purchase-INV-2001", "2020-07-10"] {
+            let err = substitute_pack_query_bindings(query, &bindings(&[("invoice", literal)]))
+                .expect_err(&format!("{literal:?} has no scheme and must be refused"));
+            assert!(matches!(err, CatalogError::Validation(_)), "{err:?}");
+        }
+    }
+
+    /// **A malformed scheme is not the same failure as no scheme at all** —
+    /// RFC 3986 §3.1 requires the scheme to *start* with a letter, with
+    /// digits/`+`/`-`/`.` only allowed after that first character. A value
+    /// with a colon but no valid scheme (`"123:foo"` starts with a digit;
+    /// `"a_b:c"`'s scheme contains an underscore, which is not
+    /// `ALPHA`/`DIGIT`/`+`/`-`/`.`) must still be refused, not accepted just
+    /// because *some* text precedes the colon.
+    #[test]
+    fn a_colon_with_no_valid_scheme_before_it_is_refused() {
+        let query = "ASK { <{{invoice}}> ?p ?o }";
+
+        for malformed in ["123:foo", "a_b:c"] {
+            let err = substitute_pack_query_bindings(query, &bindings(&[("invoice", malformed)]))
+                .expect_err(&format!(
+                    "{malformed:?} has no valid scheme and must be refused"
+                ));
             assert!(matches!(err, CatalogError::Validation(_)), "{err:?}");
         }
     }
