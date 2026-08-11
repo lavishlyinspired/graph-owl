@@ -296,7 +296,11 @@ async fn explain_reaches_the_real_derivation_through_the_real_adapter() {
     .expect("no source error")
     .expect("the fact is derived");
 
-    assert_eq!(fact.explanation["status"], "derived", "{:?}", fact.explanation);
+    assert_eq!(
+        fact.explanation["status"], "derived",
+        "{:?}",
+        fact.explanation
+    );
     let chain = &fact.explanation["chains"][0];
     assert_eq!(chain["rule"], "subClassOf", "{:?}", fact.explanation);
     let deeper = chain["premises"]

@@ -212,6 +212,36 @@ pub trait ContextSource: Send + Sync {
         predicate: &graph_owl_core::flake::Sid,
         object: &graph_owl_core::flake::Sid,
     ) -> Result<Option<FactExplanation>, SourceError>;
+
+    /// Evaluate a pack's registered rules and record what they conclude —
+    /// Epic 105 P10's fourth intelligence tool, wrapping
+    /// [`graph_owl_api::Catalog::reconcile_pack`] (the same computation
+    /// `POST /packs/{pack}/reconcile` already serves — the console's own
+    /// "Run reconciliation" button).
+    ///
+    /// **Admin-gated, unlike every other tool on this trait** — because,
+    /// unlike a read, this call **writes**: every finding it evaluates and
+    /// records lands in the review queue as a side effect. The HTTP route
+    /// this wraps already restricts it to `principal.is_admin` (`if
+    /// !principal.is_admin { return Err(AppError::NotFound); }`); an agent
+    /// tool wrapping the identical capability inherits that restriction
+    /// rather than quietly widening it. `finding_rules` (`GET
+    /// /packs/{pack}/finding-rules`, the route immediately above this one
+    /// in `graph-owl-server`) draws the identical line for the identical
+    /// reason, confirming this is an established convention here, not a
+    /// one-off judgement call.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached. `Ok(None)`
+    /// when the caller is not an admin — indistinguishable from any other
+    /// denial on this trait, for the same reason [`Outcome::NotFound`]
+    /// exists.
+    async fn reconcile(
+        &self,
+        principal: &str,
+        pack: &str,
+    ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError>;
 }
 
 /// A bounded walk's answer, as an agent receives it — Epic 105 P10's
@@ -515,6 +545,9 @@ pub enum Outcome {
     EvidenceFound(Box<EvidenceContext>),
     /// Why a fact holds — Epic 105 P10's `explain()`.
     Explained(Box<FactExplanation>),
+    /// A pack's rules ran and their findings were recorded — Epic 105
+    /// P10's `reconcile()`.
+    Reconciled(Box<graph_owl_api::ReconcileOutcome>),
     /// A write landed or became a proposal — Epic 32.
     Wrote(Box<write::WriteReceipt>),
     /// **An agent write was refused, readably.**
@@ -595,6 +628,10 @@ pub const FIND_EVIDENCE: &str = "find_evidence";
 
 /// Why a fact holds — Epic 105 P10's third intelligence tool.
 pub const EXPLAIN: &str = "explain";
+
+/// Run a pack's registered rules and record what they conclude — Epic
+/// 105 P10's fourth intelligence tool.
+pub const RECONCILE: &str = "reconcile";
 
 /// The most hops an agent may ask `traverse` to walk.
 ///
@@ -863,6 +900,24 @@ pub fn tools() -> Vec<ToolDeclaration> {
                     },
                 },
                 "required": ["subject", "predicate", "object"],
+                "additionalProperties": false,
+            }),
+        },
+        ToolDeclaration {
+            name: RECONCILE,
+            description: "Run a pack's registered rules and record what they conclude as \
+                      findings — the same computation the console's \"Run reconciliation\" \
+                      button triggers. Admin-only: this writes to the review queue, unlike \
+                      every other tool on this surface.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pack": {
+                        "type": "string",
+                        "description": "The pack to reconcile, e.g. \"gst\".",
+                    },
+                },
+                "required": ["pack"],
                 "additionalProperties": false,
             }),
         },
@@ -1139,6 +1194,18 @@ pub async fn call_within(
                     }
                     Outcome::Explained(Box::new(fact))
                 }
+                Ok(None) => Outcome::NotFound,
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
+        RECONCILE => {
+            let pack = match required_text(arguments, "pack") {
+                Ok(pack) => pack,
+                Err(problem) => return problem,
+            };
+            match source.reconcile(principal, pack).await {
+                Ok(Some(outcome)) => Outcome::Reconciled(Box::new(outcome)),
                 Ok(None) => Outcome::NotFound,
                 Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
             }
@@ -1864,6 +1931,37 @@ mod tests {
             }
             Ok(None)
         }
+
+        async fn reconcile(
+            &self,
+            principal: &str,
+            pack: &str,
+        ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError> {
+            self.asked
+                .lock()
+                .expect("lock")
+                .push((principal.to_string(), format!("reconcile:{pack}")));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            // `alice` is this fixture's one admin principal, matching the
+            // real adapter's `principal.is_admin` gate — an authorization
+            // axis independent of the asset-visibility one `alice`/`mallory`
+            // model elsewhere in this fixture.
+            if principal != "alice" {
+                return Ok(None);
+            }
+            if pack == "gst" {
+                return Ok(Some(graph_owl_api::ReconcileOutcome {
+                    pack: pack.to_string(),
+                    evaluated: 6,
+                    found: 2,
+                    opened: 1,
+                    already_open: 1,
+                }));
+            }
+            Ok(None)
+        }
     }
 
     /// A trust summary for a context whose trust is not what is under test.
@@ -2189,9 +2287,10 @@ mod tests {
                     TRAVERSE,
                     FIND_EVIDENCE,
                     EXPLAIN,
+                    RECONCILE,
                 ],
                 "the seven read capabilities Epic 14 promises, plus Epic 105 P10's \
-                 first three intelligence tools, and no others — a tool that appears \
+                 first four intelligence tools, and no others — a tool that appears \
                  here without a dispatch arm teaches an agent to distrust the \
                  manifest, and one that dispatches without appearing here is a \
                  capability no agent will ever find"
@@ -3474,6 +3573,80 @@ mod tests {
                 derived["chains"][0]["premises"][0],
                 serde_json::json!({ "status": "unknown" })
             );
+        }
+    }
+
+    /// Epic 105 P10 — `reconcile()`, the platform doc's fourth intelligence
+    /// tool.
+    mod the_reconcile_tool {
+        use super::*;
+
+        fn pack_args(pack: &str) -> serde_json::Value {
+            serde_json::json!({ "pack": pack })
+        }
+
+        #[tokio::test]
+        async fn an_admin_reconciles_the_known_pack() {
+            let source = Fixture::working();
+
+            let outcome = call(&source, Some("alice"), RECONCILE, &pack_args("gst")).await;
+
+            let Outcome::Reconciled(result) = outcome else {
+                panic!("expected Reconciled, got {outcome:?}");
+            };
+            assert_eq!(result.pack, "gst");
+            assert_eq!(result.evaluated, 6);
+            assert_eq!(result.opened, 1);
+        }
+
+        /// **The one tool on this trait an ordinary authenticated caller
+        /// cannot use** — matching the HTTP route's own `principal.is_admin`
+        /// gate, not a new restriction this tool invents.
+        #[tokio::test]
+        async fn a_non_admin_principal_is_refused_the_same_as_absent() {
+            let source = Fixture::working();
+
+            let outcome = call(&source, Some("mallory"), RECONCILE, &pack_args("gst")).await;
+
+            assert_eq!(outcome, Outcome::NotFound);
+        }
+
+        #[tokio::test]
+        async fn an_unauthenticated_caller_learns_nothing() {
+            let source = Fixture::working();
+
+            let outcome = call(&source, None, RECONCILE, &pack_args("gst")).await;
+
+            assert_eq!(outcome, Outcome::Unauthenticated);
+        }
+
+        #[tokio::test]
+        async fn a_call_with_no_pack_is_a_bad_request() {
+            let source = Fixture::working();
+
+            let outcome = call(&source, Some("alice"), RECONCILE, &serde_json::json!({})).await;
+
+            assert!(matches!(outcome, Outcome::BadRequest(_)), "{outcome:?}");
+        }
+
+        /// **No budget fitting** — matching `Outcome::Wrote`'s own
+        /// precedent (`write.rs` never calls `budget::fit` either):
+        /// `ReconcileOutcome` is five scalar fields, nothing to shrink, and
+        /// there is no entity list for a truncation flag to describe.
+        #[tokio::test]
+        async fn the_default_budget_never_truncates_a_reconcile_outcome() {
+            let source = Fixture::working();
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                RECONCILE,
+                &pack_args("gst"),
+                budget::TokenBudget { max_tokens: 0 },
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::Reconciled(_)), "{outcome:?}");
         }
     }
 

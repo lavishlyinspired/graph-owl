@@ -17,7 +17,8 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use common::{authorization_fixture, test_app, token};
+use common::{authorization_fixture, test_app, test_catalog, token};
+use graph_owl_core::{Principal, PrincipalKind};
 use tower::ServiceExt;
 
 const MISSING_IN_GSTR2B: &str = r"
@@ -197,6 +198,46 @@ async fn a_registered_rule_evaluated_against_real_imported_facts_produces_a_find
             .any(|e| e["predicate"] == "gst:invoiceNumber" && e["value"] == "INV-1003"),
         "evidence value must be the bare literal, not \"quoted\": {evidence:?}"
     );
+}
+
+/// **Epic 105 P10's `reconcile()` tool, against the real adapter.** Proves
+/// two things the HTTP route's own tests above never distinguish, because
+/// every call there resolves to `Principal::system()` (open mode, always
+/// admin): `CatalogContext::reconcile` really does call through to
+/// `Catalog::reconcile_pack` for a real admin, *and* really does refuse a
+/// non-admin — the property the trait doc comment states but no earlier
+/// test in this codebase exercises, since nothing else drives
+/// `CatalogContext` with a hand-built non-admin `Principal`.
+#[tokio::test]
+async fn reconcile_admits_an_admin_and_refuses_a_non_admin_through_the_real_adapter() {
+    let (catalog, _db, _url) = test_catalog().await;
+    let app = graph_owl_server::app(catalog.clone());
+    seed_gst_vocabulary_and_one_unmatched_invoice(&app).await;
+    register_missing_in_gstr2b_rule(&app).await;
+
+    let admin = Principal::system();
+    let admin_reads = graph_owl_mcp::catalog::CatalogContext::new(catalog.clone(), admin.clone());
+    let outcome = graph_owl_mcp::ContextSource::reconcile(&admin_reads, &admin.id, "gst")
+        .await
+        .expect("no source error")
+        .expect("an admin may reconcile");
+    assert_eq!(outcome.pack, "gst");
+    assert_eq!(outcome.evaluated, 1, "{outcome:?}");
+    assert_eq!(outcome.found, 1, "{outcome:?}");
+    assert_eq!(outcome.opened, 1, "{outcome:?}");
+
+    let contractor = Principal {
+        id: "contractor".to_string(),
+        name: "contractor".to_string(),
+        kind: PrincipalKind::User,
+        roles: Vec::new(),
+        is_admin: false,
+    };
+    let contractor_reads = graph_owl_mcp::catalog::CatalogContext::new(catalog, contractor.clone());
+    let refused = graph_owl_mcp::ContextSource::reconcile(&contractor_reads, &contractor.id, "gst")
+        .await
+        .expect("no source error");
+    assert!(refused.is_none(), "a non-admin must be refused: {refused:?}");
 }
 
 /// A second run over the same unmatched invoice must not double the queue —

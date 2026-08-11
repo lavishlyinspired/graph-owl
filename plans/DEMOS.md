@@ -1194,6 +1194,27 @@ Mutation testing on the real adapter, proven against `reasoning.rs`'s own
 three-level ontology fixture, came back clean — zero open gaps, the
 cleanest of the three tools shipped so far, because `explain` has no
 hop-count or bounds parameter for a fixture-shaped gap to hide behind.
+**P10's fourth intelligence tool shipped, 11 August 2026** (`105n`):
+`reconcile()` wraps `Catalog::reconcile_pack` — the first P10 tool that
+needed a genuinely new authorization check rather than inheriting one,
+because unlike every prior tool on this trait it **writes**: it evaluates
+a pack's rules and records what they conclude in the review queue.
+`ContextSource::reconcile` checks `principal.is_admin` itself, matching
+the HTTP route this wraps exactly (the identical gate `GET
+/packs/{pack}/finding-rules` already applies, confirming this is an
+established convention here rather than a one-off call); a non-admin gets
+the same `Ok(None)` every denial on this trait already returns. It reuses
+`graph_owl_api::ReconcileOutcome` directly as its wire type (already
+`Serialize`, from `105b`) and skips `budget::Fits` entirely, matching
+`Outcome::Wrote`'s own precedent — five scalar fields have nothing to
+shrink. Mutation testing on the dispatch code came back clean (0 missed).
+Mutation testing on the real adapter, proven against a new real-Postgres
+test built from two hand-constructed `Principal`s (one admin, one not) run
+against the same catalog, found the property no earlier test in this
+codebase could exercise: every existing HTTP test resolves to
+`Principal::system()` in open mode regardless of which subject a bearer
+token claims, so this is the first proof that a genuinely non-admin
+caller is refused. Zero open gaps.
 **Still open, recorded
 rather than assumed away**: no reference agent app
 (`examples/gst-reconcile/`) and so no scored evaluation run; the live
@@ -1202,7 +1223,7 @@ principal who can query at all (per-named-graph policy needs a policy model
 that does not exist yet); six of the seven planned packs are unwritten; and
 P2's remaining connectors, P3, P4, the rest of P8 (temporal engine,
 generalization beyond GST), P9's GraphRAG/hybrid-search remaining thirds,
-P10's other five tools, P11 and P12 are untouched — this is the spine, not
+P10's other four tools, P11 and P12 are untouched — this is the spine, not
 the finished platform
 
 ### Console half

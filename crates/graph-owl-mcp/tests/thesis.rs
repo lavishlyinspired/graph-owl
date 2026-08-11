@@ -283,6 +283,15 @@ impl ContextSource for Seeded {
         self.record("explain");
         Ok(None)
     }
+
+    async fn reconcile(
+        &self,
+        _principal: &str,
+        _pack: &str,
+    ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError> {
+        self.record("reconcile");
+        Ok(None)
+    }
 }
 
 fn about(fqn: &str) -> serde_json::Value {

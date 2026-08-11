@@ -708,6 +708,27 @@ impl ContextSource for CatalogContext {
             truncation_reason: None,
         }))
     }
+
+    async fn reconcile(
+        &self,
+        principal: &str,
+        pack: &str,
+    ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError> {
+        let who = self.authenticated(principal)?;
+
+        // Admin-gated, matching the HTTP route this wraps exactly — see
+        // the trait doc comment for why this tool, unlike every other one
+        // on this trait, needs its own authorization check rather than
+        // inheriting an open one.
+        if !who.is_admin {
+            return Ok(None);
+        }
+
+        match self.catalog.reconcile_pack(&who, pack).await {
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(error) => Err(unavailable(&error)),
+        }
+    }
 }
 
 impl CatalogContext {

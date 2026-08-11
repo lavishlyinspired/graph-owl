@@ -203,6 +203,13 @@ mod tests {
         ) -> Result<Option<FactExplanation>, SourceError> {
             Ok(None)
         }
+        async fn reconcile(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError> {
+            Ok(None)
+        }
     }
 
     fn read_only() -> graph_owl_mcp::jsonrpc::Server<'static> {
