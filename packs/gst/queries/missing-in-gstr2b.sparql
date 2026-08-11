@@ -24,6 +24,12 @@
 # blocking strategy, which sees through a transposition where an exact join
 # cannot. The difference between these two answers is the argument for the
 # fusion engine.
+#
+# **The GSTIN is reached by traversal, not read off a literal — Epic 105c.**
+# `?invoice gst:issuedBy ?supplier` is a real edge to a `gst:Supplier`
+# subject; the GSTIN comparison still happens on that subject's own
+# `supplierGstin` property, which is what keeps the transposed pair joinable
+# as *different* subjects rather than silently merged by a shared literal.
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
@@ -31,15 +37,17 @@ SELECT ?invoice ?number ?gstin ?taxAmount
 WHERE {
   GRAPH ?register {
     ?invoice a gst:PurchaseInvoice ;
-             gst:supplierGstin ?gstin ;
+             gst:issuedBy ?supplier ;
              gst:invoiceNumber ?number ;
              gst:taxAmount ?taxAmount .
+    ?supplier gst:supplierGstin ?gstin .
   }
   OPTIONAL {
     GRAPH ?authority {
       ?filed a gst:Gstr2bInvoice ;
-             gst:supplierGstin ?gstin ;
+             gst:issuedBy ?filedSupplier ;
              gst:invoiceNumber ?number .
+      ?filedSupplier gst:supplierGstin ?gstin .
     }
   }
   FILTER (!BOUND(?filed))

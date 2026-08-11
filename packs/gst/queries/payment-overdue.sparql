@@ -18,14 +18,17 @@
 # to threshold, so a model that stored "days to pay" as a column would report
 # nothing wrong about the worst case the section exists for.
 
+# The GSTIN is reached by traversal, not read off a literal — Epic 105c.
+
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
 SELECT ?purchase ?number ?gstin ?purchasedAt ?paidAt
 WHERE {
   GRAPH ?register {
     ?invoice a gst:PurchaseInvoice ;
-             gst:supplierGstin ?gstin ;
+             gst:issuedBy ?supplier ;
              gst:invoiceNumber ?number .
+    ?supplier gst:supplierGstin ?gstin .
   }
   GRAPH ?events {
     ?purchase a gst:PurchaseEvent ;

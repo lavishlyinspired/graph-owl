@@ -89,6 +89,20 @@ class Gstr2bInvoice:
         live line and a fixture line are indistinguishable to the rules."""
         return f"{PREFIX}:2b-{self.invoice_number}"
 
+    @property
+    def supplier_subject(self) -> str:
+        """The real graph node this invoice was `issuedBy` — Epic 105c.
+
+        Keyed on the GSTIN, never the invoice: two invoices from the same
+        supplier must resolve to the *same* subject, which is what makes
+        "which invoices did this supplier issue" a traversal instead of a
+        second string join. `plans/105c-gst-causal-graph.md` names the
+        specific gap this closes: `gst:Supplier` was declared in the
+        ontology and never instantiated — every invoice carried the GSTIN
+        as a bare literal, unreachable by a graph walk.
+        """
+        return f"{PREFIX}:supplier-{self.supplier_gstin}"
+
 
 def _money(value: object) -> str:
     """A monetary figure as a fixed two-decimal string."""
@@ -234,11 +248,34 @@ def to_turtle(invoices: list[Gstr2bInvoice], namespace: str | None = None) -> st
         "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .",
         "",
     ]
+
+    # One Supplier subject per unique GSTIN — Epic 105c. Keyed by GSTIN and
+    # deduplicated across invoices, because two invoices from the same
+    # supplier must resolve to the same node; a block per invoice would make
+    # "issued by the same supplier" require a second string join, exactly
+    # the failure mode this closes. The first name seen for a GSTIN wins —
+    # a real GSP response gives one consistent name per supplier.
+    supplier_names: dict[str, str] = {}
+    for invoice in invoices:
+        supplier_names.setdefault(invoice.supplier_gstin, invoice.supplier_name)
+
+    for gstin in supplier_names:
+        lines.append(f"{PREFIX}:supplier-{gstin} rdf:type {PREFIX}:Supplier ;")
+        name = supplier_names[gstin]
+        fields = [("supplierGstin", gstin), ("supplierName", name)]
+        present = [(field_name, value) for field_name, value in fields if value != ""]
+        for index, (field_name, value) in enumerate(present):
+            terminator = " ." if index == len(present) - 1 else " ;"
+            lines.append(f'    {PREFIX}:{field_name:<13} "{_literal(value)}"{terminator}')
+        lines.append("")
+
     for invoice in invoices:
         lines.append(f"{invoice.subject} rdf:type {PREFIX}:Gstr2bInvoice ;")
-        fields = [
-            ("supplierGstin", invoice.supplier_gstin),
-            ("supplierName", invoice.supplier_name),
+        # `issuedBy` is a reference, not a literal — written unquoted, like
+        # `onInvoice`/`governedBy` already are, so the query engine resolves
+        # it as an edge instead of a string that happens to look like one.
+        edges = [("issuedBy", invoice.supplier_subject)]
+        literal_fields = [
             ("invoiceNumber", invoice.invoice_number),
             ("invoiceDate", invoice.invoice_date),
             ("taxableValue", invoice.taxable_value),
@@ -256,9 +293,16 @@ def to_turtle(invoices: list[Gstr2bInvoice], namespace: str | None = None) -> st
         # An absent value is omitted rather than written blank: "not reported"
         # and "reported as empty" are different facts, and a reconciliation is
         # mostly a set of questions about missing data.
-        present = [(name, value) for name, value in fields if value != ""]
-        for index, (name, value) in enumerate(present):
-            terminator = " ." if index == len(present) - 1 else " ;"
+        present_literals = [(name, value) for name, value in literal_fields if value != ""]
+        total = len(edges) + len(present_literals)
+        written = 0
+        for name, value in edges:
+            written += 1
+            terminator = " ." if written == total else " ;"
+            lines.append(f"    {PREFIX}:{name:<13} {value}{terminator}")
+        for name, value in present_literals:
+            written += 1
+            terminator = " ." if written == total else " ;"
             lines.append(f'    {PREFIX}:{name:<13} "{_literal(value)}"{terminator}')
         lines.append("")
     return "\n".join(lines)

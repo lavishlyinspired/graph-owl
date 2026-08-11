@@ -13,22 +13,28 @@
 # problems". Found by running this against real loaded data and getting zero
 # rows where three scenarios were planted.
 
+# The GSTIN is reached by traversal, not read off a literal — Epic 105c.
+# Note: not registered in pack.toml's [[queries]] — kept for reference
+# alongside amount-mismatch.sparql, which is the rule actually wired in.
+
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
 SELECT ?purchase ?number ?gstin ?claimed ?filed
 WHERE {
   GRAPH ?register {
     ?purchase a gst:PurchaseInvoice ;
-              gst:supplierGstin ?gstin ;
+              gst:issuedBy ?supplier ;
               gst:invoiceNumber ?number ;
               gst:taxAmount ?claimed .
+    ?supplier gst:supplierGstin ?gstin .
   }
 
   GRAPH ?authority {
     ?gstr2b a gst:Gstr2bInvoice ;
-            gst:supplierGstin ?gstin ;
+            gst:issuedBy ?filedSupplier ;
             gst:invoiceNumber ?number ;
             gst:taxAmount ?filed .
+    ?filedSupplier gst:supplierGstin ?gstin .
   }
 
   FILTER (?claimed != ?filed)

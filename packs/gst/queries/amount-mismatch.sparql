@@ -18,6 +18,11 @@
 # silent and looks like a clean result, which is why it is written this way
 # and why the reason is recorded here rather than in a commit message.
 
+# **The GSTIN is reached by traversal, not read off a literal — Epic 105c.**
+# `?purchase gst:issuedBy ?supplier` is a real edge to a `gst:Supplier`
+# subject; the comparison against the filed side still happens on that
+# subject's own `supplierGstin` property.
+
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 
@@ -25,17 +30,19 @@ SELECT ?purchase ?number ?gstin ?claimed ?filed ?capPercent ?citation
 WHERE {
   GRAPH ?register {
     ?purchase a gst:PurchaseInvoice ;
-              gst:supplierGstin ?gstin ;
+              gst:issuedBy ?supplier ;
               gst:invoiceNumber ?number ;
               gst:invoiceDate   ?date ;
               gst:taxableValue  ?claimed .
+    ?supplier gst:supplierGstin ?gstin .
   }
 
   GRAPH ?authority {
     ?filedLine a gst:Gstr2bInvoice ;
-               gst:supplierGstin ?gstin ;
+               gst:issuedBy ?filedSupplier ;
                gst:invoiceNumber ?number ;
                gst:taxableValue  ?filed .
+    ?filedSupplier gst:supplierGstin ?gstin .
   }
 
   # The provision in force on the invoice date.

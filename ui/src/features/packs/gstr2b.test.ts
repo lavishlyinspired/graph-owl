@@ -100,7 +100,6 @@ describe("toTurtle", () => {
     const turtle = toTurtle(normalize(getPayload()));
 
     expect(turtle).toContain("gst:2b-INV-1001 rdf:type gst:Gstr2bInvoice");
-    expect(turtle).toContain('gst:supplierGstin "27AABCU9603R1ZM"');
     expect(turtle).toContain('gst:invoiceDate   "2026-07-04"');
     expect(turtle).toContain('gst:itcAvailable  "N"');
     expect(turtle).toContain('gst:period        "2026-07"');
@@ -131,5 +130,48 @@ describe("toTurtle", () => {
     const turtle = toTurtle(normalize(getPayload()));
 
     expect(turtle).toMatch(/"2026-07" \./);
+  });
+
+  // ---- Supplier as a real graph node, not a literal on the invoice ----
+  //
+  // The gap `plans/105c-gst-causal-graph.md` names directly: `gst:Supplier`
+  // was declared and never instantiated. Pinned to the same shape the
+  // Python port (`connectors/python/graph_owl_packs/gstr2b.py`) now emits.
+
+  it("gives each unique supplier its own subject", () => {
+    const turtle = toTurtle(normalize(getPayload()));
+
+    expect(turtle).toContain("gst:supplier-27AABCU9603R1ZM rdf:type gst:Supplier");
+    expect(turtle).toContain("gst:supplier-29AACCG0527D1Z8 rdf:type gst:Supplier");
+    expect((turtle.match(/rdf:type gst:Supplier/g) ?? []).length).toBe(2);
+  });
+
+  it("carries the GSTIN and name on the supplier subject, not the invoice", () => {
+    const turtle = toTurtle(normalize(getPayload()));
+    const supplierBlock = turtle.slice(turtle.indexOf("gst:supplier-27AABCU9603R1ZM"));
+
+    expect(supplierBlock).toContain('gst:supplierGstin "27AABCU9603R1ZM"');
+    expect(supplierBlock).toContain('gst:supplierName  "Umbrella Supplies"');
+  });
+
+  it("points an invoice at its supplier by edge, not literal", () => {
+    const turtle = toTurtle(normalize(getPayload()));
+    const start = turtle.indexOf("gst:2b-INV-1001");
+    const invoiceBlock = turtle.slice(start, turtle.indexOf("\n\n", start));
+
+    expect(invoiceBlock).toContain("gst:issuedBy      gst:supplier-27AABCU9603R1ZM");
+    expect(invoiceBlock).not.toContain("gst:supplierGstin");
+    expect(invoiceBlock).not.toContain("gst:supplierName");
+  });
+
+  it("resolves two invoices from the same supplier to the same subject", () => {
+    const turtle = toTurtle(normalize(getPayload()));
+    const firstStart = turtle.indexOf("gst:2b-INV-1001");
+    const first = turtle.slice(firstStart, turtle.indexOf("\n\n", firstStart));
+    const secondStart = turtle.indexOf("gst:2b-INV-1005");
+    const second = turtle.slice(secondStart, turtle.indexOf("\n\n", secondStart));
+
+    expect(first).toContain("gst:issuedBy      gst:supplier-27AABCU9603R1ZM");
+    expect(second).toContain("gst:issuedBy      gst:supplier-27AABCU9603R1ZM");
   });
 });

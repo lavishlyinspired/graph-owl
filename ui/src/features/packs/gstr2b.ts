@@ -146,9 +146,7 @@ function literal(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 }
 
-const FIELDS: readonly (readonly [string, keyof Gstr2bInvoice])[] = [
-  ["supplierGstin", "supplierGstin"],
-  ["supplierName", "supplierName"],
+const LITERAL_FIELDS: readonly (readonly [string, keyof Gstr2bInvoice])[] = [
   ["invoiceNumber", "invoiceNumber"],
   ["invoiceDate", "invoiceDate"],
   ["taxableValue", "taxableValue"],
@@ -164,8 +162,20 @@ const FIELDS: readonly (readonly [string, keyof Gstr2bInvoice])[] = [
   ["period", "period"],
 ];
 
+/** The subject an invoice was `issuedBy`, keyed on the GSTIN so two invoices
+ *  from the same supplier resolve to the same node — Epic 105c. */
+function supplierSubject(prefix: string, gstin: string): string {
+  return `${prefix}:supplier-${gstin}`;
+}
+
 /** The same shape `packs/gst/fixtures/gstr2b.ttl` carries, so the six finding
- *  rules cannot tell an uploaded file from a fixture. */
+ *  rules cannot tell an uploaded file from a fixture.
+ *
+ *  **`gst:Supplier` is a real subject, not a literal on the invoice — Epic
+ *  105c.** `plans/105c-gst-causal-graph.md` names the gap directly: the
+ *  class was declared and never instantiated. One subject per unique GSTIN,
+ *  deduplicated across invoices; each invoice points at it with `issuedBy`,
+ *  written unquoted like `onInvoice` already is, so it resolves as an edge. */
 export function toTurtle(invoices: readonly Gstr2bInvoice[], prefix = "gst", iri?: string): string {
   const namespace = iri ?? "https://graph-owl.dev/packs/gst#";
   const lines = [
@@ -175,14 +185,42 @@ export function toTurtle(invoices: readonly Gstr2bInvoice[], prefix = "gst", iri
     "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .",
     "",
   ];
+
+  const supplierNames = new Map<string, string>();
+  for (const invoice of invoices) {
+    if (!supplierNames.has(invoice.supplierGstin)) {
+      supplierNames.set(invoice.supplierGstin, invoice.supplierName);
+    }
+  }
+  for (const [gstin, name] of supplierNames) {
+    lines.push(`${supplierSubject(prefix, gstin)} rdf:type ${prefix}:Supplier ;`);
+    const present = ([["supplierGstin", gstin] as const, ["supplierName", name] as const]).filter(
+      ([, value]) => value !== "",
+    );
+    present.forEach(([fieldName, value], index) => {
+      const terminator = index === present.length - 1 ? " ." : " ;";
+      lines.push(`    ${prefix}:${fieldName.padEnd(13)} "${literal(value)}"${terminator}`);
+    });
+    lines.push("");
+  }
+
   for (const invoice of invoices) {
     lines.push(`${prefix}:2b-${invoice.invoiceNumber} rdf:type ${prefix}:Gstr2bInvoice ;`);
     // An absent value is omitted rather than written blank: "not reported" and
     // "reported as empty" are different facts, and a reconciliation is mostly
     // a set of questions about missing data.
-    const present = FIELDS.filter(([, key]) => invoice[key] !== "");
-    present.forEach(([name, key], index) => {
-      const terminator = index === present.length - 1 ? " ." : " ;";
+    const presentLiterals = LITERAL_FIELDS.filter(([, key]) => invoice[key] !== "");
+    const total = 1 + presentLiterals.length;
+    let written = 0;
+    written += 1;
+    lines.push(
+      `    ${prefix}:${"issuedBy".padEnd(13)} ${supplierSubject(prefix, invoice.supplierGstin)}${
+        written === total ? " ." : " ;"
+      }`,
+    );
+    presentLiterals.forEach(([name, key]) => {
+      written += 1;
+      const terminator = written === total ? " ." : " ;";
       lines.push(`    ${prefix}:${name.padEnd(13)} "${literal(invoice[key])}"${terminator}`);
     });
     lines.push("");

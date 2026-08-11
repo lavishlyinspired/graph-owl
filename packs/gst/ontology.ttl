@@ -45,3 +45,8 @@ gst:citation      rdf:type gst:Property ; gst:label "citation" .
 gst:onInvoice     rdf:type gst:Property ; gst:label "on invoice" .
 gst:atTime        rdf:type gst:Property ; gst:label "at time" .
 gst:amount        rdf:type gst:Property ; gst:label "amount" .
+
+# `gst:Supplier` was already declared above and never instantiated — every
+# invoice carried its GSTIN as a bare literal, unreachable by a graph walk.
+# `issuedBy` is the edge that closes that: `plans/105c-gst-causal-graph.md`.
+gst:issuedBy      rdf:type gst:Property ; gst:label "issued by" .

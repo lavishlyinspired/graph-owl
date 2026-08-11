@@ -132,6 +132,14 @@ name = "amount"
 name = "governedBy"
 value_type = 0
 
+# `gst:Supplier` was declared in the ontology and never instantiated — every
+# invoice carried its GSTIN as a bare literal. This edge is what closes that
+# gap: `issuedBy` points at a real Supplier subject, traversable the way
+# `onInvoice`/`governedBy` already are. See `plans/105c-gst-causal-graph.md`.
+[[predicates]]
+name = "issuedBy"
+value_type = 0
+
 [[matching.blocking]]
 strategy = "normalized"
 fields = ["gst:supplierGstin", "gst:invoiceNumber"]

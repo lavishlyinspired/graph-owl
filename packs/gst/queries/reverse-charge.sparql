@@ -5,21 +5,25 @@
 # `itc-not-available`, this is a finding on an invoice where every number
 # agrees — which is the point: matching is necessary and not sufficient.
 
+# The GSTIN is reached by traversal, not read off a literal — Epic 105c.
+
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
 SELECT ?purchase ?number ?gstin ?taxAmount ?reverseCharge
 WHERE {
   GRAPH ?register {
     ?purchase a gst:PurchaseInvoice ;
-              gst:supplierGstin ?gstin ;
+              gst:issuedBy ?supplier ;
               gst:invoiceNumber ?number ;
               gst:taxAmount     ?taxAmount .
+    ?supplier gst:supplierGstin ?gstin .
   }
   GRAPH ?authority {
     ?filed a gst:Gstr2bInvoice ;
-           gst:supplierGstin ?gstin ;
+           gst:issuedBy ?filedSupplier ;
            gst:invoiceNumber ?number ;
            gst:reverseCharge ?reverseCharge .
+    ?filedSupplier gst:supplierGstin ?gstin .
   }
   FILTER (?reverseCharge = "R")
 }

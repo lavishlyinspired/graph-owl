@@ -203,7 +203,6 @@ def test_turtle_uses_the_vocabulary_the_pack_already_defines() -> None:
     turtle = to_turtle(normalize(get_payload()))
 
     assert "gst:2b-INV-1001 rdf:type gst:Gstr2bInvoice" in turtle
-    assert 'gst:supplierGstin "27AABCU9603R1ZM"' in turtle
     assert 'gst:invoiceDate   "2026-07-04"' in turtle
     assert 'gst:itcAvailable  "Y"' in turtle
     assert 'gst:reverseCharge "N"' in turtle
@@ -218,14 +217,6 @@ def test_the_period_comes_from_the_invoice_date_not_from_today() -> None:
     assert turtle.count('gst:period        "2026-07"') == 3
 
 
-def test_a_supplier_trade_name_is_recorded_when_present() -> None:
-    """Not required by any rule, and worth carrying anyway: a reviewer deciding
-    a transposition needs to see who the two GSTINs claim to be."""
-    turtle = to_turtle(normalize(get_payload()))
-
-    assert 'gst:supplierName  "Umbrella Supplies"' in turtle
-
-
 def test_a_quote_in_a_trade_name_cannot_break_the_document() -> None:
     """One badly-named supplier would otherwise corrupt every triple after it."""
     payload = get_payload()
@@ -235,3 +226,67 @@ def test_a_quote_in_a_trade_name_cannot_break_the_document() -> None:
 
     assert r'\"Best\"' in turtle
     assert r"\\" in turtle
+
+
+# ---- Supplier as a real graph node, not a literal on the invoice ----
+#
+# **The gap `plans/105c-gst-causal-graph.md` names directly.** `gst:Supplier`
+# was declared in the ontology and never instantiated — every invoice carried
+# `gst:supplierGstin` as a bare literal, so "who issued this invoice" was
+# unanswerable by a graph traversal, only by string equality. These pin the
+# fix: one `gst:Supplier` subject per unique GSTIN, and each invoice points at
+# it with `gst:issuedBy` — a real edge, traversable the way `onInvoice`
+# already is.
+
+
+def test_each_unique_supplier_becomes_its_own_subject() -> None:
+    turtle = to_turtle(normalize(get_payload()))
+
+    assert "gst:supplier-27AABCU9603R1ZM rdf:type gst:Supplier" in turtle
+    assert "gst:supplier-29AACCG0527D1Z8 rdf:type gst:Supplier" in turtle
+    # Two suppliers in the fixture, not one block per invoice — three
+    # invoices must not produce three supplier subjects for the two that
+    # share a GSTIN.
+    assert turtle.count("rdf:type gst:Supplier") == 2
+
+
+def test_the_supplier_subject_carries_its_own_gstin_and_name() -> None:
+    turtle = to_turtle(normalize(get_payload()))
+    supplier_block = turtle[turtle.index("gst:supplier-27AABCU9603R1ZM") :]
+
+    assert 'gst:supplierGstin "27AABCU9603R1ZM"' in supplier_block
+    assert 'gst:supplierName  "Umbrella Supplies"' in supplier_block
+
+
+def test_a_supplier_with_no_trade_name_still_gets_a_subject() -> None:
+    turtle = to_turtle(normalize(get_payload()))
+    supplier_block = turtle[turtle.index("gst:supplier-29AACCG0527D1Z8") :]
+
+    assert 'gst:supplierGstin "29AACCG0527D1Z8"' in supplier_block
+
+
+def test_an_invoice_points_at_its_supplier_by_edge_not_literal() -> None:
+    turtle = to_turtle(normalize(get_payload()))
+    invoice_block = turtle[turtle.index("gst:2b-INV-1001") :]
+    invoice_block = invoice_block[: invoice_block.index("\n\n")]
+
+    assert "gst:issuedBy      gst:supplier-27AABCU9603R1ZM" in invoice_block
+    assert "gst:supplierGstin" not in invoice_block, (
+        "the GSTIN belongs to the supplier subject now, not the invoice"
+    )
+    assert "gst:supplierName" not in invoice_block
+
+
+def test_two_invoices_from_the_same_supplier_point_at_the_same_subject() -> None:
+    # INV-1001 and INV-1005 are both Umbrella Supplies in get_payload() —
+    # the property that makes "which invoices did this supplier issue" a
+    # traversal rather than a second join on a string.
+    turtle = to_turtle(normalize(get_payload()))
+
+    first = turtle[turtle.index("gst:2b-INV-1001") :]
+    first = first[: first.index("\n\n")]
+    second = turtle[turtle.index("gst:2b-INV-1005") :]
+    second = second[: second.index("\n\n")]
+
+    assert "gst:issuedBy      gst:supplier-27AABCU9603R1ZM" in first
+    assert "gst:issuedBy      gst:supplier-27AABCU9603R1ZM" in second

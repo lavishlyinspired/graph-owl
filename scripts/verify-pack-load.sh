@@ -140,12 +140,23 @@ assert unmatched == ["INV-1003", "INV-1004"], (
 )
 
 deltas = {field(r, "number"): (field(r, "claimed"), field(r, "filed")) for r in mismatch}
-assert deltas == {"INV-1002": ("18000.00", "17100.00")}, deltas
+# tax-amount-mismatch.sparql is unconditional — no Rule 36(4) cap, unlike the
+# registered amount-mismatch.sparql it stands beside. So it also catches the
+# two 2020-period scenarios purchase-register.ttl plants specifically to
+# prove the *dated* cap matters (5% delta tolerated at the 2020 10% cap,
+# 20% delta not) — this query has no notion of "tolerated" at all, so both
+# show up as a raw delta regardless of what the cap-aware rule concludes.
+assert deltas == {
+    "INV-1002": ("18000.00", "17100.00"),
+    "INV-2001": ("18000.00", "17100.00"),
+    "INV-2002": ("18000.00", "14400.00"),
+}, deltas
 
 print("ok: INV-1003 never filed; INV-1004 unmatched on an exact join (its GSTIN "
       "is transposed — the `ngram` strategy is what would pair it, which is the "
-      "argument for the fusion engine); INV-1002 claims 18000.00 against "
-      "17100.00 filed; INV-1001 correctly produces nothing")
+      "argument for the fusion engine); INV-1001 correctly produces nothing; "
+      "INV-1002/INV-2001/INV-2002 all show a raw delta on this uncapped query "
+      "(only INV-2002's survives the dated Rule 36(4) cap in amount-mismatch.sparql)")
 PYCHECK
 
 echo "==> the acceptance criterion: no pack needed Rust or TypeScript"

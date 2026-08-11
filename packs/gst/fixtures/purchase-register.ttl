@@ -19,12 +19,30 @@
 # July 2020 was 10% and the cap in force in July 2026 is nil. If the
 # percentage were a constant in the query, INV-2001 would be a false finding
 # and a reviewer would be dismissing a compliant invoice every month.
+#
+# **`gst:Supplier` is a real subject here, not a literal on the invoice —
+# Epic 105c (`plans/105c-gst-causal-graph.md`).** INV-1004's transposed GSTIN
+# is not a typo in this fixture: it is a *second, distinct* Supplier subject,
+# because that is exactly what a transposition means at the graph level — two
+# nodes an ngram similarity band suspects are one entity, not yet merged.
 
 @prefix gst: <https://graph-owl.dev/packs/gst#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 
+gst:supplier-27AABCU9603R1ZM rdf:type gst:Supplier ;
+    gst:supplierGstin "27AABCU9603R1ZM" .
+
+gst:supplier-29AACCG0527D1Z8 rdf:type gst:Supplier ;
+    gst:supplierGstin "29AACCG0527D1Z8" .
+
+# The two characters at the end are swapped against what the supplier
+# actually filed under — a different subject, deliberately, from
+# gst:supplier-27AABCU9603R1ZM above.
+gst:supplier-27AABCU9603R1MZ rdf:type gst:Supplier ;
+    gst:supplierGstin "27AABCU9603R1MZ" .
+
 gst:pr-INV-1001 rdf:type gst:PurchaseInvoice ;
-    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1001" ;
     gst:invoiceDate   "2026-07-04" ;
     gst:taxableValue  "100000.00" ;
@@ -32,7 +50,7 @@ gst:pr-INV-1001 rdf:type gst:PurchaseInvoice ;
     gst:period        "2026-07" .
 
 gst:pr-INV-1002 rdf:type gst:PurchaseInvoice ;
-    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1002" ;
     gst:invoiceDate   "2026-07-09" ;
     gst:taxableValue  "100000.00" ;
@@ -40,16 +58,15 @@ gst:pr-INV-1002 rdf:type gst:PurchaseInvoice ;
     gst:period        "2026-07" .
 
 gst:pr-INV-1003 rdf:type gst:PurchaseInvoice ;
-    gst:supplierGstin "29AACCG0527D1Z8" ;
+    gst:issuedBy      gst:supplier-29AACCG0527D1Z8 ;
     gst:invoiceNumber "INV-1003" ;
     gst:invoiceDate   "2026-07-15" ;
     gst:taxableValue  "250000.00" ;
     gst:taxAmount     "45000.00" ;
     gst:period        "2026-07" .
 
-# The two characters at the end are swapped against what the supplier filed.
 gst:pr-INV-1004 rdf:type gst:PurchaseInvoice ;
-    gst:supplierGstin "27AABCU9603R1MZ" ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1MZ ;
     gst:invoiceNumber "INV-1004" ;
     gst:invoiceDate   "2026-07-21" ;
     gst:taxableValue  "50000.00" ;
@@ -57,7 +74,7 @@ gst:pr-INV-1004 rdf:type gst:PurchaseInvoice ;
     gst:period        "2026-07" .
 
 gst:pr-INV-1005 rdf:type gst:PurchaseInvoice ;
-    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1005" ;
     gst:invoiceDate   "2026-07-24" ;
     gst:taxableValue  "40000.00" ;
@@ -65,7 +82,7 @@ gst:pr-INV-1005 rdf:type gst:PurchaseInvoice ;
     gst:period        "2026-07" .
 
 gst:pr-INV-1006 rdf:type gst:PurchaseInvoice ;
-    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1006" ;
     gst:invoiceDate   "2026-07-26" ;
     gst:taxableValue  "60000.00" ;
@@ -73,7 +90,7 @@ gst:pr-INV-1006 rdf:type gst:PurchaseInvoice ;
     gst:period        "2026-07" .
 
 gst:pr-INV-2001 rdf:type gst:PurchaseInvoice ;
-    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-2001" ;
     gst:invoiceDate   "2020-07-10" ;
     gst:taxableValue  "100000.00" ;
@@ -81,7 +98,7 @@ gst:pr-INV-2001 rdf:type gst:PurchaseInvoice ;
     gst:period        "2020-07" .
 
 gst:pr-INV-2002 rdf:type gst:PurchaseInvoice ;
-    gst:supplierGstin "27AABCU9603R1ZM" ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-2002" ;
     gst:invoiceDate   "2020-07-12" ;
     gst:taxableValue  "100000.00" ;

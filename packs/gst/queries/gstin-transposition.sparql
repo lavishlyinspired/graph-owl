@@ -14,6 +14,12 @@
 # without touching a query — and it is measured, not guessed. Against this
 # fixture the transposition scores 0.619 and the nearest genuinely different
 # supplier scores 0.065.
+#
+# **Each side's GSTIN is reached by traversal — Epic 105c.** The claimed and
+# filed sides are now genuinely different `gst:Supplier` subjects (a
+# transposed GSTIN is a second node, not a second string on the same one),
+# which is the graph-level shape this rule's whole premise depends on: it
+# exists to suspect two subjects are one entity, so there have to be two.
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
@@ -21,15 +27,17 @@ SELECT ?purchase ?number ?claimedGstin ?filedGstin ?period
 WHERE {
   GRAPH ?register {
     ?purchase a gst:PurchaseInvoice ;
-              gst:supplierGstin ?claimedGstin ;
+              gst:issuedBy ?supplier ;
               gst:invoiceNumber ?number ;
               gst:period        ?period .
+    ?supplier gst:supplierGstin ?claimedGstin .
   }
   GRAPH ?authority {
     ?filed a gst:Gstr2bInvoice ;
-           gst:supplierGstin ?filedGstin ;
+           gst:issuedBy ?filedSupplier ;
            gst:invoiceNumber ?number ;
            gst:period        ?period .
+    ?filedSupplier gst:supplierGstin ?filedGstin .
   }
   FILTER (?claimedGstin != ?filedGstin)
 }
