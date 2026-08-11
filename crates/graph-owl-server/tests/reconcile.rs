@@ -243,6 +243,70 @@ async fn reconcile_admits_an_admin_and_refuses_a_non_admin_through_the_real_adap
     );
 }
 
+/// **Epic 105 P10's `run_rule()` tool, against the real adapter.** The
+/// single-rule counterpart to the test above, proving the same two
+/// properties for the narrower call: `CatalogContext::run_rule` reaches
+/// `Catalog::run_rule` for a real admin, and refuses a real non-admin —
+/// plus the one property `run_rule` adds that `reconcile` has no way to
+/// express, an unknown label coming back exactly like a denial.
+#[tokio::test]
+async fn run_rule_admits_an_admin_refuses_a_non_admin_and_reports_an_unknown_rule() {
+    let (catalog, _db, _url) = test_catalog().await;
+    let app = graph_owl_server::app(catalog.clone());
+    seed_gst_vocabulary_and_one_unmatched_invoice(&app).await;
+    register_missing_in_gstr2b_rule(&app).await;
+
+    let admin = Principal::system();
+    let admin_reads = graph_owl_mcp::catalog::CatalogContext::new(catalog.clone(), admin.clone());
+    let outcome = graph_owl_mcp::ContextSource::run_rule(
+        &admin_reads,
+        &admin.id,
+        "gst",
+        "gst:PotentialMismatch",
+    )
+    .await
+    .expect("no source error")
+    .expect("an admin may run the rule");
+    assert_eq!(outcome.pack, "gst");
+    assert_eq!(
+        outcome.evaluated, 1,
+        "one rule, not the whole pack: {outcome:?}"
+    );
+    assert_eq!(outcome.found, 1, "{outcome:?}");
+    assert_eq!(outcome.opened, 1, "{outcome:?}");
+
+    let contractor = Principal {
+        id: "contractor".to_string(),
+        name: "contractor".to_string(),
+        kind: PrincipalKind::User,
+        roles: Vec::new(),
+        is_admin: false,
+    };
+    let contractor_reads =
+        graph_owl_mcp::catalog::CatalogContext::new(catalog.clone(), contractor.clone());
+    let refused = graph_owl_mcp::ContextSource::run_rule(
+        &contractor_reads,
+        &contractor.id,
+        "gst",
+        "gst:PotentialMismatch",
+    )
+    .await
+    .expect("no source error");
+    assert!(
+        refused.is_none(),
+        "a non-admin must be refused: {refused:?}"
+    );
+
+    let unknown =
+        graph_owl_mcp::ContextSource::run_rule(&admin_reads, &admin.id, "gst", "gst:NoSuchRule")
+            .await
+            .expect("no source error");
+    assert!(
+        unknown.is_none(),
+        "an unknown rule must read the same as a denial: {unknown:?}"
+    );
+}
+
 /// A second run over the same unmatched invoice must not double the queue —
 /// the same idempotence `record_findings` already gives `POST /findings`,
 /// now exercised through the whole reconcile path rather than a hand-posted

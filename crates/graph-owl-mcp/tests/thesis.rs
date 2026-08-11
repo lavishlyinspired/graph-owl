@@ -303,6 +303,16 @@ impl ContextSource for Seeded {
         self.record("analytics");
         Ok(None)
     }
+
+    async fn run_rule(
+        &self,
+        _principal: &str,
+        _pack: &str,
+        _label: &str,
+    ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError> {
+        self.record("run_rule");
+        Ok(None)
+    }
 }
 
 fn about(fqn: &str) -> serde_json::Value {

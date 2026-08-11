@@ -271,6 +271,35 @@ pub trait ContextSource: Send + Sync {
         direction: Direction,
         max_hops: u32,
     ) -> Result<Option<AnalyticsContext>, SourceError>;
+
+    /// Evaluate exactly one of a pack's registered rules by name, and
+    /// record what it concludes — Epic 105 P10's sixth intelligence tool,
+    /// wrapping [`graph_owl_api::Catalog::run_rule`]. The single-rule
+    /// counterpart to [`Self::reconcile`] for an agent that already knows
+    /// which rule it wants re-evaluated rather than the whole pack — the
+    /// same narrowing `traverse`/`analytics` share for a walk.
+    ///
+    /// **Admin-gated, for the identical reason [`Self::reconcile`] is**:
+    /// this call **writes** — a matched rule's finding lands in the review
+    /// queue as a side effect, the same as running the whole pack does.
+    /// There is no HTTP route this wraps (unlike `reconcile`, which mirrors
+    /// `POST /packs/{pack}/reconcile`'s existing gate); the posture is
+    /// carried over from `reconcile` rather than re-derived, because the
+    /// side effect — a queue write — is the same one, just narrower in
+    /// scope.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached. `Ok(None)`
+    /// when the caller is not an admin, **or** when the pack has no rule
+    /// with that label — indistinguishable, for the same reason
+    /// [`Outcome::NotFound`] exists everywhere else on this trait.
+    async fn run_rule(
+        &self,
+        principal: &str,
+        pack: &str,
+        label: &str,
+    ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError>;
 }
 
 /// A bounded walk's answer, as an agent receives it — Epic 105 P10's
@@ -612,7 +641,10 @@ pub enum Outcome {
     /// Why a fact holds — Epic 105 P10's `explain()`.
     Explained(Box<FactExplanation>),
     /// A pack's rules ran and their findings were recorded — Epic 105
-    /// P10's `reconcile()`.
+    /// P10's `reconcile()`, or its single-rule counterpart `run_rule()`
+    /// (the payload shape and the fields it reports are identical either
+    /// way; `evaluated` is the field that tells them apart — one rule or
+    /// the whole pack).
     Reconciled(Box<graph_owl_api::ReconcileOutcome>),
     /// Degree/component structure over a bounded neighbourhood — Epic 105
     /// P10's `analytics()`.
@@ -705,6 +737,10 @@ pub const RECONCILE: &str = "reconcile";
 /// Degree centrality, components and orphans over a bounded neighbourhood
 /// — Epic 105 P10's fifth intelligence tool.
 pub const ANALYTICS: &str = "analytics";
+
+/// Evaluate one named rule and record what it concludes — Epic 105 P10's
+/// sixth intelligence tool.
+pub const RUN_RULE: &str = "run_rule";
 
 /// The most hops an agent may ask `traverse` to walk.
 ///
@@ -1024,6 +1060,28 @@ pub fn tools() -> Vec<ToolDeclaration> {
                 "additionalProperties": false,
             }),
         },
+        ToolDeclaration {
+            name: RUN_RULE,
+            description: "Evaluate one named rule from a pack and record what it concludes as \
+                      findings — the single-rule counterpart to `reconcile`, for re-checking \
+                      one rule rather than the whole pack. Admin-only: this writes to the \
+                      review queue, unlike every other tool on this surface but `reconcile`.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pack": {
+                        "type": "string",
+                        "description": "The pack the rule belongs to, e.g. \"gst\".",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "The rule's own label, e.g. \"gst:PotentialMismatch\".",
+                    },
+                },
+                "required": ["pack", "label"],
+                "additionalProperties": false,
+            }),
+        },
     ]
 }
 
@@ -1335,6 +1393,22 @@ pub async fn call_within(
                     }
                     Outcome::Analyzed(Box::new(context))
                 }
+                Ok(None) => Outcome::NotFound,
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
+        RUN_RULE => {
+            let pack = match required_text(arguments, "pack") {
+                Ok(pack) => pack,
+                Err(problem) => return problem,
+            };
+            let label = match required_text(arguments, "label") {
+                Ok(label) => label,
+                Err(problem) => return problem,
+            };
+            match source.run_rule(principal, pack, label).await {
+                Ok(Some(outcome)) => Outcome::Reconciled(Box::new(outcome)),
                 Ok(None) => Outcome::NotFound,
                 Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
             }
@@ -2172,6 +2246,35 @@ mod tests {
             }
             Ok(None)
         }
+
+        async fn run_rule(
+            &self,
+            principal: &str,
+            pack: &str,
+            label: &str,
+        ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError> {
+            self.asked
+                .lock()
+                .expect("lock")
+                .push((principal.to_string(), format!("run_rule:{pack}:{label}")));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            // Same admin-only pair `reconcile` uses.
+            if principal != "alice" {
+                return Ok(None);
+            }
+            if pack == "gst" && label == "gst:PotentialMismatch" {
+                return Ok(Some(graph_owl_api::ReconcileOutcome {
+                    pack: pack.to_string(),
+                    evaluated: 1,
+                    found: 1,
+                    opened: 1,
+                    already_open: 0,
+                }));
+            }
+            Ok(None)
+        }
     }
 
     /// A trust summary for a context whose trust is not what is under test.
@@ -2499,9 +2602,10 @@ mod tests {
                     EXPLAIN,
                     RECONCILE,
                     ANALYTICS,
+                    RUN_RULE,
                 ],
                 "the seven read capabilities Epic 14 promises, plus Epic 105 P10's \
-                 first five intelligence tools, and no others — a tool that appears \
+                 first six intelligence tools, and no others — a tool that appears \
                  here without a dispatch arm teaches an agent to distrust the \
                  manifest, and one that dispatches without appearing here is a \
                  capability no agent will ever find"
@@ -4070,6 +4174,126 @@ mod tests {
                 context.orphans.is_empty(),
                 "the dropped node's own orphan flag must not survive it: {context:?}"
             );
+        }
+    }
+
+    /// Epic 105 P10 — `run_rule()`, the platform doc's sixth intelligence
+    /// tool: the single-rule counterpart to `reconcile()`.
+    mod the_run_rule_tool {
+        use super::*;
+
+        fn rule_args(pack: &str, label: &str) -> serde_json::Value {
+            serde_json::json!({ "pack": pack, "label": label })
+        }
+
+        #[tokio::test]
+        async fn an_admin_runs_the_known_rule() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                RUN_RULE,
+                &rule_args("gst", "gst:PotentialMismatch"),
+            )
+            .await;
+
+            let Outcome::Reconciled(result) = outcome else {
+                panic!("expected Reconciled, got {outcome:?}");
+            };
+            assert_eq!(result.pack, "gst");
+            assert_eq!(
+                result.evaluated, 1,
+                "one rule ran, not the whole pack: {result:?}"
+            );
+            assert_eq!(result.found, 1, "{result:?}");
+        }
+
+        /// **The one property no other tool on this trait needs to prove
+        /// twice**: `run_rule` shares `reconcile`'s admin gate, not a
+        /// separately-invented one. A non-admin is refused the same way,
+        /// for the same reason.
+        #[tokio::test]
+        async fn a_non_admin_principal_is_refused_the_same_as_absent() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("mallory"),
+                RUN_RULE,
+                &rule_args("gst", "gst:PotentialMismatch"),
+            )
+            .await;
+
+            assert_eq!(outcome, Outcome::NotFound);
+        }
+
+        #[tokio::test]
+        async fn an_unauthenticated_caller_learns_nothing() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                None,
+                RUN_RULE,
+                &rule_args("gst", "gst:PotentialMismatch"),
+            )
+            .await;
+
+            assert_eq!(outcome, Outcome::Unauthenticated);
+        }
+
+        /// **Absent and denied are one answer here too** — a rule that does
+        /// not exist reads exactly like one the admin caller could not
+        /// evaluate, for the identical "do not disclose what exists"
+        /// reasoning every other tool on this trait already carries.
+        #[tokio::test]
+        async fn an_unknown_rule_is_not_found_not_refused() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                RUN_RULE,
+                &rule_args("gst", "gst:NoSuchRule"),
+            )
+            .await;
+
+            assert_eq!(outcome, Outcome::NotFound);
+        }
+
+        #[tokio::test]
+        async fn a_call_with_no_label_is_a_bad_request() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                RUN_RULE,
+                &serde_json::json!({ "pack": "gst" }),
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::BadRequest(_)), "{outcome:?}");
+        }
+
+        /// **No budget fitting**, matching `reconcile`'s own precedent
+        /// exactly: `ReconcileOutcome` is five scalar fields, nothing to
+        /// shrink.
+        #[tokio::test]
+        async fn the_default_budget_never_truncates_a_run_rule_outcome() {
+            let source = Fixture::working();
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                RUN_RULE,
+                &rule_args("gst", "gst:PotentialMismatch"),
+                budget::TokenBudget { max_tokens: 0 },
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::Reconciled(_)), "{outcome:?}");
         }
     }
 

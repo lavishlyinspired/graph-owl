@@ -2349,6 +2349,66 @@ impl Catalog {
         })
     }
 
+    /// Evaluate exactly one of a pack's registered rules by name, and
+    /// record what it concludes — Epic 105 P10's `run_rule()` tool
+    /// (`plans/105p-run-rule-tool.md`), the single-rule counterpart to
+    /// [`reconcile_pack`] for an agent that already knows which rule it
+    /// wants re-evaluated rather than the whole pack.
+    ///
+    /// **Reuses [`finding_rules`] rather than adding a registry lookup
+    /// method.** `FindingRuleRegistry` has no per-label fetch, and a
+    /// pack's own rule count is small enough (six for GST) that filtering
+    /// the already-fetched list costs nothing a new registry method would
+    /// save.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no finding-rule registry is configured or the rule's
+    /// query fails to parse or execute. `NotFound` if the pack has no rule
+    /// with that label — a rule's key is `(pack, label)`, not `label`
+    /// alone, so the identical label registered under a different pack
+    /// does not match here either.
+    ///
+    /// [`reconcile_pack`]: Self::reconcile_pack
+    /// [`finding_rules`]: Self::finding_rules
+    pub async fn run_rule(
+        &self,
+        principal: &Principal,
+        pack: &str,
+        label: &str,
+    ) -> Result<ReconcileOutcome, CatalogError> {
+        let rules = self.finding_rules(pack).await?;
+        let rule = rules
+            .iter()
+            .find(|r| r.label == label)
+            .ok_or(CatalogError::NotFound)?;
+
+        let outcome = self
+            .sparql(principal, &rule.query, None, SparqlBudget::default())
+            .await?;
+        let findings = findings_from_rows(rule, &outcome.rows)?;
+        let found = findings.len();
+
+        if findings.is_empty() {
+            return Ok(ReconcileOutcome {
+                pack: pack.to_string(),
+                evaluated: 1,
+                found: 0,
+                opened: 0,
+                already_open: 0,
+            });
+        }
+
+        let recorded = self.record_findings(&findings).await?;
+        Ok(ReconcileOutcome {
+            pack: pack.to_string(),
+            evaluated: 1,
+            found,
+            opened: recorded.opened,
+            already_open: recorded.already_open,
+        })
+    }
+
     /// Every open obligation a pack's span-configured rules can see right
     /// now, due date first — Epic 105 P8's first real slice
     /// (`plans/105h-obligation-calendar.md`). Runs the exact same rule
@@ -40406,6 +40466,298 @@ mod asset_analytics_tests {
             .await;
 
         assert!(matches!(result, Err(CatalogError::NotFound)), "{result:?}");
+    }
+}
+
+#[cfg(test)]
+mod run_rule_tests {
+    //! `Catalog::run_rule` — Epic 105 P10's `run_rule()` tool
+    //! (`plans/105p-run-rule-tool.md`), the single-rule counterpart to
+    //! [`Catalog::reconcile_pack`] for an agent that already knows which
+    //! rule it wants re-evaluated. Reuses `finding_rules` rather than a
+    //! new per-label registry method — see [`Catalog::run_rule`]'s own doc
+    //! comment for why.
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use graph_owl_core::finding::{Finding, FindingStatus};
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+    use graph_owl_engine::{EvidenceBinding, FindingRuleDef, FindingRuleRegistry, RegistryError};
+    use graph_owl_storage::FindingStore;
+
+    use super::projection_isolation_tests::RecordingGraph;
+    use super::*;
+
+    #[derive(Default)]
+    struct FakeFindingRuleRegistry {
+        declared: Mutex<Vec<FindingRuleDef>>,
+    }
+
+    #[async_trait]
+    impl FindingRuleRegistry for FakeFindingRuleRegistry {
+        async fn declare(&self, rule: &FindingRuleDef) -> Result<(), RegistryError> {
+            self.declared
+                .lock()
+                .expect("not poisoned")
+                .push(rule.clone());
+            Ok(())
+        }
+
+        async fn for_pack(&self, pack: &str) -> Result<Vec<FindingRuleDef>, RegistryError> {
+            Ok(self
+                .declared
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .filter(|r| r.pack == pack)
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeFindings {
+        rows: Mutex<Vec<Finding>>,
+    }
+
+    #[async_trait]
+    impl FindingStore for FakeFindings {
+        async fn record_finding(&self, finding: &Finding) -> Result<bool, StorageError> {
+            self.rows
+                .lock()
+                .expect("not poisoned")
+                .push(finding.clone());
+            Ok(true)
+        }
+        async fn get_finding(&self, _id: Uuid) -> Result<Option<Finding>, StorageError> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn list_findings(
+            &self,
+            _pack: Option<&str>,
+            _status: Option<FindingStatus>,
+        ) -> Result<Vec<Finding>, StorageError> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn decide_finding(
+            &self,
+            _id: Uuid,
+            _status: FindingStatus,
+            _actor: &str,
+            _reason: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            unreachable!("not exercised by these tests")
+        }
+    }
+
+    /// A rule matching every asserted `<catalog#{predicate_local}>` flake,
+    /// binding the subject and the object under `var` — real SPARQL,
+    /// executed by `Catalog::sparql` against a real `RecordingGraph`, not
+    /// hand-built rows.
+    fn rule(label: &str, predicate_local: &str, var: &str) -> FindingRuleDef {
+        FindingRuleDef {
+            pack: "gst".to_string(),
+            label: label.to_string(),
+            summary: "a test rule".to_string(),
+            governed_by: "gst:Section16-2-aa".to_string(),
+            query: format!(
+                "SELECT ?subject ?{var} WHERE {{ ?subject <https://graph-owl.dev/ns/catalog#{predicate_local}> ?{var} }}"
+            ),
+            subject_var: "subject".to_string(),
+            evidence: vec![EvidenceBinding {
+                predicate: format!("https://graph-owl.dev/ns/catalog#{predicate_local}"),
+                var: var.to_string(),
+            }],
+            similarity: None,
+            span: None,
+        }
+    }
+
+    fn catalog_with(
+        rules: Arc<FakeFindingRuleRegistry>,
+        findings: Arc<FakeFindings>,
+        graph: Arc<RecordingGraph>,
+    ) -> Catalog {
+        Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_finding_rules(rules)
+        .with_findings(findings)
+        .with_graph(graph)
+    }
+
+    /// A root-kind asset — the cheap fixture, matching this project's own
+    /// "`table` requires a parent, `service` does not" precedent.
+    fn asset_req(name: &str) -> UpsertAsset {
+        UpsertAsset {
+            kind: AssetKind::Service,
+            name: name.to_string(),
+            parent_id: None,
+            description: None,
+            properties: None,
+            extension: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn evaluates_only_the_named_rule_not_every_rule_in_the_pack() {
+        let rules = Arc::new(FakeFindingRuleRegistry::default());
+        rules
+            .declare(&rule("gst:PotentialMismatch", "widgetName", "n"))
+            .await
+            .expect("declare A");
+        rules
+            .declare(&rule("gst:AmountMismatch", "widgetOwner", "o"))
+            .await
+            .expect("declare B");
+
+        let graph = RecordingGraph::working();
+        let findings = Arc::new(FakeFindings::default());
+        let catalog = catalog_with(rules, findings.clone(), graph.clone());
+
+        // Real asset rows, not hand-picked `Sid`s: `Catalog::sparql` scopes
+        // every scan to `visible`, built from real storage rows
+        // (`scoped_facts`), so a raw flake asserted straight into the
+        // graph under a subject with no matching asset row is invisible to
+        // every query — the same trap `asset_analytics_tests` already
+        // avoided by seeding through `upsert_asset` rather than a
+        // hand-keyed `Sid`.
+        let asset_a = catalog
+            .upsert_asset(&Principal::system(), asset_req("asset-a"))
+            .await
+            .expect("seed asset a");
+        let asset_b = catalog
+            .upsert_asset(&Principal::system(), asset_req("asset-b"))
+            .await
+            .expect("seed asset b");
+
+        graph
+            .assert_flakes(&[
+                // `cx: None` — the default graph, matching `Flake::assert`'s
+                // own convention (the same shape `upsert_asset`'s own
+                // projection uses). A named-graph flake here would be
+                // invisible to a `GRAPH`-less `SELECT`, which is exactly
+                // what made this test's first draft fail with real, scanned,
+                // policy-visible facts and zero SPARQL solutions.
+                Flake {
+                    s: Sid::new(namespace::DSC, asset_a.id.to_string()),
+                    p: Sid::new(namespace::DSC, "widgetName"),
+                    o: FlakeValue::String("Widget".to_string()),
+                    cx: None,
+                    t: 1,
+                    op: true,
+                },
+                // Matches rule B, which must never run: if `run_rule`
+                // silently evaluated every rule in the pack (regressing
+                // to `reconcile_pack`'s own behaviour), this flake would
+                // produce a second recorded finding.
+                Flake {
+                    s: Sid::new(namespace::DSC, asset_b.id.to_string()),
+                    p: Sid::new(namespace::DSC, "widgetOwner"),
+                    o: FlakeValue::String("alice".to_string()),
+                    cx: None,
+                    t: 1,
+                    op: true,
+                },
+            ])
+            .await
+            .expect("seed");
+
+        let outcome = catalog
+            .run_rule(&Principal::system(), "gst", "gst:PotentialMismatch")
+            .await
+            .expect("ok");
+
+        assert_eq!(outcome.pack, "gst");
+        assert_eq!(
+            outcome.evaluated, 1,
+            "only the named rule ran, not the pack's other rule: {outcome:?}"
+        );
+        assert_eq!(outcome.found, 1, "{outcome:?}");
+
+        let recorded = findings.rows.lock().expect("not poisoned");
+        assert_eq!(
+            recorded.len(),
+            1,
+            "rule B's own match must not have been recorded: {recorded:?}"
+        );
+        assert_eq!(
+            recorded[0].subject,
+            Sid::new(namespace::DSC, asset_a.id.to_string())
+                .to_iri()
+                .expect("dsc resolves")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_label_in_a_known_pack_is_not_found() {
+        let rules = Arc::new(FakeFindingRuleRegistry::default());
+        rules
+            .declare(&rule("gst:PotentialMismatch", "name", "n"))
+            .await
+            .expect("declare");
+        let catalog = catalog_with(
+            rules,
+            Arc::new(FakeFindings::default()),
+            RecordingGraph::working(),
+        );
+
+        let result = catalog
+            .run_rule(&Principal::system(), "gst", "gst:NoSuchRule")
+            .await;
+
+        assert!(matches!(result, Err(CatalogError::NotFound)), "{result:?}");
+    }
+
+    /// **The `(pack, label)` composite key, not `label` alone** — the same
+    /// property `FindingRuleRegistry::declare`'s own doc comment states.
+    /// A rule registered for a different pack under the same label must
+    /// not be reachable here.
+    #[tokio::test]
+    async fn a_known_label_registered_under_a_different_pack_is_not_found() {
+        let rules = Arc::new(FakeFindingRuleRegistry::default());
+        rules
+            .declare(&FindingRuleDef {
+                pack: "hospitality".to_string(),
+                ..rule("gst:PotentialMismatch", "name", "n")
+            })
+            .await
+            .expect("declare under a different pack");
+        let catalog = catalog_with(
+            rules,
+            Arc::new(FakeFindings::default()),
+            RecordingGraph::working(),
+        );
+
+        let result = catalog
+            .run_rule(&Principal::system(), "gst", "gst:PotentialMismatch")
+            .await;
+
+        assert!(matches!(result, Err(CatalogError::NotFound)), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn zero_matches_is_reported_not_silently_skipped() {
+        let rules = Arc::new(FakeFindingRuleRegistry::default());
+        rules
+            .declare(&rule("gst:PotentialMismatch", "name", "n"))
+            .await
+            .expect("declare");
+        let catalog = catalog_with(
+            rules,
+            Arc::new(FakeFindings::default()),
+            RecordingGraph::working(),
+        );
+
+        let outcome = catalog
+            .run_rule(&Principal::system(), "gst", "gst:PotentialMismatch")
+            .await
+            .expect("ok");
+
+        assert_eq!(outcome.evaluated, 1, "{outcome:?}");
+        assert_eq!(outcome.found, 0, "{outcome:?}");
+        assert_eq!(outcome.opened, 0, "{outcome:?}");
     }
 }
 

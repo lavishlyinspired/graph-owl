@@ -1248,6 +1248,38 @@ found the identical structural gap `105k` already recorded and did not
 close for `traverse` — no asset-to-asset relationship-creation path
 exists in this codebase to build a multi-hop fixture with — inherited
 rather than reintroduced.
+**P10's sixth intelligence tool shipped, 11 August 2026** (`105p`):
+`run_rule()` — the single-rule counterpart to `reconcile()`, evaluating
+exactly one of a pack's registered rules by `(pack, label)` rather than
+the whole pack, for an agent that already knows which rule it wants
+re-checked. Reuses `finding_rules` rather than adding a per-label registry
+lookup (`FindingRuleRegistry` has no such method, and filtering a pack's
+already-small rule list costs nothing a new one would save), reuses
+`ReconcileOutcome`/`Outcome::Reconciled` directly rather than a new wire
+type (`evaluated` — one rule vs. the whole pack — is what tells the two
+calls apart), and inherits `reconcile`'s admin gate rather than
+re-deriving it, since evaluating one rule writes to the review queue the
+same way evaluating all of them does. The Catalog-layer RED test found two
+real, pre-existing properties of `Catalog::sparql`'s own scoping that no
+earlier `graph-owl-api`-level test had exercised (because `reconcile_pack`
+itself — the method `run_rule` is the single-rule counterpart to — has
+never had one, only HTTP-level coverage): every scan is filtered to
+`visible`, built from real asset rows in storage, so a flake asserted
+under a hand-picked `Sid` with no matching asset row is invisible to every
+query; and `Flake::assert` (what `upsert_asset`'s own projection uses)
+sets `cx: None` (the default graph), so a hand-built flake asserted under
+a *named* graph is invisible to a `GRAPH`-less `SELECT` even once
+`visible` is fixed — the second failure was found only by comparing
+`facts_scanned` (1, correct) against `rows` (empty) in a debug trace, the
+same "measure directly rather than reason" discipline this project's own
+build-loop notes already establish for timing puzzles, applied here to a
+query-semantics one. Mutation testing came back clean at all three layers
+(`lib.rs`: 4 mutants, 2 caught, 2 unviable, 0 missed; `Catalog::run_rule`:
+2 mutants, 1 caught, 1 unviable, 0 missed; the real adapter, proven
+against `reconcile.rs`'s own GST fixture: 3 mutants, 2 caught, 1 unviable,
+0 missed) — every unviable mutant the same `Ok(Some(Default::default()))`
+shape every P10 tool has hit, because `ReconcileOutcome` derives no
+`Default` by `105b`'s own deliberate choice.
 **Still open, recorded
 rather than assumed away**: no reference agent app
 (`examples/gst-reconcile/`) and so no scored evaluation run; the live
@@ -1256,7 +1288,7 @@ principal who can query at all (per-named-graph policy needs a policy model
 that does not exist yet); six of the seven planned packs are unwritten; and
 P2's remaining connectors, P3, P4, the rest of P8 (temporal engine,
 generalization beyond GST), P9's GraphRAG/hybrid-search remaining thirds,
-P10's remaining three tools (`run_rule`, `resolve_entity`,
+P10's remaining two tools (`resolve_entity`,
 `calculate_risk`), P11 and P12 are untouched — this is the spine, not
 the finished platform
 

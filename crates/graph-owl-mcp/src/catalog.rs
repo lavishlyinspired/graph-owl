@@ -800,6 +800,28 @@ impl ContextSource for CatalogContext {
                 .then_some(budget::TruncationReason::DepthReached),
         }))
     }
+
+    async fn run_rule(
+        &self,
+        principal: &str,
+        pack: &str,
+        label: &str,
+    ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError> {
+        let who = self.authenticated(principal)?;
+
+        // Admin-gated, matching `reconcile`'s own gate exactly — see the
+        // trait doc comment for why this tool inherits that posture rather
+        // than re-deriving it.
+        if !who.is_admin {
+            return Ok(None);
+        }
+
+        match self.catalog.run_rule(&who, pack, label).await {
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(CatalogError::NotFound) => Ok(None),
+            Err(error) => Err(unavailable(&error)),
+        }
+    }
 }
 
 impl CatalogContext {

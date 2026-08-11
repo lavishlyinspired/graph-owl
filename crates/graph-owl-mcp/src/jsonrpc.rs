@@ -455,6 +455,14 @@ mod tests {
         ) -> Result<Option<crate::AnalyticsContext>, SourceError> {
             Ok(None)
         }
+        async fn run_rule(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<graph_owl_api::ReconcileOutcome>, SourceError> {
+            Ok(None)
+        }
     }
 
     struct Sink;
@@ -738,7 +746,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
 
-        assert_eq!(names.len(), 12, "the twelve read tools: {names:?}");
+        assert_eq!(names.len(), 13, "the thirteen read tools: {names:?}");
         assert!(!names.iter().any(|name| crate::write::is_write_tool(name)));
     }
 
@@ -757,7 +765,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
 
-        assert_eq!(names.len(), 18, "twelve read plus six write: {names:?}");
+        assert_eq!(names.len(), 19, "thirteen read plus six write: {names:?}");
         assert!(names.contains(&crate::write::RECORD_MEMORY));
     }
 
