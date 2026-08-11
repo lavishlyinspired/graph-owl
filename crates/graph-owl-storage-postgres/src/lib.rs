@@ -10591,7 +10591,15 @@ fn queued_claim_from_row(row: &PgRow) -> QueuedClaimRecord {
 /// that silently matches everything.
 fn lower(predicate: &AccessPredicate) -> Option<(Vec<String>, Vec<String>)> {
     match predicate {
-        AccessPredicate::Nothing => None,
+        // A named-graph predicate reaching this function would be a caller
+        // bug — this lowering is scoped to `fully_qualified_name`
+        // visibility only; `compile_named_graph`'s own predicate is
+        // checked directly in Rust (`graph-owl-api::scope_facts`), never
+        // through SQL. Failing closed (the same "nothing visible" `Nothing`
+        // already returns) rather than a lowering that could silently
+        // admit every row, or a panic that turns a caller's mistake into
+        // an outage.
+        AccessPredicate::Nothing | AccessPredicate::NamedGraph { .. } => None,
         // `%` matches every FQN. An empty deny array is correct rather than a
         // sentinel: `x LIKE ANY('{}')` is false, so `NOT (...)` is true and
         // every row passes the deny check. A NUL sentinel would have been both

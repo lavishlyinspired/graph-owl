@@ -73,6 +73,14 @@ pub enum ResourceMatcher {
     FqnPrefix(String),
     /// Assets carrying this classification (Epic 25).
     Tagged(String),
+    /// Facts whose named graph begins with this prefix — `graph:import:gst`,
+    /// most concretely (`plans/105y-named-graph-policy.md`). A dimension of
+    /// its own, not folded into `FqnPrefix`: a named graph is not a catalog
+    /// asset and has no FQN, and confusing the two would let an FQN-shaped
+    /// grant on an identical-looking string leak into pack-data visibility
+    /// (or vice versa) — see [`compile_named_graph`]'s own tests for the
+    /// two-way check that this cannot happen.
+    NamedGraph(String),
 }
 
 impl ResourceMatcher {
@@ -82,6 +90,11 @@ impl ResourceMatcher {
             ResourceMatcher::All => true,
             ResourceMatcher::FqnPrefix(prefix) => resource.fqn.starts_with(prefix.as_str()),
             ResourceMatcher::Tagged(tag) => resource.tags.iter().any(|t| t == tag),
+            // A named graph is not a catalog `Resource` (it has no FQN, no
+            // tags) — row-level evaluation for it happens where the row
+            // actually lives (the flake's own `cx`), through
+            // `compile_named_graph`'s predicate, not through this method.
+            ResourceMatcher::NamedGraph(_) => false,
         }
     }
 }
@@ -192,6 +205,14 @@ pub enum AccessPredicate {
         allow_prefixes: Vec<String>,
         deny_prefixes: Vec<String>,
     },
+    /// The named-graph counterpart of [`AccessPredicate::Fqn`] — same shape,
+    /// a separate variant so a caller cannot check an FQN-scoped predicate
+    /// against a named-graph identifier (or the reverse) and have it
+    /// silently compile (`plans/105y-named-graph-policy.md`).
+    NamedGraph {
+        allow_prefixes: Vec<String>,
+        deny_prefixes: Vec<String>,
+    },
 }
 
 impl AccessPredicate {
@@ -203,6 +224,10 @@ impl AccessPredicate {
             AccessPredicate::All => true,
             AccessPredicate::Nothing => false,
             AccessPredicate::Fqn {
+                allow_prefixes,
+                deny_prefixes,
+            }
+            | AccessPredicate::NamedGraph {
                 allow_prefixes,
                 deny_prefixes,
             } => {
@@ -220,6 +245,69 @@ pub fn compile(
     operation: MetadataOperation,
     policies: &[Policy],
 ) -> AccessPredicate {
+    compile_prefixes(subject, operation, policies, PrefixDimension::Fqn)
+}
+
+/// The named-graph counterpart of [`compile`]: access to `graph:import:
+/// {source}` (or any other named-graph identifier) as its own policy
+/// decision, not derived from FQN visibility — Epic 105's own follow-up,
+/// named but not built when the domain-neutrality work shipped
+/// (`plans/105-domain-neutrality.md`, `plans/105y-named-graph-policy.md`).
+#[must_use]
+pub fn compile_named_graph(
+    subject: &Subject,
+    operation: MetadataOperation,
+    policies: &[Policy],
+) -> AccessPredicate {
+    compile_prefixes(subject, operation, policies, PrefixDimension::NamedGraph)
+}
+
+/// Which resource dimension [`compile_prefixes`] is compiling for — the one
+/// thing [`compile`] and [`compile_named_graph`] do not share, since an
+/// FQN-shaped grant must never be read as a named-graph grant or the
+/// reverse (`an_fqn_prefix_rule_does_not_grant_named_graph_access`,
+/// `a_named_graph_rule_does_not_grant_fqn_access`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrefixDimension {
+    Fqn,
+    NamedGraph,
+}
+
+impl PrefixDimension {
+    /// The rule's own prefix on this dimension, or `None` if the rule is
+    /// shaped for the other dimension (or is a `Tagged` rule, which — the
+    /// same reasoning `compile`'s own comment already gives for FQN
+    /// compilation — needs a resource's tags that a row-level predicate does
+    /// not carry, so it contributes nothing on *either* dimension rather
+    /// than being compiled as unrestricted).
+    fn prefix_of(self, resources: &ResourceMatcher) -> Option<&str> {
+        match (self, resources) {
+            (PrefixDimension::Fqn, ResourceMatcher::FqnPrefix(p))
+            | (PrefixDimension::NamedGraph, ResourceMatcher::NamedGraph(p)) => Some(p.as_str()),
+            _ => None,
+        }
+    }
+
+    fn wrap(self, allow_prefixes: Vec<String>, deny_prefixes: Vec<String>) -> AccessPredicate {
+        match self {
+            PrefixDimension::Fqn => AccessPredicate::Fqn {
+                allow_prefixes,
+                deny_prefixes,
+            },
+            PrefixDimension::NamedGraph => AccessPredicate::NamedGraph {
+                allow_prefixes,
+                deny_prefixes,
+            },
+        }
+    }
+}
+
+fn compile_prefixes(
+    subject: &Subject,
+    operation: MetadataOperation,
+    policies: &[Policy],
+    dimension: PrefixDimension,
+) -> AccessPredicate {
     if subject.is_admin {
         return AccessPredicate::All;
     }
@@ -234,16 +322,19 @@ pub fn compile(
         .flat_map(|policy| &policy.rules)
         .filter(|rule| rule.operations.contains(&operation))
     {
-        match (rule.effect, &rule.resources) {
-            (Effect::Allow, ResourceMatcher::All) => allow_all = true,
-            (Effect::Deny, ResourceMatcher::All) => deny_all = true,
-            (Effect::Allow, ResourceMatcher::FqnPrefix(p)) => allow_prefixes.push(p.clone()),
-            (Effect::Deny, ResourceMatcher::FqnPrefix(p)) => deny_prefixes.push(p.clone()),
-            // Tag matching needs the resource's tags, which a row-level
-            // predicate does not carry until Epic 25 puts them in the query.
-            // Compiling it as unrestricted would be a leak, so it contributes
-            // nothing and the request falls back to whatever else allows it.
-            (_, ResourceMatcher::Tagged(_)) => {}
+        if matches!(rule.resources, ResourceMatcher::All) {
+            match rule.effect {
+                Effect::Allow => allow_all = true,
+                Effect::Deny => deny_all = true,
+            }
+            continue;
+        }
+        let Some(prefix) = dimension.prefix_of(&rule.resources) else {
+            continue;
+        };
+        match rule.effect {
+            Effect::Allow => allow_prefixes.push(prefix.to_string()),
+            Effect::Deny => deny_prefixes.push(prefix.to_string()),
         }
     }
 
@@ -254,20 +345,14 @@ pub fn compile(
         return if deny_prefixes.is_empty() {
             AccessPredicate::All
         } else {
-            AccessPredicate::Fqn {
-                // An empty prefix matches every FQN.
-                allow_prefixes: vec![String::new()],
-                deny_prefixes,
-            }
+            // An empty prefix matches everything on this dimension.
+            dimension.wrap(vec![String::new()], deny_prefixes)
         };
     }
     if allow_prefixes.is_empty() {
         return AccessPredicate::Nothing;
     }
-    AccessPredicate::Fqn {
-        allow_prefixes,
-        deny_prefixes,
-    }
+    dimension.wrap(allow_prefixes, deny_prefixes)
 }
 
 #[cfg(test)]
@@ -550,6 +635,114 @@ mod tests {
             compile(&analyst(), MetadataOperation::ViewBasic, &policies),
             AccessPredicate::Nothing,
             "a grant on one operation must not compile into a predicate for another"
+        );
+    }
+
+    // ---- named-graph compilation (Epic 105's own follow-up: `plans/00i-licensing.md`
+    // is not the right doc; see `plans/105y-named-graph-policy.md`) ----
+
+    fn named_graph_rule(effect: Effect, prefix: &str) -> Policy {
+        rule(
+            effect,
+            &[MetadataOperation::ViewBasic],
+            ResourceMatcher::NamedGraph(prefix.to_string()),
+        )
+    }
+
+    #[test]
+    fn an_admin_compiles_to_unrestricted_named_graph_access() {
+        assert_eq!(
+            compile_named_graph(&admin(), MetadataOperation::ViewBasic, &[]),
+            AccessPredicate::All
+        );
+    }
+
+    #[test]
+    fn no_named_graph_policies_compiles_to_nothing_not_to_all() {
+        // The identical failure mode `no_policies_compiles_to_nothing_not_to_all`
+        // guards for FQN access: an empty allow-list must read as "no named
+        // graph", not "every named graph".
+        assert_eq!(
+            compile_named_graph(&analyst(), MetadataOperation::ViewBasic, &[]),
+            AccessPredicate::Nothing
+        );
+    }
+
+    #[test]
+    fn a_named_graph_allow_compiles_to_that_prefix() {
+        let policies = [named_graph_rule(Effect::Allow, "graph:import:gst")];
+        assert_eq!(
+            compile_named_graph(&analyst(), MetadataOperation::ViewBasic, &policies),
+            AccessPredicate::NamedGraph {
+                allow_prefixes: vec!["graph:import:gst".to_string()],
+                deny_prefixes: Vec::new(),
+            }
+        );
+    }
+
+    /// A rule shaped for FQN matching must not leak into named-graph
+    /// compilation, and vice versa — the two dimensions are compiled
+    /// independently, matching `compilation_only_considers_the_requested_operation`'s
+    /// own "a grant on one axis must not compile into a predicate for
+    /// another" property, generalized from operations to resource kind.
+    #[test]
+    fn an_fqn_prefix_rule_does_not_grant_named_graph_access() {
+        let policies = [rule(
+            Effect::Allow,
+            &[MetadataOperation::ViewBasic],
+            ResourceMatcher::FqnPrefix("graph:import:gst".to_string()),
+        )];
+        assert_eq!(
+            compile_named_graph(&analyst(), MetadataOperation::ViewBasic, &policies),
+            AccessPredicate::Nothing,
+            "an FQN-shaped grant must not be read as a named-graph grant, even on an \
+             identical-looking string"
+        );
+    }
+
+    /// The mirror: a named-graph rule must not leak into FQN compilation.
+    #[test]
+    fn a_named_graph_rule_does_not_grant_fqn_access() {
+        let policies = [named_graph_rule(Effect::Allow, "graph:import:gst")];
+        assert_eq!(
+            compile(&analyst(), MetadataOperation::ViewBasic, &policies),
+            AccessPredicate::Nothing
+        );
+    }
+
+    #[test]
+    fn a_blanket_deny_compiles_named_graph_access_to_nothing_even_alongside_an_allow() {
+        let policies = [
+            rule(
+                Effect::Allow,
+                &[MetadataOperation::ViewBasic],
+                ResourceMatcher::All,
+            ),
+            rule(
+                Effect::Deny,
+                &[MetadataOperation::ViewBasic],
+                ResourceMatcher::All,
+            ),
+        ];
+        assert_eq!(
+            compile_named_graph(&analyst(), MetadataOperation::ViewBasic, &policies),
+            AccessPredicate::Nothing
+        );
+    }
+
+    /// `ResourceMatcher::All` grants both dimensions at once — an "allow
+    /// everything" policy is not scoped to FQNs only, matching what its own
+    /// name says.
+    #[test]
+    fn an_all_grant_compiles_to_unrestricted_named_graph_access_too() {
+        let policies = [rule(
+            Effect::Allow,
+            &[MetadataOperation::ViewBasic],
+            ResourceMatcher::All,
+        )];
+        assert_eq!(
+            compile_named_graph(&analyst(), MetadataOperation::ViewBasic, &policies),
+            AccessPredicate::All
         );
     }
 

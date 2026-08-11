@@ -845,51 +845,41 @@ fn alignment_entry_from_flakes(subject: Sid, subject_flakes: &[Flake]) -> Alignm
     }
 }
 
-/// Whether `namespace_code` names external vocabulary/ontology content —
-/// a UMLS CUI, a SNOMED CT or `RxNorm` code (Epic 104) — rather than a
-/// catalog asset.
-///
-/// The asset access-predicate policy exists to control which *catalog
-/// assets* a principal may see, checked against `visible`
-/// (`list_assets_under_fqn`). A vocabulary identifier is never a catalog
-/// asset and can never appear in `visible` no matter how permissive the
-/// policy is, so treating it as gated by that policy would not make it
-/// more secure — it would make every alignment invisible to every
-/// principal, including `Principal::system()`.
-fn is_vocabulary_namespace(namespace_code: u16) -> bool {
+/// The three hardcoded medical namespaces (Epic 104) — clinical vocabulary,
+/// never a catalog asset, always admitted regardless of policy for the
+/// reason `admitted_by_vocabulary_namespace`'s own doc comment gives. Left as its
+/// own unconditional check, not folded into the named-graph policy below:
+/// nothing in this codebase imports CUI/SNOMED/RxNorm data into a named
+/// graph the way a pack's own facts land in `graph:import:{source}`, so
+/// there is no `cx` for a policy to be scoped against.
+fn is_fixed_vocabulary_namespace(namespace_code: u16) -> bool {
     matches!(
         namespace_code,
         graph_owl_core::flake::namespace::CUI
             | graph_owl_core::flake::namespace::SNOMED_CT
             | graph_owl_core::flake::namespace::RXNORM
     )
-    // **Every runtime-declared namespace too** — Epic 105.
-    //
-    // This list was three hardcoded medical namespaces, which is the *same*
-    // per-domain hardcoding `plans/105-domain-neutrality.md` removed from
-    // `graph-owl-core`, living a second time in the authorization filter. A
-    // domain pack declares its vocabulary at runtime and gets a code at or
-    // above `RUNTIME_START`; without this every fact it lands is filtered out
-    // of SPARQL, because `scope_facts` otherwise admits only subjects that are
-    // *catalog assets* — and a pack's subjects (an invoice, a guest, a
-    // statutory section) are graph subjects with no asset row, by design.
-    //
-    // Found by loading the GST pack and getting zero rows from a query whose
-    // plan resolved perfectly. The generalization is the same argument that
-    // already admitted CUI and SNOMED: a declared vocabulary is not asset
-    // data, so asset-level visibility is the wrong question to ask of it.
-    //
-    // **The limitation this leaves, stated plainly: a pack's facts are
-    // readable by any principal who can query.** That matches how the three
-    // medical namespaces are already treated (a SNOMED-coded fact is clinical
-    // data and is admitted the same way), so this is consistent with the
-    // system's existing posture rather than a new weakening — but it is not
-    // the right long-term answer for a pack carrying real invoices. Per-named-
-    // graph policy, so access to `graph:import:{source}` is a policy decision
-    // rather than a namespace one, is the follow-up; it needs a policy model
-    // that does not exist yet and is a deliberate design decision rather than
-    // something to infer here.
-        || namespace_code >= graph_owl_core::flake::namespace::RUNTIME_START
+}
+
+/// A domain pack's own runtime-declared namespace — Epic 105. Without
+/// this, every fact a pack lands is filtered out of SPARQL, because
+/// `scope_facts` otherwise admits only subjects that are *catalog assets*
+/// — and a pack's subjects (an invoice, a guest, a statutory section) are
+/// graph subjects with no asset row, by design. Found by loading the GST
+/// pack and getting zero rows from a query whose plan resolved perfectly.
+///
+/// **Unconditional admission on this check alone was the gap
+/// `plans/105-domain-neutrality.md` named and left open**: "a pack's
+/// facts are readable by any principal who can query... it is not the
+/// right long-term answer for a pack carrying real invoices." Closed by
+/// `plans/105y-named-graph-policy.md` — a flake in this namespace range
+/// still passes this check, but `scope_facts`'s own caller now also
+/// requires a flake's named graph (`cx`), when it has one, to be admitted
+/// by a separate named-graph policy. A flake with no `cx` (not
+/// import-sourced) is unaffected, matching this function's own prior,
+/// unconditional behaviour.
+fn is_runtime_pack_namespace(namespace_code: u16) -> bool {
+    namespace_code >= graph_owl_core::flake::namespace::RUNTIME_START
 }
 
 /// Every subject's own `effective_from`/`effective_to`, read off `flakes` —
@@ -949,6 +939,24 @@ fn entity_is_valid(
         .is_none_or(|(from, to)| *from <= at && to.is_none_or(|end| at < end))
 }
 
+/// Whether a runtime-pack-namespace reference is admitted: the fixed
+/// medical namespaces pass unconditionally
+/// (`is_fixed_vocabulary_namespace`); a pack namespace additionally needs
+/// its own named graph, when the flake carrying the reference has one, to
+/// be admitted by `named_graph_predicate` — Epic 105's own follow-up
+/// (`plans/105y-named-graph-policy.md`). A flake with no `cx` (not
+/// import-sourced) is unaffected, matching this codebase's prior,
+/// unconditional behaviour for pack data.
+fn admitted_by_vocabulary_namespace(
+    namespace_code: u16,
+    cx: Option<&graph_owl_core::flake::Sid>,
+    named_graph_predicate: &AccessPredicate,
+) -> bool {
+    is_fixed_vocabulary_namespace(namespace_code)
+        || (is_runtime_pack_namespace(namespace_code)
+            && cx.is_none_or(|graph| named_graph_predicate.admits(&graph.id)))
+}
+
 /// Keep only the facts this principal may see, up to the budget.
 ///
 /// A flake is visible when its subject is a visible asset. A **relationship**
@@ -958,10 +966,11 @@ fn entity_is_valid(
 /// **alignment**'s reified metadata node (`alignmentLeft`/`alignmentRight`,
 /// Epic 104) is checked the identical way, except an endpoint counts as
 /// permitted when it is *either* a visible asset *or* a vocabulary
-/// identifier — see [`is_vocabulary_namespace`].
+/// identifier — see [`admitted_by_vocabulary_namespace`].
 fn scope_facts(
     all: &[graph_owl_core::flake::Flake],
     visible: &std::collections::HashSet<String>,
+    named_graph_predicate: &AccessPredicate,
     max_facts: usize,
 ) -> (Vec<graph_owl_core::flake::Flake>, bool) {
     use graph_owl_core::flake::FlakeValue;
@@ -991,7 +1000,13 @@ fn scope_facts(
         };
         let entry = endpoints.entry(flake.s.id.as_str()).or_insert((0, 0));
         entry.0 += 1;
-        if visible.contains(&target.id) || is_vocabulary_namespace(target.namespace_code) {
+        if visible.contains(&target.id)
+            || admitted_by_vocabulary_namespace(
+                target.namespace_code,
+                flake.cx.as_ref(),
+                named_graph_predicate,
+            )
+        {
             entry.1 += 1;
         }
     }
@@ -1009,7 +1024,11 @@ fn scope_facts(
         .filter(|flake| {
             visible.contains(&flake.s.id)
                 || visible_edges.contains(flake.s.id.as_str())
-                || is_vocabulary_namespace(flake.s.namespace_code)
+                || admitted_by_vocabulary_namespace(
+                    flake.s.namespace_code,
+                    flake.cx.as_ref(),
+                    named_graph_predicate,
+                )
         })
         .cloned()
         .collect();
@@ -4483,6 +4502,13 @@ impl Catalog {
             .filter(|asset| predicate.admits(&asset.fully_qualified_name))
             .map(|asset| asset.id.to_string())
             .collect();
+        // The named-graph counterpart — Epic 105's own follow-up
+        // (`plans/105y-named-graph-policy.md`): access to an imported
+        // pack's own named graph is a policy decision, not a namespace
+        // one.
+        let named_graph_predicate = self
+            .named_graph_predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
 
         // 2. When.
         let at = match as_of {
@@ -4565,7 +4591,8 @@ impl Catalog {
             all.retain(|flake| entity_is_valid(&flake.s, &windows, window.at));
         }
 
-        let (facts, truncated) = scope_facts(&all, &visible, budget.max_facts);
+        let (facts, truncated) =
+            scope_facts(&all, &visible, &named_graph_predicate, budget.max_facts);
         let fact_count = facts.len();
         let dataset = graph_owl_query::dataset::FlakeDataset::from_flakes(&facts)
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
@@ -7870,6 +7897,32 @@ impl Catalog {
         let predicate = compile(&subject, operation, &policies);
         self.decisions.insert(key, predicate.clone());
         Ok(predicate)
+    }
+
+    /// The named-graph counterpart of [`Self::predicate_for`] — Epic 105's
+    /// own follow-up, named but not built when domain neutrality shipped:
+    /// "access to `graph:import:{source}` is a policy decision rather than
+    /// a namespace one" (`plans/105-domain-neutrality.md`,
+    /// `plans/105y-named-graph-policy.md`).
+    ///
+    /// **Not cached**, unlike [`Self::predicate_for`]: `self.decisions`
+    /// keys on `(subject, operation)` alone, which would collide with the
+    /// FQN predicate for the identical request — reusing it here would mean
+    /// whichever compilation ran first for a given principal silently
+    /// answers both. A second cache keyed on the resource dimension too is
+    /// the correct fix once this path is warm enough to need one; until
+    /// then, compiling on every call is the same cost `predicate_for` paid
+    /// before its own cache existed, not a new one.
+    async fn named_graph_predicate_for(
+        &self,
+        principal: &Principal,
+        operation: MetadataOperation,
+    ) -> Result<AccessPredicate, CatalogError> {
+        let subject = subject_of(principal);
+        let policies = self.policies_for(principal).await?;
+        Ok(graph_owl_authz::compile_named_graph(
+            &subject, operation, &policies,
+        ))
     }
 
     /// Connection-pool occupancy, for the operational gauge.
@@ -20462,6 +20515,7 @@ mod dedup_flakes_tests {
 #[cfg(test)]
 mod scope_facts_tests {
     use super::{SparqlBudget, scope_facts};
+    use graph_owl_authz::AccessPredicate;
     use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
     use std::collections::HashSet;
 
@@ -20486,6 +20540,7 @@ mod scope_facts_tests {
         let (kept, truncated) = scope_facts(
             &[about("a", "name", FlakeValue::String("visible".into()))],
             &visible(&["a"]),
+            &AccessPredicate::All,
             100,
         );
         assert_eq!(kept.len(), 1);
@@ -20497,6 +20552,7 @@ mod scope_facts_tests {
         let (kept, _) = scope_facts(
             &[about("secret", "name", FlakeValue::String("pan".into()))],
             &visible(&["a"]),
+            &AccessPredicate::All,
             100,
         );
         assert!(kept.is_empty());
@@ -20511,7 +20567,7 @@ mod scope_facts_tests {
         let mut flakes = edge("r1", "a", "secret");
         flakes.push(about("a", "name", FlakeValue::String("visible".into())));
 
-        let (kept, _) = scope_facts(&flakes, &visible(&["a"]), 100);
+        let (kept, _) = scope_facts(&flakes, &visible(&["a"]), &AccessPredicate::All, 100);
 
         assert_eq!(kept.len(), 1, "only the visible asset's own fact: {kept:?}");
         assert!(
@@ -20523,7 +20579,12 @@ mod scope_facts_tests {
 
     #[test]
     fn an_edge_between_two_visible_assets_is_kept_whole() {
-        let (kept, _) = scope_facts(&edge("r1", "a", "b"), &visible(&["a", "b"]), 100);
+        let (kept, _) = scope_facts(
+            &edge("r1", "a", "b"),
+            &visible(&["a", "b"]),
+            &AccessPredicate::All,
+            100,
+        );
         assert_eq!(kept.len(), 3, "every flake of the edge: {kept:?}");
     }
 
@@ -20532,7 +20593,12 @@ mod scope_facts_tests {
     /// nobody would find it.
     #[test]
     fn an_edge_from_a_hidden_asset_is_dropped_too() {
-        let (kept, _) = scope_facts(&edge("r1", "secret", "b"), &visible(&["b"]), 100);
+        let (kept, _) = scope_facts(
+            &edge("r1", "secret", "b"),
+            &visible(&["b"]),
+            &AccessPredicate::All,
+            100,
+        );
         assert!(kept.is_empty(), "{kept:?}");
     }
 
@@ -20542,7 +20608,7 @@ mod scope_facts_tests {
     #[test]
     fn an_edge_with_no_endpoints_is_not_assumed_visible() {
         let orphan = vec![about("r1", "relType", FlakeValue::String("feeds".into()))];
-        let (kept, _) = scope_facts(&orphan, &visible(&["a", "b"]), 100);
+        let (kept, _) = scope_facts(&orphan, &visible(&["a", "b"]), &AccessPredicate::All, 100);
         assert!(kept.is_empty());
     }
 
@@ -20562,7 +20628,7 @@ mod scope_facts_tests {
             FlakeValue::Ref(Sid::new(namespace::SNOMED_CT, "1")),
             1,
         );
-        let (kept, _) = scope_facts(&[direct], &visible(&[]), 100);
+        let (kept, _) = scope_facts(&[direct], &visible(&[]), &AccessPredicate::All, 100);
         assert_eq!(kept.len(), 1, "{kept:?}");
     }
 
@@ -20585,7 +20651,7 @@ mod scope_facts_tests {
             ),
             about("align:1", "confidence", FlakeValue::Float(1.0)),
         ];
-        let (kept, _) = scope_facts(&flakes, &visible(&[]), 100);
+        let (kept, _) = scope_facts(&flakes, &visible(&[]), &AccessPredicate::All, 100);
         assert_eq!(kept.len(), 3, "every flake of the alignment: {kept:?}");
     }
 
@@ -20609,7 +20675,7 @@ mod scope_facts_tests {
                 FlakeValue::Ref(Sid::dsc("secret")),
             ),
         ];
-        let (kept, _) = scope_facts(&flakes, &visible(&[]), 100);
+        let (kept, _) = scope_facts(&flakes, &visible(&[]), &AccessPredicate::All, 100);
         assert!(kept.is_empty(), "{kept:?}");
     }
 
@@ -20618,7 +20684,7 @@ mod scope_facts_tests {
         let flakes: Vec<Flake> = (0..10)
             .map(|i| about("a", &format!("p{i}"), FlakeValue::Int(i)))
             .collect();
-        let (kept, truncated) = scope_facts(&flakes, &visible(&["a"]), 4);
+        let (kept, truncated) = scope_facts(&flakes, &visible(&["a"]), &AccessPredicate::All, 4);
         assert_eq!(kept.len(), 4);
         assert!(truncated, "a truncated answer must never look complete");
     }
@@ -20630,7 +20696,7 @@ mod scope_facts_tests {
         let flakes: Vec<Flake> = (0..4)
             .map(|i| about("a", &format!("p{i}"), FlakeValue::Int(i)))
             .collect();
-        let (kept, truncated) = scope_facts(&flakes, &visible(&["a"]), 4);
+        let (kept, truncated) = scope_facts(&flakes, &visible(&["a"]), &AccessPredicate::All, 4);
         assert_eq!(kept.len(), 4);
         assert!(!truncated);
     }
@@ -26298,6 +26364,160 @@ mod projection_isolation_tests {
             effective_to: Sid::dsc("effectiveTo"),
             at: at.parse().expect("test date is ISO-8601"),
         }
+    }
+
+    /// Per-named-graph policy — Epic 105's own follow-up, named but not
+    /// built when domain neutrality shipped: "access to `graph:import:
+    /// {source}` is a policy decision rather than a namespace one"
+    /// (`plans/105-domain-neutrality.md`, `plans/105y-named-graph-policy.md`).
+    /// A non-admin principal must not see an imported pack fact until a
+    /// policy explicitly grants its own named graph — the exact gap that
+    /// document named as still open.
+    #[tokio::test]
+    async fn imported_pack_data_needs_an_explicit_named_graph_grant_for_a_non_admin_principal() {
+        use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+
+        // A distinctive, arbitrary runtime code rather than `RUNTIME_START`
+        // itself: `graph_owl_core::namespaces::register_process_namespace`
+        // writes into a single process-wide table, and the namespace-
+        // declaration tests elsewhere in this crate allocate sequentially
+        // *from* `RUNTIME_START` against their own `FakeRegistry` — running
+        // in parallel, a shared low code risks two tests' IRIs racing for
+        // the same slot. Any code `>= RUNTIME_START` satisfies
+        // `is_runtime_pack_namespace`'s own check; this one is simply
+        // unlikely to collide.
+        const TEST_PACK_NAMESPACE: u16 = 55_555;
+        graph_owl_core::namespaces::register_process_namespace(
+            TEST_PACK_NAMESPACE,
+            "https://graph-owl.dev/packs/gst-policy-test#",
+        );
+
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog =
+            Catalog::new(storage.clone()).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let pack_subject = Sid::new(TEST_PACK_NAMESPACE, "purchase-INV-1003");
+        graph
+            .assert_flakes(&[Flake {
+                s: pack_subject,
+                p: Sid::dsc("invoiceNumber"),
+                o: FlakeValue::String("INV-1003".to_string()),
+                cx: Some(Sid::dsc("graph:import:gst-purchase-register")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed an imported pack fact");
+
+        let asha = Principal {
+            id: "asha".to_string(),
+            name: "Asha".to_string(),
+            kind: graph_owl_core::PrincipalKind::User,
+            roles: vec!["analyst".to_string()],
+            is_admin: false,
+        };
+        // `GRAPH ?g { ... }`, not a plain BGP: the imported fact carries a
+        // `cx`, which `FlakeDataset::from_flakes` places in a **named**
+        // graph, not the default one. A plain `SELECT ?v WHERE { ?s p ?v }`
+        // only ever queries the default graph per SPARQL semantics
+        // (`graph-owl-query`'s own `internal_quads_for_pattern` enforces
+        // this deliberately, so an unbound `GRAPH` variable can never
+        // silently include the default graph) — it would read as "denied"
+        // even after a grant, for a reason unrelated to authorization.
+        let query = "SELECT ?v WHERE { GRAPH ?g { ?s <https://graph-owl.dev/ns/catalog#invoiceNumber> ?v } }";
+
+        let before_grant = catalog
+            .sparql(&asha, query, None, SparqlBudget::default())
+            .await
+            .expect("query");
+        assert!(
+            before_grant.rows.is_empty(),
+            "no named-graph grant exists yet: {:?}",
+            before_grant.rows
+        );
+
+        storage
+            .upsert_policy(
+                &Policy {
+                    name: "gst-reader".to_string(),
+                    rules: vec![Rule {
+                        name: "read-gst-imports".to_string(),
+                        effect: Effect::Allow,
+                        operations: vec![MetadataOperation::ViewBasic],
+                        resources: ResourceMatcher::NamedGraph("graph:import:gst".to_string()),
+                    }],
+                },
+                &["analyst".to_string()],
+            )
+            .await
+            .expect("policy");
+
+        let after_grant = catalog
+            .sparql(&asha, query, None, SparqlBudget::default())
+            .await
+            .expect("query");
+        assert_eq!(after_grant.rows.len(), 1, "{:?}", after_grant.rows);
+
+        // Admin visibility is unaffected throughout — the same posture
+        // every other policy check in this crate already has.
+        let admin_view = catalog
+            .sparql(&Principal::system(), query, None, SparqlBudget::default())
+            .await
+            .expect("query");
+        assert_eq!(admin_view.rows.len(), 1, "{:?}", admin_view.rows);
+    }
+
+    /// The scope of the fix, stated as a test: a pack fact with **no**
+    /// named graph (`cx: None` — not import-sourced) is unaffected by
+    /// named-graph policy entirely, matching current behaviour, because
+    /// there is nothing to check it against.
+    #[tokio::test]
+    async fn a_pack_fact_with_no_named_graph_is_unaffected_by_named_graph_policy() {
+        // See the sibling test above for why this is not `RUNTIME_START`
+        // itself — a distinct code from that test's own, too, so the two
+        // cannot race each other for the same slot either.
+        const TEST_PACK_NAMESPACE: u16 = 55_556;
+        graph_owl_core::namespaces::register_process_namespace(
+            TEST_PACK_NAMESPACE,
+            "https://graph-owl.dev/packs/gst-policy-test-unimported#",
+        );
+
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog =
+            Catalog::new(storage.clone()).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let pack_subject = Sid::new(TEST_PACK_NAMESPACE, "declared-term");
+        graph
+            .assert_flakes(&[Flake::assert(
+                pack_subject,
+                Sid::dsc("invoiceNumber"),
+                FlakeValue::String("INV-9999".to_string()),
+                1,
+            )])
+            .await
+            .expect("seed a non-imported pack fact");
+
+        let asha = Principal {
+            id: "asha".to_string(),
+            name: "Asha".to_string(),
+            kind: graph_owl_core::PrincipalKind::User,
+            roles: vec!["analyst".to_string()],
+            is_admin: false,
+        };
+        let query = "SELECT ?v WHERE { ?s <https://graph-owl.dev/ns/catalog#invoiceNumber> ?v }";
+
+        let outcome = catalog
+            .sparql(&asha, query, None, SparqlBudget::default())
+            .await
+            .expect("query");
+        assert_eq!(
+            outcome.rows.len(),
+            1,
+            "no named graph on this fact means no policy to check: {:?}",
+            outcome.rows
+        );
     }
 
     #[tokio::test]

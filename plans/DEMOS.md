@@ -1431,19 +1431,59 @@ node beyond it (proven, not assumed — a dedicated test). Mutation-clean at
 both layers (16/14/2/0 memory; 3/3/0/0 Postgres, the small count because
 most of the Postgres change is SQL text with nothing for a mutant to
 touch).
-Also still open: `105i`'s other two named gaps (a pack-config surface for
-declaring a temporal-resolution rule; entity-validity extension of
-`as_of`/time-travel at the storage layer — a separate question from
-date-window traversal, still unbuilt); the live GSP/ERP connectors are
-fixture-mode only;
-pack facts are readable by any principal who can query at all
-(per-named-graph policy needs a policy model that does not exist yet); six
-of the seven planned packs are unwritten (deliberately not attempted —
-DN-3's hospitality pack already carries the domain-neutrality proof, and
+**P8 closed the same day** (`105v`): entity-validity extension of
+`as_of`/time-travel at the storage layer, applied to SPARQL's own
+scoped-facts computation before the evaluator runs, the same position
+`as_of` itself already occupies. A dedicated predicate-scoped fetch, not a
+read of the pushdown-narrowed dataset — a query never naming
+`effectiveFrom`/`effectiveTo` would otherwise silently treat a dated
+subject as undated. Found and fixed a real bug this way: pushdown only
+fetches what the query pattern names, so the first version of this check
+read as "always valid" for exactly the queries most likely to touch dated
+data. `105i`'s remaining named gap — a pack-config surface for declaring a
+temporal-resolution rule — is still open.
+
+**P9 closed the same day too** (`105w`, `105x`): entity linking
+(`Catalog::link_entity`, free text to *any* graph subject `Sid`, not only
+a catalog asset — a different problem from `resolve_entity`) and
+hybrid-search fusion (`graph_owl_core::hybrid::fuse`, a new pure
+lexical/semantic/graph scorer mirroring `recall::rank`'s own architecture
+without forcing a non-memory candidate to carry memory-only fields).
+`link_entity` fuses lexical similarity with a graph-connectivity term (a
+bounded one-hop reach fraction via `TraversalEngine::neighbours`);
+`semantic` stays honestly `None` throughout — no graph subject in general
+has an embedding today, only memories do (Epic 31's own scope), and
+inventing one here would misreport "not measured" as "measured, and
+dissimilar." Mutation-clean at both layers after one round of
+strengthening (`graph-owl-core/hybrid.rs` 10/11 caught, 1 unviable;
+`graph-owl-api` 11/13 caught, 1 unviable, 1 documented-equivalent
+tie-break).
+
+**Per-named-graph policy closed 11 August 2026** (`105y`): the exact gap
+`105-domain-neutrality.md` named — "a pack's facts are now readable by any
+principal who can query... it is not the right long-term answer for a
+pack carrying real invoices" — closed with a `NamedGraph` counterpart to
+the existing `Fqn` access predicate (`graph-owl-authz`), checked at the
+same two `scope_facts` sites that already carve out the three hardcoded
+medical vocabularies. `Principal::system()`'s admin bypass means almost
+every existing test was unaffected by construction; only a non-admin
+principal querying import-sourced pack data is newly gated. The RED test
+surfaced an unrelated, already-documented gotcha along the way: a plain
+`SELECT` cannot see a fact with a `cx` at all (`FlakeDataset` places it in
+a **named** RDF graph, not the default one) — `105-domain-neutrality.md`
+already said so ("every pattern must be inside `GRAPH ?g`"), and the first
+version of the test hadn't applied it to its own query. Mutation-clean:
+`graph-owl-authz` 8/12 caught + 4 unviable; `graph-owl-storage-postgres`'s
+`lower()` exhaustiveness arm needed a re-run outside the default
+`--lib`-scoped script (that function has no unit-test caller, only
+integration ones) — 10/10 caught once scoped correctly.
+
+Still open: the live GSP/ERP connectors are fixture-mode only; six of the
+seven planned packs are unwritten (deliberately not attempted — DN-3's
+hospitality pack already carries the domain-neutrality proof, and
 inventing regulatory content for six more domains without real source
 material was assessed and declined); and P2's remaining connectors, P3,
-P4, P9's GraphRAG/hybrid-search remaining thirds are untouched — this is
-the spine, not the finished platform
+P4 are untouched — this is the spine, not the finished platform
 
 ### Console half
 - [x] **105** **One queue, every pack** — `findingsQueue.tsx` renders GST and hospitality identically; the difference lives in `pack.toml`. A `GstFindingsQueue.tsx` would have been the console's first per-domain hardcoding
