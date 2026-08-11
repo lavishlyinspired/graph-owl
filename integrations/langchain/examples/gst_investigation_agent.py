@@ -46,6 +46,22 @@ real model (any OpenAI-compatible endpoint, matching
 `reconcile_agent.py`'s own env-var names) plus `pip install
 langchain-openai` — not a `graph_owl_langchain` dependency, since nothing
 in the package itself needs a concrete model provider.
+
+**LangSmith tracing is opt-in and needs no code change here** —
+`langchain_core`'s callback system instruments `create_agent`/
+`ChatOpenAI` automatically once these are set:
+
+    LANGSMITH_TRACING=true
+    LANGSMITH_API_KEY=<your key>
+    LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+    LANGSMITH_PROJECT=<project name>
+
+Verified live 11 August 2026: a real run produced 17 traced spans
+(`ChatOpenAI`, `tools`, and each individual MCP tool call) visible in the
+LangSmith UI under the configured project. `LANGSMITH_ENDPOINT` is the
+one to get right — the standard host is `api.smith.langchain.com`, not
+`api.langsmith.com` (which does not resolve); the two look similar
+enough to type the wrong one without noticing.
 """
 
 from __future__ import annotations
