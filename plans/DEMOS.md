@@ -1172,7 +1172,29 @@ the identical gap `traverse`'s own report already named) and the near-miss
 exclusion guard's "always true" mutant (both available fixtures happen to
 have the near-miss candidate genuinely unreached, so the guard's real value
 and the mutant agree by coincidence rather than by being checked — killing
-it needs a fixture this slice did not construct). **Still open, recorded
+it needs a fixture this slice did not construct). **P10's third
+intelligence tool shipped, 11 August 2026** (`105m`): `explain()` wraps
+`Catalog::explain_fact` — the same "already ships over HTTP, so no fresh
+authorization decision" reasoning `105l` already stated for
+`find_evidence`, not re-derived. `explanation_json`/`flake_json` are
+hand-written free functions rendering the identical recursive shape
+`GET /reasoning/explain`'s own handler already produces, duplicated rather
+than shared, because neither `graph_owl_reasoning::Explanation` nor
+`graph_owl_core::flake::Flake` can derive `Serialize` (the same convention
+`Sid`/`EdgeRef` already follow) and `graph-owl-mcp` does not depend on
+`graph-owl-server`. The budget ladder is unusual by design: no lever
+shrinks an explanation at all, because a dropped chain or premise would
+misrepresent the derivation rather than merely shrink it — an oversized
+answer is returned accurate and over budget instead. Mutation testing on
+the dispatch/rendering code found 3 gaps (the rendering functions were
+never reached by the unit-level fixture, which hands back an already-built
+JSON value rather than routing a real `Explanation` through them) and
+closed them with direct tests covering all four `Explanation` variants.
+Mutation testing on the real adapter, proven against `reasoning.rs`'s own
+three-level ontology fixture, came back clean — zero open gaps, the
+cleanest of the three tools shipped so far, because `explain` has no
+hop-count or bounds parameter for a fixture-shaped gap to hide behind.
+**Still open, recorded
 rather than assumed away**: no reference agent app
 (`examples/gst-reconcile/`) and so no scored evaluation run; the live
 GSP/ERP connectors are fixture-mode only; pack facts are readable by any
@@ -1180,7 +1202,7 @@ principal who can query at all (per-named-graph policy needs a policy model
 that does not exist yet); six of the seven planned packs are unwritten; and
 P2's remaining connectors, P3, P4, the rest of P8 (temporal engine,
 generalization beyond GST), P9's GraphRAG/hybrid-search remaining thirds,
-P10's other six tools, P11 and P12 are untouched — this is the spine, not
+P10's other five tools, P11 and P12 are untouched — this is the spine, not
 the finished platform
 
 ### Console half

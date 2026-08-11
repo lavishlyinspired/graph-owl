@@ -675,6 +675,39 @@ impl ContextSource for CatalogContext {
                 .then_some(budget::TruncationReason::DepthReached),
         }))
     }
+
+    async fn explain(
+        &self,
+        principal: &str,
+        subject: &graph_owl_core::flake::Sid,
+        predicate: &graph_owl_core::flake::Sid,
+        object: &graph_owl_core::flake::Sid,
+    ) -> Result<Option<crate::FactExplanation>, SourceError> {
+        // Authentication only, matching `find_evidence` and the HTTP route
+        // this wraps — see the trait doc comment for why.
+        self.authenticated(principal)?;
+
+        let explanation = match self
+            .catalog
+            .explain_fact(
+                subject,
+                predicate,
+                object,
+                &graph_owl_reasoning::Budget::default(),
+            )
+            .await
+        {
+            Ok(explanation) => explanation,
+            Err(CatalogError::NotFound) => return Ok(None),
+            Err(error) => return Err(unavailable(&error)),
+        };
+
+        Ok(Some(crate::FactExplanation {
+            explanation: crate::explanation_json(&explanation),
+            truncated: false,
+            truncation_reason: None,
+        }))
+    }
 }
 
 impl CatalogContext {

@@ -93,8 +93,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use graph_owl_mcp::{
-        AssetContext, ContextSource, Direction, EvidenceContext, MemoryContext, SearchResults,
-        SourceError, TraversalContext,
+        AssetContext, ContextSource, Direction, EvidenceContext, FactExplanation, MemoryContext,
+        SearchResults, SourceError, TraversalContext,
     };
     use serde_json::{Value, json};
     use std::io::Cursor;
@@ -192,6 +192,15 @@ mod tests {
             _: uuid::Uuid,
             _: u32,
         ) -> Result<Option<EvidenceContext>, SourceError> {
+            Ok(None)
+        }
+        async fn explain(
+            &self,
+            _: &str,
+            _: &graph_owl_core::flake::Sid,
+            _: &graph_owl_core::flake::Sid,
+            _: &graph_owl_core::flake::Sid,
+        ) -> Result<Option<FactExplanation>, SourceError> {
             Ok(None)
         }
     }

@@ -20,6 +20,9 @@ graph-owl-authz = { path = "../graph-owl-authz", version = "0.1.0" }
 # ones `Catalog::asset_subgraph` already takes, so the tool wraps the real
 # signature rather than re-declaring a shadow of it.
 graph-owl-traversal.workspace = true
+# Epic 105 P10: `explain()`'s `Explanation`/`Chain`/`Budget` types — the
+# same ones `Catalog::explain_fact` already takes and returns.
+graph-owl-reasoning = { path = "../graph-owl-reasoning", version = "0.1.0" }
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

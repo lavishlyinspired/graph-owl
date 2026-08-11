@@ -270,6 +270,7 @@ fn render(outcome: crate::Outcome) -> Value {
         Outcome::EvidenceFound(context) => {
             (serde_json::to_value(*context).unwrap_or(Value::Null), false)
         }
+        Outcome::Explained(fact) => (serde_json::to_value(*fact).unwrap_or(Value::Null), false),
         Outcome::Wrote(receipt) => (serde_json::to_value(*receipt).unwrap_or(Value::Null), false),
 
         // **Absent and denied are one answer**, and the text says so without
@@ -421,6 +422,15 @@ mod tests {
             _: uuid::Uuid,
             _: u32,
         ) -> Result<Option<crate::EvidenceContext>, SourceError> {
+            Ok(None)
+        }
+        async fn explain(
+            &self,
+            _: &str,
+            _: &graph_owl_core::flake::Sid,
+            _: &graph_owl_core::flake::Sid,
+            _: &graph_owl_core::flake::Sid,
+        ) -> Result<Option<crate::FactExplanation>, SourceError> {
             Ok(None)
         }
     }
@@ -706,7 +716,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
 
-        assert_eq!(names.len(), 9, "the nine read tools: {names:?}");
+        assert_eq!(names.len(), 10, "the ten read tools: {names:?}");
         assert!(!names.iter().any(|name| crate::write::is_write_tool(name)));
     }
 
@@ -725,7 +735,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
 
-        assert_eq!(names.len(), 15, "nine read plus six write: {names:?}");
+        assert_eq!(names.len(), 16, "ten read plus six write: {names:?}");
         assert!(names.contains(&crate::write::RECORD_MEMORY));
     }
 

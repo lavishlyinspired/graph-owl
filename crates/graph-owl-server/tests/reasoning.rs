@@ -13,7 +13,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use common::{json_body, test_app};
+use common::{json_body, test_app, test_catalog};
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, TriplePattern, namespace};
 use graph_owl_engine::TripleStore;
 use serde_json::Value;
@@ -269,6 +269,52 @@ async fn a_derived_fact_explains_all_the_way_down_to_assertions() {
             .all(|p| p["status"] == "asserted"),
         "depth 2 rests on assertions: {body}"
     );
+}
+
+/// **Epic 105 P10's `explain()` tool, against the real adapter.** Every
+/// test above proves the HTTP route this wraps; this proves
+/// `CatalogContext::explain` really does call through to
+/// `Catalog::explain_fact` and really does render the identical recursive
+/// shape (`explanation_json`/`flake_json`) the HTTP handler's own
+/// `explanation_body` produces — not the unit-level `Fixture` double,
+/// which never touches either function.
+#[tokio::test]
+async fn explain_reaches_the_real_derivation_through_the_real_adapter() {
+    let (catalog, _database, connection_string) = test_catalog().await;
+    seed_ontology(&graph(&connection_string).await).await;
+
+    let principal = graph_owl_core::Principal::system();
+    let reads = graph_owl_mcp::catalog::CatalogContext::new(catalog, principal.clone());
+    let fact = graph_owl_mcp::ContextSource::explain(
+        &reads,
+        &principal.id,
+        &dsc("payments"),
+        &rdf_type(),
+        &dsc("GovernedTable"),
+    )
+    .await
+    .expect("no source error")
+    .expect("the fact is derived");
+
+    assert_eq!(fact.explanation["status"], "derived", "{:?}", fact.explanation);
+    let chain = &fact.explanation["chains"][0];
+    assert_eq!(chain["rule"], "subClassOf", "{:?}", fact.explanation);
+    let deeper = chain["premises"]
+        .as_array()
+        .expect("premises")
+        .iter()
+        .find(|p| p["status"] == "derived")
+        .expect("one premise is itself derived");
+    assert!(
+        deeper["chains"][0]["premises"]
+            .as_array()
+            .expect("inner premises")
+            .iter()
+            .all(|p| p["status"] == "asserted"),
+        "depth 2 rests on assertions: {:?}",
+        fact.explanation
+    );
+    assert!(!fact.truncated);
 }
 
 #[tokio::test]

@@ -184,6 +184,34 @@ pub trait ContextSource: Send + Sync {
         finding_id: Uuid,
         max_hops: u32,
     ) -> Result<Option<EvidenceContext>, SourceError>;
+
+    /// Why a fact holds — Epic 105 P10's third intelligence tool, wrapping
+    /// [`graph_owl_api::Catalog::explain_fact`]. The same capability the
+    /// pre-existing `GET /reasoning/explain` route already serves, over the
+    /// same shape: `subject`/`predicate`/`object` resolved to a [`Sid`] via
+    /// [`Sid::from_iri`] at the dispatch layer, before this method is ever
+    /// called, matching `traverse`'s own "validated types in, not raw
+    /// strings" convention.
+    ///
+    /// **Not visibility-checked, for the identical reason `find_evidence`
+    /// is not**: `Catalog::explain_fact` takes no principal at all, and the
+    /// HTTP route this wraps already discards the one its own `Auth`
+    /// extractor requires (`Auth(_principal)`) — this tool inherits that
+    /// route's existing posture rather than inventing a new one.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached. `Ok(None)`
+    /// when the fact is neither asserted nor implied.
+    ///
+    /// [`Sid`]: graph_owl_core::flake::Sid
+    async fn explain(
+        &self,
+        principal: &str,
+        subject: &graph_owl_core::flake::Sid,
+        predicate: &graph_owl_core::flake::Sid,
+        object: &graph_owl_core::flake::Sid,
+    ) -> Result<Option<FactExplanation>, SourceError>;
 }
 
 /// A bounded walk's answer, as an agent receives it — Epic 105 P10's
@@ -256,6 +284,67 @@ pub struct EvidenceNode {
     pub iri: Option<String>,
     #[serde(default)]
     pub sources: Vec<String>,
+}
+
+/// Why a fact holds, as an agent receives it — Epic 105 P10's `explain()`
+/// tool.
+///
+/// `explanation` is a bare [`serde_json::Value`] rather than a typed tree:
+/// [`graph_owl_reasoning::Explanation`]/[`graph_owl_core::flake::Flake`]
+/// deliberately have no `Serialize` impl, the same convention `Sid`/`EdgeRef`
+/// already follow throughout this crate — every graph-rendering surface
+/// builds its own wire shape by hand at the boundary rather than deriving
+/// one. [`explanation_json`] renders the identical `{"status": ...}` shape
+/// `GET /reasoning/explain`'s own `explanation_body` already produces, so an
+/// agent and a human reading the HTTP response see the same document.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FactExplanation {
+    pub explanation: serde_json::Value,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<budget::TruncationReason>,
+}
+
+/// Renders a derivation exactly the way `GET /reasoning/explain`'s own
+/// `explanation_body` does — kept as its own hand-written function rather
+/// than shared, because `Flake`/`Explanation` cannot derive `Serialize`
+/// (see [`FactExplanation`]'s own doc comment) and this crate does not
+/// depend on `graph-owl-server`.
+fn explanation_json(explanation: &graph_owl_reasoning::Explanation) -> serde_json::Value {
+    use graph_owl_reasoning::Explanation;
+    match explanation {
+        Explanation::Asserted(fact) => {
+            serde_json::json!({ "status": "asserted", "fact": flake_json(fact) })
+        }
+        Explanation::Circular(fact) => {
+            serde_json::json!({ "status": "circular", "fact": flake_json(fact) })
+        }
+        Explanation::Unknown => serde_json::json!({ "status": "unknown" }),
+        Explanation::Derived { chains } => serde_json::json!({
+            "status": "derived",
+            "chains": chains
+                .iter()
+                .map(|chain| serde_json::json!({
+                    "rule": chain.rule,
+                    "premises": chain.premises.iter().map(explanation_json).collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
+        }),
+    }
+}
+
+fn flake_json(flake: &graph_owl_core::flake::Flake) -> serde_json::Value {
+    serde_json::json!({
+        "s": flake.s.to_string(),
+        "p": flake.p.to_string(),
+        "o": match &flake.o {
+            graph_owl_core::flake::FlakeValue::Ref(sid) => sid.to_string(),
+            other => format!("{other:?}"),
+        },
+        "t": flake.t,
+    })
 }
 
 /// Which way a lineage walk goes.
@@ -424,6 +513,8 @@ pub enum Outcome {
     Traversed(Box<TraversalContext>),
     /// A finding's evidence graph — Epic 105 P10's `find_evidence()`.
     EvidenceFound(Box<EvidenceContext>),
+    /// Why a fact holds — Epic 105 P10's `explain()`.
+    Explained(Box<FactExplanation>),
     /// A write landed or became a proposal — Epic 32.
     Wrote(Box<write::WriteReceipt>),
     /// **An agent write was refused, readably.**
@@ -501,6 +592,9 @@ pub const TRAVERSE: &str = "traverse";
 
 /// A finding's evidence graph — Epic 105 P10's second intelligence tool.
 pub const FIND_EVIDENCE: &str = "find_evidence";
+
+/// Why a fact holds — Epic 105 P10's third intelligence tool.
+pub const EXPLAIN: &str = "explain";
 
 /// The most hops an agent may ask `traverse` to walk.
 ///
@@ -744,6 +838,31 @@ pub fn tools() -> Vec<ToolDeclaration> {
                     }
                 },
                 "required": ["findingId"],
+                "additionalProperties": false,
+            }),
+        },
+        ToolDeclaration {
+            name: EXPLAIN,
+            description: "Explain why a fact holds — asserted directly, or derived by a \
+                      chain of rules from other facts. Use the subject/predicate/object \
+                      IRIs a previous tool call already returned.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "subject": {
+                        "type": "string",
+                        "description": "The fact's subject, as an IRI.",
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "The fact's predicate, as an IRI.",
+                    },
+                    "object": {
+                        "type": "string",
+                        "description": "The fact's object, as an IRI.",
+                    },
+                },
+                "required": ["subject", "predicate", "object"],
                 "additionalProperties": false,
             }),
         },
@@ -996,6 +1115,35 @@ pub async fn call_within(
             }
         }
 
+        EXPLAIN => {
+            let subject = match required_sid(arguments, "subject") {
+                Ok(sid) => sid,
+                Err(problem) => return problem,
+            };
+            let predicate = match required_sid(arguments, "predicate") {
+                Ok(sid) => sid,
+                Err(problem) => return problem,
+            };
+            let object = match required_sid(arguments, "object") {
+                Ok(sid) => sid,
+                Err(problem) => return problem,
+            };
+            match source
+                .explain(principal, &subject, &predicate, &object)
+                .await
+            {
+                Ok(Some(mut fact)) => {
+                    if let Some(reason) = budget::fit(&mut fact, limit) {
+                        fact.truncated = true;
+                        fact.truncation_reason = Some(reason);
+                    }
+                    Outcome::Explained(Box::new(fact))
+                }
+                Ok(None) => Outcome::NotFound,
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
         _ => Outcome::BadRequest(format!("no tool named `{tool}`")),
     }
 }
@@ -1013,6 +1161,18 @@ fn required_finding_id(arguments: &serde_json::Value) -> Result<Uuid, Outcome> {
     let text = required_text(arguments, "findingId")?;
     Uuid::parse_str(text)
         .map_err(|_| Outcome::BadRequest(format!("`findingId` must be a UUID, not `{text}`")))
+}
+
+fn required_sid(
+    arguments: &serde_json::Value,
+    field: &str,
+) -> Result<graph_owl_core::flake::Sid, Outcome> {
+    let text = required_text(arguments, field)?;
+    graph_owl_core::flake::Sid::from_iri(text).ok_or_else(|| {
+        Outcome::BadRequest(format!(
+            "`{field}` must be an IRI this deployment resolves, not `{text}`"
+        ))
+    })
 }
 
 fn required_text<'a>(arguments: &'a serde_json::Value, field: &str) -> Result<&'a str, Outcome> {
@@ -1269,6 +1429,33 @@ impl budget::Fits for EvidenceContext {
             self.truncated = true;
             return true;
         }
+        false
+    }
+
+    fn render(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+impl budget::Fits for FactExplanation {
+    /// **No lever shrinks this payload, deliberately.** Unlike a list of
+    /// interchangeable entities, an explanation's chains and premises are
+    /// the fact's whole justification — dropping one would not present a
+    /// smaller true answer, it would present a different, wrong one (a
+    /// derivation with a missing step). `graph_owl_reasoning::Budget`
+    /// (passed to `explain_fact` before this type ever exists) already
+    /// bounds how deep and wide the search goes, so an oversized result
+    /// here should be rare; when it happens, this returns the accurate
+    /// answer over budget rather than a shrunk, misleading one.
+    fn shorten_detail(&mut self) -> bool {
+        false
+    }
+
+    fn shorten_relations(&mut self) -> bool {
+        false
+    }
+
+    fn drop_entities(&mut self) -> bool {
         false
     }
 
@@ -1642,6 +1829,41 @@ mod tests {
             }
             Ok(None)
         }
+
+        async fn explain(
+            &self,
+            principal: &str,
+            subject: &graph_owl_core::flake::Sid,
+            predicate: &graph_owl_core::flake::Sid,
+            object: &graph_owl_core::flake::Sid,
+        ) -> Result<Option<FactExplanation>, SourceError> {
+            self.asked.lock().expect("lock").push((
+                principal.to_string(),
+                format!("explain:{subject}:{predicate}:{object}"),
+            ));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            // Not gated by principal, matching `find_evidence` and the real
+            // adapter's own posture.
+            if *subject == known_derived_fact().0
+                && *predicate == known_derived_fact().1
+                && *object == known_derived_fact().2
+            {
+                return Ok(Some(FactExplanation {
+                    explanation: serde_json::json!({
+                        "status": "derived",
+                        "chains": [{
+                            "rule": "subClassOf",
+                            "premises": [{ "status": "asserted", "fact": { "s": "a", "p": "b", "o": "c", "t": 1 } }],
+                        }],
+                    }),
+                    truncated: false,
+                    truncation_reason: None,
+                }));
+            }
+            Ok(None)
+        }
     }
 
     /// A trust summary for a context whose trust is not what is under test.
@@ -1661,6 +1883,34 @@ mod tests {
     /// `Uuid::new_v4()` happened to generate.
     fn known_finding_id() -> Uuid {
         Uuid::parse_str("6f7e6b0e-6b0e-4b0e-8b0e-6b0e6b0e6b0e").expect("valid uuid literal")
+    }
+
+    /// The one `(subject, predicate, object)` triple
+    /// [`Fixture::explain`] knows about — real, `Sid::from_iri`-resolvable
+    /// IRIs under the built-in `dsc:` namespace, so a dispatcher-level test
+    /// can pass real strings rather than reaching around the parser.
+    fn known_derived_fact() -> (
+        graph_owl_core::flake::Sid,
+        graph_owl_core::flake::Sid,
+        graph_owl_core::flake::Sid,
+    ) {
+        (
+            graph_owl_core::flake::Sid::new(graph_owl_core::flake::namespace::DSC, "order-1"),
+            graph_owl_core::flake::Sid::new(graph_owl_core::flake::namespace::DSC, "derivedFrom"),
+            graph_owl_core::flake::Sid::new(graph_owl_core::flake::namespace::DSC, "staging-1"),
+        )
+    }
+
+    fn explain_args(
+        subject: &graph_owl_core::flake::Sid,
+        predicate: &graph_owl_core::flake::Sid,
+        object: &graph_owl_core::flake::Sid,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "subject": subject.to_iri().expect("dsc resolves"),
+            "predicate": predicate.to_iri().expect("dsc resolves"),
+            "object": object.to_iri().expect("dsc resolves"),
+        })
     }
 
     fn evidence_args(finding_id: Uuid) -> serde_json::Value {
@@ -1938,9 +2188,10 @@ mod tests {
                     QUERY_GRAPH,
                     TRAVERSE,
                     FIND_EVIDENCE,
+                    EXPLAIN,
                 ],
                 "the seven read capabilities Epic 14 promises, plus Epic 105 P10's \
-                 first two intelligence tools, and no others — a tool that appears \
+                 first three intelligence tools, and no others — a tool that appears \
                  here without a dispatch arm teaches an agent to distrust the \
                  manifest, and one that dispatches without appearing here is a \
                  capability no agent will ever find"
@@ -3020,6 +3271,209 @@ mod tests {
 
             assert!(context.shorten_detail());
             assert!(context.near_miss.expect("still present").sources.is_empty());
+        }
+    }
+
+    /// Epic 105 P10 — `explain()`, the platform doc's third intelligence
+    /// tool.
+    mod the_explain_tool {
+        use super::*;
+
+        #[tokio::test]
+        async fn explain_returns_the_known_derivation() {
+            let source = Fixture::working();
+            let (subject, predicate, object) = known_derived_fact();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                EXPLAIN,
+                &explain_args(&subject, &predicate, &object),
+            )
+            .await;
+
+            let Outcome::Explained(fact) = outcome else {
+                panic!("expected Explained, got {outcome:?}");
+            };
+            assert_eq!(fact.explanation["status"], "derived");
+            assert!(!fact.truncated);
+        }
+
+        /// **Not gated by principal** — `explain_fact` takes none, matching
+        /// `find_evidence`'s identical property and for the identical
+        /// reason.
+        #[tokio::test]
+        async fn any_authenticated_principal_sees_the_same_explanation() {
+            let source = Fixture::working();
+            let (subject, predicate, object) = known_derived_fact();
+
+            let as_alice = call(
+                &source,
+                Some("alice"),
+                EXPLAIN,
+                &explain_args(&subject, &predicate, &object),
+            )
+            .await;
+            let as_mallory = call(
+                &source,
+                Some("mallory"),
+                EXPLAIN,
+                &explain_args(&subject, &predicate, &object),
+            )
+            .await;
+
+            assert_eq!(as_alice, as_mallory);
+            assert!(matches!(as_alice, Outcome::Explained(_)));
+        }
+
+        #[tokio::test]
+        async fn a_fact_neither_asserted_nor_implied_is_not_found() {
+            let source = Fixture::working();
+            let unknown = graph_owl_core::flake::Sid::new(
+                graph_owl_core::flake::namespace::DSC,
+                "nothing-holds-this",
+            );
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                EXPLAIN,
+                &explain_args(&unknown, &unknown, &unknown),
+            )
+            .await;
+
+            assert_eq!(outcome, Outcome::NotFound);
+        }
+
+        #[tokio::test]
+        async fn an_iri_this_deployment_cannot_resolve_is_a_bad_request() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                EXPLAIN,
+                &serde_json::json!({
+                    "subject": "not an iri at all",
+                    "predicate": "https://graph-owl.dev/ns/catalog#derivedFrom",
+                    "object": "https://graph-owl.dev/ns/catalog#staging-1",
+                }),
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::BadRequest(_)), "{outcome:?}");
+        }
+
+        #[tokio::test]
+        async fn an_unauthenticated_caller_learns_nothing() {
+            let source = Fixture::working();
+            let (subject, predicate, object) = known_derived_fact();
+
+            let outcome = call(
+                &source,
+                None,
+                EXPLAIN,
+                &explain_args(&subject, &predicate, &object),
+            )
+            .await;
+
+            assert_eq!(outcome, Outcome::Unauthenticated);
+        }
+
+        /// **No lever ever shrinks this payload**, called directly to state
+        /// the contract — the dispatcher-level tests above never exercise
+        /// an over-budget explanation, since the known fixture answer is
+        /// small.
+        #[test]
+        fn no_lever_claims_progress_on_an_explanation() {
+            use crate::budget::Fits;
+            let mut fact = FactExplanation {
+                explanation: serde_json::json!({ "status": "derived", "chains": [] }),
+                truncated: false,
+                truncation_reason: None,
+            };
+
+            assert!(!fact.shorten_detail());
+            assert!(!fact.shorten_relations());
+            assert!(!fact.drop_entities());
+        }
+
+        /// **`render()` returns the real value, not a placeholder.** No
+        /// dispatcher-level test above distinguishes this — `budget::fit`
+        /// only uses `render()` to *estimate* size, never as the payload
+        /// actually returned to the caller (`jsonrpc.rs` serializes the
+        /// struct directly), and every dispatcher test here stays under
+        /// the default budget regardless of what the estimate says.
+        #[test]
+        fn render_serializes_the_real_explanation() {
+            use crate::budget::Fits;
+            let fact = FactExplanation {
+                explanation: serde_json::json!({ "status": "asserted" }),
+                truncated: true,
+                truncation_reason: Some(budget::TruncationReason::DetailShortened),
+            };
+
+            let rendered = fact.render();
+
+            assert_eq!(rendered["explanation"]["status"], "asserted");
+            assert_eq!(rendered["truncated"], true);
+        }
+
+        /// **`explanation_json`/`flake_json`, called directly.** No test
+        /// above reaches the real rendering function at all — the
+        /// dispatcher-level tests exercise `Fixture::explain`, which hands
+        /// back an already-built `serde_json::Value` rather than a real
+        /// `graph_owl_reasoning::Explanation` for this function to render.
+        /// Only `CatalogContext::explain` (the real adapter) calls it, and
+        /// unlike a list-shaped payload, there is no dispatcher-reachable
+        /// unit shape to route a real `Explanation` through without a
+        /// database — the same reasoning that already justified a direct
+        /// call for `TraversalContext`/`EvidenceContext`'s own
+        /// dispatcher-unreachable branches.
+        #[test]
+        fn explanation_json_matches_the_http_route_s_own_shape() {
+            use graph_owl_reasoning::{Chain, Explanation};
+
+            let subject =
+                graph_owl_core::flake::Sid::new(graph_owl_core::flake::namespace::DSC, "order-1");
+            let predicate = graph_owl_core::flake::Sid::new(
+                graph_owl_core::flake::namespace::DSC,
+                "derivedFrom",
+            );
+            let object =
+                graph_owl_core::flake::Sid::new(graph_owl_core::flake::namespace::DSC, "staging-1");
+            let fact = graph_owl_core::flake::Flake::assert(
+                subject.clone(),
+                predicate.clone(),
+                graph_owl_core::flake::FlakeValue::Ref(object.clone()),
+                7,
+            );
+
+            let asserted = explanation_json(&Explanation::Asserted(fact.clone()));
+            assert_eq!(asserted["status"], "asserted");
+            assert_eq!(asserted["fact"]["s"], subject.to_string());
+            assert_eq!(asserted["fact"]["p"], predicate.to_string());
+            assert_eq!(asserted["fact"]["o"], object.to_string());
+            assert_eq!(asserted["fact"]["t"], 7);
+
+            let circular = explanation_json(&Explanation::Circular(fact));
+            assert_eq!(circular["status"], "circular");
+
+            let unknown = explanation_json(&Explanation::Unknown);
+            assert_eq!(unknown, serde_json::json!({ "status": "unknown" }));
+
+            let derived = explanation_json(&Explanation::Derived {
+                chains: vec![Chain {
+                    rule: graph_owl_reasoning::RuleName::SubClassOf,
+                    premises: vec![Explanation::Unknown],
+                }],
+            });
+            assert_eq!(derived["status"], "derived");
+            assert_eq!(derived["chains"][0]["rule"], "subClassOf");
+            assert_eq!(
+                derived["chains"][0]["premises"][0],
+                serde_json::json!({ "status": "unknown" })
+            );
         }
     }
 
