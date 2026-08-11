@@ -128,6 +128,69 @@ pub trait ContextSource: Send + Sync {
         principal: &str,
         query: &str,
     ) -> Result<Result<QueryAnswer, QueryFault>, SourceError>;
+
+    /// A bounded neighbourhood walk from a catalog asset — Epic 105 P10,
+    /// the first of the platform plan's eight intelligence tools
+    /// (`traverse()`). **Deliberately scoped to catalog assets, not any
+    /// graph subject.** `Catalog::asset_subgraph` checks the caller's
+    /// visibility before walking (`00b` decision 7); a pack-domain
+    /// subject (a GST invoice, a hospitality guest) has no such policy
+    /// model yet — `plans/105-domain-neutrality.md`'s own recorded gap —
+    /// so this tool must not reach one until that model exists, rather
+    /// than silently serving an unauthorized read through an agent
+    /// surface.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached. `Ok(None)`
+    /// covers "no such asset" **and** "not visible to this principal",
+    /// which must not be distinguished, for the same reason
+    /// [`Outcome::NotFound`] exists everywhere else on this trait.
+    async fn traverse(
+        &self,
+        principal: &str,
+        fqn: &str,
+        direction: Direction,
+        max_hops: u32,
+    ) -> Result<Option<TraversalContext>, SourceError>;
+}
+
+/// A bounded walk's answer, as an agent receives it — Epic 105 P10's
+/// `traverse()` tool.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TraversalContext {
+    pub nodes: Vec<TraversalNode>,
+    pub edges: Vec<TraversalEdge>,
+    /// The walk hit its bounds before exhausting the neighbourhood — a
+    /// smaller answer than the true one, not a wrong one, and an agent
+    /// that cannot tell the two apart presents the smaller as complete.
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<budget::TruncationReason>,
+}
+
+/// One node the walk reached, its identity rendered as a full IRI so an
+/// agent can pass it straight back into another tool call.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraversalNode {
+    pub id: String,
+}
+
+/// One edge the walk followed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraversalEdge {
+    pub from: String,
+    pub to: String,
+    pub relationship: String,
+    /// The reasoner concluded this edge; nobody asserted it — carried
+    /// through from [`graph_owl_traversal::EdgeRef::derived`] rather than
+    /// dropped, the same reason a derived triple is tagged everywhere else
+    /// this system renders one.
+    pub derived: bool,
 }
 
 /// Which way a lineage walk goes.
@@ -292,6 +355,8 @@ pub enum Outcome {
     Governance(Box<lineage::GovernanceContext>),
     /// Bindings from a graph query.
     Bindings(Box<QueryAnswer>),
+    /// A bounded neighbourhood walk — Epic 105 P10's `traverse()`.
+    Traversed(Box<TraversalContext>),
     /// A write landed or became a proposal — Epic 32.
     Wrote(Box<write::WriteReceipt>),
     /// **An agent write was refused, readably.**
@@ -362,6 +427,23 @@ pub const GET_GOVERNANCE_CONTEXT: &str = "get_governance_context";
 
 /// The escape hatch — Epic 14 Slice D.
 pub const QUERY_GRAPH: &str = "query_graph";
+
+/// A bounded neighbourhood walk — Epic 105 P10, the first of the platform
+/// plan's eight intelligence tools.
+pub const TRAVERSE: &str = "traverse";
+
+/// The most hops an agent may ask `traverse` to walk.
+///
+/// Six, matching `GET /findings/{id}/evidence-graph`'s own server-side cap
+/// (`plans/105e-evidence-chain-walk.md`) — the same bound applied for the
+/// same reason: the cap exists to protect the server, not to be polite to
+/// the caller, and an agent-facing surface has no less reason to enforce
+/// it than a human-facing one.
+const MAX_TRAVERSE_HOPS: u32 = 6;
+
+/// `traverse`'s default when the caller does not say — small enough that a
+/// vague question does not accidentally request the whole graph.
+const DEFAULT_TRAVERSE_HOPS: u32 = 2;
 
 /// How many hits one search returns before it reports truncation.
 ///
@@ -538,6 +620,36 @@ pub fn tools() -> Vec<ToolDeclaration> {
                     }
                 },
                 "required": ["query"],
+                "additionalProperties": false,
+            }),
+        },
+        ToolDeclaration {
+            name: TRAVERSE,
+            description: "Walk a bounded neighbourhood outward from a catalog asset — \
+                      what is connected to it, within a hop limit. Scoped to catalog \
+                      assets only; ask about a domain-pack entity (an invoice, a \
+                      guest) through the tool shaped for that finding or evidence \
+                      question instead.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "fullyQualifiedName": {
+                        "type": "string",
+                        "description": "The asset to walk outward from.",
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["upstream", "downstream"],
+                        "description": "Defaults to upstream.",
+                    },
+                    "maxHops": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": i64::from(MAX_TRAVERSE_HOPS),
+                        "description": "Defaults to 2, capped at 6.",
+                    }
+                },
+                "required": ["fullyQualifiedName"],
                 "additionalProperties": false,
             }),
         },
@@ -742,6 +854,32 @@ pub async fn call_within(
             }
         }
 
+        TRAVERSE => {
+            let fqn = match required_fqn(arguments) {
+                Ok(fqn) => fqn,
+                Err(problem) => return problem,
+            };
+            let direction = match direction_of(arguments) {
+                Ok(direction) => direction,
+                Err(problem) => return problem,
+            };
+            let max_hops = match traverse_hops(arguments) {
+                Ok(max_hops) => max_hops,
+                Err(problem) => return problem,
+            };
+            match source.traverse(principal, fqn, direction, max_hops).await {
+                Ok(Some(mut context)) => {
+                    if let Some(reason) = budget::fit(&mut context, limit) {
+                        context.truncated = true;
+                        context.truncation_reason = Some(reason);
+                    }
+                    Outcome::Traversed(Box::new(context))
+                }
+                Ok(None) => Outcome::NotFound,
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
         _ => Outcome::BadRequest(format!("no tool named `{tool}`")),
     }
 }
@@ -828,6 +966,34 @@ fn search_limit(arguments: &serde_json::Value) -> Result<usize, Outcome> {
     }
 }
 
+/// `maxHops` for `traverse` — **capped, never refused**, the same posture
+/// [`search_limit`] takes: an agent asking for more than the cap means "as
+/// far as you'll go", not a malformed request.
+fn traverse_hops(arguments: &serde_json::Value) -> Result<u32, Outcome> {
+    match arguments.get("maxHops") {
+        None | Some(serde_json::Value::Null) => Ok(DEFAULT_TRAVERSE_HOPS),
+        Some(serde_json::Value::Number(number)) => {
+            let Some(asked) = number.as_u64() else {
+                return Err(Outcome::BadRequest(
+                    "`maxHops` must be a positive whole number".to_string(),
+                ));
+            };
+            if asked == 0 {
+                return Err(Outcome::BadRequest(
+                    "`maxHops` must be at least 1; a walk of zero hops asks for no answer"
+                        .to_string(),
+                ));
+            }
+            Ok(u32::try_from(asked)
+                .unwrap_or(MAX_TRAVERSE_HOPS)
+                .min(MAX_TRAVERSE_HOPS))
+        }
+        Some(_) => Err(Outcome::BadRequest(
+            "`maxHops`, when given, must be a number".to_string(),
+        )),
+    }
+}
+
 impl budget::Fits for AssetContext {
     fn shorten_detail(&mut self) -> bool {
         self.description.take().is_some()
@@ -897,6 +1063,38 @@ impl budget::Fits for QueryAnswer {
         if self.rows.pop().is_none() {
             return false;
         }
+        self.truncated = true;
+        true
+    }
+
+    fn render(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+impl budget::Fits for TraversalContext {
+    fn shorten_detail(&mut self) -> bool {
+        false
+    }
+
+    /// Edges first — every node stays present and nameable, the same
+    /// "related-entity lists before entities themselves" ordering
+    /// [`budget::fit`]'s own doc comment describes.
+    fn shorten_relations(&mut self) -> bool {
+        self.edges.pop().is_some()
+    }
+
+    /// **Removes the dropped node's own edges too**, so a truncated answer
+    /// never names an edge pointing at a node the agent was not told
+    /// about — the same invariant `graph_owl_traversal::Subgraph::
+    /// without_dangling_edges` enforces server-side, kept here because
+    /// this payload is shaped independently of that one.
+    fn drop_entities(&mut self) -> bool {
+        let Some(dropped) = self.nodes.pop() else {
+            return false;
+        };
+        self.edges
+            .retain(|edge| edge.from != dropped.id && edge.to != dropped.id);
         self.truncated = true;
         true
     }
@@ -1185,6 +1383,47 @@ mod tests {
                 truncated: false,
             }))
         }
+
+        async fn traverse(
+            &self,
+            principal: &str,
+            fqn: &str,
+            direction: Direction,
+            max_hops: u32,
+        ) -> Result<Option<TraversalContext>, SourceError> {
+            self.asked.lock().expect("lock").push((
+                principal.to_string(),
+                format!("traverse:{fqn}:{direction:?}:{max_hops}"),
+            ));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            // Same pair as `asset_context`: `alice` may see `warehouse.orders`,
+            // nobody may see `finance.salaries`, and a denial and an absence
+            // are the same `Ok(None)` — this fixture proves the dispatch path
+            // cannot tell the two apart from the response alone.
+            if principal == "alice" && fqn == "warehouse.orders" {
+                return Ok(Some(TraversalContext {
+                    nodes: vec![
+                        TraversalNode {
+                            id: "warehouse.orders".into(),
+                        },
+                        TraversalNode {
+                            id: "warehouse.customers".into(),
+                        },
+                    ],
+                    edges: vec![TraversalEdge {
+                        from: "warehouse.orders".into(),
+                        to: "warehouse.customers".into(),
+                        relationship: "references".into(),
+                        derived: false,
+                    }],
+                    truncated: false,
+                    truncation_reason: None,
+                }));
+            }
+            Ok(None)
+        }
     }
 
     /// A trust summary for a context whose trust is not what is under test.
@@ -1468,11 +1707,13 @@ mod tests {
                     ANALYZE_IMPACT,
                     GET_GOVERNANCE_CONTEXT,
                     QUERY_GRAPH,
+                    TRAVERSE,
                 ],
-                "the seven read capabilities Epic 14 promises, and no others — \
-                 a tool that appears here without a dispatch arm teaches an agent \
-                 to distrust the manifest, and one that dispatches without \
-                 appearing here is a capability no agent will ever find"
+                "the seven read capabilities Epic 14 promises, plus Epic 105 P10's \
+                 first intelligence tool, and no others — a tool that appears \
+                 here without a dispatch arm teaches an agent to distrust the \
+                 manifest, and one that dispatches without appearing here is a \
+                 capability no agent will ever find"
             );
         }
 
@@ -2026,7 +2267,12 @@ mod tests {
         async fn a_denied_asset_is_not_found_on_every_tool() {
             let source = Fixture::working();
 
-            for tool in [EXPLAIN_LINEAGE, ANALYZE_IMPACT, GET_GOVERNANCE_CONTEXT] {
+            for tool in [
+                EXPLAIN_LINEAGE,
+                ANALYZE_IMPACT,
+                GET_GOVERNANCE_CONTEXT,
+                TRAVERSE,
+            ] {
                 let denied = call(&source, Some("alice"), tool, &args("finance.salaries")).await;
                 let absent = call(&source, Some("alice"), tool, &args("no.such.thing")).await;
 
@@ -2049,6 +2295,7 @@ mod tests {
                 ANALYZE_IMPACT,
                 GET_GOVERNANCE_CONTEXT,
                 QUERY_GRAPH,
+                TRAVERSE,
             ] {
                 let outcome = call(&source, None, tool, &args("warehouse.orders")).await;
                 assert_eq!(outcome, Outcome::Unauthenticated, "{tool}");
@@ -2072,6 +2319,7 @@ mod tests {
                 ANALYZE_IMPACT,
                 GET_GOVERNANCE_CONTEXT,
                 QUERY_GRAPH,
+                TRAVERSE,
             ] {
                 let outcome = call(
                     &source,
@@ -2196,9 +2444,288 @@ mod tests {
         }
     }
 
+    /// Epic 105 P10 — `traverse()`, the first of the platform doc's eight
+    /// intelligence tools.
+    mod the_traversal_tool {
+        use super::*;
+        use crate::budget::Fits;
+
+        #[tokio::test]
+        async fn traverse_returns_the_bounded_neighbourhood() {
+            let source = Fixture::working();
+
+            let outcome = call(&source, Some("alice"), TRAVERSE, &args("warehouse.orders")).await;
+
+            let Outcome::Traversed(context) = outcome else {
+                panic!("expected Traversed, got {outcome:?}");
+            };
+            assert_eq!(context.nodes.len(), 2);
+            assert_eq!(context.edges.len(), 1);
+            assert_eq!(context.edges[0].relationship, "references");
+            assert!(!context.truncated);
+        }
+
+        /// The defaults reach the source unchanged: upstream, two hops — the
+        /// same defaults [`direction_of`] and [`traverse_hops`] document.
+        #[tokio::test]
+        async fn omitted_direction_and_hops_default_to_upstream_and_two() {
+            let source = Fixture::working();
+
+            call(&source, Some("alice"), TRAVERSE, &args("warehouse.orders")).await;
+
+            let questions = source.questions();
+            assert_eq!(
+                questions.last(),
+                Some(&(
+                    "alice".to_string(),
+                    "traverse:warehouse.orders:Upstream:2".to_string()
+                ))
+            );
+        }
+
+        /// An explicit direction and hop count reach the source as asked —
+        /// proving the dispatcher forwards them rather than only ever using
+        /// the defaults.
+        #[tokio::test]
+        async fn an_explicit_direction_and_hop_count_reach_the_source() {
+            let source = Fixture::working();
+
+            call(
+                &source,
+                Some("alice"),
+                TRAVERSE,
+                &serde_json::json!({
+                    "fullyQualifiedName": "warehouse.orders",
+                    "direction": "downstream",
+                    "maxHops": 4,
+                }),
+            )
+            .await;
+
+            let questions = source.questions();
+            assert_eq!(
+                questions.last(),
+                Some(&(
+                    "alice".to_string(),
+                    "traverse:warehouse.orders:Downstream:4".to_string()
+                ))
+            );
+        }
+
+        /// **Capped, not refused** — the same posture [`search_limit`] takes.
+        /// An agent asking for more hops than the cap allows gets the cap, not
+        /// an error scolding it for asking.
+        #[tokio::test]
+        async fn a_hop_count_over_the_cap_is_clamped_not_refused() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                TRAVERSE,
+                &serde_json::json!({ "fullyQualifiedName": "warehouse.orders", "maxHops": 99 }),
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::Traversed(_)), "{outcome:?}");
+            let questions = source.questions();
+            assert_eq!(
+                questions.last(),
+                Some(&(
+                    "alice".to_string(),
+                    "traverse:warehouse.orders:Upstream:6".to_string()
+                ))
+            );
+        }
+
+        /// A walk of zero hops asks for no answer at all — refused, not
+        /// silently rounded up to one.
+        #[tokio::test]
+        async fn a_hop_count_of_zero_is_refused() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                TRAVERSE,
+                &serde_json::json!({ "fullyQualifiedName": "warehouse.orders", "maxHops": 0 }),
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::BadRequest(_)), "{outcome:?}");
+        }
+
+        /// A denied asset and an absent one must be the same `NotFound` — the
+        /// property every other tool on this trait already holds, extended to
+        /// the newest one.
+        #[tokio::test]
+        async fn a_denied_asset_is_not_found_same_as_absent() {
+            let source = Fixture::working();
+
+            let denied = call(&source, Some("alice"), TRAVERSE, &args("finance.salaries")).await;
+            let absent = call(&source, Some("alice"), TRAVERSE, &args("no.such.thing")).await;
+
+            assert_eq!(denied, Outcome::NotFound);
+            assert_eq!(
+                denied, absent,
+                "traverse must not distinguish denied from absent"
+            );
+        }
+
+        /// **`shorten_detail` is called directly, not through `budget::fit`.**
+        /// `TraversalContext` has no prose to shorten, so the method is a
+        /// permanent `false` — and `fit`'s own shrink-check absorbs a mutant
+        /// that flips it to `true` (nothing changes either way, so the
+        /// ladder's next rung runs identically in both cases). That makes
+        /// this specific lever unobservable through the dispatcher by
+        /// construction, not a gap in the dispatcher tests above; calling it
+        /// directly is the only way to state the contract at all.
+        #[test]
+        fn shorten_detail_never_claims_progress() {
+            let mut context = TraversalContext {
+                nodes: vec![TraversalNode {
+                    id: "a".to_string(),
+                }],
+                edges: Vec::new(),
+                truncated: false,
+                truncation_reason: None,
+            };
+
+            assert!(!context.shorten_detail());
+        }
+
+        /// **`drop_entities`'s dangling-edge cleanup, called directly for the
+        /// same reason.** `budget::fit`'s ladder always drains every edge via
+        /// `shorten_relations` *before* it ever drops a node, so by the time
+        /// a real dispatcher call reaches `drop_entities`, `edges` is already
+        /// empty and this method's own retain-filter never runs against a
+        /// non-empty list — architecturally, not by test omission.
+        #[test]
+        fn drop_entities_removes_edges_left_dangling_by_the_dropped_node() {
+            let mut context = TraversalContext {
+                nodes: vec![
+                    TraversalNode {
+                        id: "a".to_string(),
+                    },
+                    TraversalNode {
+                        id: "b".to_string(),
+                    },
+                ],
+                edges: vec![
+                    TraversalEdge {
+                        from: "a".to_string(),
+                        to: "b".to_string(),
+                        relationship: "feeds".to_string(),
+                        derived: false,
+                    },
+                    TraversalEdge {
+                        from: "z".to_string(),
+                        to: "c".to_string(),
+                        relationship: "feeds".to_string(),
+                        derived: false,
+                    },
+                ],
+                truncated: false,
+                truncation_reason: None,
+            };
+
+            let cut = context.drop_entities();
+
+            assert!(cut);
+            // `b` is the last node — the one `Vec::pop` removes — so the edge
+            // naming it must go too; the edge naming neither endpoint that
+            // was dropped is unrelated and must survive untouched.
+            assert_eq!(
+                context.nodes,
+                vec![TraversalNode {
+                    id: "a".to_string()
+                }]
+            );
+            assert_eq!(context.edges.len(), 1, "{:?}", context.edges);
+            assert_eq!(context.edges[0].from, "z");
+            assert_eq!(context.edges[0].to, "c");
+        }
+    }
+
     /// Epic 14 Slice E — the budget, applied through the dispatcher.
     mod the_token_budget {
         use super::*;
+        use crate::budget::Fits;
+
+        /// **Edges before nodes, through the real dispatcher** — the same
+        /// ladder position `RelationsShortened` occupies everywhere else on
+        /// this trait, applied to `traverse`'s own edge list.
+        ///
+        /// **The budget is measured off the fixture, not guessed** — the
+        /// same discipline `budget`'s own tests use: exactly what the
+        /// payload costs once its one edge is gone, so this proves the
+        /// ordering rather than happening to fit a hand-picked number.
+        #[tokio::test]
+        async fn a_traversal_over_budget_loses_edges_before_nodes() {
+            let source = Fixture::working();
+            let max_tokens = {
+                let probe = TraversalContext {
+                    nodes: vec![
+                        TraversalNode {
+                            id: "warehouse.orders".to_string(),
+                        },
+                        TraversalNode {
+                            id: "warehouse.customers".to_string(),
+                        },
+                    ],
+                    edges: Vec::new(),
+                    truncated: false,
+                    truncation_reason: None,
+                };
+                budget::estimate_tokens(&probe.render())
+            };
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                TRAVERSE,
+                &args("warehouse.orders"),
+                budget::TokenBudget { max_tokens },
+            )
+            .await;
+
+            let Outcome::Traversed(context) = outcome else {
+                panic!("expected Traversed, got {outcome:?}");
+            };
+            assert_eq!(context.nodes.len(), 2, "every node survives: {context:?}");
+            assert!(context.edges.is_empty(), "{context:?}");
+            assert_eq!(
+                context.truncation_reason,
+                Some(budget::TruncationReason::RelationsShortened)
+            );
+        }
+
+        /// And once every edge is gone, a budget still too small drops nodes
+        /// — the same last-resort rung `EntitiesDropped` names everywhere
+        /// else, reached here through `traverse` specifically.
+        #[tokio::test]
+        async fn a_traversal_budget_too_small_for_edges_alone_drops_nodes_too() {
+            let source = Fixture::working();
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                TRAVERSE,
+                &args("warehouse.orders"),
+                budget::TokenBudget { max_tokens: 0 },
+            )
+            .await;
+
+            let Outcome::Traversed(context) = outcome else {
+                panic!("expected Traversed, got {outcome:?}");
+            };
+            assert!(context.nodes.len() < 2, "{context:?}");
+            assert!(context.truncated, "{context:?}");
+            assert_eq!(
+                context.truncation_reason,
+                Some(budget::TruncationReason::EntitiesDropped)
+            );
+        }
 
         /// **Detail before entities, through the real dispatcher.** The unit
         /// tests in [`budget`] prove the ladder; this proves it is wired in.

@@ -264,6 +264,9 @@ fn render(outcome: crate::Outcome) -> Value {
             (serde_json::to_value(*context).unwrap_or(Value::Null), false)
         }
         Outcome::Bindings(answer) => (serde_json::to_value(*answer).unwrap_or(Value::Null), false),
+        Outcome::Traversed(context) => {
+            (serde_json::to_value(*context).unwrap_or(Value::Null), false)
+        }
         Outcome::Wrote(receipt) => (serde_json::to_value(*receipt).unwrap_or(Value::Null), false),
 
         // **Absent and denied are one answer**, and the text says so without
@@ -399,6 +402,15 @@ mod tests {
             _: &str,
         ) -> Result<Result<crate::QueryAnswer, crate::QueryFault>, SourceError> {
             Ok(Ok(crate::QueryAnswer::default()))
+        }
+        async fn traverse(
+            &self,
+            _: &str,
+            _: &str,
+            _: Direction,
+            _: u32,
+        ) -> Result<Option<crate::TraversalContext>, SourceError> {
+            Ok(None)
         }
     }
 
@@ -683,7 +695,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
 
-        assert_eq!(names.len(), 7, "the seven read tools: {names:?}");
+        assert_eq!(names.len(), 8, "the eight read tools: {names:?}");
         assert!(!names.iter().any(|name| crate::write::is_write_tool(name)));
     }
 
@@ -702,7 +714,7 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
 
-        assert_eq!(names.len(), 13, "seven read plus six write: {names:?}");
+        assert_eq!(names.len(), 14, "eight read plus six write: {names:?}");
         assert!(names.contains(&crate::write::RECORD_MEMORY));
     }
 

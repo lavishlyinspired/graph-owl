@@ -1132,11 +1132,38 @@ one candidate mutant (whole-function replacement) and it was unviable,
 because `GraphContext`/`GraphContextNode` deliberately have no `Default` for
 a mutant to fall back to — the same property that made every earlier
 survivor this session possible (`TriplePattern`, `Flake`, `Asset` all derive
-`Default`) is precisely what this new code does not have. **Still open,
-recorded rather than assumed away**: no reference agent app (`examples/gst-reconcile/`)
-and so no scored evaluation run; the live GSP/ERP connectors are fixture-mode
-only; pack facts are readable by any principal who can query at all (per-named-graph policy needs a policy model that does not exist yet); six of the seven planned packs are unwritten; and P2's remaining connectors, P3, P4, the rest of P8 (temporal engine, generalization beyond GST), P9's
-query-planner/GraphRAG/hybrid-search thirds, P10, P11 and P12 are untouched — this is the spine, not the finished platform
+`Default`) is precisely what this new code does not have. **P10's first
+intelligence tool shipped, 11 August 2026** (`105k`): `traverse()`, the first
+of the platform doc's eight named MCP tools. Deliberately wraps the
+pre-existing, already-authorized `Catalog::asset_subgraph` rather than
+`graph_context` (`105j`) — `graph_context` takes no principal and has no
+policy check at all, and pack-domain data has no authorization model yet, so
+routing an agent-facing tool through it would have been a real, silent
+security gap rather than a missing feature. Scoped to catalog assets only
+for exactly that reason. Mutation testing on the dispatch/argument-parsing/
+budget-fitting code (`--lib`) found nine real gaps on the first pass, all
+inside the `Fits` impl, closed by two more dispatcher tests plus two direct
+calls onto the trait methods — direct because `budget::fit`'s ladder always
+fully drains edges before ever touching nodes, so `drop_entities`'s own
+dangling-edge cleanup can never run against a non-empty edge list through a
+real dispatcher call. Mutation testing on the real production adapter
+(`CatalogContext::traverse`, proven against a real Postgres asset via a new
+integration test, not the unit-level `Fixture` double) found one gap that
+was *not* closed: there is no asset-to-asset relationship-creation path
+anywhere in this codebase to seed a real multi-hop fixture with — the legacy
+`POST /tables/{id}/relationships` route is a different entity/id space from
+`Asset` (Epic 31's own documented gotcha), and `LINK_LINEAGE` is a declared
+write tool that is not actually wired to write anything yet, proven by its
+own existing test. Recorded as a real, structural gap rather than
+worked around. **Still open, recorded rather than assumed away**: no
+reference agent app (`examples/gst-reconcile/`) and so no scored evaluation
+run; the live GSP/ERP connectors are fixture-mode only; pack facts are
+readable by any principal who can query at all (per-named-graph policy needs
+a policy model that does not exist yet); six of the seven planned packs are
+unwritten; and P2's remaining connectors, P3, P4, the rest of P8 (temporal
+engine, generalization beyond GST), P9's GraphRAG/hybrid-search remaining
+thirds, P10's other seven tools, P11 and P12 are untouched — this is the
+spine, not the finished platform
 
 ### Console half
 - [x] **105** **One queue, every pack** — `findingsQueue.tsx` renders GST and hospitality identically; the difference lives in `pack.toml`. A `GstFindingsQueue.tsx` would have been the console's first per-domain hardcoding

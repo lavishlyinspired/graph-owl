@@ -31,7 +31,8 @@ use async_trait::async_trait;
 use graph_owl_mcp::{
     ANALYZE_IMPACT, AssetContext, ContextSource, Direction, EXPLAIN_LINEAGE, GET_ASSET_CONTEXT,
     GET_GOVERNANCE_CONTEXT, MemoryContext, Outcome, QueryAnswer, QueryFault, RECALL_MEMORY,
-    SEARCH_ASSETS, SearchHit, SearchResults, SourceError, call, lineage, trust,
+    SEARCH_ASSETS, SearchHit, SearchResults, SourceError, TraversalContext, TraversalEdge,
+    TraversalNode, call, lineage, trust,
 };
 
 /// A seeded catalog: a warehouse with a small lineage chain, one owner, one
@@ -226,6 +227,40 @@ impl ContextSource for Seeded {
     ) -> Result<Result<QueryAnswer, QueryFault>, SourceError> {
         self.record("query_graph");
         Ok(Ok(QueryAnswer::default()))
+    }
+
+    async fn traverse(
+        &self,
+        principal: &str,
+        fqn: &str,
+        direction: Direction,
+        _max_hops: u32,
+    ) -> Result<Option<TraversalContext>, SourceError> {
+        self.record("traverse");
+        if !Self::may_see(principal, fqn)
+            || fqn != "warehouse.orders"
+            || direction != Direction::Upstream
+        {
+            return Ok(None);
+        }
+        Ok(Some(TraversalContext {
+            nodes: vec![
+                TraversalNode {
+                    id: "warehouse.orders".to_string(),
+                },
+                TraversalNode {
+                    id: "warehouse.staging_orders".to_string(),
+                },
+            ],
+            edges: vec![TraversalEdge {
+                from: "warehouse.staging_orders".to_string(),
+                to: "warehouse.orders".to_string(),
+                relationship: "feeds".to_string(),
+                derived: false,
+            }],
+            truncated: false,
+            truncation_reason: None,
+        }))
     }
 }
 

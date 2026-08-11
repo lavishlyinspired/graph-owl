@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use graph_owl_api::{Catalog, CatalogError};
 
 use crate::{
-    AssetContext, ContextSource, MemoryContext, SourceError,
+    AssetContext, ContextSource, MemoryContext, SourceError, budget,
     trust::{Observed, summarise},
 };
 
@@ -527,6 +527,79 @@ impl ContextSource for CatalogContext {
             ))),
             Err(error) => Err(unavailable(&error)),
         }
+    }
+
+    async fn traverse(
+        &self,
+        principal: &str,
+        fqn: &str,
+        direction: crate::Direction,
+        max_hops: u32,
+    ) -> Result<Option<crate::TraversalContext>, SourceError> {
+        let who = self.authenticated(principal)?;
+
+        let Some(asset) = self
+            .catalog
+            .get_asset_by_fqn(fqn)
+            .await
+            .map_err(|e| unavailable(&e))?
+        else {
+            return Ok(None);
+        };
+
+        // `Incoming`/`Outgoing` name which edges the walk follows, not which
+        // direction is "up" — `Upstream` (what fed this asset) follows edges
+        // that point *into* it.
+        let mapped = match direction {
+            crate::Direction::Upstream => graph_owl_traversal::Direction::Incoming,
+            crate::Direction::Downstream => graph_owl_traversal::Direction::Outgoing,
+        };
+        let bounds = graph_owl_traversal::Bounds {
+            max_hops: max_hops as usize,
+            ..graph_owl_traversal::Bounds::default()
+        };
+
+        // `asset_subgraph` checks the caller's visibility internally
+        // (`00b` decision 7) — a `NotFound` from it covers "no such asset"
+        // **and** "not visible to this principal", which must not be told
+        // apart here for the same reason [`Outcome::NotFound`] exists
+        // everywhere else on this trait.
+        let subgraph = match self
+            .catalog
+            .asset_subgraph(&who, asset.id, mapped, bounds, None)
+            .await
+        {
+            Ok(subgraph) => subgraph,
+            Err(CatalogError::NotFound) => return Ok(None),
+            Err(error) => return Err(unavailable(&error)),
+        };
+
+        Ok(Some(crate::TraversalContext {
+            nodes: subgraph
+                .nodes
+                .iter()
+                .map(|sid| crate::TraversalNode { id: sid.id.clone() })
+                .collect(),
+            edges: subgraph
+                .edges
+                .iter()
+                .map(|edge| crate::TraversalEdge {
+                    from: edge.from.id.clone(),
+                    to: edge.to.id.clone(),
+                    relationship: edge.relationship.clone(),
+                    derived: edge.derived,
+                })
+                .collect(),
+            truncated: subgraph.truncated,
+            // The graph's own bounds stopped the walk, not the MCP payload
+            // budget — `DepthReached` is the one existing reason that means
+            // "nothing was measured or cut, the walk simply stopped".
+            // `call_within` may still overwrite this with a budget-driven
+            // reason if the answer needs shortening further.
+            truncation_reason: subgraph
+                .truncated
+                .then_some(budget::TruncationReason::DepthReached),
+        }))
     }
 }
 

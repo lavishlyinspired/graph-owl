@@ -1617,6 +1617,7 @@ dependencies = [
  "graph-owl-authz",
  "graph-owl-core",
  "graph-owl-storage",
+ "graph-owl-traversal",
  "rmcp",
  "serde",
  "serde_json",

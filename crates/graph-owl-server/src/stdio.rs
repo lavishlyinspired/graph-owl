@@ -94,6 +94,7 @@ mod tests {
     use async_trait::async_trait;
     use graph_owl_mcp::{
         AssetContext, ContextSource, Direction, MemoryContext, SearchResults, SourceError,
+        TraversalContext,
     };
     use serde_json::{Value, json};
     use std::io::Cursor;
@@ -175,6 +176,15 @@ mod tests {
         ) -> Result<Result<graph_owl_mcp::QueryAnswer, graph_owl_mcp::QueryFault>, SourceError>
         {
             Ok(Ok(graph_owl_mcp::QueryAnswer::default()))
+        }
+        async fn traverse(
+            &self,
+            _: &str,
+            _: &str,
+            _: Direction,
+            _: u32,
+        ) -> Result<Option<TraversalContext>, SourceError> {
+            Ok(None)
         }
     }
 

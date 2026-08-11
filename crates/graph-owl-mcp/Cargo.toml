@@ -16,6 +16,10 @@ graph-owl-api = { path = "../graph-owl-api", version = "0.1.0" }
 graph-owl-storage = { path = "../graph-owl-storage", version = "0.1.0" }
 # Epic 32: agent capabilities and grants.
 graph-owl-authz = { path = "../graph-owl-authz", version = "0.1.0" }
+# Epic 105 P10: the `traverse` tool's `Direction`/`Bounds` types — the same
+# ones `Catalog::asset_subgraph` already takes, so the tool wraps the real
+# signature rather than re-declaring a shadow of it.
+graph-owl-traversal.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -19,6 +19,7 @@ use std::process::Stdio;
 
 use graph_owl_api::{Catalog, UpsertAsset};
 use graph_owl_core::{AssetKind, Principal};
+use graph_owl_mcp::ContextSource;
 use graph_owl_mcp::catalog::{CatalogContext, CatalogWriter};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -108,6 +109,49 @@ async fn the_same_call_over_both_transports_gets_the_same_answer() {
         http_response["result"], stdio_response["result"],
         "http: {http_response}\nstdio: {stdio_response}"
     );
+}
+
+/// **Epic 105 P10's `traverse()` tool, against the real adapter.** Every
+/// other test in this file exercises `CatalogContext` through
+/// `GET_ASSET_CONTEXT`; this is the one that proves `traverse` specifically
+/// — that `CatalogContext::traverse` really does call the pre-existing,
+/// already-authorized `Catalog::asset_subgraph` and really does convert its
+/// `Subgraph` into a `TraversalContext`, rather than the unit-level
+/// `Fixture` double in `graph-owl-mcp`'s own tests (which never touches the
+/// real adapter at all).
+///
+/// **Deliberately a lone asset with no relationship.** There is no
+/// asset-to-asset relationship-creation path in this codebase to seed a
+/// multi-hop fixture with: the legacy `POST /tables/{id}/relationships`
+/// route operates on the older `Table`/`Relationship` entity pair, a
+/// separate id space from `Asset` (`00c`'s own documented gotcha — Epic
+/// 31's fixtures hit exactly this), and `LINK_LINEAGE`
+/// (`graph-owl-mcp::write`) is a declared write tool whose own test
+/// (`linking_lineage_asks_for_the_capability_that_cannot_apply`) proves it
+/// is not actually wired to write anything yet. Building that missing
+/// capability is out of scope for wiring one read tool; recorded instead of
+/// silently worked around. A lone asset still proves the real path: a BFS
+/// walk always includes its own seed at depth zero, so `nodes` is not
+/// empty — which is precisely what distinguishes a genuine call from the
+/// `Ok(None)` and `Ok(Some(Default::default()))` mutants `cargo mutants`
+/// found and a `--lib`-only run cannot see (same class of gap as
+/// `observe`/`metrics_endpoint`, documented in `CLAUDE.md`).
+#[tokio::test]
+async fn traverse_reaches_the_real_catalog_through_the_real_adapter() {
+    let (catalog, _container, _url) = common::test_catalog().await;
+    let fqn = seeded_asset(&catalog).await;
+
+    let principal = Principal::system();
+    let reads = CatalogContext::new(catalog, principal.clone());
+
+    let context = reads
+        .traverse(&principal.id, &fqn, graph_owl_mcp::Direction::Upstream, 2)
+        .await
+        .expect("no source error")
+        .expect("the seeded asset is visible to the system principal");
+
+    assert_eq!(context.nodes.len(), 1, "{context:?}");
+    assert!(!context.truncated, "{context:?}");
 }
 
 /// A real local `/embeddings`-style receiver isn't needed here — this is
