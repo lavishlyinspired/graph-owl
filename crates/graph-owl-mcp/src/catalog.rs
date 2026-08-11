@@ -601,6 +601,80 @@ impl ContextSource for CatalogContext {
                 .then_some(budget::TruncationReason::DepthReached),
         }))
     }
+
+    async fn find_evidence(
+        &self,
+        principal: &str,
+        finding_id: uuid::Uuid,
+        max_hops: u32,
+    ) -> Result<Option<crate::EvidenceContext>, SourceError> {
+        // Authentication only — this route is deliberately not
+        // visibility-checked per finding, matching the pre-existing
+        // `GET /findings/{id}/evidence-graph` this wraps (see the trait
+        // doc comment for why that is not a new gap).
+        self.authenticated(principal)?;
+
+        let bounds = graph_owl_traversal::Bounds {
+            max_hops: max_hops as usize,
+            ..graph_owl_traversal::Bounds::default()
+        };
+
+        let graph = match self
+            .catalog
+            .finding_evidence_graph(finding_id, graph_owl_traversal::Direction::Both, bounds)
+            .await
+        {
+            Ok(graph) => graph,
+            Err(CatalogError::NotFound) => return Ok(None),
+            Err(error) => return Err(unavailable(&error)),
+        };
+
+        // One provenance lookup per node, degrading to "sources unknown"
+        // rather than failing the whole answer — the same posture the HTTP
+        // route this wraps already takes.
+        let mut nodes = Vec::with_capacity(graph.nodes.len());
+        for sid in &graph.nodes {
+            let sources = self.catalog.node_sources(sid).await.unwrap_or_default();
+            nodes.push(crate::EvidenceNode {
+                id: sid.id.clone(),
+                iri: sid.to_iri(),
+                sources,
+            });
+        }
+
+        // Already-reached is excluded rather than duplicated — a node the
+        // walk *did* find is not a near miss, it is just a node.
+        let near_miss = match self.catalog.near_miss_node(finding_id).await {
+            Ok(Some(sid)) if !graph.nodes.contains(&sid) => {
+                let sources = self.catalog.node_sources(&sid).await.unwrap_or_default();
+                Some(crate::EvidenceNode {
+                    id: sid.id.clone(),
+                    iri: sid.to_iri(),
+                    sources,
+                })
+            }
+            _ => None,
+        };
+
+        Ok(Some(crate::EvidenceContext {
+            nodes,
+            edges: graph
+                .edges
+                .iter()
+                .map(|edge| crate::TraversalEdge {
+                    from: edge.from.id.clone(),
+                    to: edge.to.id.clone(),
+                    relationship: edge.relationship.clone(),
+                    derived: edge.derived,
+                })
+                .collect(),
+            near_miss,
+            truncated: graph.truncated,
+            truncation_reason: graph
+                .truncated
+                .then_some(budget::TruncationReason::DepthReached),
+        }))
+    }
 }
 
 impl CatalogContext {

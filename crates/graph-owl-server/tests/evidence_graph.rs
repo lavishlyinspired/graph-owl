@@ -21,7 +21,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use common::{test_app, token};
+use common::{test_app, test_catalog, token};
 use tower::ServiceExt;
 
 const MISSING_IN_GSTR2B: &str = r"
@@ -595,4 +595,110 @@ async fn a_finding_whose_rule_has_no_similarity_band_reports_no_near_miss_field(
         "a rule with no similarity band has no near-miss candidate to \
          report: {graph}"
     );
+}
+
+/// **Epic 105 P10's `find_evidence()` tool, against the real adapter.**
+/// Every test above proves the HTTP route this wraps; this proves
+/// `CatalogContext::find_evidence` really does call through to
+/// `Catalog::finding_evidence_graph` and really does assemble provenance
+/// the same way — the same real-adapter proof `mcp_stdio.rs`'s
+/// `traverse_reaches_the_real_catalog_through_the_real_adapter` gives
+/// `traverse`, reusing this file's own fixture rather than duplicating it.
+#[tokio::test]
+async fn find_evidence_reaches_the_supplier_node_through_the_real_adapter() {
+    let (catalog, _db, _url) = test_catalog().await;
+    let app = graph_owl_server::app(catalog.clone());
+    seed_invoice_with_a_real_supplier_node(&app).await;
+    register_and_run_missing_in_gstr2b(&app).await;
+
+    let (_, findings) = call(
+        &app,
+        "GET",
+        "/findings?pack=gst",
+        "application/json",
+        String::new(),
+    )
+    .await;
+    let id = findings[0]["id"].as_str().expect("finding id");
+    let finding_id = uuid::Uuid::parse_str(id).expect("finding id is a uuid");
+
+    let principal = graph_owl_core::Principal::system();
+    let reads = graph_owl_mcp::catalog::CatalogContext::new(catalog, principal.clone());
+    let context = graph_owl_mcp::ContextSource::find_evidence(&reads, &principal.id, finding_id, 2)
+        .await
+        .expect("no source error")
+        .expect("the finding exists");
+
+    assert!(
+        context
+            .nodes
+            .iter()
+            .any(|n| n.id == "supplier-29AACCG0527D1Z8"),
+        "{:?}",
+        context.nodes
+    );
+    assert!(
+        context
+            .edges
+            .iter()
+            .any(|e| e.from == "p-INV-1003" && e.to == "supplier-29AACCG0527D1Z8"),
+        "{:?}",
+        context.edges
+    );
+    let invoice_node = context
+        .nodes
+        .iter()
+        .find(|n| n.id == "p-INV-1003")
+        .expect("invoice node present");
+    assert_eq!(
+        invoice_node.sources,
+        vec!["gst-purchase-register".to_string()]
+    );
+}
+
+/// **The near-miss path, through the real adapter.** The test above never
+/// exercises `near_miss_node`'s `Some` branch at all — `PotentialMismatch`
+/// has no `[findings.similarity]` band, so `near_miss` is always `None`
+/// for it. `GstinTransposition`'s whole premise is a missing edge, which is
+/// exactly the case that needs a real near-miss candidate to prove
+/// `CatalogContext::find_evidence` folds one in correctly, and excludes it
+/// once it *is* reachable (not just when it happens to already be `None`).
+#[tokio::test]
+async fn find_evidence_names_the_near_miss_through_the_real_adapter() {
+    let (catalog, _db, _url) = test_catalog().await;
+    let app = graph_owl_server::app(catalog.clone());
+    seed_transposition_scenario(&app).await;
+    register_and_run_gstin_transposition(&app).await;
+
+    let (_, findings) = call(
+        &app,
+        "GET",
+        "/findings?pack=gst",
+        "application/json",
+        String::new(),
+    )
+    .await;
+    let id = findings[0]["id"].as_str().expect("finding id");
+    let finding_id = uuid::Uuid::parse_str(id).expect("finding id is a uuid");
+
+    let principal = graph_owl_core::Principal::system();
+    let reads = graph_owl_mcp::catalog::CatalogContext::new(catalog, principal.clone());
+    let context = graph_owl_mcp::ContextSource::find_evidence(&reads, &principal.id, finding_id, 2)
+        .await
+        .expect("no source error")
+        .expect("the finding exists");
+
+    assert!(
+        context
+            .nodes
+            .iter()
+            .all(|n| n.id != "supplier-27AABCU9603R1ZM"),
+        "the filed-side supplier must not be reachable by the walk: {:?}",
+        context.nodes
+    );
+    let near_miss = context
+        .near_miss
+        .expect("a near-miss candidate for this finding");
+    assert_eq!(near_miss.id, "supplier-27AABCU9603R1ZM");
+    assert_eq!(near_miss.sources, vec!["gst-gstr2b".to_string()]);
 }

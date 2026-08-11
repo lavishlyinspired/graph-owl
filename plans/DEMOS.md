@@ -1155,15 +1155,33 @@ anywhere in this codebase to seed a real multi-hop fixture with — the legacy
 `Asset` (Epic 31's own documented gotcha), and `LINK_LINEAGE` is a declared
 write tool that is not actually wired to write anything yet, proven by its
 own existing test. Recorded as a real, structural gap rather than
-worked around. **Still open, recorded rather than assumed away**: no
-reference agent app (`examples/gst-reconcile/`) and so no scored evaluation
-run; the live GSP/ERP connectors are fixture-mode only; pack facts are
-readable by any principal who can query at all (per-named-graph policy needs
-a policy model that does not exist yet); six of the seven planned packs are
-unwritten; and P2's remaining connectors, P3, P4, the rest of P8 (temporal
-engine, generalization beyond GST), P9's GraphRAG/hybrid-search remaining
-thirds, P10's other seven tools, P11 and P12 are untouched — this is the
-spine, not the finished platform
+worked around. **P10's second intelligence tool shipped, 11 August 2026**
+(`105l`): `find_evidence()` wraps the pre-existing `finding_evidence_graph`
+(`105e`) — unlike `traverse`, this needed no new authorization decision,
+because the HTTP route it wraps is already, deliberately, not
+visibility-checked per finding ("a finding is queue data a reviewer needs
+to see to do the job... not a new privilege"), so wrapping it exposes
+nothing beyond what the same credential can already reach over HTTP. Two
+real-Postgres tests, reusing `evidence_graph.rs`'s own GST fixtures
+(`PotentialMismatch` for the ordinary walk, `GstinTransposition` for the
+near-miss path, since the first fixture alone never exercises
+`near_miss_node`'s `Some` branch at all). Mutation testing closed 12 gaps
+in the token-budget ladder and left two open, honestly: the `max_hops`
+bound (no multi-hop pack-domain fixture exists anywhere in this codebase,
+the identical gap `traverse`'s own report already named) and the near-miss
+exclusion guard's "always true" mutant (both available fixtures happen to
+have the near-miss candidate genuinely unreached, so the guard's real value
+and the mutant agree by coincidence rather than by being checked — killing
+it needs a fixture this slice did not construct). **Still open, recorded
+rather than assumed away**: no reference agent app
+(`examples/gst-reconcile/`) and so no scored evaluation run; the live
+GSP/ERP connectors are fixture-mode only; pack facts are readable by any
+principal who can query at all (per-named-graph policy needs a policy model
+that does not exist yet); six of the seven planned packs are unwritten; and
+P2's remaining connectors, P3, P4, the rest of P8 (temporal engine,
+generalization beyond GST), P9's GraphRAG/hybrid-search remaining thirds,
+P10's other six tools, P11 and P12 are untouched — this is the spine, not
+the finished platform
 
 ### Console half
 - [x] **105** **One queue, every pack** — `findingsQueue.tsx` renders GST and hospitality identically; the difference lives in `pack.toml`. A `GstFindingsQueue.tsx` would have been the console's first per-domain hardcoding

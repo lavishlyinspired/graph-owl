@@ -29,10 +29,10 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use graph_owl_mcp::{
-    ANALYZE_IMPACT, AssetContext, ContextSource, Direction, EXPLAIN_LINEAGE, GET_ASSET_CONTEXT,
-    GET_GOVERNANCE_CONTEXT, MemoryContext, Outcome, QueryAnswer, QueryFault, RECALL_MEMORY,
-    SEARCH_ASSETS, SearchHit, SearchResults, SourceError, TraversalContext, TraversalEdge,
-    TraversalNode, call, lineage, trust,
+    ANALYZE_IMPACT, AssetContext, ContextSource, Direction, EXPLAIN_LINEAGE, EvidenceContext,
+    GET_ASSET_CONTEXT, GET_GOVERNANCE_CONTEXT, MemoryContext, Outcome, QueryAnswer, QueryFault,
+    RECALL_MEMORY, SEARCH_ASSETS, SearchHit, SearchResults, SourceError, TraversalContext,
+    TraversalEdge, TraversalNode, call, lineage, trust,
 };
 
 /// A seeded catalog: a warehouse with a small lineage chain, one owner, one
@@ -261,6 +261,16 @@ impl ContextSource for Seeded {
             truncated: false,
             truncation_reason: None,
         }))
+    }
+
+    async fn find_evidence(
+        &self,
+        _principal: &str,
+        _finding_id: uuid::Uuid,
+        _max_hops: u32,
+    ) -> Result<Option<EvidenceContext>, SourceError> {
+        self.record("find_evidence");
+        Ok(None)
     }
 }
 

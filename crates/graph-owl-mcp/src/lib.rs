@@ -18,6 +18,7 @@ pub mod write;
 
 use async_trait::async_trait;
 use serde::Serialize;
+use uuid::Uuid;
 
 /// What a tool needs from the catalog.
 ///
@@ -153,6 +154,36 @@ pub trait ContextSource: Send + Sync {
         direction: Direction,
         max_hops: u32,
     ) -> Result<Option<TraversalContext>, SourceError>;
+
+    /// A finding's evidence graph — Epic 105 P10's `find_evidence()`, the
+    /// platform doc's second intelligence tool. Wraps
+    /// [`graph_owl_api::Catalog::finding_evidence_graph`] (Epic 105 P7,
+    /// `plans/105e-evidence-chain-walk.md`), which walks outward from a
+    /// finding's own subject rather than a catalog asset.
+    ///
+    /// **Not visibility-checked per finding, deliberately, matching the
+    /// pre-existing `GET /findings/{id}/evidence-graph` route this wraps.**
+    /// That route's own doc comment states the reason directly: "a finding
+    /// is queue data a reviewer needs to see to do the job, and this is a
+    /// second view onto the same finding, not a new privilege" — an
+    /// already-shipped, already-accepted posture for pack-domain data
+    /// (`plans/105-domain-neutrality.md`'s recorded gap: no per-named-graph
+    /// policy model exists yet). Wrapping it here does not create a new
+    /// exposure; the identical read is already reachable over HTTP by the
+    /// same authenticated principal. This is the opposite situation from
+    /// `traverse`, which deliberately avoided `graph_context` because that
+    /// capability had **no** HTTP route and so no prior exposure to match.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError`] only when the catalog could not be reached. `Ok(None)`
+    /// when no such finding exists.
+    async fn find_evidence(
+        &self,
+        principal: &str,
+        finding_id: Uuid,
+        max_hops: u32,
+    ) -> Result<Option<EvidenceContext>, SourceError>;
 }
 
 /// A bounded walk's answer, as an agent receives it — Epic 105 P10's
@@ -191,6 +222,40 @@ pub struct TraversalEdge {
     /// dropped, the same reason a derived triple is tagged everywhere else
     /// this system renders one.
     pub derived: bool,
+}
+
+/// A finding's evidence graph, as an agent receives it — Epic 105 P10's
+/// `find_evidence()` tool.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceContext {
+    pub nodes: Vec<EvidenceNode>,
+    pub edges: Vec<TraversalEdge>,
+    /// Epic 105 P7's near-miss half (`plans/105g-...`) — a candidate the
+    /// walk has no edge to by design (`GstinTransposition`'s whole premise),
+    /// carried through unchanged from the HTTP route this tool wraps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_miss: Option<EvidenceNode>,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<budget::TruncationReason>,
+}
+
+/// One node the evidence walk reached. Unlike [`TraversalNode`], a finding's
+/// subject is not necessarily a catalog asset — it belongs to whichever pack
+/// raised the finding — so a node here carries its resolved IRI where one
+/// exists (`iri`) and the source document(s) that asserted it (`sources`,
+/// Epic 105 P7's `105g` provenance work), neither of which a catalog asset
+/// node needs.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceNode {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iri: Option<String>,
+    #[serde(default)]
+    pub sources: Vec<String>,
 }
 
 /// Which way a lineage walk goes.
@@ -357,6 +422,8 @@ pub enum Outcome {
     Bindings(Box<QueryAnswer>),
     /// A bounded neighbourhood walk — Epic 105 P10's `traverse()`.
     Traversed(Box<TraversalContext>),
+    /// A finding's evidence graph — Epic 105 P10's `find_evidence()`.
+    EvidenceFound(Box<EvidenceContext>),
     /// A write landed or became a proposal — Epic 32.
     Wrote(Box<write::WriteReceipt>),
     /// **An agent write was refused, readably.**
@@ -431,6 +498,9 @@ pub const QUERY_GRAPH: &str = "query_graph";
 /// A bounded neighbourhood walk — Epic 105 P10, the first of the platform
 /// plan's eight intelligence tools.
 pub const TRAVERSE: &str = "traverse";
+
+/// A finding's evidence graph — Epic 105 P10's second intelligence tool.
+pub const FIND_EVIDENCE: &str = "find_evidence";
 
 /// The most hops an agent may ask `traverse` to walk.
 ///
@@ -650,6 +720,30 @@ pub fn tools() -> Vec<ToolDeclaration> {
                     }
                 },
                 "required": ["fullyQualifiedName"],
+                "additionalProperties": false,
+            }),
+        },
+        ToolDeclaration {
+            name: FIND_EVIDENCE,
+            description: "Walk a finding's evidence graph — what supports it, beyond the \
+                      flat evidence list the rule that raised it named. Includes a \
+                      near-miss candidate when one exists (a plausible match the rule \
+                      found no edge to).",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "findingId": {
+                        "type": "string",
+                        "description": "The finding's own id (a UUID).",
+                    },
+                    "maxHops": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": i64::from(MAX_TRAVERSE_HOPS),
+                        "description": "Defaults to 2, capped at 6.",
+                    }
+                },
+                "required": ["findingId"],
                 "additionalProperties": false,
             }),
         },
@@ -880,6 +974,28 @@ pub async fn call_within(
             }
         }
 
+        FIND_EVIDENCE => {
+            let finding_id = match required_finding_id(arguments) {
+                Ok(finding_id) => finding_id,
+                Err(problem) => return problem,
+            };
+            let max_hops = match traverse_hops(arguments) {
+                Ok(max_hops) => max_hops,
+                Err(problem) => return problem,
+            };
+            match source.find_evidence(principal, finding_id, max_hops).await {
+                Ok(Some(mut context)) => {
+                    if let Some(reason) = budget::fit(&mut context, limit) {
+                        context.truncated = true;
+                        context.truncation_reason = Some(reason);
+                    }
+                    Outcome::EvidenceFound(Box::new(context))
+                }
+                Ok(None) => Outcome::NotFound,
+                Err(SourceError::Unavailable(detail)) => Outcome::Unavailable(detail),
+            }
+        }
+
         _ => Outcome::BadRequest(format!("no tool named `{tool}`")),
     }
 }
@@ -891,6 +1007,12 @@ pub async fn call_within(
 /// happened is that it never asked about one.
 fn required_fqn(arguments: &serde_json::Value) -> Result<&str, Outcome> {
     required_text(arguments, "fullyQualifiedName")
+}
+
+fn required_finding_id(arguments: &serde_json::Value) -> Result<Uuid, Outcome> {
+    let text = required_text(arguments, "findingId")?;
+    Uuid::parse_str(text)
+        .map_err(|_| Outcome::BadRequest(format!("`findingId` must be a UUID, not `{text}`")))
 }
 
 fn required_text<'a>(arguments: &'a serde_json::Value, field: &str) -> Result<&'a str, Outcome> {
@@ -1097,6 +1219,57 @@ impl budget::Fits for TraversalContext {
             .retain(|edge| edge.from != dropped.id && edge.to != dropped.id);
         self.truncated = true;
         true
+    }
+
+    fn render(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+impl budget::Fits for EvidenceContext {
+    /// Unlike [`TraversalContext`], this payload has real detail to
+    /// shorten: each node's `sources`. Clearing them keeps the graph's
+    /// shape and every node's identity intact — an agent that needs to
+    /// know which document backs a node can still ask for that node by
+    /// name, the same trade [`AssetContext::shorten_detail`] makes for a
+    /// description.
+    fn shorten_detail(&mut self) -> bool {
+        let mut shrank = false;
+        for node in &mut self.nodes {
+            if !node.sources.is_empty() {
+                node.sources.clear();
+                shrank = true;
+            }
+        }
+        if let Some(near_miss) = &mut self.near_miss
+            && !near_miss.sources.is_empty()
+        {
+            near_miss.sources.clear();
+            shrank = true;
+        }
+        shrank
+    }
+
+    fn shorten_relations(&mut self) -> bool {
+        self.edges.pop().is_some()
+    }
+
+    /// **Removes the dropped node's own edges too**, the same dangling-edge
+    /// invariant [`TraversalContext::drop_entities`] enforces. The
+    /// near-miss node is dropped last of all — it is additive context, not
+    /// part of the walk itself, so it is the cheapest thing here to lose.
+    fn drop_entities(&mut self) -> bool {
+        if let Some(dropped) = self.nodes.pop() {
+            self.edges
+                .retain(|edge| edge.from != dropped.id && edge.to != dropped.id);
+            self.truncated = true;
+            return true;
+        }
+        if self.near_miss.take().is_some() {
+            self.truncated = true;
+            return true;
+        }
+        false
     }
 
     fn render(&self) -> serde_json::Value {
@@ -1424,6 +1597,51 @@ mod tests {
             }
             Ok(None)
         }
+
+        async fn find_evidence(
+            &self,
+            principal: &str,
+            finding_id: Uuid,
+            max_hops: u32,
+        ) -> Result<Option<EvidenceContext>, SourceError> {
+            self.asked.lock().expect("lock").push((
+                principal.to_string(),
+                format!("find_evidence:{finding_id}:{max_hops}"),
+            ));
+            if self.broken {
+                return Err(SourceError::Unavailable("the database is down".into()));
+            }
+            // **Not gated by principal**, unlike `traverse` above — matching
+            // the real adapter, which wraps a route deliberately not
+            // visibility-checked per finding. Any authenticated caller gets
+            // the same answer for the one known finding.
+            if finding_id == known_finding_id() {
+                return Ok(Some(EvidenceContext {
+                    nodes: vec![
+                        EvidenceNode {
+                            id: "gst:INV001".into(),
+                            iri: Some("https://graph-owl.dev/packs/gst#INV001".into()),
+                            sources: vec!["invoice-register.csv".into()],
+                        },
+                        EvidenceNode {
+                            id: "gst:SUP001".into(),
+                            iri: Some("https://graph-owl.dev/packs/gst#SUP001".into()),
+                            sources: vec!["supplier-master.csv".into()],
+                        },
+                    ],
+                    edges: vec![TraversalEdge {
+                        from: "gst:INV001".into(),
+                        to: "gst:SUP001".into(),
+                        relationship: "issuedBy".into(),
+                        derived: false,
+                    }],
+                    near_miss: None,
+                    truncated: false,
+                    truncation_reason: None,
+                }));
+            }
+            Ok(None)
+        }
     }
 
     /// A trust summary for a context whose trust is not what is under test.
@@ -1436,6 +1654,17 @@ mod tests {
 
     fn args(fqn: &str) -> serde_json::Value {
         serde_json::json!({ "fullyQualifiedName": fqn })
+    }
+
+    /// The one finding [`Fixture::find_evidence`] knows about — a fixed id
+    /// so tests can assert on it by name rather than by whatever a fresh
+    /// `Uuid::new_v4()` happened to generate.
+    fn known_finding_id() -> Uuid {
+        Uuid::parse_str("6f7e6b0e-6b0e-4b0e-8b0e-6b0e6b0e6b0e").expect("valid uuid literal")
+    }
+
+    fn evidence_args(finding_id: Uuid) -> serde_json::Value {
+        serde_json::json!({ "findingId": finding_id.to_string() })
     }
 
     /// Recall arguments, with an optional query.
@@ -1708,9 +1937,10 @@ mod tests {
                     GET_GOVERNANCE_CONTEXT,
                     QUERY_GRAPH,
                     TRAVERSE,
+                    FIND_EVIDENCE,
                 ],
                 "the seven read capabilities Epic 14 promises, plus Epic 105 P10's \
-                 first intelligence tool, and no others — a tool that appears \
+                 first two intelligence tools, and no others — a tool that appears \
                  here without a dispatch arm teaches an agent to distrust the \
                  manifest, and one that dispatches without appearing here is a \
                  capability no agent will ever find"
@@ -2647,6 +2877,152 @@ mod tests {
         }
     }
 
+    /// Epic 105 P10 — `find_evidence()`, the platform doc's second
+    /// intelligence tool.
+    mod the_find_evidence_tool {
+        use super::*;
+
+        #[tokio::test]
+        async fn find_evidence_returns_the_known_findings_graph() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                FIND_EVIDENCE,
+                &evidence_args(known_finding_id()),
+            )
+            .await;
+
+            let Outcome::EvidenceFound(context) = outcome else {
+                panic!("expected EvidenceFound, got {outcome:?}");
+            };
+            assert_eq!(context.nodes.len(), 2);
+            assert_eq!(context.edges.len(), 1);
+            assert_eq!(context.edges[0].relationship, "issuedBy");
+            assert!(!context.truncated);
+        }
+
+        /// **Not gated by principal** — the whole point of wrapping a route
+        /// that is deliberately not visibility-checked per finding. Any
+        /// authenticated caller gets the identical answer.
+        #[tokio::test]
+        async fn any_authenticated_principal_sees_the_same_evidence() {
+            let source = Fixture::working();
+
+            let as_alice = call(
+                &source,
+                Some("alice"),
+                FIND_EVIDENCE,
+                &evidence_args(known_finding_id()),
+            )
+            .await;
+            let as_mallory = call(
+                &source,
+                Some("mallory"),
+                FIND_EVIDENCE,
+                &evidence_args(known_finding_id()),
+            )
+            .await;
+
+            assert_eq!(as_alice, as_mallory);
+            assert!(matches!(as_alice, Outcome::EvidenceFound(_)));
+        }
+
+        #[tokio::test]
+        async fn an_unknown_finding_is_not_found() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                FIND_EVIDENCE,
+                &evidence_args(Uuid::new_v4()),
+            )
+            .await;
+
+            assert_eq!(outcome, Outcome::NotFound);
+        }
+
+        #[tokio::test]
+        async fn a_malformed_finding_id_is_a_bad_request() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                Some("alice"),
+                FIND_EVIDENCE,
+                &serde_json::json!({ "findingId": "not-a-uuid" }),
+            )
+            .await;
+
+            assert!(matches!(outcome, Outcome::BadRequest(_)), "{outcome:?}");
+        }
+
+        #[tokio::test]
+        async fn an_unauthenticated_caller_learns_nothing() {
+            let source = Fixture::working();
+
+            let outcome = call(
+                &source,
+                None,
+                FIND_EVIDENCE,
+                &evidence_args(known_finding_id()),
+            )
+            .await;
+
+            assert_eq!(outcome, Outcome::Unauthenticated);
+        }
+
+        /// Defaults propagate the same way `traverse`'s do — measured
+        /// through the recorded question, not inferred from the answer.
+        #[tokio::test]
+        async fn omitted_max_hops_defaults_to_two() {
+            let source = Fixture::working();
+
+            call(
+                &source,
+                Some("alice"),
+                FIND_EVIDENCE,
+                &evidence_args(known_finding_id()),
+            )
+            .await;
+
+            let questions = source.questions();
+            assert_eq!(
+                questions.last(),
+                Some(&(
+                    "alice".to_string(),
+                    format!("find_evidence:{}:2", known_finding_id())
+                ))
+            );
+        }
+
+        /// **`shorten_detail`'s near-miss branch, called directly.** No
+        /// fixture in this file gives `find_evidence` a near-miss node, so
+        /// the dispatcher-level budget tests above never reach it — the
+        /// same reasoning that already justifies a direct call for
+        /// `drop_entities`'s equivalent branch.
+        #[test]
+        fn shorten_detail_clears_the_near_miss_s_sources_too() {
+            use crate::budget::Fits;
+            let mut context = EvidenceContext {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                near_miss: Some(EvidenceNode {
+                    id: "near".to_string(),
+                    iri: None,
+                    sources: vec!["a-document.csv".to_string()],
+                }),
+                truncated: false,
+                truncation_reason: None,
+            };
+
+            assert!(context.shorten_detail());
+            assert!(context.near_miss.expect("still present").sources.is_empty());
+        }
+    }
+
     /// Epic 14 Slice E — the budget, applied through the dispatcher.
     mod the_token_budget {
         use super::*;
@@ -2725,6 +3101,202 @@ mod tests {
                 context.truncation_reason,
                 Some(budget::TruncationReason::EntitiesDropped)
             );
+        }
+
+        /// **`find_evidence`'s own detail rung** — unlike `traverse`,
+        /// `EvidenceContext::shorten_detail` has real work to do (clearing
+        /// each node's `sources`), so it is reachable through the real
+        /// ladder rather than only by a direct call.
+        #[tokio::test]
+        async fn an_evidence_graph_over_budget_loses_sources_before_edges() {
+            let source = Fixture::working();
+            let max_tokens = {
+                let mut probe = known_evidence_context();
+                probe.shorten_detail();
+                budget::estimate_tokens(&probe.render())
+            };
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                FIND_EVIDENCE,
+                &evidence_args(known_finding_id()),
+                budget::TokenBudget { max_tokens },
+            )
+            .await;
+
+            let Outcome::EvidenceFound(context) = outcome else {
+                panic!("expected EvidenceFound, got {outcome:?}");
+            };
+            assert_eq!(context.nodes.len(), 2, "every node survives: {context:?}");
+            assert_eq!(context.edges.len(), 1, "the edge survives: {context:?}");
+            assert!(
+                context.nodes.iter().all(|n| n.sources.is_empty()),
+                "{context:?}"
+            );
+            assert_eq!(
+                context.truncation_reason,
+                Some(budget::TruncationReason::DetailShortened)
+            );
+        }
+
+        #[tokio::test]
+        async fn an_evidence_graph_too_small_for_detail_alone_loses_edges_too() {
+            let source = Fixture::working();
+            let max_tokens = {
+                let mut probe = known_evidence_context();
+                budget::Fits::shorten_detail(&mut probe);
+                probe.edges.clear();
+                budget::estimate_tokens(&budget::Fits::render(&probe))
+            };
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                FIND_EVIDENCE,
+                &evidence_args(known_finding_id()),
+                budget::TokenBudget { max_tokens },
+            )
+            .await;
+
+            let Outcome::EvidenceFound(context) = outcome else {
+                panic!("expected EvidenceFound, got {outcome:?}");
+            };
+            assert_eq!(context.nodes.len(), 2, "every node survives: {context:?}");
+            assert!(context.edges.is_empty(), "{context:?}");
+            assert_eq!(
+                context.truncation_reason,
+                Some(budget::TruncationReason::RelationsShortened)
+            );
+        }
+
+        #[tokio::test]
+        async fn an_evidence_graph_budget_of_zero_drops_nodes_too() {
+            let source = Fixture::working();
+
+            let outcome = call_within(
+                &source,
+                Some("alice"),
+                FIND_EVIDENCE,
+                &evidence_args(known_finding_id()),
+                budget::TokenBudget { max_tokens: 0 },
+            )
+            .await;
+
+            let Outcome::EvidenceFound(context) = outcome else {
+                panic!("expected EvidenceFound, got {outcome:?}");
+            };
+            assert!(context.nodes.len() < 2, "{context:?}");
+            assert!(context.truncated, "{context:?}");
+            assert_eq!(
+                context.truncation_reason,
+                Some(budget::TruncationReason::EntitiesDropped)
+            );
+        }
+
+        /// **`drop_entities`'s dangling-edge cleanup and near-miss-last
+        /// ordering, called directly.** Unreachable through the real
+        /// dispatcher for the same structural reason `TraversalContext`'s
+        /// equivalent test is: `budget::fit`'s ladder always fully drains
+        /// `edges` via `shorten_relations` before `drop_entities` ever
+        /// runs, so this method's own edge-retention logic never sees a
+        /// non-empty edge list through a real call.
+        #[test]
+        fn drop_entities_removes_dangling_edges_and_saves_the_near_miss_for_last() {
+            let mut context = EvidenceContext {
+                nodes: vec![
+                    EvidenceNode {
+                        id: "a".to_string(),
+                        iri: None,
+                        sources: Vec::new(),
+                    },
+                    EvidenceNode {
+                        id: "b".to_string(),
+                        iri: None,
+                        sources: Vec::new(),
+                    },
+                ],
+                edges: vec![
+                    TraversalEdge {
+                        from: "a".to_string(),
+                        to: "b".to_string(),
+                        relationship: "feeds".to_string(),
+                        derived: false,
+                    },
+                    TraversalEdge {
+                        from: "z".to_string(),
+                        to: "c".to_string(),
+                        relationship: "feeds".to_string(),
+                        derived: false,
+                    },
+                ],
+                near_miss: Some(EvidenceNode {
+                    id: "near".to_string(),
+                    iri: None,
+                    sources: Vec::new(),
+                }),
+                truncated: false,
+                truncation_reason: None,
+            };
+
+            // First pull: the last node (`b`) is dropped, and the edge
+            // naming it goes with it; the unrelated edge and the near-miss
+            // both survive.
+            assert!(context.drop_entities());
+            assert_eq!(
+                context.nodes,
+                vec![EvidenceNode {
+                    id: "a".to_string(),
+                    iri: None,
+                    sources: Vec::new(),
+                }]
+            );
+            assert_eq!(context.edges.len(), 1, "{:?}", context.edges);
+            assert_eq!(context.edges[0].from, "z");
+            assert!(context.near_miss.is_some());
+
+            // Second pull: `a`, the last node.
+            assert!(context.drop_entities());
+            assert!(context.nodes.is_empty());
+            assert!(context.near_miss.is_some(), "the near miss is not yet gone");
+
+            // Third pull: nodes are exhausted, so the near miss goes —
+            // additive context, the cheapest thing left to lose.
+            assert!(context.drop_entities());
+            assert!(context.near_miss.is_none());
+
+            // Fourth pull: nothing left to drop.
+            assert!(!context.drop_entities());
+        }
+
+        /// The finding-evidence graph [`Fixture::working`] answers for
+        /// [`known_finding_id`] — factored out so the budget tests above can
+        /// measure a rung's cost off the exact same shape the dispatcher
+        /// returns, the same discipline `budget.rs`'s own tests use.
+        fn known_evidence_context() -> EvidenceContext {
+            EvidenceContext {
+                nodes: vec![
+                    EvidenceNode {
+                        id: "gst:INV001".to_string(),
+                        iri: Some("https://graph-owl.dev/packs/gst#INV001".to_string()),
+                        sources: vec!["invoice-register.csv".to_string()],
+                    },
+                    EvidenceNode {
+                        id: "gst:SUP001".to_string(),
+                        iri: Some("https://graph-owl.dev/packs/gst#SUP001".to_string()),
+                        sources: vec!["supplier-master.csv".to_string()],
+                    },
+                ],
+                edges: vec![TraversalEdge {
+                    from: "gst:INV001".to_string(),
+                    to: "gst:SUP001".to_string(),
+                    relationship: "issuedBy".to_string(),
+                    derived: false,
+                }],
+                near_miss: None,
+                truncated: false,
+                truncation_reason: None,
+            }
         }
 
         /// **Detail before entities, through the real dispatcher.** The unit
