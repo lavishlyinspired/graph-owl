@@ -89,6 +89,11 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/predicates", post(define_predicate))
         .route("/findings", get(list_findings).post(record_findings))
         .route("/findings/{id}/decision", post(decide_finding))
+        .route(
+            "/packs/{pack}/finding-rules",
+            post(declare_finding_rules).get(list_finding_rules),
+        )
+        .route("/packs/{pack}/reconcile", post(reconcile_pack))
         .route("/graph/export/preview", get(export_preview))
         // Epic 42 Slice G: the text-first ontology editor. `preview` is the
         // fast, as-the-author-types path (parse only); `dry-run` is the
@@ -8112,6 +8117,112 @@ async fn list_namespaces(
     Auth(_principal): Auth,
 ) -> Result<Json<Vec<graph_owl_api::NamespaceDef>>, AppError> {
     Ok(Json(catalog.namespaces().await?))
+}
+
+impl ValidateBody for DeclareFindingRules {
+    fn validate_body(_: &serde_json::Value) -> Vec<FieldError> {
+        Vec::new()
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EvidenceBindingInput {
+    predicate: String,
+    var: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FindingRuleInput {
+    label: String,
+    summary: String,
+    governed_by: String,
+    query: String,
+    subject_var: String,
+    #[serde(default)]
+    evidence: Vec<EvidenceBindingInput>,
+    #[serde(default)]
+    similarity: Option<serde_json::Value>,
+    #[serde(default)]
+    span: Option<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeclareFindingRules {
+    rules: Vec<FindingRuleInput>,
+}
+
+/// Register a pack's `[[findings]]` rules — Epic 105 P5b
+/// (`plans/105b-native-reconcile-engine.md`). The Python pack loader's
+/// fourth phase, after namespace → predicates → documents: SPARQL text
+/// inlined here, never a file path — this route, like `/namespaces` and
+/// `/predicates` beside it, never touches a pack manifest or the filesystem.
+async fn declare_finding_rules(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(pack): Path<String>,
+    AppJson(payload): AppJson<DeclareFindingRules>,
+) -> Result<StatusCode, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    for rule in payload.rules {
+        catalog
+            .declare_finding_rule(&graph_owl_api::FindingRuleDef {
+                pack: pack.clone(),
+                label: rule.label,
+                summary: rule.summary,
+                governed_by: rule.governed_by,
+                query: rule.query,
+                subject_var: rule.subject_var,
+                evidence: rule
+                    .evidence
+                    .into_iter()
+                    .map(|e| graph_owl_api::EvidenceBinding {
+                        predicate: e.predicate,
+                        var: e.var,
+                    })
+                    .collect(),
+                similarity: rule.similarity,
+                span: rule.span,
+            })
+            .await?;
+    }
+    // `200`, not `201`: declaring is upsert, so a pack reload has created
+    // nothing new for any rule it already had.
+    Ok(StatusCode::OK)
+}
+
+/// Every finding rule registered for one pack — admin-gated, the same
+/// sensitivity tier as `/predicates`: these are rule definitions, not
+/// review data.
+async fn list_finding_rules(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(pack): Path<String>,
+) -> Result<Json<Vec<graph_owl_api::FindingRuleDef>>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.finding_rules(&pack).await?))
+}
+
+/// Evaluate a pack's registered rules and record what they conclude — Epic
+/// 105 P5b, the platform doc's own P5 finding runtime, native. What used to
+/// be `graph-owl-load-pack reconcile <id>` calling Python's `run_findings`
+/// is now this: the console's "Run reconciliation" button, one HTTP call,
+/// no CLI involved.
+async fn reconcile_pack(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(pack): Path<String>,
+) -> Result<Json<graph_owl_api::ReconcileOutcome>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(catalog.reconcile_pack(&principal, &pack).await?))
 }
 
 /// The findings queue — Epic 105 P5.

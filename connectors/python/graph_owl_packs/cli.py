@@ -174,9 +174,13 @@ def erpnext_main(argv: list[str] | None = None) -> int:
 def build_reconcile_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="graph-owl-reconcile",
-        description="Run a pack's finding rules and queue what they conclude.",
+        description="Trigger the native reconcile engine for a pack's registered rules.",
     )
-    parser.add_argument("pack", type=Path, help="the pack directory (containing pack.toml)")
+    parser.add_argument(
+        "pack",
+        help="the pack id (e.g. 'gst') — its rules must already be registered, "
+        "which graph-owl-load-pack does as part of loading",
+    )
     parser.add_argument(
         "--server",
         default=os.environ.get("GRAPH_OWL_SERVER", "http://localhost:8080"),
@@ -187,18 +191,20 @@ def build_reconcile_parser() -> argparse.ArgumentParser:
 
 
 def reconcile_main(argv: list[str] | None = None) -> int:
-    """`graph-owl-reconcile` — evaluate a pack's rules.
+    """`graph-owl-reconcile` — trigger a pack's registered rules.
 
-    Exits `2` on an unevaluable rule rather than reporting a clean run: a
-    reconciliation that silently found nothing is what somebody files a return
-    on.
+    **A thin HTTP trigger, nothing more.** The rules were registered by
+    `graph-owl-load-pack`; evaluating them is `Catalog::reconcile_pack`,
+    entirely server-side (Epic 105 P5b). This command used to run the rule
+    engine itself — it no longer does, and cannot: the engine it called is
+    deleted from this package.
     """
-    from .reconcile import ReconcileError, run_findings
+    from .reconcile import run_findings
 
     args = build_reconcile_parser().parse_args(argv)
     try:
         result = run_findings(args.pack, args.server, args.token)
-    except (ManifestError, LoadError, ReconcileError) as failed:
+    except LoadError as failed:
         print(str(failed), file=sys.stderr)
         return EXIT_UNUSABLE
 

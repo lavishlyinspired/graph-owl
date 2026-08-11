@@ -67,23 +67,25 @@ Python pack loader (unchanged 3-phase order, +1 phase)
 - [x] `Catalog::declare_finding_rule` / `Catalog::finding_rules(pack)` — sixth optional field on `Catalog`, same precedent `namespaces`/`predicates` already set
 - [x] Wired into all three composition roots (`main.rs`, `bin/graph-owl-mcp-stdio.rs`, `tests/common/mod.rs`)
 - [x] 6 integration tests against real Postgres: read-back, per-pack scoping, upsert-replaces (not duplicates), empty pack, similarity/span JSON round-trip, `None` bands stay `None` not JSON `null`
-- [ ] `POST /packs/{id}/finding-rules` (admin) HTTP route + OpenAPI contract regen — **deferred to Slice C**, since the route is only needed once the Python loader (Slice D) has something to call; the registry itself is fully usable via `Catalog` today
-- [ ] Mutation run on the adapter/orchestration logic — pending, done together with Slice C's orchestration
+- [x] `POST /packs/{id}/finding-rules` (admin, upsert) + `GET /packs/{id}/finding-rules` (admin) HTTP routes, built together with Slice C once there was a real caller (the integration test) to prove them against
+- [x] Mutation run on the adapter/orchestration logic — done together with Slice C, see below
 
-### Slice C — `POST /packs/{id}/reconcile`
+### Slice C — `POST /packs/{id}/reconcile` — ✅ done, uncommitted
 
-- [ ] RED (unit, `graph-owl-api`, fake `FindingRuleRegistry` + fake SPARQL): zero rules for a pack → `evaluated: 0, found: 0`, no write; a rule whose query returns rows with the similarity band failing produces no finding; a rule with a `subject` variable absent from a row is a named error (mirrors `reconcile.py`'s own `ReconcileError` for exactly this — a query edited to rename a variable must not fail silently); evidence entries whose `var` is unbound (OPTIONAL) are dropped, not the whole finding
-- [ ] Orchestration function in `graph-owl-api`: run each registered rule's query via `Catalog::sparql`, filter via Slice A's primitives, build `Finding`s, call `record_findings`
-- [ ] `POST /packs/{id}/reconcile` route (admin) in `graph-owl-server`, returning `{ pack, evaluated, found, opened, alreadyOpen }` — same shape `ReconcileResult` already has, so nothing downstream (the eval harness, if ever pointed at this) needs to change its expectations
-- [ ] Integration test against real Postgres + the actual GST pack fixtures: run against the clean fixture data, assert the same six-finding baseline `verify-pack-load.sh` already asserts for the Python path — this is the parity proof, not a new behavior spec
-- [ ] Mutation run
+- [x] RED (unit, `graph-owl-api`, hand-built `BTreeMap` rows — no fake SPARQL needed once `findings_from_rows` was split out as pure): zero rows → zero findings, no error; a rule whose query returns rows failing the similarity/span band produces no finding; a rule with a subject variable absent from a row is a named error; evidence entries whose `var` is unbound (OPTIONAL) are dropped, not the whole finding — 11 tests, all pinned to real values (the 0.619 transposition score, the real GST predicate names)
+- [x] `findings_from_rows` (pure) + `passes_similarity_band`/`passes_span_condition` (parse the rule's opaque `similarity`/`span` JSON, look up the row's named variables, call Slice A's primitives) + `Catalog::reconcile_pack` (orchestration: fetch rules, run `Catalog::sparql` per rule — in-process, no loopback HTTP — call `findings_from_rows`, `record_findings`)
+- [x] `POST /packs/{id}/reconcile` route (admin) in `graph-owl-server`, returning `{ pack, evaluated, found, opened, alreadyOpen }` — the same shape `ReconcileResult` already had
+- [x] Integration test against real Postgres, using the **real** `missing-in-gstr2b.sparql` query text verbatim (not a stand-in): a rule registered over HTTP, evaluated against facts landed through the real `POST /graph/import/rdf` path, produces a finding visible through `GET /findings` with the bare (unwrapped) subject and evidence values. Plus: idempotent on a second run (opened→0, alreadyOpen→1), a genuinely matched invoice produces no finding, and the route is admin-gated (`authorization_fixture`/`asha`, not `test_app`'s always-admin caller — the documented gotcha this crate already hit twice) — 4 tests, all passing
+- [x] `.config/nextest.toml`: `reconcile` added to the `containers` serialization group (mixes `test_app` and `authorization_fixture` in one binary — the same latent fragility `graph_import`/`namespaces`/`findings` already required this for)
+- [x] OpenAPI contract regenerated (`cargo run -p graph-owl-server --bin openapi > openapi.json`), `the_committed_contract_matches_the_code` and `every_documented_route_is_served_by_the_router` both green
+- [x] Mutation run — `--diff crates/graph-owl-api/src/lib.rs`, 23/23 (19 caught, 3 unviable, 0 missed) after one fix round: `bare_term`'s two `&&` guards had never been exercised by a partially-matching value (starts with `<` but doesn't end with `>`, and the reverse) — every existing test passed a fully-wrapped or fully-bare term
 
-### Slice D — Python: register, don't evaluate
+### Slice D — Python: register, don't evaluate — ✅ done
 
-- [ ] Pack loader gains a fourth phase: after documents, read `[[findings]]` + `[[queries]]`, inline each named query's `.sparql` file, `POST /packs/{id}/finding-rules`
-- [ ] `reconcile.py`'s `similarity`/`_passes_span`/`_rows_to_findings`/`run_findings` deleted; `graph-owl-load-pack reconcile <id>` becomes a thin `POST /packs/{id}/reconcile` call
-- [ ] `scripts/demo.sh --gst` updated: pack install now also registers rules; the reconcile step becomes the HTTP trigger
-- [ ] `graph_owl_packs` test suite updated — the deleted unit tests for `similarity`/`_passes_span` move to Slice A's Rust tests (same fixture numbers), not lost
+- [x] Pack loader (`loader.py`) gains a fourth phase: after documents, `_register_finding_rules` reads `manifest.findings` + `manifest.queries`, inlines each named query's `.sparql` file via `_query_text`, translates the manifest's snake_case `similarity`/`span` bands to the wire's camelCase via `_camel_case_band`, and `POST`s one batch to `/packs/{id}/finding-rules`. Skipped entirely for a pack with no query-bearing findings (hospitality) — zero calls, not an empty batch
+- [x] `reconcile.py`'s `similarity`/`_trigrams`/`_passes_similarity`/`_as_date`/`_passes_span`/`_run_query`/`_rows_to_findings`/`run_findings`(old) all deleted — the file is 66 lines now, down from 344. `run_findings(pack_id, server, token)` is a thin `POST /packs/{id}/reconcile` call reading back `{pack, evaluated, found, opened, alreadyOpen}`; `graph-owl-reconcile` now takes a pack **id**, not a directory
+- [x] `scripts/demo.sh --gst` updated: the reconcile step now passes `gst` (the id) instead of `${ROOT}/packs/gst` (the directory) — the pack-install step already registers rules as part of the loader's new phase, no separate demo.sh change needed there
+- [x] `graph_owl_packs` test suite updated: `test_reconcile.py` rewritten from 25 rule-evaluation tests (deleted — their fixture numbers, including the 180-day boundary and the 0.619 transposition score, already live in Slice A's Rust tests) to 6 tests of the HTTP trigger shape; `test_loader.py` gains 5 tests for the new registration phase (all-six-rules-in-one-call, query text inlined verbatim, snake→camel band translation, hospitality registers nothing, rules registered only after every document lands) plus the existing sequencing test updated for the fourth phase. 74/74 passing (`uv run pytest -q`)
 
 ### Slice E — console: click, and reconciliation happens
 

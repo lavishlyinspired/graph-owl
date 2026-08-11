@@ -587,6 +587,35 @@ pub static ROUTES: &[Route] = &[
     ),
     route(
         "post",
+        "/packs/{pack}/finding-rules",
+        "Register a pack's [[findings]] rules for the native reconcile \
+         engine (admin only; upsert per rule label)",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "get",
+        "/packs/{pack}/finding-rules",
+        "Every finding rule registered for one pack (admin only)",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "post",
+        "/packs/{pack}/reconcile",
+        "Evaluate a pack's registered rules and record what they conclude \
+         (admin only)",
+        None,
+        None,
+        200,
+        true,
+    ),
+    route(
+        "post",
         "/sparql",
         "Run a SPARQL query",
         None,

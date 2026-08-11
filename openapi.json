@@ -5600,6 +5600,30 @@
           }
         ],
         "summary": "The reconciliation findings queue, optionally scoped to one pack and status"
+      },
+      "post": {
+        "operationId": "post_findings",
+        "responses": {
+          "200": {
+            "description": "Record a reconciliation run's findings (admin only; idempotent while a matching finding is still pending)"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Record a reconciliation run's findings (admin only; idempotent while a matching finding is still pending)"
       }
     },
     "/findings/{id}/decision": {
@@ -8014,6 +8038,82 @@
         },
         "security": [],
         "summary": "Everything the landing page needs"
+      }
+    },
+    "/packs/{pack}/finding-rules": {
+      "get": {
+        "operationId": "get_packs__pack__finding-rules",
+        "responses": {
+          "200": {
+            "description": "Every finding rule registered for one pack (admin only)"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Every finding rule registered for one pack (admin only)"
+      },
+      "post": {
+        "operationId": "post_packs__pack__finding-rules",
+        "responses": {
+          "200": {
+            "description": "Register a pack's [[findings]] rules for the native reconcile engine (admin only; upsert per rule label)"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Register a pack's [[findings]] rules for the native reconcile engine (admin only; upsert per rule label)"
+      }
+    },
+    "/packs/{pack}/reconcile": {
+      "post": {
+        "operationId": "post_packs__pack__reconcile",
+        "responses": {
+          "200": {
+            "description": "Evaluate a pack's registered rules and record what they conclude (admin only)"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Evaluate a pack's registered rules and record what they conclude (admin only)"
       }
     },
     "/policies": {

@@ -47,7 +47,7 @@ use graph_owl_engine::{NamespaceRegistry, TripleStore};
 // Re-exported so `graph-owl-server` can name the type its
 // `/namespaces` route returns without taking a direct dependency on
 // the engine port — the facade is what the server is meant to speak to.
-pub use graph_owl_engine::{NamespaceDef, PredicateDef};
+pub use graph_owl_engine::{EvidenceBinding, FindingRuleDef, NamespaceDef, PredicateDef};
 use graph_owl_events::{ChangeEvent, EventSink, EventSubject};
 use graph_owl_reasoning as reasoning;
 use graph_owl_resolution::bands::{ConfidenceBands, Decision, decide};
@@ -1078,6 +1078,263 @@ fn collect(
     }
 }
 
+/// What one `Catalog::reconcile_pack` run did — Epic 105 P5b. The same
+/// shape `reconcile.py`'s Python `ReconcileResult` already had, so nothing
+/// reading this response format needs to change.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconcileOutcome {
+    /// Which pack was reconciled.
+    pub pack: String,
+    /// How many `[[findings]]` rules this pack has registered.
+    pub evaluated: usize,
+    /// How many rows, across every rule, survived their similarity/span
+    /// bands and became a finding.
+    pub found: usize,
+    /// Findings this run put in the queue for the first time.
+    pub opened: usize,
+    /// Findings this run re-derived that a reviewer had already been shown.
+    pub already_open: usize,
+}
+
+/// The bare value behind a SPARQL result term.
+///
+/// `SparqlOutcome.rows` carries terms in `/sparql`'s own rendering — `<iri>`
+/// for an IRI, `"literal"` for a literal (confirmed against the live
+/// server: `spareval`'s `Term::to_string()` produces exactly this for the
+/// plain-string predicates every pack fixture uses). A finding's subject
+/// must be the bare IRI — it is what the console links and what a later
+/// query joins on — and a subject still carrying angle brackets matches
+/// nothing. The direct Rust port of `reconcile.py`'s own `_term()`.
+fn bare_term(value: &str) -> &str {
+    if value.len() >= 2 && value.starts_with('<') && value.ends_with('>') {
+        return &value[1..value.len() - 1];
+    }
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        return &value[1..value.len() - 1];
+    }
+    value
+}
+
+fn rule_error(
+    rule: &graph_owl_engine::FindingRuleDef,
+    message: impl std::fmt::Display,
+) -> CatalogError {
+    CatalogError::Validation(vec![FieldError::new(
+        "rule",
+        FieldErrorCode::Value,
+        format!("rule '{}': {message}", rule.label),
+    )])
+}
+
+/// `[findings.similarity]`, as the pack manifest and the registry both carry
+/// it — untyped JSON in [`graph_owl_engine::FindingRuleDef::similarity`]
+/// until evaluated, deserialized here into the shape
+/// [`graph_owl_resolution::rule_match`] actually runs.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SimilarityRuleConfig {
+    strategy: String,
+    #[serde(default)]
+    n: i64,
+    left: String,
+    right: String,
+    at_least: f64,
+    at_most: f64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SpanRuleConfig {
+    from: String,
+    to: String,
+    exceeds_days: i64,
+    #[serde(default)]
+    when_missing: Option<String>,
+    #[serde(default)]
+    as_of: Option<String>,
+}
+
+/// Whether a row survives its rule's `[findings.similarity]` band, if it
+/// has one. Mirrors `reconcile.py`'s `_passes_similarity`.
+///
+/// # Errors
+///
+/// `Validation` if `similarity` is not the expected shape, names an unknown
+/// strategy, or names a variable the row does not bind — a rule that
+/// silently scored nothing would report a clean reconciliation.
+fn passes_similarity_band(
+    rule: &graph_owl_engine::FindingRuleDef,
+    row: &std::collections::BTreeMap<String, String>,
+) -> Result<bool, CatalogError> {
+    let Some(json) = &rule.similarity else {
+        return Ok(true);
+    };
+    let config: SimilarityRuleConfig = serde_json::from_value(json.clone())
+        .map_err(|e| rule_error(rule, format!("its similarity band is malformed: {e}")))?;
+
+    let lookup = |variable: &str| -> Result<&str, CatalogError> {
+        row.get(variable).map(|v| bare_term(v)).ok_or_else(|| {
+            rule_error(
+                rule,
+                format!(
+                    "compares similarity on variable '{variable}', which its query does not bind"
+                ),
+            )
+        })
+    };
+    let left = lookup(&config.left)?;
+    let right = lookup(&config.right)?;
+
+    let strategy = match config.strategy.as_str() {
+        "exact" => graph_owl_resolution::rule_match::SimilarityStrategy::Exact,
+        "ngram" => graph_owl_resolution::rule_match::SimilarityStrategy::NGram { n: config.n },
+        other => {
+            return Err(rule_error(
+                rule,
+                format!("names unknown similarity strategy '{other}'"),
+            ));
+        }
+    };
+    let band = graph_owl_resolution::rule_match::SimilarityBand {
+        strategy,
+        at_least: config.at_least,
+        at_most: config.at_most,
+    };
+    graph_owl_resolution::rule_match::passes_similarity(left, right, &band)
+        .map_err(|e| rule_error(rule, e))
+}
+
+/// Whether a row survives its rule's `[findings.span]` condition, if it
+/// has one. Mirrors `reconcile.py`'s `_passes_span`.
+///
+/// # Errors
+///
+/// `Validation` if `span` is malformed, `from` is unbound, or a bound date
+/// cannot be read as ISO-8601.
+fn passes_span_condition(
+    rule: &graph_owl_engine::FindingRuleDef,
+    row: &std::collections::BTreeMap<String, String>,
+    today: chrono::NaiveDate,
+) -> Result<bool, CatalogError> {
+    let Some(json) = &rule.span else {
+        return Ok(true);
+    };
+    let config: SpanRuleConfig = serde_json::from_value(json.clone())
+        .map_err(|e| rule_error(rule, format!("its span condition is malformed: {e}")))?;
+
+    let start = row.get(&config.from).map(|v| bare_term(v)).ok_or_else(|| {
+        rule_error(
+            rule,
+            format!(
+                "measures a span from variable '{}', which its query does not bind",
+                config.from
+            ),
+        )
+    })?;
+    // The *second* event is legitimately absent — an OPTIONAL that did not
+    // match — so its absence from the row is not itself an error; only an
+    // unreadable *bound* value is.
+    let end = row.get(&config.to).map(|v| bare_term(v));
+
+    let when_missing = match config.when_missing.as_deref() {
+        None | Some("ignore") => graph_owl_resolution::rule_match::WhenMissing::Ignore,
+        Some("finding") => graph_owl_resolution::rule_match::WhenMissing::Finding,
+        Some("elapsed") => graph_owl_resolution::rule_match::WhenMissing::Elapsed,
+        Some(other) => {
+            return Err(rule_error(
+                rule,
+                format!("names unknown when_missing '{other}'"),
+            ));
+        }
+    };
+    let as_of = config
+        .as_of
+        .as_deref()
+        .map(|v| {
+            chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d")
+                .map_err(|_| rule_error(rule, format!("its span as_of '{v}' is not ISO-8601")))
+        })
+        .transpose()?;
+
+    let condition = graph_owl_resolution::rule_match::SpanCondition {
+        exceeds_days: config.exceeds_days,
+        when_missing,
+        as_of,
+    };
+    graph_owl_resolution::rule_match::passes_span(start, end, &condition, today)
+        .map_err(|e| rule_error(rule, e))
+}
+
+/// Turn one rule's already-fetched SPARQL rows into findings — Epic 105
+/// P5b, the pure half of [`Catalog::reconcile_pack`]. No I/O: the query has
+/// already run, and this only filters and shapes what it returned. Mirrors
+/// `reconcile.py`'s `_rows_to_findings`.
+///
+/// # Errors
+///
+/// `Validation` if a row does not bind the rule's declared subject
+/// variable, or a similarity/span band is malformed or names an unbound
+/// variable — see [`passes_similarity_band`]/[`passes_span_condition`].
+fn findings_from_rows(
+    rule: &graph_owl_engine::FindingRuleDef,
+    rows: &[std::collections::BTreeMap<String, String>],
+) -> Result<Vec<graph_owl_core::finding::Finding>, CatalogError> {
+    let today = chrono::Utc::now().date_naive();
+    let mut built = Vec::new();
+
+    for row in rows {
+        if !passes_similarity_band(rule, row)? {
+            continue;
+        }
+        if !passes_span_condition(rule, row, today)? {
+            continue;
+        }
+
+        let subject = row.get(&rule.subject_var).ok_or_else(|| {
+            rule_error(
+                rule,
+                format!(
+                    "names subject variable '{}', which its query does not bind — most often \
+                     a query edited to rename a variable, leaving the rule pointing at nothing",
+                    rule.subject_var
+                ),
+            )
+        })?;
+        let subject = bare_term(subject).to_string();
+
+        // An unbound evidence variable (an OPTIONAL that did not match) is
+        // not an error — it is often *why* the finding exists. What must
+        // not happen is dropping the finding itself.
+        let evidence: Vec<graph_owl_core::finding::Evidence> = rule
+            .evidence
+            .iter()
+            .filter_map(|binding| {
+                row.get(&binding.var)
+                    .map(|value| graph_owl_core::finding::Evidence {
+                        subject: subject.clone(),
+                        predicate: binding.predicate.clone(),
+                        value: bare_term(value).to_string(),
+                    })
+            })
+            .collect();
+
+        built.push(
+            graph_owl_core::finding::Finding::new(
+                rule.pack.clone(),
+                rule.label.clone(),
+                subject,
+                rule.summary.clone(),
+                rule.governed_by.clone(),
+                evidence,
+            )
+            .map_err(|e| rule_error(rule, e))?,
+        );
+    }
+
+    Ok(built)
+}
+
 /// The landing page's answer.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1853,6 +2110,63 @@ impl Catalog {
             .for_pack(pack)
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// Evaluate every rule a pack has registered, and record what they
+    /// conclude — Epic 105 P5b, the platform doc's P5 finding runtime,
+    /// native at last. This is the whole of what `reconcile.py`'s
+    /// `run_findings` used to do over HTTP, run in-process instead:
+    /// [`Catalog::sparql`] is the exact function `/sparql`'s own handler
+    /// calls, so no query makes a loopback HTTP round trip to reach it.
+    ///
+    /// **Zero rules is a legitimate, half-built pack, not an error** — the
+    /// same reading `reconcile.py` already gave it. Zero findings from rules
+    /// that *did* run is reported, not silently skipped: a no-op write to the
+    /// findings table is how a "nothing to review" answer gets confused with
+    /// "the run never happened".
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no finding-rule registry is configured, a rule's query
+    /// fails to parse or execute, or the findings store refuses the write.
+    /// `Validation` if a rule's `similarity`/`span` band is malformed, or a
+    /// row does not bind a variable the rule declares — see
+    /// [`findings_from_rows`].
+    pub async fn reconcile_pack(
+        &self,
+        principal: &Principal,
+        pack: &str,
+    ) -> Result<ReconcileOutcome, CatalogError> {
+        let rules = self.finding_rules(pack).await?;
+        let evaluated = rules.len();
+
+        let mut all_findings = Vec::new();
+        for rule in &rules {
+            let outcome = self
+                .sparql(principal, &rule.query, None, SparqlBudget::default())
+                .await?;
+            all_findings.extend(findings_from_rows(rule, &outcome.rows)?);
+        }
+        let found = all_findings.len();
+
+        if all_findings.is_empty() {
+            return Ok(ReconcileOutcome {
+                pack: pack.to_string(),
+                evaluated,
+                found: 0,
+                opened: 0,
+                already_open: 0,
+            });
+        }
+
+        let recorded = self.record_findings(&all_findings).await?;
+        Ok(ReconcileOutcome {
+            pack: pack.to_string(),
+            evaluated,
+            found,
+            opened: recorded.opened,
+            already_open: recorded.already_open,
+        })
     }
 
     /// The neighbourhood around an asset, as a graph.
@@ -37768,6 +38082,336 @@ mod finding_rule_declaration_tests {
                 .await
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod bare_term_tests {
+    //! `bare_term` — Epic 105 P5b. Every test elsewhere in this file passes
+    //! a fully-wrapped term (`<iri>` or `"literal"`), which never exercises
+    //! the two conditions independently. A value starting with `<` but not
+    //! ending with `>` (or the reverse) is what distinguishes the intended
+    //! `&&` from a `||` that would strip on either signal alone.
+
+    use super::bare_term;
+
+    #[test]
+    fn strips_a_fully_wrapped_iri() {
+        assert_eq!(
+            bare_term("<https://example.org/x>"),
+            "https://example.org/x"
+        );
+    }
+
+    #[test]
+    fn strips_a_fully_wrapped_literal() {
+        assert_eq!(bare_term("\"INV-1001\""), "INV-1001");
+    }
+
+    #[test]
+    fn a_value_starting_with_angle_bracket_but_not_ending_with_one_is_untouched() {
+        assert_eq!(bare_term("<not-closed"), "<not-closed");
+    }
+
+    #[test]
+    fn a_value_ending_with_angle_bracket_but_not_starting_with_one_is_untouched() {
+        assert_eq!(bare_term("not-opened>"), "not-opened>");
+    }
+
+    #[test]
+    fn a_value_starting_with_a_quote_but_not_ending_with_one_is_untouched() {
+        assert_eq!(bare_term("\"not-closed"), "\"not-closed");
+    }
+
+    #[test]
+    fn a_value_ending_with_a_quote_but_not_starting_with_one_is_untouched() {
+        assert_eq!(bare_term("not-opened\""), "not-opened\"");
+    }
+
+    #[test]
+    fn a_bare_value_is_returned_unchanged() {
+        assert_eq!(bare_term("plain"), "plain");
+    }
+}
+
+#[cfg(test)]
+mod findings_from_rows_tests {
+    //! `findings_from_rows` — Epic 105 P5b, the pure half of
+    //! `Catalog::reconcile_pack` (`plans/105b-native-reconcile-engine.md`
+    //! Slice C). Deliberately no `Catalog`, no SPARQL, no Postgres — rows
+    //! are handed in exactly as `SparqlOutcome.rows` shapes them (rendered
+    //! terms: `<iri>` / `"literal"`), pinned against a real example fetched
+    //! from the live demo server rather than assumed.
+
+    use std::collections::BTreeMap;
+
+    use graph_owl_engine::{EvidenceBinding, FindingRuleDef};
+
+    use super::{CatalogError, findings_from_rows};
+
+    /// `CatalogError` has no `Display` impl (the wire form is `FieldError`'s
+    /// own `detail`, not a formatted string), so tests read the first
+    /// violation's detail directly rather than stringifying the error.
+    fn detail(error: &CatalogError) -> &str {
+        match error {
+            CatalogError::Validation(errors) => {
+                errors.first().map(|e| e.detail.as_str()).unwrap_or("")
+            }
+            other => panic!("expected a Validation error, got {other:?}"),
+        }
+    }
+
+    fn row(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn rule(evidence: Vec<EvidenceBinding>) -> FindingRuleDef {
+        FindingRuleDef {
+            pack: "gst".to_string(),
+            label: "gst:PotentialMismatch".to_string(),
+            summary: "claimed but never filed".to_string(),
+            governed_by: "gst:Section16-2-aa".to_string(),
+            query: "SELECT ?invoice ?number {}".to_string(),
+            subject_var: "invoice".to_string(),
+            evidence,
+            similarity: None,
+            span: None,
+        }
+    }
+
+    #[test]
+    fn a_row_with_no_bands_becomes_a_finding_with_bare_subject_and_evidence() {
+        let rows = vec![row(&[
+            ("invoice", "<https://graph-owl.dev/packs/gst#2b-INV-1001>"),
+            ("number", "\"INV-1001\""),
+        ])];
+        let rule = rule(vec![EvidenceBinding {
+            predicate: "gst:invoiceNumber".to_string(),
+            var: "number".to_string(),
+        }]);
+
+        let findings = findings_from_rows(&rule, &rows).expect("no bands, nothing to fail");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].subject, "https://graph-owl.dev/packs/gst#2b-INV-1001",
+            "the wrapping <> must be stripped, matching reconcile.py's own _term()"
+        );
+        assert_eq!(
+            findings[0].evidence[0].value, "INV-1001",
+            "and the wrapping \"\""
+        );
+    }
+
+    #[test]
+    fn zero_rows_produces_zero_findings_without_error() {
+        let rule = rule(vec![]);
+        assert_eq!(
+            findings_from_rows(&rule, &[]).expect("empty is not an error"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn an_unbound_optional_evidence_variable_is_dropped_not_an_error() {
+        // `filed` names the query's OPTIONAL-joined GSTR-2B side, unmatched
+        // for this row (the invoice was never filed) — reconcile.py's own
+        // rule: an unbound OPTIONAL is often *why* the finding exists, and
+        // must not sink the finding. `claimed` is always bound, from the
+        // purchase register side of the same query — as it is for every
+        // real rule in packs/gst/pack.toml, none of which has *only*
+        // OPTIONAL evidence, which is what keeps this from colliding with
+        // `Finding::new`'s own non-empty-evidence invariant.
+        let rows = vec![row(&[
+            ("invoice", "<https://graph-owl.dev/packs/gst#2b-INV-1003>"),
+            ("claimed", "\"18000.00\""),
+        ])];
+        let rule = rule(vec![
+            EvidenceBinding {
+                predicate: "gst:taxAmount".to_string(),
+                var: "claimed".to_string(),
+            },
+            EvidenceBinding {
+                predicate: "gst:taxAmount".to_string(),
+                var: "filed".to_string(),
+            },
+        ]);
+
+        let findings = findings_from_rows(&rule, &rows).expect("ok");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].evidence.len(),
+            1,
+            "the bound var survives, the unbound one is omitted: {:?}",
+            findings[0].evidence
+        );
+        assert_eq!(findings[0].evidence[0].value, "18000.00");
+    }
+
+    #[test]
+    fn a_row_missing_the_declared_subject_variable_is_a_named_error() {
+        // Most often a query edited to rename a variable, leaving the rule
+        // pointing at nothing — must fail loudly, mirroring reconcile.py's
+        // own ReconcileError for exactly this.
+        let rows = vec![row(&[("wrongName", "<https://example.org/x>")])];
+        let rule = rule(vec![]);
+
+        let error = findings_from_rows(&rule, &rows).expect_err("must be refused");
+        let message = detail(&error);
+        assert!(
+            message.contains("invoice"),
+            "the error must name the missing variable: {message}"
+        );
+    }
+
+    #[test]
+    fn a_row_passing_a_similarity_band_becomes_a_finding() {
+        let mut rule = rule(vec![EvidenceBinding {
+            predicate: "gst:supplierGstin".to_string(),
+            var: "claimedGstin".to_string(),
+        }]);
+        rule.label = "gst:GstinTransposition".to_string();
+        rule.subject_var = "purchase".to_string();
+        rule.similarity = Some(serde_json::json!({
+            "strategy": "ngram", "n": 3,
+            "left": "claimedGstin", "right": "filedGstin",
+            "atLeast": 0.40, "atMost": 0.999
+        }));
+        let rows = vec![row(&[
+            ("purchase", "<https://graph-owl.dev/packs/gst#p-INV-1004>"),
+            ("claimedGstin", "\"27AABCU9603R1ZM\""),
+            ("filedGstin", "\"27AABCU9603R1MZ\""),
+        ])];
+
+        let findings = findings_from_rows(&rule, &rows).expect("band passes");
+        assert_eq!(
+            findings.len(),
+            1,
+            "0.619 similarity is within [0.40, 0.999]"
+        );
+    }
+
+    #[test]
+    fn a_row_failing_a_similarity_band_produces_no_finding() {
+        let mut rule = rule(vec![]);
+        rule.subject_var = "purchase".to_string();
+        rule.similarity = Some(serde_json::json!({
+            "strategy": "ngram", "n": 3,
+            "left": "claimedGstin", "right": "filedGstin",
+            "atLeast": 0.40, "atMost": 0.999
+        }));
+        let rows = vec![row(&[
+            ("purchase", "<https://graph-owl.dev/packs/gst#p-INV-1001>"),
+            ("claimedGstin", "\"27AABCU9603R1ZM\""),
+            // Identical GSTIN: a genuine, correct match, which is exactly
+            // what `at_most` exists to exclude from a transposition rule.
+            ("filedGstin", "\"27AABCU9603R1ZM\""),
+        ])];
+
+        assert_eq!(
+            findings_from_rows(&rule, &rows).expect("no error, just no finding"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn a_row_missing_a_similarity_variable_is_a_named_error() {
+        let mut rule = rule(vec![]);
+        rule.subject_var = "purchase".to_string();
+        rule.similarity = Some(serde_json::json!({
+            "strategy": "ngram", "n": 3,
+            "left": "claimedGstin", "right": "filedGstin",
+            "atLeast": 0.40, "atMost": 0.999
+        }));
+        // filedGstin is simply not bound by this query — a manifest/query
+        // mismatch, and it must be refused rather than silently skipped.
+        let rows = vec![row(&[
+            ("purchase", "<https://graph-owl.dev/packs/gst#p-INV-1004>"),
+            ("claimedGstin", "\"27AABCU9603R1ZM\""),
+        ])];
+
+        let error = findings_from_rows(&rule, &rows).expect_err("must be refused");
+        assert!(detail(&error).contains("filedGstin"), "{error:?}");
+    }
+
+    #[test]
+    fn a_row_passing_a_span_condition_becomes_a_finding() {
+        let mut rule = rule(vec![EvidenceBinding {
+            predicate: "gst:atTime".to_string(),
+            var: "purchasedAt".to_string(),
+        }]);
+        rule.subject_var = "purchase".to_string();
+        rule.span = Some(serde_json::json!({
+            "from": "purchasedAt", "to": "paidAt", "exceedsDays": 180
+        }));
+        let rows = vec![row(&[
+            ("purchase", "<https://graph-owl.dev/packs/gst#p-INV-1005>"),
+            ("purchasedAt", "\"2026-01-01\""),
+            ("paidAt", "\"2026-07-15\""),
+        ])];
+
+        let findings = findings_from_rows(&rule, &rows).expect("195 days > 180");
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn a_row_within_the_span_produces_no_finding() {
+        let mut rule = rule(vec![]);
+        rule.subject_var = "purchase".to_string();
+        rule.span = Some(serde_json::json!({
+            "from": "purchasedAt", "to": "paidAt", "exceedsDays": 180
+        }));
+        let rows = vec![row(&[
+            ("purchase", "<https://graph-owl.dev/packs/gst#p-INV-1006>"),
+            ("purchasedAt", "\"2026-01-01\""),
+            ("paidAt", "\"2026-02-01\""),
+        ])];
+
+        assert_eq!(findings_from_rows(&rule, &rows).expect("ok"), vec![]);
+    }
+
+    #[test]
+    fn a_span_with_when_missing_elapsed_and_no_second_event_uses_as_of() {
+        let mut rule = rule(vec![EvidenceBinding {
+            predicate: "gst:atTime".to_string(),
+            var: "purchasedAt".to_string(),
+        }]);
+        rule.subject_var = "purchase".to_string();
+        rule.span = Some(serde_json::json!({
+            "from": "purchasedAt", "to": "paidAt", "exceedsDays": 180,
+            "whenMissing": "elapsed", "asOf": "2026-08-01"
+        }));
+        // paidAt is simply absent from the row — the query's OPTIONAL found
+        // no payment, which is the normal "not yet paid" case.
+        let rows = vec![row(&[
+            ("purchase", "<https://graph-owl.dev/packs/gst#p-INV-1003>"),
+            ("purchasedAt", "\"2026-01-01\""),
+        ])];
+
+        let findings = findings_from_rows(&rule, &rows).expect("ok");
+        assert_eq!(
+            findings.len(),
+            1,
+            "212 elapsed days > 180, as of the configured date"
+        );
+    }
+
+    #[test]
+    fn a_span_missing_the_from_variable_is_a_named_error() {
+        let mut rule = rule(vec![]);
+        rule.subject_var = "purchase".to_string();
+        rule.span = Some(serde_json::json!({
+            "from": "purchasedAt", "to": "paidAt", "exceedsDays": 180
+        }));
+        let rows = vec![row(&[(
+            "purchase",
+            "<https://graph-owl.dev/packs/gst#p-x>",
+        )])];
+
+        let error = findings_from_rows(&rule, &rows).expect_err("must be refused");
+        assert!(detail(&error).contains("purchasedAt"), "{error:?}");
     }
 }
 

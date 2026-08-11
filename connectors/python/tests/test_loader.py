@@ -50,6 +50,8 @@ def _handler(received: list[dict], fail_on: str | None):
 
             if parsed.path == "/namespaces":
                 body = {"code": 1024, "iri": "x", "declaredBy": "y"}
+            elif parsed.path.endswith("/finding-rules"):
+                body = {}
             else:
                 # One subject per document, so `landed` counts are checkable.
                 body = {"landed": ["gst:thing"], "skipped": [], "rejected": []}
@@ -86,11 +88,13 @@ def test_a_pack_declares_its_namespace_before_importing_anything(pack):
     with scripted_server() as (url, received):
         load_pack(PACKS / pack, url)
 
-    # **Three phases, and the order of all three is load-bearing.** A
+    # **Four phases, and the order of all of them is load-bearing.** A
     # document imported before its namespace is declared resolves to nothing;
     # a document imported before its predicates are defined is rejected
-    # wholesale by `reject_unregistered_predicates`. Both were found by
-    # running this against a real server rather than by reading the code.
+    # wholesale by `reject_unregistered_predicates`; a finding rule declared
+    # before its documents load would point at a graph that was never
+    # populated. Found by running this against a real server, not by reading
+    # the code.
     paths = [r["path"] for r in received]
     assert paths[0] == "/namespaces", f"the vocabulary must be declared first, got {paths}"
 
@@ -98,7 +102,13 @@ def test_a_pack_declares_its_namespace_before_importing_anything(pack):
     assert all(p == "/predicates" for p in paths[1:first_import]), (
         f"predicates must all be defined before the first import: {paths}"
     )
-    assert all(p == "/graph/import/rdf" for p in paths[first_import:])
+
+    imports = [p for p in paths[first_import:] if p == "/graph/import/rdf"]
+    after_imports = paths[first_import + len(imports) :]
+    assert paths[first_import : first_import + len(imports)] == imports
+    assert after_imports in ([], [f"/packs/{pack}/finding-rules"]), (
+        f"only one call, and only finding-rules, may follow the last import: {paths}"
+    )
 
 
 @pytest.mark.parametrize("pack", ["hospitality", "gst"])
@@ -137,6 +147,98 @@ def test_the_two_packs_declare_different_namespaces():
         json.loads(hospitality_calls[0]["raw"])["iri"]
         != json.loads(gst_calls[0]["raw"])["iri"]
     )
+
+
+def test_gst_registers_all_six_finding_rules_in_one_call():
+    # Epic 105 P5b: the native reconcile engine reads rules from the
+    # registry, never from `pack.toml` — so every rule with a `query` must
+    # reach the server, in one batch rather than one call per rule.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "gst", url)
+
+    calls = [r for r in received if r["path"] == "/packs/gst/finding-rules"]
+    assert len(calls) == 1, f"one batched call, not one per rule: {received}"
+
+    rules = json.loads(calls[0]["raw"])["rules"]
+    assert len(rules) == 6, f"pack.toml declares six findings, all with a query: {rules}"
+    assert {r["label"] for r in rules} == {
+        "gst:PotentialMismatch",
+        "gst:AmountMismatch",
+        "gst:ITCNotAvailable",
+        "gst:Reversed",
+        "gst:GstinTransposition",
+        "gst:PaymentOverdue",
+    }
+
+
+def test_the_query_text_is_inlined_not_a_path():
+    # The whole point of registering rules server-side: the native engine
+    # never reads a `.sparql` file, so the loader must have read it already.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "gst", url)
+
+    rules = json.loads(
+        next(r for r in received if r["path"] == "/packs/gst/finding-rules")["raw"]
+    )["rules"]
+    potential_mismatch = next(r for r in rules if r["label"] == "gst:PotentialMismatch")
+    assert "PREFIX gst:" in potential_mismatch["query"]
+    assert "gst:PurchaseInvoice" in potential_mismatch["query"], (
+        "the real query text from missing-in-gstr2b.sparql, not a stand-in"
+    )
+    assert potential_mismatch["subjectVar"] == "invoice"
+    assert potential_mismatch["governedBy"] == "gst:Section16-2-aa"
+
+
+def test_similarity_and_span_bands_are_translated_to_camel_case():
+    # `pack.toml` is snake_case (`at_least`, `when_missing`); the wire is
+    # camelCase, matching every other route in this project. A loader that
+    # forwarded the TOML keys verbatim would post a rule the server's
+    # `#[serde(rename_all = "camelCase")]` deserializer silently ignored,
+    # since an unrecognised key defaults to absent rather than erroring the
+    # way a typo'd required field would.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "gst", url)
+
+    rules = json.loads(
+        next(r for r in received if r["path"] == "/packs/gst/finding-rules")["raw"]
+    )["rules"]
+
+    transposition = next(r for r in rules if r["label"] == "gst:GstinTransposition")
+    assert transposition["similarity"]["atLeast"] == pytest.approx(0.40)
+    assert transposition["similarity"]["atMost"] == pytest.approx(0.999)
+    assert "at_least" not in transposition["similarity"]
+
+    overdue = next(r for r in rules if r["label"] == "gst:PaymentOverdue")
+    assert overdue["span"]["exceedsDays"] == 180
+    assert overdue["span"]["whenMissing"] == "elapsed"
+    assert "exceeds_days" not in overdue["span"]
+
+    # A rule with neither band round-trips with both keys present and null,
+    # not simply absent — the server's own `#[serde(default)]` accepts
+    # either, but an explicit `null` is what this loader actually sends.
+    reversed_rule = next(r for r in rules if r["label"] == "gst:Reversed")
+    assert reversed_rule["similarity"] is None
+    assert reversed_rule["span"] is None
+
+
+def test_hospitality_registers_no_finding_rules() -> None:
+    # Its one finding has no `query` — a declaration of intent, the same
+    # legitimate half-built state the runtime always read it as. A rule
+    # with nothing to evaluate must not reach the server at all.
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "hospitality", url)
+
+    assert not any(r["path"].endswith("/finding-rules") for r in received), received
+
+
+def test_finding_rules_are_registered_only_after_every_document_lands():
+    with scripted_server() as (url, received):
+        load_pack(PACKS / "gst", url)
+
+    paths = [r["path"] for r in received]
+    rule_call = paths.index("/packs/gst/finding-rules")
+    assert all(p != "/packs/gst/finding-rules" for p in paths[:rule_call]), paths
+    assert rule_call == len(paths) - 1, "the finding-rules call is the very last one"
 
 
 def test_a_dry_run_asks_the_server_not_to_write():

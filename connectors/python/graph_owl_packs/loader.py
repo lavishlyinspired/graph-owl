@@ -12,8 +12,13 @@ Two HTTP surfaces, both built for this:
   `graph-owl-core`.
 - `POST /graph/import/rdf` — the pack's ontology, shapes and fixtures land in
   named import graphs, one per `source`, each independently removable.
+- `POST /packs/{id}/finding-rules` — Epic 105 P5b
+  (`plans/105b-native-reconcile-engine.md`): a pack's `[[findings]]` rules,
+  registered so the *native* reconcile engine can evaluate them without ever
+  parsing a manifest itself. This loader inlines each named query's SPARQL
+  text; nothing downstream of this call ever reads a `.sparql` file again.
 
-Both are idempotent, so **loading a pack twice is a no-op rather than an
+All three are idempotent, so **loading a pack twice is a no-op rather than an
 error**. That is the normal case: a demo script runs repeatedly, and a loader
 that failed the second time would make a reload a failure.
 
@@ -181,8 +186,102 @@ def load_pack(
             )
         )
 
+    # **Finding rules after documents, for the reason that order matters
+    # everywhere else in this function: nothing downstream depends on it,
+    # but registering a rule for a pack whose documents failed to load would
+    # leave a rule pointing at a graph that was never populated.** SPARQL
+    # text is inlined here, once — the native reconcile engine (Epic 105
+    # P5b) never parses `pack.toml` or reads a `.sparql` file itself.
+    if manifest.findings:
+        _register_finding_rules(base, manifest, token)
+
     return LoadResult(
         pack_id=manifest.id,
         namespace_code=int(declared["code"]),
         documents=results,
+    )
+
+
+def _query_text(manifest: Manifest, name: str) -> str:
+    for query in manifest.queries:
+        if query.get("name") == name:
+            path = manifest.directory / str(query.get("path", ""))
+            try:
+                return path.read_text(encoding="utf-8")
+            except OSError as missing:
+                raise LoadError(
+                    f"rule query '{name}' names {path}, which cannot be read: {missing}"
+                ) from missing
+    raise LoadError(
+        f"no [[queries]] entry named '{name}' — a rule pointing at a query "
+        f"that does not exist would silently never fire"
+    )
+
+
+def _camel_case_band(band: dict | None, keys: dict[str, str]) -> dict | None:
+    """A `[findings.similarity]`/`[findings.span]` table, translated from
+    the manifest's snake_case to the wire's camelCase.
+
+    **Explicit key-by-key, not a generic snake→camel converter.** A few
+    fixed keys are known and expected; a converter would silently pass
+    through a typo'd key instead of it being caught the same way an
+    unrecognised field anywhere else in this loader would be.
+    """
+    if not band:
+        return None
+    return {wire: band[toml] for toml, wire in keys.items() if toml in band}
+
+
+def _register_finding_rules(base: str, manifest: Manifest, token: str | None) -> None:
+    rules = []
+    for rule in manifest.findings:
+        query_name = rule.get("query")
+        if not query_name:
+            # A rule with no query is a declaration of intent, the same
+            # legitimate half-built state `graph_owl_packs.reconcile` used
+            # to read it as — skipped, not refused.
+            continue
+        rules.append(
+            {
+                "label": str(rule.get("label", "")),
+                "summary": str(rule.get("summary", "")),
+                "governedBy": str(rule.get("governed_by", "")),
+                "query": _query_text(manifest, str(query_name)),
+                "subjectVar": str(rule.get("subject", "")),
+                "evidence": [
+                    {"predicate": str(b.get("predicate", "")), "var": str(b.get("var", ""))}
+                    for b in rule.get("evidence", [])
+                ],
+                "similarity": _camel_case_band(
+                    rule.get("similarity"),
+                    {
+                        "strategy": "strategy",
+                        "n": "n",
+                        "left": "left",
+                        "right": "right",
+                        "at_least": "atLeast",
+                        "at_most": "atMost",
+                    },
+                ),
+                "span": _camel_case_band(
+                    rule.get("span"),
+                    {
+                        "from": "from",
+                        "to": "to",
+                        "exceeds_days": "exceedsDays",
+                        "when_missing": "whenMissing",
+                        "as_of": "asOf",
+                    },
+                ),
+            }
+        )
+
+    if not rules:
+        return
+
+    _request(
+        f"{base}/packs/{manifest.id}/finding-rules",
+        method="POST",
+        token=token,
+        body=json.dumps({"rules": rules}).encode("utf-8"),
     )

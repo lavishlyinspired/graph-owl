@@ -276,12 +276,16 @@ if [ "${GST}" = true ]; then
   fi
   echo "${_loaded}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("  namespace", d["namespaceCode"], "·", d["landed"], "subjects ·", len(d["rejected"]), "rejected")'
 
+  # Epic 105 P5b: the rule engine is native now — this triggers
+  # `Catalog::reconcile_pack` over HTTP, it does not evaluate anything
+  # itself. The pack id, not a directory: its rules were already registered
+  # server-side as part of the load step above.
   say "Running the reconciliation"
   if ! _ran=$(PYTHONPATH="${ROOT}/connectors/python" python3 -c '
 import sys
 from graph_owl_packs.cli import reconcile_main
 sys.exit(reconcile_main(sys.argv[1:]))' \
-      "${ROOT}/packs/gst" --server "http://localhost:${APP_PORT}" \
+      gst --server "http://localhost:${APP_PORT}" \
       ${GST_TOKEN:+--token "${GST_TOKEN}"}); then
     die "the reconciliation failed — see the error above"
   fi
