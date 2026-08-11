@@ -68,10 +68,10 @@ production HTTP path today, only used as a test double / equivalence
 fixture in `graph-owl-api`'s own tests, so this was left as a known gap
 rather than expanding this slice's scope further.
 
-### Slice 2 — console (if time permits within this session)
+### Slice 2 — console (if time permits within this session) — ✅ shipped
 
-- [ ] A section in `findingsQueue.tsx`'s detail pane rendering the evidence graph (nodes + edges as a structured list — not a full interactive graph visualization, which is separate scope)
-- [ ] Verified live
+- [x] A section in `findingsQueue.tsx`'s detail pane rendering the evidence graph (nodes + edges as a structured list — not a full interactive graph visualization, which is separate scope)
+- [x] Verified live — against the demo's real accumulated GST data (9 findings), `pr-INV-1003`'s evidence graph correctly showed `issuedBy` to its `Supplier` plus two `onInvoice` edges the flat evidence list never named
 
 ## What this explicitly does not do
 
