@@ -14275,6 +14275,64 @@ impl Catalog {
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
     }
 
+    /// Resolves `subject`'s own named graph(s), if any, and adds them to
+    /// `budget.include_graphs` — a plain, additive widening; a graph the
+    /// caller already named stays named once, and a graph the subject is
+    /// not actually in is never added.
+    ///
+    /// **Why `explain` needs this and `/sparql` does not.** A SPARQL query
+    /// names its own `GRAPH ?g` clause, so a pack fact is reachable the
+    /// moment the caller writes one. `explain_fact` takes a bare
+    /// `(subject, predicate, object)` with no way to name a graph the
+    /// caller cannot be expected to already know exists — before this, a
+    /// fact stated only inside a pack's own `graph:import:{source}` was
+    /// unreasoned-about regardless of principal or budget, because
+    /// `reasoning_base` never loaded it at all (`plans/
+    /// 106-agent-trace-hygiene.md` Slice 3b, `plans/
+    /// 105-mcp-tool-visibility-divergence.md` root cause 2). A bounded,
+    /// single-subject scan is what makes resolving it here cheap enough to
+    /// do unconditionally rather than push the choice onto every caller.
+    ///
+    /// **`reasoning::reasoning_graph()` is never auto-added.** A subject
+    /// with a prior conclusion sitting in `graph:reasoning` (from an
+    /// earlier run) would otherwise widen its own budget to include that
+    /// overlay — feeding a run its own previous conclusions as if they
+    /// were asserted, exactly the case `reasoning_base`'s own doc comment
+    /// names as "a choice with a meaning, and one no default makes."
+    /// Caught by `a_classification_propagates_along_projected_lineage`
+    /// (`crates/graph-owl-server/tests/reasoning.rs`), an existing test
+    /// that started reporting a derived fact as `asserted` once this
+    /// widening looked at every graph rather than every graph except this
+    /// one.
+    async fn widen_budget_to_subjects_own_graphs(
+        graph: &dyn graph_owl_engine::TripleStore,
+        subject: &graph_owl_core::flake::Sid,
+        budget: &reasoning::Budget,
+    ) -> Result<reasoning::Budget, CatalogError> {
+        let own_facts = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                s: Some(subject.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let mut include_graphs = budget.include_graphs.clone();
+        for flake in &own_facts {
+            if let Some(named_graph) = &flake.cx
+                && *named_graph != reasoning::reasoning_graph()
+                && !include_graphs.contains(named_graph)
+            {
+                include_graphs.push(named_graph.clone());
+            }
+        }
+
+        Ok(reasoning::Budget {
+            include_graphs,
+            ..budget.clone()
+        })
+    }
+
     /// Why a fact holds, recursively, down to the assertions under it.
     ///
     /// **Re-derived rather than read back.** Provenance is not stored: the
@@ -14303,8 +14361,10 @@ impl Catalog {
             ))
         })?;
 
-        let base = Self::reasoning_base(graph.as_ref(), budget).await?;
-        let concluded = reasoning::derive_within(&base, budget);
+        let budget =
+            Self::widen_budget_to_subjects_own_graphs(graph.as_ref(), subject, budget).await?;
+        let base = Self::reasoning_base(graph.as_ref(), &budget).await?;
+        let concluded = reasoning::derive_within(&base, &budget);
         let target = Flake {
             s: subject.clone(),
             p: predicate.clone(),

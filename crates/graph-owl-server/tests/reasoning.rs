@@ -357,6 +357,59 @@ async fn a_fact_that_is_neither_asserted_nor_derived_is_not_found() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// **The fix this project's own trace investigation named**
+/// (`plans/105-mcp-tool-visibility-divergence.md` root cause 2, `plans/
+/// 106-agent-trace-hygiene.md` Slice 3b): a fact stated only inside a
+/// pack's own named graph was `Unknown` to `explain` regardless of
+/// principal, because `reasoning_base` never loaded any graph the caller
+/// did not already know to name — and a caller cannot name a graph it
+/// has no way to know exists. `explain_fact` now resolves the subject's
+/// own graph(s) first.
+#[tokio::test]
+async fn explaining_a_fact_stated_only_in_a_named_graph_finds_it() {
+    let (catalog, _database, connection_string) = test_catalog().await;
+    let store = graph(&connection_string).await;
+    let t = store.next_time().await.expect("a transaction time");
+    let pack_graph = Sid::dsc("graph:import:test-pack");
+    let fact = Flake {
+        cx: Some(pack_graph),
+        // Reusing `rdf_type()` rather than a fresh predicate name — the
+        // engine validates predicates against a registry before an
+        // assert, and this one is already registered by every other test
+        // in this file. The predicate's identity is not what this test
+        // is about; the named graph is.
+        ..Flake::assert(
+            dsc("pr-INV-1006"),
+            rdf_type(),
+            FlakeValue::Ref(dsc("Rule36-4")),
+            t,
+        )
+    };
+    store
+        .assert_flakes(&[fact])
+        .await
+        .expect("seed the pack fact");
+
+    let principal = graph_owl_core::Principal::system();
+    let reads = graph_owl_mcp::catalog::CatalogContext::new(catalog, principal.clone());
+    let context = graph_owl_mcp::ContextSource::explain(
+        &reads,
+        &principal.id,
+        &dsc("pr-INV-1006"),
+        &rdf_type(),
+        &dsc("Rule36-4"),
+    )
+    .await
+    .expect("no source error")
+    .expect("the fact is stated in the subject's own named graph");
+
+    assert_eq!(
+        context.explanation["status"], "asserted",
+        "{:?}",
+        context.explanation
+    );
+}
+
 /// A malformed identifier is the caller's mistake, not a missing fact — and
 /// `400` rather than `404` is what tells them which.
 #[tokio::test]
