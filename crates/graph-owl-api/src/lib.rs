@@ -1486,6 +1486,34 @@ pub struct ResolvedEntity {
     pub score: f64,
 }
 
+/// One graph subject [`Catalog::link_entity`] considered a candidate match
+/// for a free-text mention — Epic 105 P9's entity linking
+/// (`plans/105w-entity-linking.md`), the gap `105j` named: "resolving free
+/// text... to a seed `Sid` is a real, separate, string-matching-shaped
+/// problem... that deserves its own scoping pass." [`Catalog::graph_context`]
+/// takes an already-resolved `Sid` and has no way to get one from a mention
+/// like "the July invoices" — this closes that gap.
+///
+/// Distinct from [`ResolvedEntity`]: that resolves free text to a *catalog
+/// asset* (a table, a dashboard — the metadata-about-data layer);
+/// [`LinkedEntity`] resolves to *any* graph subject an asset's own literal
+/// properties name it has, no different in kind from an invoice, a
+/// provision, or anything a pack's own data describes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkedEntity {
+    /// The candidate graph subject.
+    pub subject: Sid,
+    /// The literal value that matched, so a caller can tell *why* this
+    /// subject was suggested — not only that it was.
+    pub matched_value: String,
+    /// `0.0..=1.0`, sorted descending across the returned list. The best
+    /// match across all of a subject's own literal properties, not one row
+    /// per property — a caller wants one seed per candidate entity, the
+    /// same "one candidate, not one row per matching field" shape
+    /// [`Catalog::resolve_entity`] already has.
+    pub score: f64,
+}
+
 /// A single anchor-plus-period obligation, computed forward rather than
 /// only checked backward — Epic 105 P8's first real slice
 /// (`plans/105h-obligation-calendar.md`). Reuses `[findings.span]` rather
@@ -9883,6 +9911,97 @@ impl Catalog {
                 .partial_cmp(&a.score)
                 .expect("a similarity score is never NaN")
         });
+        Ok(scored)
+    }
+
+    /// Resolve free text to a candidate graph subject, scored by how
+    /// closely it matches one of that subject's own literal properties —
+    /// Epic 105 P9's entity linking (`plans/105w-entity-linking.md`). See
+    /// [`LinkedEntity`]'s own doc comment for how this differs from
+    /// [`Self::resolve_entity`].
+    ///
+    /// Reuses [`Self::sparql`] rather than a new storage-layer scan:
+    /// authorization scoping and the query budget both already live there,
+    /// and a full literal scan is exactly what `scoped_facts`' own
+    /// `max_facts` truncation already exists to bound. The scan itself has
+    /// no predicate to push down — every literal property is a candidate,
+    /// by design, since a pack's own naming is never known here.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured or the scan fails.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: the `n = 3` above is a fixed literal, the one
+    /// input [`RuleMatchError::InvalidNGramSize`] can ever fire on, and
+    /// every produced score is a finite `0.0..=1.0` ratio, which can never
+    /// fail `partial_cmp` the way `NaN` would — the same reasoning
+    /// [`Self::resolve_entity`]'s own `# Panics` section already states.
+    ///
+    /// [`RuleMatchError::InvalidNGramSize`]: graph_owl_resolution::rule_match::RuleMatchError::InvalidNGramSize
+    pub async fn link_entity(
+        &self,
+        principal: &Principal,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<LinkedEntity>, CatalogError> {
+        let outcome = self
+            .sparql(
+                principal,
+                "SELECT ?s ?v WHERE { ?s ?p ?v . FILTER(isLiteral(?v)) }",
+                None,
+                SparqlBudget::default(),
+            )
+            .await?;
+
+        // Best match per subject, not one row per matching literal — see
+        // `LinkedEntity::score`'s own doc comment for why.
+        let mut best: std::collections::HashMap<Sid, LinkedEntity> =
+            std::collections::HashMap::new();
+        for row in outcome.rows {
+            let (Some(subject_term), Some(value_term)) = (row.get("s"), row.get("v")) else {
+                continue;
+            };
+            let Some(subject) = graph_owl_core::flake::Sid::from_iri(bare_term(subject_term))
+            else {
+                continue;
+            };
+            let matched_value = bare_term(value_term).to_string();
+            let score = graph_owl_resolution::rule_match::similarity(
+                query,
+                &matched_value,
+                &graph_owl_resolution::rule_match::SimilarityStrategy::NGram { n: 3 },
+            )
+            .expect("n = 3 is always a valid n-gram size");
+
+            best.entry(subject.clone())
+                // Strictly `>`: on a tie the first-seen literal keeps the
+                // slot. Arbitrary, and deliberately so — the returned
+                // `score` is identical either way, so no caller-observable
+                // behaviour depends on which literal string wins a tie,
+                // only that one wins consistently rather than depending on
+                // fetch order.
+                .and_modify(|existing| {
+                    if score > existing.score {
+                        existing.matched_value.clone_from(&matched_value);
+                        existing.score = score;
+                    }
+                })
+                .or_insert(LinkedEntity {
+                    subject,
+                    matched_value,
+                    score,
+                });
+        }
+
+        let mut scored: Vec<LinkedEntity> = best.into_values().collect();
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .expect("a similarity score is never NaN")
+        });
+        scored.truncate(limit);
         Ok(scored)
     }
 
@@ -26332,6 +26451,82 @@ mod projection_isolation_tests {
             earlier.rows.is_empty(),
             "as of t=1 the window had not yet been widened: {:?}",
             earlier.rows
+        );
+    }
+
+    /// Entity linking — Epic 105 P9 (`plans/105w-entity-linking.md`): free
+    /// text resolves to a graph *subject*, not a catalog asset — the gap
+    /// `graph_context` left ("takes an already-resolved `Sid`... has no
+    /// way to get one"). Two assets whose own `dsc:name` is close and far
+    /// from the query, so the closer one must rank first.
+    #[tokio::test]
+    async fn link_entity_ranks_the_closer_literal_match_first() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let orders = catalog
+            .upsert_asset(&Principal::system(), service("orders-table"))
+            .await
+            .expect("create orders");
+        catalog
+            .upsert_asset(&Principal::system(), service("reports-dashboard"))
+            .await
+            .expect("create reports");
+
+        let candidates = catalog
+            .link_entity(&Principal::system(), "orders", 10)
+            .await
+            .expect("link");
+
+        assert!(!candidates.is_empty(), "{candidates:?}");
+        assert_eq!(
+            candidates[0].subject,
+            graph_owl_core::projection::entity_sid(orders.id),
+            "{candidates:?}"
+        );
+        assert!(
+            candidates.windows(2).all(|w| w[0].score >= w[1].score),
+            "not sorted descending: {candidates:?}"
+        );
+    }
+
+    /// A subject with two matching literal properties (its own `dsc:name`
+    /// and a second dated-entity-style property, here reusing
+    /// `effectiveFrom`) must appear once, scored by its *best* match — not
+    /// once per literal, which would let one entity crowd out every other
+    /// candidate in a caller-facing `limit`.
+    #[tokio::test]
+    async fn link_entity_returns_one_candidate_per_subject_at_its_best_score() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let asset = catalog
+            .upsert_asset(&Principal::system(), service("orders-table"))
+            .await
+            .expect("create");
+        let subject = graph_owl_core::projection::entity_sid(asset.id);
+        graph
+            .assert_flakes(&[Flake::assert(
+                subject.clone(),
+                Sid::dsc("effectiveFrom"),
+                FlakeValue::String("orders".to_string()),
+                1,
+            )])
+            .await
+            .expect("seed a second literal");
+
+        let candidates = catalog
+            .link_entity(&Principal::system(), "orders", 10)
+            .await
+            .expect("link");
+
+        let matches: Vec<_> = candidates.iter().filter(|c| c.subject == subject).collect();
+        assert_eq!(matches.len(), 1, "{candidates:?}");
+        assert_eq!(
+            matches[0].score, 1.0,
+            "the exact match wins: {candidates:?}"
         );
     }
 
