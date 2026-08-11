@@ -21,7 +21,7 @@
  *  already *is* deferring, the same reasoning Epic 17's queue records. */
 
 import { Space, Tag, Typography } from "antd";
-import { api, type PackFinding } from "../../api";
+import { api, type EvidenceGraph, type EvidenceGraphEdge, type PackFinding } from "../../api";
 import { performAsAction } from "./apiAction";
 import type { QueueConfig, QueueEntry } from "./queues";
 
@@ -41,6 +41,10 @@ const COPY = {
   governedByLabel: "Rule",
   subjectLabel: "Subject",
   evidenceLabel: "Evidence",
+  evidenceGraphLabel: "Evidence graph",
+  evidenceGraphSeedOnly: "Nothing else in the graph connects to this yet.",
+  evidenceGraphTruncated: "Truncated — only part of the neighbourhood is shown.",
+  evidenceGraphArrow: "—",
   acceptAction: "Accept",
   acceptConfirmTitle: "Accept this finding?",
   acceptConfirmBody:
@@ -61,6 +65,22 @@ export function displayTerm(term: string): string {
   const cut = Math.max(term.lastIndexOf("#"), term.lastIndexOf("/"));
   const tail = cut >= 0 ? term.slice(cut + 1) : term;
   return tail.length > 0 ? tail : term;
+}
+
+/** One edge, as a sentence a reviewer can follow without decoding IRIs —
+ *  Epic 105 P7's console half. Both endpoints and the relationship itself
+ *  are rendered through {@link displayTerm}: a derived edge's relationship
+ *  can arrive as a full predicate IRI, and a reviewer reads it the same way
+ *  they read a node. */
+export function describeEvidenceEdge(edge: EvidenceGraphEdge): string {
+  return `${displayTerm(edge.from)} ${COPY.evidenceGraphArrow}${displayTerm(edge.relationship)}→ ${displayTerm(edge.to)}`;
+}
+
+/** Whether the walk found nothing beyond the finding's own subject — an
+ *  empty seed set (an unresolvable subject) counts the same as a lone one,
+ *  since either way there is nothing for a reviewer to follow. */
+export function evidenceGraphIsJustTheSeed(graph: EvidenceGraph): boolean {
+  return graph.nodes.length <= 1 && graph.edges.length === 0;
 }
 
 export function toQueueEntry(finding: PackFinding): QueueEntry {
@@ -131,6 +151,11 @@ export function findingsQueue(): QueueConfig {
     async fetchDetail(entry) {
       const finding = raw.get(entry.id);
       if (!finding) return null;
+      // A missing traversal engine or an unresolvable subject must not take
+      // down the rest of the detail pane — the flat evidence list above
+      // already carries the finding's citation, and this section is an
+      // addition to it, not a dependency of it.
+      const graph = await api.findingEvidenceGraph(entry.id).catch(() => null);
       return (
         <Space direction="vertical" size="small" style={{ width: "100%" }}>
           <div>
@@ -153,6 +178,29 @@ export function findingsQueue(): QueueConfig {
               </div>
             ))}
           </div>
+          {graph && (
+            <div>
+              <Text strong>{COPY.evidenceGraphLabel}</Text>
+              {evidenceGraphIsJustTheSeed(graph) ? (
+                <div>
+                  <Text type="secondary">{COPY.evidenceGraphSeedOnly}</Text>
+                </div>
+              ) : (
+                <>
+                  {graph.edges.map((edge, index) => (
+                    <div key={`${edge.from}-${edge.relationship}-${edge.to}-${index}`}>
+                      {describeEvidenceEdge(edge)}
+                    </div>
+                  ))}
+                  {graph.truncated && (
+                    <div>
+                      <Text type="secondary">{COPY.evidenceGraphTruncated}</Text>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </Space>
       );
     },

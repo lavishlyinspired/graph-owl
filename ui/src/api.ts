@@ -345,6 +345,31 @@ export interface PackFinding {
   readonly reason?: string | null;
 }
 
+/** A node in a finding's evidence graph — Epic 105 P7
+ *  (`GET /findings/{id}/evidence-graph`).
+ *
+ *  **`iri`, not `name`/`kind` like {@link GraphNode}.** A finding's subject
+ *  can be in any pack's namespace, not only `dsc:`, so there is no catalog
+ *  asset to resolve a display name from — the resolved IRI (when the
+ *  deployment recognises the namespace) is the only label the server has. */
+export interface EvidenceGraphNode {
+  readonly id: string;
+  readonly iri: string | null;
+}
+
+export interface EvidenceGraphEdge {
+  readonly from: string;
+  readonly to: string;
+  readonly relationship: string;
+  readonly derived?: boolean;
+}
+
+export interface EvidenceGraph {
+  readonly nodes: readonly EvidenceGraphNode[];
+  readonly edges: readonly EvidenceGraphEdge[];
+  readonly truncated: boolean;
+}
+
 export interface DriftItem {
   id: string;
   assetId: string;
@@ -1298,6 +1323,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify(reason ? { status, reason } : { status }),
     }),
+  /** The subgraph reachable from a finding's own subject — Epic 105 P7, the
+   *  traversal half. Computed at answer time from whatever the graph
+   *  actually contains, not the flat evidence list the rule's author named
+   *  when it was written. */
+  findingEvidenceGraph: (id: string) =>
+    request<EvidenceGraph>(`/findings/${id}/evidence-graph`),
   applyDrift: (id: string) => request<DriftItem>(`/drift/${id}/apply`, { method: "POST" }),
   ignoreDrift: (id: string, reason: string) =>
     request<DriftItem>(`/drift/${id}/ignore`, {

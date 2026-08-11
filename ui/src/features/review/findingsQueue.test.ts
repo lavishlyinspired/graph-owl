@@ -5,8 +5,8 @@
  *  the row stays readable for the shapes a real pack produces. */
 
 import { describe, expect, it } from "vitest";
-import type { PackFinding } from "../../api";
-import { displayTerm, toQueueEntry } from "./findingsQueue";
+import type { EvidenceGraph, EvidenceGraphEdge, PackFinding } from "../../api";
+import { describeEvidenceEdge, displayTerm, evidenceGraphIsJustTheSeed, toQueueEntry } from "./findingsQueue";
 
 function getFinding(overrides: Partial<PackFinding> = {}): PackFinding {
   return {
@@ -98,5 +98,60 @@ describe("toQueueEntry", () => {
 
     expect(entry.summary).toBe("DuplicateGuest");
     expect(entry.detail).toContain("hospitality");
+  });
+});
+
+function getEdge(overrides: Partial<EvidenceGraphEdge> = {}): EvidenceGraphEdge {
+  return {
+    from: "https://graph-owl.dev/packs/gst#pr-INV-1003",
+    to: "https://graph-owl.dev/packs/gst#supplier-29AACCG0527D1Z8",
+    relationship: "issuedBy",
+    ...overrides,
+  };
+}
+
+describe("describeEvidenceEdge", () => {
+  it("reads as a sentence a reviewer can follow, local names not IRIs", () => {
+    expect(describeEvidenceEdge(getEdge())).toBe(
+      "pr-INV-1003 —issuedBy→ supplier-29AACCG0527D1Z8",
+    );
+  });
+
+  it("names the relationship by its local name even when it is a full IRI", () => {
+    // A derived edge's relationship can arrive as a full predicate IRI; a
+    // reviewer reads the local name the same way they read a node's.
+    expect(
+      describeEvidenceEdge(
+        getEdge({ relationship: "https://graph-owl.dev/packs/gst#issuedBy" }),
+      ),
+    ).toBe("pr-INV-1003 —issuedBy→ supplier-29AACCG0527D1Z8");
+  });
+});
+
+describe("evidenceGraphIsJustTheSeed", () => {
+  it("is true when the walk found nothing beyond the finding's own subject", () => {
+    const graph: EvidenceGraph = {
+      nodes: [{ id: "pr-INV-1003", iri: null }],
+      edges: [],
+      truncated: false,
+    };
+    expect(evidenceGraphIsJustTheSeed(graph)).toBe(true);
+  });
+
+  it("is false once the walk reaches a second node", () => {
+    const graph: EvidenceGraph = {
+      nodes: [
+        { id: "pr-INV-1003", iri: null },
+        { id: "supplier-29AACCG0527D1Z8", iri: null },
+      ],
+      edges: [getEdge()],
+      truncated: false,
+    };
+    expect(evidenceGraphIsJustTheSeed(graph)).toBe(false);
+  });
+
+  it("is true for an empty graph too — a finding whose subject failed to resolve", () => {
+    const graph: EvidenceGraph = { nodes: [], edges: [], truncated: false };
+    expect(evidenceGraphIsJustTheSeed(graph)).toBe(true);
   });
 });
