@@ -152,12 +152,22 @@ than chased. Final: 30 tests, 0 missed mutants (1 documented equivalent).
 
 **Checked 4 August 2026**, per `CLAUDE.md`'s search-before-building rule.
 
-**Adopt `petgraph`** (MIT/Apache-2.0, 451M downloads) for the arithmetic —
-PageRank, connected components, cycle detection. Decision 3 above already
-specifies "pure algorithms over an in-memory projection the caller supplies", so
-the projection hides the reified two-hop encoding and `petgraph` sees an
-ordinary graph. What this crate builds is the projection, the caching and the
-budget, not the maths.
+**Adopt `petgraph`** (MIT/Apache-2.0, 451M downloads) — checked again 11
+August 2026 once the crate was shipped and actually adopted, not just
+proposed. The arithmetic itself (`PageRank`'s honest convergence
+reporting, `Components`' per-node detail and orphan/silo tracking) stayed
+hand-rolled: `petgraph::algo::page_rank` takes a fixed iteration count
+with no convergence signal, and `petgraph::algo::connected_components`
+returns a bare `usize` count — both materially weaker than what this
+crate's own governance-reporting use needs, so swapping them in would
+have been a regression, not a refactor (`00l-build-vs-adopt.md`'s
+petgraph entry has the full comparison). What *was* adopted is the
+storage: `CsrGraph` wraps `petgraph::csr::Csr` rather than hand-rolled
+`row_offsets`/`col_indices` — its internal layout turned out to be
+exactly that representation already, read directly from its source. What
+this crate builds is the projection, the caching, the budget, and the
+governance-shaped algorithm contracts — not the adjacency storage, which
+petgraph now owns.
 
 **Do not adopt `rust-igraph`.** It has every algorithm this epic wants and is
 **GPL-2.0-or-later** — copyleft, which `00i` rejects and which would relicense

@@ -883,3 +883,75 @@ is only `examples/gst_investigation_agent.py`'s own real-usage dependency
 `graph_owl_langchain` itself, or its test suite, needs — the same
 reasoning `reconcile_agent.py`'s stdlib-only design already established
 for its own optional narration path.
+
+## `petgraph` in `graph-owl-analytics` — declared, never used; found via a live-agent code review
+
+`plans/38-graph-analytics.md` decision 5 says "Adopt `petgraph`... for the
+arithmetic." `graph-owl-analytics/Cargo.toml` has carried
+`petgraph.workspace = true` since Epic 38 shipped. **Checked 11 August
+2026, after an unrelated review of a live agent trace raised it**: `grep`
+across every `.rs` file in the crate finds zero uses of `petgraph` —
+`CsrGraph` (`row_offsets`/`col_indices`, `graph-owl-analytics/src/
+lib.rs:31-34`) is a hand-rolled compressed-sparse-row structure, and every
+algorithm (degree centrality, connected components, `PageRank`, orphan
+detection) iterates it directly, not a `petgraph::Graph`. This is not
+"hand-rolled instead of the adopted library" in the usual sense of a
+choice revisited later — the dependency was declared and then never
+referenced even once, which no `cargo check`/clippy warning catches (an
+unused `Cargo.toml` entry is silent; `cargo udeps` or equivalent is the
+tool that would have caught it, and this project does not run one).
+
+**First removed the dead declaration**, then, on direct follow-up ("but
+we should use petgraph, isnt?"), adopted it for real rather than leaving
+the gap only documented. The two candidate scopes were evaluated
+separately, because they carry very different risk:
+
+- **The algorithms themselves** (`petgraph::algo::page_rank`,
+  `petgraph::algo::connected_components`) were checked against
+  `graph-owl-analytics`'s own contract and **rejected for a full swap**.
+  `page_rank(graph, damping, nb_iter)` takes a fixed iteration count with
+  no convergence/tolerance signal at all — no equivalent of this crate's
+  `PageRankResult.converged: bool`, which exists specifically so
+  iteration exhaustion is never silently reported as a converged answer.
+  `connected_components(g) -> usize` returns a bare count — no equivalent
+  of `Components`'s per-node assignment, `orphans()`, or
+  `filter_edge_types` tracking, all three load-bearing for this crate's
+  own governance-reporting use. Swapping these in would have been a
+  behavioural regression on shipped, tested output, not a refactor.
+- **The adjacency storage** (`CsrGraph`'s hand-rolled `row_offsets`/
+  `col_indices`) was adopted. `petgraph::csr::Csr`'s own internal layout
+  (`column: Vec<NodeIndex<Ix>>`, `row: Vec<usize>`) is, read directly from
+  its source, the identical representation — this was a genuine case of
+  "someone already built this," not a coincidence worth re-implementing.
+  `CsrGraph` (`graph-owl-analytics/src/lib.rs`) now wraps
+  `petgraph::csr::Csr<(), (), Directed, NodeId>`; `project()` builds it via
+  `Csr::with_nodes` + `add_edge` rather than `Csr::from_sorted_edges`,
+  because the latter sizes itself from the edge list alone and would
+  silently drop a node with no edges at all — exactly the orphan case
+  `connected_components`'s own `size_one_components_are_the_orphan_set`
+  test exists to catch. `degree_centrality`, `connected_components`, and
+  `pagerank` — the algorithm bodies, convergence logic, dangling-node
+  redistribution, and deterministic tie-breaking — are untouched.
+
+**The differential test this document's own rule 4 asks for was the
+crate's existing 30-test suite, unchanged.** Every assertion, including
+the mutation-testing-derived ones pinning `<` vs `<=` in union-find and
+the closed-form `PageRank` value, passed against the new internals with
+zero test-assertion edits — only construction-site code changed. One gap
+did surface under mutation testing (`cargo mutants --in-diff`, scoped to
+the change): the new `PartialEq for CsrGraph` (needed because
+`petgraph::csr::Csr` has no `PartialEq` of its own) had two survivors,
+`eq -> true` and its `&&` mutated to `||`, both invisible to every
+existing test because they only ever assert two *equal* projections —
+never two different ones. Fixed with one negative test
+(`an_empty_adjacency_is_not_equal_to_a_non_empty_one`); re-run: 19
+caught, 2 unviable, 0 missed.
+
+`38-graph-analytics.md`'s "Adopt `petgraph`... for the arithmetic" line
+(not one of its six numbered decisions — a separate library-choice note)
+is still not literally what was built: the arithmetic stayed hand-rolled,
+deliberately, for the convergence- and component-detail reasons above.
+What actually happened is closer to "adopt `petgraph` for storage, keep
+the arithmetic" — corrected directly in that plan's own text rather than
+left to drift, since the point of writing this down here is so the next
+reader does not have to reconcile the two documents themselves.

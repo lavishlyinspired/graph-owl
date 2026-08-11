@@ -20,56 +20,108 @@ use std::collections::BTreeMap;
 /// store's own identity: that stays a [`Sid`], reachable via `nodes[id]`.
 pub type NodeId = usize;
 
-/// Directed adjacency as compressed sparse row: cache-friendly and compact,
-/// the shape every algorithm here iterates over.
+/// Directed adjacency as compressed sparse row, backed by
+/// [`petgraph::csr::Csr`] — the storage and row layout are petgraph's own;
+/// this wrapper adds only what petgraph's `Csr` does not expose itself: a
+/// flat, contiguous edge-index space spanning every row (`row_offsets`,
+/// derived once from petgraph's own [`petgraph::csr::Csr::out_degree`]),
+/// which is what lets [`GraphProjection::weights`] stay a single flat `Vec`
+/// aligned index-for-index with edges rather than one `Vec` per node.
 ///
-/// `row_offsets[i]..row_offsets[i + 1]` indexes into `col_indices` for node
-/// `i`'s outgoing neighbours, which is why `row_offsets` always has one more
-/// entry than there are nodes — the final entry is `col_indices.len()`, the
-/// end of the last node's range.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Node and edge weights are left as `()`: `graph-owl-analytics` weighting
+/// is a caller-supplied, post-projection concern
+/// ([`GraphProjection::weights`]), not something the adjacency structure
+/// itself carries — see `plans/00l-build-vs-adopt.md`'s petgraph entry for
+/// why folding weights into petgraph's own per-edge slot was rejected
+/// (nothing in this crate ever constructs a weighted [`Csr`] directly; only
+/// tests mutate `weights` after the fact, which a per-edge weight slot
+/// cannot express without rebuilding the structure).
+#[derive(Debug, Clone)]
 pub struct CsrGraph {
+    inner: petgraph::csr::Csr<(), (), petgraph::Directed, NodeId>,
+    /// `row_offsets[i]..row_offsets[i + 1]` is node `i`'s outgoing edges'
+    /// position in the flat edge-index space — one more entry than there
+    /// are nodes, the last being the total edge count. Prefix-summed once
+    /// from `inner.out_degree`, not duplicated bookkeeping: petgraph's `Csr`
+    /// keeps the equivalent internally but does not make it public.
     row_offsets: Vec<usize>,
-    col_indices: Vec<NodeId>,
 }
 
 impl CsrGraph {
+    /// Build from a node count and edges already sorted by `(from, to)` —
+    /// the same order [`project`]'s own `BTreeSet<(Sid, Sid)>` iterates in
+    /// once mapped through a sort-order-preserving `Sid -> NodeId` index.
+    /// `node_count` is taken explicitly, not inferred from the edges,
+    /// because an isolated node (no edge at all — exactly what orphan
+    /// detection needs to see) would otherwise vanish: petgraph's own
+    /// `Csr::from_sorted_edges` sizes itself from the edges alone.
+    fn from_sorted_edges(node_count: usize, edges: &[(NodeId, NodeId)]) -> Self {
+        let mut inner = petgraph::csr::Csr::with_nodes(node_count);
+        for &(from, to) in edges {
+            inner.add_edge(from, to, ());
+        }
+        let mut row_offsets = Vec::with_capacity(node_count + 1);
+        row_offsets.push(0);
+        let mut acc = 0;
+        for node in 0..node_count {
+            acc += inner.out_degree(node);
+            row_offsets.push(acc);
+        }
+        Self { inner, row_offsets }
+    }
+
     #[must_use]
     pub fn node_count(&self) -> usize {
-        self.row_offsets.len().saturating_sub(1)
+        self.inner.node_count()
     }
 
     #[must_use]
     pub fn edge_count(&self) -> usize {
-        self.col_indices.len()
+        self.inner.edge_count()
     }
 
     /// `node`'s outgoing neighbours, in the deterministic order [`project`]
     /// built them (sorted by the neighbour's own [`Sid`]).
     #[must_use]
     pub fn out_neighbours(&self, node: NodeId) -> &[NodeId] {
-        let start = self.row_offsets[node];
-        let end = self.row_offsets[node + 1];
-        &self.col_indices[start..end]
+        self.inner.neighbors_slice(node)
     }
 
-    /// The half-open range into `col_indices` — and, when present, a
-    /// projection's own [`GraphProjection::weights`] — for `node`'s
-    /// outgoing edges. Exposed so a caller can walk edges by index rather
-    /// than only by neighbour, which is what reading a per-edge weight
-    /// aligned to the same index space needs.
+    /// The half-open range into the flat edge-index space — and, when
+    /// present, a projection's own [`GraphProjection::weights`] — for
+    /// `node`'s outgoing edges. Exposed so a caller can walk edges by index
+    /// rather than only by neighbour, which is what reading a per-edge
+    /// weight aligned to the same index space needs.
     #[must_use]
     pub fn out_edge_range(&self, node: NodeId) -> std::ops::Range<usize> {
         self.row_offsets[node]..self.row_offsets[node + 1]
     }
 
-    /// The neighbour at `edge_index` — an index into `col_indices`, as
-    /// returned by [`Self::out_edge_range`].
+    /// The neighbour at `edge_index`, a flat index as returned by
+    /// [`Self::out_edge_range`]. `row_offsets` is sorted, so the owning row
+    /// is a binary search away; bounded graph sizes (`AnalyticsBudget`) keep
+    /// this cheap relative to petgraph's own O(1) row-local indexing.
     #[must_use]
     pub fn target(&self, edge_index: usize) -> NodeId {
-        self.col_indices[edge_index]
+        let row = self.row_offsets.partition_point(|&x| x <= edge_index) - 1;
+        self.inner.neighbors_slice(row)[edge_index - self.row_offsets[row]]
     }
 }
+
+/// Two [`CsrGraph`]s are equal when every node has the same outgoing
+/// neighbours in the same order — `petgraph::csr::Csr` implements no
+/// `PartialEq` of its own, and this is exactly the property `row_offsets`
+/// plus `col_indices` equality expressed before the petgraph migration:
+/// equal per-node neighbour lists imply equal degrees, and prefix sums of
+/// equal degree sequences are themselves equal.
+impl PartialEq for CsrGraph {
+    fn eq(&self, other: &Self) -> bool {
+        self.node_count() == other.node_count()
+            && (0..self.node_count()).all(|n| self.out_neighbours(n) == other.out_neighbours(n))
+    }
+}
+
+impl Eq for CsrGraph {}
 
 /// A graph, projected from the catalog's flakes into the shape every
 /// algorithm in this crate wants — decision 3 of `38-graph-analytics.md`:
@@ -199,28 +251,20 @@ pub fn project(
     let nodes: Vec<Sid> = node_set.into_iter().collect();
     let index_of: BTreeMap<&Sid, NodeId> = nodes.iter().enumerate().map(|(i, s)| (s, i)).collect();
 
-    let mut adjacency: Vec<Vec<NodeId>> = vec![Vec::new(); nodes.len()];
-    for (from, to) in &distinct_edges {
-        adjacency[index_of[from]].push(index_of[to]);
-    }
-    for neighbours in &mut adjacency {
-        neighbours.sort_unstable();
-    }
-
-    let mut row_offsets = Vec::with_capacity(nodes.len() + 1);
-    let mut col_indices = Vec::with_capacity(edge_count);
-    row_offsets.push(0);
-    for neighbours in &adjacency {
-        col_indices.extend_from_slice(neighbours);
-        row_offsets.push(col_indices.len());
-    }
+    // `distinct_edges` is a `BTreeSet<(Sid, Sid)>`, so it already iterates
+    // in sorted order; `index_of` is a monotonic, order-preserving map
+    // (node ids are assigned in the same sorted-`Sid` order as `nodes`
+    // itself), so mapping each pair through it preserves that order —
+    // exactly the `(from, to)`-sorted input `CsrGraph::from_sorted_edges`
+    // requires.
+    let sorted_edges: Vec<(NodeId, NodeId)> = distinct_edges
+        .iter()
+        .map(|(from, to)| (index_of[from], index_of[to]))
+        .collect();
 
     Ok(GraphProjection {
+        adjacency: CsrGraph::from_sorted_edges(nodes.len(), &sorted_edges),
         nodes,
-        adjacency: CsrGraph {
-            row_offsets,
-            col_indices,
-        },
         weights: None,
         edge_types: edge_types.to_vec(),
     })
@@ -704,6 +748,22 @@ mod tests {
 
         assert_eq!(projection.adjacency.out_neighbours(a_id), &[b_id]);
         assert_eq!(projection.adjacency.out_neighbours(b_id), &[a_id]);
+    }
+
+    /// **The negative case for `CsrGraph`'s `PartialEq`.** Every other test
+    /// asserting on `.adjacency` compares two structurally identical graphs
+    /// (`assert_eq!`) — never two different ones — which cannot catch `eq`
+    /// mutated to always return `true`, nor its `&&` mutated to `||`: with
+    /// the empty graph on the left, `(0..0).all(..)` is vacuously `true`
+    /// regardless of the right side, so only `&&` correctly falls through
+    /// to `node_count() == node_count()` being `false`.
+    #[test]
+    fn an_empty_adjacency_is_not_equal_to_a_non_empty_one() {
+        let empty = project(&[], &[], &[feeds()], &budget()).expect("within budget");
+        let non_empty = project(&[], &[edge("a", "b", &feeds())], &[feeds()], &budget())
+            .expect("within budget");
+
+        assert_ne!(empty.adjacency, non_empty.adjacency);
     }
 
     // Every comparison in this module is against an unweighted degree —
