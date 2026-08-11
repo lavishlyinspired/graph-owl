@@ -1352,6 +1352,104 @@ fn findings_from_rows(
     Ok(built)
 }
 
+/// A single anchor-plus-period obligation, computed forward rather than
+/// only checked backward — Epic 105 P8's first real slice
+/// (`plans/105h-obligation-calendar.md`). Reuses `[findings.span]` rather
+/// than a new pack-config table: "Event → Legal Rule → Obligation → Due
+/// Date → Risk" is the same anchor/period `105b` already built for
+/// `PaymentOverdue`, read as a due date instead of only a pass/fail.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Obligation {
+    /// Which pack's rules produced it.
+    pub pack: String,
+    /// What kind of obligation — the pack's own vocabulary
+    /// (`gst:PaymentOverdue`).
+    pub label: String,
+    /// The graph subject this is about.
+    pub subject: String,
+    /// The rule, statute or policy it rests on.
+    pub governed_by: String,
+    /// The event date the period is measured from.
+    pub anchor: chrono::NaiveDate,
+    /// `anchor` plus the rule's `exceedsDays` — the day compliance ends.
+    pub due: chrono::NaiveDate,
+    /// Negative once overdue. Not itself a finding — a `PaymentOverdue`
+    /// finding requires crossing the threshold; this lists every open
+    /// obligation regardless, which is what a calendar needs to show
+    /// upcoming ones before they become one.
+    pub days_remaining: i64,
+}
+
+/// Turn one span-configured rule's already-fetched SPARQL rows into
+/// obligations. No I/O — mirrors [`findings_from_rows`]'s own shape and the
+/// same reason it takes no `Catalog`: the query has already run.
+///
+/// **A row whose `to` (the discharging event) is already bound is not on
+/// the calendar.** The obligation is settled, whether on time or late — a
+/// late payment is still a `PaymentOverdue` finding, but there is nothing
+/// left to schedule.
+///
+/// # Errors
+///
+/// `Validation` if the rule's `span` is malformed, its subject variable is
+/// unbound, or its anchor date is not ISO-8601.
+fn obligations_from_rows(
+    rule: &graph_owl_engine::FindingRuleDef,
+    rows: &[std::collections::BTreeMap<String, String>],
+    today: chrono::NaiveDate,
+) -> Result<Vec<Obligation>, CatalogError> {
+    let Some(json) = &rule.span else {
+        return Ok(Vec::new());
+    };
+    let config: SpanRuleConfig = serde_json::from_value(json.clone())
+        .map_err(|e| rule_error(rule, format!("its span condition is malformed: {e}")))?;
+
+    let mut built = Vec::new();
+    for row in rows {
+        if row.get(&config.to).is_some() {
+            continue;
+        }
+
+        let anchor = row.get(&config.from).ok_or_else(|| {
+            rule_error(
+                rule,
+                format!(
+                    "measures a span from variable '{}', which its query does not bind",
+                    config.from
+                ),
+            )
+        })?;
+        let anchor = bare_term(anchor);
+        let anchor = chrono::NaiveDate::parse_from_str(anchor, "%Y-%m-%d")
+            .map_err(|_| rule_error(rule, format!("its span anchor '{anchor}' is not ISO-8601")))?;
+
+        let subject = row.get(&rule.subject_var).ok_or_else(|| {
+            rule_error(
+                rule,
+                format!(
+                    "names subject variable '{}', which its query does not bind",
+                    rule.subject_var
+                ),
+            )
+        })?;
+        let subject = bare_term(subject).to_string();
+
+        let due = anchor + chrono::Duration::days(config.exceeds_days);
+        built.push(Obligation {
+            pack: rule.pack.clone(),
+            label: rule.label.clone(),
+            subject,
+            governed_by: rule.governed_by.clone(),
+            anchor,
+            due,
+            days_remaining: (due - today).num_days(),
+        });
+    }
+
+    Ok(built)
+}
+
 /// The landing page's answer.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2184,6 +2282,46 @@ impl Catalog {
             opened: recorded.opened,
             already_open: recorded.already_open,
         })
+    }
+
+    /// Every open obligation a pack's span-configured rules can see right
+    /// now, due date first — Epic 105 P8's first real slice
+    /// (`plans/105h-obligation-calendar.md`). Runs the exact same rule
+    /// queries [`reconcile_pack`] does; the difference is what happens to
+    /// each row afterward — [`obligations_from_rows`] computes a due date
+    /// for every open row instead of filtering to only the overdue ones.
+    ///
+    /// A rule with no `[findings.span]` band contributes nothing — most
+    /// rules never will, since an obligation calendar is specific to a rule
+    /// with an anchor and a period, not every finding.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no finding-rule registry is configured or a rule's
+    /// query fails to parse or execute. `Validation` if a rule's `span`
+    /// band is malformed — see [`obligations_from_rows`].
+    ///
+    /// [`reconcile_pack`]: Self::reconcile_pack
+    pub async fn obligation_calendar(
+        &self,
+        principal: &Principal,
+        pack: &str,
+    ) -> Result<Vec<Obligation>, CatalogError> {
+        let rules = self.finding_rules(pack).await?;
+        let today = chrono::Utc::now().date_naive();
+
+        let mut all = Vec::new();
+        for rule in &rules {
+            if rule.span.is_none() {
+                continue;
+            }
+            let outcome = self
+                .sparql(principal, &rule.query, None, SparqlBudget::default())
+                .await?;
+            all.extend(obligations_from_rows(rule, &outcome.rows, today)?);
+        }
+        all.sort_by(|a, b| a.due.cmp(&b.due).then_with(|| a.subject.cmp(&b.subject)));
+        Ok(all)
     }
 
     /// The neighbourhood around an asset, as a graph.
@@ -38628,6 +38766,176 @@ mod findings_from_rows_tests {
 
         let error = findings_from_rows(&rule, &rows).expect_err("must be refused");
         assert!(detail(&error).contains("purchasedAt"), "{error:?}");
+    }
+}
+
+#[cfg(test)]
+mod obligations_from_rows_tests {
+    //! `obligations_from_rows` — Epic 105 P8's first real slice
+    //! (`plans/105h-obligation-calendar.md`), reusing `[findings.span]`
+    //! rather than a new pack-config table: "Event → Legal Rule →
+    //! Obligation → Due Date → Risk" turns out to be the anchor/period
+    //! `105b` already built, read forward (the due date itself) instead of
+    //! only backward (has it already been exceeded). `PaymentOverdue`'s own
+    //! query and span band are the only fixture used — no new pack config.
+
+    use std::collections::BTreeMap;
+
+    use graph_owl_engine::{EvidenceBinding, FindingRuleDef};
+
+    use super::{CatalogError, obligations_from_rows};
+
+    fn detail(error: &CatalogError) -> &str {
+        match error {
+            CatalogError::Validation(errors) => {
+                errors.first().map(|e| e.detail.as_str()).unwrap_or("")
+            }
+            other => panic!("expected a Validation error, got {other:?}"),
+        }
+    }
+
+    fn row(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn rule() -> FindingRuleDef {
+        FindingRuleDef {
+            pack: "gst".to_string(),
+            label: "gst:PaymentOverdue".to_string(),
+            summary: "Credit taken on an invoice not paid within 180 days".to_string(),
+            governed_by: "gst:Section16-2-d".to_string(),
+            query: "SELECT ?purchase ?purchasedAt ?paidAt {}".to_string(),
+            subject_var: "purchase".to_string(),
+            evidence: vec![EvidenceBinding {
+                predicate: "gst:atTime".to_string(),
+                var: "purchasedAt".to_string(),
+            }],
+            similarity: None,
+            span: Some(serde_json::json!({
+                "from": "purchasedAt", "to": "paidAt", "exceedsDays": 180,
+                "whenMissing": "elapsed", "asOf": "2026-08-01"
+            })),
+        }
+    }
+
+    #[test]
+    fn an_unpaid_invoice_s_due_date_is_the_anchor_plus_the_period() {
+        let rows = vec![row(&[
+            ("purchase", "<https://graph-owl.dev/packs/gst#p-INV-1003>"),
+            ("purchasedAt", "\"2026-01-01\""),
+        ])];
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid date");
+
+        let obligations = obligations_from_rows(&rule(), &rows, today).expect("ok");
+        assert_eq!(obligations.len(), 1, "{obligations:?}");
+        assert_eq!(
+            obligations[0].due,
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 30).expect("valid date"),
+            "180 days after 2026-01-01: {obligations:?}"
+        );
+    }
+
+    #[test]
+    fn an_overdue_obligation_reports_negative_days_remaining() {
+        let rows = vec![row(&[
+            ("purchase", "<https://graph-owl.dev/packs/gst#p-INV-1003>"),
+            ("purchasedAt", "\"2026-01-01\""),
+        ])];
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid date");
+
+        let obligations = obligations_from_rows(&rule(), &rows, today).expect("ok");
+        assert!(
+            obligations[0].days_remaining < 0,
+            "due 2026-06-30, judged as of 2026-08-01, must already be overdue: {:?}",
+            obligations[0]
+        );
+    }
+
+    #[test]
+    fn an_obligation_not_yet_due_reports_positive_days_remaining() {
+        let rows = vec![row(&[
+            ("purchase", "<https://graph-owl.dev/packs/gst#p-INV-2001>"),
+            ("purchasedAt", "\"2026-07-20\""),
+        ])];
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid date");
+
+        let obligations = obligations_from_rows(&rule(), &rows, today).expect("ok");
+        assert_eq!(obligations.len(), 1, "{obligations:?}");
+        assert!(
+            obligations[0].days_remaining > 0,
+            "purchased 12 days ago, due in 180: {:?}",
+            obligations[0]
+        );
+    }
+
+    /// The obligation is discharged, whether it was paid on time or late —
+    /// a calendar of what is still owed has nothing left to show for it.
+    /// (Whether a *late* payment should still cite the finding it produced
+    /// is a `findings_from_rows` question, already answered there; this is
+    /// a different question — is anything still outstanding.)
+    #[test]
+    fn a_paid_invoice_is_not_on_the_calendar() {
+        let rows = vec![row(&[
+            ("purchase", "<https://graph-owl.dev/packs/gst#p-INV-1001>"),
+            ("purchasedAt", "\"2026-01-01\""),
+            ("paidAt", "\"2026-02-01\""),
+        ])];
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid date");
+
+        let obligations = obligations_from_rows(&rule(), &rows, today).expect("ok");
+        assert!(obligations.is_empty(), "{obligations:?}");
+    }
+
+    #[test]
+    fn a_rule_with_no_span_condition_produces_no_obligations() {
+        let mut plain = rule();
+        plain.span = None;
+        let rows = vec![row(&[(
+            "purchase",
+            "<https://graph-owl.dev/packs/gst#p-x>",
+        )])];
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid date");
+
+        assert_eq!(
+            obligations_from_rows(&plain, &rows, today).expect("ok"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn zero_rows_produces_zero_obligations_without_error() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid date");
+        assert_eq!(
+            obligations_from_rows(&rule(), &[], today).expect("ok"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn a_row_missing_the_anchor_variable_is_a_named_error() {
+        let rows = vec![row(&[(
+            "purchase",
+            "<https://graph-owl.dev/packs/gst#p-x>",
+        )])];
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid date");
+
+        let error = obligations_from_rows(&rule(), &rows, today).expect_err("must be refused");
+        assert!(detail(&error).contains("purchasedAt"), "{error:?}");
+    }
+
+    #[test]
+    fn an_unparseable_anchor_date_is_a_named_error() {
+        let rows = vec![row(&[
+            ("purchase", "<https://graph-owl.dev/packs/gst#p-x>"),
+            ("purchasedAt", "\"not-a-date\""),
+        ])];
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid date");
+
+        let error = obligations_from_rows(&rule(), &rows, today).expect_err("must be refused");
+        assert!(detail(&error).contains("not-a-date"), "{error:?}");
     }
 }
 

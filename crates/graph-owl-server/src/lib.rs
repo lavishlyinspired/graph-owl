@@ -95,6 +95,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
             post(declare_finding_rules).get(list_finding_rules),
         )
         .route("/packs/{pack}/reconcile", post(reconcile_pack))
+        .route("/packs/{pack}/obligations", get(obligation_calendar))
         .route("/graph/export/preview", get(export_preview))
         // Epic 42 Slice G: the text-first ontology editor. `preview` is the
         // fast, as-the-author-types path (parse only); `dry-run` is the
@@ -8224,6 +8225,20 @@ async fn reconcile_pack(
         return Err(AppError::NotFound);
     }
     Ok(Json(catalog.reconcile_pack(&principal, &pack).await?))
+}
+
+/// A pack's open obligations, due date first — Epic 105 P8's first real
+/// slice (`plans/105h-obligation-calendar.md`). Read-only, so not
+/// admin-gated: the same reasoning [`list_findings`] gives for its own
+/// route — an operator who cannot see the calendar cannot act on it.
+///
+/// [`list_findings`]: list_findings
+async fn obligation_calendar(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(pack): Path<String>,
+) -> Result<Json<Vec<graph_owl_api::Obligation>>, AppError> {
+    Ok(Json(catalog.obligation_calendar(&principal, &pack).await?))
 }
 
 /// The findings queue — Epic 105 P5.
