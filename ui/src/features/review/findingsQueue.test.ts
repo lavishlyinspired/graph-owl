@@ -6,7 +6,14 @@
 
 import { describe, expect, it } from "vitest";
 import type { EvidenceGraph, EvidenceGraphEdge, PackFinding } from "../../api";
-import { describeEvidenceEdge, displayTerm, evidenceGraphIsJustTheSeed, toQueueEntry } from "./findingsQueue";
+import {
+  describeEvidenceEdge,
+  displayTerm,
+  evidenceGraphIsJustTheSeed,
+  evidencePicture,
+  evidenceTriples,
+  toQueueEntry,
+} from "./findingsQueue";
 
 function getFinding(overrides: Partial<PackFinding> = {}): PackFinding {
   return {
@@ -153,5 +160,92 @@ describe("evidenceGraphIsJustTheSeed", () => {
   it("is true for an empty graph too — a finding whose subject failed to resolve", () => {
     const graph: EvidenceGraph = { nodes: [], edges: [], truncated: false };
     expect(evidenceGraphIsJustTheSeed(graph)).toBe(true);
+  });
+});
+
+describe("evidencePicture", () => {
+  const graph: EvidenceGraph = {
+    nodes: [
+      { id: "pr-INV-1003", iri: "https://graph-owl.dev/packs/gst#pr-INV-1003" },
+      {
+        id: "supplier-29AACCG0527D1Z8",
+        iri: "https://graph-owl.dev/packs/gst#supplier-29AACCG0527D1Z8",
+      },
+    ],
+    edges: [getEdge()],
+    truncated: false,
+  };
+
+  it("seeds the picture at the finding's own subject, by local name", () => {
+    const picture = evidencePicture(getFinding(), graph);
+    expect(picture.seedId).toBe("pr-INV-1003");
+  });
+
+  it("carries every node through, named by its resolved IRI's local part", () => {
+    const picture = evidencePicture(getFinding(), graph);
+    expect(picture.nodes).toEqual([
+      { id: "pr-INV-1003", name: "pr-INV-1003", kind: null },
+      { id: "supplier-29AACCG0527D1Z8", name: "supplier-29AACCG0527D1Z8", kind: null },
+    ]);
+  });
+
+  it("falls back to the bare id when a node's namespace never resolved to an IRI", () => {
+    const unresolved: EvidenceGraph = {
+      nodes: [{ id: "pr-INV-1003", iri: null }],
+      edges: [],
+      truncated: false,
+    };
+    const picture = evidencePicture(getFinding(), unresolved);
+    expect(picture.nodes).toEqual([{ id: "pr-INV-1003", name: "pr-INV-1003", kind: null }]);
+  });
+
+  it("carries the edges through unchanged — GraphEdge and EvidenceGraphEdge already share a shape", () => {
+    const picture = evidencePicture(getFinding(), graph);
+    expect(picture.edges).toEqual(graph.edges);
+  });
+
+  it("treats every node as already expanded — nothing here is a click-to-reveal", () => {
+    // The evidence graph is fetched whole in one call; a `.expandable` ring
+    // on any node would promise a click that does nothing.
+    const picture = evidencePicture(getFinding(), graph);
+    expect(picture.expanded).toEqual(["pr-INV-1003", "supplier-29AACCG0527D1Z8"]);
+  });
+
+  it("marks the seed as truncated when the walk hit its budget", () => {
+    const picture = evidencePicture(getFinding(), { ...graph, truncated: true });
+    expect(picture.truncatedAt).toEqual(["pr-INV-1003"]);
+  });
+
+  it("marks nothing as truncated when the walk completed", () => {
+    const picture = evidencePicture(getFinding(), graph);
+    expect(picture.truncatedAt).toEqual([]);
+  });
+});
+
+describe("evidenceTriples", () => {
+  it("reads each edge as a subject/predicate/object row, local names throughout", () => {
+    const graph: EvidenceGraph = {
+      nodes: [],
+      edges: [getEdge({ derived: true })],
+      truncated: false,
+    };
+    expect(evidenceTriples(graph)).toEqual([
+      {
+        subject: "pr-INV-1003",
+        predicate: "issuedBy",
+        object: "supplier-29AACCG0527D1Z8",
+        derived: true,
+      },
+    ]);
+  });
+
+  it("defaults derived to false when the server did not send it", () => {
+    const graph: EvidenceGraph = { nodes: [], edges: [getEdge()], truncated: false };
+    const [row] = evidenceTriples(graph);
+    expect(row?.derived).toBe(false);
+  });
+
+  it("is empty for a graph with no edges", () => {
+    expect(evidenceTriples({ nodes: [], edges: [], truncated: false })).toEqual([]);
   });
 });

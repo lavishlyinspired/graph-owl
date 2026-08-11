@@ -21,7 +21,12 @@
  *  already *is* deferring, the same reasoning Epic 17's queue records. */
 
 import { Space, Tag, Typography } from "antd";
+import type { CSSProperties } from "react";
 import { api, type EvidenceGraph, type EvidenceGraphEdge, type PackFinding } from "../../api";
+import type { Picture } from "../../graph/cytoscape";
+import { GraphCanvas } from "../../graph/GraphCanvas";
+import { palette } from "../../theme";
+import { readParam } from "../deepLink";
 import { performAsAction } from "./apiAction";
 import type { QueueConfig, QueueEntry } from "./queues";
 
@@ -45,6 +50,10 @@ const COPY = {
   evidenceGraphSeedOnly: "Nothing else in the graph connects to this yet.",
   evidenceGraphTruncated: "Truncated — only part of the neighbourhood is shown.",
   evidenceGraphArrow: "—",
+  triplesLabel: "Triples",
+  predicateLabel: "Predicate",
+  objectLabel: "Object",
+  derivedTag: "derived",
   acceptAction: "Accept",
   acceptConfirmTitle: "Accept this finding?",
   acceptConfirmBody:
@@ -55,6 +64,20 @@ const COPY = {
     "A dismissal has to say why. Without a reason the next reconciliation run cannot tell 'considered and dismissed' from 'nobody has looked yet' — and neither can the next reviewer.",
   rejectPlaceholder: "Why should this finding not stand?",
   separator: " · ",
+};
+
+const triplesHeaderStyle: CSSProperties = {
+  textAlign: "left",
+  fontSize: 12,
+  fontWeight: 600,
+  padding: "4px 8px 4px 0",
+  borderBottom: "1px solid rgba(0, 0, 0, 0.08)",
+};
+
+const triplesCellStyle: CSSProperties = {
+  fontSize: 13,
+  padding: "4px 8px 4px 0",
+  borderBottom: "1px solid rgba(0, 0, 0, 0.04)",
 };
 
 /** The local name of a term, for a reviewer who does not want to read IRIs.
@@ -81,6 +104,67 @@ export function describeEvidenceEdge(edge: EvidenceGraphEdge): string {
  *  since either way there is nothing for a reviewer to follow. */
 export function evidenceGraphIsJustTheSeed(graph: EvidenceGraph): boolean {
   return graph.nodes.length <= 1 && graph.edges.length === 0;
+}
+
+/** The evidence graph, as the shared `GraphCanvas` wants it — the same
+ *  Cytoscape canvas `Explore`'s asset graph already draws with, reused here
+ *  rather than a second renderer for a second kind of graph.
+ *
+ *  **`EvidenceGraphEdge` already has the shape `GraphEdge` does** — `{from,
+ *  to, relationship, derived?}` — so edges pass through unchanged; only the
+ *  nodes need adapting, since a finding's subject is not a catalog asset
+ *  and so has no `name`/`kind` the way `/assets/{id}/graph`'s nodes do.
+ *
+ *  **Every node counts as already expanded.** The evidence graph is fetched
+ *  whole in one call, unlike the asset explorer's click-to-reveal picture —
+ *  marking a node `expandable` here would draw a ring promising an
+ *  interaction nothing behind it honours. */
+export function evidencePicture(finding: PackFinding, graph: EvidenceGraph): Picture {
+  const seedId = displayTerm(finding.subject);
+  const nodeIds = graph.nodes.map((node) => node.id);
+  return {
+    seedId,
+    nodes: graph.nodes.map((node) => ({
+      id: node.id,
+      name: node.iri ? displayTerm(node.iri) : node.id,
+      kind: null,
+    })),
+    edges: graph.edges,
+    expanded: nodeIds,
+    // The API reports truncation for the walk as a whole, not per node; the
+    // seed is where a reader would look to learn more is out there, so it
+    // carries the mark.
+    truncatedAt: graph.truncated ? [seedId] : [],
+  };
+}
+
+/** One row per edge — a finding's evidence graph, as the triples it actually
+ *  is. `{from, relationship, to}` on the wire *is* `{subject, predicate,
+ *  object}`; this just names it the way a reader who wants to see raw
+ *  triples, not a rendered picture, expects to read it. */
+export function evidenceTriples(
+  graph: EvidenceGraph,
+): { subject: string; predicate: string; object: string; derived: boolean }[] {
+  return graph.edges.map((edge) => ({
+    subject: displayTerm(edge.from),
+    predicate: displayTerm(edge.relationship),
+    object: displayTerm(edge.to),
+    derived: edge.derived ?? false,
+  }));
+}
+
+/** Light by default, matching `App.tsx`'s own `useTheme()` precedence
+ *  (`?theme=` first, then the persisted choice) — `GraphCanvas` needs
+ *  concrete colour values to hand Cytoscape, so it cannot read the CSS
+ *  custom properties the rest of this file's markup relies on. Duplicated
+ *  rather than imported: `useTheme` is a hook local to `App.tsx`, and this
+ *  file is plain data-fetching functions, not a component that could call
+ *  one. */
+function currentGraphColors(): (typeof palette)["light"] {
+  const stored =
+    typeof window === "undefined" ? null : window.localStorage.getItem("graphowl.theme.v2");
+  const dark = (readParam("theme") ?? stored) === "dark";
+  return dark ? palette.dark : palette.light;
 }
 
 export function toQueueEntry(finding: PackFinding): QueueEntry {
@@ -187,16 +271,56 @@ export function findingsQueue(): QueueConfig {
                 </div>
               ) : (
                 <>
-                  {graph.edges.map((edge, index) => (
-                    <div key={`${edge.from}-${edge.relationship}-${edge.to}-${index}`}>
-                      {describeEvidenceEdge(edge)}
-                    </div>
-                  ))}
+                  <div style={{ marginTop: 8 }}>
+                    <GraphCanvas
+                      picture={evidencePicture(finding, graph)}
+                      colors={currentGraphColors()}
+                      onExpand={() => {}}
+                      label={`Evidence graph for ${displayTerm(finding.subject)}`}
+                    />
+                  </div>
+                  {/* The canvas's own `role="img"`/`aria-label` names the
+                   *  picture but not its content — this is the same
+                   *  non-visual equivalent `00f` requires of any rendered
+                   *  graph, not a duplicate of the canvas above it. */}
+                  <div style={{ marginTop: 8 }}>
+                    {graph.edges.map((edge, index) => (
+                      <div key={`${edge.from}-${edge.relationship}-${edge.to}-${index}`}>
+                        <Text type="secondary">{describeEvidenceEdge(edge)}</Text>
+                      </div>
+                    ))}
+                  </div>
                   {graph.truncated && (
                     <div>
                       <Text type="secondary">{COPY.evidenceGraphTruncated}</Text>
                     </div>
                   )}
+                  <div style={{ marginTop: 8 }}>
+                    <Text strong>{COPY.triplesLabel}</Text>
+                    <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
+                      <thead>
+                        <tr>
+                          <th style={triplesHeaderStyle}>{COPY.subjectLabel}</th>
+                          <th style={triplesHeaderStyle}>{COPY.predicateLabel}</th>
+                          <th style={triplesHeaderStyle}>{COPY.objectLabel}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {evidenceTriples(graph).map((row, index) => (
+                          <tr key={`${row.subject}-${row.predicate}-${row.object}-${index}`}>
+                            <td style={triplesCellStyle}>{row.subject}</td>
+                            <td style={triplesCellStyle}>
+                              {row.predicate}
+                              {row.derived && (
+                                <Tag style={{ marginLeft: 6 }}>{COPY.derivedTag}</Tag>
+                              )}
+                            </td>
+                            <td style={triplesCellStyle}>{row.object}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </>
               )}
             </div>
