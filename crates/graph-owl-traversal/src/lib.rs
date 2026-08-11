@@ -174,6 +174,37 @@ pub struct EdgeFilter {
     /// which is what makes time-travelling traversal fall out of Epic 4 rather
     /// than needing a mechanism of its own.
     pub as_of: Option<i64>,
+    /// Exclude entities outside their own validity window at a date. `None`
+    /// walks every entity regardless of validity — the common case, since
+    /// most nodes are not dated entities at all.
+    pub valid_at: Option<ValidityWindow>,
+}
+
+/// Which predicates name an entity's own validity window, and the date to
+/// check every node against — Epic 105 P8's date-window traversal
+/// (`plans/105u-date-window-traversal.md`).
+///
+/// **Predicate names are pack-specific, not fixed.** GST names its
+/// provisions' window `gst:effectiveFrom`/`gst:effectiveTo`; a different pack
+/// names its own concept differently. Hardcoding a predicate here would
+/// break domain neutrality the same way a hardcoded relationship-type list
+/// would, so the caller supplies both — the same posture
+/// [`EdgeFilter::relationship_types`] already takes toward relationship
+/// vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidityWindow {
+    /// The predicate naming a node's own `effectiveFrom` property.
+    pub effective_from: Sid,
+    /// The predicate naming a node's own `effectiveTo` property. A node with
+    /// no `effective_to` flake at all is still open — matching
+    /// `graph_owl_resolution::temporal::EffectivePeriod::effective_to`'s own
+    /// `None` convention, which this mirrors rather than duplicates a second
+    /// way (`graph-owl-traversal` does not depend on `graph-owl-resolution`;
+    /// the two-line containment check is small enough that owning it here
+    /// does not cost the coupling a shared dependency would).
+    pub effective_to: Sid,
+    /// The date to check every node's own window against.
+    pub at: chrono::NaiveDate,
 }
 
 /// How much of the graph a traversal may touch.

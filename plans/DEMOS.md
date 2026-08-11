@@ -1415,17 +1415,35 @@ have no automated score; P11's agent answers one question end-to-end
 against a scripted model, not a live one, and is not itself what produced
 the five scored answers above (those come from `reconcile_agent.py`'s
 deterministic P9 layer) — P12 does not yet score an agent's own free-text
-output at all, only a structured system's;
-unbuilt, so today's evaluation is this one worked example plus
-`reconcile_agent.py`'s deterministic five and
-`scripts/verify-gst-reconciliation.sh`'s hand-scripted assertions for 6-11,
-not an automated score; the live GSP/ERP connectors are fixture-mode only;
+output at all, only a structured system's. Today's evaluation is one
+worked agent example (P11, Q14) plus `reconcile_agent.py`'s scored
+deterministic five and `scripts/verify-gst-reconciliation.sh`'s
+hand-scripted assertions for 6-11 — not yet a single automated report
+across all fifteen.
+**P8's date-window traversal shipped, 11 August 2026** (`105u`): the third
+gap `105i` named and deliberately did not attempt — the graph walk itself
+filtered to entities valid at a date, not only resolving already-fetched
+rows. Same predicate-supplied-by-the-caller posture
+`relationship_types` already has, so no pack-specific hardcoding; both
+`graph-owl-traversal-memory` and `graph-owl-engine-postgres` exclude an
+invalid node *before* the walk runs, so it cannot be a pass-through to a
+node beyond it (proven, not assumed — a dedicated test). Mutation-clean at
+both layers (16/14/2/0 memory; 3/3/0/0 Postgres, the small count because
+most of the Postgres change is SQL text with nothing for a mutant to
+touch).
+Also still open: `105i`'s other two named gaps (a pack-config surface for
+declaring a temporal-resolution rule; entity-validity extension of
+`as_of`/time-travel at the storage layer — a separate question from
+date-window traversal, still unbuilt); the live GSP/ERP connectors are
+fixture-mode only;
 pack facts are readable by any principal who can query at all
 (per-named-graph policy needs a policy model that does not exist yet); six
-of the seven planned packs are unwritten; and P2's remaining connectors,
-P3, P4, the rest of P8 (temporal engine, generalization beyond GST), P9's
-GraphRAG/hybrid-search remaining thirds are untouched — this is the spine,
-not the finished platform
+of the seven planned packs are unwritten (deliberately not attempted —
+DN-3's hospitality pack already carries the domain-neutrality proof, and
+inventing regulatory content for six more domains without real source
+material was assessed and declined); and P2's remaining connectors, P3,
+P4, P9's GraphRAG/hybrid-search remaining thirds are untouched — this is
+the spine, not the finished platform
 
 ### Console half
 - [x] **105** **One queue, every pack** — `findingsQueue.tsx` renders GST and hospitality identically; the difference lives in `pack.toml`. A `GstFindingsQueue.tsx` would have been the console's first per-domain hardcoding

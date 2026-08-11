@@ -15,3 +15,4 @@ graph-owl-core = { path = "../graph-owl-core", version = "0.1.0" }
 graph-owl-engine = { path = "../graph-owl-engine", version = "0.1.0" }
 async-trait.workspace = true
 thiserror.workspace = true
+chrono.workspace = true

@@ -1869,6 +1869,7 @@ name = "graph-owl-traversal"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "graph-owl-core",
  "graph-owl-engine",
  "thiserror 2.0.19",

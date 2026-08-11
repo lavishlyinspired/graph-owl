@@ -892,6 +892,63 @@ fn is_vocabulary_namespace(namespace_code: u16) -> bool {
         || namespace_code >= graph_owl_core::flake::namespace::RUNTIME_START
 }
 
+/// Every subject's own `effective_from`/`effective_to`, read off `flakes` —
+/// the same "no second query, the flakes are already fetched" shape
+/// `graph-owl-traversal-memory`'s `node_windows` already established for
+/// date-window traversal (`105u`), generalized from graph-walk edges to
+/// arbitrary SPARQL-scoped flakes.
+fn entity_windows(
+    flakes: &[graph_owl_core::flake::Flake],
+    window: &graph_owl_traversal::ValidityWindow,
+) -> std::collections::HashMap<
+    graph_owl_core::flake::Sid,
+    (chrono::NaiveDate, Option<chrono::NaiveDate>),
+> {
+    use graph_owl_core::flake::FlakeValue;
+
+    let mut from: std::collections::HashMap<graph_owl_core::flake::Sid, chrono::NaiveDate> =
+        std::collections::HashMap::new();
+    let mut to: std::collections::HashMap<graph_owl_core::flake::Sid, chrono::NaiveDate> =
+        std::collections::HashMap::new();
+    for flake in flakes {
+        let FlakeValue::String(value) = &flake.o else {
+            continue;
+        };
+        let Ok(date) = value.parse::<chrono::NaiveDate>() else {
+            continue;
+        };
+        if flake.p == window.effective_from {
+            from.insert(flake.s.clone(), date);
+        } else if flake.p == window.effective_to {
+            to.insert(flake.s.clone(), date);
+        }
+    }
+    from.into_iter()
+        .map(|(sid, effective_from)| {
+            let effective_to = to.get(&sid).copied();
+            (sid, (effective_from, effective_to))
+        })
+        .collect()
+}
+
+/// A subject with no validity flakes of its own is not a dated entity and
+/// is always valid — the same opt-in posture `EdgeFilter::valid_at`
+/// already has. `effective_from` inclusive, `effective_to` exclusive,
+/// matching `graph_owl_resolution::temporal::EffectivePeriod`'s own
+/// convention.
+fn entity_is_valid(
+    subject: &graph_owl_core::flake::Sid,
+    windows: &std::collections::HashMap<
+        graph_owl_core::flake::Sid,
+        (chrono::NaiveDate, Option<chrono::NaiveDate>),
+    >,
+    at: chrono::NaiveDate,
+) -> bool {
+    windows
+        .get(subject)
+        .is_none_or(|(from, to)| *from <= at && to.is_none_or(|end| at < end))
+}
+
 /// Keep only the facts this principal may see, up to the budget.
 ///
 /// A flake is visible when its subject is a visible asset. A **relationship**
@@ -2550,6 +2607,7 @@ impl Catalog {
                 &EdgeFilter {
                     relationship_types: None,
                     as_of: as_of_t,
+                    valid_at: None,
                 },
             )
             .await
@@ -2721,6 +2779,7 @@ impl Catalog {
                 &EdgeFilter {
                     relationship_types: None,
                     as_of: None,
+                    valid_at: None,
                 },
             )
             .await
@@ -2765,6 +2824,7 @@ impl Catalog {
                 &EdgeFilter {
                     relationship_types: None,
                     as_of: None,
+                    valid_at: None,
                 },
             )
             .await
@@ -2964,6 +3024,51 @@ impl Catalog {
         as_of: Option<DateTime<Utc>>,
         budget: SparqlBudget,
     ) -> Result<SparqlOutcome, CatalogError> {
+        self.sparql_scoped(principal, query, as_of, None, budget)
+            .await
+    }
+
+    /// [`Self::sparql`], with the transaction-time time-travel `as_of`
+    /// already gives extended to entity validity — Epic 105 P8's second
+    /// time-travel gap (`plans/105v-entity-validity-sparql.md`), the one
+    /// `105i` named and did not attempt: "this resolves already-fetched
+    /// candidate rows; it does not change how the graph engine answers a
+    /// query." A subject outside its own `window` at query time is excluded
+    /// from the dataset before the evaluator ever sees it — the same
+    /// "before the walk/evaluator runs" posture `EdgeFilter::valid_at`
+    /// (date-window traversal, `105u`) already has, applied to SPARQL's own
+    /// visible-facts computation instead of a graph walk.
+    ///
+    /// A separate method rather than a new parameter on [`Self::sparql`]:
+    /// that method has over fifty call sites across this crate's own test
+    /// suite plus `graph-owl-mcp` and `graph-owl-server`, and this
+    /// capability is additive — every existing caller's behaviour is
+    /// unchanged by construction, not merely by passing `None`.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::sparql`]: `Validation` if the query does not
+    /// parse, `Storage` if no graph engine is configured or a scan fails.
+    pub async fn sparql_valid_at(
+        &self,
+        principal: &Principal,
+        query: &str,
+        as_of: Option<DateTime<Utc>>,
+        valid_at: &graph_owl_traversal::ValidityWindow,
+        budget: SparqlBudget,
+    ) -> Result<SparqlOutcome, CatalogError> {
+        self.sparql_scoped(principal, query, as_of, Some(valid_at), budget)
+            .await
+    }
+
+    async fn sparql_scoped(
+        &self,
+        principal: &Principal,
+        query: &str,
+        as_of: Option<DateTime<Utc>>,
+        valid_at: Option<&graph_owl_traversal::ValidityWindow>,
+        budget: SparqlBudget,
+    ) -> Result<SparqlOutcome, CatalogError> {
         let parsed = spargebra::SparqlParser::new()
             .parse_query(query)
             .map_err(|error| {
@@ -2983,7 +3088,7 @@ impl Catalog {
             self.rewrite_for_ql(parsed, budget.ql).await?;
 
         let mut outcome = self
-            .execute_algebra(principal, &parsed, as_of, budget)
+            .execute_algebra(principal, &parsed, as_of, valid_at, budget)
             .await?;
         outcome.ql_rewrite = ql_rewrite;
         outcome.refused_axioms = refused_axioms;
@@ -4069,7 +4174,7 @@ impl Catalog {
             base_iri: None,
         };
 
-        self.execute_algebra(principal, &parsed, as_of, budget)
+        self.execute_algebra(principal, &parsed, as_of, None, budget)
             .await
     }
 
@@ -4142,7 +4247,9 @@ impl Catalog {
             pattern,
             base_iri: None,
         };
-        let scoped = self.scoped_facts(principal, &parsed, None, budget).await?;
+        let scoped = self
+            .scoped_facts(principal, &parsed, None, None, budget)
+            .await?;
         let fields = projected_variables(&parsed);
         let facts = scoped.facts;
         let dataset = scoped.dataset;
@@ -4215,9 +4322,12 @@ impl Catalog {
         principal: &Principal,
         parsed: &spargebra::Query,
         as_of: Option<DateTime<Utc>>,
+        valid_at: Option<&graph_owl_traversal::ValidityWindow>,
         budget: SparqlBudget,
     ) -> Result<SparqlOutcome, CatalogError> {
-        let scoped = self.scoped_facts(principal, parsed, as_of, budget).await?;
+        let scoped = self
+            .scoped_facts(principal, parsed, as_of, valid_at, budget)
+            .await?;
         // Read before `scoped.dataset` is moved out below — a borrow of
         // `scoped.facts` alone, so the two partial moves don't conflict.
         let alignments_used = self.alignments_touched(&scoped.facts, scoped.at).await?;
@@ -4315,6 +4425,7 @@ impl Catalog {
         principal: &Principal,
         parsed: &spargebra::Query,
         as_of: Option<DateTime<Utc>>,
+        valid_at: Option<&graph_owl_traversal::ValidityWindow>,
         budget: SparqlBudget,
     ) -> Result<ScopedFacts, CatalogError> {
         let graph = self.graph.as_ref().ok_or_else(|| {
@@ -4373,6 +4484,49 @@ impl Catalog {
         // name flakes. A duplicate quad would make the evaluator emit a
         // solution twice, so the union has to be a set.
         dedup_flakes(&mut all);
+
+        // Entity-validity time travel — Epic 105 P8's second gap
+        // (`plans/105v-entity-validity-sparql.md`). Applied before
+        // authorization scoping, the same "before the evaluator/walk sees
+        // it" position `as_of` (via `scan.as_of` above) already occupies:
+        // an invalid entity is absent from the dataset, not merely
+        // unauthorized.
+        //
+        // **A dedicated fetch, not a read of `all`.** Pushdown (`scans_for`,
+        // above) narrows to exactly what the query pattern names — a query
+        // asking only `?s dsc:name ?n` never fetches `effectiveFrom`/
+        // `effectiveTo` at all, so a dated subject's own window would
+        // silently read as "undated, always valid" if this reused `all`
+        // instead of asking storage for the validity predicates directly.
+        if let Some(window) = valid_at {
+            let mut validity_flakes = Vec::new();
+            // `p: Some(predicate)` scopes each fetch to one predicate rather
+            // than reading the whole graph — a correctness no-op, since
+            // `entity_windows` below re-filters by predicate identity
+            // regardless of what was fetched (a mutation run confirmed this:
+            // deleting the `p` field here changes no test outcome), but a
+            // real fetch-volume difference on any estate larger than a unit
+            // test's own fixture. Left in for that reason, not provable by a
+            // small test — the same "over-fetch, then filter correctly"
+            // shape this codebase accepts elsewhere when the alternative is
+            // an artificial test proving nothing but its own existence.
+            for predicate in [&window.effective_from, &window.effective_to] {
+                validity_flakes.extend(
+                    graph
+                        .query_pattern(&graph_owl_core::flake::TriplePattern {
+                            p: Some(predicate.clone()),
+                            as_of: at,
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(|e| {
+                            CatalogError::Storage(StorageError::Unexpected(e.to_string()))
+                        })?,
+                );
+            }
+            let windows = entity_windows(&validity_flakes, window);
+            all.retain(|flake| entity_is_valid(&flake.s, &windows, window.at));
+        }
 
         let (facts, truncated) = scope_facts(&all, &visible, budget.max_facts);
         let fact_count = facts.len();
@@ -4450,7 +4604,7 @@ impl Catalog {
             base_iri: None,
         };
         let scoped = self
-            .scoped_facts(principal, &discovery_query, as_of, budget)
+            .scoped_facts(principal, &discovery_query, as_of, None, budget)
             .await?;
         let mut truncated = scoped.truncated;
 
@@ -4493,7 +4647,7 @@ impl Catalog {
             base_iri: None,
         };
         let mut outcome = self
-            .execute_algebra(principal, &final_query, as_of, budget)
+            .execute_algebra(principal, &final_query, as_of, None, budget)
             .await?;
         outcome.truncated |= truncated;
         Ok(outcome)
@@ -4587,6 +4741,7 @@ impl Catalog {
                             .clone()
                             .map(|relationship_type| vec![relationship_type]),
                         as_of: scoped.at,
+                        valid_at: None,
                     },
                 )
                 .await
@@ -14407,7 +14562,8 @@ impl Catalog {
             base_iri,
         };
 
-        self.execute_algebra(principal, &query, None, budget).await
+        self.execute_algebra(principal, &query, None, None, budget)
+            .await
     }
 
     /// The read-report-persist tail both validation entry points share —
@@ -25930,6 +26086,253 @@ mod projection_isolation_tests {
         assert!(outcome.facts_scanned > 0);
         assert!(!outcome.truncated);
         let _ = created;
+    }
+
+    /// Entity-validity SPARQL time travel — Epic 105 P8's second gap
+    /// (`plans/105v-entity-validity-sparql.md`): a subject outside its own
+    /// `effectiveFrom`/`effectiveTo` window at the query date is absent
+    /// from the answer entirely, not merely a row the caller has to notice
+    /// is stale.
+    fn dated_asset_flakes_at(
+        subject: &graph_owl_core::flake::Sid,
+        from: &str,
+        to: &str,
+        t: i64,
+    ) -> Vec<Flake> {
+        vec![
+            Flake::assert(
+                subject.clone(),
+                Sid::dsc("effectiveFrom"),
+                FlakeValue::String(from.to_string()),
+                t,
+            ),
+            Flake::assert(
+                subject.clone(),
+                Sid::dsc("effectiveTo"),
+                FlakeValue::String(to.to_string()),
+                t,
+            ),
+        ]
+    }
+
+    fn dated_asset_flakes(
+        subject: &graph_owl_core::flake::Sid,
+        from: &str,
+        to: &str,
+    ) -> Vec<Flake> {
+        dated_asset_flakes_at(subject, from, to, 1)
+    }
+
+    fn window(at: &str) -> graph_owl_traversal::ValidityWindow {
+        graph_owl_traversal::ValidityWindow {
+            effective_from: Sid::dsc("effectiveFrom"),
+            effective_to: Sid::dsc("effectiveTo"),
+            at: at.parse().expect("test date is ISO-8601"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sparql_valid_at_excludes_a_subject_no_longer_valid() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let asset = catalog
+            .upsert_asset(&Principal::system(), service("old-rate-card"))
+            .await
+            .expect("create");
+        let subject = graph_owl_core::projection::entity_sid(asset.id);
+        graph
+            .assert_flakes(&dated_asset_flakes(&subject, "2020-01-01", "2021-01-01"))
+            .await
+            .expect("seed validity flakes");
+
+        let outcome = catalog
+            .sparql_valid_at(
+                &Principal::system(),
+                "SELECT ?n WHERE { ?s <https://graph-owl.dev/ns/catalog#name> ?n }",
+                None,
+                &window("2026-01-01"),
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert!(outcome.rows.is_empty(), "{:?}", outcome.rows);
+    }
+
+    #[tokio::test]
+    async fn sparql_valid_at_includes_a_subject_inside_its_own_window() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let asset = catalog
+            .upsert_asset(&Principal::system(), service("current-rate-card"))
+            .await
+            .expect("create");
+        let subject = graph_owl_core::projection::entity_sid(asset.id);
+        graph
+            .assert_flakes(&dated_asset_flakes(&subject, "2020-01-01", "2030-01-01"))
+            .await
+            .expect("seed validity flakes");
+
+        let outcome = catalog
+            .sparql_valid_at(
+                &Principal::system(),
+                "SELECT ?n WHERE { ?s <https://graph-owl.dev/ns/catalog#name> ?n }",
+                None,
+                &window("2026-01-01"),
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(outcome.rows.len(), 1, "{:?}", outcome.rows);
+        assert!(outcome.rows[0]["n"].contains("current-rate-card"));
+    }
+
+    /// A subject with no validity flakes at all is not a dated entity — the
+    /// filter is opt-in per subject, not a default every subject must
+    /// satisfy, matching `EdgeFilter::valid_at`'s own posture toward an
+    /// undated node in date-window traversal (`105u`).
+    #[tokio::test]
+    async fn sparql_valid_at_leaves_an_undated_subject_untouched() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        catalog
+            .upsert_asset(&Principal::system(), service("undated-service"))
+            .await
+            .expect("create");
+
+        let outcome = catalog
+            .sparql_valid_at(
+                &Principal::system(),
+                "SELECT ?n WHERE { ?s <https://graph-owl.dev/ns/catalog#name> ?n }",
+                None,
+                &window("2026-01-01"),
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert_eq!(outcome.rows.len(), 1, "{:?}", outcome.rows);
+    }
+
+    /// `effective_to` is exclusive — matching
+    /// `graph_owl_resolution::temporal::EffectivePeriod`'s own convention
+    /// exactly, checked on the boundary date itself rather than only well
+    /// past it, the same distinction `105u`'s own boundary test makes for
+    /// date-window traversal.
+    #[tokio::test]
+    async fn sparql_valid_at_excludes_a_subject_exactly_on_its_effective_to_date() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let asset = catalog
+            .upsert_asset(&Principal::system(), service("expires-today"))
+            .await
+            .expect("create");
+        let subject = graph_owl_core::projection::entity_sid(asset.id);
+        graph
+            .assert_flakes(&dated_asset_flakes(&subject, "2020-01-01", "2026-01-01"))
+            .await
+            .expect("seed validity flakes");
+
+        let outcome = catalog
+            .sparql_valid_at(
+                &Principal::system(),
+                "SELECT ?n WHERE { ?s <https://graph-owl.dev/ns/catalog#name> ?n }",
+                None,
+                &window("2026-01-01"),
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+
+        assert!(outcome.rows.is_empty(), "{:?}", outcome.rows);
+    }
+
+    /// The transaction-time `as_of` this method already accepts reaches the
+    /// *validity* fetch too, not only the query's own scan — a subject
+    /// whose window was later widened must be judged by the window as it
+    /// stood at `as_of`, not by what it looks like today.
+    #[tokio::test]
+    async fn sparql_valid_at_judges_the_window_as_it_stood_at_as_of() {
+        let storage = Arc::new(InMemoryStorage::default());
+        let graph = RecordingGraph::working();
+        let catalog = Catalog::new(storage).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+        let asset = catalog
+            .upsert_asset(&Principal::system(), service("widened-later"))
+            .await
+            .expect("create");
+        let subject = graph_owl_core::projection::entity_sid(asset.id);
+
+        // t = 1: a window that does not cover 2026.
+        let original = dated_asset_flakes_at(&subject, "2020-01-01", "2021-01-01", 1);
+        graph
+            .assert_flakes(&original)
+            .await
+            .expect("seed the original window");
+
+        // t = 2: retracted (a retraction record's own `t` is what makes it
+        // invisible to a query resolved to t = 1 — retracting at `t = 1`
+        // would tie against the original assertion and hide it there too)
+        // and widened to a window that does.
+        graph
+            .retract_flakes(&dated_asset_flakes_at(
+                &subject,
+                "2020-01-01",
+                "2021-01-01",
+                2,
+            ))
+            .await
+            .expect("retract the original window");
+        graph
+            .assert_flakes(&dated_asset_flakes_at(
+                &subject,
+                "2020-01-01",
+                "2030-01-01",
+                2,
+            ))
+            .await
+            .expect("seed the widened window");
+
+        let now = catalog
+            .sparql_valid_at(
+                &Principal::system(),
+                "SELECT ?n WHERE { ?s <https://graph-owl.dev/ns/catalog#name> ?n }",
+                None,
+                &window("2026-01-01"),
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+        assert_eq!(now.rows.len(), 1, "widened as of now: {:?}", now.rows);
+
+        // Resolve any instant to t = 1 — before the widening.
+        graph
+            .at_resolves_to
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let earlier = catalog
+            .sparql_valid_at(
+                &Principal::system(),
+                "SELECT ?n WHERE { ?s <https://graph-owl.dev/ns/catalog#name> ?n }",
+                Some(Utc::now()),
+                &window("2026-01-01"),
+                SparqlBudget::default(),
+            )
+            .await
+            .expect("query");
+        assert!(
+            earlier.rows.is_empty(),
+            "as of t=1 the window had not yet been widened: {:?}",
+            earlier.rows
+        );
     }
 
     /// **The RED test, Epic 94 Slice D / decision 7's own stated

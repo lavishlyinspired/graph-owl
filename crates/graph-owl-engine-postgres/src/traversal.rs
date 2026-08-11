@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use graph_owl_core::flake::{Sid, namespace};
 use graph_owl_traversal::{
     Bounds, Cycle, Direction, EdgeFilter, EdgeRef, Path, PathSet, Reached, Subgraph,
-    TraversalEngine, TraversalError, TraversalResult, TruncationReason,
+    TraversalEngine, TraversalError, TraversalResult, TruncationReason, ValidityWindow,
 };
 use sqlx::{QueryBuilder, Row};
 
@@ -176,15 +176,104 @@ fn push_logical_edges(builder: &mut QueryBuilder<'_, sqlx::Postgres>, filter: &E
     builder.push_bind(i32::from(namespace::SHACL));
     builder.push("))");
 
-    if let Some(types) = &filter.relationship_types {
-        // Applied to the edge set, before the walk — filtering after the walk
-        // would return paths that travelled through edges the caller excluded.
-        builder.push(", filtered AS (SELECT * FROM edges WHERE rel_type = ANY(");
-        builder.push_bind(types.clone());
-        builder.push("))");
-    } else {
-        builder.push(", filtered AS (SELECT * FROM edges)");
+    if let Some(window) = &filter.valid_at {
+        push_invalid_nodes(builder, window);
     }
+    push_filtered(builder, filter);
+}
+
+/// The `filtered` CTE `push_frontier` reads from — every constraint that
+/// narrows the edge set *before* the walk runs, so an excluded edge or node
+/// can never be a pass-through to something the walk would otherwise still
+/// reach. Split out of [`push_logical_edges`] once date-window traversal
+/// (Epic 105 P8) gave it a second constraint to compose with the first.
+fn push_filtered(builder: &mut QueryBuilder<'_, sqlx::Postgres>, filter: &EdgeFilter) {
+    builder.push(", filtered AS (SELECT * FROM edges WHERE TRUE");
+    if let Some(types) = &filter.relationship_types {
+        builder.push(" AND rel_type = ANY(");
+        builder.push_bind(types.clone());
+        builder.push(")");
+    }
+    if filter.valid_at.is_some() {
+        // Excludes edges at *either* endpoint, not only the far one — an
+        // invalid node must not be a pass-through to a further one, the
+        // identical reason the relationship-type filter above is applied
+        // to the edge set rather than to the walk's final result.
+        builder.push(
+            " AND from_id NOT IN (SELECT node_id FROM invalid_nodes)
+               AND to_id NOT IN (SELECT node_id FROM invalid_nodes)",
+        );
+    }
+    builder.push(")");
+}
+
+/// A `node_id` (the same composite `namespace:id` text [`composite_id`]
+/// produces) is here iff it carries its own `effective_from`/`effective_to`
+/// flakes **and** its own window does not cover `window.at` — Epic 105 P8's
+/// date-window traversal (`plans/105u-date-window-traversal.md`). A node
+/// with no validity flakes at all is not a dated entity and never appears
+/// here, matching [`EdgeFilter::as_of`]'s own "`None` is now" posture toward
+/// undated nodes.
+///
+/// **Text comparison, not a date cast** — matching
+/// `amount-mismatch.sparql`'s own established convention: ISO-8601 sorts
+/// correctly as text, and every `effectiveFrom`/`effectiveTo` value this
+/// engine has ever stored is already that format.
+///
+/// A node with only `effective_to` and no `effective_from` is malformed
+/// data (a real dated entity always has a start) and is left out:
+/// `MAX(...) FILTER` for a missing `effective_from` is `NULL`, so
+/// `NULL <= at` is unknown rather than false, and `HAVING NOT (unknown)`
+/// keeps no row for it. Failing open rather than silently excluding a node
+/// over data no caller asserted correctly.
+fn push_invalid_nodes(builder: &mut QueryBuilder<'_, sqlx::Postgres>, window: &ValidityWindow) {
+    builder.push(
+        ", invalid_nodes AS (
+            SELECT namespace_s::text || ':' || sid_s AS node_id
+            FROM live
+            WHERE (namespace_p = ",
+    );
+    builder.push_bind(i32::from(window.effective_from.namespace_code));
+    builder.push(" AND sid_p = ");
+    builder.push_bind(window.effective_from.id.clone());
+    builder.push(") OR (namespace_p = ");
+    builder.push_bind(i32::from(window.effective_to.namespace_code));
+    builder.push(" AND sid_p = ");
+    builder.push_bind(window.effective_to.id.clone());
+    builder.push(
+        ")
+            GROUP BY namespace_s, sid_s
+            HAVING NOT (
+                MAX(value_str) FILTER (WHERE namespace_p = ",
+    );
+    builder.push_bind(i32::from(window.effective_from.namespace_code));
+    builder.push(" AND sid_p = ");
+    builder.push_bind(window.effective_from.id.clone());
+    builder.push(") <= ");
+    builder.push_bind(window.at.to_string());
+    builder.push(
+        "
+                AND (
+                    MAX(value_str) FILTER (WHERE namespace_p = ",
+    );
+    builder.push_bind(i32::from(window.effective_to.namespace_code));
+    builder.push(" AND sid_p = ");
+    builder.push_bind(window.effective_to.id.clone());
+    builder.push(
+        ") IS NULL
+                    OR ",
+    );
+    builder.push_bind(window.at.to_string());
+    builder.push(" < MAX(value_str) FILTER (WHERE namespace_p = ");
+    builder.push_bind(i32::from(window.effective_to.namespace_code));
+    builder.push(" AND sid_p = ");
+    builder.push_bind(window.effective_to.id.clone());
+    builder.push(
+        ")
+                )
+            )
+        )",
+    );
 }
 
 /// Encodes a `Sid` as the composite text key the recursive CTE carries as

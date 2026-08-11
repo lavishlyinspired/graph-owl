@@ -17,7 +17,7 @@ graph-owl-engine.workspace = true
 graph-owl-traversal.workspace = true
 petgraph.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-chrono.workspace = true

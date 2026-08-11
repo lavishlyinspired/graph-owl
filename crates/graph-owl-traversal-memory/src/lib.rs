@@ -19,12 +19,71 @@ use graph_owl_core::flake::{Flake, FlakeValue, Sid, TriplePattern, namespace};
 use graph_owl_engine::TripleStore;
 use graph_owl_traversal::{
     Bounds, Cycle, Direction, EdgeFilter, EdgeRef, Path, PathSet, Reached, Subgraph,
-    TraversalEngine, TraversalError, TraversalResult, TruncationReason,
+    TraversalEngine, TraversalError, TraversalResult, TruncationReason, ValidityWindow,
 };
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef as _;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+
+/// A node's own validity window, read off its `effectiveFrom`/`effectiveTo`
+/// flakes. `effective_to: None` is still open, matching
+/// `graph_owl_resolution::temporal::EffectivePeriod`'s own convention.
+struct NodeWindow {
+    effective_from: chrono::NaiveDate,
+    effective_to: Option<chrono::NaiveDate>,
+}
+
+impl NodeWindow {
+    /// `effective_from` inclusive, `effective_to` exclusive.
+    fn covers(&self, at: chrono::NaiveDate) -> bool {
+        self.effective_from <= at && self.effective_to.is_none_or(|end| at < end)
+    }
+}
+
+/// Every node's own validity window, built from the same fetched flakes
+/// `fetch_edges` already has — no second query. A node absent from this map
+/// carries no validity properties at all and is always valid, matching
+/// [`EdgeFilter::as_of`]'s own "`None` is now" posture toward nodes with no
+/// timestamp of their own.
+///
+/// A node with an `effective_to` flake but no `effective_from` one is
+/// malformed data (a real dated entity always has a start), and is left out
+/// of the map — failing open rather than silently excluding a node over
+/// partial data no caller asserted correctly.
+fn node_windows(flakes: &[Flake], window: &ValidityWindow) -> HashMap<Sid, NodeWindow> {
+    let mut from: HashMap<Sid, chrono::NaiveDate> = HashMap::new();
+    let mut to: HashMap<Sid, chrono::NaiveDate> = HashMap::new();
+    for flake in flakes {
+        let FlakeValue::String(value) = &flake.o else {
+            continue;
+        };
+        let Ok(date) = value.parse::<chrono::NaiveDate>() else {
+            continue;
+        };
+        if flake.p == window.effective_from {
+            from.insert(flake.s.clone(), date);
+        } else if flake.p == window.effective_to {
+            to.insert(flake.s.clone(), date);
+        }
+    }
+    from.into_iter()
+        .map(|(sid, effective_from)| {
+            let effective_to = to.get(&sid).copied();
+            (
+                sid,
+                NodeWindow {
+                    effective_from,
+                    effective_to,
+                },
+            )
+        })
+        .collect()
+}
+
+fn node_is_valid(sid: &Sid, windows: &HashMap<Sid, NodeWindow>, at: chrono::NaiveDate) -> bool {
+    windows.get(sid).is_none_or(|w| w.covers(at))
+}
 
 fn from_entity() -> Sid {
     Sid::dsc("fromEntity")
@@ -231,6 +290,17 @@ impl InMemoryTraversalEngine {
         let mut edges = logical_edges(&flakes);
         if let Some(types) = &filter.relationship_types {
             edges.retain(|e| types.contains(&e.rel_type));
+        }
+        if let Some(window) = &filter.valid_at {
+            // Filtering the edge set, before the walk runs, so an invalid
+            // node cannot be a pass-through to a further one — the same
+            // "applied before the walk" posture `relationship_types` already
+            // takes, for the identical reason.
+            let windows = node_windows(&flakes, window);
+            edges.retain(|e| {
+                node_is_valid(&e.from, &windows, window.at)
+                    && node_is_valid(&e.to, &windows, window.at)
+            });
         }
         Ok(edges)
     }

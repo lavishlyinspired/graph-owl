@@ -10,7 +10,7 @@ mod common;
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
 use graph_owl_engine::{PredicateDef, PredicateRegistry, TripleStore};
 use graph_owl_engine_postgres::PostgresTripleStore;
-use graph_owl_traversal::{Bounds, Direction, EdgeFilter, TraversalEngine};
+use graph_owl_traversal::{Bounds, Direction, EdgeFilter, TraversalEngine, ValidityWindow};
 
 async fn store() -> (PostgresTripleStore, common::TestDb) {
     let (database, connection_string) = common::fresh_database().await;
@@ -326,6 +326,7 @@ async fn an_excluded_relationship_type_is_not_traversed() {
             &EdgeFilter {
                 relationship_types: Some(vec!["feeds".to_string()]),
                 as_of: None,
+                valid_at: None,
             },
         )
         .await
@@ -374,6 +375,7 @@ async fn as_of_walks_the_graph_as_it_was() {
             &EdgeFilter {
                 relationship_types: None,
                 as_of: Some(3),
+                valid_at: None,
             },
         )
         .await
@@ -888,6 +890,7 @@ async fn a_filtered_out_edge_is_not_used_even_when_it_would_be_shorter() {
             &EdgeFilter {
                 relationship_types: Some(vec!["feeds".to_string()]),
                 as_of: None,
+                valid_at: None,
             },
         )
         .await
@@ -1242,4 +1245,242 @@ async fn a_self_loop_is_a_cycle_of_length_one() {
 
     assert_eq!(cycles.len(), 1, "{cycles:?}");
     assert_eq!(cycles[0].nodes.len(), 1);
+}
+
+/// Date-window traversal — Epic 105 P8 (`plans/105u-date-window-traversal.md`).
+/// Identical fixtures and assertions to
+/// `graph-owl-traversal-memory/tests/traversal.rs`'s own date-window suite,
+/// matching this file's own header comment: two implementations of one
+/// trait, differentially tested against the same input.
+fn dated(id: &str, from: &str, to: Option<&str>, t: i64) -> Vec<Flake> {
+    let subject = node(id);
+    let mut flakes = vec![Flake::assert(
+        subject.clone(),
+        Sid::dsc("effectiveFrom"),
+        FlakeValue::String(from.to_string()),
+        t,
+    )];
+    if let Some(to) = to {
+        flakes.push(Flake::assert(
+            subject,
+            Sid::dsc("effectiveTo"),
+            FlakeValue::String(to.to_string()),
+            t,
+        ));
+    }
+    flakes
+}
+
+/// `effectiveFrom`/`effectiveTo` are not among `V3__predicate_registry.sql`'s
+/// shipped DSC predicates (unlike `fromEntity`/`toEntity`/`relType`, seeded
+/// there), so — unlike every other DSC predicate this file uses — writing
+/// them needs an explicit `define` first, matching `register_pack_predicate`'s
+/// own precedent above for a namespace outside DSC's seeded set.
+async fn register_dated_predicates(store: &PostgresTripleStore) {
+    for name in ["effectiveFrom", "effectiveTo"] {
+        store
+            .define(&PredicateDef {
+                namespace: namespace::DSC,
+                name: name.to_string(),
+                value_type: 1, // string
+                many: false,
+                core: false,
+            })
+            .await
+            .expect("declare predicate");
+    }
+}
+
+fn valid_at(date: &str) -> EdgeFilter {
+    EdgeFilter {
+        valid_at: Some(ValidityWindow {
+            effective_from: Sid::dsc("effectiveFrom"),
+            effective_to: Sid::dsc("effectiveTo"),
+            at: date.parse().expect("test date is ISO-8601"),
+        }),
+        ..EdgeFilter::default()
+    }
+}
+
+#[tokio::test]
+async fn a_node_not_yet_valid_is_excluded_from_the_walk() {
+    let (store, _db) = store().await;
+    register_dated_predicates(&store).await;
+    let mut flakes = edge("rel-0", "t0", "t1", "feeds", 1);
+    flakes.extend(dated("t1", "2030-01-01", None, 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let result = store
+        .neighbours(
+            &node("t0"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 1,
+                max_nodes: 200,
+            },
+            &valid_at("2026-01-01"),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(distance_of(&result, "t1"), None, "{result:?}");
+}
+
+#[tokio::test]
+async fn a_node_no_longer_valid_is_excluded_from_the_walk() {
+    let (store, _db) = store().await;
+    register_dated_predicates(&store).await;
+    let mut flakes = edge("rel-0", "t0", "t1", "feeds", 1);
+    flakes.extend(dated("t1", "2020-01-01", Some("2021-01-01"), 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let result = store
+        .neighbours(
+            &node("t0"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 1,
+                max_nodes: 200,
+            },
+            &valid_at("2026-01-01"),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(distance_of(&result, "t1"), None, "{result:?}");
+}
+
+#[tokio::test]
+async fn a_node_inside_its_own_window_is_reached() {
+    let (store, _db) = store().await;
+    register_dated_predicates(&store).await;
+    let mut flakes = edge("rel-0", "t0", "t1", "feeds", 1);
+    flakes.extend(dated("t1", "2020-01-01", Some("2030-01-01"), 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let result = store
+        .neighbours(
+            &node("t0"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 1,
+                max_nodes: 200,
+            },
+            &valid_at("2026-01-01"),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(distance_of(&result, "t1"), Some(1), "{result:?}");
+}
+
+#[tokio::test]
+async fn the_window_boundaries_are_from_inclusive_to_exclusive() {
+    let (store, _db) = store().await;
+    register_dated_predicates(&store).await;
+    let mut flakes = edge("rel-0", "t0", "t1", "feeds", 1);
+    flakes.extend(edge("rel-1", "t0", "t2", "feeds", 1));
+    flakes.extend(dated("t1", "2026-01-01", Some("2027-01-01"), 1));
+    flakes.extend(dated("t2", "2020-01-01", Some("2026-01-01"), 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let result = store
+        .neighbours(
+            &node("t0"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 1,
+                max_nodes: 200,
+            },
+            &valid_at("2026-01-01"),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(
+        distance_of(&result, "t1"),
+        Some(1),
+        "effective_from is inclusive: {result:?}"
+    );
+    assert_eq!(
+        distance_of(&result, "t2"),
+        None,
+        "effective_to is exclusive: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_open_ended_window_is_valid_arbitrarily_far_in_the_future() {
+    let (store, _db) = store().await;
+    register_dated_predicates(&store).await;
+    let mut flakes = edge("rel-0", "t0", "t1", "feeds", 1);
+    flakes.extend(dated("t1", "2020-01-01", None, 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let result = store
+        .neighbours(
+            &node("t0"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 1,
+                max_nodes: 200,
+            },
+            &valid_at("2099-01-01"),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(distance_of(&result, "t1"), Some(1), "{result:?}");
+}
+
+#[tokio::test]
+async fn a_node_with_no_validity_properties_is_reached_regardless_of_the_filter() {
+    let (store, _db) = store().await;
+    let flakes = edge("rel-0", "t0", "t1", "feeds", 1);
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let result = store
+        .neighbours(
+            &node("t0"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 1,
+                max_nodes: 200,
+            },
+            &valid_at("2026-01-01"),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(distance_of(&result, "t1"), Some(1), "{result:?}");
+}
+
+#[tokio::test]
+async fn an_excluded_node_cannot_be_a_pass_through_to_a_further_node() {
+    let (store, _db) = store().await;
+    register_dated_predicates(&store).await;
+    let mut flakes = edge("rel-0", "t0", "t1", "feeds", 1);
+    flakes.extend(edge("rel-1", "t1", "t2", "feeds", 1));
+    flakes.extend(dated("t1", "2030-01-01", None, 1));
+    store.assert_flakes(&flakes).await.expect("write");
+
+    let result = store
+        .neighbours(
+            &node("t0"),
+            Direction::Outgoing,
+            Bounds {
+                max_hops: 2,
+                max_nodes: 200,
+            },
+            &valid_at("2026-01-01"),
+        )
+        .await
+        .expect("walk");
+
+    assert_eq!(distance_of(&result, "t1"), None, "{result:?}");
+    assert_eq!(
+        distance_of(&result, "t2"),
+        None,
+        "t2 is only reachable through the excluded t1: {result:?}"
+    );
 }
