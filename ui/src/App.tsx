@@ -103,8 +103,9 @@ import {
 } from "./trust/TrustComponents";
 import { VocabularySection } from "./features/vocabulary/VocabularySection";
 import { ReviewSection } from "./features/review/ReviewSection";
-import { ObligationCalendar } from "./features/obligations/obligationCalendar";
+import { ObligationCalendar, setObligationCalendarParams } from "./features/obligations/obligationCalendar";
 import { PackImportPanel } from "./features/packs/PackImportPanel";
+import { PackAdminPanel } from "./features/packs/PackAdminPanel";
 import { KnowledgeGraphToggle } from "./features/knowledge/KnowledgeGraphToggle";
 import { AgentActivityPanel } from "./features/agents/AgentActivityPanel";
 import { BoltSessionsPanel } from "./features/agents/BoltSessionsPanel";
@@ -3569,7 +3570,21 @@ function MemoryAdminPanel({ colors }: { colors: (typeof palette)["light"] }) {
  *  that goes missing is always the optional-looking one somebody needed. The
  *  structural test in `admin.test.ts` asserts this file grows no second renderer.
  */
-function AdminPage({ colors }: { colors: (typeof palette)["light"] }) {
+function AdminPage({
+  colors,
+  setSection,
+}: {
+  colors: (typeof palette)["light"];
+  setSection: (section: Section) => void;
+}) {
+  const viewObligationsFor = useCallback(
+    (packId: string) => {
+      setObligationCalendarParams({ pack: packId });
+      setSection("obligations");
+    },
+    [setSection],
+  );
+
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <div>
@@ -3589,6 +3604,7 @@ function AdminPage({ colors }: { colors: (typeof palette)["light"] }) {
           { key: "principals", label: "People & teams", children: <PrincipalsPanel colors={colors} /> },
           { key: "connectors", label: "Connector config", children: <ConnectorConfigPanel /> },
           { key: "policies", label: "Policies", children: <PolicyPanel /> },
+          { key: "packs", label: "Packs", children: <PackAdminPanel onViewObligations={viewObligationsFor} /> },
           { key: "memories", label: "Memories", children: <MemoryAdminPanel colors={colors} /> },
           { key: "federation", label: "Federation", children: <FederationPanel /> },
           { key: "agents", label: "Agent activity", children: <AgentActivityPanel /> },
@@ -4424,7 +4440,7 @@ function AppShell() {
               ) : section === "connectors" ? (
                 <ConnectorsPage onDone={refresh} colors={colors} />
               ) : section === "admin" ? (
-                <AdminPage colors={colors} />
+                <AdminPage colors={colors} setSection={setSection} />
               ) : results !== null ? (
                 <Row gutter={24} style={{ width: "100%" }}>
                   <Col flex="200px">

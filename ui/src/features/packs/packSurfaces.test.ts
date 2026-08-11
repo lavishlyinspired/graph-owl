@@ -1,7 +1,7 @@
 /** The gating: a pack surface exists only while its pack does. */
 
 import { describe, expect, it } from "vitest";
-import { packIdOf, surfacesFor } from "./packSurfaces";
+import { installedPacks, packIdOf, surfacesFor } from "./packSurfaces";
 import { invoicePeriod } from "./PackImportPanel";
 
 describe("packIdOf", () => {
@@ -53,6 +53,53 @@ describe("surfacesFor", () => {
 
     expect(() => gst.imports[0]!.convert('{"error":"unauthorized"}')).toThrow(/docdata/);
     expect(() => gst.imports[0]!.convert("not json at all")).toThrow();
+  });
+});
+
+describe("installedPacks", () => {
+  it("lists nothing on a deployment with no packs", () => {
+    expect(installedPacks([])).toEqual([]);
+    expect(installedPacks([{ code: 0, iri: "https://x/#", declaredBy: "system" }])).toEqual([]);
+  });
+
+  it("lists a pack that has no import surface, unlike surfacesFor", () => {
+    // The whole reason this is a separate function from `surfacesFor`:
+    // `surfacesFor` filters to packs with a registered upload surface, which
+    // would silently hide an installed pack that has none (hospitality, at
+    // the time of writing) — invisible to an admin trying to confirm it
+    // loaded at all.
+    const rows = [{ code: 1024, iri: "https://graph-owl.dev/packs/hospitality#", declaredBy: "pack:hospitality" }];
+
+    expect(surfacesFor(["pack:hospitality"])).toEqual([]);
+    expect(installedPacks(rows).map((p) => p.packId)).toEqual(["hospitality"]);
+  });
+
+  it("uses the registry's own label when a pack is registered there", () => {
+    const rows = [{ code: 1024, iri: "https://graph-owl.dev/packs/gst#", declaredBy: "pack:gst" }];
+    expect(installedPacks(rows)[0]).toEqual({
+      packId: "gst",
+      label: "GST",
+      namespaceCode: 1024,
+      iri: "https://graph-owl.dev/packs/gst#",
+    });
+  });
+
+  it("falls back to a title-cased id for a pack the registry does not name", () => {
+    const rows = [{ code: 1025, iri: "https://graph-owl.dev/packs/hospitality#", declaredBy: "pack:hospitality" }];
+    expect(installedPacks(rows)[0]!.label).toBe("Hospitality");
+  });
+
+  it("does not list the same pack twice when it declares more than one namespace", () => {
+    const rows = [
+      { code: 1024, iri: "https://graph-owl.dev/packs/gst#", declaredBy: "pack:gst" },
+      { code: 1025, iri: "https://graph-owl.dev/packs/gst/law#", declaredBy: "pack:gst" },
+    ];
+    expect(installedPacks(rows).map((p) => p.packId)).toEqual(["gst"]);
+  });
+
+  it("ignores a connector's own namespace, the same boundary packIdOf already draws", () => {
+    const rows = [{ code: 2000, iri: "https://x/erpnext#", declaredBy: "connector:erpnext" }];
+    expect(installedPacks(rows)).toEqual([]);
   });
 });
 

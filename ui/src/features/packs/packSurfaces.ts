@@ -86,3 +86,44 @@ export function surfacesFor(declaredBys: readonly string[]): readonly PackSurfac
   const installed = new Set(declaredBys.map(packIdOf).filter((id): id is string => id !== null));
   return REGISTRY.filter((surface) => installed.has(surface.packId) && surface.imports.length > 0);
 }
+
+/** One installed pack, for browsing rather than for uploading into. */
+export interface InstalledPack {
+  readonly packId: string;
+  readonly label: string;
+  /** One representative namespace's own code/IRI — a pack may declare
+   *  several (`105c`'s law namespace beside its main one); the first row
+   *  `GET /namespaces` reports for this pack id is what is shown, since
+   *  this is an identity check, not a full namespace listing. */
+  readonly namespaceCode: number;
+  readonly iri: string;
+}
+
+/** A friendly label for a pack id, from the registry when this pack
+ *  happens to have an import surface, title-cased otherwise. Reading a
+ *  label off the registry is a convenience, not a requirement — a pack
+ *  with no upload surface must still be listed, just without a curated
+ *  name. */
+function labelFor(packId: string): string {
+  const known = REGISTRY.find((surface) => surface.packId === packId);
+  return known ? known.label : packId.charAt(0).toUpperCase() + packId.slice(1);
+}
+
+/** Every distinct pack this deployment reports as installed, **whether or
+ *  not it has a registered import surface** — the property `surfacesFor`
+ *  cannot provide, since it filters to `imports.length > 0` and would
+ *  silently omit a pack with none. An admin confirming "did the pack I
+ *  just loaded actually register" needs the unfiltered list. */
+export function installedPacks(
+  rows: readonly { readonly code: number; readonly iri: string; readonly declaredBy: string }[],
+): readonly InstalledPack[] {
+  const seen = new Set<string>();
+  const out: InstalledPack[] = [];
+  for (const row of rows) {
+    const packId = packIdOf(row.declaredBy);
+    if (packId === null || seen.has(packId)) continue;
+    seen.add(packId);
+    out.push({ packId, label: labelFor(packId), namespaceCode: row.code, iri: row.iri });
+  }
+  return out;
+}
