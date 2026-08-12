@@ -1,15 +1,23 @@
 """Streaming investigation runs, one per thread — the core the FastAPI
 server in `server.py` wraps.
 
-**Lives outside `graph_owl_langchain` for the same reason
-`gst_investigation_agent.py` does** (see that module's own docstring):
-the package's `pyproject.toml` says "never a chain, an agent, or a
+**A real backend the console's "Agent" tab talks to directly, not a
+throwaway example.** Originally built as a standalone dev tool
+(`examples/chat_playground/`); the console now embeds a chat panel that
+calls this service's HTTP API over the network, which is why it moved to
+`agent_service/`, a sibling of `examples/` rather than a child of it.
+What has **not** changed: this is still a separate Python process, run
+independently of `graph-owl-server` (the Rust binary) — `graph_owl_
+langchain`'s own `pyproject.toml` says "never a chain, an agent, or a
 runtime" (`plans/00j-language-boundaries.md`, the ROADMAP's refusal
-table). This whole `chat_playground/` directory is a local dev tool, not
-a shipped surface — nothing here is reachable from `graph-owl-server` or
-the console (`ui/`), and it stays that way by construction: nothing in
-this file imports anything under `crates/` or `ui/`, and nothing in
-those trees imports this.
+table), and porting a LangGraph tool-calling loop into Rust would mean
+building an agent runtime inside the engine, which is exactly the layer
+that refusal exists to hold the line on. The console's React frontend is
+a *consumer* of this service (the same relationship it already has with
+graph-owl-server itself), not this service becoming part of the engine.
+Nothing in this file imports anything under `crates/`, and nothing under
+`crates/` imports this — the process boundary is the language boundary,
+unchanged by where the directory sits.
 
 **Framework-agnostic on purpose** (Decision 8, `43-framework-
 integrations.md`: "framework-agnostic core, thin framework shims"):

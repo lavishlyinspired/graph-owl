@@ -1,6 +1,8 @@
-"""`chat_playground.streaming.run_investigation_stream` — a local-only chat
-UI's streaming core (see `examples/chat_playground/streaming.py`'s own
-docstring for why this lives outside `graph_owl_langchain`).
+"""`agent_service.streaming.run_investigation_stream` — the streaming core
+of the agent service the console's Agent tab talks to (see
+`agent_service/streaming.py`'s own docstring for why this stays a
+separate Python process rather than being ported into `graph-owl-server`,
+and for why it lives outside `graph_owl_langchain`).
 
 Two properties matter and neither is obvious from reading the generator
 alone, so both are proven against real (scripted) execution rather than
@@ -33,9 +35,9 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from graph_owl_langchain._core.principal import Principal
 from graph_owl_langchain.tools import GraphOwlToolkit
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from chat_playground.streaming import run_investigation_stream  # noqa: E402
+from agent_service.streaming import run_investigation_stream  # noqa: E402
 
 SECRET = "sk-super-secret-token-value"
 SYSTEM_PROMPT = "Investigate using the tools available."

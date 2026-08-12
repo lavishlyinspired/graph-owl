@@ -1,33 +1,37 @@
-"""A local-only HTTP server for `chat_playground` — the FastAPI shim
-around `streaming.run_investigation_stream`.
+"""The FastAPI shim around `streaming.run_investigation_stream` — the
+service the console's Agent tab calls.
 
-**Not shipped, not embedded in graph-owl-server or the console.** See
-`streaming.py`'s docstring for why this whole directory exists outside
-`graph_owl_langchain` and stays that way. Run it directly:
+Run it directly:
 
     cd integrations/langchain
     pip install fastapi uvicorn langchain-openai
     LLM_API_BASE_URL=... LLM_MODEL=... GRAPH_OWL_SERVER=http://localhost:8080 \\
-        GRAPH_OWL_TOKEN=... \\
-        python -m uvicorn examples.chat_playground.server:app --port 8899
+        python -m uvicorn agent_service.server:app --port 8899
 
-then open `examples/chat_playground/static/index.html` directly in a
-browser (a `file://` page can call `http://localhost:8899` fine — CORS
-is opened for that reason, see `app.add_middleware` below).
+The console's own access token travels with every request (see `ask`
+below) and becomes the principal the agent's tools act as — an
+investigation run from the console sees exactly what its signed-in user
+is authorized to see, not a fixed service identity. `GRAPH_OWL_TOKEN` in
+the environment is a fallback for running this service directly (as
+`examples/chat_playground/static/index.html` still does, or its own
+successor) without a browser session to draw a token from.
 
 **Why "ask while the first still runs" needs no locking.** `POST
 /questions` returns as soon as a background `asyncio.Task` is scheduled
-— it does not await the investigation. The browser can `POST` a second
+— it does not await the investigation. The caller can `POST` a second
 question immediately; the first task keeps running independently.
 Nothing here serializes two investigations against each other, because
 nothing they touch is shared mutable state per-question (each question
 gets its own `asyncio.Queue` in `_THREADS`).
 
-**In-memory only, single-process, no auth of its own.** This is a
-personal dev tool, not a multi-user service — `_THREADS` lives in
-process memory and is lost on restart, and the only credential involved
-is the `GRAPH_OWL_TOKEN` this process already holds to call graph-owl
-itself. Do not point this at a shared/production graph-owl-server.
+**In-memory only, single-process.** `_THREADS` lives in process memory
+and is lost on restart — there is no persistence story yet, matching
+this service's current scope (one question, one answer, not a saved
+conversation history). CORS stays permissive (`allow_origins=["*"]`)
+deliberately: the real authorization boundary is the token each request
+carries through to graph-owl-server itself, not this service's own CORS
+policy — a caller with no valid token gets nothing useful back regardless
+of origin.
 """
 
 from __future__ import annotations
@@ -41,17 +45,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# `agent_service` moved out from under `examples/` to sit directly under
+# `integrations/langchain/`, a sibling of both `graph_owl_langchain/` (the
+# package) and `examples/` (where `gst_investigation_agent.py` still
+# lives) — so, unlike before the move, these are two genuinely different
+# directories and need their own sys.path entries rather than one shared
+# insert covering both imports below.
+_LANGCHAIN_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_LANGCHAIN_ROOT))
+sys.path.insert(0, str(_LANGCHAIN_ROOT / "examples"))
 
+from gst_investigation_agent import SYSTEM_PROMPT, build_chat_model  # noqa: E402
+
+from agent_service.streaming import run_investigation_stream  # noqa: E402
 from graph_owl_langchain._core.principal import Principal  # noqa: E402
 from graph_owl_langchain.tools import GraphOwlToolkit  # noqa: E402
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from chat_playground.streaming import run_investigation_stream  # noqa: E402
-from gst_investigation_agent import SYSTEM_PROMPT, build_chat_model  # noqa: E402
-
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, Header, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import StreamingResponse
 except ImportError as missing:  # pragma: no cover - exercised only by running the server
@@ -74,8 +85,14 @@ class _Thread:
 _THREADS: dict[str, _Thread] = {}
 
 
-async def _run_and_publish(thread_id: str, question: str) -> None:
+async def _run_and_publish(thread_id: str, question: str, token: str) -> None:
     """The background task `POST /questions` schedules and does not await.
+
+    `token` is the caller's own — passed in by `ask` below, never read
+    from the environment here. The toolkit built from it means every tool
+    call this investigation makes reaches graph-owl-server as that
+    specific caller, subject to their own authorization, not a shared
+    service-level identity.
 
     Publishes each chunk onto the thread's own queue as it arrives, so a
     concurrently-running `GET .../stream` sees it immediately; also
@@ -88,7 +105,7 @@ async def _run_and_publish(thread_id: str, question: str) -> None:
         model = build_chat_model()
         toolkit = GraphOwlToolkit(
             endpoint=os.environ.get("GRAPH_OWL_SERVER", "http://localhost:8080"),
-            principal=Principal(token=os.environ["GRAPH_OWL_TOKEN"]),
+            principal=Principal(token=token),
         )
         async for chunk in run_investigation_stream(
             model, toolkit.tools(), question, thread_id, SYSTEM_PROMPT
@@ -104,7 +121,7 @@ async def _run_and_publish(thread_id: str, question: str) -> None:
         await thread.queue.put(None)  # sentinel: stream ends
 
 
-app = FastAPI(title="graph-owl chat playground (local dev tool, not shipped)")
+app = FastAPI(title="graph-owl agent service")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -113,14 +130,32 @@ app.add_middleware(
 )
 
 
+def _caller_token(authorization: str | None) -> str | None:
+    """The bearer token this specific request carried, or `None` if it
+    carried none. A missing header is not an error here — `ask` falls
+    back to `GRAPH_OWL_TOKEN` for the standalone-tool case — so this
+    stays a pure extraction, no raising."""
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization[len("bearer ") :].strip()
+    return None
+
+
 @app.post("/questions")
-async def ask(body: dict[str, Any]) -> dict[str, str]:
+async def ask(
+    body: dict[str, Any], authorization: str | None = Header(default=None)
+) -> dict[str, str]:
     question = body.get("question", "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="question is required")
+    token = _caller_token(authorization) or os.environ.get("GRAPH_OWL_TOKEN")
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="no bearer token supplied, and GRAPH_OWL_TOKEN is not set as a fallback",
+        )
     thread_id = str(uuid.uuid4())
     _THREADS[thread_id] = _Thread(question=question)
-    asyncio.create_task(_run_and_publish(thread_id, question))
+    asyncio.create_task(_run_and_publish(thread_id, question, token))
     return {"threadId": thread_id}
 
 
