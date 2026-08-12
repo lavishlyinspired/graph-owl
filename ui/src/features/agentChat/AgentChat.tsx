@@ -43,12 +43,15 @@ import {
   CheckOutlined,
   CloseCircleFilled,
   FileTextOutlined,
+  HistoryOutlined,
   LoadingOutlined,
   PaperClipOutlined,
   RobotOutlined,
   SendOutlined,
   SwapOutlined,
 } from "@ant-design/icons";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   askQuestion,
   listProviders,
@@ -62,7 +65,15 @@ import {
 } from "./agentClient";
 
 const { Text, Title } = Typography;
-const { Sider, Content } = Layout;
+const { Content } = Layout;
+
+/** `"<providerId>::<modelId>"` — the merged provider+model selector's own
+ *  value shape, joined/split at its one call site each. `::` rather than
+ *  a plain separator because a provider or model id (an Ollama tag like
+ *  `qwen3.6:latest`) can itself contain a single `:`. */
+function modelSelectValue(providerId: string | null, modelId: string | null): string | undefined {
+  return providerId && modelId ? `${providerId}::${modelId}` : undefined;
+}
 
 interface Agent {
   id: string;
@@ -97,8 +108,9 @@ const COPY = {
   attachTitle: "Attach a file (e.g. a GSTR-2B export or purchase register, as JSON)",
   fallbackNotice: "Switched to a fallback model to continue this investigation.",
   toolFailed: "✕",
-  selectProvider: "Model provider",
   selectModel: "Model",
+  historyButton: "History",
+  historyTitle: "Question history",
 };
 
 /** Rotates while a thread has nothing concrete to show yet — the same
@@ -142,6 +154,11 @@ export function AgentChat() {
   const [providers, setProviders] = useState<ProviderOption[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+  // Question history moves through a popup rather than a permanent
+  // sidebar list, so the transcript gets the width back — see
+  // `modelSelectValue`'s own comment for why provider+model share one
+  // selector rather than two.
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   useEffect(() => {
     listProviders()
@@ -158,14 +175,11 @@ export function AgentChat() {
       });
   }, []);
 
-  const handleProviderChange = useCallback(
-    (providerId: string) => {
-      setSelectedProviderId(providerId);
-      const provider = providers.find((p) => p.id === providerId);
-      setSelectedModelId(provider?.models[0]?.id ?? null);
-    },
-    [providers],
-  );
+  const handleModelSelectChange = useCallback((value: string) => {
+    const [providerId, modelId] = value.split("::");
+    setSelectedProviderId(providerId ?? null);
+    setSelectedModelId(modelId ?? null);
+  }, []);
 
   // Every open EventSource, keyed by threadId — a ref rather than state
   // because opening/closing a connection is not itself something the UI
@@ -289,73 +303,29 @@ export function AgentChat() {
 
   return (
     <Layout style={{ background: "transparent", height: "100%" }}>
-      <Sider width={280} style={{ background: "transparent", paddingRight: 16 }}>
-        <Title level={3} style={{ margin: 0, fontWeight: 600, fontSize: 16 }}>
-          {COPY.title}
-        </Title>
-        <Text type="secondary">{COPY.intro}</Text>
-        <div style={{ marginTop: 16, marginBottom: 8 }}>
-          <Select<string>
-            value={agentId}
-            onChange={setAgentId}
-            style={{ width: "100%" }}
-            options={AGENTS.map((a) => ({ value: a.id, label: a.label }))}
-          />
-        </div>
-        <div style={{ marginBottom: 8 }}>
-          <Select<string>
-            value={selectedProviderId ?? undefined}
-            onChange={handleProviderChange}
-            style={{ width: "100%" }}
-            placeholder={COPY.selectProvider}
-            aria-label={COPY.selectProvider}
-            disabled={providers.length === 0}
-            options={providers.map((p) => ({ value: p.id, label: p.label }))}
-          />
-        </div>
-        <div style={{ marginBottom: 16 }}>
-          <Select<string>
-            value={selectedModelId ?? undefined}
-            onChange={setSelectedModelId}
-            style={{ width: "100%" }}
-            placeholder={COPY.selectModel}
-            aria-label={COPY.selectModel}
-            disabled={!selectedProviderId}
-            options={(providers.find((p) => p.id === selectedProviderId)?.models ?? []).map(
-              (m) => ({ value: m.id, label: m.label }),
-            )}
-          />
-        </div>
-        {threadEntries.length === 0 ? (
-          <Empty description={COPY.emptySidebar} image={Empty.PRESENTED_IMAGE_SIMPLE} />
-        ) : (
-          <List
-            size="small"
-            dataSource={threadEntries}
-            renderItem={([id, thread]) => (
-              <List.Item
-                key={id}
-                onClick={() => setActiveThreadId(id)}
-                style={{
-                  cursor: "pointer",
-                  background: id === activeThreadId ? "rgba(74,144,226,0.12)" : undefined,
-                  padding: "6px 8px",
-                  border: "none",
-                }}
-              >
-                <Space size={6} align="start">
-                  <StatusDot status={thread.status} />
-                  <Text ellipsis style={{ maxWidth: 220 }}>
-                    {thread.question}
-                  </Text>
-                </Space>
-              </List.Item>
-            )}
-          />
-        )}
-      </Sider>
       <Content style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-        <div style={{ flex: 1, overflowY: "auto", padding: "0 8px", whiteSpace: "pre-wrap" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            gap: 12,
+            marginBottom: 12,
+          }}
+        >
+          <div>
+            <Title level={3} style={{ margin: 0, fontWeight: 600, fontSize: 16 }}>
+              {COPY.title}
+            </Title>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {COPY.intro}
+            </Text>
+          </div>
+          <Button icon={<HistoryOutlined />} onClick={() => setHistoryOpen(true)}>
+            {COPY.historyButton}
+          </Button>
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: "0 8px" }}>
           {!active ? (
             <Text type="secondary">{COPY.emptyTranscript}</Text>
           ) : (
@@ -379,22 +349,9 @@ export function AgentChat() {
                   ))}
                 </Space>
               )}
-              {active.activity.length > 0 && (
-                <Space direction="vertical" size={2} style={{ marginBottom: 12 }}>
-                  {mergedActivity(active.activity).map((entry, i) =>
-                    entry.kind === "fallback" ? (
-                      <FallbackNotice key={i} />
-                    ) : (
-                      <ActivityLine key={i} entry={entry} />
-                    ),
-                  )}
-                </Space>
-              )}
-              {active.status === "running" && active.text === "" && active.activity.length === 0 ? (
-                <ThinkingIndicator />
-              ) : (
-                <Text>{active.text}</Text>
-              )}
+              <div className="gowl-markdown">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{active.text}</ReactMarkdown>
+              </div>
               {active.status === "error" && (
                 <Alert
                   type="error"
@@ -407,6 +364,34 @@ export function AgentChat() {
             </>
           )}
         </div>
+        {active &&
+          (active.activity.length > 0 ||
+            (active.status === "running" && active.text === "" && active.activity.length === 0)) && (
+            <div
+              style={{
+                flexShrink: 0,
+                padding: "8px 8px 4px",
+                borderTop: "1px solid rgba(127,127,127,0.15)",
+                background: "rgba(127,127,127,0.06)",
+                borderRadius: 8,
+                marginBottom: 8,
+              }}
+            >
+              {active.activity.length > 0 ? (
+                <Space direction="vertical" size={2}>
+                  {mergedActivity(active.activity).map((entry, i) =>
+                    entry.kind === "fallback" ? (
+                      <FallbackNotice key={i} />
+                    ) : (
+                      <ActivityLine key={i} entry={entry} />
+                    ),
+                  )}
+                </Space>
+              ) : (
+                <ThinkingIndicator />
+              )}
+            </div>
+          )}
         {submitError && (
           <Alert type="error" showIcon closable message={submitError} style={{ marginBottom: 8 }} />
         )}
@@ -453,6 +438,25 @@ export function AgentChat() {
           >
             <PaperClipOutlined />
           </Button>
+          <Select<string>
+            value={agentId}
+            onChange={setAgentId}
+            style={{ width: 170 }}
+            options={AGENTS.map((a) => ({ value: a.id, label: a.label }))}
+          />
+          <Select<string>
+            value={modelSelectValue(selectedProviderId, selectedModelId)}
+            onChange={handleModelSelectChange}
+            style={{ width: 220 }}
+            placeholder={COPY.selectModel}
+            aria-label={COPY.selectModel}
+            disabled={providers.length === 0}
+            options={providers.map((p) => ({
+              label: p.label,
+              title: p.label,
+              options: p.models.map((m) => ({ value: `${p.id}::${m.id}`, label: m.label })),
+            }))}
+          />
           <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -465,6 +469,43 @@ export function AgentChat() {
           </Button>
         </Space.Compact>
       </Content>
+      <Modal
+        open={historyOpen}
+        onCancel={() => setHistoryOpen(false)}
+        title={COPY.historyTitle}
+        footer={null}
+      >
+        {threadEntries.length === 0 ? (
+          <Empty description={COPY.emptySidebar} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        ) : (
+          <List
+            size="small"
+            dataSource={threadEntries}
+            renderItem={([id, thread]) => (
+              <List.Item
+                key={id}
+                onClick={() => {
+                  setActiveThreadId(id);
+                  setHistoryOpen(false);
+                }}
+                style={{
+                  cursor: "pointer",
+                  background: id === activeThreadId ? "rgba(74,144,226,0.12)" : undefined,
+                  padding: "6px 8px",
+                  border: "none",
+                }}
+              >
+                <Space size={6} align="start">
+                  <StatusDot status={thread.status} />
+                  <Text ellipsis style={{ maxWidth: 420 }}>
+                    {thread.question}
+                  </Text>
+                </Space>
+              </List.Item>
+            )}
+          />
+        )}
+      </Modal>
       <Modal
         open={previewFile !== null}
         title={previewFile?.name}

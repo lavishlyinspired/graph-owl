@@ -82,3 +82,107 @@ code, .fqn {
   animation: gowl-thinking-shimmer 1.8s linear infinite;
   font-weight: 500;
 }
+
+/* Agent chat answers: `react-markdown` emits plain HTML elements with no
+   styling of their own — this is what makes a rendered table, list, or
+   code block actually look like it belongs in the product instead of an
+   unstyled browser default. rgba overlays rather than fixed colours, the
+   same theme-agnostic approach `.gowl-row-cursor` above already uses, so
+   this needs no separate dark/light variant. */
+.gowl-markdown {
+  font-size: 14px;
+  line-height: 1.6;
+}
+.gowl-markdown > :first-child {
+  margin-top: 0;
+}
+.gowl-markdown > :last-child {
+  margin-bottom: 0;
+}
+.gowl-markdown p {
+  margin: 0 0 12px;
+}
+.gowl-markdown ul,
+.gowl-markdown ol {
+  margin: 0 0 12px;
+  padding-left: 22px;
+}
+.gowl-markdown li {
+  margin-bottom: 4px;
+}
+.gowl-markdown li > p {
+  margin-bottom: 4px;
+}
+.gowl-markdown h1,
+.gowl-markdown h2,
+.gowl-markdown h3,
+.gowl-markdown h4 {
+  margin: 16px 0 8px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.gowl-markdown h1 {
+  font-size: 18px;
+}
+.gowl-markdown h2 {
+  font-size: 16px;
+}
+.gowl-markdown h3,
+.gowl-markdown h4 {
+  font-size: 14px;
+}
+.gowl-markdown strong {
+  font-weight: 600;
+}
+.gowl-markdown code {
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  background: rgba(127, 127, 127, 0.14);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.gowl-markdown pre {
+  background: rgba(127, 127, 127, 0.1);
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0 0 12px;
+}
+.gowl-markdown pre code {
+  background: none;
+  padding: 0;
+}
+.gowl-markdown blockquote {
+  margin: 0 0 12px;
+  padding-left: 12px;
+  border-left: 3px solid #14c3cf;
+  opacity: 0.85;
+}
+.gowl-markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0 0 12px;
+  font-size: 13px;
+  /* A wide table (many GST reconciliation columns) scrolls inside
+     itself rather than forcing the whole transcript pane wider. */
+  display: block;
+  overflow-x: auto;
+}
+.gowl-markdown th,
+.gowl-markdown td {
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  padding: 6px 10px;
+  text-align: left;
+}
+.gowl-markdown th {
+  background: rgba(127, 127, 127, 0.1);
+  font-weight: 600;
+}
+.gowl-markdown a {
+  color: #14c3cf;
+}
+.gowl-markdown hr {
+  border: none;
+  border-top: 1px solid rgba(127, 127, 127, 0.2);
+  margin: 16px 0;
+}
