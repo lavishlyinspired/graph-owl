@@ -79,6 +79,7 @@ class _Thread:
     status: str = "running"  # "running" | "done" | "error"
     text: str = ""
     error: str | None = None
+    activity: list[dict[str, Any]] = field(default_factory=list)
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -112,6 +113,8 @@ async def _run_and_publish(thread_id: str, question: str, token: str) -> None:
         ):
             if chunk.kind == "message":
                 thread.text += chunk.text
+            elif chunk.kind == "update":
+                thread.activity.append(chunk.data)
             await thread.queue.put(chunk)
         thread.status = "done"
     except Exception as exc:  # noqa: BLE001 - surfaced to the UI, not swallowed; asyncio.CancelledError is a BaseException, unaffected
@@ -180,7 +183,13 @@ async def stream(thread_id: str) -> StreamingResponse:
     async def events():
         # Replay what already happened before this connection opened —
         # a browser tab switched away and back must not lose the
-        # transcript so far.
+        # transcript so far. Activity (tool calls) first, then the text
+        # accumulated so far: an approximation of true arrival order (the
+        # two are not stored pre-interleaved), acceptable for a
+        # reconnect/late-join view where exact ordering matters far less
+        # than for the live stream.
+        for activity in thread.activity:
+            yield f"data: {json.dumps({'kind': 'update', 'data': activity})}\n\n"
         if thread.text:
             yield f"data: {json.dumps({'kind': 'message', 'text': thread.text})}\n\n"
         if thread.status != "running":
@@ -193,10 +202,11 @@ async def stream(thread_id: str) -> StreamingResponse:
                 return
             if chunk.kind == "message":
                 yield f"data: {json.dumps({'kind': 'message', 'text': chunk.text})}\n\n"
-            # "update" (tool-call) chunks are intentionally not forwarded
-            # to the browser in this first slice — the UI shows prose,
-            # not a tool-call trace. `chunk.data` is still available to a
-            # caller of `run_investigation_stream` directly (this file's
-            # own test) for anyone who wants that detail later.
+            elif chunk.kind == "update":
+                # A clean, structured tool-call lifecycle event (see
+                # streaming.py's StreamChunk docstring for the two
+                # `data` shapes) — a UI renders this as "Using <tool>…"
+                # then "✓ <tool>", never the tool's own raw output.
+                yield f"data: {json.dumps({'kind': 'update', 'data': chunk.data})}\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")

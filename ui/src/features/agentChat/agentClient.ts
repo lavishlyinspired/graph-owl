@@ -47,8 +47,13 @@ export async function askQuestion(question: string): Promise<AskResult> {
   return (await response.json()) as AskResult;
 }
 
+export type ToolActivity =
+  | { phase: "tool_call"; tool: string; args: Record<string, unknown> }
+  | { phase: "tool_result"; tool: string; ok: boolean };
+
 export type StreamEvent =
   | { kind: "message"; text: string }
+  | { kind: "update"; data: ToolActivity }
   | { kind: "done"; status: "done" | "error"; error: string | null };
 
 /** Opens one SSE connection for one thread. Returns a closer function

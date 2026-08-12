@@ -25,9 +25,11 @@ cd integrations/langchain
 python3 -m venv .venv && source .venv/bin/activate   # if you don't already have one
 pip install -e ".[langgraph]" langchain-openai fastapi uvicorn
 
-export LLM_API_BASE_URL=...       # any OpenAI-compatible endpoint
-export LLM_MODEL=...
-export LLM_API_KEY=...            # if your endpoint needs one
+# This process does no .env loading of its own — it only sees what the
+# launching shell exports. The repo root's .env already has
+# LLM_API_BASE_URL/LLM_MODEL/LLM_API_KEY, so source it rather than
+# retyping them:
+set -a; source ../../.env; set +a
 export GRAPH_OWL_SERVER=http://localhost:8080
 
 python3 -m uvicorn agent_service.server:app --port 8899
@@ -40,6 +42,16 @@ never uses a fixed identity for console-originated questions. If you're
 calling `/questions` some other way with no token of its own (the
 standalone `static/index.html` page below, or a raw `curl`), set
 `GRAPH_OWL_TOKEN` in the environment as a fallback.
+
+**Also required when the console itself runs with OIDC off**
+(`OIDC_ISSUER=`, the open-mode demo config): with no OIDC provider there
+is no signed-in access token for the browser to forward, so every
+console-originated question hits this fallback too — set
+`GRAPH_OWL_TOKEN` to any non-empty placeholder in that case.
+graph-owl-server ignores the token's actual value in open mode (every
+request resolves to the system principal regardless), so the value
+itself carries no meaning there; this check is agent_service's own gate,
+not graph-owl-server's.
 
 ### Standalone chat page (no console needed)
 
@@ -65,18 +77,32 @@ question — it defaults to `http://localhost:8899`.
 - **Proven**: `tests/test_agent_service.py` runs two investigations
   concurrently with a scripted model and asserts neither's answer leaks
   into the other's stream — the actual property "ask while the first
-  runs" depends on. `tests/test_agent_service_server.py` runs a real
-  `uvicorn` server and proves each question authenticates as its own
+  runs" depends on. It also proves real per-token delta forwarding (a
+  scripted model implementing `_stream`/`_astream` for real, not just
+  `BaseChatModel`'s single-blob fallback) and that a turn following a
+  tool call gets a paragraph break rather than running on into the
+  previous turn's last word. `tests/test_agent_service_server.py` runs a
+  real `uvicorn` server and proves each question authenticates as its own
   caller's token, not a shared one. Verified live too: two real HTTP
   requests against a running server, a browser asking two questions back
   to back, both streaming independently, confirmed via screenshot and
   zero console errors; a real DeepSeek model answering a real question
-  against real GST data with clean prose (no tool-output leakage — a
-  real bug found and fixed live, see `streaming.py`'s `isinstance(chunk,
-  AIMessage)` check).
+  against real GST data with clean, correctly-paragraphed prose (no
+  tool-output leakage — a real bug found and fixed live, see
+  `streaming.py`'s `isinstance(chunk, AIMessage)` check), each of 7 real
+  tool calls rendered as a live "Using X…" → "✓ Used X" badge in the
+  console's Agent tab.
+- **Not built on `create_agent`**: replaced with a hand-rolled
+  `.astream()`-based ReAct loop (`run_investigation_stream`) — see that
+  function's own docstring in `streaming.py` for why; the short version
+  is that `create_agent`'s model node always calls `.ainvoke(...)`, never
+  `.astream(...)`, so no `stream_mode` the outer graph requests
+  guarantees a real token delta reaches the caller.
 - **Not attempted**: multi-browser-tab fan-out to the same thread,
-  reconnect-mid-stream beyond a full-text replay on connect, a
-  tool-call trace in the UI (the `"update"` stream chunks exist in
-  `streaming.py`'s output but `server.py` does not forward them to the
-  browser yet), and persistence across a server restart (`_THREADS`
-  is in-process memory only).
+  reconnect-mid-stream beyond a full-text-and-activity replay on connect,
+  and persistence across a server restart (`_THREADS` is in-process
+  memory only). The DeepSeek `reasoning_content` upstream bug
+  (`langchain-ai/langchain` issues #34166, #37174) remains open and can
+  still 400 a sufficiently long investigation on its second-or-later
+  tool-calling turn — not fixable here without patching a third-party
+  library or switching off reasoning mode.

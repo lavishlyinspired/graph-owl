@@ -111,7 +111,16 @@ async function askQuestion(question) {
   source.onmessage = (event) => {
     const payload = JSON.parse(event.data);
     if (payload.kind === "message") {
-      thread.text = payload.text; // server sends the accumulated text
+      // Each event is a token DELTA, not the accumulated text — matches
+      // streaming.py's StreamChunk contract. Appending, not replacing,
+      // is what makes this grow token by token instead of flickering
+      // through fragments (found live, 12 August 2026, alongside the
+      // identical bug in the React console's own AgentChat.tsx).
+      thread.text += payload.text;
+    } else if (payload.kind === "update") {
+      // Tool-call activity is available (payload.data, see server.py's
+      // events()) but this standalone page does not render it — the
+      // React console's AgentChat.tsx is the primary surface for that.
     } else if (payload.kind === "done") {
       thread.status = payload.status;
       thread.error = payload.error;

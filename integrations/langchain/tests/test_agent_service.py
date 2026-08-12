@@ -25,12 +25,13 @@ proves the wiring, not that a real model reasons well.
 import asyncio
 import json
 import sys
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 
 from graph_owl_langchain._core.principal import Principal
 from graph_owl_langchain.tools import GraphOwlToolkit
@@ -129,6 +130,63 @@ class _ScriptedToolCallingModel(BaseChatModel):
         return self
 
 
+class _ScriptedStreamingModel(BaseChatModel):
+    """Unlike `_ScriptedToolCallingModel` (which only implements
+    `_generate`, so `BaseChatModel`'s own default `astream()` falls back
+    to yielding the whole response as a single chunk), this one
+    implements `_stream`/`_astream` for real — each step is a *sequence*
+    of small chunks the caller must see arrive one at a time, the same
+    property a real token-streaming model has. Proves
+    `run_investigation_stream` actually forwards deltas as they happen
+    rather than only ever emitting one blob per model turn — the gap
+    found live (12 August 2026): `create_agent`'s own model node always
+    calls `model.ainvoke(...)`, never `.astream(...)`, so no matter what
+    `stream_mode` the outer graph requests, there was nothing to forward
+    incrementally. `run_investigation_stream` no longer goes through
+    `create_agent` for exactly this reason."""
+
+    steps: list[list[AIMessageChunk]] = []
+    calls: list[int] = []
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        raise NotImplementedError("this model only streams")
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        step = len(self.calls)
+        self.calls.append(step)
+        for chunk in self.steps[step]:
+            yield ChatGenerationChunk(message=chunk)
+
+    async def _astream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        for gen in self._stream(messages, stop, run_manager, **kwargs):
+            yield gen
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-streaming-model"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "_ScriptedStreamingModel":
+        return self
+
+
 async def _collect(model: Any, question: str, thread_id: str) -> list:
     return [
         chunk
@@ -168,6 +226,58 @@ def test_streaming_yields_progress_and_a_final_message_not_just_a_blob():
         assert "fullyQualifiedName" not in chunk.text, (
             f"tool output leaked into a message chunk: {chunk.text!r}"
         )
+
+
+def test_a_streaming_model_yields_each_token_delta_separately():
+    """The actual complaint this exists to fix: a real model's response
+    must arrive as it is produced, not as one blob once the whole answer
+    is ready — the same expectation Cursor/Claude/ChatGPT's own chat UIs
+    set. Three separate deltas in the script; the assertion is that at
+    least three separate "message" chunks arrive with the right partial
+    text each, not one chunk already containing the full sentence."""
+    model = _ScriptedStreamingModel(
+        steps=[
+            [
+                AIMessageChunk(content="Hello"),
+                AIMessageChunk(content=", "),
+                AIMessageChunk(content="world!"),
+            ]
+        ]
+    )
+
+    chunks = asyncio.run(_collect(model, "say hello", "thread-stream"))
+
+    message_chunks = [c for c in chunks if c.kind == "message"]
+    assert len(message_chunks) >= 3, (
+        f"expected at least 3 separate deltas, got {len(message_chunks)}: {message_chunks}"
+    )
+    assert [c.text for c in message_chunks] == ["Hello", ", ", "world!"], message_chunks
+    # The full text must still be recoverable by concatenation — proves
+    # this is real incremental delivery, not the tokens arriving
+    # correctly-ordered but truncated or duplicated.
+    assert "".join(c.text for c in message_chunks) == "Hello, world!"
+
+
+def test_a_turn_following_a_tool_call_gets_a_paragraph_break_not_a_run_on():
+    """Found live, 12 August 2026: two consecutive turns' prose
+    concatenated with no separator at all — "...tables relatedThe
+    catalog has 15 tables...". The first turn's own text needs no
+    leading separator (nothing precedes it); every turn after a tool
+    call does."""
+    model = _ScriptedToolCallingModel(
+        steps=[
+            AIMessage(
+                content="Let me check.",
+                tool_calls=[{"name": "search_assets", "args": {"query": "x"}, "id": "call-1"}],
+            ),
+            AIMessage(content="Found it."),
+        ]
+    )
+
+    chunks = asyncio.run(_collect(model, "find something", "thread-sep"))
+
+    text = "".join(c.text for c in chunks if c.kind == "message")
+    assert text == "Let me check.\n\nFound it.", repr(text)
 
 
 def test_two_concurrent_investigations_do_not_cross_contaminate():

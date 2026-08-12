@@ -31,11 +31,32 @@ whole tool-calling loop finishes and returns one string — fine for a
 CLI, wrong for a UI that wants to show live progress and, per the
 "ask a new question while the first still runs" requirement, run
 several of these loops at once without one blocking another.
-`agent.astream(stream_mode=["updates", "messages"])` is exactly that:
-"messages" for the model's own text as it is produced, "updates" for
-node-level progress (a tool call and its result) — see
-https://docs.langchain.com/oss/python/langgraph/streaming for the
-stream_mode contract this relies on.
+
+**Not built on `langchain.agents.create_agent`, on purpose — found
+live, 12 August 2026.** The first version called `create_agent(...)
+.astream(stream_mode=["updates", "messages"])`, matching
+https://docs.langchain.com/oss/python/langgraph/streaming's own
+documented contract. It worked in every scripted test (a scripted model
+implementing `_stream` really does forward per-chunk deltas through that
+path) but showed no visible token-by-token typing against the real
+model in the console — text arrived as one block. Root cause, found by
+reading `create_agent`'s own source
+(`langchain/agents/factory.py::_execute_model_async`): its model node
+always calls `await model_.ainvoke(messages)`, never `.astream(...)`.
+Whether that still produces incremental deltas depends on LangChain's
+callback-triggered auto-streaming kicking in for the specific
+model/provider — for this deployment's DeepSeek endpoint, it did not.
+Rather than depend on that indirection, this module calls
+`model.astream(messages)` directly, in a hand-rolled ReAct loop: stream
+the model's response, merge the `AIMessageChunk`s as they arrive
+(`+=`, which LangChain's own chunk type supports for both `content` and
+`tool_call_chunks`), yield each content delta immediately, then either
+stop (no tool calls) or invoke each tool call directly
+(`tool.ainvoke(call)`, which returns a `ToolMessage` with the right
+`tool_call_id` set automatically) and loop. This is a deliberately
+minimal reimplementation of what `create_agent` already does, with one
+difference — the model call streams for real — not a wholesale rebuild
+of agentic tool-calling.
 
 **Concurrency safety, stated explicitly rather than assumed.**
 `thread_id` goes into `config["configurable"]` — LangGraph's own
@@ -71,15 +92,15 @@ DEFAULT_RECURSION_LIMIT = 40
 class StreamChunk:
     """One piece of progress from a running investigation.
 
-    `kind` mirrors the two `stream_mode`s requested: `"message"` is a
-    text fragment from the model (a UI renders this directly, token by
-    token if the underlying model streams natively, or as one chunk
-    otherwise — `BaseChatModel`'s own default `stream()` falls back to a
-    single complete chunk when a subclass implements only `_generate`).
-    `"update"` is a node-level event, typically a tool call and its
-    result — carried in `data` rather than `text`, since it is
-    structured detail a UI may show separately (a "thinking" trace),
-    not prose to append to the answer.
+    `"message"` is a text delta from the model — a UI appends each one
+    to what it has already shown, the same way Cursor/Claude/ChatGPT's
+    own chat views grow a response token by token rather than replacing
+    it. `"update"` is a tool-call lifecycle event — `data` is always one
+    of two small, JSON-serializable shapes a UI can render as a clean
+    "Using <tool>…" / "✓ <tool>" line, never the tool's own raw output:
+
+    - `{"phase": "tool_call", "tool": name, "args": {...}}`
+    - `{"phase": "tool_result", "tool": name, "ok": bool}`
     """
 
     kind: str  # "message" | "update"
@@ -91,44 +112,94 @@ async def run_investigation_stream(
     model: Any,
     tools: list[Any],
     question: str,
-    thread_id: str,
+    thread_id: str,  # noqa: ARG001 - bookkeeping key for the caller (server.py), not used here; kept in the signature so a future checkpointer-backed version has an obvious place to plug in
     system_prompt: str,
     recursion_limit: int = DEFAULT_RECURSION_LIMIT,
 ) -> AsyncIterator[StreamChunk]:
-    """Run one question through a real tool-calling loop, yielding
-    progress as it happens rather than blocking for the final answer.
+    """Run one question through a hand-rolled tool-calling loop, yielding
+    progress — including real token deltas — as it happens rather than
+    blocking for the final answer.
 
     Two calls to this function, awaited concurrently (`asyncio.gather`,
     or two independently-scheduled tasks — which is what `server.py`
-    does per incoming question), run their own independent tool-calling
-    loops. Neither call blocks the other; a UI can start a second
-    question while the first is still streaming.
-    """
-    from langchain.agents import create_agent
-    from langchain_core.messages import AIMessage
+    does per incoming question), run their own independent loops.
+    Neither shares state with the other: each has its own local
+    `messages` list, and the only shared objects (`model`, `tools`) are
+    the same kind of concurrency-safe HTTP-backed clients any two
+    coroutines already share safely.
 
-    agent = create_agent(model, tools, system_prompt=system_prompt)
-    config = {
-        "configurable": {"thread_id": thread_id},
-        "recursion_limit": recursion_limit,
-    }
-    async for stream_mode, payload in agent.astream(
-        {"messages": [("user", question)]},
-        config=config,
-        stream_mode=["updates", "messages"],
-    ):
-        if stream_mode == "messages":
-            chunk, _metadata = payload
-            # "messages" mode streams every message flowing through the
-            # graph, not only the model's own generated text — a
-            # ToolMessage (the raw string a tool like query_graph
-            # returned) has a `.content` attribute too, and forwarding it
-            # unfiltered means a large SPARQL result renders as a wall of
-            # JSON in what is supposed to be the model's prose. Only
-            # AIMessage/AIMessageChunk is the model's own output.
-            if isinstance(chunk, AIMessage):
-                text = chunk.content or ""
-                if text:
-                    yield StreamChunk(kind="message", text=text)
-        elif stream_mode == "updates":
-            yield StreamChunk(kind="update", data=payload)
+    # Raises
+
+    `RuntimeError` if the model has not stopped calling tools after
+    `recursion_limit` turns — surfaced, not swallowed, matching
+    `gst_investigation_agent.py`'s own `GraphRecursionError` posture: a
+    silent partial answer at the cap would look like a real conclusion.
+    """
+    from langchain_core.messages import (
+        AIMessage,
+        AIMessageChunk,
+        HumanMessage,
+        SystemMessage,
+        ToolMessage,
+    )
+
+    tools_by_name = {tool.name: tool for tool in tools}
+    model_with_tools = model.bind_tools(tools) if tools else model
+    messages: list[Any] = [SystemMessage(content=system_prompt), HumanMessage(content=question)]
+
+    for turn in range(recursion_limit):
+        accumulated: AIMessage | None = None
+        started_this_turns_prose = False
+        async for piece in model_with_tools.astream(messages):
+            if not isinstance(piece, AIMessage):
+                continue
+            # A model that streams natively yields many AIMessageChunks,
+            # merged via `+` as they arrive. A model with no `_stream`
+            # override falls back to exactly one plain AIMessage (not a
+            # Chunk) carrying the whole response — nothing to merge, and
+            # `+` is not defined on the base type, so that single piece
+            # is used as-is rather than accumulated.
+            if isinstance(piece, AIMessageChunk):
+                accumulated = piece if accumulated is None else accumulated + piece
+            else:
+                accumulated = piece
+            if piece.content:
+                # A turn after the first (i.e. one that follows at least
+                # one tool call) starts a new paragraph rather than
+                # butting directly up against the previous turn's last
+                # word — found live, 12 August 2026: "...tables
+                # relatedThe catalog has 15 tables..." with no separator
+                # at all between two consecutive turns' prose.
+                if turn > 0 and not started_this_turns_prose:
+                    yield StreamChunk(kind="message", text="\n\n")
+                started_this_turns_prose = True
+                yield StreamChunk(kind="message", text=piece.content)
+
+        if accumulated is None:
+            return
+        messages.append(accumulated)
+
+        tool_calls = accumulated.tool_calls
+        if not tool_calls:
+            return
+
+        for call in tool_calls:
+            yield StreamChunk(
+                kind="update",
+                data={"phase": "tool_call", "tool": call["name"], "args": call["args"]},
+            )
+            tool = tools_by_name.get(call["name"])
+            if tool is None:
+                result = ToolMessage(
+                    content=f"no such tool: {call['name']}", tool_call_id=call["id"]
+                )
+                ok = False
+            else:
+                result = await tool.ainvoke(call)
+                ok = True
+            messages.append(result)
+            yield StreamChunk(
+                kind="update", data={"phase": "tool_result", "tool": call["name"], "ok": ok}
+            )
+
+    raise RuntimeError(f"agent did not stop calling tools after {recursion_limit} turns")

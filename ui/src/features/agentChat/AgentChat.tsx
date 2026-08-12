@@ -26,8 +26,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Empty, Input, Layout, List, Select, Space, Tag, Typography } from "antd";
-import { RobotOutlined, SendOutlined } from "@ant-design/icons";
-import { askQuestion, streamAnswer } from "./agentClient";
+import { CheckOutlined, LoadingOutlined, RobotOutlined, SendOutlined } from "@ant-design/icons";
+import { askQuestion, streamAnswer, type ToolActivity } from "./agentClient";
 
 const { Text, Title } = Typography;
 const { Sider, Content } = Layout;
@@ -49,6 +49,7 @@ interface ThreadState {
   question: string;
   status: ThreadStatus;
   text: string;
+  activity: ToolActivity[];
   error: string | null;
 }
 
@@ -106,13 +107,35 @@ export function AgentChat() {
 
     setThreads((prev) => ({
       ...prev,
-      [threadId]: { agentId, question, status: "running", text: "", error: null },
+      [threadId]: { agentId, question, status: "running", text: "", activity: [], error: null },
     }));
     setActiveThreadId(threadId);
 
+    // Each "message" event is a *delta* — the agent service sends only
+    // the newly-produced piece, not the whole answer so far (see
+    // agent_service/streaming.py's StreamChunk docstring) — so this
+    // reads the latest React state via the functional form of
+    // setThreads rather than closing over a stale `text` from when
+    // handleAsk started. Appending, not replacing, is what makes the
+    // answer grow token by token the way Cursor/Claude/ChatGPT's own
+    // chat views do, instead of the text flickering through
+    // fragments and settling on whatever chunk happened to arrive last.
     const close = streamAnswer(threadId, (event) => {
       if (event.kind === "message") {
-        updateThread(threadId, { text: event.text });
+        setThreads((prev) => {
+          const current = prev[threadId];
+          if (!current) return prev;
+          return { ...prev, [threadId]: { ...current, text: current.text + event.text } };
+        });
+      } else if (event.kind === "update") {
+        setThreads((prev) => {
+          const current = prev[threadId];
+          if (!current) return prev;
+          return {
+            ...prev,
+            [threadId]: { ...current, activity: [...current.activity, event.data] },
+          };
+        });
       } else {
         updateThread(threadId, { status: event.status, error: event.error });
         streamsRef.current.delete(threadId);
@@ -173,7 +196,19 @@ export function AgentChat() {
             <Text type="secondary">{COPY.emptyTranscript}</Text>
           ) : (
             <>
-              <Text>{active.text || (active.status === "running" ? COPY.thinking : "")}</Text>
+              {active.activity.length > 0 && (
+                <Space direction="vertical" size={2} style={{ marginBottom: 12 }}>
+                  {mergedActivity(active.activity).map((entry, i) => (
+                    <ActivityLine key={i} entry={entry} />
+                  ))}
+                </Space>
+              )}
+              <Text>
+                {active.text ||
+                  (active.status === "running" && active.activity.length === 0
+                    ? COPY.thinking
+                    : "")}
+              </Text>
               {active.status === "error" && (
                 <Alert
                   type="error"
@@ -209,4 +244,54 @@ export function AgentChat() {
 function StatusDot({ status }: { status: ThreadStatus }) {
   const color = status === "running" ? "gold" : status === "done" ? "green" : "red";
   return <Tag color={color} style={{ width: 8, height: 8, padding: 0, borderRadius: "50%" }} />;
+}
+
+interface ActivityEntry {
+  tool: string;
+  ok: boolean | null; // null = call made, result not back yet
+}
+
+/** Pairs each `tool_call` with its later `tool_result` by tool name,
+ *  FIFO per name (two calls to the same tool resolve in the order they
+ *  were made) — turns the flat event log into one line per tool
+ *  invocation, the shape Cursor/Claude/ChatGPT's own "Using X…" / "✓ X"
+ *  indicators render. */
+function mergedActivity(activity: ToolActivity[]): ActivityEntry[] {
+  const entries: ActivityEntry[] = [];
+  const pending: Record<string, number[]> = {};
+  for (const item of activity) {
+    if (item.phase === "tool_call") {
+      entries.push({ tool: item.tool, ok: null });
+      (pending[item.tool] ??= []).push(entries.length - 1);
+    } else {
+      const idx = pending[item.tool]?.shift();
+      const existing = idx !== undefined ? entries[idx] : undefined;
+      if (idx !== undefined && existing !== undefined) {
+        entries[idx] = { tool: existing.tool, ok: item.ok };
+      }
+    }
+  }
+  return entries;
+}
+
+function ActivityLine({ entry }: { entry: ActivityEntry }) {
+  return (
+    <Space size={6}>
+      {entry.ok === null ? (
+        <LoadingOutlined spin style={{ fontSize: 12 }} />
+      ) : entry.ok ? (
+        <CheckOutlined style={{ fontSize: 12, color: "#52c41a" }} />
+      ) : (
+        <Text type="danger" style={{ fontSize: 12 }}>
+          ✕
+        </Text>
+      )}
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        {entry.ok === null ? "Using " : "Used "}
+        <Text code style={{ fontSize: 12 }}>
+          {entry.tool}
+        </Text>
+      </Text>
+    </Space>
+  );
 }
