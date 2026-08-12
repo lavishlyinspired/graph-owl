@@ -33,12 +33,21 @@ export interface AskResult {
  *  mechanism behind "ask a second question while the first still runs":
  *  the caller gets a `threadId` back fast, opens a stream for it, and can
  *  call `askQuestion` again right away for a second question with its own
- *  independent `threadId`. */
-export async function askQuestion(question: string): Promise<AskResult> {
+ *  independent `threadId`.
+ *
+ *  `fileIds` names files already uploaded via `uploadFile` — the server
+ *  turns them into an explicit "here are the file IDs you can use"
+ *  note ahead of the question text (see `server.py`'s
+ *  `_files_context_note`) and offers the `reconcile_uploaded_files`
+ *  tool only when at least one is attached. */
+export async function askQuestion(
+  question: string,
+  fileIds: string[] = [],
+): Promise<AskResult> {
   const response = await fetch(`${AGENT_SERVICE_URL}/questions`, {
     method: "POST",
     headers: { "content-type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, fileIds }),
   });
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
@@ -47,9 +56,49 @@ export async function askQuestion(question: string): Promise<AskResult> {
   return (await response.json()) as AskResult;
 }
 
+export interface UploadedFile {
+  fileId: string;
+  name: string;
+  contentType: string;
+  size: number;
+}
+
+/** Uploads a file's raw text content and returns its assigned ID —
+ *  attach that ID to a subsequent `askQuestion` call, or pass it to
+ *  `readFile` to preview what was actually stored. */
+export async function uploadFile(name: string, contentType: string, content: string): Promise<UploadedFile> {
+  const response = await fetch(`${AGENT_SERVICE_URL}/files`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name, contentType, content }),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`could not upload ${name} (${response.status}): ${detail}`);
+  }
+  return (await response.json()) as UploadedFile;
+}
+
+export interface FileContent extends UploadedFile {
+  content: string;
+}
+
+/** Reads back a previously uploaded file's content — the preview modal's
+ *  only data source, so what a user sees on click is exactly what the
+ *  agent's tools would read for the same file ID. */
+export async function readFile(fileId: string): Promise<FileContent> {
+  const response = await fetch(`${AGENT_SERVICE_URL}/files/${fileId}`);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`could not read file ${fileId} (${response.status}): ${detail}`);
+  }
+  return (await response.json()) as FileContent;
+}
+
 export type ToolActivity =
   | { phase: "tool_call"; tool: string; args: Record<string, unknown> }
-  | { phase: "tool_result"; tool: string; ok: boolean };
+  | { phase: "tool_result"; tool: string; ok: boolean }
+  | { phase: "model_fallback"; reason: string };
 
 export type StreamEvent =
   | { kind: "message"; text: string }

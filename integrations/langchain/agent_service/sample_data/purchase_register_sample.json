@@ -1,0 +1,116 @@
+{
+  "gstin": "27AABCU9603R1ZM",
+  "period": "June 2026",
+  "entries": [
+    {
+      "invoiceNumber": "INV-2001",
+      "invoiceDate": "2026-06-03",
+      "vendorGstin": "29AAACG1234A1Z5",
+      "vendorName": "Bright Textiles Pvt Ltd",
+      "taxableValue": 125000.0,
+      "cgst": 11250.0,
+      "sgst": 11250.0,
+      "igst": 0.0,
+      "totalTax": 22500.0
+    },
+    {
+      "invoiceNumber": "INV-2002",
+      "invoiceDate": "2026-06-05",
+      "vendorGstin": "18AABCC5566B1Z9",
+      "vendorName": "Comet Chemicals Ltd",
+      "taxableValue": 52000.0,
+      "cgst": 4680.0,
+      "sgst": 4680.0,
+      "igst": 0.0,
+      "totalTax": 9360.0
+    },
+    {
+      "invoiceNumber": "INV-2004",
+      "invoiceDate": "2026-06-09",
+      "vendorGstin": "36AABCQ3321F1Z4",
+      "vendorName": "Quantum Freight Services",
+      "taxableValue": 9800.0,
+      "cgst": 882.0,
+      "sgst": 882.0,
+      "igst": 0.0,
+      "totalTax": 1764.0
+    },
+    {
+      "invoiceNumber": "INV-2005",
+      "invoiceDate": "2026-06-10",
+      "vendorGstin": "24AAFCP7788K1QZ",
+      "vendorName": "Harbor Steel Traders",
+      "taxableValue": 67000.0,
+      "cgst": 6030.0,
+      "sgst": 6030.0,
+      "igst": 0.0,
+      "totalTax": 12060.0
+    },
+    {
+      "invoiceNumber": "INV-2006",
+      "invoiceDate": "2026-06-11",
+      "vendorGstin": "07AABCV4455J1Z1",
+      "vendorName": "Vertex Logistics LLP",
+      "taxableValue": 32000.0,
+      "cgst": 2880.0,
+      "sgst": 2880.0,
+      "igst": 0.0,
+      "totalTax": 5760.0
+    },
+    {
+      "invoiceNumber": "INV-2007",
+      "invoiceDate": "2026-06-13",
+      "vendorGstin": "33AABCZ9988H1Z3",
+      "vendorName": "Zenith Packaging Co",
+      "taxableValue": 76500.0,
+      "cgst": 6885.0,
+      "sgst": 6885.0,
+      "igst": 0.0,
+      "totalTax": 13770.0
+    },
+    {
+      "invoiceNumber": "INV-2008",
+      "invoiceDate": "2026-06-15",
+      "vendorGstin": "06AADCO3344M1Z7",
+      "vendorName": "Orion Industrial Supplies",
+      "taxableValue": 210000.0,
+      "cgst": 0.0,
+      "sgst": 0.0,
+      "igst": 37800.0,
+      "totalTax": 37800.0
+    },
+    {
+      "invoiceNumber": "INV-2009",
+      "invoiceDate": "2026-06-17",
+      "vendorGstin": "29AAJCM2211N1Z5",
+      "vendorName": "Meridian Auto Components",
+      "taxableValue": 45000.0,
+      "cgst": 4050.0,
+      "sgst": 4050.0,
+      "igst": 0.0,
+      "totalTax": 8100.0
+    },
+    {
+      "invoiceNumber": "INV-2010",
+      "invoiceDate": "2026-06-20",
+      "vendorGstin": "27AABCC6677P1Z6",
+      "vendorName": "Coral Bay Facilities Pvt Ltd",
+      "taxableValue": 15200.0,
+      "cgst": 1368.0,
+      "sgst": 1368.0,
+      "igst": 0.0,
+      "totalTax": 2736.0
+    },
+    {
+      "invoiceNumber": "INV-2011",
+      "invoiceDate": "2026-06-22",
+      "vendorGstin": "19BBBCX1122L1Z8",
+      "vendorName": "Falcon Engg Associates",
+      "taxableValue": 12000.0,
+      "cgst": 1080.0,
+      "sgst": 1080.0,
+      "igst": 0.0,
+      "totalTax": 2160.0
+    }
+  ]
+}

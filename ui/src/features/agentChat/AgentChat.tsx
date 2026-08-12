@@ -25,9 +25,39 @@
  *  state all key off `agentId` already. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Button, Empty, Input, Layout, List, Select, Space, Tag, Typography } from "antd";
-import { CheckOutlined, LoadingOutlined, RobotOutlined, SendOutlined } from "@ant-design/icons";
-import { askQuestion, streamAnswer, type ToolActivity } from "./agentClient";
+import {
+  Alert,
+  Button,
+  Empty,
+  Input,
+  Layout,
+  List,
+  Modal,
+  Select,
+  Space,
+  Spin,
+  Tag,
+  Typography,
+} from "antd";
+import {
+  CheckOutlined,
+  CloseCircleFilled,
+  FileTextOutlined,
+  LoadingOutlined,
+  PaperClipOutlined,
+  RobotOutlined,
+  SendOutlined,
+  SwapOutlined,
+} from "@ant-design/icons";
+import {
+  askQuestion,
+  readFile,
+  streamAnswer,
+  uploadFile,
+  type FileContent,
+  type ToolActivity,
+  type UploadedFile,
+} from "./agentClient";
 
 const { Text, Title } = Typography;
 const { Sider, Content } = Layout;
@@ -51,6 +81,7 @@ interface ThreadState {
   text: string;
   activity: ToolActivity[];
   error: string | null;
+  files: UploadedFile[];
 }
 
 const COPY = {
@@ -61,8 +92,29 @@ const COPY = {
   emptyTranscript: "Ask a question below.",
   emptySidebar: "No questions yet.",
   submitError: "Could not reach the agent service.",
-  thinking: "…",
+  attachTitle: "Attach a file (e.g. a GSTR-2B export or purchase register, as JSON)",
+  fallbackNotice: "Switched to a fallback model to continue this investigation.",
+  toolFailed: "✕",
 };
+
+/** Rotates while a thread has nothing concrete to show yet — the same
+ *  role Cursor/Claude/ChatGPT's own animated "Thinking…" labels play,
+ *  rather than a single static word for however long the first model
+ *  turn takes. */
+const THINKING_LABELS = [
+  "Thinking",
+  "Cogitating",
+  "Catapulating",
+  "Percolating",
+  "Ruminating",
+  "Noodling",
+  "Synthesizing",
+  "Pondering",
+  "Untangling",
+  "Marinating",
+];
+
+const THINKING_LABEL_INTERVAL_MS = 1400;
 
 export function AgentChat() {
   const [agentId, setAgentId] = useState<string>(AGENTS[0]?.id ?? "reconciliation");
@@ -70,6 +122,14 @@ export function AgentChat() {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Files uploaded but not yet attached to a sent question — cleared
+  // once `handleAsk` sends them, mirroring how `input` clears on send.
+  const [stagedFiles, setStagedFiles] = useState<UploadedFile[]>([]);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [previewFile, setPreviewFile] = useState<FileContent | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Every open EventSource, keyed by threadId — a ref rather than state
   // because opening/closing a connection is not itself something the UI
@@ -91,23 +151,65 @@ export function AgentChat() {
     });
   }, []);
 
+  const handleFilesSelected = useCallback(async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    setUploadError(null);
+    for (const file of Array.from(fileList)) {
+      try {
+        const text = await file.text();
+        const uploaded = await uploadFile(file.name, file.type || "application/json", text);
+        setStagedFiles((prev) => [...prev, uploaded]);
+      } catch (e) {
+        setUploadError(e instanceof Error ? e.message : `Could not read ${file.name}.`);
+      }
+    }
+  }, []);
+
+  const openPreview = useCallback(async (file: UploadedFile) => {
+    setPreviewFile({ ...file, content: "" });
+    setPreviewError(null);
+    setPreviewLoading(true);
+    try {
+      const full = await readFile(file.fileId);
+      setPreviewFile(full);
+    } catch (e) {
+      setPreviewError(e instanceof Error ? e.message : "Could not load this file.");
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, []);
+
   const handleAsk = useCallback(async () => {
     const question = input.trim();
     if (!question) return;
     setInput("");
     setSubmitError(null);
+    const filesForThisQuestion = stagedFiles;
+    setStagedFiles([]);
 
     let threadId: string;
     try {
-      ({ threadId } = await askQuestion(question));
+      ({ threadId } = await askQuestion(
+        question,
+        filesForThisQuestion.map((f) => f.fileId),
+      ));
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : COPY.submitError);
+      setStagedFiles(filesForThisQuestion); // put them back — the question never went out
       return;
     }
 
     setThreads((prev) => ({
       ...prev,
-      [threadId]: { agentId, question, status: "running", text: "", activity: [], error: null },
+      [threadId]: {
+        agentId,
+        question,
+        status: "running",
+        text: "",
+        activity: [],
+        error: null,
+        files: filesForThisQuestion,
+      },
     }));
     setActiveThreadId(threadId);
 
@@ -142,7 +244,7 @@ export function AgentChat() {
       }
     });
     streamsRef.current.set(threadId, close);
-  }, [input, agentId, updateThread]);
+  }, [input, agentId, updateThread, stagedFiles]);
 
   const threadEntries = Object.entries(threads).sort(([a], [b]) => a.localeCompare(b));
   const active = activeThreadId ? threads[activeThreadId] : undefined;
@@ -196,19 +298,29 @@ export function AgentChat() {
             <Text type="secondary">{COPY.emptyTranscript}</Text>
           ) : (
             <>
-              {active.activity.length > 0 && (
-                <Space direction="vertical" size={2} style={{ marginBottom: 12 }}>
-                  {mergedActivity(active.activity).map((entry, i) => (
-                    <ActivityLine key={i} entry={entry} />
+              {active.files.length > 0 && (
+                <Space wrap size={6} style={{ marginBottom: 12 }}>
+                  {active.files.map((f) => (
+                    <FileChip key={f.fileId} file={f} onClick={() => openPreview(f)} />
                   ))}
                 </Space>
               )}
-              <Text>
-                {active.text ||
-                  (active.status === "running" && active.activity.length === 0
-                    ? COPY.thinking
-                    : "")}
-              </Text>
+              {active.activity.length > 0 && (
+                <Space direction="vertical" size={2} style={{ marginBottom: 12 }}>
+                  {mergedActivity(active.activity).map((entry, i) =>
+                    entry.kind === "fallback" ? (
+                      <FallbackNotice key={i} />
+                    ) : (
+                      <ActivityLine key={i} entry={entry} />
+                    ),
+                  )}
+                </Space>
+              )}
+              {active.status === "running" && active.text === "" && active.activity.length === 0 ? (
+                <ThinkingIndicator />
+              ) : (
+                <Text>{active.text}</Text>
+              )}
               {active.status === "error" && (
                 <Alert
                   type="error"
@@ -224,7 +336,49 @@ export function AgentChat() {
         {submitError && (
           <Alert type="error" showIcon closable message={submitError} style={{ marginBottom: 8 }} />
         )}
+        {uploadError && (
+          <Alert
+            type="error"
+            showIcon
+            closable
+            message={uploadError}
+            style={{ marginBottom: 8 }}
+            onClose={() => setUploadError(null)}
+          />
+        )}
+        {stagedFiles.length > 0 && (
+          <Space wrap size={6} style={{ marginBottom: 8 }}>
+            {stagedFiles.map((f) => (
+              <FileChip
+                key={f.fileId}
+                file={f}
+                onClick={() => openPreview(f)}
+                onRemove={() =>
+                  setStagedFiles((prev) => prev.filter((s) => s.fileId !== f.fileId))
+                }
+              />
+            ))}
+          </Space>
+        )}
         <Space.Compact style={{ width: "100%" }}>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept=".json,application/json,.csv,text/csv"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              void handleFilesSelected(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          <Button
+            onClick={() => fileInputRef.current?.click()}
+            aria-label="Attach a file"
+            title={COPY.attachTitle}
+          >
+            <PaperClipOutlined />
+          </Button>
           <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -237,7 +391,95 @@ export function AgentChat() {
           </Button>
         </Space.Compact>
       </Content>
+      <Modal
+        open={previewFile !== null}
+        title={previewFile?.name}
+        onCancel={() => setPreviewFile(null)}
+        footer={null}
+        width={720}
+      >
+        {previewLoading ? (
+          <Spin />
+        ) : previewError ? (
+          <Alert type="error" showIcon message={previewError} />
+        ) : (
+          <pre
+            style={{
+              maxHeight: "60vh",
+              overflow: "auto",
+              fontSize: 12,
+              background: "rgba(127,127,127,0.08)",
+              padding: 12,
+              borderRadius: 6,
+            }}
+          >
+            {formatPreview(previewFile)}
+          </pre>
+        )}
+      </Modal>
     </Layout>
+  );
+}
+
+function formatPreview(file: FileContent | null): string {
+  if (!file) return "";
+  try {
+    return JSON.stringify(JSON.parse(file.content), null, 2);
+  } catch {
+    return file.content;
+  }
+}
+
+function FileChip({
+  file,
+  onClick,
+  onRemove,
+}: {
+  file: UploadedFile;
+  onClick: () => void;
+  onRemove?: () => void;
+}) {
+  return (
+    <Tag
+      style={{ cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}
+      onClick={onClick}
+    >
+      <FileTextOutlined />
+      {file.name}
+      {onRemove && (
+        <CloseCircleFilled
+          style={{ fontSize: 12, opacity: 0.6 }}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+        />
+      )}
+    </Tag>
+  );
+}
+
+function ThinkingIndicator() {
+  const [labelIndex, setLabelIndex] = useState(0);
+  useEffect(() => {
+    const id = setInterval(
+      () => setLabelIndex((i) => (i + 1) % THINKING_LABELS.length),
+      THINKING_LABEL_INTERVAL_MS,
+    );
+    return () => clearInterval(id);
+  }, []);
+  const label = THINKING_LABELS[labelIndex % THINKING_LABELS.length] ?? "Thinking";
+  return <span className="gowl-thinking-label">{`${label}…`}</span>;
+}
+
+function FallbackNotice() {
+  return (
+    <Space size={6}>
+      <SwapOutlined style={{ fontSize: 12, color: "#faad14" }} />
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        {COPY.fallbackNotice}
+      </Text>
+    </Space>
   );
 }
 
@@ -246,35 +488,46 @@ function StatusDot({ status }: { status: ThreadStatus }) {
   return <Tag color={color} style={{ width: 8, height: 8, padding: 0, borderRadius: "50%" }} />;
 }
 
-interface ActivityEntry {
+interface ToolEntry {
+  kind: "tool";
   tool: string;
   ok: boolean | null; // null = call made, result not back yet
 }
+
+interface FallbackEntry {
+  kind: "fallback";
+}
+
+type ActivityEntry = ToolEntry | FallbackEntry;
 
 /** Pairs each `tool_call` with its later `tool_result` by tool name,
  *  FIFO per name (two calls to the same tool resolve in the order they
  *  were made) — turns the flat event log into one line per tool
  *  invocation, the shape Cursor/Claude/ChatGPT's own "Using X…" / "✓ X"
- *  indicators render. */
+ *  indicators render. `model_fallback` events pass through as their own
+ *  entry kind rather than being forced into the tool-pairing logic
+ *  above — they never had a "call" half to pair with. */
 function mergedActivity(activity: ToolActivity[]): ActivityEntry[] {
   const entries: ActivityEntry[] = [];
   const pending: Record<string, number[]> = {};
   for (const item of activity) {
     if (item.phase === "tool_call") {
-      entries.push({ tool: item.tool, ok: null });
+      entries.push({ kind: "tool", tool: item.tool, ok: null });
       (pending[item.tool] ??= []).push(entries.length - 1);
-    } else {
+    } else if (item.phase === "tool_result") {
       const idx = pending[item.tool]?.shift();
       const existing = idx !== undefined ? entries[idx] : undefined;
-      if (idx !== undefined && existing !== undefined) {
-        entries[idx] = { tool: existing.tool, ok: item.ok };
+      if (idx !== undefined && existing !== undefined && existing.kind === "tool") {
+        entries[idx] = { kind: "tool", tool: existing.tool, ok: item.ok };
       }
+    } else {
+      entries.push({ kind: "fallback" });
     }
   }
   return entries;
 }
 
-function ActivityLine({ entry }: { entry: ActivityEntry }) {
+function ActivityLine({ entry }: { entry: ToolEntry }) {
   return (
     <Space size={6}>
       {entry.ok === null ? (
@@ -283,7 +536,7 @@ function ActivityLine({ entry }: { entry: ActivityEntry }) {
         <CheckOutlined style={{ fontSize: 12, color: "#52c41a" }} />
       ) : (
         <Text type="danger" style={{ fontSize: 12 }}>
-          ✕
+          {COPY.toolFailed}
         </Text>
       )}
       <Text type="secondary" style={{ fontSize: 12 }}>

@@ -29,6 +29,7 @@ from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
@@ -187,11 +188,88 @@ class _ScriptedStreamingModel(BaseChatModel):
         return self
 
 
-async def _collect(model: Any, question: str, thread_id: str) -> list:
+class _FailsWithReasoningContentError(BaseChatModel):
+    """Simulates the real, live-found DeepSeek thinking-mode failure: the
+    provider rejects the request with a 400 the moment it is received —
+    before any chunk is streamed back — because a prior tool-calling
+    turn's `reasoning_content` was not echoed in this request. The
+    OpenAI Python SDK (which `ChatOpenAI` sits on) renders that as
+    `Error code: 400 - {...}`, so the substring match in
+    `run_investigation_stream` is against exactly this shape, not an
+    invented one."""
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        raise NotImplementedError("this model only streams")
+
+    async def _astream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        raise RuntimeError(
+            "Error code: 400 - {'error': {'param': None, 'type': "
+            "'invalid_request_error', 'code': 'invalid_request_error', "
+            "'message': 'Error from provider (Console): Upstream request "
+            "failed: [invalid_request_error] The `reasoning_content` in "
+            "the thinking mode must be passed back to the API.'}}"
+        )
+        yield  # pragma: no cover - unreachable; makes this an async generator function
+
+    @property
+    def _llm_type(self) -> str:
+        return "fails-with-reasoning-content-error"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "_FailsWithReasoningContentError":
+        return self
+
+
+class _FailsForAnUnrelatedReason(BaseChatModel):
+    """The negative case: a 400 (or any error) that is NOT the
+    reasoning_content shape must still fail the investigation rather than
+    being silently retried against a fallback model — a fallback is a
+    narrow, named recovery for one known upstream bug, not a general
+    retry-on-any-error policy that would hide real failures."""
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        raise NotImplementedError("this model only streams")
+
+    async def _astream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        raise RuntimeError("Error code: 429 - rate limit exceeded")
+        yield  # pragma: no cover - unreachable; makes this an async generator function
+
+    @property
+    def _llm_type(self) -> str:
+        return "fails-for-an-unrelated-reason"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "_FailsForAnUnrelatedReason":
+        return self
+
+
+async def _collect(model: Any, question: str, thread_id: str, **kwargs: Any) -> list:
     return [
         chunk
         async for chunk in run_investigation_stream(
-            model, _toolkit_tools(), question, thread_id, SYSTEM_PROMPT
+            model, _toolkit_tools(), question, thread_id, SYSTEM_PROMPT, **kwargs
         )
     ]
 
@@ -302,3 +380,55 @@ def test_two_concurrent_investigations_do_not_cross_contaminate():
     assert "answer for question B" not in text_a, "thread A leaked thread B's answer"
     assert "answer for question B" in text_b
     assert "answer for question A" not in text_b, "thread B leaked thread A's answer"
+
+
+def test_a_reasoning_content_error_recovers_via_the_fallback_model():
+    """The actual bug hit live, 12 August 2026: a real multi-hop
+    investigation against a DeepSeek thinking-mode model 400s with "the
+    `reasoning_content` in the thinking mode must be passed back to the
+    API" the moment a tool-calling turn is echoed back in the next
+    request — a known, open upstream bug (langchain-ai/langchain
+    #34166, #37174) that neither this project nor `ChatOpenAI`'s own
+    message serialization works around. Rather than fail the whole
+    investigation, the SAME turn retries against a second, configured
+    fallback model."""
+    primary = _FailsWithReasoningContentError()
+    fallback = _ScriptedToolCallingModel(steps=[AIMessage(content="Fallback answer.")])
+
+    chunks = asyncio.run(
+        _collect(primary, "a question", "thread-fallback", fallback_model=fallback)
+    )
+
+    phases = [c.data.get("phase") for c in chunks if c.kind == "update"]
+    assert "model_fallback" in phases, (
+        f"expected a model_fallback update chunk announcing the switch, got {phases}"
+    )
+    text = "".join(c.text for c in chunks if c.kind == "message")
+    assert text == "Fallback answer."
+
+
+def test_an_unrelated_error_is_not_silently_retried_against_the_fallback():
+    """The negative half of the fallback behaviour: only the named
+    reasoning_content shape triggers a retry. Anything else — a rate
+    limit, a real outage — must still surface as a failed investigation,
+    not be silently absorbed by falling back to a different model."""
+    primary = _FailsForAnUnrelatedReason()
+    fallback = _ScriptedToolCallingModel(
+        steps=[AIMessage(content="should never be reached")]
+    )
+
+    with pytest.raises(RuntimeError, match="rate limit exceeded"):
+        asyncio.run(
+            _collect(primary, "a question", "thread-no-fallback", fallback_model=fallback)
+        )
+
+
+def test_no_fallback_configured_still_fails_the_investigation_as_before():
+    """When no fallback model is configured at all (the default), a
+    reasoning_content error must propagate exactly as it did before this
+    feature existed — this is what proves the fallback is additive, not
+    a change to the no-fallback default behaviour."""
+    primary = _FailsWithReasoningContentError()
+
+    with pytest.raises(RuntimeError, match="reasoning_content"):
+        asyncio.run(_collect(primary, "a question", "thread-no-fallback-configured"))

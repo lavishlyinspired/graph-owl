@@ -108,6 +108,18 @@ class StreamChunk:
     data: Any = None
 
 
+#: The exact substring the OpenAI SDK's rendered error carries for the
+#: known, open upstream bug (langchain-ai/langchain issues #34166,
+#: #37174): a DeepSeek thinking-mode model 400s a request that echoes
+#: back a prior tool-calling turn without that turn's own
+#: `reasoning_content`, because `ChatOpenAI`'s message serialization
+#: does not round-trip that field. Narrow and literal on purpose — this
+#: must trigger a fallback for exactly this bug, never for an unrelated
+#: 400 (a malformed tool call, say) that happens to also be worth
+#: knowing about as a real failure.
+_REASONING_CONTENT_ERROR_MARKER = "reasoning_content"
+
+
 async def run_investigation_stream(
     model: Any,
     tools: list[Any],
@@ -115,6 +127,7 @@ async def run_investigation_stream(
     thread_id: str,  # noqa: ARG001 - bookkeeping key for the caller (server.py), not used here; kept in the signature so a future checkpointer-backed version has an obvious place to plug in
     system_prompt: str,
     recursion_limit: int = DEFAULT_RECURSION_LIMIT,
+    fallback_model: Any | None = None,
 ) -> AsyncIterator[StreamChunk]:
     """Run one question through a hand-rolled tool-calling loop, yielding
     progress — including real token deltas — as it happens rather than
@@ -145,35 +158,78 @@ async def run_investigation_stream(
 
     tools_by_name = {tool.name: tool for tool in tools}
     model_with_tools = model.bind_tools(tools) if tools else model
+    # Bound once, up front, rather than re-bound on every fallback — the
+    # tool set never changes mid-investigation, only which underlying
+    # model is answering.
+    fallback_with_tools = (
+        fallback_model.bind_tools(tools) if fallback_model and tools else fallback_model
+    )
+    active_model = model_with_tools
     messages: list[Any] = [SystemMessage(content=system_prompt), HumanMessage(content=question)]
 
     for turn in range(recursion_limit):
         accumulated: AIMessage | None = None
         started_this_turns_prose = False
-        async for piece in model_with_tools.astream(messages):
-            if not isinstance(piece, AIMessage):
-                continue
-            # A model that streams natively yields many AIMessageChunks,
-            # merged via `+` as they arrive. A model with no `_stream`
-            # override falls back to exactly one plain AIMessage (not a
-            # Chunk) carrying the whole response — nothing to merge, and
-            # `+` is not defined on the base type, so that single piece
-            # is used as-is rather than accumulated.
-            if isinstance(piece, AIMessageChunk):
-                accumulated = piece if accumulated is None else accumulated + piece
-            else:
-                accumulated = piece
-            if piece.content:
-                # A turn after the first (i.e. one that follows at least
-                # one tool call) starts a new paragraph rather than
-                # butting directly up against the previous turn's last
-                # word — found live, 12 August 2026: "...tables
-                # relatedThe catalog has 15 tables..." with no separator
-                # at all between two consecutive turns' prose.
-                if turn > 0 and not started_this_turns_prose:
-                    yield StreamChunk(kind="message", text="\n\n")
-                started_this_turns_prose = True
-                yield StreamChunk(kind="message", text=piece.content)
+        attempted_fallback_this_turn = False
+        while True:
+            try:
+                async for piece in active_model.astream(messages):
+                    if not isinstance(piece, AIMessage):
+                        continue
+                    # A model that streams natively yields many AIMessageChunks,
+                    # merged via `+` as they arrive. A model with no `_stream`
+                    # override falls back to exactly one plain AIMessage (not a
+                    # Chunk) carrying the whole response — nothing to merge, and
+                    # `+` is not defined on the base type, so that single piece
+                    # is used as-is rather than accumulated.
+                    if isinstance(piece, AIMessageChunk):
+                        accumulated = piece if accumulated is None else accumulated + piece
+                    else:
+                        accumulated = piece
+                    if piece.content:
+                        # A turn after the first (i.e. one that follows at least
+                        # one tool call) starts a new paragraph rather than
+                        # butting directly up against the previous turn's last
+                        # word — found live, 12 August 2026: "...tables
+                        # relatedThe catalog has 15 tables..." with no separator
+                        # at all between two consecutive turns' prose.
+                        if turn > 0 and not started_this_turns_prose:
+                            yield StreamChunk(kind="message", text="\n\n")
+                        started_this_turns_prose = True
+                        yield StreamChunk(kind="message", text=piece.content)
+                break
+            except Exception as exc:
+                # A narrow, named recovery for one known, open upstream
+                # bug (langchain-ai/langchain #34166, #37174) — a
+                # thinking-mode model 400s once a prior tool-calling
+                # turn's `reasoning_content` isn't echoed back, which
+                # `ChatOpenAI`'s own message serialization never does.
+                # Guarded on all four conditions: a fallback exists, this
+                # turn hasn't already tried it, this turn isn't already
+                # running on the fallback, and no content was received
+                # yet this attempt (a 400 arrives before any chunk is
+                # streamed, so a mid-stream failure — accumulated not
+                # None — is a different, real problem and must not be
+                # retried against a different model with a half-built
+                # response already in flight). Anything not matching all
+                # four re-raises, so an unrelated failure (rate limit,
+                # real outage) still fails the investigation rather than
+                # being silently absorbed.
+                should_fall_back = (
+                    fallback_with_tools is not None
+                    and not attempted_fallback_this_turn
+                    and active_model is not fallback_with_tools
+                    and accumulated is None
+                    and _REASONING_CONTENT_ERROR_MARKER in str(exc)
+                )
+                if not should_fall_back:
+                    raise
+                attempted_fallback_this_turn = True
+                active_model = fallback_with_tools
+                yield StreamChunk(
+                    kind="update",
+                    data={"phase": "model_fallback", "reason": "reasoning_content"},
+                )
 
         if accumulated is None:
             return

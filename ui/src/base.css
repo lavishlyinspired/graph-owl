@@ -56,3 +56,29 @@ code, .fqn {
 .ant-empty-image svg {
   opacity: 0.45;
 }
+
+/* Agent chat "thinking" indicator: a moving gradient sweeps across the
+   label text, the same shimmer-text pattern Cursor/Claude/ChatGPT use for
+   an in-progress state that has nothing concrete to show yet. The colour
+   stops are the product's own accent (#14C3CF) either side of a lighter
+   sweep highlight, not an invented palette. */
+@keyframes gowl-thinking-shimmer {
+  to {
+    background-position: -200% center;
+  }
+}
+.gowl-thinking-label {
+  background: linear-gradient(
+    90deg,
+    #14c3cf 0%,
+    #7ee6ec 45%,
+    #14c3cf 100%
+  );
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: gowl-thinking-shimmer 1.8s linear infinite;
+  font-weight: 500;
+}

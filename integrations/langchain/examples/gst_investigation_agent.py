@@ -267,6 +267,32 @@ def build_chat_model() -> BaseChatModel:
     )
 
 
+def build_fallback_chat_model() -> BaseChatModel | None:
+    """The same `LLM_FALLBACK_MODEL`/`LLM_FALLBACK_BASE_URL` convention
+    `reconcile_agent.py`'s own `narrate()` already established for a
+    reasoning model that stalls — reused here for a reasoning model that
+    400s instead (`agent_service/streaming.py`'s `reasoning_content`
+    fallback). Returns `None`, not an error, when no fallback is
+    configured: unlike `build_chat_model`, having no fallback is a valid,
+    common configuration (most deployments never hit the bug this
+    exists for), not a misconfiguration to reject.
+    """
+    model_name = os.environ.get("LLM_FALLBACK_MODEL")
+    if not model_name:
+        return None
+    base_url = os.environ.get("LLM_FALLBACK_BASE_URL") or os.environ.get("LLM_API_BASE_URL")
+    if not base_url:
+        return None
+    from langchain_openai import ChatOpenAI
+    from pydantic import SecretStr
+
+    return ChatOpenAI(
+        base_url=base_url,
+        model=model_name,
+        api_key=SecretStr(os.environ.get("LLM_API_KEY", "unused")),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gst_investigation_agent",

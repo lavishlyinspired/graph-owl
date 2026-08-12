@@ -55,8 +55,14 @@ _LANGCHAIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_LANGCHAIN_ROOT))
 sys.path.insert(0, str(_LANGCHAIN_ROOT / "examples"))
 
-from gst_investigation_agent import SYSTEM_PROMPT, build_chat_model  # noqa: E402
+from gst_investigation_agent import (  # noqa: E402
+    SYSTEM_PROMPT,
+    build_chat_model,
+    build_fallback_chat_model,
+)
 
+from agent_service.files import get_file, store_file  # noqa: E402
+from agent_service.reconcile_uploaded import reconcile_uploaded_files  # noqa: E402
 from agent_service.streaming import run_investigation_stream  # noqa: E402
 from graph_owl_langchain._core.principal import Principal  # noqa: E402
 from graph_owl_langchain.tools import GraphOwlToolkit  # noqa: E402
@@ -81,9 +87,28 @@ class _Thread:
     error: str | None = None
     activity: list[dict[str, Any]] = field(default_factory=list)
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    # [{fileId, name}], for the UI's attached-file chips
+    files: list[dict[str, str]] = field(default_factory=list)
 
 
 _THREADS: dict[str, _Thread] = {}
+
+
+def _files_context_note(files: list[dict[str, str]]) -> str:
+    """Turns the attached files into a short, explicit note prepended to
+    the question — the only way the model learns a real file ID exists
+    to pass to `reconcile_uploaded_files`, since IDs are server-assigned
+    UUIDs the model could never guess. Empty when there are no
+    attachments, so a question with none reads exactly as it always
+    did."""
+    if not files:
+        return ""
+    lines = "\n".join(f'- {f["fileId"]}: "{f["name"]}"' for f in files)
+    return (
+        "The user has attached the following file(s) to this question. "
+        "Use their exact IDs (not their names) with any tool that takes "
+        f"a file ID:\n{lines}\n\n"
+    )
 
 
 async def _run_and_publish(thread_id: str, question: str, token: str) -> None:
@@ -104,12 +129,25 @@ async def _run_and_publish(thread_id: str, question: str, token: str) -> None:
     thread = _THREADS[thread_id]
     try:
         model = build_chat_model()
+        fallback_model = build_fallback_chat_model()
         toolkit = GraphOwlToolkit(
             endpoint=os.environ.get("GRAPH_OWL_SERVER", "http://localhost:8080"),
             principal=Principal(token=token),
         )
+        # The uploaded-file comparison tool is only offered when a
+        # question actually has files attached — an investigation with
+        # nothing attached sees exactly the same tool set it always did,
+        # rather than a permanently larger one the model has to reason
+        # past on every question.
+        tools = toolkit.tools() + ([reconcile_uploaded_files] if thread.files else [])
+        question_with_files = _files_context_note(thread.files) + question
         async for chunk in run_investigation_stream(
-            model, toolkit.tools(), question, thread_id, SYSTEM_PROMPT
+            model,
+            tools,
+            question_with_files,
+            thread_id,
+            SYSTEM_PROMPT,
+            fallback_model=fallback_model,
         ):
             if chunk.kind == "message":
                 thread.text += chunk.text
@@ -156,10 +194,56 @@ async def ask(
             status_code=401,
             detail="no bearer token supplied, and GRAPH_OWL_TOKEN is not set as a fallback",
         )
+    files: list[dict[str, str]] = []
+    for file_id in body.get("fileIds", []):
+        record = get_file(file_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"no such uploaded file: {file_id}")
+        files.append({"fileId": record.file_id, "name": record.name})
     thread_id = str(uuid.uuid4())
-    _THREADS[thread_id] = _Thread(question=question)
+    _THREADS[thread_id] = _Thread(question=question, files=files)
     asyncio.create_task(_run_and_publish(thread_id, question, token))
     return {"threadId": thread_id}
+
+
+@app.post("/files")
+async def upload_file(body: dict[str, Any]) -> dict[str, Any]:
+    """Stores an uploaded file's raw text content in memory, keyed by a
+    fresh UUID the caller then attaches to a question's `fileIds` (see
+    `ask` above) or reads back via `GET /files/{file_id}` for a preview.
+    No auth on this route deliberately: the file itself carries no
+    graph-owl authorization semantics (it's the user's own local file,
+    not a catalog asset), and the token that matters — the caller's own
+    — is only meaningful once it's used against graph-owl-server, which
+    happens at `ask` time, not at upload time.
+    """
+    name = body.get("name", "").strip()
+    content = body.get("content")
+    if not name or content is None:
+        raise HTTPException(status_code=400, detail="name and content are required")
+    if len(content) > 5_000_000:
+        raise HTTPException(status_code=413, detail="file too large (5,000,000 character limit)")
+    record = store_file(name, body.get("contentType", "text/plain"), content)
+    return {
+        "fileId": record.file_id,
+        "name": record.name,
+        "contentType": record.content_type,
+        "size": len(record.content),
+    }
+
+
+@app.get("/files/{file_id}")
+async def read_file(file_id: str) -> dict[str, Any]:
+    record = get_file(file_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="no such uploaded file")
+    return {
+        "fileId": record.file_id,
+        "name": record.name,
+        "contentType": record.content_type,
+        "content": record.content,
+        "size": len(record.content),
+    }
 
 
 @app.get("/questions")
