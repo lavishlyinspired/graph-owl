@@ -4428,7 +4428,19 @@ function AppShell() {
               </Sider>
             )}
 
-            <Content style={{ padding: 24, overflow: "auto" }}>
+            <Content
+              style={{
+                padding: 24,
+                overflow: "auto",
+                // The agent tab is a permanently-mounted sibling below (an
+                // in-flight investigation's EventSource must survive
+                // switching sections, not just its transcript — see that
+                // element's own comment). This Content still renders on
+                // every other section exactly as before; only "agent"
+                // hides it in favour of that sibling.
+                display: section === "agent" ? "none" : undefined,
+              }}
+            >
               {section === "overview" ? (
                 <OverviewPage
                   colors={colors}
@@ -4452,8 +4464,6 @@ function AppShell() {
                 <ConnectorsPage onDone={refresh} colors={colors} />
               ) : section === "admin" ? (
                 <AdminPage colors={colors} setSection={setSection} />
-              ) : section === "agent" ? (
-                <AgentChat />
               ) : results !== null ? (
                 <Row gutter={24} style={{ width: "100%" }}>
                   <Col flex="200px">
@@ -4621,6 +4631,24 @@ function AppShell() {
                   </Button>
                 </div>
               )}
+            </Content>
+
+            {/* Permanently mounted, hidden (not unmounted) on every other
+                section — an in-flight investigation opens a real
+                EventSource (`AgentChat.tsx`'s `streamsRef`), and that
+                connection's own cleanup effect closes it on unmount.
+                Rendering this inside the `section === "agent"` ternary
+                above meant switching tabs mid-investigation silently
+                killed it, and switching back showed an empty "No
+                questions yet" as if it had never been asked. */}
+            <Content
+              style={{
+                padding: 24,
+                overflow: "auto",
+                display: section === "agent" ? undefined : "none",
+              }}
+            >
+              <AgentChat />
             </Content>
               </>
             )}
