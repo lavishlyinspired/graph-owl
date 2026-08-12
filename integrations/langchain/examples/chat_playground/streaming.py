@@ -97,6 +97,7 @@ async def run_investigation_stream(
     question while the first is still streaming.
     """
     from langchain.agents import create_agent
+    from langchain_core.messages import AIMessage
 
     agent = create_agent(model, tools, system_prompt=system_prompt)
     config = {
@@ -110,8 +111,16 @@ async def run_investigation_stream(
     ):
         if stream_mode == "messages":
             chunk, _metadata = payload
-            text = getattr(chunk, "content", "") or ""
-            if text:
-                yield StreamChunk(kind="message", text=text)
+            # "messages" mode streams every message flowing through the
+            # graph, not only the model's own generated text — a
+            # ToolMessage (the raw string a tool like query_graph
+            # returned) has a `.content` attribute too, and forwarding it
+            # unfiltered means a large SPARQL result renders as a wall of
+            # JSON in what is supposed to be the model's prose. Only
+            # AIMessage/AIMessageChunk is the model's own output.
+            if isinstance(chunk, AIMessage):
+                text = chunk.content or ""
+                if text:
+                    yield StreamChunk(kind="message", text=text)
         elif stream_mode == "updates":
             yield StreamChunk(kind="update", data=payload)

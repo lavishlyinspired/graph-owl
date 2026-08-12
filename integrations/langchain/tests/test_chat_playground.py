@@ -156,6 +156,16 @@ def test_streaming_yields_progress_and_a_final_message_not_just_a_blob():
     message_chunks = [c for c in chunks if c.kind == "message"]
     assert message_chunks, "expected at least one message chunk"
     assert any("orders table" in c.text for c in message_chunks), message_chunks
+    # The negative that makes the positive assertion mean something: the
+    # tool's own raw output (the fake search_assets result body) must
+    # never appear as "message" text — it belongs only in "update" chunks'
+    # `data`, or a large tool result renders as a wall of JSON in what is
+    # supposed to be the model's prose (found live, 12 August 2026, a real
+    # query_graph scan streaming raw rows into the chat transcript).
+    for chunk in message_chunks:
+        assert "fullyQualifiedName" not in chunk.text, (
+            f"tool output leaked into a message chunk: {chunk.text!r}"
+        )
 
 
 def test_two_concurrent_investigations_do_not_cross_contaminate():
