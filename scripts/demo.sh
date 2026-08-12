@@ -45,7 +45,24 @@ OIDC_MODE=false
 OIDC_ACCESS_TOKEN=""
 OIDC_ISSUER_URL=""
 OIDC_AUDIENCE_URL=""
-if [ "${SECURE}" = false ] && [ -f "${ROOT}/.env" ]; then
+# Environment beats .env, and "beats" has to include turning OIDC *off* —
+# not just adding to it. `${VAR+x}` (parameter existence) rather than
+# `-n "${VAR:-}"` (non-empty) is what makes that possible: the caller can
+# be in one of three states — never mentioned OIDC_ISSUER (fall through to
+# .env), set it to a real value (use that, skip .env), or explicitly set it
+# to "" to force OIDC off for this run regardless of what .env says. The
+# old `-n "${OIDC_ISSUER:-}"` check could only ever detect the second case;
+# an explicit empty override was indistinguishable from never having set it
+# at all, so `OIDC_ISSUER= OIDC_AUDIENCE= ./scripts/demo.sh` — this
+# script's own documented escape hatch — silently did nothing.
+if [ -n "${OIDC_ISSUER+x}" ]; then
+  if [ -n "${OIDC_ISSUER}" ]; then
+    OIDC_MODE=true
+    OIDC_ISSUER_URL="${OIDC_ISSUER}"
+    OIDC_AUDIENCE_URL="${OIDC_AUDIENCE:-}"
+  fi
+  # else: OIDC_ISSUER explicitly set empty — OIDC stays off, .env is not consulted.
+elif [ "${SECURE}" = false ] && [ -f "${ROOT}/.env" ]; then
   _oidc=$(grep '^OIDC_ISSUER=' "${ROOT}/.env" 2>/dev/null | head -1 || true)
   _aud=$(grep '^OIDC_AUDIENCE=' "${ROOT}/.env" 2>/dev/null | head -1 || true)
   if [ -n "$_oidc" ]; then
@@ -54,9 +71,6 @@ if [ "${SECURE}" = false ] && [ -f "${ROOT}/.env" ]; then
     OIDC_AUDIENCE_URL="${_aud#*=}"
   fi
 fi
-# Environment beats .env
-if [ -n "${OIDC_ISSUER:-}" ]; then OIDC_MODE=true; OIDC_ISSUER_URL="${OIDC_ISSUER}"; fi
-if [ -n "${OIDC_AUDIENCE:-}" ]; then OIDC_AUDIENCE_URL="${OIDC_AUDIENCE}"; fi
 
 # Acquire a token for OIDC-authenticated requests.
 #
