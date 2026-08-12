@@ -28,18 +28,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
+  Dropdown,
   Empty,
   Input,
   Layout,
   List,
   Modal,
-  Select,
   Space,
   Spin,
   Tag,
   Typography,
 } from "antd";
 import {
+  ApiOutlined,
   CheckOutlined,
   CloseCircleFilled,
   FileTextOutlined,
@@ -108,7 +109,8 @@ const COPY = {
   attachTitle: "Attach a file (e.g. a GSTR-2B export or purchase register, as JSON)",
   fallbackNotice: "Switched to a fallback model to continue this investigation.",
   toolFailed: "✕",
-  selectModel: "Model",
+  selectAgent: "Select the agent",
+  selectModel: "Select the model",
   historyButton: "History",
   historyTitle: "Question history",
 };
@@ -438,25 +440,40 @@ export function AgentChat() {
           >
             <PaperClipOutlined />
           </Button>
-          <Select<string>
-            value={agentId}
-            onChange={setAgentId}
-            style={{ width: 170 }}
-            options={AGENTS.map((a) => ({ value: a.id, label: a.label }))}
-          />
-          <Select<string>
-            value={modelSelectValue(selectedProviderId, selectedModelId)}
-            onChange={handleModelSelectChange}
-            style={{ width: 220 }}
-            placeholder={COPY.selectModel}
-            aria-label={COPY.selectModel}
+          <Dropdown
+            trigger={["click"]}
+            menu={{
+              items: AGENTS.map((a) => ({ key: a.id, label: a.label })),
+              selectedKeys: [agentId],
+              onClick: ({ key }) => setAgentId(key),
+            }}
+          >
+            <Button aria-label={COPY.selectAgent} title={COPY.selectAgent}>
+              <RobotOutlined />
+            </Button>
+          </Dropdown>
+          <Dropdown
+            trigger={["click"]}
             disabled={providers.length === 0}
-            options={providers.map((p) => ({
-              label: p.label,
-              title: p.label,
-              options: p.models.map((m) => ({ value: `${p.id}::${m.id}`, label: m.label })),
-            }))}
-          />
+            menu={{
+              items: providers.map((p) => ({
+                key: p.id,
+                type: "group" as const,
+                label: p.label,
+                children: p.models.map((m) => ({ key: `${p.id}::${m.id}`, label: m.label })),
+              })),
+              selectedKeys: [modelSelectValue(selectedProviderId, selectedModelId) ?? ""],
+              onClick: ({ key }) => handleModelSelectChange(key),
+            }}
+          >
+            <Button
+              aria-label={COPY.selectModel}
+              title={COPY.selectModel}
+              disabled={providers.length === 0}
+            >
+              <ApiOutlined />
+            </Button>
+          </Dropdown>
           <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}
