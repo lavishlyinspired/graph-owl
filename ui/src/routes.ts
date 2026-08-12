@@ -28,6 +28,7 @@ export const ROUTES = [
   "obligations",
   "connectors",
   "admin",
+  "agent",
 ] as const;
 
 export type Route = (typeof ROUTES)[number];

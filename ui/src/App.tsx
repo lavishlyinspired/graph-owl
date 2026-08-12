@@ -73,6 +73,7 @@ import HistoryOutlined from "@ant-design/icons/es/icons/HistoryOutlined";
 import MergeOutlined from "@ant-design/icons/es/icons/MergeOutlined";
 import TeamOutlined from "@ant-design/icons/es/icons/TeamOutlined";
 import UserOutlined from "@ant-design/icons/es/icons/UserOutlined";
+import RobotOutlined from "@ant-design/icons/es/icons/RobotOutlined";
 import {
   type Asset,
   type AssetKind,
@@ -104,6 +105,7 @@ import {
 import { VocabularySection } from "./features/vocabulary/VocabularySection";
 import { ReviewSection } from "./features/review/ReviewSection";
 import { ObligationCalendar, setObligationCalendarParams } from "./features/obligations/obligationCalendar";
+import { AgentChat } from "./features/agentChat/AgentChat";
 import { PackImportPanel } from "./features/packs/PackImportPanel";
 import { PackAdminPanel } from "./features/packs/PackAdminPanel";
 import { KnowledgeGraphToggle } from "./features/knowledge/KnowledgeGraphToggle";
@@ -178,7 +180,8 @@ type Section =
   | "vocabulary"
   | "review"
   | "obligations"
-  | "admin";
+  | "admin"
+  | "agent";
 
 const KIND_ICON: Record<AssetKind, React.ReactNode> = {
   service: <CloudServerOutlined />,
@@ -3952,7 +3955,14 @@ function AppShell() {
       named === "governance" ||
       named === "workbench" ||
       named === "vocabulary" ||
-      named === "review"
+      named === "review" ||
+      // "obligations" was missing here until now — a cold load or
+      // bookmark on `?section=obligations` fell through to "overview"
+      // even though `setSection("obligations")` writes that exact URL.
+      // Included explicitly for "agent" from the start rather than
+      // repeating that gap.
+      named === "obligations" ||
+      named === "agent"
     ) {
       return named;
     }
@@ -4367,6 +4377,7 @@ function AppShell() {
                   { key: "obligations", icon: <CalendarOutlined />, label: "Obligations" },
                   { key: "connectors", icon: <PlusOutlined />, label: "Connectors" },
                   { key: "admin", icon: <TeamOutlined />, label: "Admin" },
+                  { key: "agent", icon: <RobotOutlined />, label: "Agent" },
                 ]}
               />
             </Sider>
@@ -4441,6 +4452,8 @@ function AppShell() {
                 <ConnectorsPage onDone={refresh} colors={colors} />
               ) : section === "admin" ? (
                 <AdminPage colors={colors} setSection={setSection} />
+              ) : section === "agent" ? (
+                <AgentChat />
               ) : results !== null ? (
                 <Row gutter={24} style={{ width: "100%" }}>
                   <Col flex="200px">
