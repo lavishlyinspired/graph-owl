@@ -62,6 +62,11 @@ from gst_investigation_agent import (  # noqa: E402
 )
 
 from agent_service.files import get_file, store_file  # noqa: E402
+from agent_service.providers import (  # noqa: E402
+    build_chat_model_from,
+    list_providers,
+    resolve_model,
+)
 from agent_service.reconcile_uploaded import reconcile_uploaded_files  # noqa: E402
 from agent_service.streaming import run_investigation_stream  # noqa: E402
 from graph_owl_langchain._core.principal import Principal  # noqa: E402
@@ -89,6 +94,10 @@ class _Thread:
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     # [{fileId, name}], for the UI's attached-file chips
     files: list[dict[str, str]] = field(default_factory=list)
+    # Both None means "use the default env-configured model" — the path
+    # every caller used before the picker existed, unchanged.
+    provider: str | None = None
+    model: str | None = None
 
 
 _THREADS: dict[str, _Thread] = {}
@@ -128,8 +137,16 @@ async def _run_and_publish(thread_id: str, question: str, token: str) -> None:
     """
     thread = _THREADS[thread_id]
     try:
-        model = build_chat_model()
-        fallback_model = build_fallback_chat_model()
+        if thread.provider and thread.model:
+            # An explicit pick from the model selector. No fallback here —
+            # `build_fallback_chat_model`'s `reasoning_content` retry is
+            # specifically the default "opencode" path's own known bug;
+            # a model the user picked deliberately gets no silent swap.
+            model = build_chat_model_from(resolve_model(thread.provider, thread.model))
+            fallback_model = None
+        else:
+            model = build_chat_model()
+            fallback_model = build_fallback_chat_model()
         toolkit = GraphOwlToolkit(
             endpoint=os.environ.get("GRAPH_OWL_SERVER", "http://localhost:8080"),
             principal=Principal(token=token),
@@ -200,10 +217,24 @@ async def ask(
         if record is None:
             raise HTTPException(status_code=404, detail=f"no such uploaded file: {file_id}")
         files.append({"fileId": record.file_id, "name": record.name})
+    provider = body.get("provider") or None
+    model = body.get("model") or None
     thread_id = str(uuid.uuid4())
-    _THREADS[thread_id] = _Thread(question=question, files=files)
+    _THREADS[thread_id] = _Thread(question=question, files=files, provider=provider, model=model)
     asyncio.create_task(_run_and_publish(thread_id, question, token))
     return {"threadId": thread_id}
+
+
+@app.get("/providers")
+async def providers() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": p.id,
+            "label": p.label,
+            "models": [{"id": m.id, "label": m.label} for m in p.models],
+        }
+        for p in await list_providers()
+    ]
 
 
 @app.post("/files")

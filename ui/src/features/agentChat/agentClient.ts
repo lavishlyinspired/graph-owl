@@ -28,6 +28,31 @@ export interface AskResult {
   threadId: string;
 }
 
+export interface ModelOption {
+  id: string;
+  label: string;
+}
+
+export interface ProviderOption {
+  id: string;
+  label: string;
+  models: ModelOption[];
+}
+
+/** Every provider the agent service currently reports as both configured
+ *  and reachable — see `agent_service/providers.py`'s own docstring for
+ *  why this list is discovered live rather than hardcoded here: a
+ *  provider with nothing behind it (an unset API key, an unreachable
+ *  local Ollama) is simply absent, not shown as a dead option. */
+export async function listProviders(): Promise<ProviderOption[]> {
+  const response = await fetch(`${AGENT_SERVICE_URL}/providers`);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`could not list model providers (${response.status}): ${detail}`);
+  }
+  return (await response.json()) as ProviderOption[];
+}
+
 /** Submits a question and returns immediately once the agent service has
  *  scheduled the run — it does not wait for an answer. This is the whole
  *  mechanism behind "ask a second question while the first still runs":
@@ -39,15 +64,22 @@ export interface AskResult {
  *  turns them into an explicit "here are the file IDs you can use"
  *  note ahead of the question text (see `server.py`'s
  *  `_files_context_note`) and offers the `reconcile_uploaded_files`
- *  tool only when at least one is attached. */
+ *  tool only when at least one is attached.
+ *
+ *  `provider`/`model` name one entry from `listProviders()` — omitted,
+ *  the agent service falls back to its own default env-configured model
+ *  (`server.py`'s `_run_and_publish`), unchanged from before the picker
+ *  existed. */
 export async function askQuestion(
   question: string,
   fileIds: string[] = [],
+  provider?: string,
+  model?: string,
 ): Promise<AskResult> {
   const response = await fetch(`${AGENT_SERVICE_URL}/questions`, {
     method: "POST",
     headers: { "content-type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ question, fileIds }),
+    body: JSON.stringify({ question, fileIds, provider, model }),
   });
   if (!response.ok) {
     const detail = await response.text().catch(() => "");

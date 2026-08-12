@@ -51,10 +51,12 @@ import {
 } from "@ant-design/icons";
 import {
   askQuestion,
+  listProviders,
   readFile,
   streamAnswer,
   uploadFile,
   type FileContent,
+  type ProviderOption,
   type ToolActivity,
   type UploadedFile,
 } from "./agentClient";
@@ -95,6 +97,8 @@ const COPY = {
   attachTitle: "Attach a file (e.g. a GSTR-2B export or purchase register, as JSON)",
   fallbackNotice: "Switched to a fallback model to continue this investigation.",
   toolFailed: "✕",
+  selectProvider: "Model provider",
+  selectModel: "Model",
 };
 
 /** Rotates while a thread has nothing concrete to show yet — the same
@@ -130,6 +134,38 @@ export function AgentChat() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Every provider the agent service currently reports as configured and
+  // reachable — fetched once on mount. An empty list (no provider
+  // reachable, or the service itself unreachable) leaves the selector
+  // empty and `handleAsk` sends no provider/model at all, which is
+  // exactly the pre-picker default behaviour, unchanged.
+  const [providers, setProviders] = useState<ProviderOption[]>([]);
+  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
+  const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+
+  useEffect(() => {
+    listProviders()
+      .then((list) => {
+        setProviders(list);
+        const first = list[0];
+        if (first) {
+          setSelectedProviderId(first.id);
+          setSelectedModelId(first.models[0]?.id ?? null);
+        }
+      })
+      .catch(() => {
+        // No providers reachable right now — selector stays empty.
+      });
+  }, []);
+
+  const handleProviderChange = useCallback(
+    (providerId: string) => {
+      setSelectedProviderId(providerId);
+      const provider = providers.find((p) => p.id === providerId);
+      setSelectedModelId(provider?.models[0]?.id ?? null);
+    },
+    [providers],
+  );
 
   // Every open EventSource, keyed by threadId — a ref rather than state
   // because opening/closing a connection is not itself something the UI
@@ -192,6 +228,8 @@ export function AgentChat() {
       ({ threadId } = await askQuestion(
         question,
         filesForThisQuestion.map((f) => f.fileId),
+        selectedProviderId ?? undefined,
+        selectedModelId ?? undefined,
       ));
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : COPY.submitError);
@@ -244,7 +282,7 @@ export function AgentChat() {
       }
     });
     streamsRef.current.set(threadId, close);
-  }, [input, agentId, updateThread, stagedFiles]);
+  }, [input, agentId, updateThread, stagedFiles, selectedProviderId, selectedModelId]);
 
   const threadEntries = Object.entries(threads).sort(([a], [b]) => a.localeCompare(b));
   const active = activeThreadId ? threads[activeThreadId] : undefined;
@@ -262,6 +300,30 @@ export function AgentChat() {
             onChange={setAgentId}
             style={{ width: "100%" }}
             options={AGENTS.map((a) => ({ value: a.id, label: a.label }))}
+          />
+        </div>
+        <div style={{ marginBottom: 8 }}>
+          <Select<string>
+            value={selectedProviderId ?? undefined}
+            onChange={handleProviderChange}
+            style={{ width: "100%" }}
+            placeholder={COPY.selectProvider}
+            aria-label={COPY.selectProvider}
+            disabled={providers.length === 0}
+            options={providers.map((p) => ({ value: p.id, label: p.label }))}
+          />
+        </div>
+        <div style={{ marginBottom: 16 }}>
+          <Select<string>
+            value={selectedModelId ?? undefined}
+            onChange={setSelectedModelId}
+            style={{ width: "100%" }}
+            placeholder={COPY.selectModel}
+            aria-label={COPY.selectModel}
+            disabled={!selectedProviderId}
+            options={(providers.find((p) => p.id === selectedProviderId)?.models ?? []).map(
+              (m) => ({ value: m.id, label: m.label }),
+            )}
           />
         </div>
         {threadEntries.length === 0 ? (
@@ -298,6 +360,18 @@ export function AgentChat() {
             <Text type="secondary">{COPY.emptyTranscript}</Text>
           ) : (
             <>
+              <div
+                style={{
+                  marginBottom: 12,
+                  padding: "8px 12px",
+                  borderRadius: 8,
+                  background: "rgba(127,127,127,0.08)",
+                  fontWeight: 500,
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {active.question}
+              </div>
               {active.files.length > 0 && (
                 <Space wrap size={6} style={{ marginBottom: 12 }}>
                   {active.files.map((f) => (
