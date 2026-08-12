@@ -955,3 +955,24 @@ What actually happened is closer to "adopt `petgraph` for storage, keep
 the arithmetic" — corrected directly in that plan's own text rather than
 left to drift, since the point of writing this down here is so the next
 reader does not have to reconcile the two documents themselves.
+
+## `toml`, for `GET /packs/available` reading `pack.toml` server-side
+
+**Adopted.** `MIT OR Apache-2.0` (`crates.io/api/v1/crates/toml`, checked
+2026-08-13 — the plain `curl` without a User-Agent header returned
+crates.io's own API-access-policy error, not a licence result; retried
+with one and got a real answer, recorded here rather than skipped),
+`toml-rs` org, `1.1.4` published 2026-07-28, 811M downloads, real
+`github.com/toml-rs/toml` repository that resolves. The canonical Rust
+TOML parser — Cargo itself is built on it — for a need with no
+architectural nuance to get wrong: read a pack's `[pack]` header
+(`id`/`label`/`description`) off disk to list packs available to
+install, before this server had ever read a `pack.toml` itself (every
+pack-installing step to date was the separate `graph-owl-load-pack`
+Python process, `connectors/python/graph_owl_packs/loader.py`, using
+`tomllib` — 3.11's own standard library, no crate needed on that side).
+Writing a hand-rolled TOML reader for four known keys was briefly
+considered and rejected on the same reasoning `00i` already applies
+project-wide: a parser is exactly the shape of thing to adopt rather than
+half-implement, and a partial TOML reader would be wrong about escaping
+and multi-line strings the moment a pack author used either.

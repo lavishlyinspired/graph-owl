@@ -5,6 +5,7 @@ pub mod budget;
 pub mod jwks;
 pub mod observability;
 pub mod openapi;
+pub mod pack_install;
 pub mod rate_limit;
 pub mod stdio;
 pub mod streaming;
@@ -101,6 +102,8 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         )
         .route("/packs/{pack}/reconcile", post(reconcile_pack))
         .route("/packs/{pack}/obligations", get(obligation_calendar))
+        .route("/packs/available", get(list_available_packs))
+        .route("/packs/{pack}/install", post(install_pack))
         .route("/graph/export/preview", get(export_preview))
         // Epic 42 Slice G: the text-first ontology editor. `preview` is the
         // fast, as-the-author-types path (parse only); `dry-run` is the
@@ -1215,6 +1218,31 @@ where
 
         record_principal(parts, &principal);
         Ok(Auth(principal))
+    }
+}
+
+/// The caller's own raw bearer token — `Auth` above discards it once
+/// verified into a [`Principal`], but `install_pack` needs the literal
+/// string to hand to the pack loader subprocess so the install is
+/// attributed to whoever clicked the button, not a fixed service
+/// credential. Never fails on a missing header: open mode (`Auth` resolves
+/// to `Principal::system()` without ever reading one) must still be able
+/// to install a pack, and `graph-owl-server` itself ignores a bearer
+/// token's value in that mode regardless of what is sent — see
+/// `RawToken`'s one call site for the placeholder this becomes there.
+struct RawToken(Option<String>);
+
+impl<S> FromRequestParts<S> for RawToken
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(RawToken(bearer_token(parts).ok().map(str::to_string)))
     }
 }
 
@@ -8214,6 +8242,95 @@ async fn list_finding_rules(
         return Err(AppError::NotFound);
     }
     Ok(Json(catalog.finding_rules(&pack).await?))
+}
+
+/// A pack id travels straight into a filesystem path
+/// (`pack_install::packs_base_dir().join(id)`) — this is the one gate
+/// standing between a URL path segment and a directory traversal. Matches
+/// every real pack id in this repo (`gst`, `hospitality`) and rejects `.`,
+/// `/`, and anything else `..`-shaped could hide inside.
+fn pack_id_is_safe(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// `GET /packs/available` — every pack this deployment could install but
+/// has not, discovered the same way `PackAdminPanel` already discovers
+/// what *is* installed (`GET /namespaces`'s own `declaredBy: "pack:<id>"`
+/// marker), cross-referenced against `pack_install::scan_available_packs`'s
+/// read of `pack.toml` headers on disk.
+async fn list_available_packs(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+) -> Result<Json<Vec<pack_install::AvailablePack>>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    let installed: std::collections::HashSet<String> = catalog
+        .namespaces()
+        .await?
+        .into_iter()
+        .filter_map(|n| n.declared_by.strip_prefix("pack:").map(str::to_string))
+        .collect();
+    let base_dir = pack_install::packs_base_dir();
+    Ok(Json(pack_install::scan_available_packs(
+        &base_dir, &installed,
+    )))
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallPackResponse {
+    pack: String,
+    ok: bool,
+    output: String,
+}
+
+/// `POST /packs/{pack}/install` — installs a pack from the console instead
+/// of the `graph-owl-load-pack` CLI, by running that exact CLI as a
+/// subprocess (`pack_install::run_pack_loader`'s own doc comment explains
+/// why this is not a second implementation of `pack.toml`'s grammar).
+///
+/// **A loader that ran and reported failure is still a `200`** — `ok:
+/// false` plus the loader's own captured output, the same "surface what
+/// actually happened" choice `ImportSurface`'s upload result already makes
+/// in the console. Only a genuine inability to *start* the loader (the
+/// venv is missing, the binary is not on `PATH`) is a `500`: that is an
+/// environment problem, not something about the pack the caller uploaded.
+async fn install_pack(
+    Auth(principal): Auth,
+    RawToken(token): RawToken,
+    Path(pack): Path<String>,
+) -> Result<Json<InstallPackResponse>, AppError> {
+    if !principal.is_admin {
+        return Err(AppError::NotFound);
+    }
+    if !pack_id_is_safe(&pack) {
+        return Err(AppError::NotFound);
+    }
+    let pack_dir = pack_install::packs_base_dir().join(&pack);
+    if !pack_dir.join("pack.toml").is_file() {
+        return Err(AppError::NotFound);
+    }
+    let self_url =
+        std::env::var("GRAPH_OWL_SELF_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+    // Open mode ignores a bearer token's value entirely (`Auth` resolves
+    // every request to `Principal::system()` without reading one), so any
+    // non-empty placeholder satisfies the loader's own `--token` requirement
+    // there — this reaches that branch only when `Auth` above already
+    // proved the caller is an admin, so there is nothing this placeholder
+    // could grant that the caller did not already have.
+    let token = token.unwrap_or_else(|| "open-mode".to_string());
+    let outcome = pack_install::run_pack_loader(&pack_dir, &self_url, &token)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Json(InstallPackResponse {
+        pack,
+        ok: outcome.ok,
+        output: outcome.output,
+    }))
 }
 
 #[derive(Debug, serde::Deserialize)]

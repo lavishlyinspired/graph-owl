@@ -23,6 +23,7 @@ bolt = ["dep:graph-owl-bolt", "dep:async-trait", "dep:thiserror"]
 [dependencies]
 utoipa.workspace = true
 base64.workspace = true
+toml.workspace = true
 graph-owl-api.workspace = true
 graph-owl-ontology = { path = "../graph-owl-ontology", version = "0.1.0" }
 # Epic 9a's export-authorization gap, closed: `GET /graph/export/{format}`

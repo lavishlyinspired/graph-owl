@@ -106,7 +106,6 @@ import { VocabularySection } from "./features/vocabulary/VocabularySection";
 import { ReviewSection } from "./features/review/ReviewSection";
 import { ObligationCalendar, setObligationCalendarParams } from "./features/obligations/obligationCalendar";
 import { AgentChat } from "./features/agentChat/AgentChat";
-import { PackImportPanel } from "./features/packs/PackImportPanel";
 import { PackAdminPanel } from "./features/packs/PackAdminPanel";
 import { KnowledgeGraphToggle } from "./features/knowledge/KnowledgeGraphToggle";
 import { AgentActivityPanel } from "./features/agents/AgentActivityPanel";
@@ -2994,11 +2993,6 @@ function ConnectorsPage({ onDone, colors }: { onDone: () => void; colors: (typeo
         </Title>
         <Text type="secondary">Choose a source to catalogue.</Text>
       </div>
-      {/* Pack-declared imports, rendered only for packs this deployment has
-       *  actually installed — see `features/packs/packSurfaces.ts`. A console
-       *  with no pack shows an explanatory empty state rather than a GST tab
-       *  nobody asked for. */}
-      <PackImportPanel />
       <Row gutter={[16, 16]}>
         {CONNECTORS.map((connector) => (
           <Col key={connector.id} xs={24} sm={12} lg={8} xl={6}>

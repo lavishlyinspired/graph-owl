@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { installedPacks, packIdOf, surfacesFor } from "./packSurfaces";
-import { invoicePeriod } from "./PackImportPanel";
+import { invoicePeriod } from "./PackAdminPanel";
 
 describe("packIdOf", () => {
   it("recognises a pack-declared namespace", () => {

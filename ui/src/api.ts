@@ -361,6 +361,25 @@ export interface Obligation {
   readonly daysRemaining: number;
 }
 
+/** A pack's own registered *detector*, as `GET /packs/{pack}/finding-rules`
+ *  returns it — the rule definition itself (what this pack knows how to
+ *  find), distinct from `PackFinding` above (an actual detection an
+ *  evaluation run produced). `evidence`/`similarity`/`span` are the rule's
+ *  internal matching configuration, not rendered here — this type exists
+ *  for "what can this pack detect", which only needs label/summary/
+ *  governedBy. */
+export interface FindingRuleDef {
+  readonly pack: string;
+  readonly label: string;
+  readonly summary: string;
+  readonly governedBy: string;
+  readonly query: string;
+  readonly subjectVar: string;
+  readonly evidence: readonly unknown[];
+  readonly similarity: unknown;
+  readonly span: unknown;
+}
+
 /** A node in a finding's evidence graph — Epic 105 P7
  *  (`GET /findings/{id}/evidence-graph`).
  *
@@ -1338,6 +1357,28 @@ export const api = {
   reconcilePack: (pack: string) =>
     request<{ pack: string; evaluated: number; found: number; opened: number; alreadyOpen: number }>(
       `/packs/${encodeURIComponent(pack)}/reconcile`,
+      { method: "POST" },
+    ),
+
+  /** What a pack knows how to detect, before any evaluation has run —
+   *  the "what's inside this pack" view's own data source. Admin-gated
+   *  server-side, matching `reconcilePack` above. */
+  findingRules: (pack: string) =>
+    request<FindingRuleDef[]>(`/packs/${encodeURIComponent(pack)}/finding-rules`),
+
+  /** Every pack on disk this deployment could install but has not —
+   *  `pack.toml` headers read server-side, cross-referenced against
+   *  `GET /namespaces`'s own `declaredBy: "pack:<id>"` marker. */
+  availablePacks: () => request<{ id: string; description: string }[]>("/packs/available"),
+
+  /** Installs a pack by running the existing `graph-owl-load-pack` loader
+   *  server-side, attributed to the caller's own admin session. `ok: false`
+   *  is a real, expected outcome (a bad manifest, a rejected call) — not
+   *  thrown — with `output` carrying the loader's own stdout/stderr so the
+   *  admin can see why. */
+  installPack: (pack: string) =>
+    request<{ pack: string; ok: boolean; output: string }>(
+      `/packs/${encodeURIComponent(pack)}/install`,
       { method: "POST" },
     ),
 
