@@ -118,6 +118,16 @@ check "INV-1001, which matches exactly, is not" \
 # that teaches a reviewer to stop reading the queue.
 check "INV-1009, reverse-charge with no supplier filing, is NOT" \
   "$(count gst:SupplierNotFiled INV-1009)" "0"
+# **The regression this rule shipped with and a live run caught.** INV-1004 is
+# booked under a transposed GSTIN and filed under the correct one, so an exact
+# join cannot see the declared line and the rule concluded "the supplier has
+# not reported this invoice" — false, and the most damaging thing it could
+# say, because a CA acts on it by chasing a supplier who filed correctly. One
+# typo was producing three findings, two of them wrong.
+check "INV-1004, filed under a GSTIN the register transposed, is NOT" \
+  "$(count gst:SupplierNotFiled INV-1004)" "0"
+check "  …and the transposition itself is still reported" \
+  "$(count gst:GstinTransposition INV-1004)" "1"
 
 echo
 echo "==> Section 16(2)(aa): filed by the supplier, and it reached no GSTR-2B"
@@ -141,6 +151,11 @@ check "  …and names the value sitting unclaimed" \
 check "INV-1001, which is in the register, is not" "$(count gst:MissingInBooks INV-1001)" "0"
 # The reverse-direction rule must not simply report the whole of GSTR-1.
 check "exactly one invoice is missing from the books" "$(count gst:MissingInBooks)" "1"
+# The mirror image of the same regression: a GSTIN transposed between the two
+# sides breaks the exact join in *both* directions, so the same typo also
+# reported an invoice as never booked when it is in the register.
+check "INV-1004, booked under a transposed GSTIN, is NOT missing from the books" \
+  "$(count gst:MissingInBooks INV-1004)" "0"
 
 echo
 echo "==> Rule 36(4) against GSTR-1: did I book what the supplier declared"

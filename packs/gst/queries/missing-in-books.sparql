@@ -48,6 +48,26 @@ WHERE {
     }
   }
 
+  # **The same keying-error guard `missing-in-gstr1.sparql` carries, mirrored**
+  # — and found the same way, against real data. A GSTIN transposed between
+  # the register and the filing makes the exact join above fail in *both*
+  # directions, so one typo produced "the supplier never filed it" and "you
+  # never booked it" about the same invoice, both false, alongside the
+  # transposition finding that was already saying the true thing.
+  #
+  # Matching on invoice number and taxable value under any GSTIN: the claim
+  # "the register does not carry this invoice" is falsified by such a row
+  # existing, whoever it is booked against. Its cost is written up in the
+  # other query and applies identically here.
+  OPTIONAL {
+    GRAPH ?anyRegister {
+      ?bookedUnderAnotherGstin a gst:PurchaseInvoice ;
+              gst:invoiceNumber ?number ;
+              gst:taxableValue  ?taxableValue .
+    }
+  }
+
   FILTER (!BOUND(?booked))
+  FILTER (!BOUND(?bookedUnderAnotherGstin))
 }
 ORDER BY ?number

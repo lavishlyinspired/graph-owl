@@ -42,6 +42,7 @@ WHERE {
              gst:issuedBy ?supplier ;
              gst:invoiceNumber ?number ;
              gst:invoiceDate   ?invoiceDate ;
+             gst:taxableValue  ?taxableValue ;
              gst:taxAmount     ?taxAmount .
     ?supplier gst:supplierGstin ?gstin .
   }
@@ -64,7 +65,42 @@ WHERE {
     }
   }
 
+  # **The keying-error guard, and it is not optional politeness — without it
+  # this rule tells a CA to chase a supplier who filed correctly.**
+  #
+  # Found against real data, not reasoned about in advance. The register books
+  # INV-1004 under `…1MZ` and the supplier filed it under `…1ZM`: two
+  # characters transposed, which is the classic data-entry error this pack
+  # already has a rule for. An exact GSTIN join cannot see through it, so the
+  # declared line is invisible here and the rule concludes "the supplier has
+  # not reported this invoice" — which is false, and is the single most
+  # damaging thing this rule could say. One root cause was producing three
+  # findings, two of them wrong.
+  #
+  # The guard is *same invoice number and same taxable value, under any
+  # GSTIN*. Similarity is not expressible in SPARQL — that is what
+  # `[findings.similarity]` in the manifest exists for — but it is not needed:
+  # the claim "no supplier has declared this invoice" is falsified by any such
+  # record existing, whatever GSTIN it sits under. Whether the two GSTINs are
+  # a transposition or two genuinely different suppliers is
+  # `gstin-transposition.sparql`'s question, and it is already asked.
+  #
+  # **What this costs, stated rather than discovered later**: if two unrelated
+  # suppliers issue the same invoice number for the same taxable value and
+  # only one of them files, this rule stays silent. That needs both fields to
+  # collide exactly, and the alternative — a false accusation every time a
+  # GSTIN is mistyped, which is common — is far worse than a missed finding in
+  # a case that is not.
+  OPTIONAL {
+    GRAPH ?anyGstr1 {
+      ?declaredUnderAnotherGstin a gst:Gstr1Invoice ;
+                gst:invoiceNumber ?number ;
+                gst:taxableValue  ?taxableValue .
+    }
+  }
+
   FILTER (!BOUND(?declared))
+  FILTER (!BOUND(?declaredUnderAnotherGstin))
   FILTER (!BOUND(?rcm) || ?rcm != "Y")
 }
 ORDER BY ?number
