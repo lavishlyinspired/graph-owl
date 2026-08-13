@@ -11,8 +11,17 @@
 #   INV-1004  GSTIN transposed (…1ZM vs …1MZ)             → GstinTransposition
 #   INV-1005  filed, but credit reported unavailable      → ITCNotAvailable
 #   INV-1006  filed, but flagged as reverse-charge        → Reversed
+#   INV-1007  supplier filed it, no 2B holds it           → Gstr1NotIn2b
+#   INV-1009  reverse-charge, supplier files nothing      → nothing
+#   INV-1010  matched, goods received the next month      → GoodsReceiptTiming
+#   INV-1011  matched, goods received within the period   → nothing
 #   INV-2001  2020 invoice, 5% delta, cap was 10%         → nothing
 #   INV-2002  2020 invoice, 20% delta, cap was 10%        → AmountMismatch
+#
+# …and one invoice that is deliberately **not** here at all: INV-1008 exists
+# in GSTR-1 and in GSTR-2B with no register row, which is what `MissingInBooks`
+# fires on. An absence cannot be planted in the file it is absent from, so it
+# is written up here instead of being discovered as a surprise.
 #
 # The last two are the ones worth reading twice. Same rule, same query,
 # different answer — because `law/rule-36-4.ttl` says the cap in force in
@@ -88,6 +97,57 @@ gst:pr-INV-1006 rdf:type gst:PurchaseInvoice ;
     gst:taxableValue  "60000.00" ;
     gst:taxAmount     "10800.00" ;
     gst:period        "2026-07" .
+
+# The four rows Plan 108 adds, each planted for one of the new rules.
+
+# Declared by the supplier on 18 August and in no GSTR-2B this pack holds.
+# Fires `Gstr1NotIn2b` and, deliberately, *not* `PotentialMismatch` — the
+# vaguer rule stands down once the graph can say which of its two causes
+# applies. See `queries/missing-in-gstr2b.sparql`.
+gst:pr-INV-1007 rdf:type gst:PurchaseInvoice ;
+    gst:issuedBy      gst:supplier-29AACCG0527D1Z8 ;
+    gst:invoiceNumber "INV-1007" ;
+    gst:invoiceDate   "2026-07-28" ;
+    gst:taxableValue  "30000.00" ;
+    gst:taxAmount     "5400.00" ;
+    gst:period        "2026-07" .
+
+# **The negative case `SupplierNotFiled` exists to not fire on.** A
+# reverse-charge purchase: the recipient self-assesses the tax, so there is no
+# supplier-side GSTR-1 line to wait for and its absence means nothing is
+# wrong. Without this row the rule would look correct while firing on every
+# RCM invoice a real taxpayer holds.
+gst:pr-INV-1009 rdf:type gst:PurchaseInvoice ;
+    gst:issuedBy      gst:supplier-29AACCG0527D1Z8 ;
+    gst:invoiceNumber "INV-1009" ;
+    gst:invoiceDate   "2026-07-30" ;
+    gst:taxableValue  "25000.00" ;
+    gst:taxAmount     "4500.00" ;
+    gst:reverseCharge "Y" ;
+    gst:period        "2026-07" .
+
+# Matched everywhere — books, GSTR-1 and August's 2B all agree — and still not
+# claimable in August, because the goods arrived on 4 September. Every
+# document check passes; `GoodsReceiptTiming` is the only rule that catches
+# it, and it is the reason Section 16(2)(b) is a separate condition.
+gst:pr-INV-1010 rdf:type gst:PurchaseInvoice ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+    gst:invoiceNumber "INV-1010" ;
+    gst:invoiceDate   "2026-08-30" ;
+    gst:taxableValue  "20000.00" ;
+    gst:taxAmount     "3600.00" ;
+    gst:period        "2026-08" .
+
+# The same shape with the goods received *inside* the period — the row that
+# proves the rule reads the receipt date rather than merely the presence of a
+# receipt.
+gst:pr-INV-1011 rdf:type gst:PurchaseInvoice ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+    gst:invoiceNumber "INV-1011" ;
+    gst:invoiceDate   "2026-08-12" ;
+    gst:taxableValue  "15000.00" ;
+    gst:taxAmount     "2700.00" ;
+    gst:period        "2026-08" .
 
 gst:pr-INV-2001 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;

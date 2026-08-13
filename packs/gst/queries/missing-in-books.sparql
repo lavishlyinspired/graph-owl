@@ -1,0 +1,53 @@
+# The **reverse direction**: the GST records carry an invoice the taxpayer's
+# own register never recorded — Plan 108 Slice 4.
+#
+# **No other rule in this pack runs this way round, and that is the gap it
+# closes.** Every finding before it starts from the register and asks what the
+# authority says about it, which can only ever find problems with invoices the
+# taxpayer already knows about. An invoice the books have never heard of is
+# invisible to all of them — and it is the case where a CA finds *unclaimed
+# credit* rather than an over-claim, so it is the one finding here that can be
+# worth money rather than cost it.
+#
+# **This is a bookkeeping-completeness question, not an eligibility one**, which
+# is why it cites `gst:Section16` — the general eligibility section, whose
+# condition is that the recipient holds the invoice — rather than
+# `Section16(2)(aa)`, which is about the *supplier* having furnished details.
+# Here the supplier plainly has.
+#
+# **Surfaced, never written.** There is a real temptation to "add it to the
+# books", and it is the wrong instinct: a GSTR-2B line filed against this
+# GSTIN by mistake would then become a purchase this taxpayer appears to have
+# made. The finding asks the question; a human answers it.
+#
+# The join is anchored on the declared side and the register side is the
+# `OPTIONAL` — the mirror image of `missing-in-gstr2b.sparql`, with the same
+# `OPTIONAL` + `!BOUND` idiom and the same `GRAPH ?var { }` discipline, both
+# documented there.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?declared ?number ?gstin ?taxableValue ?taxAmount ?invoiceDate
+WHERE {
+  GRAPH ?gstr1 {
+    ?declared a gst:Gstr1Invoice ;
+              gst:issuedBy ?declaredSupplier ;
+              gst:invoiceNumber ?number ;
+              gst:invoiceDate   ?invoiceDate ;
+              gst:taxableValue  ?taxableValue ;
+              gst:taxAmount     ?taxAmount .
+    ?declaredSupplier gst:supplierGstin ?gstin .
+  }
+
+  OPTIONAL {
+    GRAPH ?register {
+      ?booked a gst:PurchaseInvoice ;
+              gst:issuedBy ?bookedSupplier ;
+              gst:invoiceNumber ?number .
+      ?bookedSupplier gst:supplierGstin ?gstin .
+    }
+  }
+
+  FILTER (!BOUND(?booked))
+}
+ORDER BY ?number

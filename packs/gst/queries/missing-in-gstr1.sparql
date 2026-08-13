@@ -1,0 +1,70 @@
+# Invoices the register claims that **no supplier has declared in any
+# GSTR-1/IFF** — Plan 108 Slice 2.
+#
+# **This is half of what `PotentialMismatch` used to say, and the useful
+# half.** "Not in your GSTR-2B" has two causes with opposite next actions: the
+# supplier never filed it, or the supplier filed it and it never reached this
+# taxpayer. This query answers the first — chase the supplier, they have not
+# reported the sale — and `gstr1-not-in-2b.sparql` answers the second.
+#
+# **The reverse-charge exclusion is load-bearing, not defensive.** Under
+# reverse charge the *recipient* self-assesses the tax; there is no
+# supplier-side outward-supply line to wait for, so the absence of a GSTR-1
+# record means nothing is wrong. Without the filter this rule fires on every
+# RCM invoice a real taxpayer holds — a false-positive rate that teaches a
+# reviewer to stop reading the queue, which is worse than the rule not
+# existing. The same reasoning covers import of services and ISD credit,
+# neither of which this pack models as invoices yet.
+#
+# **`OPTIONAL` + `!BOUND`, not `FILTER NOT EXISTS`.** The pushdown planner does
+# not descend into `NOT EXISTS`, so the GSTR-1 facts would never be loaded into
+# the dataset and the filter would be trivially true for every invoice —
+# reporting the entire register as unfiled, silently, which reads exactly like
+# a diligent reconciliation. `missing-in-gstr2b.sparql` documents the same trap
+# because it was found there first, against real data.
+#
+# **Every pattern sits inside its own `GRAPH ?var { }`.** An import lands in
+# `graph:import:{source}`, never the default graph, so a pattern outside a
+# GRAPH block matches nothing at all.
+#
+# **The GSTIN is reached by traversal.** `?invoice gst:issuedBy ?supplier` is a
+# real edge to a `gst:Supplier` subject, and the comparison happens on that
+# subject's own `supplierGstin` — which is what keeps a transposed pair
+# joinable as two distinct subjects rather than silently merged by a shared
+# literal.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?invoice ?number ?gstin ?taxAmount ?invoiceDate
+WHERE {
+  GRAPH ?register {
+    ?invoice a gst:PurchaseInvoice ;
+             gst:issuedBy ?supplier ;
+             gst:invoiceNumber ?number ;
+             gst:invoiceDate   ?invoiceDate ;
+             gst:taxAmount     ?taxAmount .
+    ?supplier gst:supplierGstin ?gstin .
+  }
+
+  # Reverse charge, where recorded. Absent on most rows, which is why it is
+  # OPTIONAL rather than a required pattern — requiring it would silence the
+  # rule entirely on every register that does not carry the flag.
+  OPTIONAL {
+    GRAPH ?rcmGraph {
+      ?invoice gst:reverseCharge ?rcm .
+    }
+  }
+
+  OPTIONAL {
+    GRAPH ?gstr1 {
+      ?declared a gst:Gstr1Invoice ;
+                gst:issuedBy ?declaredSupplier ;
+                gst:invoiceNumber ?number .
+      ?declaredSupplier gst:supplierGstin ?gstin .
+    }
+  }
+
+  FILTER (!BOUND(?declared))
+  FILTER (!BOUND(?rcm) || ?rcm != "Y")
+}
+ORDER BY ?number

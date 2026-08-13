@@ -1,0 +1,45 @@
+# GSTR-2B for August 2026 — a **second period, as a second document**.
+#
+# **Why this is a separate file rather than more rows in `gstr2b.ttl`.** A
+# GSTR-2B is a monthly statement: one document, one period, generated once and
+# never revised. Two periods in one file would model something that does not
+# exist, and would make `gst:period` look like a per-row attribute the
+# importer chooses rather than what it is — the return period of the document
+# the rows came out of. Each import lands in its own named graph
+# (`graph:import:gst-gstr2b-2026-08`), which is what lets a query ask "in
+# *which* period's 2B did this appear" instead of only "does any 2B have it".
+#
+# Two invoices, both of which every document check passes:
+#
+#   INV-1010  in books, in GSTR-1, in this 2B — goods received 4 Sept
+#   INV-1011  in books, in GSTR-1, in this 2B — goods received 31 Aug
+#
+# They are identical in every respect a document comparison can see. Only
+# `fixtures/goods-receipt.ttl` tells them apart, and that is exactly the point
+# of Section 16(2)(b) being a condition of its own.
+
+@prefix gst: <https://graph-owl.dev/packs/gst#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+gst:supplier-27AABCU9603R1ZM rdf:type gst:Supplier ;
+    gst:supplierGstin "27AABCU9603R1ZM" .
+
+gst:2b-INV-1010 rdf:type gst:Gstr2bInvoice ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+    gst:invoiceNumber "INV-1010" ;
+    gst:invoiceDate   "2026-08-30" ;
+    gst:taxableValue  "20000.00" ;
+    gst:taxAmount     "3600.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "N" ;
+    gst:period        "2026-08" .
+
+gst:2b-INV-1011 rdf:type gst:Gstr2bInvoice ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+    gst:invoiceNumber "INV-1011" ;
+    gst:invoiceDate   "2026-08-12" ;
+    gst:taxableValue  "15000.00" ;
+    gst:taxAmount     "2700.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "N" ;
+    gst:period        "2026-08" .

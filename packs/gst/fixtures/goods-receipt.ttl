@@ -1,0 +1,38 @@
+# Receipt of the goods or services, as **events with time anchors** — the same
+# shape `events.ttl` already gives purchases and payments, for the same
+# reason.
+#
+# Section 16(2)(b) makes receipt a condition in its own right, and it is the
+# one condition no document comparison can answer. Every other rule in this
+# pack asks *does a filing contain this invoice*; this one asks *has something
+# happened yet*. An invoice can be in the register, declared in GSTR-1 and
+# present in the right period's GSTR-2B — every document agreeing — and still
+# carry no claimable credit for that period, because the goods had not
+# arrived.
+#
+# Two receipts, planted so the rule has to read the **date** rather than merely
+# notice a receipt exists:
+#
+#   INV-1010  2B period 2026-08, received 2026-09-04  → GoodsReceiptTiming
+#   INV-1011  2B period 2026-08, received 2026-08-31  → nothing
+#
+# **A `GoodsReceipt` that is absent entirely is a different question** — ITC is
+# not eligible at all until the goods are received, so an invoice with no
+# receipt event anywhere is arguably the more serious case. It is a
+# presence/absence finding rather than a date comparison, closer in shape to
+# `SupplierNotFiled` than to this rule, and it is deliberately not folded in
+# here (Plan 108's own parking lot).
+#
+# `gst:GoodsReceipt` needs **no new predicates**: `onInvoice` and `atTime` are
+# the same two the other two event classes already use.
+
+@prefix gst: <https://graph-owl.dev/packs/gst#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+gst:receipt-INV-1010 rdf:type gst:GoodsReceipt ;
+    gst:onInvoice  gst:pr-INV-1010 ;
+    gst:atTime     "2026-09-04" .
+
+gst:receipt-INV-1011 rdf:type gst:GoodsReceipt ;
+    gst:onInvoice  gst:pr-INV-1011 ;
+    gst:atTime     "2026-08-31" .

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The GST pack's six finding rules, against a real graph-owl and a real
+# The GST pack's eleven finding rules, against a real graph-owl and a real
 # Postgres — Epic 105 P5/P6.
 #
 # **Every rule is checked in both directions.** A reconciliation that fires on
@@ -90,15 +90,86 @@ check "the pack's vocabulary is a runtime namespace" \
 check "nothing was rejected" \
   "$(echo "$LOADED" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["rejected"]))')" "0"
 
-echo "==> running the six rules"
+echo "==> running the rules"
 RUN=$(reconcile "$ROOT/packs/gst" --server "http://127.0.0.1:$PORT")
-check "all six rules were evaluated" \
-  "$(echo "$RUN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rulesEvaluated"])')" "6"
+check "every registered rule was evaluated" \
+  "$(echo "$RUN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rulesEvaluated"])')" "11"
 
 echo
-echo "==> Section 16(2)(aa): claimed but never filed"
-check "INV-1003, absent from GSTR-2B, is a finding" "$(count gst:PotentialMismatch INV-1003)" "1"
-check "INV-1001, which matches exactly, is not"     "$(count gst:PotentialMismatch INV-1001)" "0"
+echo "==> Section 16(2)(aa): the two causes of an invoice missing from GSTR-2B"
+# **Plan 108 Slice 3's handover, asserted in both directions.** `PotentialMismatch`
+# is the books-vs-2B answer and stands down entirely once GSTR-1 evidence
+# exists, because two better rules then say *which* of its two causes applies.
+# Asserting only that the new rules fire would let a regression that leaves the
+# old rule firing as well pass silently — and a CA would see the same invoice
+# accused twice, in two vocabularies, with two different next actions.
+check "the vaguer books-vs-2B rule stands down once GSTR-1 is loaded" \
+  "$(count gst:PotentialMismatch)" "0"
+check "INV-1003 — the supplier filed nothing — is SupplierNotFiled" \
+  "$(count gst:SupplierNotFiled INV-1003)" "1"
+check "  …and carries the invoice date a reviewer would chase on" \
+  "$(evidence gst:SupplierNotFiled INV-1003 invoiceDate)" "2026-07-15"
+check "INV-1001, which matches exactly, is not" \
+  "$(count gst:SupplierNotFiled INV-1001)" "0"
+# **The exclusion that decides whether this rule is usable at all.** Under
+# reverse charge the recipient self-assesses, so there is no supplier-side
+# GSTR-1 line to wait for. Without the filter the rule fires on every RCM
+# invoice a real taxpayer holds — correct-looking, and a false-positive rate
+# that teaches a reviewer to stop reading the queue.
+check "INV-1009, reverse-charge with no supplier filing, is NOT" \
+  "$(count gst:SupplierNotFiled INV-1009)" "0"
+
+echo
+echo "==> Section 16(2)(aa): filed by the supplier, and it reached no GSTR-2B"
+check "INV-1007 is a finding"                            "$(count gst:Gstr1NotIn2b INV-1007)" "1"
+# The whole reason this finding is more useful than "unmatched": the date the
+# supplier actually filed is *why* no 2B could carry it, and it travels with
+# the finding so a reviewer never has to ask.
+check "  …and names the date the supplier actually filed" "$(evidence gst:Gstr1NotIn2b INV-1007 filedDate)" "2026-08-18"
+check "INV-1003, which the supplier never filed, is not"  "$(count gst:Gstr1NotIn2b INV-1003)" "0"
+check "INV-1001, present in July's 2B, is not"            "$(count gst:Gstr1NotIn2b INV-1001)" "0"
+# The two rules must partition the problem, not overlap on it — one invoice,
+# one finding, one next action.
+check "no invoice fires both of the two causes"           "$(count gst:SupplierNotFiled INV-1007)" "0"
+
+echo
+echo "==> Section 16: in the GST records, absent from the books"
+check "INV-1008 — declared and available, never booked — is a finding" \
+  "$(count gst:MissingInBooks INV-1008)" "1"
+check "  …and names the value sitting unclaimed" \
+  "$(evidence gst:MissingInBooks INV-1008 taxAmount)" "8100.00"
+check "INV-1001, which is in the register, is not" "$(count gst:MissingInBooks INV-1001)" "0"
+# The reverse-direction rule must not simply report the whole of GSTR-1.
+check "exactly one invoice is missing from the books" "$(count gst:MissingInBooks)" "1"
+
+echo
+echo "==> Rule 36(4) against GSTR-1: did I book what the supplier declared"
+check "INV-1002 (books 100,000, declared 95,000, nil cap) is a finding" \
+  "$(count gst:BooksGstr1Mismatch INV-1002)" "1"
+check "INV-2002 (2020, 20% delta, 10% cap) is a finding" \
+  "$(count gst:BooksGstr1Mismatch INV-2002)" "1"
+# The same discriminator `AmountMismatch` turns on, against a different named
+# graph: a hardcoded tolerance of any value gets one of these two wrong.
+check "INV-2001 (2020, 5% delta, 10% cap) is NOT a finding" \
+  "$(count gst:BooksGstr1Mismatch INV-2001)" "0"
+check "  …and the finding cites the notification then in force" \
+  "$(evidence gst:BooksGstr1Mismatch INV-2002 citation)" "Notification 75/2019-CT"
+
+echo
+echo "==> Section 16(2)(b): every document agrees, and the goods had not arrived"
+check "INV-1010, in August's 2B, received 4 September, is a finding" \
+  "$(count gst:GoodsReceiptTiming INV-1010)" "1"
+check "  …and names the receipt date" \
+  "$(evidence gst:GoodsReceiptTiming INV-1010 atTime)" "2026-09-04"
+# **The load-bearing negative.** INV-1011 is identical in every respect a
+# document comparison can see — booked, declared, in the same 2B — and differs
+# only by a receipt four days earlier, inside the period. A rule that merely
+# noticed a receipt exists, or compared the receipt against the invoice date
+# rather than the 2B's period, would fire on both.
+check "INV-1011, received 31 August against the same 2B, is NOT" \
+  "$(count gst:GoodsReceiptTiming INV-1011)" "0"
+check "and a matched invoice with no receipt recorded is not either" \
+  "$(count gst:GoodsReceiptTiming INV-1001)" "0"
 
 echo
 echo "==> Rule 36(4): the cap is read from the law, not written in the query"
@@ -140,8 +211,16 @@ check "INV-1006, unpaid but only six days old, is NOT" "$(count gst:PaymentOverd
 echo
 echo "==> a re-run over unchanged data opens nothing"
 AGAIN=$(reconcile "$ROOT/packs/gst" --server "http://127.0.0.1:$PORT")
-check "opened"      "$(echo "$AGAIN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["opened"])')" "0"
-check "alreadyOpen" "$(echo "$AGAIN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["alreadyOpen"])')" "9"
+check "opened" "$(echo "$AGAIN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["opened"])')" "0"
+# **Against the API's own count, not a magic number.** The property under test
+# is "a second run recognises what the first one found", and pinning a literal
+# made adding a rule a two-place edit whose second place is easy to miss — the
+# count is then either updated by hand to whatever the run produced, which
+# asserts nothing, or left stale. Every rule's own population is asserted
+# above, which is where a rule silently ceasing to fire is actually caught.
+check "alreadyOpen matches the findings that exist" \
+  "$(echo "$AGAIN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["alreadyOpen"])')" \
+  "$(curl -sf "http://127.0.0.1:$PORT/findings?pack=gst" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
 
 echo
 echo "==> a dismissal survives the next run"
@@ -161,7 +240,7 @@ echo
 echo "==> the rules cannot tell live-shaped data from a hand-written fixture"
 # **The claim the whole connector rests on.** The API-shaped response carries
 # DD-MM-YYYY dates and splits one invoice's tax into CGST/SGST — neither of
-# which the hand-written fixture does — and after normalization the six rules
+# which the hand-written fixture does — and after normalization the rules
 # must reach exactly the same conclusions. If they do not, the "develop
 # against fixtures, deploy against a GSP" split is a fiction.
 BEFORE=$(curl -sf "http://127.0.0.1:$PORT/findings?pack=gst" \

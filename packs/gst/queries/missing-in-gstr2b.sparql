@@ -31,6 +31,33 @@
 # `supplierGstin` property, which is what keeps the transposed pair joinable
 # as *different* subjects rather than silently merged by a shared literal.
 
+# **Narrowed by Plan 108 Slice 3, and the narrowing is a behaviour change
+# worth stating plainly.** This rule is the answer you get from **books and
+# GSTR-2B alone** — the two-document reconciliation a deployment starts with,
+# and still the only one available to anyone who cannot obtain their
+# suppliers' GSTR-1 data. It says an invoice is claimed and not available, and
+# it cannot say why, because with two documents there is nothing in the graph
+# that could.
+#
+# Once a GSTR-1 document *is* loaded there is something better to say, and two
+# rules say it: `missing-in-gstr1.sparql` (the supplier never filed — chase
+# the supplier) and `gstr1-not-in-2b.sparql` (the supplier filed and it never
+# reached you — chase the mapping). Those are opposite next actions, and a
+# queue that also carried this vaguer finding would report the same invoice
+# twice under a name that contradicts neither and helps with neither.
+#
+# So the guard below is deliberately **global rather than per-invoice**: this
+# rule stands down entirely as soon as any GSTR-1 evidence exists, rather than
+# only on the invoices that happen to have a matching declared line. A
+# per-invoice guard would leave it firing on exactly the population
+# `SupplierNotFiled` already covers — the same accusation, twice, in two
+# vocabularies. Silence here is a *better* answer, not a lost one.
+#
+# The cost of being wrong about this is bounded and visible: if GSTR-1 is
+# loaded and both new rules somehow miss an invoice, it appears in no queue.
+# `scripts/verify-gst-reconciliation.sh` therefore asserts the population
+# handover in both directions rather than only that the new rules fire.
+
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
 SELECT ?invoice ?number ?gstin ?taxAmount
@@ -50,6 +77,13 @@ WHERE {
       ?filedSupplier gst:supplierGstin ?gstin .
     }
   }
+  # Any GSTR-1 evidence at all, anywhere in the graph — the handover switch.
+  OPTIONAL {
+    GRAPH ?gstr1 {
+      ?anyDeclared a gst:Gstr1Invoice .
+    }
+  }
   FILTER (!BOUND(?filed))
+  FILTER (!BOUND(?anyDeclared))
 }
 ORDER BY ?number

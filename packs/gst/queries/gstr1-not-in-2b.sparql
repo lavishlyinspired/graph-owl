@@ -1,0 +1,70 @@
+# The supplier **declared** the invoice, and it has reached **no GSTR-2B this
+# pack holds** — Plan 108 Slice 3.
+#
+# **This is the finding that carries a reason rather than a flag.** The
+# supplier has filed; the credit still is not available. The usual causes are
+# all supplier-side or mapping-side and all actionable: the return was filed
+# after the period's 2B had already been generated, a B2B supply was reported
+# as B2C, the recipient's GSTIN was keyed wrongly, or the line went to another
+# GSTIN entirely. `filedDate` is projected as evidence precisely so a reviewer
+# can see the first of those without asking anyone: an invoice dated in July
+# and filed on 18 August cannot be in July's 2B, and the graph does not need
+# to know what a cut-off is to show that — the 2B document either contains the
+# invoice or it does not, and that document *is* the authority's answer.
+#
+# **"No 2B" means no 2B in any period this deployment has imported.** Each 2B
+# lands in its own named graph, so `?authority` ranges over every period at
+# once — an invoice that surfaces in a *later* period's 2B is a carry-forward,
+# not a failure, and must not fire here. Naming the period it did surface in is
+# a separate finding that needs `gst:FilingPeriod` (Plan 107) to traverse
+# through; this rule deliberately stops at "it reached none of them", which
+# needs no such machinery and is already actionable.
+#
+# **Reverse-charge invoices are excluded**, for the same reason
+# `missing-in-gstr1.sparql` excludes them: the recipient self-assesses, so
+# there is no supplier line to arrive.
+#
+# `OPTIONAL` + `!BOUND` rather than `FILTER NOT EXISTS`, and every pattern
+# inside its own `GRAPH ?var { }` — both traps are documented at length in
+# `missing-in-gstr2b.sparql`, which is where they were found against real data.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?invoice ?number ?gstin ?taxAmount ?filedDate ?declaredPeriod
+WHERE {
+  GRAPH ?register {
+    ?invoice a gst:PurchaseInvoice ;
+             gst:issuedBy ?supplier ;
+             gst:invoiceNumber ?number ;
+             gst:taxAmount     ?taxAmount .
+    ?supplier gst:supplierGstin ?gstin .
+  }
+
+  GRAPH ?gstr1 {
+    ?declared a gst:Gstr1Invoice ;
+              gst:issuedBy ?declaredSupplier ;
+              gst:invoiceNumber ?number ;
+              gst:filedDate     ?filedDate ;
+              gst:period        ?declaredPeriod .
+    ?declaredSupplier gst:supplierGstin ?gstin .
+  }
+
+  OPTIONAL {
+    GRAPH ?rcmGraph {
+      ?invoice gst:reverseCharge ?rcm .
+    }
+  }
+
+  OPTIONAL {
+    GRAPH ?authority {
+      ?filed a gst:Gstr2bInvoice ;
+             gst:issuedBy ?filedSupplier ;
+             gst:invoiceNumber ?number .
+      ?filedSupplier gst:supplierGstin ?gstin .
+    }
+  }
+
+  FILTER (!BOUND(?filed))
+  FILTER (!BOUND(?rcm) || ?rcm != "Y")
+}
+ORDER BY ?number

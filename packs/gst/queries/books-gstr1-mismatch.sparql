@@ -1,0 +1,72 @@
+# The register and the supplier's own GSTR-1 declare the **same invoice with
+# different values** — Plan 108 Slice 5.
+#
+# **`AmountMismatch` compares the register against GSTR-2B; this compares it
+# against what the supplier actually declared, and the difference matters for
+# whose mistake it is.** A disagreement with 2B can be caused by the authority
+# not having received the line at all. A disagreement with GSTR-1 cannot: both
+# sides are asserting a figure about the same invoice, so one of the two is
+# wrong, and the finding names both so a reviewer can tell which.
+#
+# **The cap is read from the graph, exactly as `amount-mismatch.sparql` reads
+# it**, and for the same reason: a tolerance hardcoded here would report a
+# compliant 2020 invoice as a finding every month. Amending the law is adding
+# a subject to `law/rule-36-4.ttl`, and the citation travels with the row so a
+# reviewer sees which notification the judgement was made under.
+#
+# **Scoped to `taxableValue` for this first cut**, matching `AmountMismatch`'s
+# own scope. Invoice-number, date and tax-head diffing are real and are
+# deliberately a later slice — bundling them here would mean one finding with
+# four possible meanings, which is the thing this plan exists to undo.
+#
+# "Latest provision in force" is `OPTIONAL` + `!BOUND`, not `FILTER NOT
+# EXISTS` — see `amount-mismatch.sparql` for why that distinction is not
+# stylistic.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+SELECT ?purchase ?number ?gstin ?claimed ?declaredValue ?capPercent ?citation
+WHERE {
+  GRAPH ?register {
+    ?purchase a gst:PurchaseInvoice ;
+              gst:issuedBy ?supplier ;
+              gst:invoiceNumber ?number ;
+              gst:invoiceDate   ?date ;
+              gst:taxableValue  ?claimed .
+    ?supplier gst:supplierGstin ?gstin .
+  }
+
+  GRAPH ?gstr1 {
+    ?declared a gst:Gstr1Invoice ;
+              gst:issuedBy ?declaredSupplier ;
+              gst:invoiceNumber ?number ;
+              gst:taxableValue  ?declaredValue .
+    ?declaredSupplier gst:supplierGstin ?gstin .
+  }
+
+  # The provision in force on the invoice date.
+  GRAPH ?law {
+    ?provision a gst:Provision ;
+               gst:effectiveFrom ?from ;
+               gst:capPercent    ?capPercent ;
+               gst:citation      ?citation .
+  }
+  FILTER (?from <= ?date)
+
+  # …and no later one that had also taken effect by then.
+  OPTIONAL {
+    GRAPH ?laterLaw {
+      ?later a gst:Provision ;
+             gst:effectiveFrom ?laterFrom .
+    }
+    FILTER (?laterFrom <= ?date && ?laterFrom > ?from)
+  }
+  FILTER (!BOUND(?later))
+
+  FILTER (
+    ABS(xsd:decimal(?claimed) - xsd:decimal(?declaredValue))
+      > xsd:decimal(?claimed) * xsd:decimal(?capPercent) / 100
+  )
+}
+ORDER BY ?number

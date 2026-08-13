@@ -23,6 +23,11 @@
 gst:supplier-27AABCU9603R1ZM rdf:type gst:Supplier ;
     gst:supplierGstin "27AABCU9603R1ZM" .
 
+# A supplier this taxpayer's own register has never heard of — which is the
+# entire point of INV-1008 below.
+gst:supplier-33AAGCV2109L1ZH rdf:type gst:Supplier ;
+    gst:supplierGstin "33AAGCV2109L1ZH" .
+
 gst:2b-INV-1001 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1001" ;
@@ -71,6 +76,19 @@ gst:2b-INV-1006 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "10800.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "R" ;
+    gst:period        "2026-07" .
+
+# Filed by the supplier and made available to this taxpayer, with no register
+# row to match — `MissingInBooks`. Credit sitting unclaimed, or somebody
+# filing against the wrong GSTIN; either way a question, never a write.
+gst:2b-INV-1008 rdf:type gst:Gstr2bInvoice ;
+    gst:issuedBy      gst:supplier-33AAGCV2109L1ZH ;
+    gst:invoiceNumber "INV-1008" ;
+    gst:invoiceDate   "2026-07-19" ;
+    gst:taxableValue  "45000.00" ;
+    gst:taxAmount     "8100.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "N" ;
     gst:period        "2026-07" .
 
 gst:2b-INV-2001 rdf:type gst:Gstr2bInvoice ;

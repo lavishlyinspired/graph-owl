@@ -17,6 +17,21 @@ gst:Supplier        rdf:type gst:Class ; gst:label "Supplier" .
 gst:PurchaseInvoice rdf:type gst:Class ; gst:label "Purchase invoice (taxpayer's register)" .
 gst:Gstr2bInvoice   rdf:type gst:Class ; gst:label "GSTR-2B invoice (as filed by the supplier)" .
 gst:Section         rdf:type gst:Class ; gst:label "Statutory section" .
+
+# **The third evidence source, and the one that turns "unmatched" into a
+# reason** — `plans/108-books-gstr1-gstr2b-reconciliation.md` Slice 1.
+#
+# GSTR-1 is what the supplier *declared*; GSTR-2B is what the authority
+# *made available* to the recipient for a period. Without this class the two
+# very different causes of an invoice's absence from 2B — the supplier never
+# filed it, versus the supplier filed it and it never reached this taxpayer —
+# collapse into one finding, and they need opposite next actions from a CA.
+#
+# **There is deliberately no `gst:Gstr2aInvoice`.** 2A is a revolving view
+# over the same supplier-declared data this class already carries; modelling
+# both would give the graph two sources for one fact with no query that needs
+# the distinction.
+gst:Gstr1Invoice    rdf:type gst:Class ; gst:label "GSTR-1/IFF invoice (as declared by the supplier)" .
 gst:Provision       rdf:type gst:Class ; gst:label "Dated provision (a rule in force between two dates)" .
 gst:Policy          rdf:type gst:Class ; gst:label "Matching policy (this pack's own judgement, not statute)" .
 
@@ -26,6 +41,16 @@ gst:Policy          rdf:type gst:Class ; gst:label "Matching policy (this pack's
 gst:PurchaseEvent   rdf:type gst:Class ; gst:label "Purchase event" .
 gst:PaymentEvent    rdf:type gst:Class ; gst:label "Payment event" .
 
+# The third event, and it needs **no new predicates at all** — it reuses
+# `onInvoice` and `atTime` exactly as the two above do (Plan 108 Slice 8).
+#
+# Section 16(2)(b) makes receipt of the goods or services a condition in its
+# own right. That is a different *kind* of question from every other rule in
+# this pack: the others ask whether a document contains an invoice, this one
+# asks whether something has happened yet. An invoice can pass every document
+# check and still not be claimable, because the goods had not arrived.
+gst:GoodsReceipt    rdf:type gst:Class ; gst:label "Goods or services receipt event" .
+
 gst:supplierGstin rdf:type gst:Property ; gst:label "supplier GSTIN" .
 gst:invoiceNumber rdf:type gst:Property ; gst:label "invoice number" .
 gst:invoiceDate   rdf:type gst:Property ; gst:label "invoice date" .
@@ -33,6 +58,14 @@ gst:taxableValue  rdf:type gst:Property ; gst:label "taxable value" .
 gst:taxAmount     rdf:type gst:Property ; gst:label "tax amount" .
 gst:period        rdf:type gst:Property ; gst:label "return period" .
 gst:itcAvailable  rdf:type gst:Property ; gst:label "input tax credit available (as reported in GSTR-2B)" .
+
+# **The one new scalar Plan 108 needs**, and the reason a late filing is an
+# explainable fact rather than an inferred one. An invoice dated 7 July with
+# `filedDate = "2026-08-18"` is *why* it cannot be in July's 2B — the graph
+# never has to know what a cut-off is, because the 2B document for a period
+# either contains the invoice or it does not, and that document is the
+# authority's own answer to whether the filing landed in time.
+gst:filedDate     rdf:type gst:Property ; gst:label "date the supplier filed the return declaring this invoice" .
 gst:reverseCharge rdf:type gst:Property ; gst:label "reverse-charge flag (as reported in GSTR-2B)" .
 gst:governedBy    rdf:type gst:Property ; gst:label "governed by" .
 

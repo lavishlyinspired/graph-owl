@@ -57,6 +57,24 @@ source = "gst-purchase-register"
 path = "fixtures/gstr2b.ttl"
 source = "gst-gstr2b"
 
+# **A second period as a second document, not more rows in the first.** A
+# GSTR-2B is a monthly statement generated once; two periods in one file would
+# model something that does not exist, and each import landing in its own
+# named graph is what lets a query ask *which* period's 2B carried an invoice.
+[[documents]]
+path = "fixtures/gstr2b-2026-08.ttl"
+source = "gst-gstr2b-2026-08"
+
+# The third evidence source — Plan 108. What the supplier declared, as
+# distinct from what the authority made available.
+[[documents]]
+path = "fixtures/gstr1.ttl"
+source = "gst-gstr1"
+
+[[documents]]
+path = "fixtures/goods-receipt.ttl"
+source = "gst-goods-receipt"
+
 # **The identical strategies the hospitality pack uses, over different
 # fields.** `normalized` there matched a phone number; here it matches an
 # invoice number. `composite` pairs it with a date window, because two systems
@@ -110,6 +128,12 @@ name = "sgst"
 
 [[predicates]]
 name = "cess"
+
+# When the supplier actually submitted the return declaring an invoice —
+# Plan 108. Distinct from `invoiceDate`, and the field that turns "filed late"
+# from an inference into a fact a reviewer can read off the finding.
+[[predicates]]
+name = "filedDate"
 
 [[predicates]]
 name = "supplierName"
@@ -194,9 +218,13 @@ n = 3
 # rather than hidden in the runtime, so the thresholds are visible to whoever
 # has to defend a finding.
 
+# **Narrowed by Plan 108 Slice 3.** This is the books-vs-2B answer, and it
+# stands down entirely once GSTR-1 evidence is loaded, because the two rules
+# below then say which of its two causes applies. See the query's own comment
+# — the guard is global rather than per-invoice on purpose.
 [[findings]]
 label = "gst:PotentialMismatch"
-summary = "An invoice claimed in the purchase register that the supplier never filed"
+summary = "An invoice claimed in the purchase register that has not reached GSTR-2B (no GSTR-1 data loaded to say why)"
 governed_by = "gst:Section16-2-aa"
 query = "missing-in-gstr2b"
 subject = "invoice"
@@ -292,6 +320,108 @@ at_most = 0.999
 # comparing two strings.
 resolve_by = "https://graph-owl.dev/packs/gst#supplierGstin"
 
+# ── Plan 108: the three-way reconciliation ──────────────────────────────────
+#
+# **Five rules, and each one names a different next action.** That is the whole
+# claim of `plans/108-books-gstr1-gstr2b-reconciliation.md`: "unmatched" is not
+# a finding, it is four findings a CA has to tell apart by hand. With GSTR-1 in
+# the graph the runtime tells them apart instead — chase the supplier, chase
+# the mapping, fix the books, record the purchase, or wait for the goods.
+#
+# Every one of them is pack content. No Rust, no loader change, no new console
+# component: a `[[findings]]` entry naming a `.sparql` file and a statute
+# subject a reviewer can traverse to and read.
+
+# Books has it; no supplier has declared it anywhere. Cites the same section
+# `PotentialMismatch` does — verified present in `law/sections.ttl`, not
+# assumed — because it is the same statutory condition, read at the stage
+# where the graph can now say which side has not met it.
+[[findings]]
+label = "gst:SupplierNotFiled"
+summary = "An invoice claimed in the purchase register that the supplier has not reported in any GSTR-1/IFF filing"
+governed_by = "gst:Section16-2-aa"
+query = "missing-in-gstr1"
+subject = "invoice"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+  { predicate = "gst:invoiceDate", var = "invoiceDate" },
+]
+
+# The supplier filed it and it reached no GSTR-2B. `filedDate` is projected
+# because it is usually the whole explanation — an invoice filed after a
+# period's 2B was generated cannot be in it, and a reviewer should be able to
+# see that without asking anybody.
+[[findings]]
+label = "gst:Gstr1NotIn2b"
+summary = "The supplier declared the invoice in GSTR-1/IFF, and it has not reached any GSTR-2B this pack holds"
+governed_by = "gst:Section16-2-aa"
+query = "gstr1-not-in-2b"
+subject = "invoice"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+  { predicate = "gst:filedDate", var = "filedDate" },
+  { predicate = "gst:period", var = "declaredPeriod" },
+]
+
+# The reverse direction — and the one finding here that can be worth money
+# rather than cost it. `gst:Section16` rather than `16(2)(aa)`: this is a
+# completeness question about the recipient's own records, not a question
+# about whether the supplier furnished details. The subject is the *declared*
+# invoice, because there is no register row to point at — that absence is the
+# finding.
+[[findings]]
+label = "gst:MissingInBooks"
+summary = "The supplier's declared invoice appears in GSTR-1/IFF with no matching entry in the purchase register"
+governed_by = "gst:Section16"
+query = "missing-in-books"
+subject = "declared"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxableValue", var = "taxableValue" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+  { predicate = "gst:invoiceDate", var = "invoiceDate" },
+]
+
+# Same cap logic as `AmountMismatch`, against a different named graph — so the
+# citation still travels with the row and a 2020 invoice inside the cap then
+# in force stays silent.
+[[findings]]
+label = "gst:BooksGstr1Mismatch"
+summary = "The purchase register and the supplier's GSTR-1/IFF declare the same invoice with different values"
+governed_by = "gst:Rule36-4"
+query = "books-gstr1-mismatch"
+subject = "purchase"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:taxableValue", var = "claimed" },
+  { predicate = "gst:taxableValue", var = "declaredValue" },
+  { predicate = "gst:capPercent", var = "capPercent" },
+  { predicate = "gst:citation", var = "citation" },
+]
+
+# **Every document agrees and the credit is still not claimable yet.** The one
+# rule here that is not a document comparison — see the query's own comment,
+# and `gst:Section16-2-b`, the one genuinely new statute subject this plan
+# adds.
+[[findings]]
+label = "gst:GoodsReceiptTiming"
+summary = "The invoice is matched and its GSTR-2B period contains it, but the goods or services were received in a later period"
+governed_by = "gst:Section16-2-b"
+query = "goods-receipt-timing"
+subject = "purchase"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:period", var = "period" },
+  { predicate = "gst:atTime", var = "receivedAt" },
+]
+
 # The 180-day condition, as a span between two events.
 #
 # `when_missing = "elapsed"`, not `"finding"`. Treating every unpaid invoice
@@ -355,6 +485,31 @@ name = "payment-overdue"
 path = "queries/payment-overdue.sparql"
 label = "Unpaid past 180 days (Section 16(2)(d))"
 
+[[queries]]
+name = "missing-in-gstr1"
+path = "queries/missing-in-gstr1.sparql"
+label = "Claimed, and the supplier has filed nothing (Section 16(2)(aa))"
+
+[[queries]]
+name = "gstr1-not-in-2b"
+path = "queries/gstr1-not-in-2b.sparql"
+label = "Supplier filed it, no GSTR-2B carries it (Section 16(2)(aa))"
+
+[[queries]]
+name = "missing-in-books"
+path = "queries/missing-in-books.sparql"
+label = "In the GST records, absent from the purchase register (Section 16)"
+
+[[queries]]
+name = "books-gstr1-mismatch"
+path = "queries/books-gstr1-mismatch.sparql"
+label = "Register and GSTR-1 disagree beyond the cap then in force (Rule 36(4))"
+
+[[queries]]
+name = "goods-receipt-timing"
+path = "queries/goods-receipt-timing.sparql"
+label = "Matched, but the goods arrived in a later period (Section 16(2)(b))"
+
 # Not referenced by any [[findings]] rule — a direct lookup for the
 # run_pack_query MCP tool, not a detector. Epic 105 P106 Slice 4a.
 [[queries]]
@@ -374,6 +529,13 @@ labels = [
   "gst:Reversed",
   "gst:GstinTransposition",
   "gst:PaymentOverdue",
+  # Plan 108. One line each — the queue renderer is generic per pack, so a
+  # new finding costs a config entry rather than a component.
+  "gst:SupplierNotFiled",
+  "gst:Gstr1NotIn2b",
+  "gst:MissingInBooks",
+  "gst:BooksGstr1Mismatch",
+  "gst:GoodsReceiptTiming",
 ]
 actions = ["accept", "reject-with-reason", "defer"]
 evidence = "side-by-side"

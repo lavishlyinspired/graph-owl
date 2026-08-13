@@ -1,0 +1,65 @@
+# Every document agrees, and the credit **still** is not claimable for that
+# period — because the goods had not arrived yet. Section 16(2)(b), Plan 108
+# Slice 8.
+#
+# **This is the only rule in the pack that is not a document comparison, and
+# the distinction is the point.** Slices 1–5 all ask "does a filing contain
+# this invoice" — a presence/absence join across named graphs. This one asks
+# "has something happened yet". An invoice can pass every one of those checks
+# — booked, declared in GSTR-1, present in the right period's GSTR-2B — and
+# still carry no claimable credit, because Section 16(2) requires *all* of its
+# conditions to be satisfied and "the documents agree" is only one of them.
+# Folding this into the matching rules would hide exactly the case it exists
+# to catch.
+#
+# **The comparison is period-to-period, not date-to-date.** ITC is claimed in
+# a return period, so a receipt on 4 September against an August 2B is a
+# finding, and a receipt on 31 August against the same 2B is not — one day
+# apart, opposite answers, and a naive "receipt after the invoice date" test
+# gets both wrong. `SUBSTR(?receivedAt, 1, 7)` is the receipt's own period,
+# which is comparable with `?period` only because every date in this pack is
+# normalized to ISO-8601 at import (`isoDate` in the importers) so that
+# lexicographic order *is* chronological order. A day-first date passed
+# through unconverted would silently sort by day-of-month and this rule would
+# report the wrong months while looking entirely authoritative.
+#
+# **`?period` is the 2B document's own return period**, which is the period the
+# credit was made available in — not the invoice's date. The two differ in
+# every carry-forward case, which is the case this pack most needs to be right
+# about.
+#
+# **An invoice with no `GoodsReceipt` at all does not fire this rule**, and
+# that is deliberate rather than an oversight. "Received later" and "never
+# recorded as received" are different findings with different next actions —
+# one is a timing question, the other is a data-completeness one — and Plan
+# 108's parking lot keeps the second as its own slice rather than letting this
+# rule quietly mean both.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?purchase ?number ?gstin ?period ?receivedAt
+WHERE {
+  GRAPH ?register {
+    ?purchase a gst:PurchaseInvoice ;
+              gst:issuedBy ?supplier ;
+              gst:invoiceNumber ?number .
+    ?supplier gst:supplierGstin ?gstin .
+  }
+
+  GRAPH ?authority {
+    ?filed a gst:Gstr2bInvoice ;
+           gst:issuedBy ?filedSupplier ;
+           gst:invoiceNumber ?number ;
+           gst:period        ?period .
+    ?filedSupplier gst:supplierGstin ?gstin .
+  }
+
+  GRAPH ?receipts {
+    ?receipt a gst:GoodsReceipt ;
+             gst:onInvoice ?purchase ;
+             gst:atTime    ?receivedAt .
+  }
+
+  FILTER (SUBSTR(?receivedAt, 1, 7) > ?period)
+}
+ORDER BY ?number

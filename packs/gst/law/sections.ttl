@@ -16,6 +16,10 @@ gst:Section16-2-aa rdf:type gst:Section ;
     gst:label "Section 16(2)(aa) — the supplier must have furnished the details" ;
     gst:comment "Credit is available only where the supplier furnished the outward-supply details and they are communicated to the recipient. This is the statutory basis for matching against GSTR-2B rather than against the taxpayer's own register alone." .
 
+gst:Section16-2-b rdf:type gst:Section ;
+    gst:label "Section 16(2)(b) — the recipient must have received the goods or services" ;
+    gst:comment "Credit is available only where the recipient has received the goods or services. Receipt is an event, and it can fall in a later tax period than the invoice or than the GSTR-2B that made the credit available — in which case the credit belongs to the later period, not the one the 2B was generated for. This is the one condition in Section 16(2) that no document comparison can answer: every other rule in this pack asks whether a filing contains an invoice, and this one asks whether something has happened yet." .
+
 gst:Section16-2-d rdf:type gst:Section ;
     gst:label "Section 16(2)(d) — payment to the supplier within 180 days" ;
     gst:comment "Where the recipient has not paid the supplier the value of the supply together with the tax within 180 days of the invoice date, the credit taken must be reversed. The condition is a span between two events, which is why the register models a purchase and a payment as events with time anchors rather than as dates flattened onto an invoice row." .
