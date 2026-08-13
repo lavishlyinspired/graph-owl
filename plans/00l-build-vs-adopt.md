@@ -976,3 +976,44 @@ considered and rejected on the same reasoning `00i` already applies
 project-wide: a parser is exactly the shape of thing to adopt rather than
 half-implement, and a partial TOML reader would be wrong about escaping
 and multi-line strings the moment a pack author used either.
+
+## GST reconciliation reference implementations, checked 14 August 2026
+
+**Nothing adopted; three read for their patterns, three refused on licence.**
+The check ran because Plan 108's reconciliation logic was being hardened and
+this project's own rule puts the build-vs-adopt question *before* the RED test.
+Recorded whichever way it goes, because a rejection nobody wrote down gets
+re-proposed in a few months.
+
+| Repository | Licence | Verdict |
+|---|---|---|
+| `Rekvia` | MIT | **Read.** Patterns re-derived, no code taken |
+| `gst-recon-engine` | MIT | **Read.** Ditto |
+| `Free-GST-Billing-Software` | MIT | Read; billing, not reconciliation — not relevant |
+| `india-compliance` | **GPL-3.0** | **Refused.** Copyleft is a gate, not a score — adopting or deriving from it would relicense this project |
+| `gstr-reconciliation` | **none** | **Refused.** No `LICENSE` file at all, which is all-rights-reserved by default, not "probably fine" |
+| `GST-Bank-Reconciliation-Tool` | **All Rights Reserved** | **Refused** |
+
+**The three refusals were not read as source at all**, per `00i` rule 1 —
+studying an implementation and writing the corresponding code are separate
+sessions, and for a copyleft or all-rights-reserved work the first must simply
+not happen. `india-compliance` is the most mature GSTR-2B reconciliation in the
+ecosystem and is exactly the one this rule exists to keep out; that it would
+have been useful is the point, not an argument against.
+
+**Nothing was adopted as a dependency either**, and that is the honest outcome:
+what the two MIT tools have that this project lacked was not a library, it was
+three *decisions* — normalize the invoice number before matching, tolerate a
+rounding difference, and compare tax head by head rather than as a total. All
+three are a few lines each once the decision is made, and all three are now
+implemented from the GST return format and the practitioner reconciliation
+formats, which are the specification (`00i` rule 2). The value of the check was
+the decisions, not the code.
+
+**One thing deliberately not taken.** `Rekvia` matches on `(GSTIN, rounded tax)`
+as a fallback blocking key, then accepts a fuzzy invoice-number match within
+that block. That is a genuinely good second pass and this project does not have
+it — but it belongs in the resolution engine (`[[matching.blocking]]`, which
+already declares `normalized`/`composite`/`ngram` strategies), not in a SPARQL
+finding rule. Recorded as the shape of the next slice rather than half-built
+into a query where it would be invisible to the engine that should own it.

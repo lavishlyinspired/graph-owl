@@ -22,6 +22,7 @@ import {
   scenarioFor,
   sourceSummary,
   statementCsv,
+  supplierView,
   type SourceInvoice,
 } from "./statement";
 
@@ -593,5 +594,90 @@ describe("head-wise reconciliation, which is how ITC is actually claimed", () =>
 
     expect(summary.igst).toBe(0);
     expect(summary.taxAmount).toBe(18000);
+  });
+});
+
+describe("the supplier view, which is what the shared subject buys", () => {
+  /** **This is the graph's own model made visible.** A supplier is one
+   *  `gst:Supplier` subject that the register, the GSTR-2A and the GSTR-2B all
+   *  point at with `gst:issuedBy` — not three copies of a GSTIN string. So
+   *  "which of my suppliers has filed nothing at all" is answerable by asking
+   *  which documents describe each subject, and it is the view every
+   *  practitioner tool offers because chasing is done supplier by supplier,
+   *  not invoice by invoice.
+   *
+   *  Computed from the three source lists already fetched rather than a fourth
+   *  query: the answer is the same and it cannot disagree with the totals shown
+   *  beside it. */
+  it("reports which sources describe each supplier", () => {
+    const view = supplierView({
+      books: [invoice({ invoiceNumber: "INV-1", gstin: "27AAA", supplierName: "Umbrella" })],
+      gstr1: [invoice({ invoiceNumber: "INV-1", gstin: "27AAA" })],
+      authority: [invoice({ invoiceNumber: "INV-1", gstin: "27AAA" })],
+    });
+
+    expect(view).toHaveLength(1);
+    expect(view[0]!.gstin).toBe("27AAA");
+    expect(view[0]!.inBooks).toBe(true);
+    expect(view[0]!.inGstr1).toBe(true);
+    expect(view[0]!.inAuthority).toBe(true);
+  });
+
+  /** The two rows a CA acts on: a supplier who has filed nothing at all, and
+   *  one who is filing against this GSTIN with nothing booked against them. */
+  it("separates a supplier who has filed nothing from one never booked", () => {
+    const view = supplierView({
+      books: [invoice({ invoiceNumber: "INV-1", gstin: "27NOTFILED" })],
+      gstr1: [invoice({ invoiceNumber: "INV-9", gstin: "29NOTBOOKED" })],
+      authority: [invoice({ invoiceNumber: "INV-9", gstin: "29NOTBOOKED" })],
+    });
+
+    const notFiled = view.find((s) => s.gstin === "27NOTFILED")!;
+    const notBooked = view.find((s) => s.gstin === "29NOTBOOKED")!;
+
+    expect(notFiled.inBooks).toBe(true);
+    expect(notFiled.inAuthority).toBe(false);
+    expect(notBooked.inBooks).toBe(false);
+    expect(notBooked.inAuthority).toBe(true);
+  });
+
+  /** The name lives on the shared subject, and only GSTR-2A carries it in this
+   *  pack — so it has to survive being absent from the other two sources. That
+   *  is the whole argument for subjects over literals. */
+  it("takes the supplier's name from whichever source carried it", () => {
+    const view = supplierView({
+      books: [invoice({ invoiceNumber: "INV-1", gstin: "27AAA", supplierName: "" })],
+      gstr1: [invoice({ invoiceNumber: "INV-1", gstin: "27AAA", supplierName: "Umbrella Industrial" })],
+      authority: [],
+    });
+
+    expect(view[0]!.supplierName).toBe("Umbrella Industrial");
+  });
+
+  it("totals the credit riding on each supplier, so chasing can be prioritised", () => {
+    const view = supplierView({
+      books: [
+        invoice({ invoiceNumber: "INV-1", gstin: "27AAA", taxAmount: "18000.00" }),
+        invoice({ invoiceNumber: "INV-2", gstin: "27AAA", taxAmount: "9000.00" }),
+      ],
+      gstr1: [],
+      authority: [],
+    });
+
+    expect(view[0]!.booksTax).toBe(27000);
+    expect(view[0]!.invoices).toBe(2);
+  });
+
+  it("orders by the credit at stake, because that is the order to chase in", () => {
+    const view = supplierView({
+      books: [
+        invoice({ invoiceNumber: "INV-1", gstin: "27SMALL", taxAmount: "100.00" }),
+        invoice({ invoiceNumber: "INV-2", gstin: "29LARGE", taxAmount: "90000.00" }),
+      ],
+      gstr1: [],
+      authority: [],
+    });
+
+    expect(view.map((s) => s.gstin)).toEqual(["29LARGE", "27SMALL"]);
   });
 });

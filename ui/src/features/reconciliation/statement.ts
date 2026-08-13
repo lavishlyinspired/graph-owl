@@ -609,3 +609,89 @@ export function statementCsv(items: readonly ReconcilingItem[]): string {
   }
   return lines.join("\n");
 }
+
+/** One supplier, and which of the three documents describe them.
+ *
+ *  **This is the graph's own model made visible, not a report over three
+ *  spreadsheets.** A supplier is one `gst:Supplier` subject that the register,
+ *  the GSTR-2A and the GSTR-2B all point at with `gst:issuedBy` — the shared
+ *  subject Epic 105c introduced precisely so a third source *enriches* a node
+ *  rather than creating a fourth copy of a GSTIN string. Because it is one
+ *  subject, "which of my suppliers has filed nothing at all" is answerable by
+ *  asking which documents describe it. */
+export interface SupplierRow {
+  readonly gstin: string;
+  readonly supplierName: string;
+  readonly inBooks: boolean;
+  readonly inGstr1: boolean;
+  readonly inAuthority: boolean;
+  readonly invoices: number;
+  readonly booksTax: number;
+  readonly authorityTax: number;
+}
+
+/** The supplier-level view of the same reconciliation.
+ *
+ *  **Chasing is done supplier by supplier, not invoice by invoice**, which is
+ *  why every practitioner tool offers this view: one phone call covers every
+ *  invoice a supplier has failed to file, and the order to make those calls in
+ *  is by credit at stake.
+ *
+ *  Computed from the three source lists already fetched rather than a fourth
+ *  query — the answer is identical and it cannot disagree with the totals
+ *  rendered beside it, which a separately-fetched figure eventually would. */
+export function supplierView(sources: {
+  books: readonly SourceInvoice[];
+  gstr1: readonly SourceInvoice[];
+  authority: readonly SourceInvoice[];
+}): SupplierRow[] {
+  const rows = new Map<string, {
+    gstin: string;
+    supplierName: string;
+    inBooks: boolean;
+    inGstr1: boolean;
+    inAuthority: boolean;
+    invoices: number;
+    booksTax: number;
+    authorityTax: number;
+  }>();
+
+  const visit = (invoice: SourceInvoice, where: "books" | "gstr1" | "authority") => {
+    if (invoice.gstin === "") return;
+    const row =
+      rows.get(invoice.gstin) ??
+      {
+        gstin: invoice.gstin,
+        supplierName: "",
+        inBooks: false,
+        inGstr1: false,
+        inAuthority: false,
+        invoices: 0,
+        booksTax: 0,
+        authorityTax: 0,
+      };
+    // The name lives on the shared subject and only GSTR-2A carries it in this
+    // pack, so it has to survive being absent from the other two sources.
+    if (row.supplierName === "") row.supplierName = invoice.supplierName;
+    if (where === "books") {
+      row.inBooks = true;
+      row.invoices += 1;
+      row.booksTax += Number(invoice.taxAmount || 0);
+    } else if (where === "gstr1") {
+      row.inGstr1 = true;
+    } else {
+      row.inAuthority = true;
+      row.authorityTax += Number(invoice.taxAmount || 0);
+    }
+    rows.set(invoice.gstin, row);
+  };
+
+  for (const invoice of sources.books) visit(invoice, "books");
+  for (const invoice of sources.gstr1) visit(invoice, "gstr1");
+  for (const invoice of sources.authority) visit(invoice, "authority");
+
+  // Largest credit first: that is the order to make the calls in.
+  return [...rows.values()].sort(
+    (a, b) => Math.max(b.booksTax, b.authorityTax) - Math.max(a.booksTax, a.authorityTax),
+  );
+}

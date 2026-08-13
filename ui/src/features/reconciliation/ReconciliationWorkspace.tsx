@@ -63,10 +63,12 @@ import {
   scenarioFor,
   sourceSummary,
   statementCsv,
+  supplierView,
   type BoundInvoice,
   type Heads,
   type ReconcilingItem,
   type SourceInvoice,
+  type SupplierRow,
   type Statement,
 } from "./statement";
 
@@ -123,6 +125,16 @@ const COPY = {
   headBooks: "Books",
   headAuthority: "GSTR-2B",
   headDifference: "Difference",
+  step5: "5 · By supplier",
+  supplierHint:
+    "One supplier is one subject in the graph, pointed at by the register, the GSTR-2A and the GSTR-2B alike — so which documents describe it is a question the graph answers directly. Chasing is done supplier by supplier, and this is the order to make the calls in.",
+  inAll: "in all three",
+  notFiled: "nothing filed",
+  notBooked: "not in your books",
+  partial: "partly filed",
+  sourceBooks: "books",
+  sourceGstr1: "GSTR-2A",
+  sourceAuthority: "GSTR-2B",
 };
 
 /** ₹ the way an Indian statement writes it — lakhs and crores, not thousands.
@@ -667,6 +679,18 @@ export function ReconciliationWorkspace({ onReview }: { onReview: () => void }) 
     [rows, findings],
   );
 
+  const suppliers = useMemo(
+    () =>
+      rows
+        ? supplierView({
+            books: rows.books ?? [],
+            gstr1: rows.gstr1 ?? [],
+            authority: rows.authority ?? [],
+          })
+        : [],
+    [rows],
+  );
+
   const download = useCallback(() => {
     if (!statement) return;
     const blob = new Blob([statementCsv(statement.items)], { type: "text/csv;charset=utf-8" });
@@ -741,6 +765,79 @@ export function ReconciliationWorkspace({ onReview }: { onReview: () => void }) 
       <div>
         <Title level={5}>{COPY.step3}</Title>
         <StatementPanel statement={statement} />
+      </div>
+
+      <div>
+        <Title level={5}>{COPY.step5}</Title>
+        <Paragraph type="secondary" style={{ fontSize: 12 }}>
+          {COPY.supplierHint}
+        </Paragraph>
+        <Table
+          size="small"
+          rowKey="gstin"
+          dataSource={[...suppliers]}
+          pagination={suppliers.length > 10 ? { pageSize: 10 } : false}
+          scroll={{ x: "max-content" }}
+          columns={[
+            {
+              title: "Supplier",
+              key: "supplier",
+              render: (_: unknown, row: SupplierRow) => (
+                <Space direction="vertical" size={0}>
+                  <Text>{row.supplierName || "—"}</Text>
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    {row.gstin}
+                  </Text>
+                </Space>
+              ),
+            },
+            {
+              title: "Described by",
+              key: "sources",
+              render: (_: unknown, row: SupplierRow) => (
+                <Space size={4} wrap>
+                  {row.inBooks && <Tag>{COPY.sourceBooks}</Tag>}
+                  {row.inGstr1 && <Tag>{COPY.sourceGstr1}</Tag>}
+                  {row.inAuthority && <Tag color="green">{COPY.sourceAuthority}</Tag>}
+                </Space>
+              ),
+            },
+            {
+              title: "Standing",
+              key: "standing",
+              render: (_: unknown, row: SupplierRow) =>
+                row.inBooks && row.inGstr1 && row.inAuthority ? (
+                  <Tag color="green">{COPY.inAll}</Tag>
+                ) : !row.inGstr1 && !row.inAuthority ? (
+                  <Tag color="red">{COPY.notFiled}</Tag>
+                ) : !row.inBooks ? (
+                  <Tag color="blue">{COPY.notBooked}</Tag>
+                ) : (
+                  <Tag color="orange">{COPY.partial}</Tag>
+                ),
+            },
+            {
+              title: "Your invoices",
+              dataIndex: "invoices",
+              key: "invoices",
+              align: "right" as const,
+            },
+            {
+              title: "Tax in books",
+              dataIndex: "booksTax",
+              key: "booksTax",
+              align: "right" as const,
+              render: (v: number) => rupees(v),
+            },
+            {
+              title: "Tax in GSTR-2B",
+              dataIndex: "authorityTax",
+              key: "authorityTax",
+              align: "right" as const,
+              render: (v: number) => rupees(v),
+            },
+          ]}
+        />
       </div>
 
       <div>
