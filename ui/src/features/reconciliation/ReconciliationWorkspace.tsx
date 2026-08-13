@@ -60,11 +60,13 @@ import {
   distinctInvoices,
   evidenceOf,
   first,
+  guidanceFrom,
   scenarioFor,
   sourceSummary,
   statementCsv,
   supplierView,
   type BoundInvoice,
+  type GuidanceIndex,
   type Heads,
   type ReconcilingItem,
   type SourceInvoice,
@@ -164,35 +166,59 @@ const COPY = {
  *  `graph:import:{source}`, never the default graph, so a pattern outside one
  *  matches nothing at all — silently, which reads exactly like "you have not
  *  uploaded anything yet". */
-function sourceQuery(className: string, matchKey: string): string {
-  return `PREFIX gst: <https://graph-owl.dev/packs/gst#>
-SELECT ?invoice ?invoiceNumber ?matchKey ?gstin ?supplierName ?invoiceDate ?taxableValue ?taxAmount ?igst ?cgst ?sgst ?cess ?period
+/** The query for one source, built from **the pack's own vocabulary**.
+ *
+ *  **This hardcoded `PREFIX gst:` and nine `gst:` predicate names**, which is
+ *  the same defect the source list and the guidance had: a healthcare or
+ *  banking pack would have had the console ask for GST's predicates against
+ *  its data and get nothing. The console now knows the *roles* — an identity,
+ *  a matching key, a date, a period, the party a record is attributed to, and
+ *  the measures that have to agree — and the pack names each one.
+ *
+ *  Every pattern sits inside its own `GRAPH ?g { }`: an import lands in
+ *  `graph:import:{source}`, never the default graph, so a pattern outside one
+ *  matches nothing at all — silently, which reads exactly like "you have not
+ *  uploaded anything yet".
+ *
+ *  Everything but the identity is `OPTIONAL`, and deliberately: a required
+ *  pattern silently drops every record missing that field, so a register
+ *  exported without a supplier name would vanish from its own totals and the
+ *  page would look like it worked. */
+function sourceQuery(spec: {
+  namespace: string;
+  className: string;
+  identity: string;
+  matchKey: string;
+  fields: NonNullable<NonNullable<PackConsoleConfig["reconciliation"]>["fields"]>;
+  measures: readonly string[];
+}): string {
+  const { namespace, className, identity, matchKey, fields, measures } = spec;
+  const optional = (variable: string, predicate: string | undefined, subject = "?invoice") =>
+    predicate ? `  OPTIONAL { GRAPH ?g_${variable} { ${subject} p:${predicate} ?${variable} } }` : "";
+
+  const measureLines = measures.map((name) => optional(name, name)).join("\n");
+  const measureVars = measures.map((name) => `?${name}`).join(" ");
+
+  return `PREFIX p: <${namespace}>
+SELECT ?invoice ?invoiceNumber ?matchKey ?gstin ?supplierName ?invoiceDate ?period ${measureVars}
 WHERE {
   GRAPH ?g {
-    ?invoice a gst:${className} ;
-             gst:issuedBy      ?supplier ;
-             gst:invoiceNumber ?invoiceNumber ;
-             gst:invoiceDate   ?invoiceDate ;
-             gst:taxableValue  ?taxableValue ;
-             gst:taxAmount     ?taxAmount ;
-             gst:period        ?period .
-    ?supplier gst:supplierGstin ?gstin .
+    ?invoice a p:${className} ;
+             p:${identity} ?invoiceNumber .
   }
-  OPTIONAL {
-    GRAPH ?names { ?supplier gst:supplierName ?supplierName }
-  }
-  # **The four heads are OPTIONAL, and that is the whole point.** ITC is
-  # claimed head-wise, so the statement needs them — but a register exported
-  # without IGST/CGST/SGST columns must still reconcile on totals rather than
-  # vanishing from its own figures because a required pattern did not match.
-  OPTIONAL { GRAPH ?hi { ?invoice gst:igst ?igst } }
-  OPTIONAL { GRAPH ?hc { ?invoice gst:cgst ?cgst } }
-  OPTIONAL { GRAPH ?hs { ?invoice gst:sgst ?sgst } }
-  OPTIONAL { GRAPH ?hx { ?invoice gst:cess ?cess } }
-  # The predicate the pack names as what two records being the same thing
-  # means. OPTIONAL so a pack declaring none still reconciles on the printed
-  # identity rather than collapsing every record onto one empty key.
-  OPTIONAL { GRAPH ?mk { ?invoice gst:${matchKey} ?matchKey } }
+${optional("matchKey", matchKey)}
+${optional("invoiceDate", fields.date)}
+${optional("period", fields.period)}
+${
+  fields.party
+    ? `  OPTIONAL {
+    GRAPH ?g_party { ?invoice p:${fields.party} ?party }
+${fields.partyId ? `    OPTIONAL { GRAPH ?g_pid { ?party p:${fields.partyId} ?gstin } }` : ""}
+${fields.partyName ? `    OPTIONAL { GRAPH ?g_pname { ?party p:${fields.partyName} ?supplierName } }` : ""}
+  }`
+    : ""
+}
+${measureLines}
 }`;
 }
 
@@ -551,12 +577,15 @@ function FindingGroup({
   item,
   findings,
   money,
+  guidance,
 }: {
   item: ReconcilingItem;
   findings: readonly PackFinding[];
   money: (value: number) => string;
+  /** The pack's own words for its own rules. */
+  guidance: GuidanceIndex;
 }) {
-  const scenario = scenarioFor(item.label);
+  const scenario = scenarioFor(item.label, guidance);
   const mine = findings.filter((f) => f.label === item.label && f.status !== "rejected");
   // **The rule renders its own evidence.** A predicate does not identify a
   // fact here: `PaymentOverdue` projects `gst:atTime` twice and
@@ -636,6 +665,7 @@ export function ReconciliationWorkspace({
 }) {
   const [ruleCount, setRuleCount] = useState<number | null>(null);
   const [config, setConfig] = useState<PackConsoleConfig | null>(null);
+  const [guidance, setGuidance] = useState<GuidanceIndex>({});
   /** Which pack this page is showing. Discovered, never assumed — the page
    *  addressed `"gst"` by name in five places even after it had discovered a
    *  pack, so any other domain would have had its uploads, its rules and its
@@ -683,7 +713,21 @@ export function ReconciliationWorkspace({
       }
 
       const results = await Promise.all(
-        specs.map((source) => api.sparql(sourceQuery(source.className, declared?.reconciliation?.matchKey ?? "invoiceKey"))),
+        specs.map((source) =>
+          api.sparql(
+            sourceQuery({
+              // The pack's own namespace, from the namespace row its loader
+              // declared — never a constant in the console.
+              namespace:
+                namespaces.find((n) => n.declaredBy === `pack:${pack.packId}`)?.iri ?? "",
+              className: source.className,
+              identity: declared?.reconciliation?.identity ?? "invoiceNumber",
+              matchKey: declared?.reconciliation?.matchKey ?? "",
+              fields: declared?.reconciliation?.fields ?? {},
+              measures: (declared?.reconciliation?.measures ?? []).map((m) => m.name),
+            }),
+          ),
+        ),
       );
       const next: Record<string, SourceInvoice[]> = {};
       specs.forEach((source, index) => {
@@ -698,6 +742,14 @@ export function ReconciliationWorkspace({
       // The pack's own registered rules — real data, already admin-gated, and
       // the honest answer to "what is actually evaluating my data".
       setRuleCount(await api.findingRules(pack.packId).then((r) => r.length).catch(() => null));
+      // Per-rule wording as the pack declared it. It arrives with the console
+      // config rather than with the rules, because the finding-rule registry
+      // has no field for it — see `read_console_config`.
+      setGuidance(
+        guidanceFrom(
+          Object.entries(declared?.guidance ?? {}).map(([label, g]) => ({ label, guidance: g })),
+        ),
+      );
     } catch (error) {
       setFailure(error instanceof Error ? error.message : COPY.loadFailed);
     }
@@ -726,7 +778,7 @@ export function ReconciliationWorkspace({
   const statement = useMemo(
     () =>
       rows
-        ? buildStatement({ books: rows.books ?? [], authority: rows.authority ?? [], findings })
+        ? buildStatement({ books: rows.books ?? [], authority: rows.authority ?? [], findings, guidance })
         : null,
     [rows, findings],
   );
@@ -983,7 +1035,7 @@ export function ReconciliationWorkspace({
           />
         ) : (
           statement.items.map((item) => (
-            <FindingGroup key={item.label} item={item} findings={findings} money={money} />
+            <FindingGroup key={item.label} item={item} findings={findings} money={money} guidance={guidance} />
           ))
         )}
       </div>

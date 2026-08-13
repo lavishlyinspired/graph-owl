@@ -251,116 +251,6 @@ export interface Scenario {
   readonly detail?: (evidence: EvidenceIndex) => string;
 }
 
-const SCENARIOS: Record<string, Scenario> = {
-  "gst:SupplierNotFiled": {
-    title: "Supplier has not filed",
-    meaning: "You have booked this purchase and no supplier has declared it in any GSTR-1 or IFF.",
-    nextAction: "Chase the supplier to file it. Do not claim the credit until it appears in a GSTR-2B.",
-    tone: "danger",
-  },
-  "gst:Gstr1NotIn2b": {
-    title: "Filed by the supplier, not in your GSTR-2B",
-    meaning:
-      "The supplier did declare it — the filing date is on the finding — but it has reached none of the GSTR-2B statements loaded here.",
-    nextAction:
-      "Check the GSTIN they filed against and whether it went in as B2C. If they simply filed late, it should appear in a later period's 2B.",
-    tone: "warning",
-    detail: (e) => {
-      const filed = first(e, "filedDate");
-      const period = first(e, "period");
-      if (filed === "") return "";
-      return period === "" ? `filed ${filed}` : `declared for ${period}, filed ${filed}`;
-    },
-  },
-  "gst:MissingInBooks": {
-    title: "In the GST records, not in your books",
-    meaning: "A supplier has declared an invoice against your GSTIN that your purchase register does not carry.",
-    nextAction:
-      "Find out whether the purchase was simply never recorded — this is credit you may be entitled to and have not claimed — or whether somebody has filed against the wrong GSTIN.",
-    tone: "info",
-  },
-  "gst:BooksGstr1Mismatch": {
-    title: "Your books and the supplier's filing disagree",
-    meaning: "Both sides declare this invoice and the values differ by more than the cap in force allowed.",
-    nextAction: "Compare against the physical invoice. One of the two is wrong, and the finding names both figures.",
-    tone: "warning",
-    detail: (e) => {
-      const pair = values(e, "taxableValue");
-      return pair.length === 2 ? `books ${pair[0]} vs declared ${pair[1]}` : "";
-    },
-  },
-  "gst:GoodsReceiptTiming": {
-    title: "Goods received after the period",
-    meaning:
-      "Every document agrees and the credit is still not claimable in this period, because the goods or services arrived in a later one.",
-    nextAction: "Defer the claim to the period the goods were received in. Section 16(2)(b) is a condition in its own right.",
-    tone: "warning",
-    detail: (e) => {
-      const received = first(e, "atTime");
-      const period = first(e, "period");
-      return received === "" ? "" : `available in ${period}, received ${received}`;
-    },
-  },
-  "gst:PotentialMismatch": {
-    title: "Claimed, not available in GSTR-2B",
-    meaning:
-      "This invoice is in your books and in no GSTR-2B. No GSTR-1/2A data is loaded, so nothing here can say whether the supplier filed it.",
-    nextAction: "Upload the GSTR-2A for this period — it separates 'the supplier never filed' from 'they filed and it did not reach you'.",
-    tone: "danger",
-  },
-  "gst:AmountMismatch": {
-    title: "Your books and GSTR-2B disagree",
-    meaning: "Both sides report the invoice and the values differ by more than the cap in force allowed.",
-    nextAction: "Compare against the physical invoice, then correct whichever side is wrong.",
-    tone: "warning",
-    detail: (e) => {
-      const pair = values(e, "taxableValue");
-      return pair.length === 2 ? `books ${pair[0]} vs GSTR-2B ${pair[1]}` : "";
-    },
-  },
-  "gst:ITCNotAvailable": {
-    title: "Credit reported as unavailable",
-    meaning: "The invoice matches perfectly and the authority reports the credit as not available.",
-    nextAction: "Check whether it falls under Section 17(5) blocked credits. Do not claim it on the strength of the match alone.",
-    tone: "danger",
-  },
-  "gst:Reversed": {
-    title: "Flagged as reverse charge",
-    meaning: "The invoice matches and the authority flags it as reverse-charge, so the tax is yours to self-assess.",
-    nextAction: "Confirm the tax has been paid under RCM before taking the credit.",
-    tone: "info",
-  },
-  "gst:GstinTransposition": {
-    title: "Near-identical GSTIN — probably a keying error",
-    meaning:
-      "Two records agree on invoice number and period under GSTINs that differ by what looks like a transposition. Nothing has been merged.",
-    nextAction: "Confirm which GSTIN is right and correct the register. Merging automatically would attribute one supplier's invoice to another.",
-    tone: "warning",
-    detail: (e) => {
-      const pair = values(e, "supplierGstin");
-      return pair.length === 2 ? `booked ${pair[0]}, filed ${pair[1]}` : "";
-    },
-  },
-  "gst:PaymentOverdue": {
-    title: "Unpaid past 180 days",
-    meaning: "Credit was taken on an invoice the supplier has not been paid for within 180 days of its date.",
-    nextAction: "Reverse the credit, or pay the supplier. Section 16(2)(d) leaves no third option.",
-    tone: "danger",
-    // Two `gst:atTime` facts, in the order `pack.toml` projects them:
-    // `purchasedAt` then `paidAt`. A second one absent is the invoice never
-    // having been paid at all, which is a different sentence and the more
-    // serious one — the rule fires on elapsed time precisely so an unpaid
-    // invoice is not invisible for want of a payment row to subtract from.
-    detail: (e) => {
-      const times = values(e, "atTime");
-      const purchased = times[0] ?? "";
-      const paid = times[1];
-      if (purchased === "") return "";
-      return paid ? `purchased ${purchased}, paid ${paid}` : `purchased ${purchased}, still unpaid`;
-    },
-  },
-};
-
 /** The local name of a term, for a reader who does not want to read IRIs.
  *
  *  **Both a full IRI and a curie, because both really arrive.** A finding's
@@ -379,13 +269,39 @@ function localName(term: string): string {
   return tail.length > 0 ? tail : term;
 }
 
-export function scenarioFor(label: string): Scenario {
-  const known = SCENARIOS[label];
-  if (known) return known;
-  // A pack this console has never seen must still render: the label beats an
-  // empty card, and beats a crash by a great deal more.
+/** Guidance keyed by rule label, as the pack declared it.
+ *
+ *  **This was a table of thirteen GST rules compiled into the console.** It is
+ *  now `[findings.guidance]` in `pack.toml`, delivered by
+ *  `GET /packs/{pack}/finding-rules`, so a healthcare or banking rule carries
+ *  its own words rather than rendering under GST's or under none. */
+export type GuidanceIndex = Readonly<Record<string, Scenario | undefined>>;
+
+export function scenarioFor(label: string, guidance: GuidanceIndex = {}): Scenario {
+  const declared = guidance[label];
+  if (declared) return declared;
+  // A rule whose pack declared no guidance must still render: the label beats
+  // an empty card, and beats a crash by a great deal more.
   const name = localName(label);
   return { title: name, meaning: "", nextAction: `Review ${name}.`, tone: "info" };
+}
+
+/** The guidance a pack's registered rules carry, indexed by label. */
+export function guidanceFrom(
+  rules: readonly { readonly label: string; readonly guidance?: unknown }[],
+): GuidanceIndex {
+  const out: Record<string, Scenario> = {};
+  for (const rule of rules) {
+    const g = rule.guidance as Partial<Scenario> | undefined;
+    if (!g?.title) continue;
+    out[rule.label] = {
+      title: g.title,
+      meaning: g.meaning ?? "",
+      nextAction: g.nextAction ?? "",
+      tone: g.tone ?? "info",
+    };
+  }
+  return out;
 }
 
 /** Which invoice a finding is about.
@@ -510,6 +426,7 @@ export function reconcilingItems(
   findings: readonly PackFinding[],
   books: readonly SourceInvoice[],
   authority: readonly SourceInvoice[],
+  guidance: GuidanceIndex = {},
 ): ReconcilingItem[] {
   const booksBy = index(books);
   const authorityBy = index(authority);
@@ -534,7 +451,7 @@ export function reconcilingItems(
     );
     items.push({
       label,
-      title: scenarioFor(label).title,
+      title: scenarioFor(label, guidance).title,
       count: numbers.length,
       taxableValue: totals.taxableValue,
       taxAmount: totals.taxAmount,
@@ -565,10 +482,11 @@ export function buildStatement(input: {
   books: readonly SourceInvoice[];
   authority: readonly SourceInvoice[];
   findings: readonly PackFinding[];
+  guidance?: GuidanceIndex;
 }): Statement {
   const books = sourceSummary(input.books);
   const authority = sourceSummary(input.authority);
-  const items = reconcilingItems(input.findings, input.books, input.authority);
+  const items = reconcilingItems(input.findings, input.books, input.authority, input.guidance);
 
   const booksBy = index(input.books);
   const authorityBy = index(input.authority);

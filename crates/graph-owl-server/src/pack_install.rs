@@ -223,7 +223,77 @@ pub fn read_console_config(base_dir: &Path, pack: &str) -> Option<serde_json::Va
     }
     let text = std::fs::read_to_string(base_dir.join(pack).join("pack.toml")).ok()?;
     let parsed: serde_json::Value = toml::from_str(&text).ok()?;
-    parsed.get("console").cloned()
+    // **camelCase the whole table, not just guidance.** A TOML author writes
+    // `match_key` and `party_id`; every response on this surface is read as
+    // JSON, where those are `matchKey` and `partyId`. Converting only part of
+    // it is worse than converting none: `match_key` reached the console as a
+    // key it never read, so the reconciliation silently fell back to matching
+    // on the printed identity — a wrong answer that looks like a working page.
+    let mut console = camel_case_keys(parsed.get("console").cloned()?);
+
+    // **Guidance travels with the console config, because nothing else carries
+    // it.** `[findings.guidance]` is the reviewer-facing wording for each rule
+    // — what it means and what to do — and the finding-rule registry the loader
+    // POSTs has no field for it. Without this the console renders a bare label
+    // and the words sit unread in the manifest.
+    //
+    // Keys are camelCased on the way out: a TOML author writes `next_action`
+    // and the console reads `nextAction`, which is the convention every other
+    // response on this surface already uses.
+    let mut guidance = serde_json::Map::new();
+    if let Some(findings) = parsed.get("findings").and_then(|f| f.as_array()) {
+        for finding in findings {
+            let (Some(label), Some(declared)) = (
+                finding.get("label").and_then(|l| l.as_str()),
+                finding.get("guidance").and_then(|g| g.as_object()),
+            ) else {
+                continue;
+            };
+            let camel: serde_json::Map<String, serde_json::Value> = declared
+                .iter()
+                .map(|(key, value)| (snake_to_camel(key), value.clone()))
+                .collect();
+            guidance.insert(label.to_string(), serde_json::Value::Object(camel));
+        }
+    }
+    if let Some(object) = console.as_object_mut() {
+        object.insert("guidance".to_string(), serde_json::Value::Object(guidance));
+    }
+    Some(console)
+}
+
+/// Every key in a value tree, camelCased, recursively.
+fn camel_case_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(key, inner)| (snake_to_camel(&key), camel_case_keys(inner)))
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(camel_case_keys).collect())
+        }
+        other => other,
+    }
+}
+
+/// `next_action` → `nextAction`. The manifest is written in TOML's idiom and
+/// every response on this surface is read in JSON's; converting here keeps a
+/// pack author from having to know which side they are writing for.
+fn snake_to_camel(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    let mut upper = false;
+    for ch in key.chars() {
+        if ch == '_' {
+            upper = true;
+        } else if upper {
+            out.extend(ch.to_uppercase());
+            upper = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -395,6 +465,92 @@ label = "Your books"
             found["reconciliation"]["sources"][0]["class"],
             "PurchaseInvoice"
         );
+    }
+
+    /// **Guidance travels with the console config, because nothing else
+    /// carries it.** `[findings.guidance]` is the CA-facing wording for each
+    /// rule — what it means and what to do about it — and it lives on the rule
+    /// in `pack.toml`. The finding-rule registry the loader POSTs has no field
+    /// for it, so without this the console falls back to rendering a bare
+    /// label and the words sit in the manifest unread.
+    #[test]
+    fn carries_each_rules_declared_guidance() {
+        let base = temp_dir("console-guidance");
+        let pack = base.join("gst");
+        fs::create_dir_all(&pack).expect("mkdir");
+        fs::write(
+            pack.join("pack.toml"),
+            r#"
+[pack]
+id = "gst"
+description = "d"
+
+[[findings]]
+label = "gst:SupplierNotFiled"
+summary = "written for a reviewer of the rule"
+
+[findings.guidance]
+title = "Supplier has not filed"
+meaning = "You booked it and nobody declared it."
+next_action = "Chase the supplier."
+tone = "danger"
+
+[console]
+[console.reconciliation]
+label = "GST reconciliation"
+"#,
+        )
+        .expect("write");
+
+        let found = read_console_config(&base, "gst").expect("console section");
+
+        assert_eq!(found["reconciliation"]["label"], "GST reconciliation");
+        assert_eq!(
+            found["guidance"]["gst:SupplierNotFiled"]["title"],
+            "Supplier has not filed"
+        );
+        // camelCase on the wire, snake_case in the manifest — the console reads
+        // one convention and a TOML author writes the other.
+        assert_eq!(
+            found["guidance"]["gst:SupplierNotFiled"]["nextAction"],
+            "Chase the supplier."
+        );
+    }
+
+    /// **Converting only part of the table is worse than converting none.**
+    /// A TOML author writes `match_key`; the console reads `matchKey`. When
+    /// only guidance was camelCased, the reconciliation's own key arrived under
+    /// a name nothing read and the page silently fell back to matching on the
+    /// printed identity — the exact bug the key exists to prevent, reintroduced
+    /// by a serialization detail.
+    #[test]
+    fn camel_cases_every_key_not_only_guidance() {
+        let base = temp_dir("console-camel");
+        let pack = base.join("gst");
+        fs::create_dir_all(&pack).expect("mkdir");
+        fs::write(
+            pack.join("pack.toml"),
+            r#"
+[pack]
+id = "gst"
+description = "d"
+
+[console]
+[console.reconciliation]
+match_key = "invoiceKey"
+record_noun = "invoice"
+
+[console.reconciliation.fields]
+party_id = "supplierGstin"
+"#,
+        )
+        .expect("write");
+
+        let found = read_console_config(&base, "gst").expect("console section");
+
+        assert_eq!(found["reconciliation"]["matchKey"], "invoiceKey");
+        assert_eq!(found["reconciliation"]["recordNoun"], "invoice");
+        assert_eq!(found["reconciliation"]["fields"]["partyId"], "supplierGstin");
     }
 
     /// A pack that declares no console section is the ordinary case, not a

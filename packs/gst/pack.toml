@@ -705,6 +705,7 @@ match_key = "invoiceKey"
 identity = "invoiceNumber"
 record_noun = "invoice"
 
+
 # The figures the statement totals, in the order every practitioner
 # reconciliation format lists them. A pack reconciling something other than tax
 # declares its own — quantities, claim amounts, whatever has to agree.
@@ -716,6 +717,18 @@ measures = [
   { name = "cess", label = "Cess" },
   { name = "taxAmount", label = "Total tax", total = true },
 ]
+
+# **Which predicate carries each thing the page needs**, so the console builds
+# its query from the pack's own vocabulary instead of `gst:` compiled into
+# TypeScript. A healthcare pack names `claimNumber`/`memberId`; a banking one
+# names `reference`/`counterparty`. The console knows the *roles*, never the
+# names.
+[console.reconciliation.fields]
+date = "invoiceDate"
+period = "period"
+party = "issuedBy"
+party_id = "supplierGstin"
+party_name = "supplierName"
 
 # **Ordered the way the reconciliation is actually performed.** `role` says
 # which side of the statement a source is: `opening` is what the taxpayer

@@ -393,6 +393,12 @@ export interface FindingRuleDef {
  *  `404` for a pack with no `[console]` section, which is ordinary rather than
  *  exceptional and renders as an honest empty state. */
 export interface PackConsoleConfig {
+  /** Each rule's reviewer-facing wording, keyed by label — `[findings.guidance]`
+   *  in the manifest. Delivered here because the finding-rule registry the
+   *  loader posts has no field for it. */
+  readonly guidance?: Readonly<
+    Record<string, { title: string; meaning?: string; nextAction?: string; tone?: "warning" | "danger" | "info" }>
+  >;
   readonly reconciliation?: {
     readonly label: string;
     readonly subtitle?: string;
@@ -402,6 +408,17 @@ export interface PackConsoleConfig {
     readonly identity?: string;
     readonly recordNoun?: string;
     readonly measures?: readonly { readonly name: string; readonly label: string; readonly total?: boolean }[];
+    /** Which predicate carries each role the page needs. The console knows the
+     *  *roles* — a date, a period, the party a record is attributed to — and
+     *  never their names, so a healthcare pack naming `claimDate`/`memberId`
+     *  renders through the same query builder. */
+    readonly fields?: {
+      readonly date?: string;
+      readonly period?: string;
+      readonly party?: string;
+      readonly partyId?: string;
+      readonly partyName?: string;
+    };
     readonly sources?: readonly {
       readonly key: string;
       readonly class: string;
