@@ -74,6 +74,25 @@ export function isoDate(value: string): string {
   );
 }
 
+/** A supplier's declared return period, `MMYYYY`, as the `YYYY-MM` the rules
+ *  compare periods in.
+ *
+ *  **This, not the invoice's own date, is what `gst:period` means.** GSTR-2B
+ *  is a monthly snapshot of *filed* returns, not of invoice dates — an
+ *  invoice dated in July can legitimately surface only in August's 2B, once
+ *  the supplier files late. Deriving the period from `invoiceDate` instead
+ *  silently makes that case, and the carry-forward reasoning built on it,
+ *  untestable: every invoice would report the period it was *issued* in,
+ *  never the period it was *filed* in. */
+export function returnPeriod(supprd: string): string {
+  const match = /^(0[1-9]|1[0-2])(\d{4})$/.exec(String(supprd ?? ""));
+  if (!match) {
+    throw new Gstr2bError(`'${supprd}' is not a return period this importer can place — expected 'supprd' as MMYYYY`);
+  }
+  const [, month, year] = match;
+  return `${year}-${month}`;
+}
+
 /** The `docdata` section, wherever the wrapper puts it.
  *
  *  A GSP nests it at `data.data.docdata`; a portal download uses
@@ -106,6 +125,7 @@ export function normalize(payload: unknown): Gstr2bInvoice[] {
   for (const supplier of suppliers as Record<string, unknown>[]) {
     const gstin = String(supplier.ctin ?? "");
     const name = String(supplier.trdnm ?? "");
+    const period = returnPeriod(String(supplier.supprd ?? ""));
     for (const line of (supplier.inv ?? []) as Record<string, unknown>[]) {
       const igst = money(line.igst);
       const cgst = money(line.cgst);
@@ -131,9 +151,7 @@ export function normalize(payload: unknown): Gstr2bInvoice[] {
         reverseCharge: String(line.rev ?? ""),
         invoiceType: String(line.typ ?? ""),
         placeOfSupply: String(line.pos ?? ""),
-        // From the invoice's own date. Deriving it from the clock would
-        // silently change what a re-import of the same period means.
-        period: invoiceDate.slice(0, 7),
+        period,
       });
     }
   }

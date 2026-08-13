@@ -6,7 +6,7 @@
  *  normalizer defensible. */
 
 import { describe, expect, it } from "vitest";
-import { Gstr2bError, isoDate, normalize, toTurtle } from "./gstr2b";
+import { Gstr2bError, isoDate, normalize, returnPeriod, toTurtle } from "./gstr2b";
 
 function getPayload(overrides: Record<string, unknown> = {}) {
   return {
@@ -17,6 +17,7 @@ function getPayload(overrides: Record<string, unknown> = {}) {
             {
               ctin: "27AABCU9603R1ZM",
               trdnm: "Umbrella Supplies",
+              supprd: "072026",
               inv: [
                 { inum: "INV-1001", dt: "04-07-2026", txval: 100000.0, igst: 18000.0, cgst: 0, sgst: 0, cess: 0, itcavl: "Y", rev: "N", typ: "R", pos: "27" },
                 { inum: "INV-1005", dt: "24-07-2026", txval: 40000.0, igst: 0, cgst: 3600.0, sgst: 3600.0, cess: 0, itcavl: "N", rev: "N", typ: "R", pos: "27" },
@@ -24,6 +25,7 @@ function getPayload(overrides: Record<string, unknown> = {}) {
             },
             {
               ctin: "29AACCG0527D1Z8",
+              supprd: "072026",
               inv: [{ inum: "INV-1003", dt: "15-07-2026", txval: 250000.0, igst: 45000.0, cgst: 0, sgst: 0, cess: 0, itcavl: "Y", rev: "N", typ: "R", pos: "29" }],
             },
           ],
@@ -57,8 +59,38 @@ describe("normalize", () => {
     expect(normalize(getPayload())[1]!.taxableValue).toBe("40000.00");
   });
 
-  it("derives the period from the invoice date, not from today", () => {
-    expect(normalize(getPayload()).every((i) => i.period === "2026-07")).toBe(true);
+  it("derives the period from the document's own declared return period, not the invoice date", () => {
+    // An invoice dated in July can legitimately belong to August's GSTR-2B —
+    // that's the whole carry-forward scenario `supprd` exists to represent.
+    // Deriving from invoiceDate instead would make this untestable.
+    const payload = getPayload();
+    payload.data.data.docdata.b2b[0]!.supprd = "082026";
+
+    expect(normalize(payload)[0]!.period).toBe("2026-08");
+  });
+
+  it("scopes the declared return period to its own supplier, not every invoice", () => {
+    const payload = getPayload();
+    payload.data.data.docdata.b2b[0]!.supprd = "082026"; // Umbrella files for August
+    // Globex (b2b[1]) keeps the factory default of "072026".
+
+    const invoices = normalize(payload);
+
+    expect(invoices[0]!.period).toBe("2026-08"); // INV-1001, Umbrella
+    expect(invoices[1]!.period).toBe("2026-08"); // INV-1005, Umbrella
+    expect(invoices[2]!.period).toBe("2026-07"); // INV-1003, Globex
+  });
+
+  it("refuses a supplier block with no declared return period", () => {
+    // Silently falling back to the invoice date would reintroduce the exact
+    // bug this field exists to close, invisibly.
+    const payload = getPayload();
+    delete (payload.data.data.docdata.b2b[0] as { supprd?: string }).supprd;
+
+    expect(() => normalize(payload)).toThrow(Gstr2bError);
+    // The exact quoted value, not just the field name — otherwise a defaulted
+    // placeholder string could stand in for the missing field unnoticed.
+    expect(() => normalize(payload)).toThrow("'' is not a return period");
   });
 
   it("accepts a portal download and a GSP response identically", () => {
@@ -77,6 +109,34 @@ describe("normalize", () => {
     // every claimed invoice as unmatched.
     expect(() => normalize({ error: "unauthorized" })).toThrow(Gstr2bError);
     expect(() => normalize({})).toThrow(/docdata/);
+  });
+});
+
+describe("returnPeriod", () => {
+  it("converts the authority's MMYYYY to the rules' YYYY-MM", () => {
+    expect(returnPeriod("072026")).toBe("2026-07");
+  });
+
+  it("accepts month boundaries 01 and 12", () => {
+    expect(returnPeriod("012026")).toBe("2026-01");
+    expect(returnPeriod("122026")).toBe("2026-12");
+  });
+
+  it("refuses a month of 00 or 13, rather than emitting an unsortable period", () => {
+    expect(() => returnPeriod("002026")).toThrow(Gstr2bError);
+    expect(() => returnPeriod("132026")).toThrow(Gstr2bError);
+  });
+
+  it("refuses anything that is not six digits", () => {
+    expect(() => returnPeriod("2026-07")).toThrow(Gstr2bError);
+    expect(() => returnPeriod("")).toThrow(Gstr2bError);
+  });
+
+  it("refuses extra characters before or after the six digits, not just a match inside them", () => {
+    // An unanchored match would find "072026" inside either string and
+    // silently accept garbage on one side of it.
+    expect(() => returnPeriod("X072026")).toThrow(Gstr2bError);
+    expect(() => returnPeriod("072026X")).toThrow(Gstr2bError);
   });
 });
 

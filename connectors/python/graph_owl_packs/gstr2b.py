@@ -29,6 +29,7 @@ stdlib only, like the loader beside it.
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -73,15 +74,7 @@ class Gstr2bInvoice:
     reverse_charge: str
     invoice_type: str
     place_of_supply: str
-
-    @property
-    def period(self) -> str:
-        """The return period, from the invoice's own date.
-
-        Deriving it from the clock instead would silently change what a re-run
-        of the same period means.
-        """
-        return self.invoice_date[:7]
+    period: str
 
     @property
     def subject(self) -> str:
@@ -145,6 +138,31 @@ def _iso_date(value: str) -> str:
     )
 
 
+_RETURN_PERIOD = re.compile(r"^(0[1-9]|1[0-2])(\d{4})$")
+
+
+def return_period(supprd: str) -> str:
+    """A supplier's declared return period, `MMYYYY`, as the `YYYY-MM` the
+    rules compare periods in.
+
+    **This, not the invoice's own date, is what `gst:period` means.** GSTR-2B
+    is a monthly snapshot of *filed* returns, not of invoice dates — an
+    invoice dated in July can legitimately surface only in August's 2B, once
+    the supplier files late. Deriving the period from the invoice date
+    instead silently makes that case, and the carry-forward reasoning built
+    on it, untestable: every invoice would report the period it was *issued*
+    in, never the period it was *filed* in.
+    """
+    match = _RETURN_PERIOD.match(str(supprd))
+    if not match:
+        raise Gstr2bError(
+            f"'{supprd}' is not a return period this connector can place — "
+            f"expected 'supprd' as MMYYYY"
+        )
+    month, year = match.groups()
+    return f"{year}-{month}"
+
+
 def _docdata(payload: dict) -> dict:
     """The `docdata` section, wherever the provider chose to wrap it.
 
@@ -192,6 +210,7 @@ def normalize(payload: dict) -> list[Gstr2bInvoice]:
     for supplier in suppliers:
         gstin = str(supplier.get("ctin", ""))
         name = str(supplier.get("trdnm", ""))
+        period = return_period(str(supplier.get("supprd", "")))
         for line in supplier.get("inv", []):
             igst, cgst = _money(line.get("igst")), _money(line.get("cgst"))
             sgst, cess = _money(line.get("sgst")), _money(line.get("cess"))
@@ -218,6 +237,7 @@ def normalize(payload: dict) -> list[Gstr2bInvoice]:
                     reverse_charge=str(line.get("rev", "")),
                     invoice_type=str(line.get("typ", "")),
                     place_of_supply=str(line.get("pos", "")),
+                    period=period,
                 )
             )
     return invoices
@@ -375,6 +395,7 @@ __all__ = [
     "Gstr2bError",
     "Gstr2bInvoice",
     "normalize",
+    "return_period",
     "to_turtle",
     "fetch",
     "from_file",

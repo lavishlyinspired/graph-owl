@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from graph_owl_packs.gstr2b import (  # noqa: E402
     Gstr2bError,
     normalize,
+    return_period,
     to_turtle,
 )
 
@@ -77,6 +78,7 @@ def get_payload(**overrides: object) -> dict:
                         {
                             "ctin": "29AACCG0527D1Z8",
                             "trdnm": "Globex Trading",
+                            "supprd": "072026",
                             "inv": [
                                 {
                                     "inum": "INV-1003",
@@ -209,12 +211,72 @@ def test_turtle_uses_the_vocabulary_the_pack_already_defines() -> None:
     assert 'gst:period        "2026-07"' in turtle
 
 
-def test_the_period_comes_from_the_invoice_date_not_from_today() -> None:
+def test_the_period_comes_from_the_declared_return_period_not_the_invoice_date() -> None:
     """A reconciliation is for a stated period; deriving it from the clock
-    would silently change what a re-run means."""
+    would silently change what a re-run means.
+
+    **Nor from the invoice's own date.** GSTR-2B is a monthly snapshot of
+    *filed* returns, not of invoice dates — an invoice dated in July can
+    legitimately surface only in August's 2B, once the supplier files late.
+    `supprd` (the supplier's own declared return period) is what `gst:period`
+    means; deriving it from `dt` instead makes that carry-forward case, and
+    the reasoning built on it, permanently untestable.
+    """
     turtle = to_turtle(normalize(get_payload()))
 
     assert turtle.count('gst:period        "2026-07"') == 3
+
+
+def test_the_declared_period_is_scoped_to_its_own_supplier() -> None:
+    payload = get_payload()
+    payload["data"]["data"]["docdata"]["b2b"][0]["supprd"] = "082026"  # Umbrella files for August
+    # Globex (b2b[1]) keeps the factory default of "072026".
+
+    records = normalize(payload)
+
+    assert records[0].period == "2026-08"  # INV-1001, Umbrella
+    assert records[1].period == "2026-08"  # INV-1005, Umbrella
+    assert records[2].period == "2026-07"  # INV-1003, Globex
+
+
+def test_a_supplier_block_with_no_declared_return_period_is_refused() -> None:
+    """Silently falling back to the invoice date would reintroduce the exact
+    bug this field exists to close, invisibly."""
+    payload = get_payload()
+    del payload["data"]["data"]["docdata"]["b2b"][0]["supprd"]
+
+    with pytest.raises(Gstr2bError, match="'' is not a return period"):
+        normalize(payload)
+
+
+def test_return_period_converts_mmyyyy_to_yyyy_mm() -> None:
+    assert return_period("072026") == "2026-07"
+
+
+def test_return_period_accepts_month_boundaries_01_and_12() -> None:
+    assert return_period("012026") == "2026-01"
+    assert return_period("122026") == "2026-12"
+
+
+def test_return_period_refuses_month_00_or_13() -> None:
+    with pytest.raises(Gstr2bError):
+        return_period("002026")
+    with pytest.raises(Gstr2bError):
+        return_period("132026")
+
+
+def test_return_period_refuses_anything_that_is_not_six_digits() -> None:
+    with pytest.raises(Gstr2bError):
+        return_period("2026-07")
+    with pytest.raises(Gstr2bError):
+        return_period("")
+
+
+def test_return_period_refuses_extra_characters_before_or_after_the_six_digits() -> None:
+    with pytest.raises(Gstr2bError):
+        return_period("X072026")
+    with pytest.raises(Gstr2bError):
+        return_period("072026X")
 
 
 def test_a_quote_in_a_trade_name_cannot_break_the_document() -> None:

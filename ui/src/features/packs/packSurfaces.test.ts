@@ -37,7 +37,7 @@ describe("surfacesFor", () => {
     const gst = surfacesFor(["pack:gst"])[0]!;
     const file = JSON.stringify({
       docdata: {
-        b2b: [{ ctin: "27AABCU9603R1ZM", inv: [{ inum: "INV-1", dt: "09-07-2026", txval: 100, igst: 18, cgst: 0, sgst: 0, cess: 0, itcavl: "Y", rev: "N" }] }],
+        b2b: [{ ctin: "27AABCU9603R1ZM", supprd: "072026", inv: [{ inum: "INV-1", dt: "09-07-2026", txval: 100, igst: 18, cgst: 0, sgst: 0, cess: 0, itcavl: "Y", rev: "N" }] }],
       },
     });
 
