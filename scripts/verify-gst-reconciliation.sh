@@ -98,7 +98,34 @@ check "nothing was rejected" \
 echo "==> running the rules"
 RUN=$(reconcile gst --server "http://127.0.0.1:$PORT")
 check "every registered rule was evaluated" \
-  "$(echo "$RUN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rulesEvaluated"])')" "12"
+  "$(echo "$RUN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rulesEvaluated"])')" "13"
+
+echo
+echo "==> the same legal entity under two state registrations"
+# A GSTIN is `SS PPPPPPPPPP E Z C`. INV-1015 is booked against
+# 29AABCU9603R1ZK (Karnataka) and filed under 27AABCU9603R1ZM (Maharashtra):
+# characters 3-12 are identical, so this is one taxpayer with two valid
+# registrations — neither a typo nor a different supplier.
+check "INV-1015 is reported as a PAN-level registration difference" \
+  "$(count gst:SupplierPanMismatch INV-1015)" "1"
+check "  …naming the registration the books used" \
+  "$(evidence gst:SupplierPanMismatch INV-1015 supplierGstin)" "29AABCU9603R1ZK"
+# **The interaction the study predicted.** Two GSTINs differing in two of
+# fifteen characters is exactly what a transposition looks like to an ngram
+# band — so without a PAN guard this pair would also be reported as a keying
+# error, telling a reviewer to correct a GSTIN that is already correct.
+check "  …and is NOT also called a keying error" \
+  "$(count gst:GstinTransposition INV-1015)" "0"
+# The real transposition must survive the guard: …1MZ against …1ZM share a PAN
+# only if the transposition is inside the PAN itself, and here it is not.
+check "the genuine transposition still fires" \
+  "$(count gst:GstinTransposition INV-1004)" "1"
+# Both absence rules must stay silent: the invoice *is* filed and *is* booked,
+# under a different registration of the same entity.
+check "a PAN-level pair is not 'the supplier has not filed'" \
+  "$(count gst:SupplierNotFiled INV-1015)" "0"
+check "  …nor missing from the books" \
+  "$(count gst:MissingInBooks INV-1015)" "0"
 
 echo
 echo "==> the matching key: one invoice, three printed formats"

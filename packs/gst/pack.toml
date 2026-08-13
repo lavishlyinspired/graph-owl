@@ -444,6 +444,25 @@ evidence = [
   { predicate = "gst:igst", var = "filedIgst" },
 ]
 
+# **The same legal entity, a different state registration.** Not a typo — both
+# GSTINs are valid and belong to one taxpayer, so this is neither
+# `GstinTransposition` (a keying error) nor a value mismatch (nothing is wrong
+# with the figures). Cites the matching policy rather than a statute, because
+# the judgement is this pack's own: which registration the supply actually came
+# from is a question for a human. Plan 109.
+[[findings]]
+label = "gst:SupplierPanMismatch"
+summary = "Booked against one GSTIN of a supplier and filed under another registration of the same PAN"
+governed_by = "gst:MatchingPolicy"
+query = "supplier-pan-mismatch"
+subject = "invoice"
+evidence = [
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:supplierGstin", var = "bookedGstin" },
+  { predicate = "gst:supplierGstin", var = "filedGstin" },
+  { predicate = "gst:taxAmount", var = "taxAmount" },
+]
+
 # The 180-day condition, as a span between two events.
 #
 # `when_missing = "elapsed"`, not `"finding"`. Treating every unpaid invoice
@@ -533,6 +552,11 @@ path = "queries/goods-receipt-timing.sparql"
 label = "Matched, but the goods arrived in a later period (Section 16(2)(b))"
 
 [[queries]]
+name = "supplier-pan-mismatch"
+path = "queries/supplier-pan-mismatch.sparql"
+label = "Filed under a different state registration of the same PAN"
+
+[[queries]]
 name = "tax-head-mismatch"
 path = "queries/tax-head-mismatch.sparql"
 label = "Totals agree, tax heads do not (IGST against CGST+SGST)"
@@ -564,6 +588,7 @@ labels = [
   "gst:BooksGstr1Mismatch",
   "gst:GoodsReceiptTiming",
   "gst:TaxHeadMismatch",
+  "gst:SupplierPanMismatch",
 ]
 actions = ["accept", "reject-with-reason", "defer"]
 evidence = "side-by-side"

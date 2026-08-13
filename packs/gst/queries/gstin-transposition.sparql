@@ -40,5 +40,38 @@ WHERE {
     ?filedSupplier gst:supplierGstin ?filedGstin .
   }
   FILTER (?claimedGstin != ?filedGstin)
+
+  # **A shared PAN is not a keying error, and this rule must not call it one.**
+  #
+  # A GSTIN is `SS PPPPPPPPPP E Z C` — two state digits, then the ten-character
+  # PAN. Two GSTINs agreeing on characters 3-12 are the *same legal entity
+  # registered in two states*, which is legitimate and common: a supplier bills
+  # from their Maharashtra registration and the register books their Karnataka
+  # one. Both identifiers are valid; nothing has been mistyped.
+  #
+  # Left in, the ngram similarity band would score such a pair highly — they
+  # differ in two characters out of fifteen, which is exactly what a
+  # transposition looks like — and the reviewer would be told to correct a
+  # GSTIN that is already correct. `supplier-pan-mismatch.sparql` reports this
+  # case properly, as a question about which registration the supply came from.
+  #
+  # **The state code is the discriminator, not the PAN alone** — and getting
+  # that wrong silenced the genuine transposition this rule exists for.
+  #
+  # A legal entity gets exactly *one* registration per state. So:
+  #   same PAN + different state  → two valid registrations, not an error
+  #   same PAN + same state       → one of the two GSTINs is mistyped
+  #
+  # INV-1004's pair is `27AABCU9603R1MZ` against `27AABCU9603R1ZM`: the
+  # transposition is in the entity/checksum suffix at positions 13-15, so the
+  # PAN at 3-12 is *identical* and a PAN-only guard excluded the very case this
+  # rule is for. Caught by this file's own negative assertion, which is what it
+  # is there for.
+  #
+  # `plans/109-reconciliation-logic-study.md` records the tiering this came from.
+  FILTER (
+    SUBSTR(?claimedGstin, 3, 10) != SUBSTR(?filedGstin, 3, 10)
+    || SUBSTR(?claimedGstin, 1, 2) = SUBSTR(?filedGstin, 1, 2)
+  )
 }
 ORDER BY ?number

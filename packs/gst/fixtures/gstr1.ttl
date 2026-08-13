@@ -193,6 +193,16 @@ gst:g1-INV-1014 rdf:type gst:Gstr1Invoice ;
     gst:filedDate     "2026-08-11" ;
     gst:period        "2026-07" .
 
+gst:g1-INV-1015 rdf:type gst:Gstr1Invoice ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+    gst:invoiceNumber "INV-1015" ;
+    gst:invoiceKey    "INV1015" ;
+    gst:invoiceDate   "2026-07-31" ;
+    gst:taxableValue  "80000.00" ;
+    gst:taxAmount     "14400.00" ;
+    gst:filedDate     "2026-08-11" ;
+    gst:period        "2026-07" .
+
 gst:g1-INV-2001 rdf:type gst:Gstr1Invoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-2001" ;

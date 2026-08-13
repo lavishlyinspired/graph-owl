@@ -1,0 +1,66 @@
+# The supplier filed under a **different state registration of the same legal
+# entity** — Plan 109's one immediately implementable finding.
+#
+# **The domain fact this rests on.** A GSTIN is `SS PPPPPPPPPP E Z C`: two state
+# digits, then the ten-character PAN, then an entity code, a literal `Z`, and a
+# checksum. Two GSTINs sharing characters 3–12 are the *same legal entity*
+# registered in two states — which is not an error and not a typo, and is
+# exactly why it needs its own finding rather than being swept in with either.
+#
+# **Why this is not `GstinTransposition`.** That rule catches a keying error:
+# two strings a similarity band suspects are one identifier mistyped. This is
+# the opposite situation — both GSTINs are perfectly valid, both belong to the
+# same taxpayer, and the register simply used the wrong one. A transposition is
+# fixed by correcting a character; this is fixed by deciding which registration
+# the supply actually came from, which changes the place of supply and therefore
+# which heads the tax belongs under.
+#
+# **And that is why this rule compares nothing but identity.** A genuinely
+# cross-state pair *should* differ on the tax heads — IGST on one side,
+# CGST+SGST on the other — so reusing `tax-head-mismatch.sparql`'s comparison
+# here would report the correct behaviour as an error on every single row. The
+# heads are projected as evidence for the reviewer, never filtered on.
+#
+# **Excluded: the same GSTIN.** The whole point is that the two registrations
+# differ, so an exact GSTIN match is the ordinary matched case and belongs to
+# the other rules.
+#
+# `OPTIONAL` + `!BOUND` for the exclusion, and every pattern inside its own
+# `GRAPH ?var { }` — both traps are documented at length in
+# `missing-in-gstr2b.sparql`, where they were found against real data.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+
+SELECT ?invoice ?number ?bookedGstin ?filedGstin ?pan ?taxAmount
+WHERE {
+  GRAPH ?register {
+    ?invoice a gst:PurchaseInvoice ;
+             gst:issuedBy ?supplier ;
+             gst:invoiceNumber ?number ;
+             gst:invoiceKey    ?key ;
+             gst:taxAmount     ?taxAmount .
+    ?supplier gst:supplierGstin ?bookedGstin .
+  }
+
+  GRAPH ?authority {
+    ?filed a gst:Gstr2bInvoice ;
+           gst:issuedBy ?filedSupplier ;
+           gst:invoiceKey ?key .
+    ?filedSupplier gst:supplierGstin ?filedGstin .
+  }
+
+  # Characters 3–12: the PAN inside each GSTIN. SPARQL's `SUBSTR` is 1-based.
+  BIND(SUBSTR(?bookedGstin, 3, 10) AS ?pan)
+
+  # Same legal entity…
+  FILTER (?pan = SUBSTR(?filedGstin, 3, 10))
+  # …in a *different state*, which is what makes both registrations valid.
+  #
+  # **The state code is load-bearing, not decoration.** A legal entity gets
+  # exactly one registration per state, so two GSTINs sharing a PAN *and* a
+  # state code cannot both be valid — that is a mistyped suffix, and
+  # `gstin-transposition.sparql` is the rule for it. Without this clause the
+  # two rules would each claim the other's population.
+  FILTER (SUBSTR(?bookedGstin, 1, 2) != SUBSTR(?filedGstin, 1, 2))
+}
+ORDER BY ?number

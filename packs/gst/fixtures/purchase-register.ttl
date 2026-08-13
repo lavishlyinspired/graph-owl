@@ -217,6 +217,25 @@ gst:pr-INV-1014 rdf:type gst:PurchaseInvoice ;
     gst:taxAmount     "12600.00" ;
     gst:period        "2026-07" .
 
+# **The same legal entity under a different state registration.** Booked
+# against 29AABCU9603R1ZK (Karnataka); the supplier filed under
+# 27AABCU9603R1ZM (Maharashtra). The PAN — AABCU9603R, characters 3-12 — is
+# identical, so this is one taxpayer with two valid registrations, not a typo
+# and not a different supplier. Fires `SupplierPanMismatch` and nothing else:
+# the tax heads legitimately differ across states, so no head rule may judge it.
+gst:supplier-29AABCU9603R1ZK rdf:type gst:Supplier ;
+    gst:supplierGstin "29AABCU9603R1ZK" ;
+    gst:supplierName  "Umbrella Industrial Supplies Pvt Ltd (Karnataka)" .
+
+gst:pr-INV-1015 rdf:type gst:PurchaseInvoice ;
+    gst:issuedBy      gst:supplier-29AABCU9603R1ZK ;
+    gst:invoiceNumber "INV-1015" ;
+    gst:invoiceKey    "INV1015" ;
+    gst:invoiceDate   "2026-07-31" ;
+    gst:taxableValue  "80000.00" ;
+    gst:taxAmount     "14400.00" ;
+    gst:period        "2026-07" .
+
 gst:pr-INV-2001 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-2001" ;

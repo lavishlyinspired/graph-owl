@@ -141,6 +141,19 @@ gst:2b-INV-1014 rdf:type gst:Gstr2bInvoice ;
     gst:reverseCharge "N" ;
     gst:period        "2026-07" .
 
+# Filed under the Maharashtra registration of the entity the register booked
+# under its Karnataka one. Same PAN, different state.
+gst:2b-INV-1015 rdf:type gst:Gstr2bInvoice ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+    gst:invoiceNumber "INV-1015" ;
+    gst:invoiceKey    "INV1015" ;
+    gst:invoiceDate   "2026-07-31" ;
+    gst:taxableValue  "80000.00" ;
+    gst:taxAmount     "14400.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "N" ;
+    gst:period        "2026-07" .
+
 gst:2b-INV-2001 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-2001" ;
