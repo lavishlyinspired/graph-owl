@@ -380,6 +380,39 @@ export interface FindingRuleDef {
   readonly span: unknown;
 }
 
+/** A pack's own console configuration — `GET /packs/{pack}/console`.
+ *
+ *  **What this replaced.** The reconciliation page's source list, its measures
+ *  and its per-finding guidance were TypeScript constants, so the page knew how
+ *  to render GST and only GST: a healthcare, banking or automotive pack would
+ *  have had its data shown under GST's headings, or nothing at all. The page's
+ *  *shape* — sources in, rules run, a statement out, exceptions to work — is
+ *  genuinely domain-neutral and stays here; everything naming a domain now
+ *  comes from the pack that owns it.
+ *
+ *  `404` for a pack with no `[console]` section, which is ordinary rather than
+ *  exceptional and renders as an honest empty state. */
+export interface PackConsoleConfig {
+  readonly reconciliation?: {
+    readonly label: string;
+    readonly subtitle?: string;
+    readonly currency?: string;
+    readonly locale?: string;
+    readonly matchKey?: string;
+    readonly identity?: string;
+    readonly recordNoun?: string;
+    readonly measures?: readonly { readonly name: string; readonly label: string; readonly total?: boolean }[];
+    readonly sources?: readonly {
+      readonly key: string;
+      readonly class: string;
+      readonly label: string;
+      readonly description?: string;
+      readonly surface?: string;
+      readonly role?: "opening" | "closing" | "evidence";
+    }[];
+  };
+}
+
 /** Structural analytics over one asset's bounded neighbourhood — Epic 105
  *  P10's projection, reachable from the console at last.
  *
@@ -1428,6 +1461,11 @@ export const api = {
    *  `nodes`, `inDegree` and `outDegree` are index-aligned — the client joins
    *  on position, and reordering either side attributes one node's
    *  connectivity to another. */
+  /** A pack's declared console configuration, or `null` when it declares none
+   *  — an ordinary answer, not a failure. */
+  packConsole: (pack: string) =>
+    request<PackConsoleConfig>(`/packs/${encodeURIComponent(pack)}/console`).catch(() => null),
+
   assetAnalytics: (assetId: string, params: { hops?: number; maxNodes?: number } = {}) => {
     const query = new URLSearchParams();
     if (params.hops !== undefined) query.set("hops", String(params.hops));

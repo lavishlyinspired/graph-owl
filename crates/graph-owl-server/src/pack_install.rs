@@ -190,6 +190,42 @@ pub async fn run_pack_loader(
     })
 }
 
+/// A pack's own `[console]` table, verbatim, as JSON.
+///
+/// **Why the console needed this at all.** The reconciliation page's source
+/// list, its measures and its per-finding guidance lived in TypeScript, so it
+/// only ever knew how to render GST. Install a healthcare, banking or
+/// automotive pack and the page would show that pack's data under GST's
+/// headings, or nothing. The *shape* — sources in, rules run, a statement out,
+/// exceptions to work — is genuinely domain-neutral and stays in the console;
+/// everything that names a domain now comes from the pack that owns it.
+///
+/// **Read at request time, not stored** — the same reading
+/// [`scan_available_packs`] already does of the `[pack]` header, for the same
+/// reason: `pack.toml` stays the single source of truth for what a pack is,
+/// and this needs no migration, no storage table and no loader change.
+///
+/// **Returned as untyped JSON on purpose.** Giving it a Rust struct would put
+/// a second copy of the manifest's grammar in the server and make every new
+/// console field a Rust change — exactly what `plans/105-domain-neutrality.md`
+/// refuses. The console is the only consumer and it is the right place to know
+/// the shape.
+///
+/// `None` for a pack with no `[console]` section, which is the ordinary case
+/// (hospitality has never had one) and must render an honest empty state
+/// rather than an error.
+#[must_use]
+pub fn read_console_config(base_dir: &Path, pack: &str) -> Option<serde_json::Value> {
+    // The same path-traversal refusal installing already applies — an id is
+    // joined onto a filesystem path here too.
+    if !crate::pack_id_is_safe(pack) {
+        return None;
+    }
+    let text = std::fs::read_to_string(base_dir.join(pack).join("pack.toml")).ok()?;
+    let parsed: serde_json::Value = toml::from_str(&text).ok()?;
+    parsed.get("console").cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +348,72 @@ mod tests {
             found.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
             vec!["gst", "hospitality"]
         );
+    }
+
+    /// **The reconciliation page was GST-shaped, and a second domain made that
+    /// a defect rather than a shortcut.** Its source list, its measures and its
+    /// per-finding guidance all lived in TypeScript, so installing a
+    /// healthcare or banking pack would render that pack's data under GST's
+    /// headings — or nothing at all. The shape of the page (sources in, rules
+    /// run, a statement out, exceptions to work) is genuinely domain-neutral;
+    /// everything that names a domain now comes from the pack that owns it.
+    ///
+    /// Read from `pack.toml` at request time rather than stored, exactly as
+    /// [`scan_available_packs`] already reads the `[pack]` header — no
+    /// migration, no loader change, and the manifest stays the single source
+    /// of truth for what a pack is.
+    #[test]
+    fn reads_a_packs_declared_console_configuration() {
+        let base = temp_dir("console-config");
+        let pack = base.join("gst");
+        fs::create_dir_all(&pack).expect("mkdir");
+        fs::write(
+            pack.join("pack.toml"),
+            r#"
+[pack]
+id = "gst"
+description = "d"
+
+[console]
+[console.reconciliation]
+label = "GST reconciliation"
+currency = "INR"
+locale = "en-IN"
+
+[[console.reconciliation.sources]]
+key = "books"
+class = "PurchaseInvoice"
+label = "Your books"
+"#,
+        )
+        .expect("write");
+
+        let found = read_console_config(&base, "gst").expect("console section");
+
+        assert_eq!(found["reconciliation"]["label"], "GST reconciliation");
+        assert_eq!(
+            found["reconciliation"]["sources"][0]["class"],
+            "PurchaseInvoice"
+        );
+    }
+
+    /// A pack that declares no console section is the ordinary case, not a
+    /// failure — hospitality has never had one. The console must render an
+    /// honest empty state for it rather than an error.
+    #[test]
+    fn a_pack_with_no_console_section_reports_none() {
+        let base = temp_dir("console-none");
+        write_pack(&base, "hospitality", "d");
+
+        assert!(read_console_config(&base, "hospitality").is_none());
+    }
+
+    /// The same path-traversal refusal `pack_id_is_safe` already applies to
+    /// installing — an id is joined onto a filesystem path here too.
+    #[test]
+    fn refuses_a_path_traversal_shaped_id() {
+        let base = temp_dir("console-traversal");
+
+        assert!(read_console_config(&base, "../../etc").is_none());
     }
 }

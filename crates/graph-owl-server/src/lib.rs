@@ -103,6 +103,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/packs/{pack}/reconcile", post(reconcile_pack))
         .route("/packs/{pack}/obligations", get(obligation_calendar))
         .route("/packs/available", get(list_available_packs))
+        .route("/packs/{pack}/console", get(pack_console_config))
         .route("/packs/{pack}/install", post(install_pack))
         .route("/graph/export/preview", get(export_preview))
         // Epic 42 Slice G: the text-first ontology editor. `preview` is the
@@ -8320,6 +8321,30 @@ fn pack_id_is_safe(id: &str) -> bool {
 /// what *is* installed (`GET /namespaces`'s own `declaredBy: "pack:<id>"`
 /// marker), cross-referenced against `pack_install::scan_available_packs`'s
 /// read of `pack.toml` headers on disk.
+/// `GET /packs/{pack}/console` — a pack's own `[console]` table.
+///
+/// **What this route exists to stop.** The reconciliation page knew how to
+/// render GST and only GST: its sources, its measures and its per-finding
+/// guidance were TypeScript constants. A second domain — healthcare, banking,
+/// automotive — would have had its data rendered under GST's headings, or not
+/// at all. The page's *shape* is domain-neutral and stays in the console;
+/// everything naming a domain now comes from the pack.
+///
+/// **Not admin-gated**, unlike `/packs/available`: this is presentation
+/// configuration for a pack the caller can already see, not an inventory of
+/// what is installable on the host.
+///
+/// `404` for a pack with no `[console]` section, which is ordinary rather than
+/// exceptional — the console renders an honest empty state for it.
+async fn pack_console_config(
+    Auth(_principal): Auth,
+    Path(pack): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    pack_install::read_console_config(&pack_install::packs_base_dir(), &pack)
+        .map(Json)
+        .ok_or(AppError::NotFound)
+}
+
 async fn list_available_packs(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,

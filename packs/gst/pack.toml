@@ -242,6 +242,15 @@ evidence = [
 # from `law/rule-36-4.ttl` by traversal. The citation is projected into the
 # evidence so a reviewer sees which notification the judgement was made under
 # — a finding that cannot name its authority is not defensible.
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "Claimed, not available in GSTR-2B"
+meaning = "This invoice is in your books and in no GSTR-2B. No GSTR-1/2A data is loaded, so nothing here can say whether the supplier filed it."
+next_action = "Upload the GSTR-2A for this period — it separates 'the supplier never filed' from 'they filed and it did not reach you'."
+tone = "danger"
+
 [[findings]]
 label = "gst:AmountMismatch"
 summary = "Both sides report the invoice, and the values differ by more than the cap then in force allowed"
@@ -260,6 +269,15 @@ evidence = [
 # Both of the next two are findings on invoices where **every number agrees**
 # — which is the point. Matching is necessary and not sufficient, and a
 # reconciliation that stopped at amounts would pass both of these silently.
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "Your books and GSTR-2B disagree"
+meaning = "Both sides report the invoice and the values differ by more than the cap in force allowed."
+next_action = "Compare against the physical invoice, then correct whichever side is wrong."
+tone = "warning"
+
 [[findings]]
 label = "gst:ITCNotAvailable"
 summary = "The invoice matches, and the authority reports the credit as unavailable"
@@ -271,6 +289,14 @@ evidence = [
   { predicate = "gst:taxAmount", var = "taxAmount" },
   { predicate = "gst:itcAvailable", var = "itcAvailable" },
 ]
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "Credit reported as unavailable"
+meaning = "The invoice matches perfectly and the authority reports the credit as not available."
+next_action = "Check whether it falls under Section 17(5) blocked credits. Do not claim it on the strength of the match alone."
+tone = "danger"
 
 [[findings]]
 label = "gst:Reversed"
@@ -294,6 +320,15 @@ evidence = [
 # `at_most` is the load-bearing half. Without it every *correctly* matched
 # invoice scores 1.0 and is reported as a suspected typo — the finding that
 # would make a reviewer stop trusting the queue on day one.
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "Flagged as reverse charge"
+meaning = "The invoice matches and the authority flags it as reverse-charge, so the tax is yours to self-assess."
+next_action = "Confirm the tax has been paid under RCM before taking the credit."
+tone = "info"
+
 [[findings]]
 label = "gst:GstinTransposition"
 summary = "Same invoice number and period on both sides under near-identical GSTINs — probably a keying error"
@@ -340,6 +375,15 @@ resolve_by = "https://graph-owl.dev/packs/gst#supplierGstin"
 # `PotentialMismatch` does — verified present in `law/sections.ttl`, not
 # assumed — because it is the same statutory condition, read at the stage
 # where the graph can now say which side has not met it.
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "Near-identical GSTIN — probably a keying error"
+meaning = "Two records agree on invoice number and period under GSTINs that differ by what looks like a transposition. Nothing has been merged."
+next_action = "Confirm which GSTIN is right and correct the register. Merging automatically would attribute one supplier's invoice to another."
+tone = "warning"
+
 [[findings]]
 label = "gst:SupplierNotFiled"
 summary = "An invoice claimed in the purchase register that the supplier has not reported in any GSTR-1/IFF filing"
@@ -357,6 +401,15 @@ evidence = [
 # because it is usually the whole explanation — an invoice filed after a
 # period's 2B was generated cannot be in it, and a reviewer should be able to
 # see that without asking anybody.
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "Supplier has not filed"
+meaning = "You have booked this purchase and no supplier has declared it in any GSTR-1 or IFF."
+next_action = "Chase the supplier to file it. Do not claim the credit until it appears in a GSTR-2B."
+tone = "danger"
+
 [[findings]]
 label = "gst:Gstr1NotIn2b"
 summary = "The supplier declared the invoice in GSTR-1/IFF, and it has not reached any GSTR-2B this pack holds"
@@ -377,6 +430,15 @@ evidence = [
 # about whether the supplier furnished details. The subject is the *declared*
 # invoice, because there is no register row to point at — that absence is the
 # finding.
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "Filed by the supplier, not in your GSTR-2B"
+meaning = "The supplier did declare it — the filing date is on the finding — but it has reached none of the GSTR-2B statements loaded here."
+next_action = "Check the GSTIN they filed against and whether it went in as B2C. If they simply filed late, it should appear in a later period's 2B."
+tone = "warning"
+
 [[findings]]
 label = "gst:MissingInBooks"
 summary = "The supplier's declared invoice appears in GSTR-1/IFF with no matching entry in the purchase register"
@@ -394,6 +456,15 @@ evidence = [
 # Same cap logic as `AmountMismatch`, against a different named graph — so the
 # citation still travels with the row and a 2020 invoice inside the cap then
 # in force stays silent.
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "In the GST records, not in your books"
+meaning = "A supplier has declared an invoice against your GSTIN that your purchase register does not carry."
+next_action = "Find out whether the purchase was never recorded — this is credit you may be entitled to and have not claimed — or whether somebody filed against the wrong GSTIN."
+tone = "info"
+
 [[findings]]
 label = "gst:BooksGstr1Mismatch"
 summary = "The purchase register and the supplier's GSTR-1/IFF declare the same invoice with different values"
@@ -413,6 +484,15 @@ evidence = [
 # rule here that is not a document comparison — see the query's own comment,
 # and `gst:Section16-2-b`, the one genuinely new statute subject this plan
 # adds.
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "Your books and the supplier's filing disagree"
+meaning = "Both sides declare this invoice and the values differ by more than the cap in force allowed."
+next_action = "Compare against the physical invoice. One of the two is wrong, and the finding names both figures."
+tone = "warning"
+
 [[findings]]
 label = "gst:GoodsReceiptTiming"
 summary = "The invoice is matched and its GSTR-2B period contains it, but the goods or services were received in a later period"
@@ -431,6 +511,15 @@ evidence = [
 # in GSTR-3B, so credit taken under the wrong head is a real reversal exposure.
 # The head-wise figures were already being imported as evidence with no rule
 # reading them; this is that rule.
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "Goods received after the period"
+meaning = "Every document agrees and the credit is still not claimable in this period, because the goods or services arrived in a later one."
+next_action = "Defer the claim to the period the goods were received in. Section 16(2)(b) is a condition in its own right."
+tone = "warning"
+
 [[findings]]
 label = "gst:TaxHeadMismatch"
 summary = "The invoice matches on every total, and the tax is split across different heads than the supplier filed"
@@ -450,6 +539,15 @@ evidence = [
 # with the figures). Cites the matching policy rather than a statute, because
 # the judgement is this pack's own: which registration the supply actually came
 # from is a question for a human. Plan 109.
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "Totals agree, tax heads do not"
+meaning = "Every total matches and the tax sits under different heads than the supplier filed — inter-state against intra-state."
+next_action = "ITC is claimed head-wise in GSTR-3B, so correct the head before claiming. Credit under the wrong head is a reversal exposure with interest."
+tone = "danger"
+
 [[findings]]
 label = "gst:SupplierPanMismatch"
 summary = "Booked against one GSTIN of a supplier and filed under another registration of the same PAN"
@@ -475,6 +573,15 @@ evidence = [
 # than "now" — and because a fixture judged against the wall clock silently
 # changes meaning as the calendar moves, which would turn a passing test into
 # a failing one on a date nobody chose.
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "A different state registration of the same supplier"
+meaning = "Booked against one GSTIN and filed under another registration sharing the same PAN — both are valid, and one is the wrong one for this supply."
+next_action = "Decide which registration the supply actually came from. It changes the place of supply, and therefore which heads the tax belongs under."
+tone = "warning"
+
 [[findings]]
 label = "gst:PaymentOverdue"
 summary = "Credit taken on an invoice not paid within 180 days of its date"
@@ -494,6 +601,14 @@ to = "paidAt"
 exceeds_days = 180
 when_missing = "elapsed"
 as_of = "2026-08-01"
+
+# Written for the person who has to act on this, which is a different
+# sentence from `summary` — that one is written for a reviewer of the rule.
+[findings.guidance]
+title = "Unpaid past 180 days"
+meaning = "Credit was taken on an invoice the supplier has not been paid for within 180 days of its date."
+next_action = "Reverse the credit, or pay the supplier. Section 16(2)(d) leaves no third option."
+tone = "danger"
 
 # The same answers, reachable from the console workbench with no new route.
 [[queries]]
@@ -569,6 +684,67 @@ path = "queries/provision-in-force.sparql"
 label = "The Rule 36(4)/Section 16(2)(aa) provision in force on one invoice's own date"
 
 [console]
+
+# **What this pack looks like on the reconciliation page — declared here, not
+# in the console.** The page's shape is domain-neutral: sources in, rules run,
+# a statement out, exceptions to work. Everything below names GST, and a
+# healthcare, banking or automotive pack declares its own instead. A pack that
+# declares no `[console.reconciliation]` simply does not appear on that page,
+# which is the correct answer rather than an error — the hospitality pack has
+# never had one.
+[console.reconciliation]
+label = "GST reconciliation"
+subtitle = "Your books against what your suppliers declared and what the authority made available — with the reason for every difference."
+# Formatting is a domain fact too: a GST working paper grouped 1,000,000 reads
+# as wrong before it reads as foreign.
+currency = "INR"
+locale = "en-IN"
+# What "the same record" means here, and what a human calls one. Both are
+# predicate names in this pack's own vocabulary.
+match_key = "invoiceKey"
+identity = "invoiceNumber"
+record_noun = "invoice"
+
+# The figures the statement totals, in the order every practitioner
+# reconciliation format lists them. A pack reconciling something other than tax
+# declares its own — quantities, claim amounts, whatever has to agree.
+measures = [
+  { name = "taxableValue", label = "Taxable value" },
+  { name = "igst", label = "IGST" },
+  { name = "cgst", label = "CGST" },
+  { name = "sgst", label = "SGST" },
+  { name = "cess", label = "Cess" },
+  { name = "taxAmount", label = "Total tax", total = true },
+]
+
+# **Ordered the way the reconciliation is actually performed.** `role` says
+# which side of the statement a source is: `opening` is what the taxpayer
+# claims, `closing` is what the statement reconciles *to*, and `evidence`
+# explains differences without being a balance of its own.
+[[console.reconciliation.sources]]
+key = "books"
+class = "PurchaseInvoice"
+label = "Your books"
+description = "What you have recorded"
+surface = "books"
+role = "opening"
+
+[[console.reconciliation.sources]]
+key = "gstr1"
+class = "Gstr1Invoice"
+label = "GSTR-2A / GSTR-1"
+description = "What your suppliers declared"
+surface = "gstr1"
+role = "evidence"
+
+[[console.reconciliation.sources]]
+key = "authority"
+class = "Gstr2bInvoice"
+label = "GSTR-2B"
+description = "What credit the authority made available"
+surface = "gstr2b"
+role = "closing"
+
 [[console.queues]]
 id = "gst-reconciliation"
 label = "GST reconciliation"
@@ -592,3 +768,4 @@ labels = [
 ]
 actions = ["accept", "reject-with-reason", "defer"]
 evidence = "side-by-side"
+

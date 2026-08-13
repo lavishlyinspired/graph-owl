@@ -51,7 +51,7 @@ import {
   WarningOutlined,
 } from "@ant-design/icons";
 import type { UploadFile } from "antd/es/upload/interface";
-import { api, type PackFinding } from "../../api";
+import { api, type PackConsoleConfig, type PackFinding } from "../../api";
 import { lexical } from "../../workbench/results";
 import { importThroughSurface } from "../packs/importFile";
 import { surfacesFor, type PackImportSurface } from "../packs/packSurfaces";
@@ -152,20 +152,6 @@ const COPY = {
   openVocabulary: "Browse the vocabulary",
 };
 
-/** ₹ the way an Indian statement writes it — lakhs and crores, not thousands.
- *  A figure grouped `1,000,000` in a GST working paper reads as wrong before
- *  it reads as foreign. */
-const RUPEES = new Intl.NumberFormat("en-IN", {
-  style: "currency",
-  currency: "INR",
-  maximumFractionDigits: 2,
-  minimumFractionDigits: 2,
-});
-
-function rupees(value: number): string {
-  return RUPEES.format(value);
-}
-
 /** Every invoice in one class, with the fields the statement totals.
  *
  *  **`supplierName` is the only OPTIONAL, and deliberately so.** A required
@@ -215,34 +201,22 @@ interface SourceSpec {
   readonly surfaceKey: string;
 }
 
-/** The three sources of a GST reconciliation, in the order it is done.
+/** The sources this pack declares, in the order it declares them.
  *
- *  Lives here rather than in `pack.toml` for the same reason `SCENARIOS` does
- *  — see `statement.ts`. When a second domain needs a workspace, this is the
- *  table that moves to the manifest. */
-const SOURCES: readonly SourceSpec[] = [
-  {
-    key: "books",
-    className: "PurchaseInvoice",
-    label: "Your books",
-    role: "What you have recorded",
-    surfaceKey: "books",
-  },
-  {
-    key: "gstr1",
-    className: "Gstr1Invoice",
-    label: "GSTR-2A / GSTR-1",
-    role: "What your suppliers declared",
-    surfaceKey: "gstr1",
-  },
-  {
-    key: "authority",
-    className: "Gstr2bInvoice",
-    label: "GSTR-2B",
-    role: "What credit the authority made available",
-    surfaceKey: "gstr2b",
-  },
-];
+ *  **This was a TypeScript constant naming GST's three documents, and a second
+ *  domain made that a defect rather than a shortcut.** Install a healthcare,
+ *  banking or automotive pack and the page would have rendered its data under
+ *  GST's headings, or nothing. It now comes from `[console.reconciliation]` in
+ *  the pack's own manifest — see `packs/gst/pack.toml`. */
+function sourcesFromConfig(config: PackConsoleConfig | null): readonly SourceSpec[] {
+  return (config?.reconciliation?.sources ?? []).map((source) => ({
+    key: source.key,
+    className: source.class,
+    label: source.label,
+    role: source.description ?? "",
+    surfaceKey: source.surface ?? source.key,
+  }));
+}
 
 /** One SPARQL solution as a source row.
  *
@@ -284,11 +258,17 @@ function SourceCard({
   rows,
   surface,
   onImported,
+  money,
+  packId,
 }: {
   spec: SourceSpec;
   rows: readonly SourceInvoice[];
   surface: PackImportSurface | undefined;
   onImported: () => void;
+  money: (value: number) => string;
+  /** Whose pack this upload belongs to — discovered by the page, never the
+   *  literal `"gst"` this used to pass. */
+  packId: string;
 }) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -301,7 +281,7 @@ function SourceCard({
       setBusy(true);
       setFailure(null);
       try {
-        const outcome = await importThroughSurface("gst", surface, await blob.text());
+        const outcome = await importThroughSurface(packId, surface, await blob.text());
         message.success(
           outcome.count === 0
             ? "That file held no invoices — a period nobody filed against is a valid answer."
@@ -316,7 +296,7 @@ function SourceCard({
         setBusy(false);
       }
     },
-    [surface, onImported],
+    [surface, onImported, packId],
   );
 
   const loaded = summary.count > 0;
@@ -338,9 +318,9 @@ function SourceCard({
 
       {loaded && (
         <Space direction="vertical" size={2} style={{ marginBottom: 12, width: "100%" }}>
-          <Text style={{ fontSize: 22, fontWeight: 600 }}>{rupees(summary.taxAmount)}</Text>
+          <Text style={{ fontSize: 22, fontWeight: 600 }}>{money(summary.taxAmount)}</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {`${summary.count} invoice${summary.count === 1 ? "" : "s"} · taxable ${rupees(summary.taxableValue)}`}
+            {`${summary.count} invoice${summary.count === 1 ? "" : "s"} · taxable ${money(summary.taxableValue)}`}
           </Text>
           {summary.periods.length > 0 && (
             <Text type="secondary" style={{ fontSize: 12 }}>
@@ -391,18 +371,8 @@ function SourceCard({
   );
 }
 
-/** The five figures a GST reconciliation is done in, in the order every
- *  practitioner format lists them. */
-const HEADS: readonly { key: keyof Heads; label: string }[] = [
-  { key: "taxableValue", label: "Taxable value" },
-  { key: "igst", label: "IGST" },
-  { key: "cgst", label: "CGST" },
-  { key: "sgst", label: "SGST" },
-  { key: "cess", label: "Cess" },
-  { key: "taxAmount", label: "Total tax" },
-];
-
-const INVOICE_COLUMNS = [
+function invoiceColumns(money: (v: number) => string) {
+  return [
   { title: "Invoice", dataIndex: "invoiceNumber", key: "invoiceNumber", width: 130 },
   { title: "Supplier", dataIndex: "supplierName", key: "supplierName", render: (v: string) => v || "—" },
   { title: "GSTIN", dataIndex: "gstin", key: "gstin", width: 170 },
@@ -413,28 +383,38 @@ const INVOICE_COLUMNS = [
     dataIndex: "taxableValue",
     key: "taxableValue",
     align: "right" as const,
-    render: (v: string) => rupees(Number(v || 0)),
+    render: (v: string) => money(Number(v || 0)),
   },
   {
     title: "Tax",
     dataIndex: "taxAmount",
     key: "taxAmount",
     align: "right" as const,
-    render: (v: string) => rupees(Number(v || 0)),
+    render: (v: string) => money(Number(v || 0)),
   },
-];
+  ];
+}
 
 /** The statement's own arithmetic, laid out the way a practitioner's format
  *  lays it out: an opening balance, the reconciling items, a closing balance,
  *  and — the line a spreadsheet cannot produce — whatever is left over. */
-function StatementPanel({ statement }: { statement: Statement }) {
+function StatementPanel({
+  statement,
+  measures,
+  money,
+}: {
+  statement: Statement;
+  /** Declared by the pack, not assumed — see `sourcesFromConfig`. */
+  measures: readonly { key: keyof Heads; label: string }[];
+  money: (value: number) => string;
+}) {
   return (
     <Card size="small">
       <Row gutter={[24, 16]}>
         <Col xs={24} md={6}>
           <Statistic
             title={COPY.booksTotal}
-            value={rupees(statement.books.taxAmount)}
+            value={money(statement.books.taxAmount)}
             valueStyle={{ fontSize: 20 }}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>{`${statement.books.count} ${COPY.invoicesSuffix}`}</Text>
@@ -442,7 +422,7 @@ function StatementPanel({ statement }: { statement: Statement }) {
         <Col xs={24} md={6}>
           <Statistic
             title={COPY.authorityTotal}
-            value={rupees(statement.authority.taxAmount)}
+            value={money(statement.authority.taxAmount)}
             valueStyle={{ fontSize: 20 }}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>{`${statement.authority.count} ${COPY.invoicesSuffix}`}</Text>
@@ -450,7 +430,7 @@ function StatementPanel({ statement }: { statement: Statement }) {
         <Col xs={24} md={6}>
           <Statistic
             title={COPY.differenceTotal}
-            value={rupees(statement.difference.taxAmount)}
+            value={money(statement.difference.taxAmount)}
             valueStyle={{ fontSize: 20 }}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>{COPY.differenceHint}</Text>
@@ -458,7 +438,7 @@ function StatementPanel({ statement }: { statement: Statement }) {
         <Col xs={24} md={6}>
           <Statistic
             title={COPY.explainedTotal}
-            value={rupees(statement.explained.taxAmount)}
+            value={money(statement.explained.taxAmount)}
             valueStyle={{ fontSize: 20 }}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>{COPY.explainedHint}</Text>
@@ -478,7 +458,7 @@ function StatementPanel({ statement }: { statement: Statement }) {
           size="small"
           rowKey="head"
           pagination={false}
-          dataSource={HEADS.map((head) => ({
+          dataSource={measures.map((head) => ({
             head: head.label,
             books: statement.books[head.key],
             authority: statement.authority[head.key],
@@ -491,14 +471,14 @@ function StatementPanel({ statement }: { statement: Statement }) {
               dataIndex: "books",
               key: "books",
               align: "right" as const,
-              render: (v: number) => rupees(v),
+              render: (v: number) => money(v),
             },
             {
               title: COPY.headAuthority,
               dataIndex: "authority",
               key: "authority",
               align: "right" as const,
-              render: (v: number) => rupees(v),
+              render: (v: number) => money(v),
             },
             {
               title: COPY.headDifference,
@@ -509,10 +489,10 @@ function StatementPanel({ statement }: { statement: Statement }) {
               // quiet; one that does not is the whole reason this table exists.
               render: (v: number) =>
                 Math.abs(v) < 0.005 ? (
-                  <Text type="secondary">{rupees(v)}</Text>
+                  <Text type="secondary">{money(v)}</Text>
                 ) : (
                   <Text strong type="warning">
-                    {rupees(v)}
+                    {money(v)}
                   </Text>
                 ),
             },
@@ -528,7 +508,7 @@ function StatementPanel({ statement }: { statement: Statement }) {
         message={
           statement.reconciled
             ? COPY.reconciledTitle
-            : `${COPY.unexplainedTitle}: ${rupees(statement.unexplained.taxAmount)}`
+            : `${COPY.unexplainedTitle}: ${money(statement.unexplained.taxAmount)}`
         }
         description={
           statement.reconciled ? (
@@ -544,7 +524,7 @@ function StatementPanel({ statement }: { statement: Statement }) {
                   size="small"
                   rowKey="invoiceNumber"
                   dataSource={[...statement.unexplained.invoices]}
-                  columns={INVOICE_COLUMNS}
+                  columns={invoiceColumns(money)}
                   pagination={statement.unexplained.invoices.length > 10 ? { pageSize: 10 } : false}
                   scroll={{ x: "max-content" }}
                 />
@@ -562,7 +542,15 @@ function StatementPanel({ statement }: { statement: Statement }) {
  *  **The extra evidence is rendered for the rules whose whole point is a pair
  *  of numbers.** A mismatch shown as one figure is unreviewable, and a
  *  late-filing finding without the filing date is just "unmatched" again. */
-function FindingGroup({ item, findings }: { item: ReconcilingItem; findings: readonly PackFinding[] }) {
+function FindingGroup({
+  item,
+  findings,
+  money,
+}: {
+  item: ReconcilingItem;
+  findings: readonly PackFinding[];
+  money: (value: number) => string;
+}) {
   const scenario = scenarioFor(item.label);
   const mine = findings.filter((f) => f.label === item.label && f.status !== "rejected");
   // **The rule renders its own evidence.** A predicate does not identify a
@@ -591,7 +579,7 @@ function FindingGroup({ item, findings }: { item: ReconcilingItem; findings: rea
             {item.count}
           </Tag>
           <Text strong>{scenario.title}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{rupees(item.atStake)}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{money(item.atStake)}</Text>
         </Space>
       }
     >
@@ -615,7 +603,7 @@ function FindingGroup({ item, findings }: { item: ReconcilingItem; findings: rea
         size="small"
         rowKey="invoiceNumber"
         dataSource={[...item.rows]}
-        columns={INVOICE_COLUMNS}
+        columns={invoiceColumns(money)}
         pagination={item.rows.length > 10 ? { pageSize: 10 } : false}
         scroll={{ x: "max-content" }}
       />
@@ -642,6 +630,12 @@ export function ReconciliationWorkspace({
   onVocabulary: () => void;
 }) {
   const [ruleCount, setRuleCount] = useState<number | null>(null);
+  const [config, setConfig] = useState<PackConsoleConfig | null>(null);
+  /** Which pack this page is showing. Discovered, never assumed — the page
+   *  addressed `"gst"` by name in five places even after it had discovered a
+   *  pack, so any other domain would have had its uploads, its rules and its
+   *  findings all pointed at GST. */
+  const [packId, setPackId] = useState<string | null>(null);
   const [rows, setRows] = useState<Record<string, SourceInvoice[]> | null>(null);
   const [findings, setFindings] = useState<readonly PackFinding[]>([]);
   const [truncated, setTruncated] = useState(false);
@@ -654,17 +648,38 @@ export function ReconciliationWorkspace({
     setFailure(null);
     try {
       const namespaces = await api.namespaces();
-      const pack = surfacesFor(namespaces.map((n) => n.declaredBy)).find((p) => p.packId === "gst");
+      // The first installed pack that declares a reconciliation. A deployment
+      // with several picks the first; a deployment with none renders empty.
+      const candidates = surfacesFor(namespaces.map((n) => n.declaredBy));
+      let pack = candidates[0] ?? undefined;
+      for (const candidate of candidates) {
+        const declared = await api.packConsole(candidate.packId);
+        if (declared?.reconciliation) {
+          pack = candidate;
+          break;
+        }
+      }
       setPackInstalled(pack !== undefined);
+      setPackId(pack?.packId ?? null);
       setSurfaces(pack?.imports ?? []);
       if (!pack) {
         setRows({});
         return;
       }
 
-      const results = await Promise.all(SOURCES.map((source) => api.sparql(sourceQuery(source.className))));
+      const declared = await api.packConsole(pack.packId);
+      setConfig(declared);
+      const specs = sourcesFromConfig(declared);
+      if (specs.length === 0) {
+        // A pack with no declared reconciliation is not an error — it simply
+        // does not appear on this page.
+        setRows({});
+        return;
+      }
+
+      const results = await Promise.all(specs.map((source) => api.sparql(sourceQuery(source.className))));
       const next: Record<string, SourceInvoice[]> = {};
-      SOURCES.forEach((source, index) => {
+      specs.forEach((source, index) => {
         next[source.key] = distinctInvoices((results[index]?.rows ?? []).map(toSourceInvoice));
       });
       setRows(next);
@@ -672,10 +687,10 @@ export function ReconciliationWorkspace({
       // that looks complete is the failure this project refuses everywhere,
       // and here it would be a tax figure quietly missing invoices.
       setTruncated(results.some((result) => result.truncated));
-      setFindings(await api.findings({ pack: "gst" }));
+      setFindings(await api.findings({ pack: pack.packId }));
       // The pack's own registered rules — real data, already admin-gated, and
       // the honest answer to "what is actually evaluating my data".
-      setRuleCount(await api.findingRules("gst").then((r) => r.length).catch(() => null));
+      setRuleCount(await api.findingRules(pack.packId).then((r) => r.length).catch(() => null));
     } catch (error) {
       setFailure(error instanceof Error ? error.message : COPY.loadFailed);
     }
@@ -688,7 +703,8 @@ export function ReconciliationWorkspace({
   const run = useCallback(async () => {
     setRunning(true);
     try {
-      const outcome = await api.reconcilePack("gst");
+      if (packId === null) return;
+      const outcome = await api.reconcilePack(packId);
       message.success(
         outcome.found === 0 ? "Reconciliation ran — no rule matched." : `${outcome.found} finding(s).`,
       );
@@ -707,6 +723,37 @@ export function ReconciliationWorkspace({
         : null,
     [rows, findings],
   );
+
+  /** Whatever the installed pack declares — empty for a pack that declares no
+   *  reconciliation, which renders an honest empty state rather than GST's
+   *  headings over somebody else's data. */
+  const sources = useMemo(() => sourcesFromConfig(config), [config]);
+
+  /** The measures this pack reconciles in. A pack reconciling something other
+   *  than tax declares its own — quantities, claim amounts, whatever has to
+   *  agree — and this table follows it. */
+  const measures = useMemo(
+    () =>
+      (config?.reconciliation?.measures ?? []).map((m) => ({
+        key: m.name as keyof Heads,
+        label: m.label,
+      })),
+    [config],
+  );
+
+  /** Currency and grouping are a domain fact, not a global preference: ₹ in
+   *  Indian grouping for GST, and whatever a different pack declares for
+   *  itself. Falls back to plain grouping when a pack declares neither. */
+  const money = useMemo(() => {
+    const currency = config?.reconciliation?.currency;
+    const locale = config?.reconciliation?.locale ?? "en-US";
+    const format = new Intl.NumberFormat(locale, {
+      ...(currency ? { style: "currency" as const, currency } : {}),
+      maximumFractionDigits: 2,
+      minimumFractionDigits: 2,
+    });
+    return (value: number) => format.format(value);
+  }, [config]);
 
   const suppliers = useMemo(
     () =>
@@ -760,13 +807,15 @@ export function ReconciliationWorkspace({
       <div>
         <Title level={5}>{COPY.step1}</Title>
         <Row gutter={[16, 16]}>
-          {SOURCES.map((source) => (
+          {sources.map((source) => (
             <Col xs={24} md={8} key={source.key}>
               <SourceCard
                 spec={source}
                 rows={rows[source.key] ?? []}
                 surface={surfaces.find((s) => s.key === source.surfaceKey)}
                 onImported={() => void refresh()}
+                money={money}
+                packId={packId ?? ""}
               />
             </Col>
           ))}
@@ -793,7 +842,7 @@ export function ReconciliationWorkspace({
 
       <div>
         <Title level={5}>{COPY.step3}</Title>
-        <StatementPanel statement={statement} />
+        <StatementPanel statement={statement} measures={measures} money={money} />
       </div>
 
       {/* **The graph made visible, from data already fetched.** The complaint
@@ -817,7 +866,7 @@ export function ReconciliationWorkspace({
             {
               label: COPY.graphSources,
               hint: COPY.graphSourcesHint,
-              value: SOURCES.filter((s) => (rows[s.key]?.length ?? 0) > 0).length,
+              value: sources.filter((s) => (rows[s.key]?.length ?? 0) > 0).length,
             },
             { label: COPY.graphRules, hint: COPY.graphRulesHint, value: ruleCount ?? 0 },
           ].map((tile) => (
@@ -901,14 +950,14 @@ export function ReconciliationWorkspace({
               dataIndex: "booksTax",
               key: "booksTax",
               align: "right" as const,
-              render: (v: number) => rupees(v),
+              render: (v: number) => money(v),
             },
             {
               title: "Tax in GSTR-2B",
               dataIndex: "authorityTax",
               key: "authorityTax",
               align: "right" as const,
-              render: (v: number) => rupees(v),
+              render: (v: number) => money(v),
             },
           ]}
         />
@@ -927,7 +976,7 @@ export function ReconciliationWorkspace({
           />
         ) : (
           statement.items.map((item) => (
-            <FindingGroup key={item.label} item={item} findings={findings} />
+            <FindingGroup key={item.label} item={item} findings={findings} money={money} />
           ))
         )}
       </div>
