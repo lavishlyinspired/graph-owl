@@ -20,6 +20,11 @@
 
 export const ROUTES = [
   "overview",
+  // Plan 108 Slice 7. A route of its own rather than a tab under Admin: for
+  // the person closing a period this *is* the product, and it was previously
+  // reachable only by uploading through an admin table, clicking a button in
+  // one of its rows, and reading the result in a third section.
+  "reconciliation",
   "explore",
   "governance",
   "workbench",

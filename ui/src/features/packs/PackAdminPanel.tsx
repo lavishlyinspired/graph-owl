@@ -24,6 +24,7 @@ import { Alert, Button, Card, Empty, List, Space, Table, Tag, Typography, Upload
 import { InboxOutlined, SyncOutlined } from "@ant-design/icons";
 import type { UploadFile } from "antd/es/upload/interface";
 import { api, type FindingRuleDef, type OntologyPack } from "../../api";
+import { importThroughSurface } from "./importFile";
 import {
   installedPacks,
   surfacesFor,
@@ -91,15 +92,12 @@ function ReconcileAction({ packId }: { packId: string }) {
   );
 }
 
-/** The first `gst:period "..."`-shaped literal in the converted Turtle, used
- *  to scope the import source. Reading it back out of the Turtle rather than
- *  changing every surface's `convert` signature keeps `PackImportSurface`
- *  generic — a surface with no period concept simply produces none, and the
- *  import falls back to the pack-wide source name. */
-export function invoicePeriod(turtle: string): string | null {
-  const match = turtle.match(/:period\s+"(\d{4}-\d{2})"/);
-  return match?.[1] ?? null;
-}
+/** Moved to `importFile.ts` now that the reconciliation workspace uploads
+ *  through the same surfaces. Re-exported so this module's existing callers
+ *  and tests keep working — the rule for naming an import source has to be one
+ *  rule, or the same file uploaded from two places lands in two named graphs
+ *  and is counted twice. */
+export { invoicePeriod } from "./importFile";
 
 function ImportSurface({ packId, surface }: { packId: string; surface: PackImportSurface }) {
   const [busy, setBusy] = useState(false);
@@ -113,30 +111,11 @@ function ImportSurface({ packId, surface }: { packId: string; surface: PackImpor
       setResult(null);
       setFailure(null);
       try {
-        const text = await blob.text();
-        // Convert first. A file the pack cannot read must never reach the
-        // graph — a partial import is harder to undo than a refused one.
-        const { turtle, count } = surface.convert(text);
-        if (count === 0) {
-          // Not an error: a period nobody filed against is a legitimate and
-          // informative answer. Saying so beats a silent success.
-          setResult({ landed: 0, skipped: 0, rejected: 0 });
-          return;
-        }
-        // Scoped by period rather than the pack's own `${packId}-${surface.key}`
-        // source name — that name is also what the pack's *bundled demo
-        // fixture* imports into, so a real upload whose invoice numbers
-        // happened to coincide with the fixture's would silently skip as
-        // "already imported". Scoping by period both avoids that collision
-        // and gives a natural idempotence key: re-uploading the same period
-        // is a no-op, uploading a different one lands separately.
-        const period = invoicePeriod(turtle);
-        const outcome = await api.importRdf(
-          period ? `${packId}-${surface.key}-${period}` : `${packId}-${surface.key}`,
-          turtle,
-        );
-        setResult({ landed: outcome.landed.length, skipped: outcome.skipped.length, rejected: outcome.rejected.length });
-        message.success(`${outcome.landed.length} facts imported.`);
+        const outcome = await importThroughSurface(packId, surface, await blob.text());
+        setResult({ landed: outcome.landed, skipped: outcome.skipped, rejected: outcome.rejected });
+        // Zero is not an error: a period nobody filed against is a legitimate
+        // and informative answer. Saying so beats a silent success.
+        if (outcome.count > 0) message.success(`${outcome.landed} facts imported.`);
       } catch (error) {
         // The message is the pack's own, written for whoever is uploading —
         // "not a GSTR-2B download", not "unexpected token < in JSON".

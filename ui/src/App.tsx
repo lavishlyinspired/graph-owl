@@ -53,6 +53,7 @@ import ApartmentOutlined from "@ant-design/icons/es/icons/ApartmentOutlined";
 import ArrowLeftOutlined from "@ant-design/icons/es/icons/ArrowLeftOutlined";
 import BookOutlined from "@ant-design/icons/es/icons/BookOutlined";
 import CalendarOutlined from "@ant-design/icons/es/icons/CalendarOutlined";
+import ReconciliationOutlined from "@ant-design/icons/es/icons/ReconciliationOutlined";
 import BulbOutlined from "@ant-design/icons/es/icons/BulbOutlined";
 import DownloadOutlined from "@ant-design/icons/es/icons/DownloadOutlined";
 import CheckCircleFilled from "@ant-design/icons/es/icons/CheckCircleFilled";
@@ -105,6 +106,7 @@ import {
 import { VocabularySection } from "./features/vocabulary/VocabularySection";
 import { ReviewSection } from "./features/review/ReviewSection";
 import { ObligationCalendar, setObligationCalendarParams } from "./features/obligations/obligationCalendar";
+import { ReconciliationWorkspace } from "./features/reconciliation/ReconciliationWorkspace";
 import { AgentChat } from "./features/agentChat/AgentChat";
 import { PackAdminPanel } from "./features/packs/PackAdminPanel";
 import { KnowledgeGraphToggle } from "./features/knowledge/KnowledgeGraphToggle";
@@ -172,6 +174,7 @@ const { Text, Title, Paragraph } = Typography;
 
 type Section =
   | "overview"
+  | "reconciliation"
   | "explore"
   | "connectors"
   | "governance"
@@ -3956,6 +3959,7 @@ function AppShell() {
       // Included explicitly for "agent" from the start rather than
       // repeating that gap.
       named === "obligations" ||
+      named === "reconciliation" ||
       named === "agent"
     ) {
       return named;
@@ -4359,6 +4363,11 @@ function AppShell() {
                 style={{ borderInlineEnd: 0, paddingTop: 8 }}
                 items={[
                   { key: "overview", icon: <DashboardOutlined />, label: "Overview" },
+                  {
+                    key: "reconciliation",
+                    icon: <ReconciliationOutlined />,
+                    label: "Reconciliation",
+                  },
                   { key: "explore", icon: <CompassOutlined />, label: "Explore" },
                   {
                     key: "governance",
@@ -4444,6 +4453,8 @@ function AppShell() {
                   }}
                   onAddSource={() => setSection("connectors")}
                 />
+              ) : section === "reconciliation" ? (
+                <ReconciliationWorkspace onReview={() => setSection("review")} />
               ) : section === "governance" ? (
                 <GovernancePage colors={colors} />
               ) : section === "workbench" ? (
