@@ -78,6 +78,11 @@ until curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; do sleep 1; done
 
 export PYTHONPATH="$ROOT/connectors/python"
 load()      { python3 -m graph_owl_packs.cli "$@"; }
+# **A pack id, not a directory** — `run_findings` reads nothing local, and its
+# own docstring says so. This script passed `$ROOT/packs/gst` and produced
+# `POST /packs//Users/…/packs/gst/reconcile`, a 405 that killed the run at the
+# first rule. Pre-existing: the CLI moved to id-based triggering when the rule
+# engine went server-side (Epic 105 P5b) and this caller was never updated.
 reconcile() { python3 -c "
 import sys
 from graph_owl_packs.cli import reconcile_main
@@ -91,7 +96,7 @@ check "nothing was rejected" \
   "$(echo "$LOADED" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["rejected"]))')" "0"
 
 echo "==> running the rules"
-RUN=$(reconcile "$ROOT/packs/gst" --server "http://127.0.0.1:$PORT")
+RUN=$(reconcile gst --server "http://127.0.0.1:$PORT")
 check "every registered rule was evaluated" \
   "$(echo "$RUN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rulesEvaluated"])')" "11"
 
@@ -225,7 +230,7 @@ check "INV-1006, unpaid but only six days old, is NOT" "$(count gst:PaymentOverd
 
 echo
 echo "==> a re-run over unchanged data opens nothing"
-AGAIN=$(reconcile "$ROOT/packs/gst" --server "http://127.0.0.1:$PORT")
+AGAIN=$(reconcile gst --server "http://127.0.0.1:$PORT")
 check "opened" "$(echo "$AGAIN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["opened"])')" "0"
 # **Against the API's own count, not a magic number.** The property under test
 # is "a second run recognises what the first one found", and pinning a literal
@@ -247,7 +252,7 @@ check "dismissing without a reason is refused" \
 curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/findings/$ID/decision" \
   -H 'content-type: application/json' \
   -d '{"status":"rejected","reason":"supplier filed in the next period"}'
-THIRD=$(reconcile "$ROOT/packs/gst" --server "http://127.0.0.1:$PORT")
+THIRD=$(reconcile gst --server "http://127.0.0.1:$PORT")
 check "the dismissed finding does not come back" \
   "$(echo "$THIRD" | python3 -c 'import json,sys; print(json.load(sys.stdin)["opened"])')" "0"
 
@@ -287,7 +292,7 @@ python3 -m graph_owl_packs.cli "$LIVE" --server "http://127.0.0.1:$((PORT + 1))"
 python3 -c "
 import sys
 from graph_owl_packs.cli import reconcile_main
-sys.exit(reconcile_main(sys.argv[1:]))" "$LIVE" --server "http://127.0.0.1:$((PORT + 1))" >/dev/null
+sys.exit(reconcile_main(sys.argv[1:]))" gst --server "http://127.0.0.1:$((PORT + 1))" >/dev/null
 AFTER=$(curl -sf "http://127.0.0.1:$((PORT + 1))/findings?pack=gst" \
   | python3 -c 'import json,sys; print(sorted((r["label"], r["subject"]) for r in json.load(sys.stdin)))')
 kill "$LIVE_PID" 2>/dev/null || true

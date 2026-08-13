@@ -1,10 +1,38 @@
 # Plan 108 — Books ↔ GSTR-1 ↔ GSTR-2B: a three-way reconciliation graph, with period-aware carry-forward and receipt timing
 
-**Status**: story-split, not yet planned or built. **Branch**: main.
-**Depends on**: nothing, for Slices 1–5 and 8. Slice 6 (period-aware
-carry-forward) depends on `107-filing-period.md` Slice 1
-(`gst:FilingPeriod`), itself unbuilt — see that plan's own parking lot
-before starting Slice 6 here.
+**Status**: **Slices 1–5, 7 and 8 shipped 13 August 2026.** Slice 6
+(period-aware carry-forward) remains blocked on `107-filing-period.md`
+Slice 1 (`gst:FilingPeriod`), still unbuilt. **Branch**: main.
+
+**What shipped, and where it went past this plan.** Slices 1–5 and 8 landed
+as written — `gst:Gstr1Invoice`, `gst:filedDate`, `gst:GoodsReceipt`,
+`gst:Section16-2-b`, five new `[[findings]]` and their queries, all pure
+pack content. Slice 7 was written here as "one line per label in
+`[console.queues]`" and was deliberately widened, because that was not the
+real gap: the Review queue is a reviewer's tool and closing a period needs a
+different page. What shipped is a **Reconciliation route** — three source
+uploads, a run button, a statement (books total, GSTR-2B total, the
+difference, what the findings explain and what they do not), and the
+exceptions grouped by next action. The queue labels were added too.
+
+**Three things this plan did not anticipate, all found by running it:**
+
+- **A purchase-register importer was the actual blocker.** Every rule here
+  compares the taxpayer's books against something, and the books could only
+  arrive as a Turtle fixture inside the pack — so a CA uploading a real
+  GSTR-2B was reconciling it against demo data. `books.ts` (CSV/TSV, alias
+  column matching) and `gstr1.ts` (GSTR-2A JSON) shipped alongside.
+- **`SupplierNotFiled` and `MissingInBooks` shipped with a false-accusation
+  bug**, caught only against real data: a transposed GSTIN breaks the exact
+  join in both directions, so one typo produced three findings and two of
+  them were wrong — including "the supplier has not reported this invoice"
+  about a supplier who had. Fixed with a guard both queries now document.
+- **Slash-bearing invoice numbers (`RST/2026/0455`) produced invalid
+  Turtle** in all three importers, including the GSTR-2B one that predates
+  this plan. Now percent-encoded. Nothing in this document predicted it and
+  it would have failed on the first real upload.
+
+**Depends on**: nothing, for the slices that shipped.
 
 **Trigger**: three rounds of the same question, in this session. First: "how
 would the graph be used for a single ₹350 invoice whose supplier files
