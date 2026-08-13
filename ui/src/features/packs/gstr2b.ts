@@ -18,7 +18,24 @@
  *  `ctin`, `trdnm`, `inum`, `dt`, `txval`, `igst`/`cgst`/`sgst`/`cess`,
  *  `itcavl`, `rev`, `typ`, `pos`, under `docdata.b2b[].inv[]`. */
 
-export class Gstr2bError extends Error {}
+/** **One error type for every GST import surface, aliased rather than
+ *  subclassed.** A subclass would make `toThrow(Gstr2bError)` fail the moment
+ *  a shared normalizer threw the base — the pinned tests would start failing
+ *  for a reason that has nothing to do with what they assert. Callers here
+ *  only ever read `.message`, which is written for whoever is uploading. */
+export { GstImportError as Gstr2bError } from "./gstText";
+
+/** **Shared with `gstr1.ts` and `books.ts`, not reimplemented beside them.**
+ *  Plan 108's own warning: a second importer needs the *identical* normalizer.
+ *  Two `money()`s that disagree in the last decimal place produce a
+ *  reconciliation reporting mismatches that are not there, with nothing in the
+ *  output to say which importer was wrong.
+ *
+ *  Re-exported because the pinned Python-twin tests import `isoDate` and
+ *  `returnPeriod` from this module by name. */
+import { GstImportError, isoDate, literal, money, returnPeriod, supplierSubject } from "./gstText";
+
+export { isoDate, returnPeriod };
 
 export interface Gstr2bInvoice {
   readonly supplierGstin: string;
@@ -38,61 +55,6 @@ export interface Gstr2bInvoice {
   readonly period: string;
 }
 
-/** A monetary figure as a fixed two-decimal string.
- *
- *  `String(40000)` is `"40000"`, which does not equal a purchase register's
- *  `"40000.00"` — and the reconciliation compares them as strings, so a number
- *  that looks equal to a human simply fails to match. */
-function money(value: unknown): string {
-  if (value === null || value === undefined || value === "") return "0.00";
-  const parsed = typeof value === "number" ? value : Number(String(value));
-  if (!Number.isFinite(parsed)) throw new Gstr2bError(`'${String(value)}' is not a monetary amount`);
-  return parsed.toFixed(2);
-}
-
-/** A GST date as ISO-8601.
- *
- *  **The trap this normalizer exists to close.** GST reports `DD-MM-YYYY`, and
- *  every finding rule compares dates as ISO strings, relying on lexicographic
- *  order being chronological order — the only reason "which provision was in
- *  force" is answerable, since the query engine has no date type. Passing
- *  `04-07-2026` through breaks that ordering *silently*: the string sorts by
- *  day-of-month, the Rule 36(4) resolution picks the wrong provision, and the
- *  finding cites the wrong notification while looking entirely authoritative.
- *
- *  ISO input passes through rather than being re-parsed day-first, and
- *  anything unplaceable is refused — a wrong citation is worse than a missing
- *  finding. */
-export function isoDate(value: string): string {
-  const text = String(value ?? "").trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
-  const dmy = text.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
-  if (dmy) return `${dmy[3]}-${dmy[2]}-${dmy[1]}`;
-  throw new Gstr2bError(
-    `'${text}' is not a date this importer can place — GST reports DD-MM-YYYY ` +
-      `and the rules need ISO-8601; guessing would produce a finding citing the wrong provision`,
-  );
-}
-
-/** A supplier's declared return period, `MMYYYY`, as the `YYYY-MM` the rules
- *  compare periods in.
- *
- *  **This, not the invoice's own date, is what `gst:period` means.** GSTR-2B
- *  is a monthly snapshot of *filed* returns, not of invoice dates — an
- *  invoice dated in July can legitimately surface only in August's 2B, once
- *  the supplier files late. Deriving the period from `invoiceDate` instead
- *  silently makes that case, and the carry-forward reasoning built on it,
- *  untestable: every invoice would report the period it was *issued* in,
- *  never the period it was *filed* in. */
-export function returnPeriod(supprd: string): string {
-  const match = /^(0[1-9]|1[0-2])(\d{4})$/.exec(String(supprd ?? ""));
-  if (!match) {
-    throw new Gstr2bError(`'${supprd}' is not a return period this importer can place — expected 'supprd' as MMYYYY`);
-  }
-  const [, month, year] = match;
-  return `${year}-${month}`;
-}
-
 /** The `docdata` section, wherever the wrapper puts it.
  *
  *  A GSP nests it at `data.data.docdata`; a portal download uses
@@ -110,7 +72,7 @@ function docdata(payload: unknown): Record<string, unknown> {
     }
     seen = record.data;
   }
-  throw new Gstr2bError(
+  throw new GstImportError(
     "no 'docdata' section in this file — it is not a GSTR-2B download, and " +
       "reading it as an empty return would report every claimed invoice as unmatched",
   );
@@ -119,7 +81,7 @@ function docdata(payload: unknown): Record<string, unknown> {
 export function normalize(payload: unknown): Gstr2bInvoice[] {
   const suppliers = docdata(payload).b2b;
   if (suppliers === undefined) return [];
-  if (!Array.isArray(suppliers)) throw new Gstr2bError("'b2b' is present but is not a list of suppliers");
+  if (!Array.isArray(suppliers)) throw new GstImportError("'b2b' is present but is not a list of suppliers");
 
   const invoices: Gstr2bInvoice[] = [];
   for (const supplier of suppliers as Record<string, unknown>[]) {
@@ -158,12 +120,6 @@ export function normalize(payload: unknown): Gstr2bInvoice[] {
   return invoices;
 }
 
-/** Backslash first, or the escapes escape each other and one badly-named
- *  supplier corrupts every triple after it. */
-function literal(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
-}
-
 const LITERAL_FIELDS: readonly (readonly [string, keyof Gstr2bInvoice])[] = [
   ["invoiceNumber", "invoiceNumber"],
   ["invoiceDate", "invoiceDate"],
@@ -179,12 +135,6 @@ const LITERAL_FIELDS: readonly (readonly [string, keyof Gstr2bInvoice])[] = [
   ["placeOfSupply", "placeOfSupply"],
   ["period", "period"],
 ];
-
-/** The subject an invoice was `issuedBy`, keyed on the GSTIN so two invoices
- *  from the same supplier resolve to the same node — Epic 105c. */
-function supplierSubject(prefix: string, gstin: string): string {
-  return `${prefix}:supplier-${gstin}`;
-}
 
 /** The same shape `packs/gst/fixtures/gstr2b.ttl` carries, so the six finding
  *  rules cannot tell an uploaded file from a fixture.

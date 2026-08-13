@@ -18,6 +18,8 @@
  *  that the config is *gated at runtime* — a queue is always available, a pack
  *  surface exists only while its pack does. */
 
+import * as books from "./books";
+import * as gstr1 from "./gstr1";
 import { normalize, toTurtle } from "./gstr2b";
 
 /** A file a pack knows how to turn into graph facts. */
@@ -45,15 +47,49 @@ export interface PackSurfaces {
  *
  *  Nothing outside this object knows what GST is. Adding a second domain is
  *  adding a second entry, and the components below change not at all. */
+/** **Ordered the way the reconciliation is actually done**, not
+ *  alphabetically: your books first, then what your suppliers declared, then
+ *  what the authority made available. A CA reads down the list and it is the
+ *  workflow. */
 const GST: PackSurfaces = {
   packId: "gst",
   label: "GST",
   imports: [
     {
-      key: "gstr2b",
-      label: "GSTR-2B",
+      key: "books",
+      label: "Purchase register (your books)",
       description:
-        "The return your suppliers filed, as the authority reports it. Reconciled against your purchase register.",
+        "What you have recorded. Everything else is reconciled against this, so it is the one to load first.",
+      accept: ".csv,.tsv,.txt,text/csv",
+      howToObtain:
+        "Export the purchase register from your accounting system as CSV — in Tally, Display → Account Books → " +
+        "Purchase Register → Export (CSV). It needs at least a supplier GSTIN, invoice number, invoice date and " +
+        "taxable value; tax columns (IGST/CGST/SGST/Cess) and a reverse-charge column are used when present.",
+      convert(text) {
+        const invoices = books.normalize(text);
+        return { turtle: books.toTurtle(invoices), count: invoices.length };
+      },
+    },
+    {
+      key: "gstr1",
+      label: "GSTR-2A / GSTR-1 (what your suppliers declared)",
+      description:
+        "What your suppliers reported to GST. This is what separates 'the supplier never filed it' from " +
+        "'they filed it and it never reached you' — two problems with opposite next actions.",
+      accept: "application/json,.json",
+      howToObtain:
+        "Download it from the GST portal: Returns Dashboard → select the period → GSTR-2A → Download JSON. " +
+        "GSTR-2A carries what your suppliers declared in their GSTR-1, which is exactly what this compares against.",
+      convert(text) {
+        const invoices = gstr1.normalize(JSON.parse(text));
+        return { turtle: gstr1.toTurtle(invoices), count: invoices.length };
+      },
+    },
+    {
+      key: "gstr2b",
+      label: "GSTR-2B (what credit is available)",
+      description:
+        "The authority's own statement of the credit available to you for a period. This is what gates the claim.",
       accept: "application/json,.json",
       howToObtain:
         "Download it from the GST portal: Returns Dashboard → select the period → GSTR-2B → Download JSON. " +
