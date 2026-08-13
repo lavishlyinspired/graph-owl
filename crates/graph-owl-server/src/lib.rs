@@ -598,6 +598,7 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/assets/{id}/resolve", post(resolve_asset))
         .route("/assets/{id}/children", get(list_asset_children))
         .route("/assets/{id}/graph", get(asset_graph))
+        .route("/assets/{id}/analytics", get(asset_analytics))
         .route("/assets/{id}/ancestors", get(asset_ancestors))
         .route("/assets/{id}/lpg-node", get(asset_lpg_node))
         .with_state(catalog);
@@ -2599,6 +2600,64 @@ struct SubgraphQuery {
 /// Returns nodes with their kind and name resolved, so a renderer can draw
 /// labels without N follow-up reads — the whole point of one statement per
 /// traversal is lost if the client then makes one request per node.
+/// Degree centrality, connected components and orphan detection over one
+/// asset's bounded neighbourhood — `Catalog::asset_analytics`, exposed over
+/// HTTP.
+///
+/// **The capability existed and only the agent could reach it.** Epic 105 P10
+/// wired `graph-owl-analytics` to the `analytics()` MCP tool and stopped there,
+/// so the console — the surface a human actually uses — had no way to ask how
+/// connected anything was. That is not a missing capability, it is a missing
+/// route, and this is the route.
+///
+/// Bounds and direction parse exactly as [`asset_graph`]'s do, and are capped
+/// server-side for the same reason: the projection can never exceed the walk's
+/// own node cap, so this always answers "how connected is this neighbourhood"
+/// and never "how connected is the whole graph" — Epic 38 decision 2, which
+/// forbids the latter on a synchronous request.
+async fn asset_analytics(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    AppQuery(query): AppQuery<SubgraphQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let direction = match query.direction.as_deref() {
+        None | Some("both") => graph_owl_traversal::Direction::Both,
+        Some("outgoing") => graph_owl_traversal::Direction::Outgoing,
+        Some("incoming") => graph_owl_traversal::Direction::Incoming,
+        Some(other) => {
+            return Err(AppError::Validation(vec![FieldError::new(
+                "direction",
+                FieldErrorCode::Type,
+                format!("`{other}` is not one of: outgoing, incoming, both"),
+            )]));
+        }
+    };
+
+    let defaults = graph_owl_traversal::Bounds::default();
+    let bounds = graph_owl_traversal::Bounds {
+        max_hops: query.hops.unwrap_or(defaults.max_hops).min(6),
+        max_nodes: query.max_nodes.unwrap_or(defaults.max_nodes).min(1_000),
+    };
+
+    let analytics = catalog
+        .asset_analytics(&principal, id, direction, bounds)
+        .await?;
+
+    // Node identity travels as the rendered `Sid`, index-aligned with the two
+    // degree vectors exactly as `AssetAnalytics` documents — the client joins
+    // on position, and reordering either side here would silently attribute one
+    // node's connectivity to another.
+    Ok(Json(json!({
+        "nodes": analytics.nodes.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+        "inDegree": analytics.in_degree,
+        "outDegree": analytics.out_degree,
+        "orphans": analytics.orphans.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+        "edgeTypes": analytics.edge_types.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+        "truncated": analytics.truncated,
+    })))
+}
+
 async fn asset_graph(
     State(catalog): State<Catalog>,
     Auth(principal): Auth,

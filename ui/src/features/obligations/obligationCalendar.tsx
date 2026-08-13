@@ -17,6 +17,7 @@ import { Alert, Space, Spin, Table, Tag, Typography } from "antd";
 import { ApiError, api, type Obligation } from "../../api";
 import { displayTerm } from "../review/findingsQueue";
 import { readParam, writeParam } from "../deepLink";
+import { installedPacks } from "../packs/packSurfaces";
 
 const { Text, Title } = Typography;
 
@@ -81,13 +82,49 @@ type LoadState =
   | { kind: "ready"; obligations: Obligation[] };
 
 export function ObligationCalendar() {
-  const pack = readParam("pack") ?? "gst";
+  const requested = readParam("pack");
   const windowParam = readParam("window");
   const windowDays = windowParam !== null && windowParam !== "" ? Number(windowParam) : null;
 
   const [state, setState] = useState<LoadState>({ kind: "loading" });
+  /** **Discovered, never defaulted to `"gst"`.** This read
+   *  `readParam("pack") ?? "gst"`, which pointed a deployment that has never
+   *  installed the GST pack at a pack that does not exist for them — the
+   *  calendar then reported an error, or worse an empty calendar, for a
+   *  question nobody asked. `plans/105-f1-pack-admin-tab.md` recorded the gap
+   *  when the tab shipped and it was never closed.
+   *
+   *  `GET /namespaces` already answers "which packs does this deployment
+   *  have", because the loader writes `declaredBy: "pack:<id>"` — the same
+   *  discovery `packSurfaces.ts` uses, rather than a second mechanism. */
+  const [pack, setPack] = useState<string | null>(requested);
+
+  useEffect(() => {
+    if (requested !== null && requested !== "") return;
+    let live = true;
+    api
+      .namespaces()
+      .then((rows) => {
+        if (!live) return;
+        const installed = installedPacks(rows);
+        setPack(installed[0]?.packId ?? "");
+      })
+      .catch(() => {
+        if (live) setPack("");
+      });
+    return () => {
+      live = false;
+    };
+  }, [requested]);
 
   const load = useCallback(() => {
+    if (pack === null) return;
+    if (pack === "") {
+      // No pack installed is a correct, informative answer — not an error, and
+      // not a request for a pack this deployment does not have.
+      setState({ kind: "ready", obligations: [] });
+      return;
+    }
     setState({ kind: "loading" });
     api.obligationCalendar(pack).then(
       (obligations) => setState({ kind: "ready", obligations }),

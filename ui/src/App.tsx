@@ -4454,7 +4454,11 @@ function AppShell() {
                   onAddSource={() => setSection("connectors")}
                 />
               ) : section === "reconciliation" ? (
-                <ReconciliationWorkspace onReview={() => setSection("review")} />
+                <ReconciliationWorkspace
+                  onReview={() => setSection("review")}
+                  onWorkbench={() => setSection("workbench")}
+                  onVocabulary={() => setSection("vocabulary")}
+                />
               ) : section === "governance" ? (
                 <GovernancePage colors={colors} />
               ) : section === "workbench" ? (

@@ -380,6 +380,27 @@ export interface FindingRuleDef {
   readonly span: unknown;
 }
 
+/** Structural analytics over one asset's bounded neighbourhood — Epic 105
+ *  P10's projection, reachable from the console at last.
+ *
+ *  **Deliberately bounded, never whole-graph**: the projection cannot exceed
+ *  the traversal walk's own node cap, so this answers "how connected is this
+ *  neighbourhood" and never "how connected is the whole graph". */
+export interface AssetAnalytics {
+  /** Index-aligned with {@link inDegree} and {@link outDegree}. */
+  readonly nodes: readonly string[];
+  readonly inDegree: readonly number[];
+  readonly outDegree: readonly number[];
+  /** Nodes connected to nothing else in this neighbourhood. */
+  readonly orphans: readonly string[];
+  /** Which predicates were counted as graph structure — derived from the data,
+   *  not a pack-specific list. */
+  readonly edgeTypes: readonly string[];
+  /** **Always present, never inferred from a count.** A truncated walk that
+   *  looks complete is the failure this project refuses everywhere. */
+  readonly truncated: boolean;
+}
+
 /** A node in a finding's evidence graph — Epic 105 P7
  *  (`GET /findings/{id}/evidence-graph`).
  *
@@ -1396,6 +1417,25 @@ export const api = {
       method: "POST",
       body: JSON.stringify(reason ? { status, reason } : { status }),
     }),
+  /** Degree centrality, connected components and orphan detection over one
+   *  asset's bounded neighbourhood — `GET /assets/{id}/analytics`.
+   *
+   *  **The capability was built and only the agent could reach it.** Epic 105
+   *  P10 wired `graph-owl-analytics` to the `analytics()` MCP tool and stopped
+   *  there, so the console had no way to ask how connected anything was. The
+   *  gap was a route, not an algorithm.
+   *
+   *  `nodes`, `inDegree` and `outDegree` are index-aligned — the client joins
+   *  on position, and reordering either side attributes one node's
+   *  connectivity to another. */
+  assetAnalytics: (assetId: string, params: { hops?: number; maxNodes?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.hops !== undefined) query.set("hops", String(params.hops));
+    if (params.maxNodes !== undefined) query.set("maxNodes", String(params.maxNodes));
+    const suffix = query.toString();
+    return request<AssetAnalytics>(`/assets/${assetId}/analytics${suffix ? `?${suffix}` : ""}`);
+  },
+
   /** The subgraph reachable from a finding's own subject — Epic 105 P7, the
    *  traversal half. Computed at answer time from whatever the graph
    *  actually contains, not the flat evidence list the rule's author named

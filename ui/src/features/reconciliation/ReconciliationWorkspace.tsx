@@ -135,6 +135,21 @@ const COPY = {
   sourceBooks: "books",
   sourceGstr1: "GSTR-2A",
   sourceAuthority: "GSTR-2B",
+  graphTitle: "6 · What the graph knows",
+  graphHint:
+    "These are not three spreadsheets joined by a batch job. Each import lands in its own named graph, one gst:Supplier subject is shared across all of them, and every finding is the live result of a query with the statute it rests on attached — nothing is written onto an invoice as a flag.",
+  graphSubjects: "Invoice records",
+  graphSubjectsHint: "one per source, joined by a normalized key",
+  graphSuppliers: "Supplier subjects",
+  graphSuppliersHint: "shared across every document that names them",
+  graphSources: "Named graphs",
+  graphSourcesHint: "one per imported document, never the default graph",
+  graphRules: "Rules evaluated",
+  graphRulesHint: "each a SPARQL file plus the provision it cites",
+  graphVocab: "Vocabulary",
+  graphVocabHint: "classes and predicates the pack registered at runtime",
+  openWorkbench: "Query the graph directly",
+  openVocabulary: "Browse the vocabulary",
 };
 
 /** ₹ the way an Indian statement writes it — lakhs and crores, not thousands.
@@ -615,7 +630,18 @@ function FindingGroup({ item, findings }: { item: ReconcilingItem; findings: rea
   );
 }
 
-export function ReconciliationWorkspace({ onReview }: { onReview: () => void }) {
+export function ReconciliationWorkspace({
+  onReview,
+  onWorkbench,
+  onVocabulary,
+}: {
+  onReview: () => void;
+  /** The console already has a SPARQL workbench and a vocabulary browser; this
+   *  page's job is to point at them, not to grow its own copies. */
+  onWorkbench: () => void;
+  onVocabulary: () => void;
+}) {
+  const [ruleCount, setRuleCount] = useState<number | null>(null);
   const [rows, setRows] = useState<Record<string, SourceInvoice[]> | null>(null);
   const [findings, setFindings] = useState<readonly PackFinding[]>([]);
   const [truncated, setTruncated] = useState(false);
@@ -647,6 +673,9 @@ export function ReconciliationWorkspace({ onReview }: { onReview: () => void }) 
       // and here it would be a tax figure quietly missing invoices.
       setTruncated(results.some((result) => result.truncated));
       setFindings(await api.findings({ pack: "gst" }));
+      // The pack's own registered rules — real data, already admin-gated, and
+      // the honest answer to "what is actually evaluating my data".
+      setRuleCount(await api.findingRules("gst").then((r) => r.length).catch(() => null));
     } catch (error) {
       setFailure(error instanceof Error ? error.message : COPY.loadFailed);
     }
@@ -765,6 +794,51 @@ export function ReconciliationWorkspace({ onReview }: { onReview: () => void }) 
       <div>
         <Title level={5}>{COPY.step3}</Title>
         <StatementPanel statement={statement} />
+      </div>
+
+      {/* **The graph made visible, from data already fetched.** The complaint
+        *  this answers is a fair one: a page can reconcile perfectly and give
+        *  no sign that a graph is involved at all. Every figure here is a real
+        *  count off the same three queries the statement uses, plus the pack's
+        *  own registered rules and vocabulary. */}
+      <div>
+        <Title level={5}>{COPY.graphTitle}</Title>
+        <Paragraph type="secondary" style={{ fontSize: 12 }}>
+          {COPY.graphHint}
+        </Paragraph>
+        <Row gutter={[16, 16]}>
+          {[
+            {
+              label: COPY.graphSubjects,
+              hint: COPY.graphSubjectsHint,
+              value: (rows.books?.length ?? 0) + (rows.gstr1?.length ?? 0) + (rows.authority?.length ?? 0),
+            },
+            { label: COPY.graphSuppliers, hint: COPY.graphSuppliersHint, value: suppliers.length },
+            {
+              label: COPY.graphSources,
+              hint: COPY.graphSourcesHint,
+              value: SOURCES.filter((s) => (rows[s.key]?.length ?? 0) > 0).length,
+            },
+            { label: COPY.graphRules, hint: COPY.graphRulesHint, value: ruleCount ?? 0 },
+          ].map((tile) => (
+            <Col xs={12} md={6} key={tile.label}>
+              <Card size="small">
+                <Statistic title={tile.label} value={tile.value} valueStyle={{ fontSize: 22 }} />
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  {tile.hint}
+                </Text>
+              </Card>
+            </Col>
+          ))}
+        </Row>
+        <Space style={{ marginTop: 12 }} wrap>
+          <Button size="small" onClick={onWorkbench}>
+            {COPY.openWorkbench}
+          </Button>
+          <Button size="small" onClick={onVocabulary}>
+            {COPY.openVocabulary}
+          </Button>
+        </Space>
       </div>
 
       <div>
