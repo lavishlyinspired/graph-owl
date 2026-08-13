@@ -33,7 +33,7 @@ export { GstImportError as Gstr2bError } from "./gstText";
  *
  *  Re-exported because the pinned Python-twin tests import `isoDate` and
  *  `returnPeriod` from this module by name. */
-import { GstImportError, isoDate, literal, money, returnPeriod, supplierSubject } from "./gstText";
+import { GstImportError, isoDate, literal, money, returnPeriod, subjectSuffix, supplierSubject } from "./gstText";
 
 export { isoDate, returnPeriod };
 
@@ -173,7 +173,7 @@ export function toTurtle(invoices: readonly Gstr2bInvoice[], prefix = "gst", iri
   }
 
   for (const invoice of invoices) {
-    lines.push(`${prefix}:2b-${invoice.invoiceNumber} rdf:type ${prefix}:Gstr2bInvoice ;`);
+    lines.push(`${prefix}:2b-${subjectSuffix(invoice.invoiceNumber)} rdf:type ${prefix}:Gstr2bInvoice ;`);
     // An absent value is omitted rather than written blank: "not reported" and
     // "reported as empty" are different facts, and a reconciliation is mostly
     // a set of questions about missing data.

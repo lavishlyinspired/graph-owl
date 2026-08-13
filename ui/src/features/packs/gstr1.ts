@@ -37,6 +37,7 @@ import {
   monthNameDate,
   monthNamePeriod,
   returnPeriod,
+  subjectSuffix,
   supplierSubject,
   turtleSubject,
 } from "./gstText";
@@ -197,7 +198,7 @@ export function toTurtle(invoices: readonly Gstr1Invoice[], prefix = "gst", iri?
 
   for (const invoice of invoices) {
     lines.push(
-      ...turtleSubject(prefix, `${prefix}:g1-${invoice.invoiceNumber}`, "Gstr1Invoice", [
+      ...turtleSubject(prefix, `${prefix}:g1-${subjectSuffix(invoice.invoiceNumber)}`, "Gstr1Invoice", [
         ["issuedBy", supplierSubject(prefix, invoice.supplierGstin), true],
         ["invoiceNumber", invoice.invoiceNumber],
         ["invoiceDate", invoice.invoiceDate],

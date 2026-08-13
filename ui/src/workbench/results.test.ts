@@ -5,6 +5,7 @@ import {
   columns,
   display,
   graphShape,
+  lexical,
   toGraph,
   verdict,
 } from "./results";
@@ -369,5 +370,56 @@ describe("alignmentBadgeLabel names what a colour cannot", () => {
     expect(
       alignmentBadgeLabel({ predicate: null, sourceKind: "computed", confidence: 0.55 }),
     ).toBe("alignment · computed 55%");
+  });
+});
+
+/** Reading a solution's *value*, as distinct from its rendered term — the bug
+ *  a live run caught and no unit test could, because every fixture in this
+ *  suite had already been written as a plain string.
+ *
+ *  `POST /sparql` returns terms in N-Triples form: a literal arrives as
+ *  `"INV-1001"`, quotes included, and a typed one as `"18000.00"^^<…decimal>`.
+ *  That is correct for a query workbench, where seeing the term *is* the
+ *  point. It is wrong for anything that has to compute with the value:
+ *  `Number('"18000.00"')` is `NaN`, and `'"INV-1001"'` joins to nothing. */
+describe("lexical", () => {
+  it("unwraps a plain literal", () => {
+    expect(lexical('"INV-1001"')).toBe("INV-1001");
+  });
+
+  it("unwraps a typed literal, dropping the datatype", () => {
+    expect(lexical('"18000.00"^^<http://www.w3.org/2001/XMLSchema#decimal>')).toBe("18000.00");
+  });
+
+  it("unwraps a language-tagged literal", () => {
+    expect(lexical('"Umbrella Supplies"@en')).toBe("Umbrella Supplies");
+  });
+
+  it("unwraps an IRI to the IRI itself, not to its local name", () => {
+    // `display` is the one that shortens; this must not, or two different
+    // subjects sharing a local name would compare equal.
+    expect(lexical("<https://graph-owl.dev/packs/gst#pr-INV-1>")).toBe(
+      "https://graph-owl.dev/packs/gst#pr-INV-1",
+    );
+  });
+
+  /** A supplier called `Acme "Best" Ltd` round-trips through the escape the
+   *  importers deliberately write. Returning it still escaped would put a
+   *  backslash into a tax working paper. */
+  it("undoes the escapes a literal carries", () => {
+    expect(lexical('"Acme \\"Best\\" Ltd"')).toBe('Acme "Best" Ltd');
+    expect(lexical('"a\\\\b"')).toBe("a\\b");
+    expect(lexical('"line\\none"')).toBe("line\none");
+  });
+
+  it("passes an already-plain value through unchanged", () => {
+    // Belt and braces: a caller that has already unwrapped, or a term the
+    // engine returned bare, must not lose its first and last characters.
+    expect(lexical("INV-1001")).toBe("INV-1001");
+    expect(lexical("")).toBe("");
+  });
+
+  it("leaves a blank node alone", () => {
+    expect(lexical("_:b0")).toBe("_:b0");
   });
 });

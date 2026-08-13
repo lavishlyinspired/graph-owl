@@ -138,6 +138,42 @@ export function display(term: string): string {
   return trimmed.slice(cut + 1);
 }
 
+/** A solution's **value**, as distinct from its rendered term.
+ *
+ *  **`POST /sparql` returns N-Triples.** A literal arrives as `"INV-1001"`
+ *  with the quotes, a typed one as `"18000.00"^^<…#decimal>`, an IRI in
+ *  angle brackets. For a query workbench that is exactly right — seeing the
+ *  term *is* the point, and it is what a follow-up query gets written
+ *  against. For anything that computes with the value it is a trap that fails
+ *  in two different ways at once: `Number('"18000.00"')` is `NaN`, and
+ *  `'"INV-1001"'` joins to nothing, so totals go blank *and* rows silently
+ *  stop matching. Both were live in the reconciliation workspace until a real
+ *  browser run showed a column of `₹NaN`; no unit test could have caught it,
+ *  because every fixture was already written as a plain string.
+ *
+ *  **Not {@link display}.** That one shortens an IRI to its local name for
+ *  reading; this one must not, or two subjects sharing a local name across
+ *  namespaces would compare equal. Different jobs, and conflating them would
+ *  merge records that are not the same record.
+ *
+ *  Anything that is not a recognisable term — an already-unwrapped value, a
+ *  blank node — passes through untouched, because a caller that unwraps twice
+ *  must not lose the first and last characters of a real value. */
+export function lexical(term: string): string {
+  if (term.startsWith("<") && term.endsWith(">")) return term.slice(1, -1);
+  if (!term.startsWith('"')) return term;
+  // The closing quote is the last one, not the second: a literal may contain
+  // escaped quotes, and everything after the close is a datatype or language
+  // tag that is not part of the value.
+  const close = term.lastIndexOf('"');
+  if (close <= 0) return term;
+  return term
+    .slice(1, close)
+    .replace(/\\n/g, "\n")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
+}
+
 /** How the answer should be read, given what came back and what it cost. */
 export interface Verdict {
   /** Worth saying out loud above the results. */

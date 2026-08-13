@@ -52,16 +52,18 @@ import {
 } from "@ant-design/icons";
 import type { UploadFile } from "antd/es/upload/interface";
 import { api, type PackFinding } from "../../api";
+import { lexical } from "../../workbench/results";
 import { importThroughSurface } from "../packs/importFile";
 import { surfacesFor, type PackImportSurface } from "../packs/packSurfaces";
 import {
   buildStatement,
+  distinctInvoices,
   evidenceOf,
   first,
   scenarioFor,
   sourceSummary,
   statementCsv,
-  values,
+  type BoundInvoice,
   type ReconcilingItem,
   type SourceInvoice,
   type Statement,
@@ -144,7 +146,7 @@ function rupees(value: number): string {
  *  uploaded anything yet". */
 function sourceQuery(className: string): string {
   return `PREFIX gst: <https://graph-owl.dev/packs/gst#>
-SELECT ?invoiceNumber ?gstin ?supplierName ?invoiceDate ?taxableValue ?taxAmount ?period
+SELECT ?invoice ?invoiceNumber ?gstin ?supplierName ?invoiceDate ?taxableValue ?taxAmount ?period
 WHERE {
   GRAPH ?g {
     ?invoice a gst:${className} ;
@@ -200,18 +202,34 @@ const SOURCES: readonly SourceSpec[] = [
   },
 ];
 
-/** One SPARQL solution as a source row. Missing bindings become empty strings
- *  and `"0.00"`, so a total is never `NaN` — an unreadable figure in a tax
+/** One SPARQL solution as a source row.
+ *
+ *  **Every field goes through `lexical`, and skipping it broke this page in
+ *  two ways at once.** `POST /sparql` returns N-Triples, so a literal arrives
+ *  as `"18000.00"` *with* the quotes: `Number` of that is `NaN`, so every
+ *  total rendered as `₹NaN`, and `"INV-1001"` never equalled the finding's
+ *  own `INV-1001`, so every invoice joined to nothing and each reconciling
+ *  line valued itself at zero. Found in a browser against real data — the
+ *  unit tests could not see it, because their fixtures were already plain
+ *  strings.
+ *
+ *  Missing bindings become empty strings and `"0.00"`, so a total is never
+ *  `NaN` for the other reason either — an unreadable figure in a tax
  *  statement is worse than a visibly absent one. */
-function toSourceInvoice(row: Readonly<Record<string, string>>): SourceInvoice {
+function toSourceInvoice(row: Readonly<Record<string, string>>): BoundInvoice {
+  const value = (name: string, fallback = "") =>
+    row[name] === undefined ? fallback : lexical(row[name]);
   return {
-    invoiceNumber: row.invoiceNumber ?? "",
-    gstin: row.gstin ?? "",
-    supplierName: row.supplierName ?? "",
-    invoiceDate: row.invoiceDate ?? "",
-    taxableValue: row.taxableValue ?? "0.00",
-    taxAmount: row.taxAmount ?? "0.00",
-    period: row.period ?? "",
+    // The invoice's own subject, kept so `distinctInvoices` can collapse the
+    // repeated bindings an `OPTIONAL` across named graphs produces.
+    subject: value("invoice"),
+    invoiceNumber: value("invoiceNumber"),
+    gstin: value("gstin"),
+    supplierName: value("supplierName"),
+    invoiceDate: value("invoiceDate"),
+    taxableValue: value("taxableValue", "0.00"),
+    taxAmount: value("taxAmount", "0.00"),
+    period: value("period"),
   };
 }
 
@@ -327,6 +345,28 @@ function SourceCard({
   );
 }
 
+const INVOICE_COLUMNS = [
+  { title: "Invoice", dataIndex: "invoiceNumber", key: "invoiceNumber", width: 130 },
+  { title: "Supplier", dataIndex: "supplierName", key: "supplierName", render: (v: string) => v || "—" },
+  { title: "GSTIN", dataIndex: "gstin", key: "gstin", width: 170 },
+  { title: "Date", dataIndex: "invoiceDate", key: "invoiceDate", width: 110 },
+  { title: "Period", dataIndex: "period", key: "period", width: 90 },
+  {
+    title: "Taxable",
+    dataIndex: "taxableValue",
+    key: "taxableValue",
+    align: "right" as const,
+    render: (v: string) => rupees(Number(v || 0)),
+  },
+  {
+    title: "Tax",
+    dataIndex: "taxAmount",
+    key: "taxAmount",
+    align: "right" as const,
+    render: (v: string) => rupees(Number(v || 0)),
+  },
+];
+
 /** The statement's own arithmetic, laid out the way a practitioner's format
  *  lays it out: an opening balance, the reconciling items, a closing balance,
  *  and — the line a spreadsheet cannot produce — whatever is left over. */
@@ -378,33 +418,32 @@ function StatementPanel({ statement }: { statement: Statement }) {
             ? COPY.reconciledTitle
             : `${COPY.unexplainedTitle}: ${rupees(statement.unexplained.taxAmount)}`
         }
-        description={statement.reconciled ? COPY.reconciledBody : COPY.unexplainedBody}
+        description={
+          statement.reconciled ? (
+            COPY.reconciledBody
+          ) : (
+            <Space direction="vertical" size={8} style={{ width: "100%" }}>
+              <span>{COPY.unexplainedBody}</span>
+              {/* **Naming them is what makes the number worth printing.** A
+                *  bare "₹9,900 unaccounted for" sends a reviewer through the
+                *  whole period; the invoices are a minute's work. */}
+              {statement.unexplained.invoices.length > 0 && (
+                <Table
+                  size="small"
+                  rowKey="invoiceNumber"
+                  dataSource={[...statement.unexplained.invoices]}
+                  columns={INVOICE_COLUMNS}
+                  pagination={statement.unexplained.invoices.length > 10 ? { pageSize: 10 } : false}
+                  scroll={{ x: "max-content" }}
+                />
+              )}
+            </Space>
+          )
+        }
       />
     </Card>
   );
 }
-
-const INVOICE_COLUMNS = [
-  { title: "Invoice", dataIndex: "invoiceNumber", key: "invoiceNumber", width: 130 },
-  { title: "Supplier", dataIndex: "supplierName", key: "supplierName", render: (v: string) => v || "—" },
-  { title: "GSTIN", dataIndex: "gstin", key: "gstin", width: 170 },
-  { title: "Date", dataIndex: "invoiceDate", key: "invoiceDate", width: 110 },
-  { title: "Period", dataIndex: "period", key: "period", width: 90 },
-  {
-    title: "Taxable",
-    dataIndex: "taxableValue",
-    key: "taxableValue",
-    align: "right" as const,
-    render: (v: string) => rupees(Number(v || 0)),
-  },
-  {
-    title: "Tax",
-    dataIndex: "taxAmount",
-    key: "taxAmount",
-    align: "right" as const,
-    render: (v: string) => rupees(Number(v || 0)),
-  },
-];
 
 /** One kind of finding: what it means, what to do, and the invoices behind it.
  *
@@ -414,27 +453,21 @@ const INVOICE_COLUMNS = [
 function FindingGroup({ item, findings }: { item: ReconcilingItem; findings: readonly PackFinding[] }) {
   const scenario = scenarioFor(item.label);
   const mine = findings.filter((f) => f.label === item.label && f.status !== "rejected");
-  const detail = mine
-    .map((finding) => {
-      const evidence = evidenceOf(finding);
-      const number = first(evidence, "invoiceNumber");
-      const parts: string[] = [];
-      const filed = first(evidence, "filedDate");
-      const received = first(evidence, "atTime");
-      const citation = first(evidence, "citation");
-      const declared = values(evidence, "taxableValue");
-      if (filed) parts.push(`filed ${filed}`);
-      if (received) parts.push(`received ${received}`);
-      // Exactly two is the shape a mismatch rule projects — the register's
-      // figure and the other side's. Rendering one of them alone would show a
-      // "mismatch" against nothing.
-      if (declared.length === 2) {
-        parts.push(`books ${rupees(Number(declared[0]))} vs ${rupees(Number(declared[1]))}`);
-      }
-      if (citation) parts.push(citation);
-      return parts.length > 0 ? `${number}: ${parts.join(" · ")}` : "";
-    })
-    .filter((line) => line !== "");
+  // **The rule renders its own evidence.** A predicate does not identify a
+  // fact here: `PaymentOverdue` projects `gst:atTime` twice and
+  // `GoodsReceiptTiming` once, so reading by predicate name alone labelled a
+  // purchase date as a receipt date — the page asserting something false
+  // about somebody's tax position, not a formatting slip.
+  const detail = scenario.detail
+    ? mine
+        .map((finding) => {
+          const evidence = evidenceOf(finding);
+          const line = scenario.detail?.(evidence) ?? "";
+          const number = first(evidence, "invoiceNumber");
+          return line === "" ? "" : number === "" ? line : `${number}: ${line}`;
+        })
+        .filter((line) => line !== "")
+    : [];
 
   return (
     <Card
@@ -446,7 +479,7 @@ function FindingGroup({ item, findings }: { item: ReconcilingItem; findings: rea
             {item.count}
           </Tag>
           <Text strong>{scenario.title}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{rupees(item.taxAmount)}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{rupees(item.atStake)}</Text>
         </Space>
       }
     >
@@ -509,7 +542,7 @@ export function ReconciliationWorkspace({ onReview }: { onReview: () => void }) 
       const results = await Promise.all(SOURCES.map((source) => api.sparql(sourceQuery(source.className))));
       const next: Record<string, SourceInvoice[]> = {};
       SOURCES.forEach((source, index) => {
-        next[source.key] = (results[index]?.rows ?? []).map(toSourceInvoice);
+        next[source.key] = distinctInvoices((results[index]?.rows ?? []).map(toSourceInvoice));
       });
       setRows(next);
       // **Surfaced, never inferred from the row count.** A truncated answer

@@ -80,7 +80,7 @@ class Gstr2bInvoice:
     def subject(self) -> str:
         """The graph subject, matching the fixtures' own `2b-` convention so a
         live line and a fixture line are indistinguishable to the rules."""
-        return f"{PREFIX}:2b-{self.invoice_number}"
+        return f"{PREFIX}:2b-{subject_suffix(self.invoice_number)}"
 
     @property
     def supplier_subject(self) -> str:
@@ -94,7 +94,37 @@ class Gstr2bInvoice:
         ontology and never instantiated — every invoice carried the GSTIN
         as a bare literal, unreachable by a graph walk.
         """
-        return f"{PREFIX}:supplier-{self.supplier_gstin}"
+        return f"{PREFIX}:supplier-{subject_suffix(self.supplier_gstin)}"
+
+
+def subject_suffix(value: str) -> str:
+    """An identifier as the local part of a prefixed name.
+
+    **The bug a real upload found, and it is not an edge case.** Indian invoice
+    numbers routinely look like ``RST/2026/0455`` — a slash is the ordinary
+    separator. Written straight into a prefixed name that is
+    ``gst:2b-RST/2026/0455``, which is not legal Turtle, and the server rejects
+    the whole import. Both this module and its TypeScript twin had it.
+
+    **Percent-encoded rather than substituted, because a collision here merges
+    two invoices.** Mapping every unsafe character onto ``-`` would make
+    ``INV/1`` and ``INV-1`` one subject: two different invoices silently
+    becoming one in a tax reconciliation. Percent-encoding is reversible and is
+    explicitly legal in a Turtle ``PN_LOCAL`` (the ``PLX``/``PERCENT``
+    production).
+
+    Kept byte-for-byte equivalent to ``subjectSuffix`` in
+    ``ui/src/features/packs/gstText.ts`` — the two are pinned to the same
+    fixture assertions, and an encoding that differed between them would land
+    the same invoice under two subjects.
+    """
+    out = []
+    for char in value:
+        if char.isascii() and (char.isalnum() or char in "_-"):
+            out.append(char)
+        else:
+            out.extend(f"%{byte:02X}" for byte in char.encode("utf-8"))
+    return "".join(out)
 
 
 def _money(value: object) -> str:
@@ -280,7 +310,7 @@ def to_turtle(invoices: list[Gstr2bInvoice], namespace: str | None = None) -> st
         supplier_names.setdefault(invoice.supplier_gstin, invoice.supplier_name)
 
     for gstin in supplier_names:
-        lines.append(f"{PREFIX}:supplier-{gstin} rdf:type {PREFIX}:Supplier ;")
+        lines.append(f"{PREFIX}:supplier-{subject_suffix(gstin)} rdf:type {PREFIX}:Supplier ;")
         name = supplier_names[gstin]
         fields = [("supplierGstin", gstin), ("supplierName", name)]
         present = [(field_name, value) for field_name, value in fields if value != ""]

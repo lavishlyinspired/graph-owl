@@ -25,7 +25,7 @@
  *  `gstText.ts`. Plan 108's own warning: two `money()`s disagreeing in the
  *  last decimal produce mismatches that are not there. */
 
-import { GstImportError, isoDate, money, supplierSubject, turtleSubject } from "./gstText";
+import { GstImportError, isoDate, money, subjectSuffix, supplierSubject, turtleSubject } from "./gstText";
 
 export interface BooksInvoice {
   readonly supplierGstin: string;
@@ -305,7 +305,7 @@ export function toTurtle(invoices: readonly BooksInvoice[], prefix = "gst", iri?
 
   for (const invoice of invoices) {
     lines.push(
-      ...turtleSubject(prefix, `${prefix}:pr-${invoice.invoiceNumber}`, "PurchaseInvoice", [
+      ...turtleSubject(prefix, `${prefix}:pr-${subjectSuffix(invoice.invoiceNumber)}`, "PurchaseInvoice", [
         ["issuedBy", supplierSubject(prefix, invoice.supplierGstin), true],
         ["invoiceNumber", invoice.invoiceNumber],
         ["invoiceDate", invoice.invoiceDate],

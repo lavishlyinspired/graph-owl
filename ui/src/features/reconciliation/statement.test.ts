@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import type { PackFinding } from "../../api";
 import {
   buildStatement,
+  distinctInvoices,
   evidenceOf,
   invoiceKey,
   values,
@@ -164,15 +165,33 @@ describe("the reconciling items between books and GSTR-2B", () => {
     expect(notFiled.taxableValue).toBe(25000);
   });
 
-  /** Books minus 2B: an invoice in the books and not in 2B *raises* the books
-   *  balance above the authority's, and one in 2B and not in the books lowers
-   *  it. Getting a sign wrong here inverts the whole statement. */
-  it("signs an item by which side the invoice is missing from", () => {
+  /** **An item's amount is what it contributes to `books \u2212 GSTR-2B`, and
+   *  that is one subtraction covering every case rather than a sign per rule.**
+   *  An invoice only in the books contributes its whole value, one only in 2B
+   *  contributes its negative, and one present in both contributes the
+   *  difference — so a rule about invoices that *match* and still disagree
+   *  carries its delta automatically instead of being classed as explaining
+   *  nothing.
+   *
+   *  A sign per rule was the first attempt, and a live run showed why it was
+   *  wrong: the mismatch rules were hard-coded to 0, so real value differences
+   *  the rules had found were reported as unaccounted for, on the same screen,
+   *  directly below the findings that accounted for them. */
+  it("values an item by what it contributes to books minus GSTR-2B", () => {
     const items = reconcilingItems(findings, books, authority);
 
-    expect(items.find((i) => i.label === "gst:SupplierNotFiled")!.sign).toBe(1);
-    expect(items.find((i) => i.label === "gst:Gstr1NotIn2b")!.sign).toBe(1);
-    expect(items.find((i) => i.label === "gst:MissingInBooks")!.sign).toBe(-1);
+    expect(items.find((i) => i.label === "gst:SupplierNotFiled")!.taxAmount).toBe(4500);
+    expect(items.find((i) => i.label === "gst:MissingInBooks")!.taxAmount).toBe(-8100);
+  });
+
+  it("gives a matched-but-disagreeing invoice its delta, not zero", () => {
+    const items = reconcilingItems(
+      [finding("gst:AmountMismatch", "pr-INV-1", { invoiceNumber: "INV-1" })],
+      [invoice({ invoiceNumber: "INV-1", taxAmount: "18000.00" })],
+      [invoice({ invoiceNumber: "INV-1", taxAmount: "17100.00" })],
+    );
+
+    expect(items[0]!.taxAmount).toBe(900);
   });
 
   it("groups every finding of one kind into one line", () => {
@@ -294,6 +313,70 @@ describe("the statement as a whole", () => {
     expect(statement.reconciled).toBe(true);
     expect(statement.difference.taxAmount).toBe(0);
   });
+
+  /** **One invoice, two findings, counted once.** INV-1002 in the real pack
+   *  fires both `AmountMismatch` (books vs GSTR-2B) and `BooksGstr1Mismatch`
+   *  (books vs GSTR-1) — the same ₹900 of difference, found twice. Summing the
+   *  lines would explain ₹1,800 of an ₹900 gap and drive the residual
+   *  negative, which reads as the reconciliation having found *more* than
+   *  exists. The explained total is over the union of invoices, not the sum of
+   *  the lines. */
+  it("counts an invoice once however many rules named it", () => {
+    const statement = buildStatement({
+      books: [invoice({ invoiceNumber: "INV-1", taxAmount: "18000.00" })],
+      authority: [invoice({ invoiceNumber: "INV-1", taxAmount: "17100.00" })],
+      findings: [
+        finding("gst:AmountMismatch", "pr-INV-1", { invoiceNumber: "INV-1" }),
+        finding("gst:BooksGstr1Mismatch", "pr-INV-1", { invoiceNumber: "INV-1" }),
+      ],
+    });
+
+    expect(statement.difference.taxAmount).toBe(900);
+    expect(statement.explained.taxAmount).toBe(900);
+    expect(statement.reconciled).toBe(true);
+  });
+
+  /** **The residual has to name itself to be worth printing.** "₹4,500
+   *  unaccounted for" sends a CA looking through the whole period; "₹4,500,
+   *  and it is INV-9" is a minute's work. */
+  it("names the invoices the residual consists of", () => {
+    const statement = buildStatement({
+      books: [
+        invoice({ invoiceNumber: "INV-1", taxAmount: "18000.00" }),
+        invoice({ invoiceNumber: "INV-9", taxAmount: "4500.00" }),
+      ],
+      authority: [invoice({ invoiceNumber: "INV-1", taxAmount: "18000.00" })],
+      findings: [],
+    });
+
+    expect(statement.unexplained.taxAmount).toBe(4500);
+    expect(statement.unexplained.invoices.map((row) => row.invoiceNumber)).toEqual(["INV-9"]);
+  });
+
+  it("names nothing when every contributing invoice has a finding", () => {
+    const statement = buildStatement({
+      books: [invoice({ invoiceNumber: "INV-9", taxAmount: "4500.00" })],
+      authority: [],
+      findings: [finding("gst:SupplierNotFiled", "pr-INV-9", { invoiceNumber: "INV-9" })],
+    });
+
+    expect(statement.unexplained.invoices).toEqual([]);
+    expect(statement.reconciled).toBe(true);
+  });
+
+  /** An invoice both sides agree on contributes nothing and must not be listed
+   *  as an unexplained difference just because no rule mentioned it — most
+   *  invoices in a healthy period are exactly this. */
+  it("does not list a perfectly matched invoice as unexplained", () => {
+    const statement = buildStatement({
+      books: [invoice({ invoiceNumber: "INV-1", taxAmount: "18000.00" })],
+      authority: [invoice({ invoiceNumber: "INV-1", taxAmount: "18000.00" })],
+      findings: [],
+    });
+
+    expect(statement.unexplained.invoices).toEqual([]);
+    expect(statement.reconciled).toBe(true);
+  });
 });
 
 describe("what each finding means to a CA", () => {
@@ -324,7 +407,7 @@ describe("what each finding means to a CA", () => {
     const unknown = scenarioFor("hospitality:DuplicateGuest");
 
     expect(unknown.title).toBe("DuplicateGuest");
-    expect(unknown.sign).toBe(0);
+    expect(unknown.nextAction).toContain("DuplicateGuest");
   });
 });
 
@@ -334,10 +417,10 @@ describe("the working paper a CA takes away", () => {
       {
         label: "gst:SupplierNotFiled",
         title: "Supplier has not filed",
-        sign: 1,
         count: 1,
         taxableValue: 25000,
         taxAmount: 4500,
+        atStake: 4500,
         invoices: ["INV-3"],
         rows: [invoice({ invoiceNumber: "INV-3", taxableValue: "25000.00", taxAmount: "4500.00" })],
       },
@@ -355,10 +438,10 @@ describe("the working paper a CA takes away", () => {
       {
         label: "gst:SupplierNotFiled",
         title: "Supplier has not filed",
-        sign: 1,
         count: 1,
         taxableValue: 100,
         taxAmount: 18,
+        atStake: 18,
         invoices: ["INV-3"],
         rows: [invoice({ invoiceNumber: "INV-3", supplierName: "Kumar, Sons & Co" })],
       },
@@ -369,5 +452,85 @@ describe("the working paper a CA takes away", () => {
 
   it("writes a header and nothing else when there is nothing to report", () => {
     expect(statementCsv([]).split("\n")).toHaveLength(1);
+  });
+});
+
+describe("the credit at stake, which is not the contribution to the difference", () => {
+  /** **These are two different numbers and showing one for the other is a
+   *  wrong figure in a tax working paper.** An invoice both sides agree on
+   *  contributes nothing to `books − GSTR-2B`, and the credit riding on it is
+   *  its whole tax. `ITCNotAvailable` and `PaymentOverdue` fire on exactly
+   *  those invoices — a card reading ₹0.00 beside "reverse this credit" says
+   *  there is nothing to do. */
+  it("reports the whole credit on an invoice both sides agree on", () => {
+    const both = [invoice({ invoiceNumber: "INV-1", taxAmount: "18000.00" })];
+    const item = reconcilingItems(
+      [finding("gst:PaymentOverdue", "purchase-INV-1", { invoiceNumber: "INV-1" })],
+      both,
+      both,
+    )[0]!;
+
+    expect(item.taxAmount).toBe(0);
+    expect(item.atStake).toBe(18000);
+  });
+
+  it("reports the authority's figure when the invoice was never booked", () => {
+    const item = reconcilingItems(
+      [finding("gst:MissingInBooks", "g1-INV-8", { invoiceNumber: "INV-8" })],
+      [],
+      [invoice({ invoiceNumber: "INV-8", taxAmount: "8100.00" })],
+    )[0]!;
+
+    expect(item.taxAmount).toBe(-8100);
+    expect(item.atStake).toBe(8100);
+  });
+});
+
+describe("one row per invoice, however many times the graph binds it", () => {
+  /** **The bug that inflated every total on the page by about 44%, found by
+   *  comparing the rendered counts against the graph's own.** The source query
+   *  carries `OPTIONAL { ?supplier gst:supplierName ?supplierName }`, and a
+   *  supplier is named in every document that mentions them — the bundled
+   *  fixture, the uploaded GSTR-2A, the uploaded register. Each of those is a
+   *  separate named graph, so the OPTIONAL matched several times and SPARQL
+   *  returned the same invoice several times over.
+   *
+   *  Nothing about that looks wrong in a result table, which is why it reached
+   *  a screenshot: 26 invoices where the graph held 18, ₹4,82,930 where it held
+   *  ₹3,06,710 — every figure plausible and every figure false.
+   *
+   *  **Deduplicated on the invoice's own subject, not its number.** Two
+   *  different suppliers can legitimately issue the same invoice number, and
+   *  collapsing on the number would silently drop one of them — trading an
+   *  overstatement for an understatement, which in a tax working paper is the
+   *  worse direction. */
+  it("collapses repeated bindings of one invoice", () => {
+    const rows = [
+      { subject: "gst:pr-INV-1", ...invoice({ invoiceNumber: "INV-1", supplierName: "" }) },
+      { subject: "gst:pr-INV-1", ...invoice({ invoiceNumber: "INV-1", supplierName: "Umbrella" }) },
+      { subject: "gst:pr-INV-2", ...invoice({ invoiceNumber: "INV-2" }) },
+    ];
+
+    expect(distinctInvoices(rows).map((row) => row.invoiceNumber)).toEqual(["INV-1", "INV-2"]);
+  });
+
+  /** The fan-out is what carries the supplier name, so collapsing must not
+   *  throw it away by keeping whichever row happened to arrive first. */
+  it("keeps a supplier name that only one of the repeated bindings carried", () => {
+    const rows = [
+      { subject: "gst:pr-INV-1", ...invoice({ invoiceNumber: "INV-1", supplierName: "" }) },
+      { subject: "gst:pr-INV-1", ...invoice({ invoiceNumber: "INV-1", supplierName: "Umbrella" }) },
+    ];
+
+    expect(distinctInvoices(rows)[0]!.supplierName).toBe("Umbrella");
+  });
+
+  it("keeps two suppliers' identically numbered invoices apart", () => {
+    const rows = [
+      { subject: "gst:pr-a", ...invoice({ invoiceNumber: "INV-001", gstin: "27AAAAA0000A1Z5" }) },
+      { subject: "gst:pr-b", ...invoice({ invoiceNumber: "INV-001", gstin: "29BBBBB1111B1Z5" }) },
+    ];
+
+    expect(distinctInvoices(rows)).toHaveLength(2);
   });
 });

@@ -39,6 +39,50 @@ export interface SourceInvoice {
   readonly period: string;
 }
 
+/** A source row as SPARQL returned it, still carrying the invoice's own
+ *  subject — which is what makes duplicates identifiable. */
+export interface BoundInvoice extends SourceInvoice {
+  readonly subject: string;
+}
+
+/** One row per invoice, however many times the query bound it.
+ *
+ *  **The bug that inflated every total on the page by about 44%.** The source
+ *  query carries `OPTIONAL { ?supplier gst:supplierName ?supplierName }`, and
+ *  a supplier is named in every document that mentions them — the bundled
+ *  fixture, an uploaded GSTR-2A, an uploaded register. Each of those is a
+ *  separate named graph, so the OPTIONAL matched several times and the same
+ *  invoice came back several times over. Nothing about that looks wrong in a
+ *  result table, which is why it reached a screenshot: 26 invoices where the
+ *  graph held 18, every figure plausible and every figure false.
+ *
+ *  **Collapsed on the subject, not the invoice number.** Two suppliers can
+ *  legitimately issue the same invoice number, and collapsing on the number
+ *  would silently drop one of them — trading an overstatement for an
+ *  understatement, which in a tax working paper is the worse direction.
+ *
+ *  The richest binding wins field by field, because the fan-out is precisely
+ *  what carries the supplier name: keeping whichever row arrived first would
+ *  fix the totals by throwing away the data the OPTIONAL existed for. */
+export function distinctInvoices(rows: readonly BoundInvoice[]): SourceInvoice[] {
+  const bySubject = new Map<string, SourceInvoice>();
+  for (const row of rows) {
+    const seen = bySubject.get(row.subject);
+    if (!seen) {
+      bySubject.set(row.subject, row);
+      continue;
+    }
+    bySubject.set(row.subject, {
+      ...seen,
+      supplierName: seen.supplierName || row.supplierName,
+      gstin: seen.gstin || row.gstin,
+      invoiceDate: seen.invoiceDate || row.invoiceDate,
+      period: seen.period || row.period,
+    });
+  }
+  return [...bySubject.values()];
+}
+
 export interface SourceSummary {
   readonly count: number;
   readonly taxableValue: number;
@@ -46,17 +90,26 @@ export interface SourceSummary {
   readonly periods: readonly string[];
 }
 
-/** One line of the statement: every finding of one kind, valued and signed. */
+/** One line of the statement: every finding of one kind, valued by what its
+ *  invoices contribute to `books − GSTR-2B`.
+ *
+ *  **Positive raises the books above the authority, negative lowers it, and
+ *  neither is a property of the rule** — it falls out of one subtraction that
+ *  covers every case. See {@link contribution}. */
 export interface ReconcilingItem {
   readonly label: string;
   readonly title: string;
-  /** `+1` raises the books above the authority, `-1` lowers it, `0` explains
-   *  none of the difference (an invoice both sides agree on that is still not
-   *  claimable). */
-  readonly sign: number;
   readonly count: number;
   readonly taxableValue: number;
   readonly taxAmount: number;
+  /** **The credit these invoices carry, which is not the same number as
+   *  {@link taxAmount} and must not be shown in its place.** The statement
+   *  needs the *contribution* to `books − GSTR-2B`; a reviewer looking at
+   *  "unpaid past 180 days" needs the credit at risk. On an invoice both
+   *  sides agree on, the contribution is zero and the credit at stake is the
+   *  whole of it — reporting ₹0 beside a rule that means "reverse this" would
+   *  read as nothing to do. */
+  readonly atStake: number;
   readonly invoices: readonly string[];
   readonly rows: readonly SourceInvoice[];
 }
@@ -66,137 +119,17 @@ export interface Statement {
   readonly authority: SourceSummary;
   readonly difference: { readonly taxableValue: number; readonly taxAmount: number };
   readonly explained: { readonly taxableValue: number; readonly taxAmount: number };
-  readonly unexplained: { readonly taxableValue: number; readonly taxAmount: number };
+  /** The residual, **with the invoices it consists of**. "₹4,500 unaccounted
+   *  for" sends a reviewer through the whole period; naming the invoice is a
+   *  minute's work. */
+  readonly unexplained: {
+    readonly taxableValue: number;
+    readonly taxAmount: number;
+    readonly invoices: readonly SourceInvoice[];
+  };
   readonly items: readonly ReconcilingItem[];
   /** Whether the rules account for the whole difference. */
   readonly reconciled: boolean;
-}
-
-/** What a rule means to the person who has to act on it.
- *
- *  `summary` on the rule itself is written for a reviewer of the *rule* — "an
- *  invoice claimed in the purchase register that the supplier has not reported
- *  in any GSTR-1/IFF filing". A CA looking at a queue of two hundred needs the
- *  next action, and that is a different sentence. */
-export interface Scenario {
-  readonly title: string;
-  readonly meaning: string;
-  readonly nextAction: string;
-  readonly sign: number;
-  readonly tone: "warning" | "danger" | "info";
-}
-
-const SCENARIOS: Record<string, Scenario> = {
-  "gst:SupplierNotFiled": {
-    title: "Supplier has not filed",
-    meaning: "You have booked this purchase and no supplier has declared it in any GSTR-1 or IFF.",
-    nextAction: "Chase the supplier to file it. Do not claim the credit until it appears in a GSTR-2B.",
-    sign: 1,
-    tone: "danger",
-  },
-  "gst:Gstr1NotIn2b": {
-    title: "Filed by the supplier, not in your GSTR-2B",
-    meaning:
-      "The supplier did declare it — the filing date is on the finding — but it has reached none of the GSTR-2B statements loaded here.",
-    nextAction:
-      "Check the GSTIN they filed against and whether it went in as B2C. If they simply filed late, it should appear in a later period's 2B.",
-    sign: 1,
-    tone: "warning",
-  },
-  "gst:MissingInBooks": {
-    title: "In the GST records, not in your books",
-    meaning: "A supplier has declared an invoice against your GSTIN that your purchase register does not carry.",
-    nextAction:
-      "Find out whether the purchase was simply never recorded — this is credit you may be entitled to and have not claimed — or whether somebody has filed against the wrong GSTIN.",
-    sign: -1,
-    tone: "info",
-  },
-  "gst:BooksGstr1Mismatch": {
-    title: "Your books and the supplier's filing disagree",
-    meaning: "Both sides declare this invoice and the values differ by more than the cap in force allowed.",
-    nextAction: "Compare against the physical invoice. One of the two is wrong, and the finding names both figures.",
-    sign: 0,
-    tone: "warning",
-  },
-  "gst:GoodsReceiptTiming": {
-    title: "Goods received after the period",
-    meaning:
-      "Every document agrees and the credit is still not claimable in this period, because the goods or services arrived in a later one.",
-    nextAction: "Defer the claim to the period the goods were received in. Section 16(2)(b) is a condition in its own right.",
-    sign: 0,
-    tone: "warning",
-  },
-  "gst:PotentialMismatch": {
-    title: "Claimed, not available in GSTR-2B",
-    meaning:
-      "This invoice is in your books and in no GSTR-2B. No GSTR-1/2A data is loaded, so nothing here can say whether the supplier filed it.",
-    nextAction: "Upload the GSTR-2A for this period — it separates 'the supplier never filed' from 'they filed and it did not reach you'.",
-    sign: 1,
-    tone: "danger",
-  },
-  "gst:AmountMismatch": {
-    title: "Your books and GSTR-2B disagree",
-    meaning: "Both sides report the invoice and the values differ by more than the cap in force allowed.",
-    nextAction: "Compare against the physical invoice, then correct whichever side is wrong.",
-    sign: 0,
-    tone: "warning",
-  },
-  "gst:ITCNotAvailable": {
-    title: "Credit reported as unavailable",
-    meaning: "The invoice matches perfectly and the authority reports the credit as not available.",
-    nextAction: "Check whether it falls under Section 17(5) blocked credits. Do not claim it on the strength of the match alone.",
-    sign: 0,
-    tone: "danger",
-  },
-  "gst:Reversed": {
-    title: "Flagged as reverse charge",
-    meaning: "The invoice matches and the authority flags it as reverse-charge, so the tax is yours to self-assess.",
-    nextAction: "Confirm the tax has been paid under RCM before taking the credit.",
-    sign: 0,
-    tone: "info",
-  },
-  "gst:GstinTransposition": {
-    title: "Near-identical GSTIN — probably a keying error",
-    meaning:
-      "Two records agree on invoice number and period under GSTINs that differ by what looks like a transposition. Nothing has been merged.",
-    nextAction: "Confirm which GSTIN is right and correct the register. Merging automatically would attribute one supplier's invoice to another.",
-    sign: 0,
-    tone: "warning",
-  },
-  "gst:PaymentOverdue": {
-    title: "Unpaid past 180 days",
-    meaning: "Credit was taken on an invoice the supplier has not been paid for within 180 days of its date.",
-    nextAction: "Reverse the credit, or pay the supplier. Section 16(2)(d) leaves no third option.",
-    sign: 0,
-    tone: "danger",
-  },
-};
-
-/** The local name of a term, for a reader who does not want to read IRIs.
- *
- *  **Both a full IRI and a curie, because both really arrive.** A finding's
- *  `predicate` comes back expanded (`https://…/gst#taxAmount`) while its
- *  `label` stays as `pack.toml` wrote it (`gst:AmountMismatch`). Handling only
- *  the first leaves every label unmatched in {@link SCENARIOS}, so every
- *  finding renders under its raw label with no next action — the page still
- *  loads, which is exactly why it would not be noticed.
- *
- *  The `:` cut is tried last, never first: an IRI's own scheme separator is a
- *  colon, and cutting there would turn every IRI into `//graph-owl.dev/…`. */
-function localName(term: string): string {
-  const slash = Math.max(term.lastIndexOf("#"), term.lastIndexOf("/"));
-  const cut = slash >= 0 ? slash : term.lastIndexOf(":");
-  const tail = cut >= 0 ? term.slice(cut + 1) : term;
-  return tail.length > 0 ? tail : term;
-}
-
-export function scenarioFor(label: string): Scenario {
-  const known = SCENARIOS[label];
-  if (known) return known;
-  // A pack this console has never seen must still render: the label beats an
-  // empty card, and beats a crash by a great deal more.
-  const name = localName(label);
-  return { title: name, meaning: "", nextAction: `Review ${name}.`, sign: 0, tone: "info" };
 }
 
 /** A finding's evidence, indexed by the predicate each fact came from.
@@ -231,6 +164,167 @@ export function values(index: EvidenceIndex, predicate: string): readonly string
  *  a date or a citation to render and have nothing sensible to do with a list. */
 export function first(index: EvidenceIndex, predicate: string): string {
   return values(index, predicate)[0] ?? "";
+}
+
+/** What a rule means to the person who has to act on it.
+ *
+ *  `summary` on the rule itself is written for a reviewer of the *rule* — "an
+ *  invoice claimed in the purchase register that the supplier has not reported
+ *  in any GSTR-1/IFF filing". A CA looking at a queue of two hundred needs the
+ *  next action, and that is a different sentence. */
+export interface Scenario {
+  readonly title: string;
+  readonly meaning: string;
+  readonly nextAction: string;
+  readonly tone: "warning" | "danger" | "info";
+  /** The rule's own evidence, in words, for the rules whose whole point is a
+   *  pair of values.
+   *
+   *  **Per rule, because a predicate does not identify a fact here.**
+   *  `PaymentOverdue` projects `gst:atTime` twice — once for the purchase and
+   *  once for the payment — and `GoodsReceiptTiming` projects it once, for the
+   *  receipt. Rendering by predicate name alone labelled a purchase date as
+   *  "received", which is not a formatting slip: it is the page stating a fact
+   *  about somebody's tax position that is false. The rule knows what its own
+   *  evidence means, and the order is the order `pack.toml` projected it in. */
+  readonly detail?: (evidence: EvidenceIndex) => string;
+}
+
+const SCENARIOS: Record<string, Scenario> = {
+  "gst:SupplierNotFiled": {
+    title: "Supplier has not filed",
+    meaning: "You have booked this purchase and no supplier has declared it in any GSTR-1 or IFF.",
+    nextAction: "Chase the supplier to file it. Do not claim the credit until it appears in a GSTR-2B.",
+    tone: "danger",
+  },
+  "gst:Gstr1NotIn2b": {
+    title: "Filed by the supplier, not in your GSTR-2B",
+    meaning:
+      "The supplier did declare it — the filing date is on the finding — but it has reached none of the GSTR-2B statements loaded here.",
+    nextAction:
+      "Check the GSTIN they filed against and whether it went in as B2C. If they simply filed late, it should appear in a later period's 2B.",
+    tone: "warning",
+    detail: (e) => {
+      const filed = first(e, "filedDate");
+      const period = first(e, "period");
+      if (filed === "") return "";
+      return period === "" ? `filed ${filed}` : `declared for ${period}, filed ${filed}`;
+    },
+  },
+  "gst:MissingInBooks": {
+    title: "In the GST records, not in your books",
+    meaning: "A supplier has declared an invoice against your GSTIN that your purchase register does not carry.",
+    nextAction:
+      "Find out whether the purchase was simply never recorded — this is credit you may be entitled to and have not claimed — or whether somebody has filed against the wrong GSTIN.",
+    tone: "info",
+  },
+  "gst:BooksGstr1Mismatch": {
+    title: "Your books and the supplier's filing disagree",
+    meaning: "Both sides declare this invoice and the values differ by more than the cap in force allowed.",
+    nextAction: "Compare against the physical invoice. One of the two is wrong, and the finding names both figures.",
+    tone: "warning",
+    detail: (e) => {
+      const pair = values(e, "taxableValue");
+      return pair.length === 2 ? `books ${pair[0]} vs declared ${pair[1]}` : "";
+    },
+  },
+  "gst:GoodsReceiptTiming": {
+    title: "Goods received after the period",
+    meaning:
+      "Every document agrees and the credit is still not claimable in this period, because the goods or services arrived in a later one.",
+    nextAction: "Defer the claim to the period the goods were received in. Section 16(2)(b) is a condition in its own right.",
+    tone: "warning",
+    detail: (e) => {
+      const received = first(e, "atTime");
+      const period = first(e, "period");
+      return received === "" ? "" : `available in ${period}, received ${received}`;
+    },
+  },
+  "gst:PotentialMismatch": {
+    title: "Claimed, not available in GSTR-2B",
+    meaning:
+      "This invoice is in your books and in no GSTR-2B. No GSTR-1/2A data is loaded, so nothing here can say whether the supplier filed it.",
+    nextAction: "Upload the GSTR-2A for this period — it separates 'the supplier never filed' from 'they filed and it did not reach you'.",
+    tone: "danger",
+  },
+  "gst:AmountMismatch": {
+    title: "Your books and GSTR-2B disagree",
+    meaning: "Both sides report the invoice and the values differ by more than the cap in force allowed.",
+    nextAction: "Compare against the physical invoice, then correct whichever side is wrong.",
+    tone: "warning",
+    detail: (e) => {
+      const pair = values(e, "taxableValue");
+      return pair.length === 2 ? `books ${pair[0]} vs GSTR-2B ${pair[1]}` : "";
+    },
+  },
+  "gst:ITCNotAvailable": {
+    title: "Credit reported as unavailable",
+    meaning: "The invoice matches perfectly and the authority reports the credit as not available.",
+    nextAction: "Check whether it falls under Section 17(5) blocked credits. Do not claim it on the strength of the match alone.",
+    tone: "danger",
+  },
+  "gst:Reversed": {
+    title: "Flagged as reverse charge",
+    meaning: "The invoice matches and the authority flags it as reverse-charge, so the tax is yours to self-assess.",
+    nextAction: "Confirm the tax has been paid under RCM before taking the credit.",
+    tone: "info",
+  },
+  "gst:GstinTransposition": {
+    title: "Near-identical GSTIN — probably a keying error",
+    meaning:
+      "Two records agree on invoice number and period under GSTINs that differ by what looks like a transposition. Nothing has been merged.",
+    nextAction: "Confirm which GSTIN is right and correct the register. Merging automatically would attribute one supplier's invoice to another.",
+    tone: "warning",
+    detail: (e) => {
+      const pair = values(e, "supplierGstin");
+      return pair.length === 2 ? `booked ${pair[0]}, filed ${pair[1]}` : "";
+    },
+  },
+  "gst:PaymentOverdue": {
+    title: "Unpaid past 180 days",
+    meaning: "Credit was taken on an invoice the supplier has not been paid for within 180 days of its date.",
+    nextAction: "Reverse the credit, or pay the supplier. Section 16(2)(d) leaves no third option.",
+    tone: "danger",
+    // Two `gst:atTime` facts, in the order `pack.toml` projects them:
+    // `purchasedAt` then `paidAt`. A second one absent is the invoice never
+    // having been paid at all, which is a different sentence and the more
+    // serious one — the rule fires on elapsed time precisely so an unpaid
+    // invoice is not invisible for want of a payment row to subtract from.
+    detail: (e) => {
+      const times = values(e, "atTime");
+      const purchased = times[0] ?? "";
+      const paid = times[1];
+      if (purchased === "") return "";
+      return paid ? `purchased ${purchased}, paid ${paid}` : `purchased ${purchased}, still unpaid`;
+    },
+  },
+};
+
+/** The local name of a term, for a reader who does not want to read IRIs.
+ *
+ *  **Both a full IRI and a curie, because both really arrive.** A finding's
+ *  `predicate` comes back expanded (`https://…/gst#taxAmount`) while its
+ *  `label` stays as `pack.toml` wrote it (`gst:AmountMismatch`). Handling only
+ *  the first leaves every label unmatched in {@link SCENARIOS}, so every
+ *  finding renders under its raw label with no next action — the page still
+ *  loads, which is exactly why it would not be noticed.
+ *
+ *  The `:` cut is tried last, never first: an IRI's own scheme separator is a
+ *  colon, and cutting there would turn every IRI into `//graph-owl.dev/…`. */
+function localName(term: string): string {
+  const slash = Math.max(term.lastIndexOf("#"), term.lastIndexOf("/"));
+  const cut = slash >= 0 ? slash : term.lastIndexOf(":");
+  const tail = cut >= 0 ? term.slice(cut + 1) : term;
+  return tail.length > 0 ? tail : term;
+}
+
+export function scenarioFor(label: string): Scenario {
+  const known = SCENARIOS[label];
+  if (known) return known;
+  // A pack this console has never seen must still render: the label beats an
+  // empty card, and beats a crash by a great deal more.
+  const name = localName(label);
+  return { title: name, meaning: "", nextAction: `Review ${name}.`, tone: "info" };
 }
 
 /** Which invoice a finding is about.
@@ -271,16 +365,54 @@ export function sourceSummary(rows: readonly SourceInvoice[]): SourceSummary {
  *  it; leaving it in means the statement never converges however much work
  *  gets done. An *accepted* one stays: accepting confirms the item is real,
  *  which is the opposite of closing it. */
-export function reconcilingItems(
-  findings: readonly PackFinding[],
-  books: readonly SourceInvoice[],
-  authority: readonly SourceInvoice[],
-): ReconcilingItem[] {
-  const byNumber = new Map<string, SourceInvoice>();
-  for (const row of [...authority, ...books]) byNumber.set(row.invoiceNumber, row);
+/** An invoice indexed by number, per side, so absence is answerable. */
+function index(rows: readonly SourceInvoice[]): Map<string, SourceInvoice> {
+  const found = new Map<string, SourceInvoice>();
+  for (const row of rows) found.set(row.invoiceNumber, row);
+  return found;
+}
 
+const ZERO: SourceInvoice = {
+  invoiceNumber: "",
+  gstin: "",
+  supplierName: "",
+  invoiceDate: "",
+  taxableValue: "0.00",
+  taxAmount: "0.00",
+  period: "",
+};
+
+/** What one invoice contributes to `books − GSTR-2B`.
+ *
+ *  **One subtraction covers every case, which is why there is no sign per
+ *  rule.** An invoice only in the register contributes its whole value; one
+ *  only in GSTR-2B contributes its negative; one present in both contributes
+ *  the difference between them — which is exactly what a mismatch rule has
+ *  found, and which a fixed sign of 0 threw away. A live run made that
+ *  concrete: real value differences the rules *had* found were reported as
+ *  unaccounted for on the same screen, immediately below the findings that
+ *  accounted for them. */
+function contribution(
+  number: string,
+  booksBy: Map<string, SourceInvoice>,
+  authorityBy: Map<string, SourceInvoice>,
+): { taxableValue: number; taxAmount: number } {
+  const mine = booksBy.get(number) ?? ZERO;
+  const theirs = authorityBy.get(number) ?? ZERO;
+  return {
+    taxableValue: Number(mine.taxableValue || 0) - Number(theirs.taxableValue || 0),
+    taxAmount: Number(mine.taxAmount || 0) - Number(theirs.taxAmount || 0),
+  };
+}
+
+/** Which invoices each kind of finding is about. */
+function invoicesByLabel(findings: readonly PackFinding[]): Map<string, Set<string>> {
   const grouped = new Map<string, Set<string>>();
   for (const finding of findings) {
+    // A dismissed finding has been considered and rejected by a human; leaving
+    // it in means the statement never converges however much work gets done.
+    // An *accepted* one stays — accepting confirms the item is real, which is
+    // the opposite of closing it.
     if (finding.status === "rejected") continue;
     const key = invoiceKey(finding);
     if (key === "") continue;
@@ -288,37 +420,47 @@ export function reconcilingItems(
     if (bucket) bucket.add(key);
     else grouped.set(finding.label, new Set([key]));
   }
+  return grouped;
+}
+
+export function reconcilingItems(
+  findings: readonly PackFinding[],
+  books: readonly SourceInvoice[],
+  authority: readonly SourceInvoice[],
+): ReconcilingItem[] {
+  const booksBy = index(books);
+  const authorityBy = index(authority);
 
   const items: ReconcilingItem[] = [];
-  for (const [label, invoices] of grouped) {
-    const scenario = scenarioFor(label);
+  for (const [label, invoices] of invoicesByLabel(findings)) {
     const numbers = [...invoices].sort();
-    const rows = numbers.map(
-      (number) =>
-        byNumber.get(number) ?? {
-          invoiceNumber: number,
-          gstin: "",
-          supplierName: "",
-          invoiceDate: "",
-          taxableValue: "0.00",
-          taxAmount: "0.00",
-          period: "",
-        },
+    const totals = numbers.reduce(
+      (sum, number) => {
+        const one = contribution(number, booksBy, authorityBy);
+        return { taxableValue: sum.taxableValue + one.taxableValue, taxAmount: sum.taxAmount + one.taxAmount };
+      },
+      { taxableValue: 0, taxAmount: 0 },
     );
     items.push({
       label,
-      title: scenario.title,
-      sign: scenario.sign,
+      title: scenarioFor(label).title,
       count: numbers.length,
-      taxableValue: total(rows, "taxableValue"),
-      taxAmount: total(rows, "taxAmount"),
+      taxableValue: totals.taxableValue,
+      taxAmount: totals.taxAmount,
+      atStake: numbers.reduce(
+        (sum, number) => sum + Number((booksBy.get(number) ?? authorityBy.get(number))?.taxAmount || 0),
+        0,
+      ),
       invoices: numbers,
-      rows,
+      // The register's own row is shown when there is one — it is the
+      // taxpayer's record of the invoice, and the one they will go and check.
+      // Only an invoice they never booked falls back to the authority's.
+      rows: numbers.map((number) => booksBy.get(number) ?? authorityBy.get(number) ?? { ...ZERO, invoiceNumber: number }),
     });
   }
-  // Signed items first — they are what the difference is made of — then the
-  // ones that explain none of it but still stop a claim.
-  return items.sort((a, b) => Math.abs(b.sign) - Math.abs(a.sign) || a.title.localeCompare(b.title));
+  // Largest movement first: the line worth reading is the one carrying most of
+  // the difference, not the one whose rule happens to sort first.
+  return items.sort((a, b) => Math.abs(b.taxAmount) - Math.abs(a.taxAmount) || a.title.localeCompare(b.title));
 }
 
 /** Below one paisa is zero.
@@ -337,17 +479,47 @@ export function buildStatement(input: {
   const authority = sourceSummary(input.authority);
   const items = reconcilingItems(input.findings, input.books, input.authority);
 
+  const booksBy = index(input.books);
+  const authorityBy = index(input.authority);
+
   const difference = {
     taxableValue: books.taxableValue - authority.taxableValue,
     taxAmount: books.taxAmount - authority.taxAmount,
   };
-  const explained = {
-    taxableValue: items.reduce((sum, item) => sum + item.sign * item.taxableValue, 0),
-    taxAmount: items.reduce((sum, item) => sum + item.sign * item.taxAmount, 0),
-  };
+
+  // **Over the union of invoices, not the sum of the lines.** One invoice
+  // routinely fires two rules — `AmountMismatch` compares the register against
+  // GSTR-2B and `BooksGstr1Mismatch` against GSTR-1, and a single wrong figure
+  // trips both. Adding the lines would explain the same rupees twice and drive
+  // the residual negative, which reads as the reconciliation having found more
+  // than exists.
+  const named = new Set(items.flatMap((item) => item.invoices));
+  const explained = [...named].reduce(
+    (sum, number) => {
+      const one = contribution(number, booksBy, authorityBy);
+      return { taxableValue: sum.taxableValue + one.taxableValue, taxAmount: sum.taxAmount + one.taxAmount };
+    },
+    { taxableValue: 0, taxAmount: 0 },
+  );
+
+  // Every invoice that moves the difference and that no rule named. An invoice
+  // both sides agree on contributes nothing and is not listed — in a healthy
+  // period that is almost all of them, and listing them would bury the few
+  // that matter.
+  const unexplainedInvoices: SourceInvoice[] = [];
+  for (const number of new Set([...booksBy.keys(), ...authorityBy.keys()])) {
+    if (named.has(number)) continue;
+    const one = contribution(number, booksBy, authorityBy);
+    if (Math.abs(one.taxAmount) < PAISA && Math.abs(one.taxableValue) < PAISA) continue;
+    const row = booksBy.get(number) ?? authorityBy.get(number);
+    if (row) unexplainedInvoices.push(row);
+  }
+  unexplainedInvoices.sort((a, b) => a.invoiceNumber.localeCompare(b.invoiceNumber));
+
   const unexplained = {
     taxableValue: difference.taxableValue - explained.taxableValue,
     taxAmount: difference.taxAmount - explained.taxAmount,
+    invoices: unexplainedInvoices,
   };
 
   return {

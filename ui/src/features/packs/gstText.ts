@@ -126,10 +126,40 @@ export function literal(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 }
 
+/** An identifier as the local part of a prefixed name.
+ *
+ *  **The bug a real upload found, and it is not an edge case.** Indian invoice
+ *  numbers routinely look like `RST/2026/0455` — a slash is the ordinary
+ *  separator. Written straight into a prefixed name that is
+ *  `gst:pr-RST/2026/0455`, which is not legal Turtle, and the server rejected
+ *  the entire import with "1 field failed validation". Every importer here had
+ *  it, including the GSTR-2B one that shipped long before this and would have
+ *  failed identically on any real return whose supplier numbers that way.
+ *
+ *  **Percent-encoded rather than substituted, because a collision here merges
+ *  two invoices.** Mapping every unsafe character onto `-` would make `INV/1`
+ *  and `INV-1` one subject: two different invoices silently becoming one in a
+ *  tax reconciliation, which is worse than the rejected import this replaces.
+ *  Percent-encoding is reversible and is explicitly legal in a Turtle
+ *  `PN_LOCAL` (the `PLX`/`PERCENT` production), so no escaping scheme of our
+ *  own is needed.
+ *
+ *  The true value always travels beside it as a `gst:invoiceNumber` literal,
+ *  and every rule joins on *that*, so the subject is free to be an identifier
+ *  rather than a display value. */
+export function subjectSuffix(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/g, (char) =>
+    char
+      .split("")
+      .map((c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`)
+      .join(""),
+  );
+}
+
 /** The subject an invoice was `issuedBy`, keyed on the GSTIN so two invoices
  *  from the same supplier resolve to the same node — Epic 105c. */
 export function supplierSubject(prefix: string, gstin: string): string {
-  return `${prefix}:supplier-${gstin}`;
+  return `${prefix}:supplier-${subjectSuffix(gstin)}`;
 }
 
 /** One subject's predicate block, with the terminator each line needs.
