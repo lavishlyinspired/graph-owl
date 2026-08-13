@@ -33,6 +33,7 @@ function invoice(overrides: Partial<SourceInvoice> & { invoiceNumber: string }):
     invoiceDate: "2026-07-04",
     taxableValue: "100000.00",
     taxAmount: "18000.00",
+    matchKey: "",
     igst: "0.00",
     cgst: "0.00",
     sgst: "0.00",
@@ -679,5 +680,74 @@ describe("the supplier view, which is what the shared subject buys", () => {
     });
 
     expect(view.map((s) => s.gstin)).toEqual(["29LARGE", "27SMALL"]);
+  });
+});
+
+describe("the statement joins on the same key the rules do", () => {
+  /** **Found by looking at the rendered page, not by a test.** The register
+   *  writes `INV/1014` and the authority reports `INV-1014`. The finding rules
+   *  match them — they join on `gst:invoiceKey` and fire nothing — but the
+   *  statement still keyed on the *printed* number, so it saw an invoice only
+   *  in the books and another only in GSTR-2B and listed both as unexplained.
+   *
+   *  The residual total stayed correct because the two contributions cancel,
+   *  which is exactly what made it survive review: the number was right and the
+   *  list underneath it named two invoices that reconcile perfectly. */
+  it("treats two printed spellings of one invoice as one", () => {
+    const statement = buildStatement({
+      books: [invoice({ invoiceNumber: "INV/1014", matchKey: "INV1014", taxAmount: "12600.00" })],
+      authority: [invoice({ invoiceNumber: "INV-1014", matchKey: "INV1014", taxAmount: "12600.00" })],
+      findings: [],
+    });
+
+    expect(statement.difference.taxAmount).toBe(0);
+    expect(statement.unexplained.invoices).toEqual([]);
+    expect(statement.reconciled).toBe(true);
+  });
+
+  /** A source that carries no key falls back to the printed number, so a pack
+   *  declaring no `match_key` still reconciles rather than collapsing every
+   *  record onto an empty string. */
+  it("falls back to the printed number when a pack declares no key", () => {
+    const statement = buildStatement({
+      books: [invoice({ invoiceNumber: "INV-1", matchKey: "", taxAmount: "100.00" })],
+      authority: [invoice({ invoiceNumber: "INV-1", matchKey: "", taxAmount: "100.00" })],
+      findings: [],
+    });
+
+    expect(statement.difference.taxAmount).toBe(0);
+    expect(statement.unexplained.invoices).toEqual([]);
+  });
+
+  /** A finding projects the printed number, not the key — so joining a finding
+   *  to its source row has to work from either. */
+  it("values a finding whose rule projected the printed spelling", () => {
+    const items = reconcilingItems(
+      [finding("gst:SupplierNotFiled", "pr-INV-1014", { invoiceNumber: "INV/1014" })],
+      [invoice({ invoiceNumber: "INV/1014", matchKey: "INV1014", taxAmount: "12600.00" })],
+      [],
+    );
+
+    expect(items[0]!.taxAmount).toBe(12600);
+  });
+});
+
+describe("findings and source rows meet on the same key", () => {
+  /** **The second half of the key bug, and it produced the opposite symptom.**
+   *  Once the statement joined source rows on the pack's declared key, the
+   *  `named` set was still built from the *printed* number a rule projects —
+   *  so `INV1002` never matched `INV-1002`, and every invoice that had a
+   *  finding was reported as unexplained instead. Same total both times; a
+   *  completely different, and completely wrong, list underneath it. */
+  it("counts an invoice as explained when its rule projected the printed spelling", () => {
+    const statement = buildStatement({
+      books: [invoice({ invoiceNumber: "INV/1014", matchKey: "INV1014", taxAmount: "12600.00" })],
+      authority: [],
+      findings: [finding("gst:SupplierNotFiled", "pr-INV-1014", { invoiceNumber: "INV/1014" })],
+    });
+
+    expect(statement.unexplained.invoices).toEqual([]);
+    expect(statement.explained.taxAmount).toBe(12600);
+    expect(statement.reconciled).toBe(true);
   });
 });

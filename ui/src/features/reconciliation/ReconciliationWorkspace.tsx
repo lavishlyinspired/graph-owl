@@ -125,7 +125,7 @@ const COPY = {
   headBooks: "Books",
   headAuthority: "GSTR-2B",
   headDifference: "Difference",
-  step5: "5 · By supplier",
+  step5: "6 · By supplier",
   supplierHint:
     "One supplier is one subject in the graph, pointed at by the register, the GSTR-2A and the GSTR-2B alike — so which documents describe it is a question the graph answers directly. Chasing is done supplier by supplier, and this is the order to make the calls in.",
   inAll: "in all three",
@@ -135,7 +135,7 @@ const COPY = {
   sourceBooks: "books",
   sourceGstr1: "GSTR-2A",
   sourceAuthority: "GSTR-2B",
-  graphTitle: "6 · What the graph knows",
+  graphTitle: "5 · What the graph knows",
   graphHint:
     "These are not three spreadsheets joined by a batch job. Each import lands in its own named graph, one gst:Supplier subject is shared across all of them, and every finding is the live result of a query with the statute it rests on attached — nothing is written onto an invoice as a flag.",
   graphSubjects: "Invoice records",
@@ -164,9 +164,9 @@ const COPY = {
  *  `graph:import:{source}`, never the default graph, so a pattern outside one
  *  matches nothing at all — silently, which reads exactly like "you have not
  *  uploaded anything yet". */
-function sourceQuery(className: string): string {
+function sourceQuery(className: string, matchKey: string): string {
   return `PREFIX gst: <https://graph-owl.dev/packs/gst#>
-SELECT ?invoice ?invoiceNumber ?gstin ?supplierName ?invoiceDate ?taxableValue ?taxAmount ?igst ?cgst ?sgst ?cess ?period
+SELECT ?invoice ?invoiceNumber ?matchKey ?gstin ?supplierName ?invoiceDate ?taxableValue ?taxAmount ?igst ?cgst ?sgst ?cess ?period
 WHERE {
   GRAPH ?g {
     ?invoice a gst:${className} ;
@@ -189,6 +189,10 @@ WHERE {
   OPTIONAL { GRAPH ?hc { ?invoice gst:cgst ?cgst } }
   OPTIONAL { GRAPH ?hs { ?invoice gst:sgst ?sgst } }
   OPTIONAL { GRAPH ?hx { ?invoice gst:cess ?cess } }
+  # The predicate the pack names as what two records being the same thing
+  # means. OPTIONAL so a pack declaring none still reconciles on the printed
+  # identity rather than collapsing every record onto one empty key.
+  OPTIONAL { GRAPH ?mk { ?invoice gst:${matchKey} ?matchKey } }
 }`;
 }
 
@@ -245,6 +249,7 @@ function toSourceInvoice(row: Readonly<Record<string, string>>): BoundInvoice {
     invoiceDate: value("invoiceDate"),
     taxableValue: value("taxableValue", "0.00"),
     taxAmount: value("taxAmount", "0.00"),
+    matchKey: value("matchKey"),
     igst: value("igst", "0.00"),
     cgst: value("cgst", "0.00"),
     sgst: value("sgst", "0.00"),
@@ -677,7 +682,9 @@ export function ReconciliationWorkspace({
         return;
       }
 
-      const results = await Promise.all(specs.map((source) => api.sparql(sourceQuery(source.className))));
+      const results = await Promise.all(
+        specs.map((source) => api.sparql(sourceQuery(source.className, declared?.reconciliation?.matchKey ?? "invoiceKey"))),
+      );
       const next: Record<string, SourceInvoice[]> = {};
       specs.forEach((source, index) => {
         next[source.key] = distinctInvoices((results[index]?.rows ?? []).map(toSourceInvoice));

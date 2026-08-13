@@ -36,6 +36,20 @@ export interface SourceInvoice {
   readonly invoiceDate: string;
   readonly taxableValue: string;
   readonly taxAmount: string;
+  /** **What two records being the same thing means here**, read from the
+   *  predicate the pack names in `[console.reconciliation].match_key`.
+   *
+   *  The rules join on this; the statement must too. It did not, and the page
+   *  showed it: the register writes `INV/1014` and the authority reports
+   *  `INV-1014`, the rules matched them and fired nothing, and the statement
+   *  listed both as unexplained because it keyed on the printed number. The
+   *  residual total stayed *correct* — the two contributions cancel — which is
+   *  exactly what let it survive review, with a right number over a list naming
+   *  two invoices that reconcile perfectly.
+   *
+   *  Empty for a pack that declares no key, which falls back to the printed
+   *  identity rather than collapsing every record onto one empty string. */
+  readonly matchKey: string;
   /** **The four heads, because ITC is claimed head-wise.** Every practitioner
    *  reconciliation format checked carries BASIC | CGST | SGST | IGST | CESS as
    *  separate columns, and GSTR-3B is *filed* that way — so an intra-state
@@ -410,12 +424,24 @@ export function sourceSummary(rows: readonly SourceInvoice[]): SourceSummary {
 /** An invoice indexed by number, per side, so absence is answerable. */
 function index(rows: readonly SourceInvoice[]): Map<string, SourceInvoice> {
   const found = new Map<string, SourceInvoice>();
-  for (const row of rows) found.set(row.invoiceNumber, row);
+  for (const row of rows) {
+    found.set(keyOf(row), row);
+    // Also reachable by its printed identity, because a *finding* projects the
+    // number a human reads, not the key the rules joined on.
+    if (row.invoiceNumber !== "") found.set(row.invoiceNumber, row);
+  }
   return found;
+}
+
+/** What a row is joined by: the pack's declared key, or its printed identity
+ *  when the pack declares none. */
+function keyOf(row: SourceInvoice): string {
+  return row.matchKey !== "" ? row.matchKey : row.invoiceNumber;
 }
 
 const ZERO: SourceInvoice = {
   invoiceNumber: "",
+  matchKey: "",
   gstin: "",
   supplierName: "",
   invoiceDate: "",
@@ -451,8 +477,18 @@ function contribution(
   };
 }
 
-/** Which invoices each kind of finding is about. */
-function invoicesByLabel(findings: readonly PackFinding[]): Map<string, Set<string>> {
+/** Which invoices each kind of finding is about, **as join keys**.
+ *
+ *  A rule projects the identity a human reads (`INV/1014`); the statement joins
+ *  on the key the pack declares (`INV1014`). Resolving here rather than at each
+ *  call site is what stops the two drifting — they already did once, in both
+ *  directions: first the statement keyed on the printed number and listed two
+ *  spellings of one invoice as unexplained, then it keyed on the declared key
+ *  and listed every invoice that *had* a finding as unexplained instead. */
+function invoicesByLabel(
+  findings: readonly PackFinding[],
+  resolve: (identity: string) => string,
+): Map<string, Set<string>> {
   const grouped = new Map<string, Set<string>>();
   for (const finding of findings) {
     // A dismissed finding has been considered and rejected by a human; leaving
@@ -460,8 +496,9 @@ function invoicesByLabel(findings: readonly PackFinding[]): Map<string, Set<stri
     // An *accepted* one stays — accepting confirms the item is real, which is
     // the opposite of closing it.
     if (finding.status === "rejected") continue;
-    const key = invoiceKey(finding);
-    if (key === "") continue;
+    const identity = invoiceKey(finding);
+    if (identity === "") continue;
+    const key = resolve(identity);
     const bucket = grouped.get(finding.label);
     if (bucket) bucket.add(key);
     else grouped.set(finding.label, new Set([key]));
@@ -477,8 +514,16 @@ export function reconcilingItems(
   const booksBy = index(books);
   const authorityBy = index(authority);
 
+  // A rule's projected identity resolved to the row it belongs to, and thence
+  // to that row's join key. An identity matching no row keeps its own value —
+  // a finding about a record neither source holds is still a finding.
+  const resolve = (identity: string) => {
+    const row = booksBy.get(identity) ?? authorityBy.get(identity);
+    return row ? keyOf(row) : identity;
+  };
+
   const items: ReconcilingItem[] = [];
-  for (const [label, invoices] of invoicesByLabel(findings)) {
+  for (const [label, invoices] of invoicesByLabel(findings, resolve)) {
     const numbers = [...invoices].sort();
     const totals = numbers.reduce(
       (sum, number) => {
@@ -550,7 +595,12 @@ export function buildStatement(input: {
   // period that is almost all of them, and listing them would bury the few
   // that matter.
   const unexplainedInvoices: SourceInvoice[] = [];
-  for (const number of new Set([...booksBy.keys(), ...authorityBy.keys()])) {
+  // **Over the join keys, not every alias.** `index` deliberately makes a row
+  // reachable by both its key and its printed number so a finding can find it;
+  // walking those keys here would visit the same invoice twice and report it
+  // as two unexplained records — which is the bug this whole key exists to fix.
+  const joinKeys = new Set([...input.books, ...input.authority].map(keyOf));
+  for (const number of joinKeys) {
     if (named.has(number)) continue;
     const one = contribution(number, booksBy, authorityBy);
     if (Math.abs(one.taxAmount) < PAISA && Math.abs(one.taxableValue) < PAISA) continue;
