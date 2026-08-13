@@ -97,6 +97,25 @@ class Gstr2bInvoice:
         return f"{PREFIX}:supplier-{subject_suffix(self.supplier_gstin)}"
 
 
+def invoice_key(value: str) -> str:
+    """The key two records are the same invoice by.
+
+    A supplier writes ``INV-2023/01``, the taxpayer's clerk keys ``INV202301``,
+    and an exact join sees two unrelated invoices — so the register row reads as
+    one the supplier never filed *and* the 2B row as one never booked. Two false
+    findings, opposite in direction, about a single invoice that matched.
+
+    Deliberately conservative: case and punctuation only. Leading zeros are
+    **not** stripped — ``INV-001`` and ``INV-1`` are different invoices in
+    plenty of numbering schemes, and a wrong match silently claims credit
+    against the wrong invoice, where a missed one only leaves a finding.
+
+    Kept byte-for-byte equivalent to ``invoiceKey`` in
+    ``ui/src/features/packs/gstText.ts``.
+    """
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
 def subject_suffix(value: str) -> str:
     """An identifier as the local part of a prefixed name.
 
@@ -327,6 +346,8 @@ def to_turtle(invoices: list[Gstr2bInvoice], namespace: str | None = None) -> st
         edges = [("issuedBy", invoice.supplier_subject)]
         literal_fields = [
             ("invoiceNumber", invoice.invoice_number),
+            # What the rules join on — see `invoice_key`.
+            ("invoiceKey", invoice_key(invoice.invoice_number)),
             ("invoiceDate", invoice.invoice_date),
             ("taxableValue", invoice.taxable_value),
             ("taxAmount", invoice.tax_amount),

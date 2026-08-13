@@ -32,6 +32,7 @@ WHERE {
     ?purchase a gst:PurchaseInvoice ;
               gst:issuedBy ?supplier ;
               gst:invoiceNumber ?number ;
+              gst:invoiceKey    ?key ;
               gst:invoiceDate   ?date ;
               gst:taxableValue  ?claimed .
     ?supplier gst:supplierGstin ?gstin .
@@ -40,7 +41,7 @@ WHERE {
   GRAPH ?authority {
     ?filedLine a gst:Gstr2bInvoice ;
                gst:issuedBy ?filedSupplier ;
-               gst:invoiceNumber ?number ;
+               gst:invoiceKey    ?key ;
                gst:taxableValue  ?filed .
     ?filedSupplier gst:supplierGstin ?gstin .
   }
@@ -66,9 +67,26 @@ WHERE {
 
   # The delta, against the cap that provision sets. A nil cap (2022 onward)
   # makes any disagreement a finding; a 10% cap tolerates a small one.
+
+  # **A de-minimis floor beside the statutory cap, because they are different
+  # things and only one of them is in the statute.**
+  #
+  # Rule 36(4)'s `capPercent` is a *legal* tolerance on provisional credit, and
+  # from 2022 it is nil — so `ABS(diff) > 0` fires on a one-paisa rounding
+  # difference. Two systems that agree perfectly still disagree in the last
+  # paisa constantly (the register rounds per invoice, the return rounds per
+  # line), and a queue full of ₹0.01 findings is one a reviewer stops reading —
+  # which buries the real ones.
+  #
+  # ₹1 is chosen as the smallest unit a CA would ever act on: GSTR-3B itself is
+  # filed in whole rupees, so a sub-rupee difference cannot change what is
+  # claimed. It is a floor, not a replacement — the cap still governs everything
+  # above it, so a 2020 invoice inside its 10% cap stays silent and a 2026 one
+  # outside a nil cap still fires.
   FILTER (
     ABS(xsd:decimal(?claimed) - xsd:decimal(?filed))
       > xsd:decimal(?claimed) * xsd:decimal(?capPercent) / 100
   )
+  FILTER (ABS(xsd:decimal(?claimed) - xsd:decimal(?filed)) > 1)
 }
 ORDER BY ?number

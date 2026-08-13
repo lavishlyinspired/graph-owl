@@ -33,7 +33,7 @@ export { GstImportError as Gstr2bError } from "./gstText";
  *
  *  Re-exported because the pinned Python-twin tests import `isoDate` and
  *  `returnPeriod` from this module by name. */
-import { GstImportError, isoDate, literal, money, returnPeriod, subjectSuffix, supplierSubject } from "./gstText";
+import { GstImportError, invoiceKey, isoDate, literal, money, returnPeriod, subjectSuffix, supplierSubject } from "./gstText";
 
 export { isoDate, returnPeriod };
 
@@ -41,6 +41,8 @@ export interface Gstr2bInvoice {
   readonly supplierGstin: string;
   readonly supplierName: string;
   readonly invoiceNumber: string;
+  /** What the rules join on — see `invoiceKey` in `gstText.ts`. */
+  readonly invoiceKey: string;
   readonly invoiceDate: string;
   readonly taxableValue: string;
   readonly igst: string;
@@ -98,6 +100,7 @@ export function normalize(payload: unknown): Gstr2bInvoice[] {
         supplierGstin: gstin,
         supplierName: name,
         invoiceNumber: String(line.inum ?? ""),
+        invoiceKey: invoiceKey(String(line.inum ?? "")),
         invoiceDate,
         taxableValue: money(line.txval),
         igst,
@@ -122,6 +125,7 @@ export function normalize(payload: unknown): Gstr2bInvoice[] {
 
 const LITERAL_FIELDS: readonly (readonly [string, keyof Gstr2bInvoice])[] = [
   ["invoiceNumber", "invoiceNumber"],
+  ["invoiceKey", "invoiceKey"],
   ["invoiceDate", "invoiceDate"],
   ["taxableValue", "taxableValue"],
   ["taxAmount", "taxAmount"],

@@ -98,7 +98,61 @@ check "nothing was rejected" \
 echo "==> running the rules"
 RUN=$(reconcile gst --server "http://127.0.0.1:$PORT")
 check "every registered rule was evaluated" \
-  "$(echo "$RUN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rulesEvaluated"])')" "11"
+  "$(echo "$RUN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["rulesEvaluated"])')" "12"
+
+echo
+echo "==> the matching key: one invoice, three printed formats"
+# **The most common real-world matching failure in this file.** The register
+# writes `INV/1014`, the supplier declared `INV 1014`, the authority reports
+# `INV-1014`. An exact join on the printed number sees three unrelated records
+# and reports the register row as never filed *and* the 2B row as never booked
+# — two false findings, opposite in direction, about one invoice that matched.
+check "a punctuation difference does not become a missing invoice" \
+  "$(count gst:SupplierNotFiled INV-1014)" "0"
+check "  …nor a missing book entry in the other direction" \
+  "$(count gst:MissingInBooks INV-1014)" "0"
+check "  …and it produces no finding of any kind" \
+  "$(python3 -c "
+import json,urllib.request
+rows=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/findings?pack=gst'))
+print(sum(1 for r in rows if '1014' in r['subject']))")" "0"
+
+echo
+echo "==> tax heads: every total agrees and the credit is still wrong"
+# ITC is claimed head-wise in GSTR-3B, so an intra-state supply booked as
+# inter-state is a real reversal exposure — and it nets to zero on every total,
+# which is exactly why no amount-comparing rule can see it.
+check "INV-1012 (IGST 18,000 booked, CGST+SGST 9,000 each filed) is a finding" \
+  "$(count gst:TaxHeadMismatch INV-1012)" "1"
+check "  …and names the booked IGST figure" \
+  "$(evidence gst:TaxHeadMismatch INV-1012 igst)" "18000.00"
+# The load-bearing negative: identical totals *and* identical heads.
+check "INV-1001, whose heads agree, is NOT" \
+  "$(count gst:TaxHeadMismatch INV-1001)" "0"
+# And the amount rules must stay silent on it, or the head mismatch would just
+# be a duplicate of something already reported.
+check "  …and no amount rule fires on INV-1012, whose totals agree" \
+  "$(count gst:AmountMismatch INV-1012)" "0"
+
+echo
+echo "==> two guards that a live probe found, both proven by one silent invoice"
+# INV-1013 is 50 paise below the authority and absent from GSTR-1 while present
+# in GSTR-2B. Before the de-minimis floor the nil cap made ABS(diff) > 0 fire on
+# the rounding difference every system produces; before the 2B-presence guard
+# the missing GSTR-1 row accused a supplier whose invoice is sitting in the
+# taxpayer's own 2B — which only a filed GSTR-1 can put there.
+check "a 50-paise rounding difference is not an AmountMismatch" \
+  "$(count gst:AmountMismatch INV-1013)" "0"
+check "an invoice present in GSTR-2B is never 'the supplier has not filed'" \
+  "$(count gst:SupplierNotFiled INV-1013)" "0"
+check "  …and INV-1013 produces no finding at all" \
+  "$(python3 -c "
+import json,urllib.request
+rows=json.load(urllib.request.urlopen('http://127.0.0.1:$PORT/findings?pack=gst'))
+print(sum(1 for r in rows if '1013' in r['subject']))")" "0"
+# The floor must not swallow a real one: INV-1002 differs by 5,000.
+check "a real difference still fires above the floor" \
+  "$(count gst:AmountMismatch INV-1002)" "1"
 
 echo
 echo "==> Section 16(2)(aa): the two causes of an invoice missing from GSTR-2B"

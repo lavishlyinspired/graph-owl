@@ -1,0 +1,74 @@
+# Every total agrees, and the tax is under the **wrong head**.
+#
+# **The error that a total-only reconciliation cannot see, by construction.**
+# An intra-state supply booked as inter-state puts ₹18,000 in IGST where the
+# supplier filed ₹9,000 CGST + ₹9,000 SGST. Taxable value is identical, total
+# tax is identical, so `AmountMismatch` and `BooksGstr1Mismatch` are both
+# correctly silent — and the invoice still cannot be claimed as booked, because
+# ITC is claimed **head-wise** in GSTR-3B. Credit taken under the wrong head is
+# a real reversal exposure with interest, not a presentation quibble.
+#
+# This pack's own importer comment has named this case from the beginning —
+# "an intra-state supply reported as inter-state is a real and common error the
+# total alone hides completely" — and the head-wise figures were being imported
+# as evidence with no rule reading them. This is that rule.
+#
+# **Fires only where both sides actually carry head-wise figures.** A register
+# exported without IGST/CGST/SGST columns can still reconcile on totals, and it
+# must not be accused of a head mismatch the data cannot support: absent is not
+# zero. Every head pattern below therefore sits in the required block on its own
+# side, so an invoice missing them simply produces no row here.
+#
+# **Compared head by head, not by classifying each side as "inter" or "intra".**
+# A classifier would have to decide what to do with a cess-only line, a
+# zero-rated supply, or a line carrying both IGST and cess — and would be
+# guessing. Three independent comparisons need no such judgement and say
+# precisely which head disagrees.
+#
+# The join is on `gst:invoiceKey`, the normalized matching key, for the reason
+# `ontology.ttl` gives: an exact join on the printed number reports a punctuation
+# difference as two unrelated invoices.
+
+PREFIX gst: <https://graph-owl.dev/packs/gst#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+SELECT ?purchase ?number ?gstin ?booked ?filed ?bookedIgst ?filedIgst
+WHERE {
+  GRAPH ?register {
+    ?purchase a gst:PurchaseInvoice ;
+              gst:issuedBy ?supplier ;
+              gst:invoiceNumber ?number ;
+              gst:invoiceKey    ?key ;
+              gst:igst          ?bookedIgst ;
+              gst:cgst          ?bookedCgst ;
+              gst:sgst          ?bookedSgst .
+    ?supplier gst:supplierGstin ?gstin .
+  }
+
+  GRAPH ?authority {
+    ?filedLine a gst:Gstr2bInvoice ;
+               gst:issuedBy ?filedSupplier ;
+               gst:invoiceKey ?key ;
+               gst:igst       ?filedIgst ;
+               gst:cgst       ?filedCgst ;
+               gst:sgst       ?filedSgst .
+    ?filedSupplier gst:supplierGstin ?gstin .
+  }
+
+  # The two figures a reviewer needs to see the shape of the error at a glance:
+  # IGST on each side. A row where those two differ is inter-state against
+  # intra-state, which is the overwhelming majority of real cases.
+  BIND(CONCAT("IGST ", ?bookedIgst, " / CGST ", ?bookedCgst, " / SGST ", ?bookedSgst) AS ?booked)
+  BIND(CONCAT("IGST ", ?filedIgst, " / CGST ", ?filedCgst, " / SGST ", ?filedSgst) AS ?filed)
+
+  # Any head differing by more than a rounding paisa. `ROUNDING_TOLERANCE` is
+  # deliberately the same de-minimis floor `amount-mismatch.sparql` applies and
+  # for the same reason — two systems that agree exactly still disagree in the
+  # last paisa often enough to bury a real finding under noise.
+  FILTER (
+       ABS(xsd:decimal(?bookedIgst) - xsd:decimal(?filedIgst)) > 1
+    || ABS(xsd:decimal(?bookedCgst) - xsd:decimal(?filedCgst)) > 1
+    || ABS(xsd:decimal(?bookedSgst) - xsd:decimal(?filedSgst)) > 1
+  )
+}
+ORDER BY ?number

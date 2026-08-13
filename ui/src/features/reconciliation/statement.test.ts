@@ -32,6 +32,10 @@ function invoice(overrides: Partial<SourceInvoice> & { invoiceNumber: string }):
     invoiceDate: "2026-07-04",
     taxableValue: "100000.00",
     taxAmount: "18000.00",
+    igst: "0.00",
+    cgst: "0.00",
+    sgst: "0.00",
+    cess: "0.00",
     period: "2026-07",
     ...overrides,
   };
@@ -118,7 +122,16 @@ describe("what each source holds", () => {
   });
 
   it("reports an empty source as empty rather than as zero rupees of something", () => {
-    expect(sourceSummary([])).toEqual({ count: 0, taxableValue: 0, taxAmount: 0, periods: [] });
+    expect(sourceSummary([])).toEqual({
+      count: 0,
+      taxableValue: 0,
+      taxAmount: 0,
+      igst: 0,
+      cgst: 0,
+      sgst: 0,
+      cess: 0,
+      periods: [],
+    });
   });
 
   /** A CA reconciles one period at a time, and uploading August's 2B against
@@ -532,5 +545,53 @@ describe("one row per invoice, however many times the graph binds it", () => {
     ];
 
     expect(distinctInvoices(rows)).toHaveLength(2);
+  });
+});
+
+describe("head-wise reconciliation, which is how ITC is actually claimed", () => {
+  /** **The practitioner reconciliation formats reconcile head-wise, and this
+   *  module reconciled one total.** Every format checked carries BASIC | CGST |
+   *  SGST | IGST | CESS as separate columns, because GSTR-3B is *filed*
+   *  head-wise: credit taken under the wrong head is a real reversal exposure
+   *  with interest, not a presentation detail.
+   *
+   *  A total-only statement cannot show it. An intra-state supply booked as
+   *  inter-state moves ₹18,000 from CGST+SGST to IGST and nets to exactly zero
+   *  on the total — so the invoice reads as a perfect match. */
+  it("totals each tax head separately, not just their sum", () => {
+    const summary = sourceSummary([
+      invoice({ invoiceNumber: "INV-1", igst: "18000.00", cgst: "0.00", sgst: "0.00", taxAmount: "18000.00" }),
+      invoice({ invoiceNumber: "INV-2", igst: "0.00", cgst: "4500.00", sgst: "4500.00", taxAmount: "9000.00" }),
+    ]);
+
+    expect(summary.igst).toBe(18000);
+    expect(summary.cgst).toBe(4500);
+    expect(summary.sgst).toBe(4500);
+    expect(summary.taxAmount).toBe(27000);
+  });
+
+  /** The case the whole head-wise column exists for: totals identical on both
+   *  sides, heads completely different. A statement that reconciles only the
+   *  total reports this period as balanced. */
+  it("shows a head-wise difference where the total shows none", () => {
+    const statement = buildStatement({
+      books: [invoice({ invoiceNumber: "INV-1", igst: "18000.00", cgst: "0.00", sgst: "0.00", taxAmount: "18000.00" })],
+      authority: [invoice({ invoiceNumber: "INV-1", igst: "0.00", cgst: "9000.00", sgst: "9000.00", taxAmount: "18000.00" })],
+      findings: [],
+    });
+
+    expect(statement.difference.taxAmount).toBe(0);
+    expect(statement.difference.igst).toBe(18000);
+    expect(statement.difference.cgst).toBe(-9000);
+    expect(statement.difference.sgst).toBe(-9000);
+  });
+
+  /** A register exported without head columns still reconciles on totals, and
+   *  must not report phantom head differences — absent is not zero here either. */
+  it("reads a source with no head columns as zero across the heads", () => {
+    const summary = sourceSummary([invoice({ invoiceNumber: "INV-1", igst: "", cgst: "", sgst: "", cess: "" })]);
+
+    expect(summary.igst).toBe(0);
+    expect(summary.taxAmount).toBe(18000);
   });
 });

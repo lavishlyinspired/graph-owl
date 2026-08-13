@@ -36,7 +36,53 @@ export interface SourceInvoice {
   readonly invoiceDate: string;
   readonly taxableValue: string;
   readonly taxAmount: string;
+  /** **The four heads, because ITC is claimed head-wise.** Every practitioner
+   *  reconciliation format checked carries BASIC | CGST | SGST | IGST | CESS as
+   *  separate columns, and GSTR-3B is *filed* that way — so an intra-state
+   *  supply booked as inter-state is a real reversal exposure with interest.
+   *  A total-only statement cannot show it: moving ₹18,000 from CGST+SGST to
+   *  IGST nets to exactly zero on the total, and the invoice reads as a perfect
+   *  match. Empty where a source carried no head columns — absent is not zero,
+   *  and a register exported without them must still reconcile on totals. */
+  readonly igst: string;
+  readonly cgst: string;
+  readonly sgst: string;
+  readonly cess: string;
   readonly period: string;
+}
+
+/** The five figures a GST reconciliation is actually done in. */
+export interface Heads {
+  readonly taxableValue: number;
+  readonly taxAmount: number;
+  readonly igst: number;
+  readonly cgst: number;
+  readonly sgst: number;
+  readonly cess: number;
+}
+
+const HEAD_FIELDS = ["taxableValue", "taxAmount", "igst", "cgst", "sgst", "cess"] as const;
+
+export const ZERO_HEADS: Heads = { taxableValue: 0, taxAmount: 0, igst: 0, cgst: 0, sgst: 0, cess: 0 };
+
+function headsOf(rows: readonly SourceInvoice[]): Heads {
+  const out = { ...ZERO_HEADS } as Record<(typeof HEAD_FIELDS)[number], number>;
+  for (const row of rows) {
+    for (const field of HEAD_FIELDS) out[field] += Number(row[field] || 0);
+  }
+  return out;
+}
+
+/** `a − b`, head by head. */
+function minusHeads(a: Heads, b: Heads): Heads {
+  return {
+    taxableValue: a.taxableValue - b.taxableValue,
+    taxAmount: a.taxAmount - b.taxAmount,
+    igst: a.igst - b.igst,
+    cgst: a.cgst - b.cgst,
+    sgst: a.sgst - b.sgst,
+    cess: a.cess - b.cess,
+  };
 }
 
 /** A source row as SPARQL returned it, still carrying the invoice's own
@@ -83,10 +129,8 @@ export function distinctInvoices(rows: readonly BoundInvoice[]): SourceInvoice[]
   return [...bySubject.values()];
 }
 
-export interface SourceSummary {
+export interface SourceSummary extends Heads {
   readonly count: number;
-  readonly taxableValue: number;
-  readonly taxAmount: number;
   readonly periods: readonly string[];
 }
 
@@ -117,7 +161,10 @@ export interface ReconcilingItem {
 export interface Statement {
   readonly books: SourceSummary;
   readonly authority: SourceSummary;
-  readonly difference: { readonly taxableValue: number; readonly taxAmount: number };
+  /** **Head by head, not only as a total.** The difference that matters most
+   *  is the one a total cannot show: heads that disagree while summing to the
+   *  same figure. */
+  readonly difference: Heads;
   readonly explained: { readonly taxableValue: number; readonly taxAmount: number };
   /** The residual, **with the invoices it consists of**. "₹4,500 unaccounted
    *  for" sends a reviewer through the whole period; naming the invoice is a
@@ -339,15 +386,10 @@ export function invoiceKey(finding: PackFinding): string {
   return localName(finding.subject).replace(/^(pr|g1|2b|receipt|purchase|payment)-/, "");
 }
 
-function total(rows: readonly SourceInvoice[], field: "taxableValue" | "taxAmount"): number {
-  return rows.reduce((sum, row) => sum + Number(row[field] || 0), 0);
-}
-
 export function sourceSummary(rows: readonly SourceInvoice[]): SourceSummary {
   return {
     count: rows.length,
-    taxableValue: total(rows, "taxableValue"),
-    taxAmount: total(rows, "taxAmount"),
+    ...headsOf(rows),
     periods: [...new Set(rows.map((row) => row.period).filter((p) => p !== ""))].sort(),
   };
 }
@@ -379,6 +421,10 @@ const ZERO: SourceInvoice = {
   invoiceDate: "",
   taxableValue: "0.00",
   taxAmount: "0.00",
+  igst: "0.00",
+  cgst: "0.00",
+  sgst: "0.00",
+  cess: "0.00",
   period: "",
 };
 
@@ -482,10 +528,7 @@ export function buildStatement(input: {
   const booksBy = index(input.books);
   const authorityBy = index(input.authority);
 
-  const difference = {
-    taxableValue: books.taxableValue - authority.taxableValue,
-    taxAmount: books.taxAmount - authority.taxAmount,
-  };
+  const difference = minusHeads(books, authority);
 
   // **Over the union of invoices, not the sum of the lines.** One invoice
   // routinely fires two rules — `AmountMismatch` compares the register against

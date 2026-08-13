@@ -95,6 +95,10 @@ name = "supplierGstin"
 [[predicates]]
 name = "invoiceNumber"
 
+# The normalized key every finding rule joins on — see `ontology.ttl`.
+[[predicates]]
+name = "invoiceKey"
+
 [[predicates]]
 name = "invoiceDate"
 
@@ -422,6 +426,24 @@ evidence = [
   { predicate = "gst:atTime", var = "receivedAt" },
 ]
 
+# **The error a total-only reconciliation cannot see, by construction.** Every
+# total agrees and the tax sits under the wrong head — ITC is claimed head-wise
+# in GSTR-3B, so credit taken under the wrong head is a real reversal exposure.
+# The head-wise figures were already being imported as evidence with no rule
+# reading them; this is that rule.
+[[findings]]
+label = "gst:TaxHeadMismatch"
+summary = "The invoice matches on every total, and the tax is split across different heads than the supplier filed"
+governed_by = "gst:Section16-2-aa"
+query = "tax-head-mismatch"
+subject = "purchase"
+evidence = [
+  { predicate = "gst:supplierGstin", var = "gstin" },
+  { predicate = "gst:invoiceNumber", var = "number" },
+  { predicate = "gst:igst", var = "bookedIgst" },
+  { predicate = "gst:igst", var = "filedIgst" },
+]
+
 # The 180-day condition, as a span between two events.
 #
 # `when_missing = "elapsed"`, not `"finding"`. Treating every unpaid invoice
@@ -510,6 +532,11 @@ name = "goods-receipt-timing"
 path = "queries/goods-receipt-timing.sparql"
 label = "Matched, but the goods arrived in a later period (Section 16(2)(b))"
 
+[[queries]]
+name = "tax-head-mismatch"
+path = "queries/tax-head-mismatch.sparql"
+label = "Totals agree, tax heads do not (IGST against CGST+SGST)"
+
 # Not referenced by any [[findings]] rule — a direct lookup for the
 # run_pack_query MCP tool, not a detector. Epic 105 P106 Slice 4a.
 [[queries]]
@@ -536,6 +563,7 @@ labels = [
   "gst:MissingInBooks",
   "gst:BooksGstr1Mismatch",
   "gst:GoodsReceiptTiming",
+  "gst:TaxHeadMismatch",
 ]
 actions = ["accept", "reject-with-reason", "defer"]
 evidence = "side-by-side"

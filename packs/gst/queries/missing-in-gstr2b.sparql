@@ -66,6 +66,7 @@ WHERE {
     ?invoice a gst:PurchaseInvoice ;
              gst:issuedBy ?supplier ;
              gst:invoiceNumber ?number ;
+             gst:invoiceKey    ?key ;
              gst:taxAmount ?taxAmount .
     ?supplier gst:supplierGstin ?gstin .
   }
@@ -73,7 +74,7 @@ WHERE {
     GRAPH ?authority {
       ?filed a gst:Gstr2bInvoice ;
              gst:issuedBy ?filedSupplier ;
-             gst:invoiceNumber ?number .
+             gst:invoiceKey    ?key .
       ?filedSupplier gst:supplierGstin ?gstin .
     }
   }

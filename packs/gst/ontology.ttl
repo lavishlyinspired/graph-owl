@@ -53,6 +53,16 @@ gst:GoodsReceipt    rdf:type gst:Class ; gst:label "Goods or services receipt ev
 
 gst:supplierGstin rdf:type gst:Property ; gst:label "supplier GSTIN" .
 gst:invoiceNumber rdf:type gst:Property ; gst:label "invoice number" .
+
+# **What two records are the same invoice by**, as distinct from what the
+# invoice is *called*. A supplier writes `INV-2023/01` and the taxpayer's clerk
+# keys `INV202301`; an exact join on the number sees two unrelated invoices and
+# reports the register row as never filed *and* the 2B row as never booked —
+# two false findings, opposite in direction, about one invoice that matched.
+# Case and punctuation are removed; leading zeros deliberately are not, because
+# `INV-001` and `INV-1` are different invoices in plenty of numbering schemes
+# and a wrong match claims credit against the wrong one.
+gst:invoiceKey    rdf:type gst:Property ; gst:label "normalized invoice matching key" .
 gst:invoiceDate   rdf:type gst:Property ; gst:label "invoice date" .
 gst:taxableValue  rdf:type gst:Property ; gst:label "taxable value" .
 gst:taxAmount     rdf:type gst:Property ; gst:label "tax amount" .

@@ -126,6 +126,33 @@ export function literal(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 }
 
+/** The key two records are the same invoice by.
+ *
+ *  **The single most common real-world matching failure this closes.** A
+ *  supplier writes `INV-2023/01`, the taxpayer's clerk keys `INV202301`, and an
+ *  exact join sees two unrelated invoices — so the register row is reported as
+ *  one the supplier never filed *and* the GSTR-2B row as one never booked. Two
+ *  false findings, opposite in direction, about a single invoice that matched.
+ *
+ *  **Written into the graph at import rather than computed in the query.**
+ *  SPARQL can do this with `REPLACE`, but only inside a `FILTER` — which turns
+ *  an indexable join into a cross product filtered afterwards, O(n×m) on a real
+ *  register. As a stored property it stays a plain join, and it is visible to a
+ *  reviewer reading the data rather than buried in five query files.
+ *
+ *  **Deliberately conservative: case and punctuation only.** Collapsing harder
+ *  is worse than not collapsing — a missed match leaves a finding for a human,
+ *  a wrong match silently claims credit against the wrong invoice. Leading
+ *  zeros in particular are *not* stripped: `INV-001` and `INV-1` are different
+ *  invoices in plenty of numbering schemes.
+ *
+ *  This is the same normalization this project's own `[[matching.blocking]]`
+ *  `normalized` strategy describes — a strategy the finding rules never
+ *  invoked, because they join on the raw literal. */
+export function invoiceKey(value: string): string {
+  return String(value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
 /** An identifier as the local part of a prefixed name.
  *
  *  **The bug a real upload found, and it is not an edge case.** Indian invoice

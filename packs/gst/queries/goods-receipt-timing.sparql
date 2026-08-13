@@ -42,14 +42,15 @@ WHERE {
   GRAPH ?register {
     ?purchase a gst:PurchaseInvoice ;
               gst:issuedBy ?supplier ;
-              gst:invoiceNumber ?number .
+              gst:invoiceNumber ?number ;
+              gst:invoiceKey    ?key .
     ?supplier gst:supplierGstin ?gstin .
   }
 
   GRAPH ?authority {
     ?filed a gst:Gstr2bInvoice ;
            gst:issuedBy ?filedSupplier ;
-           gst:invoiceNumber ?number ;
+           gst:invoiceKey    ?key ;
            gst:period        ?period .
     ?filedSupplier gst:supplierGstin ?gstin .
   }

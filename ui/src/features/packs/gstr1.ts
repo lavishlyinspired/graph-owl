@@ -32,6 +32,7 @@
 
 import {
   GstImportError,
+  invoiceKey,
   isoDate,
   money,
   monthNameDate,
@@ -201,6 +202,7 @@ export function toTurtle(invoices: readonly Gstr1Invoice[], prefix = "gst", iri?
       ...turtleSubject(prefix, `${prefix}:g1-${subjectSuffix(invoice.invoiceNumber)}`, "Gstr1Invoice", [
         ["issuedBy", supplierSubject(prefix, invoice.supplierGstin), true],
         ["invoiceNumber", invoice.invoiceNumber],
+        ["invoiceKey", invoiceKey(invoice.invoiceNumber)],
         ["invoiceDate", invoice.invoiceDate],
         ["taxableValue", invoice.taxableValue],
         ["taxAmount", invoice.taxAmount],

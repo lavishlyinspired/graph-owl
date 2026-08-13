@@ -98,6 +98,45 @@
                 "rev": "N",
                 "typ": "R",
                 "pos": "27"
+              },
+              {
+                "inum": "INV-1012",
+                "dt": "29-07-2026",
+                "txval": 100000.0,
+                "igst": 0,
+                "cgst": 9000.0,
+                "sgst": 9000.0,
+                "cess": 0,
+                "itcavl": "Y",
+                "rev": "N",
+                "typ": "R",
+                "pos": "27"
+              },
+              {
+                "inum": "INV-1013",
+                "dt": "31-07-2026",
+                "txval": 50000.0,
+                "igst": 9000.0,
+                "cgst": 0,
+                "sgst": 0,
+                "cess": 0,
+                "itcavl": "Y",
+                "rev": "N",
+                "typ": "R",
+                "pos": "27"
+              },
+              {
+                "inum": "INV-1014",
+                "dt": "31-07-2026",
+                "txval": 70000.0,
+                "igst": 12600.0,
+                "cgst": 0,
+                "sgst": 0,
+                "cess": 0,
+                "itcavl": "Y",
+                "rev": "N",
+                "typ": "R",
+                "pos": "27"
               }
             ]
           }

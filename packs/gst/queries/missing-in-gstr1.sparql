@@ -41,6 +41,7 @@ WHERE {
     ?invoice a gst:PurchaseInvoice ;
              gst:issuedBy ?supplier ;
              gst:invoiceNumber ?number ;
+             gst:invoiceKey    ?key ;
              gst:invoiceDate   ?invoiceDate ;
              gst:taxableValue  ?taxableValue ;
              gst:taxAmount     ?taxAmount .
@@ -60,7 +61,7 @@ WHERE {
     GRAPH ?gstr1 {
       ?declared a gst:Gstr1Invoice ;
                 gst:issuedBy ?declaredSupplier ;
-                gst:invoiceNumber ?number .
+                gst:invoiceKey    ?key .
       ?declaredSupplier gst:supplierGstin ?gstin .
     }
   }
@@ -94,13 +95,34 @@ WHERE {
   OPTIONAL {
     GRAPH ?anyGstr1 {
       ?declaredUnderAnotherGstin a gst:Gstr1Invoice ;
-                gst:invoiceNumber ?number ;
+                gst:invoiceKey    ?key ;
                 gst:taxableValue  ?taxableValue .
+    }
+  }
+
+  # **GSTR-2B presence is conclusive proof the supplier filed, and ignoring it
+  # made this rule accuse suppliers who plainly had.**
+  #
+  # A 2B is *generated from* filed GSTR-1s: an invoice cannot be in it unless a
+  # supplier furnished the details. So "no supplier has declared this invoice"
+  # is falsified by a 2B row, whatever the GSTR-1 data does or does not cover.
+  #
+  # Found by probing the running server with a books+2B pair and only partial
+  # GSTR-2A — which is not a contrived case but the *normal* one. A CA
+  # routinely holds 2B for every supplier and 2A for only some periods, and
+  # before this guard every 2B-matched invoice with no 2A row was reported as
+  # one the supplier had never filed. Not an edge case: the false-positive rate
+  # scaled with how incomplete the 2A coverage was.
+  OPTIONAL {
+    GRAPH ?authority {
+      ?availableIn2b a gst:Gstr2bInvoice ;
+                gst:invoiceKey ?key .
     }
   }
 
   FILTER (!BOUND(?declared))
   FILTER (!BOUND(?declaredUnderAnotherGstin))
+  FILTER (!BOUND(?availableIn2b))
   FILTER (!BOUND(?rcm) || ?rcm != "Y")
 }
 ORDER BY ?number

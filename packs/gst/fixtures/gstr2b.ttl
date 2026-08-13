@@ -31,9 +31,13 @@ gst:supplier-33AAGCV2109L1ZH rdf:type gst:Supplier ;
 gst:2b-INV-1001 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1001" ;
+    gst:invoiceKey    "INV1001" ;
     gst:invoiceDate   "2026-07-04" ;
     gst:taxableValue  "100000.00" ;
     gst:taxAmount     "18000.00" ;
+    gst:igst          "18000.00" ;
+    gst:cgst          "0.00" ;
+    gst:sgst          "0.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
     gst:period        "2026-07" .
@@ -41,6 +45,7 @@ gst:2b-INV-1001 rdf:type gst:Gstr2bInvoice ;
 gst:2b-INV-1002 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1002" ;
+    gst:invoiceKey    "INV1002" ;
     gst:invoiceDate   "2026-07-09" ;
     gst:taxableValue  "95000.00" ;
     gst:taxAmount     "17100.00" ;
@@ -51,6 +56,7 @@ gst:2b-INV-1002 rdf:type gst:Gstr2bInvoice ;
 gst:2b-INV-1004 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1004" ;
+    gst:invoiceKey    "INV1004" ;
     gst:invoiceDate   "2026-07-22" ;
     gst:taxableValue  "50000.00" ;
     gst:taxAmount     "9000.00" ;
@@ -61,6 +67,7 @@ gst:2b-INV-1004 rdf:type gst:Gstr2bInvoice ;
 gst:2b-INV-1005 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1005" ;
+    gst:invoiceKey    "INV1005" ;
     gst:invoiceDate   "2026-07-24" ;
     gst:taxableValue  "40000.00" ;
     gst:taxAmount     "7200.00" ;
@@ -71,6 +78,7 @@ gst:2b-INV-1005 rdf:type gst:Gstr2bInvoice ;
 gst:2b-INV-1006 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1006" ;
+    gst:invoiceKey    "INV1006" ;
     gst:invoiceDate   "2026-07-26" ;
     gst:taxableValue  "60000.00" ;
     gst:taxAmount     "10800.00" ;
@@ -84,6 +92,7 @@ gst:2b-INV-1006 rdf:type gst:Gstr2bInvoice ;
 gst:2b-INV-1008 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-33AAGCV2109L1ZH ;
     gst:invoiceNumber "INV-1008" ;
+    gst:invoiceKey    "INV1008" ;
     gst:invoiceDate   "2026-07-19" ;
     gst:taxableValue  "45000.00" ;
     gst:taxAmount     "8100.00" ;
@@ -91,9 +100,51 @@ gst:2b-INV-1008 rdf:type gst:Gstr2bInvoice ;
     gst:reverseCharge "N" ;
     gst:period        "2026-07" .
 
+# The same invoice the register booked as inter-state, filed as intra-state.
+# Totals identical on both sides; only the heads disagree.
+gst:2b-INV-1012 rdf:type gst:Gstr2bInvoice ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+    gst:invoiceNumber "INV-1012" ;
+    gst:invoiceKey    "INV1012" ;
+    gst:invoiceDate   "2026-07-29" ;
+    gst:taxableValue  "100000.00" ;
+    gst:taxAmount     "18000.00" ;
+    gst:igst          "0.00" ;
+    gst:cgst          "9000.00" ;
+    gst:sgst          "9000.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "N" ;
+    gst:period        "2026-07" .
+
+# 50 paise above the register, and no GSTR-1 row — the pair that proves the
+# de-minimis floor and the 2B-presence guard both hold.
+gst:2b-INV-1013 rdf:type gst:Gstr2bInvoice ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+    gst:invoiceNumber "INV-1013" ;
+    gst:invoiceKey    "INV1013" ;
+    gst:invoiceDate   "2026-07-31" ;
+    gst:taxableValue  "50000.00" ;
+    gst:taxAmount     "9000.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "N" ;
+    gst:period        "2026-07" .
+
+# The authority's own spelling of the invoice the register writes `INV/1014`.
+gst:2b-INV-1014 rdf:type gst:Gstr2bInvoice ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+    gst:invoiceNumber "INV-1014" ;
+    gst:invoiceKey    "INV1014" ;
+    gst:invoiceDate   "2026-07-31" ;
+    gst:taxableValue  "70000.00" ;
+    gst:taxAmount     "12600.00" ;
+    gst:itcAvailable  "Y" ;
+    gst:reverseCharge "N" ;
+    gst:period        "2026-07" .
+
 gst:2b-INV-2001 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-2001" ;
+    gst:invoiceKey    "INV2001" ;
     gst:invoiceDate   "2020-07-10" ;
     gst:taxableValue  "95000.00" ;
     gst:taxAmount     "17100.00" ;
@@ -104,6 +155,7 @@ gst:2b-INV-2001 rdf:type gst:Gstr2bInvoice ;
 gst:2b-INV-2002 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-2002" ;
+    gst:invoiceKey    "INV2002" ;
     gst:invoiceDate   "2020-07-12" ;
     gst:taxableValue  "80000.00" ;
     gst:taxAmount     "14400.00" ;

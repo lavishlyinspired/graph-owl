@@ -64,6 +64,7 @@ import {
   sourceSummary,
   statementCsv,
   type BoundInvoice,
+  type Heads,
   type ReconcilingItem,
   type SourceInvoice,
   type Statement,
@@ -116,6 +117,12 @@ const COPY = {
   explainedTotal: "Explained by findings",
   explainedHint: "sum of the items below",
   invoicesSuffix: "invoices",
+  headsTitle: "Head-wise",
+  headsHint:
+    "ITC is claimed head by head in GSTR-3B, so a total that agrees is not the same as a reconciliation that agrees. An intra-state supply booked as inter-state nets to zero on the total and is still a reversal exposure.",
+  headBooks: "Books",
+  headAuthority: "GSTR-2B",
+  headDifference: "Difference",
 };
 
 /** ₹ the way an Indian statement writes it — lakhs and crores, not thousands.
@@ -146,7 +153,7 @@ function rupees(value: number): string {
  *  uploaded anything yet". */
 function sourceQuery(className: string): string {
   return `PREFIX gst: <https://graph-owl.dev/packs/gst#>
-SELECT ?invoice ?invoiceNumber ?gstin ?supplierName ?invoiceDate ?taxableValue ?taxAmount ?period
+SELECT ?invoice ?invoiceNumber ?gstin ?supplierName ?invoiceDate ?taxableValue ?taxAmount ?igst ?cgst ?sgst ?cess ?period
 WHERE {
   GRAPH ?g {
     ?invoice a gst:${className} ;
@@ -161,6 +168,14 @@ WHERE {
   OPTIONAL {
     GRAPH ?names { ?supplier gst:supplierName ?supplierName }
   }
+  # **The four heads are OPTIONAL, and that is the whole point.** ITC is
+  # claimed head-wise, so the statement needs them — but a register exported
+  # without IGST/CGST/SGST columns must still reconcile on totals rather than
+  # vanishing from its own figures because a required pattern did not match.
+  OPTIONAL { GRAPH ?hi { ?invoice gst:igst ?igst } }
+  OPTIONAL { GRAPH ?hc { ?invoice gst:cgst ?cgst } }
+  OPTIONAL { GRAPH ?hs { ?invoice gst:sgst ?sgst } }
+  OPTIONAL { GRAPH ?hx { ?invoice gst:cess ?cess } }
 }`;
 }
 
@@ -229,6 +244,10 @@ function toSourceInvoice(row: Readonly<Record<string, string>>): BoundInvoice {
     invoiceDate: value("invoiceDate"),
     taxableValue: value("taxableValue", "0.00"),
     taxAmount: value("taxAmount", "0.00"),
+    igst: value("igst", "0.00"),
+    cgst: value("cgst", "0.00"),
+    sgst: value("sgst", "0.00"),
+    cess: value("cess", "0.00"),
     period: value("period"),
   };
 }
@@ -345,6 +364,17 @@ function SourceCard({
   );
 }
 
+/** The five figures a GST reconciliation is done in, in the order every
+ *  practitioner format lists them. */
+const HEADS: readonly { key: keyof Heads; label: string }[] = [
+  { key: "taxableValue", label: "Taxable value" },
+  { key: "igst", label: "IGST" },
+  { key: "cgst", label: "CGST" },
+  { key: "sgst", label: "SGST" },
+  { key: "cess", label: "Cess" },
+  { key: "taxAmount", label: "Total tax" },
+];
+
 const INVOICE_COLUMNS = [
   { title: "Invoice", dataIndex: "invoiceNumber", key: "invoiceNumber", width: 130 },
   { title: "Supplier", dataIndex: "supplierName", key: "supplierName", render: (v: string) => v || "—" },
@@ -407,6 +437,61 @@ function StatementPanel({ statement }: { statement: Statement }) {
           <Text type="secondary" style={{ fontSize: 12 }}>{COPY.explainedHint}</Text>
         </Col>
       </Row>
+
+      {/* **Head-wise, because that is how ITC is claimed.** Every practitioner
+        *  reconciliation format checked carries these as separate columns, and
+        *  a total-only statement cannot show the error they exist to catch:
+        *  moving tax between heads nets to zero on the total. */}
+      <div style={{ marginTop: 20 }}>
+        <Text strong>{COPY.headsTitle}</Text>
+        <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
+          {COPY.headsHint}
+        </Paragraph>
+        <Table
+          size="small"
+          rowKey="head"
+          pagination={false}
+          dataSource={HEADS.map((head) => ({
+            head: head.label,
+            books: statement.books[head.key],
+            authority: statement.authority[head.key],
+            difference: statement.difference[head.key],
+          }))}
+          columns={[
+            { title: "", dataIndex: "head", key: "head", width: 130 },
+            {
+              title: COPY.headBooks,
+              dataIndex: "books",
+              key: "books",
+              align: "right" as const,
+              render: (v: number) => rupees(v),
+            },
+            {
+              title: COPY.headAuthority,
+              dataIndex: "authority",
+              key: "authority",
+              align: "right" as const,
+              render: (v: number) => rupees(v),
+            },
+            {
+              title: COPY.headDifference,
+              dataIndex: "difference",
+              key: "difference",
+              align: "right" as const,
+              // A head that agrees is the ordinary case and should read as
+              // quiet; one that does not is the whole reason this table exists.
+              render: (v: number) =>
+                Math.abs(v) < 0.005 ? (
+                  <Text type="secondary">{rupees(v)}</Text>
+                ) : (
+                  <Text strong type="warning">
+                    {rupees(v)}
+                  </Text>
+                ),
+            },
+          ]}
+        />
+      </div>
 
       <Alert
         style={{ marginTop: 16 }}

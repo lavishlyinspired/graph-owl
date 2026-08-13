@@ -6,7 +6,7 @@
  *  proved was wrong. */
 
 import { describe, expect, it } from "vitest";
-import { subjectSuffix } from "./gstText";
+import { invoiceKey, subjectSuffix } from "./gstText";
 
 describe("turning an invoice number into a subject", () => {
   /** **The bug a real upload found, and it is not an edge case.** Indian
@@ -45,5 +45,52 @@ describe("turning an invoice number into a subject", () => {
    *  worth pinning so the encoding is never "improved" into changing it. */
   it("leaves a GSTIN untouched", () => {
     expect(subjectSuffix("27AABCU9603R1ZM")).toBe("27AABCU9603R1ZM");
+  });
+});
+
+describe("the key two records are the same invoice by", () => {
+  /** **The single most common real-world matching failure.** A supplier writes
+   *  `INV-2023/01` on the invoice, the taxpayer's clerk keys `INV202301`, and
+   *  an exact join sees two unrelated invoices — so the books row is reported
+   *  as one the supplier never filed *and* the 2B row as one never booked. Two
+   *  false findings about one invoice that matched perfectly.
+   *
+   *  This is what every practitioner tool normalizes away before matching, and
+   *  what this project's own `[[matching.blocking]]` `normalized` strategy is
+   *  for — a strategy the finding rules never actually invoked, because they
+   *  join on the raw literal. */
+  it("ignores the punctuation two systems disagree about", () => {
+    expect(invoiceKey("INV-2023/01")).toBe(invoiceKey("INV202301"));
+    expect(invoiceKey("RST/2026/0455")).toBe(invoiceKey("RST-2026-0455"));
+    expect(invoiceKey("PL 8834")).toBe(invoiceKey("PL-8834"));
+  });
+
+  it("ignores case, which ERPs and portals disagree about routinely", () => {
+    expect(invoiceKey("inv-001")).toBe(invoiceKey("INV-001"));
+  });
+
+  /** **Normalization must not merge invoices that are genuinely different.**
+   *  Collapsing too hard is worse than not collapsing at all: a missed match
+   *  leaves a finding for a human, a wrong match silently claims credit
+   *  against the wrong invoice. */
+  it("keeps genuinely different numbers apart", () => {
+    expect(invoiceKey("INV-001")).not.toBe(invoiceKey("INV-002"));
+    expect(invoiceKey("INV-1")).not.toBe(invoiceKey("INV-10"));
+    expect(invoiceKey("ABC-1")).not.toBe(invoiceKey("ABD-1"));
+  });
+
+  /** Leading zeros are a real formatting difference between systems, but they
+   *  are *not* safe to strip: `INV-001` and `INV-1` are different invoices in
+   *  plenty of numbering schemes, and merging them claims credit against the
+   *  wrong one. Deliberately left distinct — recorded so it is not "fixed"
+   *  later without the trade being re-argued. */
+  it("does not strip leading zeros", () => {
+    expect(invoiceKey("INV-001")).not.toBe(invoiceKey("INV-1"));
+  });
+
+  it("is empty for an empty number, so nothing joins on absence", () => {
+    expect(invoiceKey("")).toBe("");
+    expect(invoiceKey("  ")).toBe("");
+    expect(invoiceKey("///")).toBe("");
   });
 });

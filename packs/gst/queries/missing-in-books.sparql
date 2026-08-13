@@ -33,6 +33,7 @@ WHERE {
     ?declared a gst:Gstr1Invoice ;
               gst:issuedBy ?declaredSupplier ;
               gst:invoiceNumber ?number ;
+              gst:invoiceKey    ?key ;
               gst:invoiceDate   ?invoiceDate ;
               gst:taxableValue  ?taxableValue ;
               gst:taxAmount     ?taxAmount .
@@ -43,7 +44,7 @@ WHERE {
     GRAPH ?register {
       ?booked a gst:PurchaseInvoice ;
               gst:issuedBy ?bookedSupplier ;
-              gst:invoiceNumber ?number .
+              gst:invoiceKey    ?key .
       ?bookedSupplier gst:supplierGstin ?gstin .
     }
   }
@@ -62,7 +63,7 @@ WHERE {
   OPTIONAL {
     GRAPH ?anyRegister {
       ?bookedUnderAnotherGstin a gst:PurchaseInvoice ;
-              gst:invoiceNumber ?number ;
+              gst:invoiceKey    ?key ;
               gst:taxableValue  ?taxableValue .
     }
   }

@@ -53,14 +53,19 @@ gst:supplier-27AABCU9603R1MZ rdf:type gst:Supplier ;
 gst:pr-INV-1001 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1001" ;
+    gst:invoiceKey    "INV1001" ;
     gst:invoiceDate   "2026-07-04" ;
     gst:taxableValue  "100000.00" ;
     gst:taxAmount     "18000.00" ;
+    gst:igst          "18000.00" ;
+    gst:cgst          "0.00" ;
+    gst:sgst          "0.00" ;
     gst:period        "2026-07" .
 
 gst:pr-INV-1002 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1002" ;
+    gst:invoiceKey    "INV1002" ;
     gst:invoiceDate   "2026-07-09" ;
     gst:taxableValue  "100000.00" ;
     gst:taxAmount     "18000.00" ;
@@ -69,6 +74,7 @@ gst:pr-INV-1002 rdf:type gst:PurchaseInvoice ;
 gst:pr-INV-1003 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-29AACCG0527D1Z8 ;
     gst:invoiceNumber "INV-1003" ;
+    gst:invoiceKey    "INV1003" ;
     gst:invoiceDate   "2026-07-15" ;
     gst:taxableValue  "250000.00" ;
     gst:taxAmount     "45000.00" ;
@@ -77,6 +83,7 @@ gst:pr-INV-1003 rdf:type gst:PurchaseInvoice ;
 gst:pr-INV-1004 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1MZ ;
     gst:invoiceNumber "INV-1004" ;
+    gst:invoiceKey    "INV1004" ;
     gst:invoiceDate   "2026-07-21" ;
     gst:taxableValue  "50000.00" ;
     gst:taxAmount     "9000.00" ;
@@ -85,6 +92,7 @@ gst:pr-INV-1004 rdf:type gst:PurchaseInvoice ;
 gst:pr-INV-1005 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1005" ;
+    gst:invoiceKey    "INV1005" ;
     gst:invoiceDate   "2026-07-24" ;
     gst:taxableValue  "40000.00" ;
     gst:taxAmount     "7200.00" ;
@@ -93,6 +101,7 @@ gst:pr-INV-1005 rdf:type gst:PurchaseInvoice ;
 gst:pr-INV-1006 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1006" ;
+    gst:invoiceKey    "INV1006" ;
     gst:invoiceDate   "2026-07-26" ;
     gst:taxableValue  "60000.00" ;
     gst:taxAmount     "10800.00" ;
@@ -107,6 +116,7 @@ gst:pr-INV-1006 rdf:type gst:PurchaseInvoice ;
 gst:pr-INV-1007 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-29AACCG0527D1Z8 ;
     gst:invoiceNumber "INV-1007" ;
+    gst:invoiceKey    "INV1007" ;
     gst:invoiceDate   "2026-07-28" ;
     gst:taxableValue  "30000.00" ;
     gst:taxAmount     "5400.00" ;
@@ -120,6 +130,7 @@ gst:pr-INV-1007 rdf:type gst:PurchaseInvoice ;
 gst:pr-INV-1009 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-29AACCG0527D1Z8 ;
     gst:invoiceNumber "INV-1009" ;
+    gst:invoiceKey    "INV1009" ;
     gst:invoiceDate   "2026-07-30" ;
     gst:taxableValue  "25000.00" ;
     gst:taxAmount     "4500.00" ;
@@ -133,6 +144,7 @@ gst:pr-INV-1009 rdf:type gst:PurchaseInvoice ;
 gst:pr-INV-1010 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1010" ;
+    gst:invoiceKey    "INV1010" ;
     gst:invoiceDate   "2026-08-30" ;
     gst:taxableValue  "20000.00" ;
     gst:taxAmount     "3600.00" ;
@@ -144,14 +156,71 @@ gst:pr-INV-1010 rdf:type gst:PurchaseInvoice ;
 gst:pr-INV-1011 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1011" ;
+    gst:invoiceKey    "INV1011" ;
     gst:invoiceDate   "2026-08-12" ;
     gst:taxableValue  "15000.00" ;
     gst:taxAmount     "2700.00" ;
     gst:period        "2026-08" .
 
+# **Every total agrees and the tax heads do not.** Booked as an inter-state
+# supply (IGST 18,000); the supplier filed it as intra-state (CGST 9,000 +
+# SGST 9,000). Taxable value identical, total tax identical — so every
+# amount-comparing rule in this pack is silent, correctly, and the invoice
+# still cannot be claimed as booked: ITC is claimed head-wise in GSTR-3B, and
+# credit taken under the wrong head is a real reversal exposure.
+#
+# This is the case the pack's own `gstr2b.ts` comment already named — "an
+# intra-state supply reported as inter-state is a real and common error the
+# total alone hides completely" — and that nothing detected until
+# `gst:TaxHeadMismatch`.
+gst:pr-INV-1012 rdf:type gst:PurchaseInvoice ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+    gst:invoiceNumber "INV-1012" ;
+    gst:invoiceKey    "INV1012" ;
+    gst:invoiceDate   "2026-07-29" ;
+    gst:taxableValue  "100000.00" ;
+    gst:taxAmount     "18000.00" ;
+    gst:igst          "18000.00" ;
+    gst:cgst          "0.00" ;
+    gst:sgst          "0.00" ;
+    gst:period        "2026-07" .
+
+# **A negative control for two guards at once, and it must produce nothing.**
+#
+# 50 paise below what the authority reports, and absent from GSTR-1 while
+# present in GSTR-2B. Before the de-minimis floor, the nil cap in force from
+# 2022 made `ABS(diff) > 0` fire `AmountMismatch` on the rounding difference
+# every system produces. Before the 2B-presence guard, the missing GSTR-1 row
+# made `SupplierNotFiled` accuse a supplier whose invoice is sitting in the
+# taxpayer's own 2B — which only a filed GSTR-1 can put there.
+gst:pr-INV-1013 rdf:type gst:PurchaseInvoice ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+    gst:invoiceNumber "INV-1013" ;
+    gst:invoiceKey    "INV1013" ;
+    gst:invoiceDate   "2026-07-31" ;
+    gst:taxableValue  "50000.50" ;
+    gst:taxAmount     "9000.09" ;
+    gst:period        "2026-07" .
+
+# **One invoice, three printed formats, and it must produce nothing.** The
+# register writes `INV/1014`, the supplier declared `INV 1014`, the authority
+# reports `INV-1014`. An exact join on the printed number sees three unrelated
+# records and reports the register row as never filed *and* the 2B row as never
+# booked — two false findings, opposite in direction, about one invoice that
+# matched. `gst:invoiceKey` is what makes all three the same invoice.
+gst:pr-INV-1014 rdf:type gst:PurchaseInvoice ;
+    gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
+    gst:invoiceNumber "INV/1014" ;
+    gst:invoiceKey    "INV1014" ;
+    gst:invoiceDate   "2026-07-31" ;
+    gst:taxableValue  "70000.00" ;
+    gst:taxAmount     "12600.00" ;
+    gst:period        "2026-07" .
+
 gst:pr-INV-2001 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-2001" ;
+    gst:invoiceKey    "INV2001" ;
     gst:invoiceDate   "2020-07-10" ;
     gst:taxableValue  "100000.00" ;
     gst:taxAmount     "18000.00" ;
@@ -160,6 +229,7 @@ gst:pr-INV-2001 rdf:type gst:PurchaseInvoice ;
 gst:pr-INV-2002 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-2002" ;
+    gst:invoiceKey    "INV2002" ;
     gst:invoiceDate   "2020-07-12" ;
     gst:taxableValue  "100000.00" ;
     gst:taxAmount     "18000.00" ;
