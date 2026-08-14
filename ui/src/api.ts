@@ -380,6 +380,77 @@ export interface FindingRuleDef {
   readonly span: unknown;
 }
 
+/** A governed metric definition — `GET /business-metrics`.
+ *
+ *  **`gaps` is the field worth reading.** The server computes what a metric
+ *  claims and what it can actually show for it: a metric with no formula and no
+ *  source assets is a name with a number beside it, which is exactly the thing
+ *  a metric catalogue exists to stop. Reported by the server rather than
+ *  inferred here, so the console cannot disagree with it. */
+export interface BusinessMetric {
+  readonly id: string;
+  readonly name: string;
+  readonly fullyQualifiedName: string;
+  readonly definition?: string | null;
+  readonly formula?: string | null;
+  readonly unit?: string | null;
+  readonly granularity?: string | null;
+  readonly calculationType?: string;
+  readonly sourceAssets?: readonly string[];
+  readonly gaps?: readonly string[];
+}
+
+/** A deployment-defined extension property — `GET /custom-properties`. */
+export interface CustomProperty {
+  readonly id: string;
+  readonly name?: string;
+  readonly entityType?: string;
+  readonly propertyType?: string;
+  readonly description?: string | null;
+}
+
+/** A reusable data-quality test — `GET /test-definitions`.
+ *
+ *  **Domain-agnostic by nature.** A test is a named assertion with an expected
+ *  cadence; what it asserts is the deployment's business. GST's might be "no
+ *  register row lacks a supplier", a healthcare pack's "no claim lacks a member
+ *  id". The console shows the assertion and when it last held, never what it
+ *  means. */
+export interface TestDefinition {
+  readonly id: string;
+  readonly name: string;
+  readonly testType: string;
+  readonly description?: string | null;
+  readonly expectedCadence?: string | null;
+}
+
+/** One test bound to one asset — `GET /test-cases`. */
+export interface TestCase {
+  readonly id: string;
+  readonly name: string;
+  readonly targetFqn: string;
+  readonly testType: string;
+  readonly description?: string | null;
+  readonly definitionId?: string | null;
+  readonly suiteId?: string | null;
+  readonly expectedCadence?: string | null;
+}
+
+/** A promise about an asset, and to whom — `GET /contracts`.
+ *
+ *  **`consumers` is plural because a contract with one consumer is a special
+ *  case of the real thing**, not the other way round — the core type's own
+ *  reasoning, carried through rather than flattened at the boundary. */
+export interface DataContract {
+  readonly id: string;
+  readonly name: string;
+  readonly assetFqn: string;
+  readonly producer: string;
+  readonly consumers?: readonly string[];
+  readonly slas?: readonly { readonly kind?: string; readonly threshold?: unknown }[];
+  readonly status?: string;
+}
+
 /** A classification label applied to an asset — `GET /label-suggestions`
  *  returns the ones a classifier proposed and no human has vouched for yet.
  *
@@ -1547,6 +1618,32 @@ export const api = {
    *  — an ordinary answer, not a failure. */
   packConsole: (pack: string) =>
     request<PackConsoleConfig>(`/packs/${encodeURIComponent(pack)}/console`).catch(() => null),
+
+  /** Governed metric definitions, each with the gaps the server computed.
+   *
+   *  **This route paginates and the others here do not.** It answers
+   *  `{data, paging}` where `/test-definitions`, `/contracts` and
+   *  `/custom-properties` answer bare arrays — assuming otherwise blanked the
+   *  entire Governance page with `rows is not iterable`, which a type
+   *  annotation cannot catch because the annotation was the thing that was
+   *  wrong. Unwrapped here so every caller sees one shape. */
+  businessMetrics: () =>
+    request<{ data: readonly BusinessMetric[] }>("/business-metrics").then((page) => page.data ?? []),
+
+  /** Deployment-defined extension properties. */
+  customProperties: () => request<readonly CustomProperty[]>("/custom-properties"),
+
+  /** Reusable test definitions — the assertions, not their bindings. */
+  testDefinitions: () => request<readonly TestDefinition[]>("/test-definitions"),
+
+  /** Tests bound to assets. `targetFqn` narrows to one asset's tests. */
+  testCases: (params: { targetFqn?: string } = {}) => {
+    const query = params.targetFqn ? `?targetFqn=${encodeURIComponent(params.targetFqn)}` : "";
+    return request<readonly TestCase[]>(`/test-cases${query}`);
+  },
+
+  /** Data contracts and the SLAs they promise. */
+  contracts: () => request<readonly DataContract[]>("/contracts"),
 
   /** Labels a classifier proposed that nobody has vouched for yet. */
   labelSuggestions: () => request<readonly TagLabel[]>("/label-suggestions"),

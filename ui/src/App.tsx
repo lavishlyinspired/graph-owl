@@ -168,6 +168,8 @@ import type { ConnectorRun, ReasoningReport } from "./api";
 import { describeReasoningRun } from "./governance/reasoningRun";
 import { ReasoningPanel } from "./features/reasoning/ReasoningPanel";
 import { GovernanceQueues } from "./features/governance/GovernanceQueues";
+import { QualityPanel } from "./features/governance/QualityPanel";
+import { MetricsPanel } from "./features/governance/MetricsPanel";
 import { ExportDialog } from "./features/export/ExportDialog";
 import watermarkImg from "./assets/watermark1.png";
 
@@ -2794,6 +2796,12 @@ function GovernancePage({ colors }: { colors: (typeof palette)["light"] }) {
 
       {/* Plan 110 Slice 3 — two queues that were one route away from visible. */}
       <GovernanceQueues />
+
+      {/* Plan 110 Slice 2 — eleven routes, one coherent surface, no caller. */}
+      <QualityPanel />
+
+      {/* Plan 110 Slice 4 — scheduled last, built anyway; each is a table. */}
+      <MetricsPanel />
 
       {lastRun && (
         <Alert
