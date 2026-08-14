@@ -18,11 +18,19 @@
  *  neighbourhood produces a number shaped like PageRank without meaning what
  *  PageRank means.
  *
- *  Every judgement lives in `graph/analytics.ts`; this mounts, fetches, draws. */
+ *  Every judgement lives in `graph/analytics.ts`; this mounts, fetches, draws.
+ *
+ *  **Fetch is a caller-supplied `load`, not a hardcoded `api.assetAnalytics`
+ *  call — Plan 113 Slice C.** A GST invoice has no asset id to call that with
+ *  at all, so this panel would otherwise be unusable for exactly the subjects
+ *  Plan 113 exists to reach. `SubjectExplorer` supplies `api.graphContextAnalytics`
+ *  instead; the rendering — the table, the truncation tag, the malformed-payload
+ *  guard — is identical either way, because degree centrality means the same
+ *  thing whether the node is a table or an invoice. */
 
 import { useEffect, useState } from "react";
 import { Alert, Card, Empty, Space, Table, Tag, Typography } from "antd";
-import { ApiError, api, type AssetAnalytics } from "../api";
+import { ApiError, type AssetAnalytics } from "../api";
 import { connectivityRows, describeAnalytics } from "./analytics";
 
 const { Text, Paragraph } = Typography;
@@ -45,12 +53,15 @@ const COPY = {
 };
 
 export function ConnectivityPanel({
-  assetId,
-  hops,
+  cacheKey,
+  load,
   names,
 }: {
-  assetId: string;
-  hops: number;
+  /** Changes whenever `load` would return something different — the effect's
+   *  own dependency, since a closure is never comparable across renders the
+   *  way a primitive is. */
+  cacheKey: string;
+  load: () => Promise<AssetAnalytics>;
   /** Names the canvas above already resolved for these nodes. **Passed in
    *  rather than fetched**: the explorer walked this neighbourhood and has
    *  them, and a table of raw UUIDs makes the reader match hex strings by eye.
@@ -64,7 +75,7 @@ export function ConnectivityPanel({
     let live = true;
     setAnalytics(null);
     setFailure(null);
-    api.assetAnalytics(assetId, { hops }).then(
+    load().then(
       (found) => live && setAnalytics(found),
       (error: unknown) => {
         if (!live) return;
@@ -74,7 +85,11 @@ export function ConnectivityPanel({
     return () => {
       live = false;
     };
-  }, [assetId, hops]);
+    // `load` is deliberately excluded: it is a closure that changes identity
+    // every render, and `cacheKey` is the caller's own statement of when a
+    // re-fetch is actually needed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cacheKey]);
 
   // A contract violation in the payload (vectors of different lengths) throws
   // rather than rendering a shorter prefix that would look complete. Caught

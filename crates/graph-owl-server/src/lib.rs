@@ -87,6 +87,14 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         // Plan 111 Slice D: the pack's own `[[matching.blocking]]` finally
         // runs. `POST` for the same reason — the subject is an identity.
         .route("/packs/{pack}/candidates", post(pack_candidates))
+        // Plan 113 Slice A. `POST` for the same reason `/graph/paths` is: the
+        // seed is an identity, and a pack subject's local id can hold
+        // characters a query string mangles.
+        .route("/graph/context", post(graph_context_route))
+        .route(
+            "/graph/context/analytics",
+            post(graph_context_analytics_route),
+        )
         .route("/graph/export/graphml", get(export_graphml))
         .route("/graph/export/bulk-csv", get(export_bulk_csv))
         .route("/graph/export/cypher", get(export_cypher_script))
@@ -2741,6 +2749,22 @@ impl ValidateBody for PathRequest {
 /// node landed by an import is nameable too. A UUID has no colon, which is
 /// what makes the two unambiguous rather than merely usually distinguishable.
 fn parse_node_id(field: &str, raw: &str) -> Result<graph_owl_core::flake::Sid, AppError> {
+    // **Checked before the `namespace:local` case, not after.** An IRI
+    // contains a colon too (`https:`), so `raw.contains(':')` below is true
+    // for both shapes — handing an IRI to `parse_sid` would try to parse
+    // `"https"` as a numeric namespace code and fail with a confusing error
+    // instead of resolving the identity it was actually given. Plan 113
+    // Slice C: evidence-graph nodes, near-misses and blocking candidates all
+    // carry an `iri`, not a `namespace:local` string.
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        return graph_owl_core::flake::Sid::from_iri(raw).ok_or_else(|| {
+            AppError::Validation(vec![FieldError::new(
+                field,
+                FieldErrorCode::Type,
+                format!("`{raw}` is not in a namespace this deployment resolves"),
+            )])
+        });
+    }
     if raw.contains(':') {
         return parse_sid(field, raw);
     }
@@ -2752,7 +2776,9 @@ fn parse_node_id(field: &str, raw: &str) -> Result<graph_owl_core::flake::Sid, A
             AppError::Validation(vec![FieldError::new(
                 field,
                 FieldErrorCode::Type,
-                format!("`{raw}` is neither an asset id nor a `namespace:name` identifier"),
+                format!(
+                    "`{raw}` is neither an asset id, an IRI, nor a `namespace:name` identifier"
+                ),
             )])
         })
 }
@@ -2866,6 +2892,179 @@ async fn graph_paths(
             "length": path.length,
         })).collect::<Vec<_>>(),
         "truncated": found.truncated,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GraphContextRequest {
+    seed: String,
+    direction: Option<String>,
+    hops: Option<usize>,
+    max_nodes: Option<usize>,
+    relationship_types: Option<Vec<String>>,
+    as_of: Option<String>,
+}
+
+impl ValidateBody for GraphContextRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("seed"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// The neighbourhood around **any** subject, not only a catalog asset — Plan
+/// 113 Slice A.
+///
+/// **`Catalog::graph_context` already walked from any `Sid` and had zero
+/// callers.** Found answering a direct question: a GST invoice is not a
+/// catalog asset, so `/assets/{id}/graph` cannot show its neighbourhood at
+/// all — there is no UUID to put in the path. This route takes the identity
+/// the same way `/graph/paths` and `/packs/{pack}/candidates` already do
+/// (`parse_node_id`: a bare UUID is an asset, anything with a colon is a full
+/// `namespace:local` identifier), and answers the same shape
+/// `/assets/{id}/graph` does, so one console panel can render either.
+///
+/// **Not connected to anything is a `200` with an empty picture, matching the
+/// rest of this exploration surface** — `whole graph engine's stated posture
+/// carries through unchanged: an absent neighbourhood is a real answer.
+async fn graph_context_route(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(request): AppJson<GraphContextRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let direction = match request.direction.as_deref() {
+        None | Some("both") => graph_owl_traversal::Direction::Both,
+        Some("outgoing") => graph_owl_traversal::Direction::Outgoing,
+        Some("incoming") => graph_owl_traversal::Direction::Incoming,
+        Some(other) => {
+            return Err(AppError::Validation(vec![FieldError::new(
+                "direction",
+                FieldErrorCode::Type,
+                format!("`{other}` is not one of: outgoing, incoming, both"),
+            )]));
+        }
+    };
+
+    let defaults = graph_owl_traversal::Bounds::default();
+    let bounds = graph_owl_traversal::Bounds {
+        max_hops: request.hops.unwrap_or(defaults.max_hops).min(6),
+        max_nodes: request.max_nodes.unwrap_or(defaults.max_nodes).min(1_000),
+    };
+
+    let as_of = match request.as_of {
+        None => None,
+        Some(raw) => Some(
+            chrono::DateTime::parse_from_rfc3339(&raw)
+                .map_err(|e| {
+                    AppError::Validation(vec![FieldError::new(
+                        "asOf",
+                        FieldErrorCode::Type,
+                        format!("`{raw}` is not an RFC 3339 timestamp: {e}"),
+                    )])
+                })?
+                .with_timezone(&chrono::Utc),
+        ),
+    };
+
+    let context = catalog
+        .graph_context_for(
+            &principal,
+            parse_node_id("seed", &request.seed)?,
+            direction,
+            bounds,
+            request.relationship_types,
+            as_of,
+        )
+        .await?;
+
+    Ok(Json(json!({
+        "nodes": context.nodes.iter().map(|node| json!({
+            "id": node.id.id,
+            "iri": node.id.to_iri(),
+            "sources": node.sources,
+        })).collect::<Vec<_>>(),
+        "edges": context.edges.iter().map(|e| json!({
+            "from": e.from.id,
+            "to": e.to.id,
+            "relationship": e.relationship,
+            "derived": e.derived,
+        })).collect::<Vec<_>>(),
+        "truncated": context.truncated,
+    })))
+}
+
+/// Connectivity for **any** subject, not only a catalog asset — Plan 113
+/// Slice B, `/graph/context`'s counterpart to `/assets/{id}/analytics`.
+///
+/// **Same envelope as `/assets/{id}/analytics`, deliberately.** The console's
+/// `AssetAnalytics` type and its `ConnectivityPanel` rendering are reused
+/// unchanged for a subject that has no catalog asset at all — degree
+/// centrality means the same thing whether the node is a table or a GST
+/// invoice, and a second, subtly different response shape would only invite
+/// the two to drift.
+async fn graph_context_analytics_route(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(request): AppJson<GraphContextRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let direction = match request.direction.as_deref() {
+        None | Some("both") => graph_owl_traversal::Direction::Both,
+        Some("outgoing") => graph_owl_traversal::Direction::Outgoing,
+        Some("incoming") => graph_owl_traversal::Direction::Incoming,
+        Some(other) => {
+            return Err(AppError::Validation(vec![FieldError::new(
+                "direction",
+                FieldErrorCode::Type,
+                format!("`{other}` is not one of: outgoing, incoming, both"),
+            )]));
+        }
+    };
+
+    let defaults = graph_owl_traversal::Bounds::default();
+    let bounds = graph_owl_traversal::Bounds {
+        max_hops: request.hops.unwrap_or(defaults.max_hops).min(6),
+        max_nodes: request.max_nodes.unwrap_or(defaults.max_nodes).min(1_000),
+    };
+
+    let as_of = match request.as_of {
+        None => None,
+        Some(raw) => Some(
+            chrono::DateTime::parse_from_rfc3339(&raw)
+                .map_err(|e| {
+                    AppError::Validation(vec![FieldError::new(
+                        "asOf",
+                        FieldErrorCode::Type,
+                        format!("`{raw}` is not an RFC 3339 timestamp: {e}"),
+                    )])
+                })?
+                .with_timezone(&chrono::Utc),
+        ),
+    };
+
+    let analytics = catalog
+        .graph_context_analytics_for(
+            &principal,
+            parse_node_id("seed", &request.seed)?,
+            direction,
+            bounds,
+            request.relationship_types,
+            as_of,
+        )
+        .await?;
+
+    Ok(Json(json!({
+        "nodes": analytics.nodes.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+        "inDegree": analytics.in_degree,
+        "outDegree": analytics.out_degree,
+        "orphans": analytics.orphans.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+        "edgeTypes": analytics.edge_types.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+        "truncated": analytics.truncated,
     })))
 }
 
@@ -8043,12 +8242,19 @@ struct DerivedQuery {
 /// The overlay as stored, not a fresh pass: an asset page opens with this, and
 /// re-deriving per page view would make the catalog slowest where it is browsed
 /// most.
+///
+/// `subject` accepts any shape `parse_node_id` resolves — a bare asset UUID,
+/// a `namespace:local` identifier, or a full IRI — not only the
+/// `namespace:local` this route originally shipped with (Plan 113 Slice D).
+/// A pack subject reached via `SubjectExplorer` carries only an IRI, and the
+/// reasoner's per-subject view is one of the places that made an asset the
+/// only kind of subject worth asking about.
 async fn derived_about(
     State(catalog): State<Catalog>,
     Auth(_principal): Auth,
     Query(query): Query<DerivedQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let subject = parse_sid("subject", &query.subject)?;
+    let subject = parse_node_id("subject", &query.subject)?;
     let facts = catalog.derived_about(&subject).await?;
     Ok(Json(json!(
         facts.iter().map(flake_body).collect::<Vec<_>>()
@@ -13334,5 +13540,63 @@ mod finding_candidate_tests {
             .collect();
         assert_eq!(surviving_candidates(&many, &[], None, 2).len(), 2);
         assert_eq!(surviving_candidates(&many, &[], None, 50).len(), 5);
+    }
+}
+
+#[cfg(test)]
+mod parse_node_id_tests {
+    //! Plan 113 Slice C — `parse_node_id` gains a third form. Evidence-graph
+    //! nodes, near-misses and blocking candidates all carry an `iri`, not a
+    //! `namespace:local` string, so `ClickableSubject` (which links those
+    //! surfaces to `SubjectExplorer`) needed a way to resolve one. A full IRI
+    //! also contains a colon (`https:`), so it had to be told apart from
+    //! `namespace:local` *before* falling into `parse_sid`, which would
+    //! otherwise try to parse `"https"` as a numeric namespace code and fail
+    //! with a confusing error instead of resolving the identity it was given.
+
+    use super::*;
+
+    #[test]
+    fn a_bare_uuid_resolves_as_an_asset() {
+        let id = Uuid::new_v4();
+        let found = parse_node_id("seed", &id.to_string()).expect("ok");
+        assert_eq!(found.namespace_code, graph_owl_core::flake::namespace::DSC);
+        assert_eq!(found.id, id.to_string());
+    }
+
+    #[test]
+    fn a_namespace_colon_local_identifier_resolves_directly() {
+        let found = parse_node_id("seed", "1024:pr-INV-1012").expect("ok");
+        assert_eq!(found.namespace_code, 1024);
+        assert_eq!(found.id, "pr-INV-1012");
+    }
+
+    /// **The case this module exists for.** An IRI contains a colon too
+    /// (`https:`), so it must not be handed to `parse_sid`, which would try
+    /// to parse `"https"` as a `u16` namespace code and fail.
+    #[test]
+    fn a_full_iri_resolves_through_the_namespace_registry() {
+        graph_owl_core::namespaces::register_process_namespace(
+            graph_owl_core::flake::namespace::RUNTIME_START,
+            "https://graph-owl.dev/packs/gst#",
+        );
+        let found = parse_node_id("seed", "https://graph-owl.dev/packs/gst#pr-INV-1012")
+            .expect("an IRI in a registered namespace resolves");
+        assert_eq!(found.id, "pr-INV-1012");
+    }
+
+    /// An IRI in no namespace this deployment has registered is a `400`
+    /// naming the field, not a panic and not a silent `None` swallowed into
+    /// something else.
+    #[test]
+    fn an_unregistered_iri_is_rejected_by_name() {
+        let error = parse_node_id("seed", "https://nothing-registers-this.example/x")
+            .expect_err("an unresolvable IRI must be refused");
+        match error {
+            AppError::Validation(errors) => {
+                assert!(errors.iter().any(|e| e.field == "seed"), "{errors:?}");
+            }
+            other => panic!("expected a validation error, got {other:?}"),
+        }
     }
 }

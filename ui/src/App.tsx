@@ -97,11 +97,10 @@ import {
 import { AuthProvider, useAuth, tryRefresh } from "./auth";
 import { type DiffEdge, diff } from "./graph/diff";
 import { overflowTitle, summarizeOwners } from "./graph/owners";
+import { ReasoningView } from "./graph/ReasoningView";
 import {
   CertificationBadge,
   ConfidenceBadge,
-  DerivationBadge,
-  ProvenanceLabel,
   userTextDir,
 } from "./trust/TrustComponents";
 import { VocabularySection } from "./features/vocabulary/VocabularySection";
@@ -148,13 +147,6 @@ import {
   groupByAsset,
   localName,
 } from "./governance/queue";
-import {
-  type Explanation,
-  type Row as ChainRow,
-  depthOf,
-  flatten,
-  rulesUsed,
-} from "./governance/explanation";
 import {
   type Solution,
   alignmentBadgeLabel,
@@ -1234,8 +1226,8 @@ function GraphExplorer({
           picture and shares the picture's depth, so the numbers describe the
           neighbourhood on screen rather than a different one. */}
       <ConnectivityPanel
-        assetId={assetId}
-        hops={hops}
+        cacheKey={`${assetId}:${hops}`}
+        load={() => api.assetAnalytics(assetId, { hops })}
         names={
           new Map(
             picture.nodes.map((node) => [`${DSC_NAMESPACE}:${node.id}`, node.name] as const),
@@ -1851,7 +1843,7 @@ function AssetDetail({
                 <ThunderboltOutlined /> Reasoning
               </span>
             ),
-            children: <ReasoningView assetId={asset.id} colors={colors} />,
+            children: <ReasoningView subject={`1:${asset.id}`} colors={colors} />,
           },
           {
             key: "knowledge",
@@ -2363,223 +2355,6 @@ function WorkbenchPage({ colors, asOf }: { colors: (typeof palette)["light"]; as
   );
 }
 
-/** What the reasoner concluded about this asset, and why — Demo 4's second half.
- *
- *  A derived fact is **visibly marked**: `00b` decision 2 keeps conclusions in
- *  their own graph precisely so nobody mistakes one for something a person
- *  asserted, and the console has to honour that or the separation is invisible
- *  where it matters most.
- */
-function ReasoningView({
-  assetId,
-  colors,
-}: {
-  assetId: string;
-  colors: (typeof palette)["light"];
-}) {
-  const [facts, setFacts] = useState<{ s: string; p: string; o: string; t: number }[] | null>(
-    null,
-  );
-  const [open, setOpen] = useState<string | null>(null);
-  const [failed, setFailed] = useState<string | null>(null);
-
-  useEffect(() => {
-    let live = true;
-    setFacts(null);
-    api
-      .derivedAbout(`1:${assetId}`)
-      .then((found) => live && setFacts(found))
-      .catch((error) => {
-        if (!live) return;
-        setFailed(error instanceof ApiError ? error.problem.title : "could not load conclusions");
-        setFacts([]);
-      });
-    return () => {
-      live = false;
-    };
-  }, [assetId]);
-
-  if (failed) return <Alert type="error" showIcon message={failed} />;
-  if (facts === null) return <Spin />;
-
-  if (facts.length === 0) {
-    return (
-      <Paragraph type="secondary" style={{ fontSize: 13 }}>
-        The reasoner has concluded nothing about this asset. Either no rule
-        applies, or no run has happened since the facts that would trigger one —
-        run reasoning from <Text strong>Governance</Text>.
-      </Paragraph>
-    );
-  }
-
-  return (
-    <Space direction="vertical" size="small" style={{ width: "100%" }}>
-      <Alert
-        type="info"
-        showIcon
-        message="These are conclusions, not assertions"
-        description="Nobody stated them. They live in their own graph and are replaced on every run — open one to see what it rests on."
-      />
-      {facts.map((fact) => {
-        const key = `${fact.s}|${fact.p}|${fact.o}`;
-        return (
-          <Card key={key} size="small">
-            <Flex justify="space-between" align="center" wrap gap={8}>
-              <Space size={6} wrap>
-                <DerivationBadge status="derived" />
-                <Text code style={{ fontSize: 12 }}>
-                  {triple(fact)}
-                </Text>
-              </Space>
-              <Button size="small" onClick={() => setOpen(open === key ? null : key)}>
-                {open === key ? "Hide" : "Why?"}
-              </Button>
-            </Flex>
-            <ProvenanceLabel provenance={{ t: fact.t }} />
-            {open === key && (
-              <div style={{ marginTop: 10 }}>
-                <DerivationChain fact={fact} colors={colors} />
-              </div>
-            )}
-          </Card>
-        );
-      })}
-    </Space>
-  );
-}
-
-/** Why a fact holds, as an indented chain — Epic 6 Slice D on screen.
- *
- *  **The point of reasoning being explainable is that somebody reads it.** A
- *  derived fact with no visible derivation is an assertion the system made up,
- *  and the reason `00a` sells explainability is that a governance decision
- *  taken on an inference nobody can check is a governance decision nobody will
- *  take.
- *
- *  The chain is rendered to the assertions underneath, not one level down: a
- *  premise that is itself derived is the interesting half.
- */
-function DerivationChain({
-  fact,
-  colors,
-}: {
-  fact: { s: string; p: string; o: string };
-  colors: (typeof palette)["light"];
-}) {
-  const [explanation, setExplanation] = useState<Explanation | null>(null);
-  const [missing, setMissing] = useState(false);
-  const [failed, setFailed] = useState<string | null>(null);
-
-  useEffect(() => {
-    let live = true;
-    setExplanation(null);
-    setMissing(false);
-    setFailed(null);
-    api
-      .explain(fact.s, fact.p, fact.o)
-      .then((found) => live && setExplanation(found))
-      .catch((error) => {
-        if (!live) return;
-        // A 404 means nothing supports this fact — a different statement from
-        // "the server is down", and only one of them is about the data.
-        if (error instanceof ApiError && error.problem.status === 404) setMissing(true);
-        else setFailed(error instanceof ApiError ? error.problem.title : "could not explain");
-      });
-    return () => {
-      live = false;
-    };
-  }, [fact.s, fact.p, fact.o]);
-
-  if (failed) return <Alert type="error" showIcon message={failed} />;
-  if (missing) {
-    return (
-      <Alert
-        type="info"
-        showIcon
-        message="Nothing supports this fact"
-        description="It is neither asserted nor implied by anything the reasoner can see. That is a different answer from “it is false”."
-      />
-    );
-  }
-  if (!explanation) return <Spin />;
-
-  const rows = flatten(explanation);
-  const depth = depthOf(explanation);
-  const rules = rulesUsed(explanation);
-
-  return (
-    <Space direction="vertical" size="small" style={{ width: "100%" }}>
-      <Space wrap>
-        {explanation.status === "asserted" ? (
-          <DerivationBadge status="asserted" />
-        ) : (
-          <>
-            <DerivationBadge status="derived" />
-            {/* Depth is the one number that says whether an inference is a
-                restatement or a genuine conclusion. */}
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {depth} step{depth === 1 ? "" : "s"} deep
-            </Text>
-            {rules.map((rule) => (
-              <Tag key={rule}>{rule}</Tag>
-            ))}
-          </>
-        )}
-      </Space>
-
-      <div style={{ fontSize: 13 }}>
-        {rows.map((row: ChainRow, index) => (
-          <div
-            key={`${row.depth}-${index}`}
-            style={{
-              // Indentation *is* the chain. A flat list of the same rows says
-              // which facts took part and not how they hang together.
-              paddingLeft: row.depth * 18,
-              borderLeft: row.depth > 0 ? `1px solid ${colors.border}` : undefined,
-              marginLeft: row.depth > 0 ? 4 : 0,
-              padding: "3px 0 3px 8px",
-            }}
-          >
-            {row.kind === "rule" ? (
-              <Space size={6}>
-                <Tag color="purple" style={{ marginInlineEnd: 0 }}>
-                  {row.rule}
-                </Tag>
-                {row.route !== undefined && (
-                  <Text type="secondary" style={{ fontSize: 11 }}>
-                    route {row.route}
-                  </Text>
-                )}
-              </Space>
-            ) : row.kind === "asserted" ? (
-              <Space size={6}>
-                <DerivationBadge status="asserted" />
-                <Text code style={{ fontSize: 12 }}>
-                  {row.fact ? triple(row.fact) : ""}
-                </Text>
-              </Space>
-            ) : row.kind === "circular" ? (
-              // Only reachable through a cyclic ontology. Named rather than
-              // truncated, or a modelling error reads as a short chain.
-              <Text type="warning" style={{ fontSize: 12 }}>
-                circular — {row.fact ? triple(row.fact) : ""}
-              </Text>
-            ) : (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                nothing supports this premise
-              </Text>
-            )}
-          </div>
-        ))}
-      </div>
-    </Space>
-  );
-}
-
-/** A fact as a reader reads it, without the namespace codes. */
-function triple(fact: { s: string; p: string; o: string }): string {
-  return `${localName(fact.s)} ${localName(fact.p)} ${localName(fact.o)}`;
-}
 
 /** Institutional memory about one entity — Epic 31 recall, Epic 41 Slice E
  *  on screen.

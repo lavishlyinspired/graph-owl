@@ -3565,7 +3565,77 @@ impl Catalog {
         let subgraph = self
             .asset_subgraph(principal, id, direction, bounds, None, None)
             .await?;
+        self.analytics_over_subgraph(subgraph, bounds.max_nodes, None)
+            .await
+    }
 
+    /// Connectivity for **any** subject, not only a catalog asset — Plan 113
+    /// Slice B.
+    ///
+    /// **The same numbers [`asset_analytics`] reports, over
+    /// [`graph_context_for`]'s walk instead of [`asset_subgraph`]'s.** Degree
+    /// centrality and orphan detection mean the same thing whether the node
+    /// happens to be a table or a GST invoice — the shape (`AssetAnalytics`)
+    /// is reused rather than duplicated under a new name, because the answer
+    /// is the same kind of answer.
+    ///
+    /// Authorization, the relationship filter and `as_of` are exactly
+    /// [`graph_context_for`]'s posture, because this *is* that walk, only
+    /// summarized differently at the end.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the seed is a catalog asset the principal may not see.
+    /// `Storage` if no traversal or graph engine is configured, or the walk
+    /// fails.
+    ///
+    /// [`asset_analytics`]: Self::asset_analytics
+    /// [`asset_subgraph`]: Self::asset_subgraph
+    /// [`graph_context_for`]: Self::graph_context_for
+    pub async fn graph_context_analytics_for(
+        &self,
+        principal: &Principal,
+        seed: Sid,
+        direction: Direction,
+        bounds: Bounds,
+        relationship_types: Option<Vec<String>>,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<AssetAnalytics, CatalogError> {
+        let subgraph = self
+            .walk_authorized(
+                principal,
+                seed,
+                direction,
+                bounds,
+                relationship_types.clone(),
+                as_of,
+            )
+            .await?;
+        self.analytics_over_subgraph(subgraph, bounds.max_nodes, relationship_types.as_deref())
+            .await
+    }
+
+    /// The analytics-computation half shared by [`asset_analytics`] and
+    /// [`graph_context_analytics_for`] — extracted so the two answer
+    /// identically rather than drifting into two slightly different
+    /// implementations of "degree centrality over a walked neighbourhood".
+    ///
+    /// [`asset_analytics`]: Self::asset_analytics
+    /// [`graph_context_analytics_for`]: Self::graph_context_analytics_for
+    async fn analytics_over_subgraph(
+        &self,
+        subgraph: Subgraph,
+        max_nodes: usize,
+        // **Found by a test, not designed in.** The first version of this
+        // method re-derived its edge set from raw per-node flakes, entirely
+        // independent of whatever `relationship_types` narrowed the walk
+        // itself to — so a filtered picture and its analytics disagreed
+        // about the neighbourhood, which is exactly the "numbers that do not
+        // match what is drawn" failure Plan 112's own filter work refused to
+        // ship. `None` behaves exactly as before (every reference-valued
+        // predicate counts); `Some` narrows analytics to agree with the walk.
+        relationship_types: Option<&[String]>,
+    ) -> Result<AssetAnalytics, CatalogError> {
         let graph = self.graph.as_ref().ok_or_else(|| {
             CatalogError::Storage(StorageError::Unexpected(
                 "this server has no graph engine configured".to_string(),
@@ -3574,8 +3644,8 @@ impl Catalog {
 
         // One bounded fetch per node, matching `node_sources`'s own
         // established pattern — the node set is already capped at
-        // `bounds.max_nodes` by the walk above, so this fan-out is bounded
-        // by construction, not by hope.
+        // `max_nodes` by the walk above, so this fan-out is bounded by
+        // construction, not by hope.
         let mut flakes = Vec::new();
         for sid in &subgraph.nodes {
             let node_flakes = graph
@@ -3591,6 +3661,7 @@ impl Catalog {
         let edge_types: Vec<Sid> = flakes
             .iter()
             .filter(|f| f.op && matches!(f.o, FlakeValue::Ref(_)))
+            .filter(|f| relationship_types.is_none_or(|types| types.iter().any(|t| *t == f.p.id)))
             .map(|f| f.p.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -3601,8 +3672,8 @@ impl Catalog {
         // `max_nodes` the walk itself already enforces, so an in-bounds
         // walk can never be refused here.
         let budget = graph_owl_analytics::AnalyticsBudget {
-            max_nodes: bounds.max_nodes,
-            max_edges: bounds.max_nodes.saturating_mul(bounds.max_nodes),
+            max_nodes,
+            max_edges: max_nodes.saturating_mul(max_nodes),
             max_iterations: 1,
         };
         let projection =
@@ -3732,6 +3803,123 @@ impl Catalog {
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
 
+        self.assemble_graph_context(subgraph).await
+    }
+
+    /// [`graph_context`], authorized and filterable — Plan 113 Slice A.
+    ///
+    /// **The primitive that made the relationship filter and the connectivity
+    /// panel asset-only was never `graph_context` itself.** It already walked
+    /// from any `Sid`, no relational asset row required. What it lacked was
+    /// what [`asset_subgraph`] has and this method adds: a relationship-type
+    /// filter, `as_of`, and an authorization check. Found answering a direct
+    /// question — GST invoices are not catalog assets, so the console's
+    /// asset-only exploration surfaces skip them entirely, and `grep
+    /// graph_context` turned up no HTTP route and no MCP tool at all. Same
+    /// defect as `shortest_path`, `blocking_strategy` and `assetAnalytics`
+    /// before it.
+    ///
+    /// **Only the seed is authorized, not every node the walk returns** — the
+    /// same scope [`find_paths`] already accepted for its two endpoints
+    /// rather than every intermediate node, so this stays consistent with the
+    /// rest of the exploration surface rather than inventing a stricter rule
+    /// for one caller.
+    ///
+    /// **The seed is checked as an asset when it is one, and passed through
+    /// otherwise** — [`Self::graph_subject_visible`]'s already-documented
+    /// posture: there is no per-subject policy for pack vocabulary in this
+    /// system yet, so refusing every pack subject would not be safer, it
+    /// would just make the surface unusable for exactly the domain packs this
+    /// project exists to support.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the seed is a catalog asset the principal may not see.
+    /// `Storage` if no traversal engine (or, for `as_of`, no graph engine) is
+    /// configured, or the walk fails.
+    ///
+    /// [`asset_subgraph`]: Self::asset_subgraph
+    /// [`find_paths`]: Self::find_paths
+    pub async fn graph_context_for(
+        &self,
+        principal: &Principal,
+        seed: Sid,
+        direction: Direction,
+        bounds: Bounds,
+        relationship_types: Option<Vec<String>>,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<GraphContext, CatalogError> {
+        let subgraph = self
+            .walk_authorized(
+                principal,
+                seed,
+                direction,
+                bounds,
+                relationship_types,
+                as_of,
+            )
+            .await?;
+        self.assemble_graph_context(subgraph).await
+    }
+
+    /// Authorize the seed, resolve `as_of`, and walk — the half
+    /// [`graph_context_for`] and [`graph_context_analytics_for`] share,
+    /// extracted so a future third caller cannot drift from either.
+    ///
+    /// [`graph_context_for`]: Self::graph_context_for
+    /// [`graph_context_analytics_for`]: Self::graph_context_analytics_for
+    async fn walk_authorized(
+        &self,
+        principal: &Principal,
+        seed: Sid,
+        direction: Direction,
+        bounds: Bounds,
+        relationship_types: Option<Vec<String>>,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<Subgraph, CatalogError> {
+        if !self.graph_subject_visible(principal, &seed).await? {
+            return Err(CatalogError::NotFound);
+        }
+
+        let traversal = self.traversal.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no traversal engine configured".to_string(),
+            ))
+        })?;
+
+        // Same resolution `asset_subgraph` and `find_paths` perform: a
+        // wall-clock instant means nothing to the walk until the graph
+        // engine turns it into the transaction time it stores.
+        let as_of_t = match (as_of, &self.graph) {
+            (Some(at), Some(graph)) => graph
+                .time_at(at)
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?,
+            _ => None,
+        };
+
+        traversal
+            .subgraph(
+                &[seed],
+                direction,
+                bounds,
+                &EdgeFilter {
+                    relationship_types,
+                    as_of: as_of_t,
+                    valid_at: None,
+                },
+            )
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// The provenance-resolution half of [`graph_context`]/[`graph_context_for`],
+    /// factored out so the two share it rather than drifting into two slightly
+    /// different implementations of the same assembly.
+    async fn assemble_graph_context(
+        &self,
+        subgraph: graph_owl_traversal::Subgraph,
+    ) -> Result<GraphContext, CatalogError> {
         let mut nodes = Vec::with_capacity(subgraph.nodes.len());
         for id in &subgraph.nodes {
             let sources = self.node_sources(id).await.unwrap_or_default();
@@ -29614,6 +29802,499 @@ mod projection_isolation_tests {
             let f = fixture().await;
             let unknown = walk(&f, Some(vec!["NO_SUCH_EDGE".to_string()])).await;
             assert!(unknown.edges.is_empty(), "{:?}", unknown.edges);
+        }
+    }
+
+    mod graph_context_generalized_tests {
+        //! Plan 113 Slice A — **`graph_context` reaches HTTP, with the filter and
+        //! authorization every other exploration surface already has.**
+        //!
+        //! Found while answering a direct question: "GST invoices aren't catalog
+        //! assets — why do I lose the relationship filter and the connectivity
+        //! panel for them?" `graph_context` already walked from any `Sid`, no
+        //! relational asset required, and already resolved per-node provenance —
+        //! and had **zero callers anywhere**. Same defect as `shortest_path`,
+        //! `blocking_strategy` and `assetAnalytics` before it: a capability that
+        //! stops before any caller can reach it.
+        //!
+        //! **`graph_context_tests`'s `FakeTraversal` cannot prove a filter or an
+        //! `as_of` actually narrows anything** — it returns a canned answer
+        //! regardless of what is asked for. These tests use the real
+        //! `InMemoryTraversalEngine` over real reified relationship flakes, the
+        //! same posture `paths_are_reachable` (Plan 111 Slice A) and
+        //! `the_explorer_can_narrow_by_relationship` (Plan 112 Slice A)
+        //! established, because that is the only way to prove a filter works
+        //! rather than merely that it compiles.
+
+        use super::*;
+
+        /// A reified relationship between two arbitrary `Sid`s — the shape
+        /// `graph-owl-traversal-memory` reads. Unlike `paths_are_reachable::link`,
+        /// this takes identities directly rather than deriving them from a
+        /// catalog asset's UUID, because the whole point of this module is
+        /// subjects that have no UUID at all.
+        async fn link(
+            graph: &Arc<RecordingGraph>,
+            name: &str,
+            from: &Sid,
+            to: &Sid,
+            kind: &str,
+            t: i64,
+        ) {
+            let rel = Sid::dsc(name);
+            graph
+                .assert_flakes(&[
+                    Flake::assert(
+                        rel.clone(),
+                        Sid::new(namespace::RDF, "type"),
+                        FlakeValue::Ref(Sid::dsc("Relationship")),
+                        t,
+                    ),
+                    Flake::assert(
+                        rel.clone(),
+                        Sid::dsc("fromEntity"),
+                        FlakeValue::Ref(from.clone()),
+                        t,
+                    ),
+                    Flake::assert(
+                        rel.clone(),
+                        Sid::dsc("toEntity"),
+                        FlakeValue::Ref(to.clone()),
+                        t,
+                    ),
+                    Flake::assert(rel, Sid::dsc("relType"), FlakeValue::String(kind.into()), t),
+                ])
+                .await
+                .expect("seed the relationship");
+        }
+
+        fn catalog_over(graph: Arc<RecordingGraph>) -> Catalog {
+            let traversal: Arc<dyn TraversalEngine> =
+                Arc::new(graph_owl_traversal_memory::InMemoryTraversalEngine::new(
+                    graph.clone() as Arc<dyn TripleStore>,
+                ));
+            Catalog::new(Arc::new(InMemoryStorage::default()))
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_traversal(traversal)
+        }
+
+        /// **The whole reason this slice exists.** A seed with no catalog asset
+        /// row at all — a bare pack-vocabulary subject, exactly what a GST
+        /// invoice is — still walks and still returns real nodes with real
+        /// provenance, through an authorized principal.
+        #[tokio::test]
+        async fn a_seed_with_no_catalog_asset_row_still_walks() {
+            let graph = RecordingGraph::working();
+            let invoice = Sid::new(1024, "pr-INV-1012");
+            let supplier = Sid::new(1024, "supplier-27AABCU9603R1ZM");
+            graph
+                .assert_flakes(&[Flake::assert(
+                    supplier.clone(),
+                    Sid::new(1024, "supplierGstin"),
+                    FlakeValue::String("27AABCU9603R1ZM".to_string()),
+                    1,
+                )])
+                .await
+                .expect("seed a fact so provenance has something to resolve");
+            link(&graph, "rel-issued-by", &invoice, &supplier, "ISSUED_BY", 1).await;
+
+            let catalog = catalog_over(graph);
+            let found = catalog
+                .graph_context_for(
+                    &Principal::system(),
+                    invoice.clone(),
+                    Direction::Both,
+                    graph_owl_traversal::Bounds::default(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("a bare pack subject is not refused for lacking a catalog asset row");
+
+            assert_eq!(found.nodes.len(), 2, "{found:?}");
+            assert!(
+                found.nodes.iter().any(|n| n.id == supplier),
+                "the supplier the invoice names must be in the walk: {found:?}",
+            );
+        }
+
+        /// Filtering to one relationship type excludes a neighbour reachable only
+        /// by another — the same behaviour Plan 112 Slice A proved for
+        /// `asset_subgraph`, now proven for a seed that is not an asset at all.
+        #[tokio::test]
+        async fn a_relationship_filter_narrows_a_bare_subjects_neighbourhood_too() {
+            let graph = RecordingGraph::working();
+            let invoice = Sid::new(1024, "pr-INV-1012");
+            let supplier = Sid::new(1024, "supplier-27AABCU9603R1ZM");
+            let credit_note = Sid::new(1024, "cn-1012");
+            link(&graph, "rel-issued-by", &invoice, &supplier, "ISSUED_BY", 1).await;
+            link(
+                &graph,
+                "rel-adjusted-by",
+                &invoice,
+                &credit_note,
+                "ADJUSTED_BY",
+                1,
+            )
+            .await;
+
+            let catalog = catalog_over(graph);
+
+            let unfiltered = catalog
+                .graph_context_for(
+                    &Principal::system(),
+                    invoice.clone(),
+                    Direction::Both,
+                    graph_owl_traversal::Bounds::default(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("ok");
+            assert_eq!(unfiltered.nodes.len(), 3, "{unfiltered:?}");
+
+            let filtered = catalog
+                .graph_context_for(
+                    &Principal::system(),
+                    invoice.clone(),
+                    Direction::Both,
+                    graph_owl_traversal::Bounds::default(),
+                    Some(vec!["ISSUED_BY".to_string()]),
+                    None,
+                )
+                .await
+                .expect("ok");
+            assert_eq!(filtered.nodes.len(), 2, "{filtered:?}");
+            assert!(
+                !filtered.nodes.iter().any(|n| n.id == credit_note),
+                "the ADJUSTED_BY-only neighbour is excluded: {filtered:?}",
+            );
+        }
+
+        /// **A catalog-asset seed is still checked as an asset.** Generalizing
+        /// the walk to bare subjects must not weaken the check that already
+        /// existed for the case it did have — the same asset-vs-pack-subject
+        /// split `find_paths`' own `graph_subject_visible` already draws.
+        #[tokio::test]
+        async fn an_asset_seed_outside_the_policy_is_still_refused() {
+            use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+
+            let storage = Arc::new(InMemoryStorage::default());
+            storage
+                .upsert_policy(
+                    &Policy {
+                        name: "analyst".to_string(),
+                        rules: vec![Rule {
+                            name: "read-alpha".to_string(),
+                            effect: Effect::Allow,
+                            operations: vec![MetadataOperation::ViewBasic],
+                            resources: ResourceMatcher::FqnPrefix("alpha".to_string()),
+                        }],
+                    },
+                    &["analyst".to_string()],
+                )
+                .await
+                .expect("policy");
+
+            let graph = RecordingGraph::working();
+            let seeder =
+                Catalog::new(storage.clone()).with_graph(graph.clone() as Arc<dyn TripleStore>);
+            let omega = seeder
+                .upsert_asset(&Principal::system(), service("omega"))
+                .await
+                .expect("seed");
+            let omega_sid = Sid::new(namespace::DSC, omega.id.to_string());
+
+            let traversal: Arc<dyn TraversalEngine> =
+                Arc::new(graph_owl_traversal_memory::InMemoryTraversalEngine::new(
+                    graph.clone() as Arc<dyn TripleStore>,
+                ));
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_traversal(traversal);
+
+            let analyst = Principal {
+                id: "asha".to_string(),
+                name: "Asha".to_string(),
+                kind: graph_owl_core::PrincipalKind::User,
+                roles: vec!["analyst".to_string()],
+                is_admin: false,
+            };
+
+            let refused = catalog
+                .graph_context_for(
+                    &analyst,
+                    omega_sid,
+                    Direction::Both,
+                    graph_owl_traversal::Bounds::default(),
+                    None,
+                    None,
+                )
+                .await
+                .expect_err("`omega` is an asset outside the analyst's policy");
+            assert!(matches!(refused, CatalogError::NotFound), "{refused:?}");
+        }
+
+        /// Plan 113 Slice B — **connectivity for any subject, not only a
+        /// catalog asset.**
+        ///
+        /// `asset_analytics` computes degree centrality and orphan detection
+        /// over `asset_subgraph`'s walk; a GST invoice has no walk to compute
+        /// over because it has no asset row at all. This proves the same
+        /// numbers over `graph_context_for`'s walk instead — same shape
+        /// (`AssetAnalytics`), because degree means the same thing whether the
+        /// node is a table or an invoice.
+        /// **Two forms of the same two edges, seeded together, and the
+        /// comment is load-bearing.** The in-memory traversal double only
+        /// walks a *direct* reference flake into an edge when its predicate
+        /// is `dsc:`-namespaced (`graph-owl-traversal-memory`'s own "Source
+        /// 2"); anywhere else, including every pack's own vocabulary, it
+        /// needs the reified `fromEntity`/`toEntity`/`relType` shape to be
+        /// walkable at all — which is why every pack-subject test in this
+        /// file already uses `link`. But `graph_owl_analytics::project`
+        /// derives degree from **direct** reference flakes on each walked
+        /// node's own record, and never looks at a reification node's flakes
+        /// — a reified relationship is invisible to it.
+        ///
+        /// Real data does not have this problem: a GST invoice's `issuedBy`
+        /// is asserted as one direct triple (`pr-INV-1012 gst:issuedBy
+        /// supplier-X`), which both the real Postgres-backed traversal engine
+        /// and analytics read from the same flake. The double's split is a
+        /// simplification of the double, not a product gap — so this test
+        /// seeds both forms: the reified edge for the walk to find the right
+        /// *nodes*, and the direct flake for analytics to compute the right
+        /// *degree* — proving the two halves independently rather than
+        /// papering over the double's own limitation.
+        #[tokio::test]
+        async fn degree_counts_reflect_a_bare_subjects_real_neighbourhood() {
+            let graph = RecordingGraph::working();
+            let invoice = Sid::new(1024, "invoice-1");
+            let supplier = Sid::new(1024, "supplier-1");
+            let credit_note = Sid::new(1024, "creditnote-1");
+            graph
+                .assert_flakes(&[
+                    Flake::assert(
+                        invoice.clone(),
+                        Sid::new(1024, "issuedBy"),
+                        FlakeValue::Ref(supplier.clone()),
+                        1,
+                    ),
+                    Flake::assert(
+                        invoice.clone(),
+                        Sid::new(1024, "adjustedBy"),
+                        FlakeValue::Ref(credit_note.clone()),
+                        1,
+                    ),
+                ])
+                .await
+                .expect("seed the direct-reference flakes analytics reads");
+            link(&graph, "rel-issued", &invoice, &supplier, "issuedBy", 1).await;
+            link(
+                &graph,
+                "rel-adjusted",
+                &invoice,
+                &credit_note,
+                "adjustedBy",
+                1,
+            )
+            .await;
+
+            let catalog = catalog_over(graph);
+            let analytics = catalog
+                .graph_context_analytics_for(
+                    &Principal::system(),
+                    invoice.clone(),
+                    Direction::Both,
+                    graph_owl_traversal::Bounds::default(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("a bare pack subject is not refused for lacking a catalog asset row");
+
+            assert_eq!(analytics.nodes.len(), 3, "{analytics:?}");
+            let invoice_index = analytics
+                .nodes
+                .iter()
+                .position(|n| n == &invoice)
+                .expect("the seed is one of the reported nodes");
+            assert!(
+                (analytics.out_degree[invoice_index] - 2.0).abs() < f64::EPSILON,
+                "the invoice points at both its supplier and its credit note: {analytics:?}",
+            );
+        }
+
+        /// The relationship filter narrows what analytics measures, exactly as
+        /// it narrows the picture — the two must describe the same
+        /// neighbourhood, or a reader comparing the panel against the canvas
+        /// would see numbers that do not match what is drawn.
+        #[tokio::test]
+        async fn the_filter_narrows_what_analytics_measures_too() {
+            let graph = RecordingGraph::working();
+            let invoice = Sid::new(1024, "invoice-1");
+            let supplier = Sid::new(1024, "supplier-1");
+            let credit_note = Sid::new(1024, "creditnote-1");
+            graph
+                .assert_flakes(&[
+                    Flake::assert(
+                        invoice.clone(),
+                        Sid::new(1024, "issuedBy"),
+                        FlakeValue::Ref(supplier.clone()),
+                        1,
+                    ),
+                    Flake::assert(
+                        invoice.clone(),
+                        Sid::new(1024, "adjustedBy"),
+                        FlakeValue::Ref(credit_note.clone()),
+                        1,
+                    ),
+                ])
+                .await
+                .expect("seed the direct-reference flakes analytics reads");
+            link(&graph, "rel-issued", &invoice, &supplier, "issuedBy", 1).await;
+            link(
+                &graph,
+                "rel-adjusted",
+                &invoice,
+                &credit_note,
+                "adjustedBy",
+                1,
+            )
+            .await;
+
+            let catalog = catalog_over(graph);
+            let filtered = catalog
+                .graph_context_analytics_for(
+                    &Principal::system(),
+                    invoice.clone(),
+                    Direction::Both,
+                    graph_owl_traversal::Bounds::default(),
+                    Some(vec!["issuedBy".to_string()]),
+                    None,
+                )
+                .await
+                .expect("ok");
+
+            assert_eq!(filtered.nodes.len(), 2, "{filtered:?}");
+            assert!(
+                !filtered.nodes.contains(&credit_note),
+                "the adjustedBy-only neighbour is excluded: {filtered:?}",
+            );
+        }
+
+        /// A catalog-asset seed is still authorized as one — the same
+        /// consistency test as Slice A's, now for the analytics counterpart.
+        #[tokio::test]
+        async fn an_asset_seed_still_authorizes_for_analytics() {
+            use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+
+            let storage = Arc::new(InMemoryStorage::default());
+            storage
+                .upsert_policy(
+                    &Policy {
+                        name: "analyst".to_string(),
+                        rules: vec![Rule {
+                            name: "read-alpha".to_string(),
+                            effect: Effect::Allow,
+                            operations: vec![MetadataOperation::ViewBasic],
+                            resources: ResourceMatcher::FqnPrefix("alpha".to_string()),
+                        }],
+                    },
+                    &["analyst".to_string()],
+                )
+                .await
+                .expect("policy");
+
+            let graph = RecordingGraph::working();
+            let seeder =
+                Catalog::new(storage.clone()).with_graph(graph.clone() as Arc<dyn TripleStore>);
+            let omega = seeder
+                .upsert_asset(&Principal::system(), service("omega"))
+                .await
+                .expect("seed");
+            let omega_sid = Sid::new(namespace::DSC, omega.id.to_string());
+
+            let traversal: Arc<dyn TraversalEngine> =
+                Arc::new(graph_owl_traversal_memory::InMemoryTraversalEngine::new(
+                    graph.clone() as Arc<dyn TripleStore>,
+                ));
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_traversal(traversal);
+
+            let analyst = Principal {
+                id: "asha".to_string(),
+                name: "Asha".to_string(),
+                kind: graph_owl_core::PrincipalKind::User,
+                roles: vec!["analyst".to_string()],
+                is_admin: false,
+            };
+
+            let refused = catalog
+                .graph_context_analytics_for(
+                    &analyst,
+                    omega_sid,
+                    Direction::Both,
+                    graph_owl_traversal::Bounds::default(),
+                    None,
+                    None,
+                )
+                .await
+                .expect_err("`omega` is an asset outside the analyst's policy");
+            assert!(matches!(refused, CatalogError::NotFound), "{refused:?}");
+        }
+
+        /// **The same regression `find_paths` needed, for the same reason:**
+        /// deleting the `as_of` arm here would leave every test above passing,
+        /// because none of them ever asked about a moment other than now. A
+        /// route reported as of July that only came into existence in August
+        /// is a fact about the present wearing a date from the past.
+        #[tokio::test]
+        async fn a_walk_in_the_past_does_not_reach_a_neighbour_asserted_later() {
+            let graph = RecordingGraph::working();
+            let seed = Sid::new(1024, "invoice-1");
+            let neighbour = Sid::new(1024, "supplier-1");
+            link(&graph, "rel-issued", &seed, &neighbour, "issuedBy", 100).await;
+            graph
+                .at_resolves_to
+                .store(50, std::sync::atomic::Ordering::SeqCst);
+
+            let catalog = catalog_over(graph);
+
+            let then = catalog
+                .graph_context_for(
+                    &Principal::system(),
+                    seed.clone(),
+                    Direction::Both,
+                    graph_owl_traversal::Bounds::default(),
+                    None,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+                .expect("a walk in the past is not an error");
+            assert_eq!(
+                then.nodes.len(),
+                1,
+                "the edge did not exist at that instant: {then:?}",
+            );
+
+            let now = catalog
+                .graph_context_for(
+                    &Principal::system(),
+                    seed,
+                    Direction::Both,
+                    graph_owl_traversal::Bounds::default(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("path query");
+            assert_eq!(
+                now.nodes.len(),
+                2,
+                "and the same question about now finds it: {now:?}",
+            );
+            assert!(now.nodes.iter().any(|n| n.id == neighbour), "{now:?}");
         }
     }
 

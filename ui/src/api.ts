@@ -579,6 +579,24 @@ export interface PackConsoleConfig {
   };
 }
 
+/** The neighbourhood around any subject — `POST /graph/context`, Plan 113
+ *  Slice A. The same picture `GraphView` describes for a catalog asset, for a
+ *  subject that has none: a node id plus which document(s) asserted it. */
+export interface GraphContext {
+  readonly nodes: readonly {
+    readonly id: string;
+    readonly iri: string | null;
+    readonly sources: readonly string[];
+  }[];
+  readonly edges: readonly {
+    readonly from: string;
+    readonly to: string;
+    readonly relationship: string;
+    readonly derived: boolean;
+  }[];
+  readonly truncated: boolean;
+}
+
 /** Structural analytics over one asset's bounded neighbourhood — Epic 105
  *  P10's projection, reachable from the console at last.
  *
@@ -1836,6 +1854,54 @@ export const api = {
     const suffix = query.toString();
     return request<AssetAnalytics>(`/assets/${assetId}/analytics${suffix ? `?${suffix}` : ""}`);
   },
+
+  /** The neighbourhood around **any** subject, not only a catalog asset —
+   *  `POST /graph/context`, Plan 113 Slice A.
+   *
+   *  **Why this exists beside {@link graph}**: `/assets/{id}/graph` needs a
+   *  UUID with a real relational row behind it, so a GST invoice — a bare
+   *  pack-vocabulary subject with no asset row at all — has no neighbourhood
+   *  to ask for through that route. `seed` takes the same identity shape
+   *  `findPaths` already does: a bare UUID is an asset, anything with a colon
+   *  is a full `namespace:name` identifier. */
+  graphContext: (body: {
+    seed: string;
+    direction?: "outgoing" | "incoming" | "both";
+    hops?: number;
+    maxNodes?: number;
+    relationshipTypes?: readonly string[];
+    asOf?: string | null;
+  }) =>
+    request<GraphContext>("/graph/context", {
+      method: "POST",
+      body: JSON.stringify({
+        ...body,
+        relationshipTypes: body.relationshipTypes ? [...body.relationshipTypes] : undefined,
+        asOf: body.asOf ?? undefined,
+      }),
+    }),
+
+  /** Connectivity for any subject — `POST /graph/context/analytics`, the
+   *  counterpart to {@link assetAnalytics} for a subject with no asset row.
+   *  **Same response shape as {@link assetAnalytics}**, deliberately: degree
+   *  centrality means the same thing whether the node is a table or a GST
+   *  invoice, so `ConnectivityPanel` renders either without knowing which. */
+  graphContextAnalytics: (body: {
+    seed: string;
+    direction?: "outgoing" | "incoming" | "both";
+    hops?: number;
+    maxNodes?: number;
+    relationshipTypes?: readonly string[];
+    asOf?: string | null;
+  }) =>
+    request<AssetAnalytics>("/graph/context/analytics", {
+      method: "POST",
+      body: JSON.stringify({
+        ...body,
+        relationshipTypes: body.relationshipTypes ? [...body.relationshipTypes] : undefined,
+        asOf: body.asOf ?? undefined,
+      }),
+    }),
 
   /** The subgraph reachable from a finding's own subject — Epic 105 P7, the
    *  traversal half. Computed at answer time from whatever the graph

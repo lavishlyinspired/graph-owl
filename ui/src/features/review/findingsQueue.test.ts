@@ -359,8 +359,12 @@ describe("evidenceNearMiss", () => {
         sources: ["gst-gstr2b"],
       },
     };
+    // Plan 113 Slice C: `iri` is what `ClickableSubject` needs to open this
+    // subject's neighbourhood — `id` alone is a bare local name and cannot be
+    // resolved back into an identifier the server understands.
     expect(evidenceNearMiss(graph)).toEqual({
       id: "supplier-27AABCU9603R1ZM",
+      iri: "https://graph-owl.dev/packs/gst#supplier-27AABCU9603R1ZM",
       name: "supplier-27AABCU9603R1ZM",
       sources: ["gst-gstr2b"],
     });
@@ -447,6 +451,7 @@ describe("evidenceCandidates", () => {
     );
     expect(found).toEqual({
       id: "2b-INV-1004",
+      iri: "https://graph-owl.dev/packs/gst#2b-INV-1004",
       name: "2b-INV-1004",
       sources: ["gst-gstr2b"],
       by: ["ngram"],

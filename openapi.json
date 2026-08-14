@@ -6418,6 +6418,30 @@
         "summary": "Attach a term to an asset or column, by FQN"
       }
     },
+    "/graph/context": {
+      "post": {
+        "operationId": "post_graph_context",
+        "responses": {
+          "200": {
+            "description": "The neighbourhood around any subject, catalog asset or not"
+          }
+        },
+        "security": [],
+        "summary": "The neighbourhood around any subject, catalog asset or not"
+      }
+    },
+    "/graph/context/analytics": {
+      "post": {
+        "operationId": "post_graph_context_analytics",
+        "responses": {
+          "200": {
+            "description": "Connectivity for any subject, catalog asset or not"
+          }
+        },
+        "security": [],
+        "summary": "Connectivity for any subject, catalog asset or not"
+      }
+    },
     "/graph/export/bulk-csv": {
       "get": {
         "operationId": "get_graph_export_bulk-csv",

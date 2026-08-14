@@ -31,6 +31,7 @@ import {
 } from "../../api";
 import type { Picture } from "../../graph/cytoscape";
 import { GraphCanvas } from "../../graph/GraphCanvas";
+import { ClickableSubject } from "../../graph/ClickableSubject";
 import { palette } from "../../theme";
 import { readParam } from "../deepLink";
 import { performAsAction } from "./apiAction";
@@ -184,10 +185,13 @@ export function evidenceNodeSources(
  *  shared `nodeLabel`. */
 export function evidenceNearMiss(
   graph: EvidenceGraph,
-): { id: string; name: string; sources: readonly string[] } | null {
+): { id: string; iri: string | null; name: string; sources: readonly string[] } | null {
   if (!graph.nearMiss) return null;
   return {
     id: graph.nearMiss.id,
+    // Plan 113 Slice C: what `ClickableSubject` resolves against —
+    // `graph.nearMiss.id` is a bare local name and cannot be, on its own.
+    iri: graph.nearMiss.iri,
     name: nodeLabel(graph.nearMiss),
     sources: graph.nearMiss.sources,
   };
@@ -211,11 +215,18 @@ export function evidenceNearMiss(
  *  assertion that two records might be one. */
 export function evidenceCandidates(
   graph: EvidenceGraph,
-): { id: string; name: string; sources: readonly string[]; by: readonly string[] }[] {
+): {
+  id: string;
+  iri: string | null;
+  name: string;
+  sources: readonly string[];
+  by: readonly string[];
+}[] {
   return (graph.candidates ?? [])
     .filter((candidate) => candidate.by.length > 0)
     .map((candidate) => ({
       id: candidate.id,
+      iri: candidate.iri,
       name: nodeLabel(candidate),
       sources: candidate.sources,
       by: candidate.by,
@@ -411,7 +422,11 @@ export function findingsQueue(): QueueConfig {
                       </div>
                       <div>
                         <Text type="secondary">
-                          {nearMiss.name}
+                          {nearMiss.iri ? (
+                            <ClickableSubject seed={nearMiss.iri} label={nearMiss.name} />
+                          ) : (
+                            nearMiss.name
+                          )}
                           {COPY.separator}
                           {nearMiss.sources.length > 0 ? (
                             nearMiss.sources.map((source, index) => (
@@ -435,7 +450,11 @@ export function findingsQueue(): QueueConfig {
                       {candidates.map((candidate) => (
                         <div key={candidate.id}>
                           <Text type="secondary">
-                            {candidate.name}
+                            {candidate.iri ? (
+                              <ClickableSubject seed={candidate.iri} label={candidate.name} />
+                            ) : (
+                              candidate.name
+                            )}
                             {COPY.separator}
                             {/* Which strategy agreed, first: it is what tells
                                 a reviewer how much weight the row carries,
