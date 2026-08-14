@@ -1,10 +1,23 @@
-/* antd owns component styling. This is what antd does not own. */
+/* 00f-ui-architecture.md, revision 14 Aug 2026: Tailwind (via shadcn/ui
+   primitives in src/components/ui/) is the component layer, replacing Ant
+   Design. Colour still flows from theme.ts's palette/brand objects through
+   the existing `colors` prop, not through Tailwind's own colour palette —
+   this file only owns Tailwind's base/utility layers and what neither
+   Tailwind nor a component owns. */
+@import "tailwindcss";
 @import "@fontsource-variable/inter";
 @import "@fontsource-variable/sora";
 @import "@fontsource/jetbrains-mono/400.css";
 
 body {
   margin: 0;
+  /* Imported via @fontsource-variable/inter above but never applied until
+     now — the console was silently rendering the OS system-font stack
+     (San Francisco / Segoe UI / Roboto depending on platform) instead of
+     the brand typeface. Variable font, so one @font-face covers the whole
+     weight range the console uses (400–700). */
+  font-family: "Inter Variable", "Inter", -apple-system, "system-ui", "Segoe UI", Roboto, sans-serif;
+  font-feature-settings: "cv11", "ss01";
   /* Both, deliberately: without the -moz rule the same weight renders heavier
      on macOS Firefox than on Chrome, which is why text looked inconsistent. */
   -webkit-font-smoothing: antialiased;

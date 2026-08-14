@@ -1,48 +1,42 @@
 /** The canvas.
  *
- *  Cytoscape rather than the hand-drawn SVG this replaced. The SVG was honest
- *  at demo scale and explicitly would not survive 10k nodes (`00f`); Cytoscape
- *  ships a WebGL renderer and a deterministic `breadthfirst` layout, which are
- *  the two things that decision needed. Plan 114 considered and rejected
- *  replacing Cytoscape with a third graph-rendering library (`00f` commits to
- *  exactly two, one per graph *shape*) — this file is the alternative:
- *  everything reported as "not looking good" fixed inside the existing
- *  renderer, plus the interactions Plan 114 explicitly asked for.
+ *  AntV G6 rather than Cytoscape — 00f-ui-architecture.md's 14 Aug 2026
+ *  revision. See that entry for the full reasoning; in short, G6 covers in
+ *  one dependency what Cytoscape plus this project's own layout config
+ *  covered before (built-in deterministic layouts, built-in WebGL), which
+ *  is close to a like-for-like swap.
  *
- *  **Everything decidable lives in `graph/cytoscape.ts`** — which elements
- *  exist, what classes and colours they carry, whether the layout is
+ *  **Everything decidable lives in `graph/graphModel.ts`** — which nodes
+ *  and edges exist, what style and shape they carry, whether the layout is
  *  deterministic — and is tested there. This component is the imperative
- *  shell: mount, feed, listen. `00f` requires graph tests to assert the model
- *  rather than the picture, and that is only possible if the picture is this
- *  thin. The one exception is `mode` (light/dark), derived from `colors` by
- *  reference against the two exported palette objects rather than threaded
- *  as a new prop through every caller between here and the theme hook —
- *  `colors` already *is* one of exactly those two objects everywhere it is
- *  passed, never a copy.
+ *  shell: mount, feed, listen. `00f` requires graph tests to assert the
+ *  model rather than the picture, and that is only possible if the picture
+ *  is this thin. The one exception is `mode` (light/dark), derived from
+ *  `colors` by reference against the two exported palette objects rather
+ *  than threaded as a new prop through every caller between here and the
+ *  theme hook — `colors` already *is* one of exactly those two objects
+ *  everywhere it is passed, never a copy.
  *
- *  **Extracted from `App.tsx`** so it can be reused wherever a node/edge
- *  picture needs drawing, not only the asset explorer —
- *  `findingsQueue.tsx`'s evidence-graph section is the second caller (Epic
- *  105 P7's console half). Moving it out is what makes that reuse possible
- *  without a circular import: `App.tsx` already imports `ReviewSection.tsx`,
- *  which imports `findingsQueue.tsx`, so `findingsQueue.tsx` cannot import
- *  back from `App.tsx` itself. */
+ *  Reused wherever a node/edge picture needs drawing: the asset explorer
+ *  (`App.tsx`) and `findingsQueue.tsx`'s evidence-graph section. */
 
 import { CompressOutlined, ExpandOutlined, EyeOutlined } from "@ant-design/icons";
-import { Button, Card, Space, Typography } from "antd";
-import cytoscape from "cytoscape";
+import { Button, Card, Space, Typography } from "./../components/ui/antd-compat";
+import { Graph } from "@antv/g6";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { palette } from "../theme";
 import {
   MAX_ZOOM,
   type Picture,
-  graphStyle,
   layoutOptions,
   legendEntries,
-  toElements,
+  resolveEdgeStyle,
+  resolveNodeStyle,
+  toG6Data,
   visiblePicture,
   wantsWebgl,
-} from "./cytoscape";
+  type G6NodeDatum,
+} from "./graphModel";
 
 const { Text } = Typography;
 
@@ -58,22 +52,36 @@ const COPY = {
   hideNode: "Hide this node",
 };
 
-// Plan 114 Slice A. A layout with no `.fit()` after it draws at whatever zoom
-// Cytoscape defaulted to — on a small neighbourhood (the common case for a
-// finding's evidence graph) that is two nodes filling the visible area edge
-// to edge, illegible. `padding` matches `layoutOptions`' own value so the
-// fitted view and the layout agree on how much breathing room the picture
-// gets. Not unit-tested directly — `00f` requires graph tests to assert the
-// model, not the picture, and there is no model-level fact "the canvas is
-// zoomed to fit"; `layoutOptions` itself stays fully tested in
-// `cytoscape.test.ts`.
-function layoutAndFit(instance: cytoscape.Core, seedId: string) {
-  const layout = instance.layout(layoutOptions(seedId));
-  layout.promiseOn("layoutstop").then(() => instance.fit(undefined, 24));
-  layout.run();
+type CanvasNode = Picture["nodes"][number];
+
+/** G6's `.on()` accepts one broad event union regardless of which event
+ *  name string is passed — it does not narrow `IElementEvent` (which has
+ *  `target.id`) out of the wider `IEvent` per event name the way a typed
+ *  overload would, and `IElementEvent` itself is an internal type G6 does
+ *  not export for a consumer to import. This is the one, narrow, justified
+ *  assertion boundary for that gap, rather than typing every handler
+ *  parameter as `any`. */
+function elementId(evt: unknown): string | undefined {
+  const id = (evt as { target?: { id?: unknown } }).target?.id;
+  return typeof id === "string" ? id : undefined;
 }
 
-type CanvasNode = Picture["nodes"][number];
+/** Lazily resolved: `@antv/g-webgl` is a real dependency, but constructing
+ *  its renderer eagerly on every mount would pay a WebGL context-creation
+ *  cost even for the common small-neighbourhood case that never needs it —
+ *  the same reasoning `wantsWebgl`'s own doc comment gives for the
+ *  threshold existing at all. G6 renders in four layers (background, main,
+ *  label, transient); only `main` — where nodes and edges actually draw —
+ *  benefits from WebGL, so the other three stay on canvas explicitly
+ *  rather than left unset, since G6's own `renderer` option is a function
+ *  called once per layer and must return a renderer for every one of them. */
+async function layerRenderer(wantsWebglRenderer: boolean) {
+  const { Renderer: CanvasRenderer } = await import("@antv/g-canvas");
+  if (!wantsWebglRenderer) return () => new CanvasRenderer();
+  const { Renderer: WebglRenderer } = await import("@antv/g-webgl");
+  return (layer: "background" | "main" | "label" | "transient") =>
+    layer === "main" ? new WebglRenderer() : new CanvasRenderer();
+}
 
 export function GraphCanvas({
   picture,
@@ -86,30 +94,17 @@ export function GraphCanvas({
   onExpand: (id: string) => void;
   label: string;
 }) {
-  // `colors` is always exactly `palette.light` or `palette.dark` by
-  // reference — every caller threads the same object straight through from
-  // the theme hook, never a copy — so this is the mode Plan 114's colour
-  // work needs without adding a prop every intermediate component would
-  // have to pass on unchanged.
   const mode = colors === palette.dark ? "dark" : "light";
 
   const host = useRef<HTMLDivElement | null>(null);
   const wrapper = useRef<HTMLDivElement | null>(null);
-  const cy = useRef<cytoscape.Core | null>(null);
+  const graph = useRef<Graph | null>(null);
   const expand = useRef(onExpand);
   expand.current = onExpand;
 
-  // Plan 114 Slice B: which nodes a reader chose to hide, right now, on this
-  // picture. Purely client-side (`00f`'s own state-ownership table: "Explorer
-  // canvas state — selection, expansion, filters — is genuinely client-side"),
-  // never persisted into `GraphModel`. Reset whenever the canvas opens on a
-  // different seed, so a hide from one investigation cannot silently carry
-  // into the next.
   const [hidden, setHidden] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => setHidden(new Set()), [picture.seedId]);
 
-  // The Neo4j-style inspector: click any node, not only an expandable one,
-  // and see what it actually is without leaving the canvas.
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected: CanvasNode | undefined = picture.nodes.find((node) => node.id === selectedId);
 
@@ -121,69 +116,86 @@ export function GraphCanvas({
   }, []);
 
   const visible = useMemo(() => visiblePicture(picture, hidden), [picture, hidden]);
-  const elements = useMemo(() => toElements(visible, mode), [visible, mode]);
+  const data = useMemo(() => toG6Data(visible, mode), [visible, mode]);
   const legend = useMemo(() => legendEntries(visible, mode, colors), [visible, mode, colors]);
 
   useEffect(() => {
     if (!host.current) return undefined;
-    const instance = cytoscape({
-      container: host.current,
-      elements,
-      // Chosen once, at creation. `00f` rejects a hybrid that swaps renderers
-      // mid-session: the swap discards the layout at the moment a reader most
-      // needs it, because their mental map of where things are is the main
-      // thing keeping a large graph legible.
-      // `renderer` is not in Cytoscape's published option type, but it is the
-      // documented way to select the WebGL backend, so the cast is narrow and
-      // stated rather than an `any` on the whole options object.
-      ...(wantsWebgl(picture.nodes.length)
-        ? ({ renderer: { name: "canvas", webgl: true } } as unknown as cytoscape.CytoscapeOptions)
-        : {}),
-      // Cytoscape has no text-direction style property — it renders labels
-      // straight to canvas via a plain fillText call, with no bidi option
-      // exposed. A right-to-left node caption is a real, unresolved gap left
-      // for Epic 40 (the canvas is that epic's, Slice E only asserted the
-      // rule this file cannot yet satisfy), not silently worked around with
-      // an API that does not exist.
-      //
-      // The style array itself lives in `graph/cytoscape.ts` as `graphStyle`
-      // — Plan 114 Slice A — so a missing label or arrowhead is a RED test
-      // there rather than a screenshot someone has to notice.
-      style: graphStyle(colors) as cytoscape.CytoscapeOptions["style"],
-      // The layout itself never animates or re-runs on its own (`layoutOptions`:
-      // `animate: false`) — that is the "nothing moves without the reader"
-      // guarantee `00f` asks for. `autoungrabify` was a second, broader lock
-      // this file added on top of that: it also disables manually *dragging*
-      // a node, which nothing in `00f` asks for and Plan 114 explicitly asks
-      // to remove — a reader repositioning one node to see behind it is a
-      // normal way to read a graph, not a threat to layout determinism (the
-      // layout is not re-run on drag).
-      maxZoom: MAX_ZOOM,
+    let disposed = false;
+
+    // Chosen once, at creation, per node count *at creation*. `00f` rejects
+    // a hybrid that swaps renderers mid-session: the swap would discard the
+    // layout at the moment a reader most needs it — their mental map of
+    // where things are is the main thing keeping a large graph legible.
+    void layerRenderer(wantsWebgl(picture.nodes.length)).then((renderer) => {
+      if (disposed || !host.current) return;
+
+      const instance = new Graph({
+        container: host.current,
+        data: toG6Data(visiblePicture(picture, hidden), mode) as never,
+        node: {
+          style: (datum) => {
+            const nodeDatum = datum as unknown as G6NodeDatum;
+            return resolveNodeStyle(
+              { classes: nodeDatum.data.classes, color: nodeDatum.data.color, label: nodeDatum.data.label },
+              colors,
+            ) as never;
+          },
+        },
+        edge: {
+          style: (datum) => {
+            const edgeData = (datum.data ?? {}) as unknown as { classes: string; label: string };
+            return resolveEdgeStyle({ classes: edgeData.classes, label: edgeData.label }, colors) as never;
+          },
+        },
+        layout: layoutOptions(picture.seedId) as never,
+        // No `node`/`edge`/`combo` drag — a reader repositioning one node to
+        // see behind it is a normal way to read a graph (Plan 114 explicitly
+        // asks for this), but the layout is never re-run on drag, so nothing
+        // here re-triggers it either.
+        behaviors: ["zoom-canvas", "drag-canvas"],
+        animation: false,
+        // Re-fits after every `render()` call, including the data-update
+        // effect below — this is what replaces the explicit `.fit()` call
+        // Cytoscape needed after each layout run.
+        autoFit: "view",
+        padding: 24,
+        // `MAX_ZOOM`: ported from the Cytoscape version, where it was
+        // verified live against a real 2-node evidence graph. Not
+        // re-verified live against G6's own `autoFit`/`zoomRange` — worth
+        // checking in a browser before trusting this cap the same way.
+        zoomRange: [0.01, MAX_ZOOM],
+        renderer,
+      });
+
+      instance.on("node:click", (evt) => {
+        const id = elementId(evt);
+        if (id) setSelectedId(id);
+      });
+      instance.on("node:contextmenu", (evt) => {
+        (evt as { preventDefault?: () => void }).preventDefault?.();
+        const id = elementId(evt);
+        if (!id) return;
+        setHidden((current) => new Set(current).add(id));
+        setSelectedId((current) => (current === id ? null : current));
+      });
+      instance.on("canvas:click", () => {
+        // A click that hits no element — G6 does not fire `node:click` for
+        // this, so the canvas's own click is the pane-click signal.
+      });
+
+      void instance.render();
+      graph.current = instance;
     });
-    instance.on("tap", "node.expandable", (event) => {
-      expand.current(event.target.id());
-    });
-    // Any node, expandable or not — the inspector reads a node the reader is
-    // curious about, not only one they could grow.
-    instance.on("tap", "node", (event) => {
-      setSelectedId(event.target.id());
-    });
-    // Right-click / long-press to hide — Cytoscape's own convention for a
-    // secondary action, so it does not collide with the primary tap-to-expand
-    // or tap-to-inspect gesture.
-    instance.on("cxttap", "node", (event) => {
-      const id = event.target.id() as string;
-      setHidden((current) => new Set(current).add(id));
-      setSelectedId((current) => (current === id ? null : current));
-    });
-    cy.current = instance;
-    layoutAndFit(instance, picture.seedId);
+
     return () => {
-      instance.destroy();
-      cy.current = null;
+      disposed = true;
+      graph.current?.destroy();
+      graph.current = null;
     };
-    // Colours change only with the theme, which remounts cheaply; elements are
-    // handled below so an expansion does not tear the canvas down.
+    // Colours (and therefore `mode`) change only with the theme, which
+    // remounts cheaply; elements are handled below so an expansion does not
+    // tear the canvas down.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [colors]);
 
@@ -191,18 +203,33 @@ export function GraphCanvas({
   // A remount loses the reader's pan and zoom on every expand, which is the
   // one thing they were using to keep their place.
   useEffect(() => {
-    const instance = cy.current;
+    const instance = graph.current;
     if (!instance) return;
-    instance.elements().remove();
-    instance.add(elements as cytoscape.ElementDefinition[]);
-    layoutAndFit(instance, picture.seedId);
-  }, [elements, picture.seedId]);
+    instance.setData(data as never);
+    // `autoFit: "view"` on the Graph itself re-fits after this render, the
+    // same guarantee the explicit `.fit()` call gave the Cytoscape version.
+    void instance.render();
+  }, [data]);
 
-  // Opening or closing the inspector changes how much width the canvas
-  // actually has (the 240px card plus its gap), the same class of resize the
-  // fullscreen toggle already has to announce to Cytoscape explicitly.
+  // Which nodes are expandable changes what a click on them should do —
+  // re-bind rather than re-derive from `picture` inside the handler, since
+  // the handler closure was captured at mount time.
   useEffect(() => {
-    const instance = cy.current;
+    const instance = graph.current;
+    if (!instance) return;
+    const expandableIds = new Set(visible.nodes.filter((n) => !visible.expanded.includes(n.id)).map((n) => n.id));
+    const onNodeClick: Parameters<typeof instance.on>[1] = (evt) => {
+      const id = elementId(evt);
+      if (id && expandableIds.has(id)) expand.current(id);
+    };
+    instance.on("node:click", onNodeClick);
+    return () => {
+      instance.off("node:click", onNodeClick);
+    };
+  }, [visible]);
+
+  useEffect(() => {
+    const instance = graph.current;
     if (!instance) return;
     requestAnimationFrame(() => instance.resize());
   }, [selectedId]);
@@ -213,14 +240,11 @@ export function GraphCanvas({
     } else {
       void wrapper.current?.requestFullscreen();
     }
-    // A fullscreen toggle resizes the host element outside React's own
-    // render cycle — Cytoscape needs telling, or it keeps drawing at the old
-    // canvas size until the next unrelated re-layout.
     requestAnimationFrame(() => {
-      const instance = cy.current;
+      const instance = graph.current;
       if (!instance) return;
       instance.resize();
-      instance.fit(undefined, 24);
+      void instance.fitView();
     });
   };
 
@@ -228,11 +252,6 @@ export function GraphCanvas({
     <div ref={wrapper} style={{ background: colors.raised }}>
       <Space style={{ marginBottom: 8 }} wrap>
         {legend.map((entry) => (
-          // A dot plus a plain-ink label, not coloured text on a coloured
-          // fill: the dataviz skill's own rule is that text carries identity
-          // through the mark beside it, never through its own colour, so a
-          // low-contrast hue (the amber `table` slot against white) never
-          // has to double as a text colour.
           <Space key={entry.key} size={4}>
             <span
               aria-hidden
@@ -262,11 +281,6 @@ export function GraphCanvas({
         </Button>
       </Space>
 
-      {/* `minWidth: 0` on the flex child: a flex item's default min-width is
-          `auto` (its content size), which on a canvas host with no intrinsic
-          size floors it at whatever the parent's natural width already was —
-          the inspector card next to it then has nowhere to go but off the
-          right edge of the viewport rather than actually sharing the row. */}
       <div style={{ display: "flex", gap: 12 }}>
         <div
           ref={host}
@@ -282,9 +296,6 @@ export function GraphCanvas({
           }}
         />
         {selected && (
-          // The Neo4j-style inspector: whatever is selected, on the right,
-          // rather than a reader having to hunt through a separate list for
-          // the node they just clicked.
           <Card
             size="small"
             title={selected.name}
@@ -298,10 +309,6 @@ export function GraphCanvas({
             <Space direction="vertical" size={4} style={{ width: "100%" }}>
               <Space>
                 <Text type="secondary">{COPY.kind}</Text>
-                {/* Same precedence `nodeColor`/`nodeClasses` already use: a
-                    real AssetKind first, then a pack subject's own semantic
-                    type, and only "hidden by authorization" — a claim about
-                    *why* a kind is missing — when neither is true. */}
                 <Text>{selected.kind ?? selected.semanticType ?? COPY.kindHidden}</Text>
               </Space>
               <Space>

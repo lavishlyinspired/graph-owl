@@ -9,7 +9,7 @@
  *  A `Drawer` owned by this one component avoids that coupling entirely. */
 
 import { useState } from "react";
-import { Button, Drawer } from "antd";
+import { Button, Drawer } from "./../components/ui/antd-compat";
 import { SubjectExplorer } from "./SubjectExplorer";
 
 export function ClickableSubject({ seed, label }: { seed: string; label: string }) {

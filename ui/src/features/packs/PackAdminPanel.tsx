@@ -20,9 +20,9 @@
  *  installing this pack even do" was the concrete question this answers. */
 
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Card, Empty, List, Space, Table, Tag, Typography, Upload, message } from "antd";
+import { Alert, Button, Card, Empty, List, Space, Table, Tag, Typography, Upload, message } from "./../../components/ui/antd-compat";
 import { InboxOutlined, SyncOutlined } from "@ant-design/icons";
-import type { UploadFile } from "antd/es/upload/interface";
+import type { UploadFile } from "./../../components/ui/antd-compat";
 import { api, type FindingRuleDef, type OntologyPack } from "../../api";
 import { importThroughSurface } from "./importFile";
 import {

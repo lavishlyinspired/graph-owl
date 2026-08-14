@@ -13,7 +13,7 @@
  *  a click lands on by default. */
 
 import { useEffect, useState } from "react";
-import { Alert, Button, Card, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Space, Table, Tag, Typography } from "./../../components/ui/antd-compat";
 import { api } from "../../api";
 import { palette } from "../../theme";
 import { SubjectExplorer } from "../../graph/SubjectExplorer";

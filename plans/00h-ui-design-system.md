@@ -35,6 +35,8 @@ The twist is that **three things this product knows and the incumbent does not b
 
 Everything else — spacing, type scale, form controls, table density, empty states — stays conventional. **A twist that touches everything is a rewrite, not a twist.**
 
+**Revision, 14 Aug 2026 (see `00f-ui-architecture.md`'s own dated entry for the full reasoning): the component layer moves from Ant Design to shadcn/Tailwind v4.** The two-tier semantic token system below is unaffected in *shape* — it was never Ant-Design-specific, only expressed through its theme API — but every component in this document's inventory is being rebuilt on Radix UI primitives and Tailwind utility classes, so the concrete implementation of "how a token reaches a component" changes from an antd `ConfigProvider` theme object to Tailwind's `@theme` CSS variables. The **twist table** above, the **five patterns** below, and the **screen inventory** are product/UX decisions independent of which library renders them and are not reopened by this revision — only their implementation is.
+
 ## Tokens
 
 Two tiers, and only the second is ever used in a component.

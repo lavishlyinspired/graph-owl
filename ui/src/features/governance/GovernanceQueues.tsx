@@ -20,7 +20,7 @@
  *  "nothing to review". */
 
 import { useEffect, useState } from "react";
-import { Alert, Button, Card, Empty, Popconfirm, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Empty, Popconfirm, Space, Table, Tag, Typography, message } from "./../../components/ui/antd-compat";
 import { ApiError, api, type Certification, type TagLabel } from "../../api";
 
 const { Text, Paragraph } = Typography;

@@ -12,7 +12,7 @@
  *  a different invariant. */
 
 import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useState } from "react";
-import { Alert, Empty, Input, Select, Space, Spin, Table, Tag, Typography } from "antd";
+import { Alert, Empty, Input, Select, Space, Spin, Table, Tag, Typography } from "./../../components/ui/antd-compat";
 import { api, type AgentActivity, type AgentCapability, type AgentGrant } from "../../api";
 import { readParam, writeParam } from "../deepLink";
 import { describeCapability, describeOutcome, filterActivity } from "./agentActivity";
@@ -200,13 +200,13 @@ export function AgentActivityPanel() {
                 {COPY.activityTitle}
               </Title>
               <Space wrap>
-                <Select<AgentCapability | null>
+                <Select
                   allowClear
                   placeholder={COPY.filterCapability}
                   aria-label={COPY.filterCapability}
                   style={{ minWidth: 180 }}
-                  value={capabilityFilter}
-                  onChange={(v) => setCapabilityFilter(v ?? null)}
+                  value={capabilityFilter ?? undefined}
+                  onChange={(v) => setCapabilityFilter((v as AgentCapability | undefined) ?? null)}
                   options={(
                     [
                       "proposeDescription",
@@ -222,13 +222,15 @@ export function AgentActivityPanel() {
                     ] as const
                   ).map((c) => ({ value: c, label: describeCapability(c) }))}
                 />
-                <Select<AgentActivity["outcome"] | null>
+                <Select
                   allowClear
                   placeholder={COPY.allOutcomes}
                   aria-label={COPY.allOutcomes}
                   style={{ minWidth: 140 }}
-                  value={outcomeFilter}
-                  onChange={(v) => setOutcomeFilter(v ?? null)}
+                  value={outcomeFilter ?? undefined}
+                  onChange={(v) =>
+                    setOutcomeFilter((v as AgentActivity["outcome"] | undefined) ?? null)
+                  }
                   options={[
                     { value: "applied", label: "Applied" },
                     { value: "proposed", label: "Proposed" },

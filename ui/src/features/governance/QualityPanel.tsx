@@ -26,7 +26,7 @@
  *  nothing is wrong — the same distinction every queue in this console draws. */
 
 import { useEffect, useState } from "react";
-import { Alert, Card, Empty, Space, Table, Tag, Typography } from "antd";
+import { Alert, Card, Empty, Space, Table, Tag, Typography } from "./../../components/ui/antd-compat";
 import { ApiError, api, type DataContract, type TestCase, type TestDefinition } from "../../api";
 
 const { Text, Paragraph } = Typography;

@@ -21,7 +21,7 @@
  *  formula editor and a source picker, which is a feature rather than a table. */
 
 import { useEffect, useState } from "react";
-import { Alert, Card, Empty, Space, Table, Tag, Typography } from "antd";
+import { Alert, Card, Empty, Space, Table, Tag, Typography } from "./../../components/ui/antd-compat";
 import { ApiError, api, type BusinessMetric, type CustomProperty } from "../../api";
 
 const { Text, Paragraph } = Typography;

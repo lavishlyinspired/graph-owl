@@ -27,7 +27,7 @@
  *  the server ever starts returning one; it just never does today. Not
  *  fixed here — this is a backend gap, not a frontend one. */
 
-import { Space, Typography } from "antd";
+import { Space, Typography } from "./../../components/ui/antd-compat";
 import { api, type PendingClaim } from "../../api";
 import { splitPassage } from "./passageSpan";
 import { performAsAction } from "./apiAction";

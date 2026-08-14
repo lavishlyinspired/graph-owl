@@ -10,7 +10,7 @@
  *  costs nothing and both callers import downward. */
 
 import { useEffect, useState } from "react";
-import { Alert, Button, Card, Flex, Space, Spin, Tag, Typography } from "antd";
+import { Alert, Button, Card, Flex, Space, Spin, Tag, Typography } from "./../components/ui/antd-compat";
 import { ApiError, api } from "../api";
 import { palette } from "../theme";
 import { DerivationBadge, ProvenanceLabel } from "../trust/TrustComponents";

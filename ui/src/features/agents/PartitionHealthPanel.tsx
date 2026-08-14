@@ -12,7 +12,7 @@
  *  rather than a fabricated "age". */
 
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Space, Spin, Statistic, Typography } from "antd";
+import { Alert, Button, Space, Spin, Statistic, Typography } from "./../../components/ui/antd-compat";
 import { ApiError, api } from "../../api";
 
 const { Text, Title, Paragraph } = Typography;

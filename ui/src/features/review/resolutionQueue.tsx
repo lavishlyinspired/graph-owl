@@ -4,7 +4,7 @@
  *  side-by-side comparison table is this queue's own evidence renderer;
  *  no other config file has one shaped like it. */
 
-import { Space, Typography } from "antd";
+import { Space, Typography } from "./../../components/ui/antd-compat";
 import CheckCircleOutlined from "@ant-design/icons/es/icons/CheckCircleOutlined";
 import WarningOutlined from "@ant-design/icons/es/icons/WarningOutlined";
 import { api, type Evidence, type ReviewQueueEntry, type ReviewStatus } from "../../api";

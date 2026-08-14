@@ -13,7 +13,7 @@
  *  the network tab, which one a document actually recorded. */
 
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Space, Spin, Table, Tag, Typography } from "antd";
+import { Alert, Space, Spin, Table, Tag, Typography } from "./../../components/ui/antd-compat";
 import { ApiError, api, type Obligation } from "../../api";
 import { displayTerm } from "../review/findingsQueue";
 import { readParam, writeParam } from "../deepLink";

@@ -6,7 +6,7 @@
  *  ever unmounts. */
 
 import { useEffect, useState } from "react";
-import { Alert, Empty, Segmented, Space, Spin, Tag, Typography } from "antd";
+import { Alert, Empty, Segmented, Space, Spin, Tag, Typography } from "./../../components/ui/antd-compat";
 import { api, ApiError, type LpgNodeView, type Solution } from "../../api";
 import { describeLoss, inboundTriplesQuery, outboundTriplesQuery } from "./knowledgeGraph";
 

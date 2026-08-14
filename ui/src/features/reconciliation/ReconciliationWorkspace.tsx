@@ -44,7 +44,7 @@ import {
   Typography,
   Upload,
   message,
-} from "antd";
+} from "./../../components/ui/antd-compat";
 import {
   CheckCircleOutlined,
   DownloadOutlined,
@@ -53,7 +53,7 @@ import {
   SyncOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
-import type { UploadFile } from "antd/es/upload/interface";
+import type { UploadFile } from "./../../components/ui/antd-compat";
 import { api, type FindingRuleDef, type PackConsoleConfig, type PackFinding } from "../../api";
 import { lexical } from "../../workbench/results";
 import { importThroughSurface } from "../packs/importFile";
@@ -1294,7 +1294,7 @@ export function ReconciliationWorkspace({
             </Text>
             <Select
               value={period}
-              onChange={setPeriod}
+              onChange={(v) => setPeriod(typeof v === "string" ? v : ALL_PERIODS)}
               style={{ minWidth: 120 }}
               options={[
                 { value: ALL_PERIODS, label: COPY.filterAll },

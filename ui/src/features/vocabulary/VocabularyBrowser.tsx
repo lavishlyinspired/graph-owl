@@ -12,8 +12,8 @@
  *  and this is new code. */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Empty, Layout, Space, Spin, Tag, Tree, Typography } from "antd";
-import type { DataNode } from "antd/es/tree";
+import { Alert, Empty, Layout, Space, Spin, Tag, Tree, Typography } from "./../../components/ui/antd-compat";
+import type { TreeDataNode as DataNode } from "./../../components/ui/antd-compat";
 import type { Key } from "react";
 import { buildVocabularyTree, type VocabularyTreeNode } from "./vocabularyTree";
 import type { VocabularyConfig, VocabularyData, VocabularyDetail } from "./vocabularies";

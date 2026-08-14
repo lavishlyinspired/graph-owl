@@ -9,7 +9,7 @@
  *  render whatever it is handed. */
 
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Card, List, Space, Typography, message } from "antd";
+import { Alert, Button, Card, List, Space, Typography, message } from "./../../components/ui/antd-compat";
 import { DownloadOutlined } from "@ant-design/icons";
 import { api } from "../../api";
 

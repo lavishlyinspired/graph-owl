@@ -10,7 +10,7 @@
  *  glossary it named. */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Empty, Segmented, Select, Space, Spin, Typography } from "antd";
+import { Alert, Empty, Segmented, Select, Space, Spin, Typography } from "./../../components/ui/antd-compat";
 import { api, type Glossary, type OntologyPack } from "../../api";
 import { VocabularyBrowser } from "./VocabularyBrowser";
 import {
@@ -138,7 +138,7 @@ export function VocabularySection() {
         {kind === "glossary" && glossaries && glossaries.length > 0 && (
           <Select
             value={instanceId ?? undefined}
-            onChange={setInstanceId}
+            onChange={(v) => setInstanceId(typeof v === "string" ? v : null)}
             style={{ minWidth: 220 }}
             aria-label={COPY.instanceLabel}
             options={glossaries.map((g) => ({ label: g.name, value: g.id }))}
@@ -147,7 +147,7 @@ export function VocabularySection() {
         {kind === "ontology-pack" && packs && packs.length > 0 && (
           <Select
             value={instanceId ?? undefined}
-            onChange={setInstanceId}
+            onChange={(v) => setInstanceId(typeof v === "string" ? v : null)}
             style={{ minWidth: 220 }}
             aria-label={COPY.instanceLabel}
             options={packs.map((p) => ({ label: `${p.packId} ${p.version}`, value: p.id }))}

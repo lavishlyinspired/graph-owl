@@ -25,7 +25,7 @@
  *  nothing at all — a heading with nothing under it reads as broken. */
 
 import { useEffect, useState } from "react";
-import { Space, Tag, Typography } from "antd";
+import { Space, Tag, Typography } from "./../../components/ui/antd-compat";
 import { DatabaseOutlined } from "@ant-design/icons";
 import { api } from "../../api";
 import {

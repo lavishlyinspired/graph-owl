@@ -29,7 +29,7 @@
  *  thing whether the node is a table or an invoice. */
 
 import { useEffect, useState } from "react";
-import { Alert, Card, Empty, Space, Table, Tag, Typography } from "antd";
+import { Alert, Card, Empty, Space, Table, Tag, Typography } from "./../components/ui/antd-compat";
 import { ApiError, type AssetAnalytics } from "../api";
 import { connectivityRows, describeAnalytics } from "./analytics";
 

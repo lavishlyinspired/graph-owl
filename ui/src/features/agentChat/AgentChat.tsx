@@ -38,7 +38,7 @@ import {
   Spin,
   Tag,
   Typography,
-} from "antd";
+} from "./../../components/ui/antd-compat";
 import {
   ApiOutlined,
   CheckOutlined,

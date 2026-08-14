@@ -15,7 +15,7 @@
  *  see `subjectContext.ts`'s own doc comment for why. */
 
 import { useEffect, useState } from "react";
-import { Alert, Card, Select, Space, Tag, Typography } from "antd";
+import { Alert, Card, Select, Space, Tag, Typography } from "./../components/ui/antd-compat";
 import { ApiError, api, type GraphContext } from "../api";
 import { palette } from "../theme";
 import { filterParam, kindsFromAnalytics, whyEmpty } from "./edgeFilter";
@@ -109,7 +109,7 @@ export function SubjectExplorer({
           placeholder={COPY.everyRelationship}
           style={{ minWidth: 260 }}
           value={[...selected]}
-          onChange={(next: string[]) => setSelected(next)}
+          onChange={(next) => setSelected(Array.isArray(next) ? next.map(String) : [])}
           options={kinds.map((kind) => ({ value: kind, label: kind }))}
         />
       )}

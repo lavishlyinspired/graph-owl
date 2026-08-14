@@ -17,7 +17,7 @@
  *  handler that does exist) still surfaces as an error. */
 
 import { useEffect, useState } from "react";
-import { Alert, Space, Spin, Statistic, Table, Typography } from "antd";
+import { Alert, Space, Spin, Statistic, Table, Typography } from "./../../components/ui/antd-compat";
 import { ApiError, api, type BoltStatus } from "../../api";
 
 const { Text, Title, Paragraph } = Typography;

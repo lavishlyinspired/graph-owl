@@ -1,20 +1,12 @@
 /** Manage interactions, reference data, and sources — the counts that sit
  *  beside Entities and Relationships in the ontology header. */
 
-import {
-  Button,
-  Card,
-  Form,
-  Input,
-  List,
-  Popconfirm,
-  Select,
-  Space,
-  Tabs,
-  Typography,
-} from "antd";
-import DeleteOutlined from "@ant-design/icons/es/icons/DeleteOutlined";
-import PlusOutlined from "@ant-design/icons/es/icons/PlusOutlined";
+import { useState } from "react";
+import { Button } from "../../components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
+import { ConfirmButton } from "../../components/ui/confirm-button";
+import { Input } from "../../components/ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../components/ui/tabs";
 import type { OntologyModel, OntologyPackOption } from "./types";
 import {
   addInteraction,
@@ -24,158 +16,231 @@ import {
   setSources,
 } from "./state";
 
-const { Text } = Typography;
-
 interface SupportingVocabularyProps {
   readonly model: OntologyModel;
   readonly packs: readonly OntologyPackOption[];
   readonly onChange: (model: OntologyModel) => void;
 }
 
+const COPY = {
+  title: "Supporting vocabulary",
+  interactionsTab: "Interactions",
+  referenceTab: "Reference data",
+  sourcesTab: "Sources",
+  name: "Name",
+  displayName: "Display name",
+  description: "Description",
+  add: "Add",
+  delete: "Delete",
+  deleteInteractionTitle: "Delete interaction?",
+  deleteReferenceTitle: "Delete reference datum?",
+  removeSource: (label: string) => `Remove ${label}`,
+  sourcesHelp:
+    "Sources are loaded from installed ontology packs. You can also type a source name and press Enter to add it manually.",
+  selectOrTypeSource: "Select or type a source",
+  removeGlyph: "×",
+};
+
+const EMPTY_ITEM = { name: "", displayName: "", description: "" };
+
 export function SupportingVocabulary({ model, packs, onChange }: SupportingVocabularyProps) {
-  const [interactionForm] = Form.useForm<{ name: string; displayName: string; description: string }>();
-  const [referenceForm] = Form.useForm<{ name: string; displayName: string; description: string }>();
+  const [interactionDraft, setInteractionDraft] = useState(EMPTY_ITEM);
+  const [referenceDraft, setReferenceDraft] = useState(EMPTY_ITEM);
+  const [sourceInput, setSourceInput] = useState("");
 
   const addInteractionClicked = () => {
-    const values = interactionForm.getFieldsValue();
-    onChange(addInteraction(model, values));
-    interactionForm.resetFields();
+    if (!interactionDraft.name.trim()) return;
+    onChange(addInteraction(model, interactionDraft));
+    setInteractionDraft(EMPTY_ITEM);
   };
 
   const addReferenceClicked = () => {
-    const values = referenceForm.getFieldsValue();
-    onChange(addReferenceDatum(model, values));
-    referenceForm.resetFields();
+    if (!referenceDraft.name.trim()) return;
+    onChange(addReferenceDatum(model, referenceDraft));
+    setReferenceDraft(EMPTY_ITEM);
   };
 
-  const sourceOptions = packs.map((pack) => ({ value: pack.id, label: pack.name }));
+  const addSource = (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed || model.sources.some((s) => s.name === trimmed)) return;
+    const pack = packs.find((p) => p.id === trimmed);
+    onChange(
+      setSources(model, [
+        ...model.sources,
+        { id: crypto.randomUUID(), name: trimmed, displayName: pack?.name ?? trimmed },
+      ]),
+    );
+    setSourceInput("");
+  };
+
+  const removeSource = (id: string) => {
+    onChange(setSources(model, model.sources.filter((s) => s.id !== id)));
+  };
 
   return (
-    <Card size="small" title="Supporting vocabulary">
-      <Tabs
-        items={[
-          {
-            key: "interactions",
-            label: `Interactions (${model.interactions.length})`,
-            children: (
-              <Space direction="vertical" style={{ width: "100%" }}>
-                <Form form={interactionForm} layout="inline">
-                  <Form.Item name="name" rules={[{ required: true }]}>
-                    <Input placeholder="Name" />
-                  </Form.Item>
-                  <Form.Item name="displayName">
-                    <Input placeholder="Display name" />
-                  </Form.Item>
-                  <Form.Item name="description">
-                    <Input placeholder="Description" />
-                  </Form.Item>
-                  <Button icon={<PlusOutlined />} onClick={addInteractionClicked}>
-                    Add
-                  </Button>
-                </Form>
-                <List
-                  size="small"
-                  dataSource={[...model.interactions]}
-                  renderItem={(item) => (
-                    <List.Item
-                      actions={[
-                        <Popconfirm
-                          key="delete"
-                          title="Delete interaction?"
-                          onConfirm={() => onChange(removeInteraction(model, item.id))}
-                        >
-                          <Button size="small" danger icon={<DeleteOutlined />} />
-                        </Popconfirm>,
-                      ]}
-                    >
-                      <List.Item.Meta
-                        title={item.displayName || item.name}
-                        description={item.description || undefined}
-                      />
-                    </List.Item>
-                  )}
+    <Card>
+      <CardHeader>
+        <CardTitle>{COPY.title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <Tabs defaultValue="interactions">
+          <TabsList>
+            <TabsTrigger value="interactions">{`${COPY.interactionsTab} (${model.interactions.length})`}</TabsTrigger>
+            <TabsTrigger value="reference">{`${COPY.referenceTab} (${model.referenceData.length})`}</TabsTrigger>
+            <TabsTrigger value="sources">{`${COPY.sourcesTab} (${model.sources.length})`}</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="interactions">
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-wrap gap-2">
+                <Input
+                  placeholder={COPY.name}
+                  className="max-w-[160px]"
+                  value={interactionDraft.name}
+                  onChange={(e) => setInteractionDraft((d) => ({ ...d, name: e.target.value }))}
                 />
-              </Space>
-            ),
-          },
-          {
-            key: "reference",
-            label: `Reference data (${model.referenceData.length})`,
-            children: (
-              <Space direction="vertical" style={{ width: "100%" }}>
-                <Form form={referenceForm} layout="inline">
-                  <Form.Item name="name" rules={[{ required: true }]}>
-                    <Input placeholder="Name" />
-                  </Form.Item>
-                  <Form.Item name="displayName">
-                    <Input placeholder="Display name" />
-                  </Form.Item>
-                  <Form.Item name="description">
-                    <Input placeholder="Description" />
-                  </Form.Item>
-                  <Button icon={<PlusOutlined />} onClick={addReferenceClicked}>
-                    Add
-                  </Button>
-                </Form>
-                <List
-                  size="small"
-                  dataSource={[...model.referenceData]}
-                  renderItem={(item) => (
-                    <List.Item
-                      actions={[
-                        <Popconfirm
-                          key="delete"
-                          title="Delete reference datum?"
-                          onConfirm={() => onChange(removeReferenceDatum(model, item.id))}
-                        >
-                          <Button size="small" danger icon={<DeleteOutlined />} />
-                        </Popconfirm>,
-                      ]}
-                    >
-                      <List.Item.Meta
-                        title={item.displayName || item.name}
-                        description={item.description || undefined}
-                      />
-                    </List.Item>
-                  )}
+                <Input
+                  placeholder={COPY.displayName}
+                  className="max-w-[160px]"
+                  value={interactionDraft.displayName}
+                  onChange={(e) => setInteractionDraft((d) => ({ ...d, displayName: e.target.value }))}
                 />
-              </Space>
-            ),
-          },
-          {
-            key: "sources",
-            label: `Sources (${model.sources.length})`,
-            children: (
-              <Space direction="vertical" style={{ width: "100%" }}>
-                <Text type="secondary">
-                  Sources are loaded from installed ontology packs. You can also
-                  type a source name and add it manually.
-                </Text>
-                <Select
-                  mode="tags"
-                  style={{ width: "100%" }}
-                  placeholder="Select or type sources"
-                  value={model.sources.map((s) => s.name)}
-                  options={sourceOptions}
-                  onChange={(values) => {
-                    const sources = values.map((name) => {
-                      const existing = model.sources.find((s) => s.name === name);
-                      if (existing) return existing;
-                      const pack = packs.find((p) => p.id === name);
-                      return {
-                        id: crypto.randomUUID(),
-                        name,
-                        displayName: pack?.name ?? name,
-                      };
-                    });
-                    onChange(setSources(model, sources));
+                <Input
+                  placeholder={COPY.description}
+                  className="max-w-[200px]"
+                  value={interactionDraft.description}
+                  onChange={(e) => setInteractionDraft((d) => ({ ...d, description: e.target.value }))}
+                />
+                <Button onClick={addInteractionClicked} disabled={!interactionDraft.name.trim()}>
+                  {COPY.add}
+                </Button>
+              </div>
+              <ul className="flex flex-col gap-1">
+                {model.interactions.map((item) => (
+                  <li
+                    key={item.id}
+                    className="flex items-center justify-between rounded-[var(--gowl-radius-small)] border border-[var(--gowl-border-soft)] px-3 py-2"
+                  >
+                    <div>
+                      <div className="text-sm font-medium text-[var(--gowl-text)]">
+                        {item.displayName || item.name}
+                      </div>
+                      {item.description && (
+                        <div className="text-xs text-[var(--gowl-text-subtle)]">{item.description}</div>
+                      )}
+                    </div>
+                    <ConfirmButton
+                      variant="destructive"
+                      size="sm"
+                      title={COPY.deleteInteractionTitle}
+                      onConfirm={() => onChange(removeInteraction(model, item.id))}
+                    >
+                      {COPY.delete}
+                    </ConfirmButton>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="reference">
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-wrap gap-2">
+                <Input
+                  placeholder={COPY.name}
+                  className="max-w-[160px]"
+                  value={referenceDraft.name}
+                  onChange={(e) => setReferenceDraft((d) => ({ ...d, name: e.target.value }))}
+                />
+                <Input
+                  placeholder={COPY.displayName}
+                  className="max-w-[160px]"
+                  value={referenceDraft.displayName}
+                  onChange={(e) => setReferenceDraft((d) => ({ ...d, displayName: e.target.value }))}
+                />
+                <Input
+                  placeholder={COPY.description}
+                  className="max-w-[200px]"
+                  value={referenceDraft.description}
+                  onChange={(e) => setReferenceDraft((d) => ({ ...d, description: e.target.value }))}
+                />
+                <Button onClick={addReferenceClicked} disabled={!referenceDraft.name.trim()}>
+                  {COPY.add}
+                </Button>
+              </div>
+              <ul className="flex flex-col gap-1">
+                {model.referenceData.map((item) => (
+                  <li
+                    key={item.id}
+                    className="flex items-center justify-between rounded-[var(--gowl-radius-small)] border border-[var(--gowl-border-soft)] px-3 py-2"
+                  >
+                    <div>
+                      <div className="text-sm font-medium text-[var(--gowl-text)]">
+                        {item.displayName || item.name}
+                      </div>
+                      {item.description && (
+                        <div className="text-xs text-[var(--gowl-text-subtle)]">{item.description}</div>
+                      )}
+                    </div>
+                    <ConfirmButton
+                      variant="destructive"
+                      size="sm"
+                      title={COPY.deleteReferenceTitle}
+                      onConfirm={() => onChange(removeReferenceDatum(model, item.id))}
+                    >
+                      {COPY.delete}
+                    </ConfirmButton>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="sources">
+            <div className="flex flex-col gap-3">
+              <p className="text-xs text-[var(--gowl-text-subtle)]">{COPY.sourcesHelp}</p>
+              <div className="flex flex-wrap gap-2 rounded-[var(--gowl-radius-control)] border border-[var(--gowl-border)] p-2">
+                {model.sources.map((source) => (
+                  <span
+                    key={source.id}
+                    className="inline-flex items-center gap-1 rounded-full bg-[var(--gowl-fill)] px-2.5 py-1 text-xs text-[var(--gowl-text)]"
+                  >
+                    {source.displayName}
+                    <button
+                      type="button"
+                      aria-label={COPY.removeSource(source.displayName)}
+                      onClick={() => removeSource(source.id)}
+                      className="text-[var(--gowl-text-subtle)] hover:text-[var(--gowl-text)]"
+                    >
+                      {COPY.removeGlyph}
+                    </button>
+                  </span>
+                ))}
+                <input
+                  value={sourceInput}
+                  onChange={(e) => setSourceInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      addSource(sourceInput);
+                    }
                   }}
+                  placeholder={COPY.selectOrTypeSource}
+                  className="min-w-[140px] flex-1 border-none bg-transparent text-sm text-[var(--gowl-text)] outline-none placeholder:text-[var(--gowl-text-muted)]"
+                  list="ontology-builder-source-packs"
                 />
-              </Space>
-            ),
-          },
-        ]}
-      />
+                <datalist id="ontology-builder-source-packs">
+                  {packs.map((pack) => (
+                    <option key={pack.id} value={pack.id}>
+                      {pack.name}
+                    </option>
+                  ))}
+                </datalist>
+              </div>
+            </div>
+          </TabsContent>
+        </Tabs>
+      </CardContent>
     </Card>
   );
 }

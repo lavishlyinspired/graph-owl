@@ -7,7 +7,7 @@
  *  Epic 40's canvas or Epic 42's queues grow their own styling and the two
  *  drift, which is exactly how a user learns to distrust the indicator. */
 
-import { Space, Tag, Typography } from "antd";
+import { Space, Tag, Typography } from "./../components/ui/antd-compat";
 import {
   describeCertification,
   describeConfidence,

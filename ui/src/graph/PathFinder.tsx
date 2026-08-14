@@ -23,7 +23,7 @@
  *  file mounts, fetches and draws. */
 
 import { useState } from "react";
-import { Alert, AutoComplete, Button, Card, Flex, Select, Space, Tag, Typography } from "antd";
+import { Alert, AutoComplete, Button, Card, Flex, Select, Space, Tag, Typography } from "./../components/ui/antd-compat";
 import { ApiError, api, type Asset, type PathAnswer } from "../api";
 import { describeAnswer, nodeLabel, whyNotRunnable } from "./paths";
 import { filterParam } from "./edgeFilter";
@@ -169,7 +169,7 @@ export function PathFinder({
           aria-label={COPY.depth}
           value={hops}
           style={{ width: 110 }}
-          onChange={setHops}
+          onChange={(v) => setHops(Number(v))}
           options={DEPTHS.map((depth) => ({ value: depth, label: COPY.hopsLabel(depth) }))}
         />
         <Select
@@ -177,7 +177,7 @@ export function PathFinder({
           aria-label={COPY.direction}
           value={direction}
           style={{ width: 130 }}
-          onChange={setDirection}
+          onChange={(v) => setDirection(v as "outgoing" | "incoming" | "both")}
           options={[
             { value: "both", label: "either way" },
             { value: "outgoing", label: "downstream" },
@@ -189,7 +189,7 @@ export function PathFinder({
           aria-label={COPY.routes}
           value={everyRoute}
           style={{ width: 150 }}
-          onChange={setEveryRoute}
+          onChange={(v) => setEveryRoute(Boolean(v))}
           options={[
             { value: false, label: COPY.shortest },
             { value: true, label: COPY.all },
@@ -204,7 +204,7 @@ export function PathFinder({
             placeholder={COPY.everyRelationship}
             style={{ minWidth: 200 }}
             value={[...edgeTypes]}
-            onChange={(next: string[]) => setEdgeTypes(next)}
+            onChange={(next) => setEdgeTypes(Array.isArray(next) ? next.map(String) : [])}
             options={edgeKinds.map((kind) => ({ value: kind, label: kind }))}
           />
         )}

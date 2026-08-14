@@ -7,7 +7,7 @@
  *  browser. */
 
 import { type KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Empty, Flex, Input, List, Modal, Segmented, Space, Spin, Tag, Typography } from "antd";
+import { Alert, Button, Empty, Flex, Input, List, Modal, Segmented, Space, Spin, Tag, Typography } from "./../../components/ui/antd-compat";
 import type { QueueAction, QueueConfig, QueueEntry } from "./queues";
 import { readParam, writeParam } from "../deepLink";
 

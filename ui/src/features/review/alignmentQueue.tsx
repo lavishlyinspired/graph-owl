@@ -34,7 +34,7 @@
  *  text box that silently discarded what was typed into it would be worse
  *  than not asking. */
 
-import { Space, Typography } from "antd";
+import { Space, Typography } from "./../../components/ui/antd-compat";
 import { api, type AlignmentReviewEntry, type UpsertAlignmentRequest } from "../../api";
 import { performAsAction } from "./apiAction";
 import type { QueueConfig, QueueEntry } from "./queues";

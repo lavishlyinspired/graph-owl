@@ -20,7 +20,7 @@
  *  from "nobody has looked yet". There is no defer — leaving it pending
  *  already *is* deferring, the same reasoning Epic 17's queue records. */
 
-import { Card, Descriptions, Flex, Space, Table, Tag, Typography } from "antd";
+import { Card, Descriptions, Flex, Space, Table, Tag, Typography } from "./../../components/ui/antd-compat";
 import {
   api,
   type EvidenceGraph,
@@ -29,7 +29,7 @@ import {
   type PackConsoleConfig,
   type PackFinding,
 } from "../../api";
-import type { Picture } from "../../graph/cytoscape";
+import type { Picture } from "../../graph/graphModel";
 import { GraphCanvas } from "../../graph/GraphCanvas";
 import { ClickableSubject } from "../../graph/ClickableSubject";
 import { palette } from "../../theme";

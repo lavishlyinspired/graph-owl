@@ -21,7 +21,7 @@
  *  claims are about is the deployment's business, and nothing here reads it. */
 
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Card, Flex, Popconfirm, Space, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Flex, Popconfirm, Space, Tag, Typography, message } from "./../components/ui/antd-compat";
 import { ApiError, api } from "../api";
 import { type Contradiction, type ResolvedPair, kindLabel, pairsFor } from "./contradictions";
 import type { Memory } from "./memory";

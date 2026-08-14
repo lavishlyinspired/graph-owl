@@ -6,7 +6,7 @@
  *  merge review already enforce.
  */
 
-import { Space, Typography } from "antd";
+import { Space, Typography } from "./../../components/ui/antd-compat";
 import { api, type ChangeProposal, type ChangeProposalStatus } from "../../api";
 import { performAsAction } from "./apiAction";
 import type { QueueConfig, QueueEntry } from "./queues";

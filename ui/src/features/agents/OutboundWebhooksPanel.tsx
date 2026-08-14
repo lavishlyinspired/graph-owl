@@ -12,7 +12,7 @@
  *  and `api.outboundWebhookDeliveries()`, both `GET`. */
 
 import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useState } from "react";
-import { Alert, Empty, Space, Spin, Table, Tag, Typography } from "antd";
+import { Alert, Empty, Space, Spin, Table, Tag, Typography } from "./../../components/ui/antd-compat";
 import { ApiError, api, type OutboundWebhook, type OutboundWebhookDelivery } from "../../api";
 import { readParam, writeParam } from "../deepLink";
 import { describeDeliveryStatus } from "./outboundWebhooks";

@@ -10,7 +10,7 @@
  *  gap this file's own comment used to name here. */
 
 import { useMemo, useState } from "react";
-import { Segmented, Space } from "antd";
+import { Segmented, Space } from "./../../components/ui/antd-compat";
 import { ReviewQueue } from "./ReviewQueue";
 import { resolutionQueue } from "./resolutionQueue";
 import { extractionQueue } from "./extractionQueue";

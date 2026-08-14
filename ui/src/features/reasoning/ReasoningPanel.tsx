@@ -26,7 +26,7 @@
  *  file names any of them. */
 
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Card, Empty, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Empty, Space, Table, Tag, Typography, message } from "./../../components/ui/antd-compat";
 import { ExperimentOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import {
   ApiError,

@@ -5,7 +5,7 @@
  *  that is no longer `pending`, which `ReviewQueue.tsx`'s generic conflict
  *  handling already covers with no queue-specific code. */
 
-import { Space, Typography } from "antd";
+import { Space, Typography } from "./../../components/ui/antd-compat";
 import { api, type DriftItem, type DriftStatus } from "../../api";
 import { performAsAction } from "./apiAction";
 import type { QueueConfig, QueueEntry } from "./queues";

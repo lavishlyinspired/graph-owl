@@ -6,7 +6,7 @@
  *  committing to a download.
  */
 import { useState } from "react";
-import { Alert, Button, Input, Modal, Select, Space, Typography } from "antd";
+import { Alert, Button, Input, Modal, Select, Space, Typography } from "./../../components/ui/antd-compat";
 import { ApiError, api, downloadExport } from "../../api";
 import { EXPORT_FORMATS, exportPath, previewPath, type ExportFilters } from "./exportFormats";
 
@@ -113,7 +113,7 @@ export function ExportDialog({
           <Select
             style={{ width: "100%", marginTop: 4 }}
             value={formatKey}
-            onChange={(value: string) => setFormatKey(value)}
+            onChange={(value) => setFormatKey(typeof value === "string" ? value : "")}
             options={EXPORT_FORMATS.map((f) => ({ value: f.key, label: f.label }))}
           />
         </div>

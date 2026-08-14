@@ -1,7 +1,5 @@
-import type { ThemeConfig } from "antd";
-import { theme } from "antd";
 
-/** Ant Design (MIT) supplies the component layer. This is the token layer, and
+/** This is the token layer, and
  *  it is the single source of truth for colour, radius and elevation — a hex
  *  literal in a component is a value nothing can theme.
  *
@@ -39,8 +37,6 @@ export const primary = {
   // bind text and solid UI fills, not every decorative pixel.
   action: "#0B6E77",
 } as const;
-
-const FONT = `'Inter Variable', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
 
 /** Radii by role, not by number.
  *
@@ -172,123 +168,46 @@ const DARK: Palette = {
   shadowLarge: "0 25px 70px rgba(0,0,0,.45)",
 };
 
-function build(c: Palette, dark: boolean): ThemeConfig {
+export const palette = { light: LIGHT, dark: DARK };
+
+/** `--gowl-*` custom properties for the shadcn/Tailwind primitives
+ *  (`components/ui/`) introduced in `00f-ui-architecture.md`'s 14 Aug 2026
+ *  revision. `theme.ts` stays the single source of truth for colour and
+ *  radius — a shadcn component reads these vars via `var(--gowl-*)` in a
+ *  Tailwind arbitrary-value class rather than antd's `ConfigProvider`
+ *  theme object, which only Ant Design components (still present until the
+ *  console-wide swap finishes) can read. `AppShell` applies this to
+ *  `document.documentElement` whenever `dark` toggles. */
+export function cssVariables(colors: Palette): Record<string, string> {
   return {
-    algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
-    token: {
-      colorPrimary: c.primary,
-      // Text-role, not fill-role — needs the shade that passes as text on
-      // `page`, which is `selectedText` in light (primary.base fails at
-      // 2.16:1) and `primary` unchanged in dark (primary.base already
-      // passes at 8.05:1 on the dark page).
-      colorLink: c.selectedText,
-      // antd derives these from `colorPrimary` by default, and several
-      // components read them directly for a *selected/active* text state —
-      // `Tabs`' active-tab label is what the Epic 39 Slice F axe check
-      // caught (2.15:1 on white), the same failure as `Menu`'s selected
-      // item before it got its own override below. Setting the semantic
-      // text tokens here catches every such component in one place instead
-      // of chasing each one as axe happens to render it.
-      colorPrimaryText: c.selectedText,
-      colorPrimaryTextHover: c.selectedText,
-      colorPrimaryTextActive: c.selectedText,
-      colorBgLayout: c.page,
-      colorBgContainer: c.surface,
-      colorBgElevated: c.raised,
-      colorFillSecondary: c.fill,
-      colorFillQuaternary: c.fillSubtle,
-      colorBorder: c.border,
-      colorBorderSecondary: c.borderSoft,
-      colorText: c.text,
-      colorTextSecondary: c.textMuted,
-      colorTextDescription: c.textMuted,
-      colorTextTertiary: c.textSubtle,
-      colorTextQuaternary: c.textDisabled,
-      // Found by a real axe scan (Epic 42 Slice F): antd derives an input's
-      // placeholder colour from `colorTextQuaternary` (`textDisabled`) by
-      // default, which is right for an actually-disabled control but fails
-      // WCAG AA (2.45:1, needs 4.5:1) on a placeholder — a fully
-      // interactive, non-disabled state. `textMuted` is the same weight
-      // already used for secondary/description text above and measures
-      // 9.9:1 against this theme's page background, comfortably compliant.
-      colorTextPlaceholder: c.textMuted,
-      colorTextHeading: c.text,
-      // Semantic colours are theme-aware. Status is the one thing a reader
-      // must never have to squint at, and the same green cannot serve a white
-      // page and a navy one.
-      colorSuccess: c.success,
-      colorWarning: c.warning,
-      colorError: c.error,
-      colorInfo: c.primary,
-      borderRadius: radius.control,
-      borderRadiusSM: radius.small,
-      borderRadiusLG: radius.card,
-      fontFamily: FONT,
-      fontSize: 14,
-      // 500/600 far more than antd's defaults; that weight is most of why the
-      // result reads dense rather than thin.
-      fontWeightStrong: 600,
-      lineHeight: 1.5,
-      boxShadowTertiary: c.shadowSmall,
-      boxShadowSecondary: c.shadowMedium,
-      boxShadow: c.shadowLarge,
-    },
-    components: {
-      Layout: {
-        headerBg: c.page,
-        siderBg: c.sider,
-        bodyBg: c.page,
-        // Taller chrome: the header carries a logo, a search field and account
-        // controls, and 56px forces all three to sit tight against each other.
-        headerHeight: 72,
-      },
-      // `Tabs` reads its own component token for the active-tab label rather
-      // than the semantic `colorPrimaryText*` tokens above — found the same
-      // way `Menu.itemSelectedColor` was: axe flagging a real, rendered tab
-      // at 2.15:1, not a token this project decided to override on a guess.
-      Tabs: { itemActiveColor: c.selectedText, itemSelectedColor: c.selectedText },
-      // The header takes the *section* tint, so a scrolled table still reads
-      // as having a header rather than as starting mid-row.
-      Table: {
-        headerBg: c.surface,
-        headerColor: c.textMuted,
-        cellPaddingBlock: 12,
-        borderColor: c.borderSoft,
-        rowHoverBg: c.rowHover,
-        borderRadiusLG: radius.card,
-      },
-      Card: {
-        colorBorderSecondary: c.border,
-        headerFontSize: 14,
-        borderRadiusLG: radius.card,
-      },
-      Modal: { borderRadiusLG: radius.modal },
-      Tree: { nodeSelectedBg: c.selected, nodeHoverBg: c.rowHover },
-      Menu: {
-        itemSelectedBg: c.selected,
-        itemSelectedColor: c.selectedText,
-        itemHeight: 40,
-        itemBorderRadius: radius.control,
-      },
-      Descriptions: { labelBg: c.surface },
-      Tag: { defaultBg: c.fill, borderRadiusSM: radius.small },
-      Timeline: { dotBg: c.raised },
-      Button: {
-        borderRadius: radius.control,
-        primaryShadow: "none",
-        // A primary button's own fill is a solid colour carrying white
-        // text, not a tint the page shows through — `colorPrimary` here
-        // fails that role at 2.15:1 regardless of theme, which is why the
-        // component gets its own override rather than inheriting the
-        // global token.
-        colorPrimary: c.actionBg,
-      },
-      Input: { borderRadius: radius.control },
-      Statistic: { titleFontSize: 13 },
-    },
+    "--gowl-page": colors.page,
+    "--gowl-surface": colors.surface,
+    "--gowl-raised": colors.raised,
+    "--gowl-sider": colors.sider,
+    "--gowl-fill": colors.fill,
+    "--gowl-fill-subtle": colors.fillSubtle,
+    "--gowl-border": colors.border,
+    "--gowl-border-soft": colors.borderSoft,
+    "--gowl-text": colors.text,
+    "--gowl-text-muted": colors.textMuted,
+    "--gowl-text-subtle": colors.textSubtle,
+    "--gowl-text-disabled": colors.textDisabled,
+    "--gowl-selected": colors.selected,
+    "--gowl-primary": colors.primary,
+    "--gowl-selected-text": colors.selectedText,
+    "--gowl-action-bg": colors.actionBg,
+    "--gowl-primary-hover": colors.primaryHover,
+    "--gowl-success": colors.success,
+    "--gowl-warning": colors.warning,
+    "--gowl-error": colors.error,
+    "--gowl-row-hover": colors.rowHover,
+    "--gowl-shadow-small": colors.shadowSmall,
+    "--gowl-shadow-medium": colors.shadowMedium,
+    "--gowl-shadow-large": colors.shadowLarge,
+    "--gowl-radius-small": `${radius.small}px`,
+    "--gowl-radius-control": `${radius.control}px`,
+    "--gowl-radius-card": `${radius.card}px`,
+    "--gowl-radius-modal": `${radius.modal}px`,
+    "--gowl-radius-panel": `${radius.panel}px`,
   };
 }
-
-export const lightTheme = build(LIGHT, false);
-export const darkTheme = build(DARK, true);
-export const palette = { light: LIGHT, dark: DARK };

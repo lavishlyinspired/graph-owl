@@ -18,65 +18,69 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   App as AntApp,
-  Breadcrumb,
   Alert,
+  ApartmentOutlined,
+  ArrowLeftOutlined,
+  BookOutlined,
+  Breadcrumb,
+  BulbOutlined,
   Button,
+  CalendarOutlined,
   Card,
+  CheckCircleFilled,
+  ClockCircleOutlined,
+  CloudServerOutlined,
   Col,
-  ConfigProvider,
+  CompassOutlined,
+  DashboardOutlined,
+  DatabaseOutlined,
   Descriptions,
   Divider,
+  DownloadOutlined,
+  EditOutlined,
   Empty,
   Flex,
+  FolderOutlined,
   Form,
+  Header,
+  HistoryOutlined,
   Input,
   Layout,
+  MergeOutlined,
   Menu,
+  Modal,
+  PlusOutlined,
   Popover,
+  ReconciliationOutlined,
+  RobotOutlined,
   Row,
+  SafetyCertificateOutlined,
+  SearchOutlined,
   Segmented,
   Select,
+  ShareAltOutlined,
+  Sider,
   Space,
-  Modal,
   Spin,
   Statistic,
   Table,
-  Tag,
-  Timeline,
+  TableOutlined,
   Tabs,
+  Tag,
+  TagOutlined,
+  Text,
+  ThunderboltOutlined,
+  Timeline,
+  Title,
   Tooltip,
+  TooltipProvider,
   Tree,
-  Typography,
-} from "antd";
-import { theme as antdTheme } from "antd";
-import type { DataNode } from "antd/es/tree";
-import ApartmentOutlined from "@ant-design/icons/es/icons/ApartmentOutlined";
-import ShareAltOutlined from "@ant-design/icons/es/icons/ShareAltOutlined";
-import ArrowLeftOutlined from "@ant-design/icons/es/icons/ArrowLeftOutlined";
-import BookOutlined from "@ant-design/icons/es/icons/BookOutlined";
-import CalendarOutlined from "@ant-design/icons/es/icons/CalendarOutlined";
-import ReconciliationOutlined from "@ant-design/icons/es/icons/ReconciliationOutlined";
-import BulbOutlined from "@ant-design/icons/es/icons/BulbOutlined";
-import DownloadOutlined from "@ant-design/icons/es/icons/DownloadOutlined";
-import CheckCircleFilled from "@ant-design/icons/es/icons/CheckCircleFilled";
-import ClockCircleOutlined from "@ant-design/icons/es/icons/ClockCircleOutlined";
-import CloudServerOutlined from "@ant-design/icons/es/icons/CloudServerOutlined";
-import CompassOutlined from "@ant-design/icons/es/icons/CompassOutlined";
-import DashboardOutlined from "@ant-design/icons/es/icons/DashboardOutlined";
-import DatabaseOutlined from "@ant-design/icons/es/icons/DatabaseOutlined";
-import FolderOutlined from "@ant-design/icons/es/icons/FolderOutlined";
-import PlusOutlined from "@ant-design/icons/es/icons/PlusOutlined";
-import SafetyCertificateOutlined from "@ant-design/icons/es/icons/SafetyCertificateOutlined";
-import SearchOutlined from "@ant-design/icons/es/icons/SearchOutlined";
-import TableOutlined from "@ant-design/icons/es/icons/TableOutlined";
-import TagOutlined from "@ant-design/icons/es/icons/TagOutlined";
-import ThunderboltOutlined from "@ant-design/icons/es/icons/ThunderboltOutlined";
-import EditOutlined from "@ant-design/icons/es/icons/EditOutlined";
-import HistoryOutlined from "@ant-design/icons/es/icons/HistoryOutlined";
-import MergeOutlined from "@ant-design/icons/es/icons/MergeOutlined";
-import TeamOutlined from "@ant-design/icons/es/icons/TeamOutlined";
-import UserOutlined from "@ant-design/icons/es/icons/UserOutlined";
-import RobotOutlined from "@ant-design/icons/es/icons/RobotOutlined";
+  UserOutlined,
+  Paragraph,
+  Content,
+  TeamOutlined,
+} from "./components/ui/antd-compat";
+import type { TreeDataNode as DataNode } from "./components/ui/antd-compat";
 import {
   type Asset,
   type AssetKind,
@@ -118,7 +122,6 @@ import { AgentActivityPanel } from "./features/agents/AgentActivityPanel";
 import { BoltSessionsPanel } from "./features/agents/BoltSessionsPanel";
 import { PartitionHealthPanel } from "./features/agents/PartitionHealthPanel";
 import { OutboundWebhooksPanel } from "./features/agents/OutboundWebhooksPanel";
-import { OntologyEditor } from "./features/ontology/OntologyEditor";
 import { OntologyBuilder } from "./features/ontology-builder";
 import { hierarchy, type TeamNode } from "./admin/hierarchy";
 import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
@@ -139,7 +142,7 @@ import {
   stalenessLabel,
 } from "./memory/memory";
 import { type GraphModel, expand, performedExpansions, replay, seed } from "./graph/model";
-import { brand, darkTheme, lightTheme, palette } from "./theme";
+import { brand, cssVariables, palette } from "./theme";
 import { GenericSourceMark, PostgresMark } from "./icons";
 import { Background, Controls, Position, ReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -183,8 +186,9 @@ import { MetricsPanel } from "./features/governance/MetricsPanel";
 import { ExportDialog } from "./features/export/ExportDialog";
 import watermarkImg from "./assets/watermark1.png";
 
-const { Header, Sider, Content } = Layout;
-const { Text, Title, Paragraph } = Typography;
+// Layout sub-components and Typography primitives are imported directly from
+// the shadcn compat barrel; the destructuring aliases antd used are no longer
+// needed and are kept only to minimise JSX churn in this migration.
 
 type Section =
   | "overview"
@@ -1031,7 +1035,7 @@ function GraphExplorer({
             placeholder={GRAPH_COPY.everyRelationship}
             style={{ minWidth: 260 }}
             value={[...selected]}
-            onChange={(next: string[]) => setSelected(next)}
+            onChange={(next) => setSelected(Array.isArray(next) ? next.map(String) : [])}
             options={kinds.map((kind) => ({ value: kind, label: kind }))}
           />
         </Flex>
@@ -1874,7 +1878,6 @@ function ConnectorRunForm({
   onBack: () => void;
   onDone: () => void;
 }) {
-  const { token } = antdTheme.useToken();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ created: number; failed: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1911,7 +1914,9 @@ function ConnectorRunForm({
       <Card size="small" title="Connection">
         <Form
           layout="vertical"
-          onFinish={run}
+          onFinish={(values) =>
+            void run(values as { connectionString: string; serviceName: string })
+          }
           initialValues={{
             connectionString: "postgres://postgres:postgres@localhost:55432/postgres",
             serviceName: "hdfc-core",
@@ -1942,7 +1947,7 @@ function ConnectorRunForm({
       {result && (
         <Card size="small">
           <Space>
-            <CheckCircleFilled style={{ color: token.colorSuccess, fontSize: 18 }} />
+            <CheckCircleFilled style={{ color: "var(--gowl-success)", fontSize: 18 }} />
             <Text style={{ fontWeight: 500 }}>
               Catalogued {result.created} assets
               {result.failed > 0 ? `, ${result.failed} failed` : ""}.
@@ -2061,9 +2066,6 @@ function RunHistory({ colors }: { colors: (typeof palette)["light"] }) {
  *  expensive from one that is a single triple pattern away from being cheap.
  */
 function WorkbenchPage({ colors, asOf }: { colors: (typeof palette)["light"]; asOf: string | null }) {
-  const [view, setView] = useState<"query" | "ontology">(
-    () => (readParam("workbenchView") === "ontology" ? "ontology" : "query"),
-  );
   // Plan 111 Slice B. `POST /cypher` had no console caller at all before
   // this — a property-graph query language implemented end to end and
   // reachable only with curl.
@@ -2130,39 +2132,20 @@ function WorkbenchPage({ colors, asOf }: { colors: (typeof palette)["light"]; as
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      <Space align="center" wrap>
-        <div>
-          {/* level 2, matching Overview's own top-level heading — this page
-              sits directly under the app's h1, and level 4 here (found by
-              this slice's own axe check, the first to run against this
-              route) skipped two levels with nothing at 2 or 3 in between. */}
-          <Title level={2} style={{ margin: 0, fontWeight: 600, fontSize: 16 }}>
-            Workbench
-          </Title>
-          <Paragraph type="secondary" style={{ margin: "4px 0 0", fontSize: 13 }}>
-            SPARQL or Cypher over the same catalog graph, filtered to what you may
-            see. The plan shows what the engine read to answer you.
-          </Paragraph>
-        </div>
-        <Segmented
-          value={view}
-          onChange={(value) => {
-            const next = value as "query" | "ontology";
-            setView(next);
-            writeParam("workbenchView", next === "ontology" ? "ontology" : null);
-          }}
-          options={[
-            { label: "Query", value: "query" },
-            { label: "Ontology editor", value: "ontology" },
-          ]}
-        />
-      </Space>
-
-      <div style={{ display: view === "ontology" ? "block" : "none" }}>
-        <OntologyEditor colors={colors} />
+      <div>
+        {/* level 2, matching Overview's own top-level heading — this page
+            sits directly under the app's h1, and level 4 here (found by
+            this slice's own axe check, the first to run against this
+            route) skipped two levels with nothing at 2 or 3 in between. */}
+        <Title level={2} style={{ margin: 0, fontWeight: 600, fontSize: 16 }}>
+          Workbench
+        </Title>
+        <Paragraph type="secondary" style={{ margin: "4px 0 0", fontSize: 13 }}>
+          SPARQL or Cypher over the same catalog graph, filtered to what you may
+          see. The plan shows what the engine read to answer you.
+        </Paragraph>
       </div>
 
-      <div style={{ display: view === "query" ? "block" : "none" }}>
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       {/* **Two languages, one graph, one results table.** The server renders
           both through the identical outcome envelope, which is what lets the
@@ -2356,7 +2339,6 @@ function WorkbenchPage({ colors, asOf }: { colors: (typeof palette)["light"]; as
         </Card>
       )}
       </Space>
-      </div>
     </Space>
   );
 }
@@ -3925,7 +3907,13 @@ function ConnectorConfigPanel() {
 }
 
 export default function App() {
-  return <AuthProvider><AppShell /></AuthProvider>;
+  return (
+    <AuthProvider>
+      <TooltipProvider>
+        <AppShell />
+      </TooltipProvider>
+    </AuthProvider>
+  );
 }
 
 function AppShell() {
@@ -3936,6 +3924,19 @@ function AppShell() {
     setRefreshHandler(tryRefresh);
   }, []);
   const colors = dark ? palette.dark : palette.light;
+  // shadcn/Tailwind primitives (`components/ui/`) read colour and radius
+  // through these `--gowl-*` custom properties rather than antd's
+  // shadcn/Tailwind primitives (`components/ui/`) read colour and radius
+  // through these `--gowl-*` custom properties rather than antd's
+  // `ConfigProvider` theme object — 00f-ui-architecture.md's 14 Aug 2026
+  // revision. One effect, one place, rather than threading `colors` into
+  // every primitive as a prop.
+  useEffect(() => {
+    const vars = cssVariables(colors);
+    for (const [name, value] of Object.entries(vars)) {
+      document.documentElement.style.setProperty(name, value);
+    }
+  }, [colors]);
   // Overview answers "what is in here" without a click; Explore is where you
   // go once you know what you are looking for. A deep link to an asset lands
   // on Explore regardless, or the link would not open the thing it names.
@@ -4208,9 +4209,8 @@ function AppShell() {
   const total = useMemo(() => stats.reduce((sum, s) => sum + s.count, 0), [stats]);
 
   return (
-    <ConfigProvider theme={dark ? darkTheme : lightTheme}>
-      <AntApp>
-        <Layout style={{ height: "100vh" }}>
+    <AntApp>
+      <Layout style={{ height: "100vh" }}>
           <Header
             style={{
               display: "flex",
@@ -4703,6 +4703,5 @@ function AppShell() {
           </Layout>
         </Layout>
       </AntApp>
-    </ConfigProvider>
   );
 }
