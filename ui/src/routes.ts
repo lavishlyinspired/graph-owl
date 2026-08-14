@@ -34,6 +34,7 @@ export const ROUTES = [
   "connectors",
   "admin",
   "agent",
+  "ontology-builder",
 ] as const;
 
 export type Route = (typeof ROUTES)[number];

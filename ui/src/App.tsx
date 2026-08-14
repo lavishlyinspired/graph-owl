@@ -51,6 +51,7 @@ import {
 import { theme as antdTheme } from "antd";
 import type { DataNode } from "antd/es/tree";
 import ApartmentOutlined from "@ant-design/icons/es/icons/ApartmentOutlined";
+import ShareAltOutlined from "@ant-design/icons/es/icons/ShareAltOutlined";
 import ArrowLeftOutlined from "@ant-design/icons/es/icons/ArrowLeftOutlined";
 import BookOutlined from "@ant-design/icons/es/icons/BookOutlined";
 import CalendarOutlined from "@ant-design/icons/es/icons/CalendarOutlined";
@@ -118,6 +119,7 @@ import { BoltSessionsPanel } from "./features/agents/BoltSessionsPanel";
 import { PartitionHealthPanel } from "./features/agents/PartitionHealthPanel";
 import { OutboundWebhooksPanel } from "./features/agents/OutboundWebhooksPanel";
 import { OntologyEditor } from "./features/ontology/OntologyEditor";
+import { OntologyBuilder } from "./features/ontology-builder";
 import { hierarchy, type TeamNode } from "./admin/hierarchy";
 import { fields as schemaFields, missing as schemaMissing, renderable } from "./admin/schemaForm";
 import {
@@ -195,7 +197,8 @@ type Section =
   | "review"
   | "obligations"
   | "admin"
-  | "agent";
+  | "agent"
+  | "ontology-builder";
 
 const KIND_ICON: Record<AssetKind, React.ReactNode> = {
   service: <CloudServerOutlined />,
@@ -3954,7 +3957,8 @@ function AppShell() {
       // repeating that gap.
       named === "obligations" ||
       named === "reconciliation" ||
-      named === "agent"
+      named === "agent" ||
+      named === "ontology-builder"
     ) {
       return named;
     }
@@ -4385,6 +4389,7 @@ function AppShell() {
                   { key: "connectors", icon: <PlusOutlined />, label: "Connectors" },
                   { key: "admin", icon: <TeamOutlined />, label: "Admin" },
                   { key: "agent", icon: <RobotOutlined />, label: "Agent" },
+                  { key: "ontology-builder", icon: <ShareAltOutlined />, label: "Ontology Builder" },
                 ]}
               />
             </Sider>
@@ -4494,6 +4499,8 @@ function AppShell() {
                 <ConnectorsPage onDone={refresh} colors={colors} />
               ) : section === "admin" ? (
                 <AdminPage colors={colors} setSection={setSection} />
+              ) : section === "ontology-builder" ? (
+                <OntologyBuilder colors={colors} />
               ) : results !== null ? (
                 <Row gutter={24} style={{ width: "100%" }}>
                   <Col flex="200px">
