@@ -33,6 +33,7 @@ import {
   Card,
   Col,
   Empty,
+  Modal,
   Row,
   Space,
   Spin,
@@ -310,6 +311,7 @@ function SourceCard({
 }) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  const [invoiceOpen, setInvoiceOpen] = useState(false);
   const summary = useMemo(() => sourceSummary(rows), [rows]);
 
   const handle = useCallback(
@@ -357,9 +359,18 @@ function SourceCard({
       {loaded && (
         <Space direction="vertical" size={2} style={{ marginBottom: 12, width: "100%" }}>
           <Text style={{ fontSize: 22, fontWeight: 600 }}>{money(summary.taxAmount)}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {`${summary.count} invoice${summary.count === 1 ? "" : "s"} · taxable ${money(summary.taxableValue)}`}
-          </Text>
+          {/* **The count is a door, not a figure.** A number with nothing behind
+              it made a CA reach for the graph to see which invoices a total was
+              built from; the count now opens them. The taxable figure stays out
+              of the trigger — it is part of the summary, not the action. */}
+          <Space size={0} wrap>
+            <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => setInvoiceOpen(true)}>
+              {`${summary.count} invoice${summary.count === 1 ? "" : "s"}`}
+            </Button>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {` · taxable ${money(summary.taxableValue)}`}
+            </Text>
+          </Space>
           {summary.periods.length > 0 && (
             <Text type="secondary" style={{ fontSize: 12 }}>
               {`${COPY.periodsLabel}: ${summary.periods.join(", ")}`}
@@ -405,6 +416,25 @@ function SourceCard({
       </details>
 
       {failure && <Alert style={{ marginTop: 10 }} type="error" showIcon message={failure} />}
+
+      {/* **Portalled, so it can live here without owning the card's layout.**
+          The invoices behind the count, opened from the trigger above. */}
+      <Modal
+        open={invoiceOpen}
+        title={`${spec.label} · ${summary.count} ${COPY.invoicesSuffix}`}
+        onCancel={() => setInvoiceOpen(false)}
+        footer={null}
+        width={960}
+      >
+        <Table
+          size="small"
+          rowKey="invoiceNumber"
+          dataSource={[...rows]}
+          columns={invoiceColumns(money)}
+          pagination={rows.length > 10 ? { pageSize: 10 } : false}
+          scroll={{ x: "max-content" }}
+        />
+      </Modal>
     </Card>
   );
 }
