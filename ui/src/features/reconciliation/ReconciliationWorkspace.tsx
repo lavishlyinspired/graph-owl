@@ -139,7 +139,7 @@ const COPY = {
   sourceAuthority: "GSTR-2B",
   graphTitle: "5 · What the graph knows",
   graphHint:
-    "These are not three spreadsheets joined by a batch job. Each import lands in its own named graph, one gst:Supplier subject is shared across all of them, and every finding is the live result of a query with the statute it rests on attached — nothing is written onto an invoice as a flag.",
+    "These are not three spreadsheets joined by a batch job. Each import lands in its own named graph, one party subject is shared across all of them, and every finding is the live result of a query with the statute it rests on attached — nothing is written onto an invoice as a flag.",
   graphSubjects: "Invoice records",
   graphSubjectsHint: "one per source, joined by a normalized key",
   graphSuppliers: "Supplier subjects",
