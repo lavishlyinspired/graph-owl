@@ -1239,10 +1239,22 @@ export const api = {
   /** The neighbourhood around an asset. Labels are resolved server-side —
    *  one statement per traversal is pointless if the client then makes one
    *  request per node. */
-  graph: (id: string, hops: number, asOf?: string | null) =>
+  graph: (
+    id: string,
+    hops: number,
+    asOf?: string | null,
+    /** Narrow the walk to these edge names — Plan 112 Slice A. `undefined`
+     *  follows every edge; an **empty array** is a filter that matches
+     *  nothing, which is why `graph/edgeFilter.ts` sends `undefined` when the
+     *  reader has selected nothing rather than `[]`. */
+    relationshipTypes?: readonly string[],
+  ) =>
     request<GraphView>(
       `/assets/${id}/graph?hops=${hops}` +
-        (asOf ? `&asOf=${encodeURIComponent(asOf)}` : ""),
+        (asOf ? `&asOf=${encodeURIComponent(asOf)}` : "") +
+        (relationshipTypes === undefined
+          ? ""
+          : `&relationshipTypes=${encodeURIComponent(relationshipTypes.join(","))}`),
     ),
   /** One request for the whole landing page. Six would render in six stages
    *  and show a different partial truth in each. */

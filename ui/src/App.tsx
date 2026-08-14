@@ -35,6 +35,7 @@ import {
   Popover,
   Row,
   Segmented,
+  Select,
   Space,
   Modal,
   Spin,
@@ -165,6 +166,8 @@ import {
 } from "./workbench/results";
 import { GraphCanvas } from "./graph/GraphCanvas";
 import { PathFinder } from "./graph/PathFinder";
+import { filterParam, kindsFromAnalytics, whyEmpty } from "./graph/edgeFilter";
+import { ConnectivityPanel } from "./graph/ConnectivityPanel";
 import { Disagreements } from "./memory/Disagreements";
 import {
   type Drafts,
@@ -795,6 +798,35 @@ function GraphExplorer({
   colors: (typeof palette)["light"];
 }) {
   const [hops, setHops] = useState(2);
+  // Plan 112 Slice A. **The options come from analytics, which walks
+  // unfiltered**, not from the current response: deriving them from a filtered
+  // walk collapses them to the selection, and accumulating them across walks
+  // fails outright on a *shared* filtered URL, where no unfiltered walk ever
+  // happens. Found in a browser on the very link this made shareable.
+  const [selected, setSelectedRaw] = useState<readonly string[]>(() =>
+    (readParam("edges") ?? "").split(",").filter(Boolean),
+  );
+  const [kinds, setKinds] = useState<readonly string[]>([]);
+
+  useEffect(() => {
+    let live = true;
+    setKinds([]);
+    api
+      .assetAnalytics(assetId, { hops })
+      .then((found) => live && setKinds(kindsFromAnalytics(found.edgeTypes)))
+      // No control rather than a broken one: a failed lookup leaves the reader
+      // exactly where they were before this slice existed.
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [assetId, hops]);
+  const setSelected = useCallback((next: readonly string[]) => {
+    setSelectedRaw(next);
+    // Shareable, like `hops`/`asOf`/`expand` already are — a filtered picture
+    // somebody pastes into a review must come back filtered.
+    writeParam("edges", next.length > 0 ? next.join(",") : null);
+  }, []);
   const [model, setModel] = useState<GraphModel | null>(null);
   const [expanding, setExpanding] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -861,9 +893,13 @@ function GraphExplorer({
     // than the seed they started from.
     const replay = (readParam("expand") ?? "").split(",").filter(Boolean);
     (async () => {
-      let next = seed(assetId, await api.graph(assetId, hops, asOf));
+      const filter = filterParam(selected);
+      let next = seed(assetId, await api.graph(assetId, hops, asOf, filter));
       for (const id of replay) {
-        next = expand(next, id, await api.graph(id, 1, asOf));
+        // **Expansion carries the filter.** A filter applied to the seed and
+        // dropped on expansion produces a picture that is half filtered and
+        // half not, with nothing on screen to say which half is which.
+        next = expand(next, id, await api.graph(id, 1, asOf, filter));
       }
       if (current) setModel(next);
     })().catch((e: unknown) => {
@@ -874,7 +910,7 @@ function GraphExplorer({
     return () => {
       current = false;
     };
-  }, [assetId, hops, asOf]);
+  }, [assetId, hops, asOf, selected]);
 
   /** Epic 40 decision 2: the canvas grows by explicit expansion, never by
    *  "show everything". One hop per click, budgeted server-side like every
@@ -884,7 +920,7 @@ function GraphExplorer({
       if (!model || model.expanded.includes(nodeId) || expanding) return;
       setExpanding(nodeId);
       api
-        .graph(nodeId, 1, asOf)
+        .graph(nodeId, 1, asOf, filterParam(selected))
         .then((view) => {
           setModel((previous) => {
             if (!previous) return previous;
@@ -899,7 +935,7 @@ function GraphExplorer({
         })
         .finally(() => setExpanding(null));
     },
-    [model, expanding, asOf],
+    [model, expanding, asOf, selected],
   );
 
   const view = model;
@@ -936,6 +972,14 @@ function GraphExplorer({
   }
 
   const byId = new Map(picture.nodes.map((n) => [n.id, n]));
+  // `kinds` is every edge name any walk has seen, so it is the honest witness
+  // to "this node does have edges" even when the current filtered walk shows
+  // none.
+  const emptyReason = whyEmpty({
+    selected,
+    hasAnyEdge: kinds.length > 0,
+    edgesShown: view.edges.length,
+  });
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -965,6 +1009,40 @@ function GraphExplorer({
           {expanding ? "expanding…" : "click a node to expand it"}
         </Text>
       </Flex>
+
+      {/* **The third of the four controls the explorer needs** — depth and
+          time were here, relationships were not, and a hub node's
+          neighbourhood is unreadable without it: the picture is complete and
+          tells the reader nothing. Options come from every walk so far, never
+          from the current (possibly filtered) response, or the list would
+          collapse to the selection and could never be widened again.
+
+          Rendered only once a walk has reported at least one edge name: a
+          deployment whose graph has no edges gets nothing rather than an
+          enabled control with no options in it. */}
+      {kinds.length > 0 && (
+        <Flex align="center" gap={12} wrap>
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            {GRAPH_COPY.relationships}
+          </Text>
+          <Select
+            mode="multiple"
+            allowClear
+            size="small"
+            aria-label={GRAPH_COPY.relationships}
+            placeholder={GRAPH_COPY.everyRelationship}
+            style={{ minWidth: 260 }}
+            value={[...selected]}
+            onChange={(next: string[]) => setSelected(next)}
+            options={kinds.map((kind) => ({ value: kind, label: kind }))}
+          />
+        </Flex>
+      )}
+
+      {/* **"Nothing matches these filters" is not "nothing is connected."**
+          The second is a claim about the graph, and showing it when a filter is
+          responsible sends the reader hunting for data that is right there. */}
+      {emptyReason && <Alert type="info" showIcon message={emptyReason} />}
 
       {/* Diff mode. Two instants, and what moved between them — the thing this
           graph can show because `op = false` is a retraction rather than a
@@ -1150,10 +1228,47 @@ function GraphExplorer({
           lives inside this tab rather than as a route of its own: `routes.ts`
           rewards one surface absorbing many questions, and starting from the
           asset already on screen is what makes it discoverable at all. */}
-      <PathFinder seedId={assetId} seedName={assetName} asOf={asOf} colors={colors} />
+      {/* **Which node is the hub of what you are looking at** — Plan 112
+          Slice C. `GET /assets/{id}/analytics` and `api.assetAnalytics` both
+          existed and nothing in the console called either. It sits under the
+          picture and shares the picture's depth, so the numbers describe the
+          neighbourhood on screen rather than a different one. */}
+      <ConnectivityPanel
+        assetId={assetId}
+        hops={hops}
+        names={
+          new Map(
+            picture.nodes.map((node) => [`${DSC_NAMESPACE}:${node.id}`, node.name] as const),
+          )
+        }
+      />
+
+      <PathFinder
+        seedId={assetId}
+        seedName={assetName}
+        asOf={asOf}
+        edgeKinds={kinds}
+        colors={colors}
+      />
     </Space>
   );
 }
+
+/** Plan 112 Slice A's user-visible words. Externalized like every other
+ *  string in this console — `local/no-raw-jsx-text` fails the build otherwise,
+ *  and a control's label is exactly the kind of text a translator needs to
+ *  find in one place. */
+/** The catalog namespace every projected asset is keyed under
+ *  (`graph_owl_core::flake::namespace::DSC`). Analytics reports node ids as
+ *  rendered `Sid`s, and the graph view reports bare asset ids, so joining the
+ *  two needs the prefix. Not a pack vocabulary — this is the platform's own
+ *  namespace, which is why the neutrality check allowlists it. */
+const DSC_NAMESPACE = 1;
+
+const GRAPH_COPY = {
+  relationships: "Relationships",
+  everyRelationship: "every relationship",
+};
 
 /** The time control.
  *

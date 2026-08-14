@@ -26,6 +26,7 @@ import { useState } from "react";
 import { Alert, AutoComplete, Button, Card, Flex, Select, Space, Tag, Typography } from "antd";
 import { ApiError, api, type Asset, type PathAnswer } from "../api";
 import { describeAnswer, nodeLabel, whyNotRunnable } from "./paths";
+import { filterParam } from "./edgeFilter";
 import type { palette } from "../theme";
 
 const { Text, Paragraph } = Typography;
@@ -38,6 +39,8 @@ const COPY = {
   depth: "Search depth",
   direction: "Follow edges",
   routes: "Routes",
+  relationships: "Relationships",
+  everyRelationship: "every relationship",
   shortest: "Shortest only",
   all: "Every route",
   failed: "That question could not be answered",
@@ -57,11 +60,18 @@ export function PathFinder({
   seedId,
   seedName,
   asOf,
+  edgeKinds,
   colors,
 }: {
   seedId: string;
   seedName: string;
   asOf: string | null;
+  /** Edge names the surrounding explorer has actually seen. **Passed in
+   *  rather than fetched**: the explorer already walked this neighbourhood and
+   *  knows them, and a second walk here purely to populate a dropdown would
+   *  pay for the same query twice. Empty means no control is offered, which is
+   *  the honest state for a deployment whose graph has no edges. */
+  edgeKinds: readonly string[];
   colors: (typeof palette)["light"];
 }) {
   const [options, setOptions] = useState<readonly Asset[]>([]);
@@ -70,6 +80,12 @@ export function PathFinder({
   const [hops, setHops] = useState<number>(4);
   const [direction, setDirection] = useState<"outgoing" | "incoming" | "both">("both");
   const [everyRoute, setEveryRoute] = useState(false);
+  /** Plan 112 Slice B. `api.findPaths` and the route have accepted
+   *  `relationshipTypes` since Plan 111 Slice A and this screen never sent it,
+   *  so "how is this connected" could not be narrowed to *how* you care
+   *  about. Options come from the caller — `edgeKinds`, whatever the estate
+   *  actually uses — never from a list compiled in here. */
+  const [edgeTypes, setEdgeTypes] = useState<readonly string[]>([]);
   const [answer, setAnswer] = useState<PathAnswer | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -112,6 +128,7 @@ export function PathFinder({
           direction,
           hops,
           maxPaths: everyRoute ? 10 : undefined,
+          relationshipTypes: filterParam(edgeTypes),
           asOf,
         }),
       );
@@ -178,6 +195,19 @@ export function PathFinder({
             { value: true, label: COPY.all },
           ]}
         />
+        {edgeKinds.length > 0 && (
+          <Select
+            mode="multiple"
+            allowClear
+            size="small"
+            aria-label={COPY.relationships}
+            placeholder={COPY.everyRelationship}
+            style={{ minWidth: 200 }}
+            value={[...edgeTypes]}
+            onChange={(next: string[]) => setEdgeTypes(next)}
+            options={edgeKinds.map((kind) => ({ value: kind, label: kind }))}
+          />
+        )}
         <Button size="small" type="primary" loading={running} disabled={blocked !== null} onClick={() => void run()}>
           {COPY.find}
         </Button>

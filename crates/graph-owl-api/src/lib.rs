@@ -3262,6 +3262,18 @@ impl Catalog {
     /// `Storage` if no traversal engine is configured — answering a graph
     /// question with an empty graph would read as "nothing is connected",
     /// which is a wrong answer rather than a missing feature.
+    /// `relationship_types` narrows the walk to those edge names — Plan 112
+    /// Slice A. `None` follows every edge, which is what every caller before
+    /// this slice got and still gets.
+    ///
+    /// **The vocabulary is the caller's, and nothing here validates it.** A
+    /// catalog edge is one of `RelationshipType`'s seven names; a pack's edge
+    /// carries whatever string its own `relType` flakes hold, so there is no
+    /// single list to check against. An unknown name therefore matches
+    /// nothing rather than being refused — and `Some(vec![])` means *match
+    /// nothing*, not *match everything*, because a filter that silently
+    /// widens to unfiltered is a control that looks like it works and does
+    /// not.
     pub async fn asset_subgraph(
         &self,
         principal: &Principal,
@@ -3269,6 +3281,7 @@ impl Catalog {
         direction: Direction,
         bounds: Bounds,
         as_of: Option<DateTime<Utc>>,
+        relationship_types: Option<Vec<String>>,
     ) -> Result<Subgraph, CatalogError> {
         // Visibility first, and against relational state — decision 7. The
         // projection lags by design, so a permission revoked in that window
@@ -3298,7 +3311,7 @@ impl Catalog {
                 direction,
                 bounds,
                 &EdgeFilter {
-                    relationship_types: None,
+                    relationship_types,
                     as_of: as_of_t,
                     valid_at: None,
                 },
@@ -3550,7 +3563,7 @@ impl Catalog {
         bounds: Bounds,
     ) -> Result<AssetAnalytics, CatalogError> {
         let subgraph = self
-            .asset_subgraph(principal, id, direction, bounds, None)
+            .asset_subgraph(principal, id, direction, bounds, None, None)
             .await?;
 
         let graph = self.graph.as_ref().ok_or_else(|| {
@@ -29461,6 +29474,149 @@ mod projection_isolation_tests {
         );
     }
 
+    /// Plan 112 Slice A — **the explorer can narrow a neighbourhood to the
+    /// edges a reader cares about.**
+    ///
+    /// `EdgeFilter.relationship_types` has existed since Epic 7a and
+    /// `asset_subgraph` passed `None` for it unconditionally, so the doc's
+    /// Explore controls (depth / relationships / sources / time) had only two
+    /// of the four. A hub node's neighbourhood is unreadable without this: the
+    /// picture is complete and tells the reader nothing.
+    ///
+    /// **The filter's vocabulary is the caller's.** A catalog edge is one of
+    /// `RelationshipType`'s seven names; a pack's edge carries whatever string
+    /// its own `relType` flakes hold. Nothing here validates against a list,
+    /// which is why an unknown type matches nothing rather than being refused.
+    mod the_explorer_can_narrow_by_relationship {
+        use super::paths_are_reachable::link;
+        use super::*;
+
+        struct Fixture {
+            catalog: Catalog,
+            seed: Uuid,
+            /// The neighbour reachable only by `MENTIONS`, so an assertion can
+            /// name the node it expects to disappear under a `FEEDS` filter.
+            mentioned: Uuid,
+        }
+
+        /// One seed with two neighbours, reached by two different edge types —
+        /// the minimum shape that can tell a filter from no filter.
+        async fn fixture() -> Fixture {
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let seeder =
+                Catalog::new(storage.clone()).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+            let mut ids = Vec::new();
+            for name in ["seed", "fed", "mentioned"] {
+                ids.push(
+                    seeder
+                        .upsert_asset(&Principal::system(), service(name))
+                        .await
+                        .expect("seed asset")
+                        .id,
+                );
+            }
+            link(&graph, "rel-0", ids[0], ids[1], "FEEDS").await;
+            link(&graph, "rel-1", ids[0], ids[2], "MENTIONS").await;
+
+            let traversal: Arc<dyn TraversalEngine> =
+                Arc::new(graph_owl_traversal_memory::InMemoryTraversalEngine::new(
+                    graph.clone() as Arc<dyn TripleStore>,
+                ));
+            Fixture {
+                catalog: Catalog::new(storage)
+                    .with_graph(graph as Arc<dyn TripleStore>)
+                    .with_traversal(traversal),
+                seed: ids[0],
+                mentioned: ids[2],
+            }
+        }
+
+        async fn walk(f: &Fixture, types: Option<Vec<String>>) -> Subgraph {
+            f.catalog
+                .asset_subgraph(
+                    &Principal::system(),
+                    f.seed,
+                    Direction::Both,
+                    Bounds::default(),
+                    None,
+                    types,
+                )
+                .await
+                .expect("walk")
+        }
+
+        /// **`None` still follows every edge.** The regression that matters
+        /// most: the filter is additive, and a walk that asked for no filter
+        /// must be exactly what it was before this slice.
+        #[tokio::test]
+        async fn no_filter_follows_every_edge() {
+            let f = fixture().await;
+            let all = walk(&f, None).await;
+            let kinds: std::collections::BTreeSet<&str> =
+                all.edges.iter().map(|e| e.relationship.as_str()).collect();
+            assert_eq!(
+                kinds,
+                ["FEEDS", "MENTIONS"].into_iter().collect(),
+                "{:?}",
+                all.edges,
+            );
+        }
+
+        /// **Filtering to one type drops the neighbour reached only by the
+        /// other**, which is the whole point: an intermediate node reachable
+        /// only through an excluded edge is not reachable under that filter.
+        #[tokio::test]
+        async fn filtering_to_one_type_excludes_the_other_edge() {
+            let f = fixture().await;
+            let feeds = walk(&f, Some(vec!["FEEDS".to_string()])).await;
+
+            // Asserted on the *kinds*, not the count: `Direction::Both`
+            // reports each logical edge in both orientations, so one
+            // relationship is two `EdgeRef`s and a count assertion would be
+            // about the fixture rather than about the filter.
+            assert!(!feeds.edges.is_empty(), "the FEEDS edge survives");
+            assert!(
+                feeds.edges.iter().all(|e| e.relationship == "FEEDS"),
+                "no MENTIONS edge survives the filter: {:?}",
+                feeds.edges,
+            );
+            assert!(
+                !feeds
+                    .nodes
+                    .contains(&Sid::new(namespace::DSC, f.mentioned.to_string())),
+                "the MENTIONS-only neighbour is gone: {:?}",
+                feeds.nodes,
+            );
+        }
+
+        /// **An empty list means "match nothing", not "match everything".**
+        /// The dangerous direction: a filter that silently widens to
+        /// unfiltered looks like a working control that does nothing, and the
+        /// reader believes they are looking at a narrowed graph.
+        ///
+        /// The product decision that *no selection* means unfiltered belongs
+        /// in the console, which sends no filter at all in that case — it is
+        /// asserted in `graph/edgeFilter.test.ts`, not smuggled in here.
+        #[tokio::test]
+        async fn an_empty_list_matches_nothing_rather_than_everything() {
+            let f = fixture().await;
+            let none = walk(&f, Some(Vec::new())).await;
+            assert!(none.edges.is_empty(), "{:?}", none.edges);
+        }
+
+        /// A type nothing in the graph uses matches nothing — and is not an
+        /// error. There is no vocabulary to validate against: a pack's edges
+        /// carry whatever its own data says.
+        #[tokio::test]
+        async fn an_unknown_type_matches_nothing_and_is_not_an_error() {
+            let f = fixture().await;
+            let unknown = walk(&f, Some(vec!["NO_SUCH_EDGE".to_string()])).await;
+            assert!(unknown.edges.is_empty(), "{:?}", unknown.edges);
+        }
+    }
+
     /// Plan 111 Slice A — **path finding, which the engine has answered since
     /// Epic 7a and which no caller could reach.**
     ///
@@ -29488,7 +29644,7 @@ mod projection_isolation_tests {
         /// edges asserted at the same instant cannot be told apart by an
         /// `as_of` walk, so a fixture that let the clock choose could not
         /// test time travel at all.
-        async fn link_at(
+        pub(super) async fn link_at(
             graph: &Arc<RecordingGraph>,
             name: &str,
             from: Uuid,
@@ -29523,11 +29679,17 @@ mod projection_isolation_tests {
                 .expect("seed the relationship");
         }
 
-        async fn link(graph: &Arc<RecordingGraph>, name: &str, from: Uuid, to: Uuid, kind: &str) {
+        pub(super) async fn link(
+            graph: &Arc<RecordingGraph>,
+            name: &str,
+            from: Uuid,
+            to: Uuid,
+            kind: &str,
+        ) {
             link_at(graph, name, from, to, kind, 1).await;
         }
 
-        fn sid(id: Uuid) -> Sid {
+        pub(super) fn sid(id: Uuid) -> Sid {
             Sid::new(namespace::DSC, id.to_string())
         }
 

@@ -688,7 +688,7 @@ impl ContextSource for CatalogContext {
         // everywhere else on this trait.
         let subgraph = match self
             .catalog
-            .asset_subgraph(&who, asset.id, mapped, bounds, None)
+            .asset_subgraph(&who, asset.id, mapped, bounds, None, None)
             .await
         {
             Ok(subgraph) => subgraph,

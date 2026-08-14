@@ -2602,6 +2602,37 @@ struct SubgraphQuery {
     direction: Option<String>,
     max_nodes: Option<usize>,
     as_of: Option<String>,
+    /// Plan 112 Slice A: narrow the walk to these edge names. Absent follows
+    /// every edge.
+    ///
+    /// **Comma-separated rather than repeated**, because this is a query
+    /// string and a reader pasting a URL should be able to see the whole
+    /// filter in one token. Deserialized through a helper because `serde_urlencoded`
+    /// has no notion of a list in a single value.
+    #[serde(default, deserialize_with = "comma_separated")]
+    relationship_types: Option<Vec<String>>,
+}
+
+/// `a,b,c` → `Some(["a","b","c"])`; an empty or whitespace-only value →
+/// `Some([])`, which the facade reads as *match nothing*.
+///
+/// **An absent parameter and an empty one are different requests**, and the
+/// difference is the whole safety property: absent means "no filter", empty
+/// means "a filter that excludes everything". Collapsing them would make a
+/// control that selects nothing silently show everything.
+fn comma_separated<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<String> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(raw.map(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(std::string::ToString::to_string)
+            .collect()
+    }))
 }
 
 /// The neighbourhood around an asset.
@@ -2970,7 +3001,14 @@ async fn asset_graph(
     };
 
     let graph = catalog
-        .asset_subgraph(&principal, id, direction, bounds, as_of)
+        .asset_subgraph(
+            &principal,
+            id,
+            direction,
+            bounds,
+            as_of,
+            query.relationship_types,
+        )
         .await?;
 
     // Resolve labels for the nodes we are about to return. Unknown ids stay in

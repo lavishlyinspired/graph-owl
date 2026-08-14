@@ -219,3 +219,116 @@ async fn an_unknown_direction_is_rejected_by_name() {
         "the rejection must name the field that was wrong: {body}"
     );
 }
+
+/// Plan 112 Slice A — the explorer's relationship filter, over HTTP.
+///
+/// **Absent and empty are different requests**, and the difference is the
+/// safety property: absent means "no filter", empty means "a filter that
+/// excludes everything". Collapsing them would make a control that selects
+/// nothing silently show everything — a filter that looks like it works and
+/// does not.
+///
+/// **Real assets, not tables.** `/assets/{id}/graph` authorizes its seed as an
+/// asset, and `tables` and `assets` are different relations — a table id is a
+/// `404` here, and assets have no relationship-creation route at all. The two
+/// edge types below are therefore containment edges, which is what a real
+/// asset neighbourhood is mostly made of anyway.
+#[tokio::test]
+async fn the_subgraph_filters_by_relationship_type() {
+    let (app, _container, _connection_string) = test_app().await;
+
+    let asset = async |body: Value| -> String {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/assets")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        json_body(response).await["id"]
+            .as_str()
+            .expect("id")
+            .to_string()
+    };
+
+    let service = asset(json!({ "kind": "service", "name": "wh" })).await;
+    let database =
+        asset(json!({ "kind": "database", "name": "retail", "parentId": service })).await;
+    let schema = asset(json!({ "kind": "schema", "name": "public", "parentId": database })).await;
+    let table = asset(json!({ "kind": "table", "name": "a", "parentId": schema })).await;
+    // A child as well as a parent, so the seed sits between two *different*
+    // edge names and a filter has something to tell apart.
+    asset(json!({ "kind": "column", "name": "amount", "parentId": table })).await;
+
+    let walk = async |suffix: &str| -> Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/assets/{table}/graph?hops=1{suffix}"))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+        assert_eq!(response.status(), StatusCode::OK);
+        json_body(response).await
+    };
+
+    let kinds = |body: &Value| -> std::collections::BTreeSet<String> {
+        body["edges"]
+            .as_array()
+            .expect("edges")
+            .iter()
+            .map(|e| {
+                e["relationship"]
+                    .as_str()
+                    .expect("relationship")
+                    .to_string()
+            })
+            .collect()
+    };
+
+    let unfiltered = walk("").await;
+    let every = kinds(&unfiltered);
+    assert!(
+        every.len() >= 2,
+        "the seed must sit between two edge names for this to prove anything: {unfiltered}"
+    );
+    let one = every.iter().next().expect("an edge name").clone();
+
+    let filtered = walk(&format!("&relationshipTypes={one}")).await;
+    assert_eq!(
+        kinds(&filtered),
+        [one.clone()].into_iter().collect(),
+        "only the named edge survives: {filtered}"
+    );
+
+    // Every name in one comma-separated token — a reader pasting the URL sees
+    // the whole filter at once, and it must equal the unfiltered answer.
+    let all_names = every.iter().cloned().collect::<Vec<_>>().join(",");
+    let both = walk(&format!("&relationshipTypes={all_names}")).await;
+    assert_eq!(kinds(&both), every, "{both}");
+
+    // **Empty means nothing, not everything.**
+    let empty = walk("&relationshipTypes=").await;
+    assert!(
+        empty["edges"].as_array().expect("edges").is_empty(),
+        "an explicitly empty filter excludes every edge: {empty}"
+    );
+
+    // A name no edge uses matches nothing, and is not an error: there is no
+    // vocabulary to validate against when a pack brings its own edge names.
+    let unknown = walk("&relationshipTypes=noSuchEdge").await;
+    assert!(
+        unknown["edges"].as_array().expect("edges").is_empty(),
+        "{unknown}"
+    );
+}
