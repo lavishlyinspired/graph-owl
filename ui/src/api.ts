@@ -659,6 +659,29 @@ export interface EvidenceGraph {
    *  candidate — most of them, since near-miss linking is specific to a
    *  rule suspecting two subjects are one entity. */
   readonly nearMiss: EvidenceGraphNode | null;
+  /** Plan 111 Slice F — records the **pack's own blocking strategies** say
+   *  are worth comparing with this finding's subject.
+   *
+   *  **A different claim from {@link nearMiss}, which is why it is a
+   *  different field.** A near miss means the rule declared a similarity
+   *  band and a value matched exactly; a candidate means a blocking key
+   *  collided. The first is close to an assertion, the second is an
+   *  invitation to look, and flattening them into one list would present two
+   *  strengths of evidence identically.
+   *
+   *  Empty for a pack that declares no `[[matching.blocking]]`, and for a
+   *  deployment whose console is older than the server — a field absent from
+   *  the response is read as an empty list, never as an error. */
+  readonly candidates?: readonly EvidenceCandidate[];
+}
+
+/** One record a blocking strategy says is worth comparing with a finding's
+ *  subject. */
+export interface EvidenceCandidate extends EvidenceGraphNode {
+  /** Which strategies agreed, by their own names. **Reported rather than
+   *  summarised**: "an n-gram key collided" and "a normalized key collided"
+   *  are different strengths, and a reviewer's next move differs. */
+  readonly by: readonly string[];
 }
 
 export interface DriftItem {

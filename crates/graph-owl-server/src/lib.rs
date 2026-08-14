@@ -2726,6 +2726,34 @@ fn parse_node_id(field: &str, raw: &str) -> Result<graph_owl_core::flake::Sid, A
         })
 }
 
+/// Which blocking candidates are worth showing beside a finding's evidence
+/// graph — Plan 111 Slice F.
+///
+/// **A candidate the walk already reached is not a candidate, it is a node.**
+/// Re-listing it under "might be the same record" tells a reviewer there is a
+/// second record when there is one, which costs a wrong decision rather than
+/// a wasted click. The exact-value near miss is excluded for a sharper
+/// reason: it is already on screen under its own heading, carrying a
+/// *stronger* claim, and showing the same record twice at two strengths is
+/// how a reviewer learns to trust neither.
+///
+/// Pure, so the judgement is asserted directly rather than through an HTTP
+/// fixture — the same split every other decision in this file draws.
+fn surviving_candidates(
+    found: &[graph_owl_api::BlockingCandidate],
+    walked: &[graph_owl_core::flake::Sid],
+    near_miss: Option<&graph_owl_core::flake::Sid>,
+    limit: usize,
+) -> Vec<graph_owl_api::BlockingCandidate> {
+    found
+        .iter()
+        .filter(|candidate| !walked.contains(&candidate.subject))
+        .filter(|candidate| near_miss != Some(&candidate.subject))
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
 /// The route between two nodes — `Catalog::find_paths` over HTTP.
 ///
 /// **This is the route for a capability the engine has answered since Epic 7a
@@ -9011,6 +9039,40 @@ async fn finding_evidence_graph(
         .await
         .unwrap_or(None)
         .filter(|sid| !graph.nodes.contains(sid));
+    // Plan 111 Slice F: the pack's own blocking strategies, run against this
+    // finding's subject.
+    //
+    // **A separate key from `nearMiss`, deliberately.** The two are different
+    // claims and flattening them into one list would be the "different
+    // strengths of evidence presented identically" mistake this plan keeps
+    // refusing: `nearMiss` means *the rule declared a similarity band and a
+    // value matched exactly*; a candidate means *a blocking key says these
+    // two are worth comparing*. The first is close to an assertion, the
+    // second is an invitation to look.
+    //
+    // Degrades to an empty list at every step rather than failing — a pack
+    // that declares no strategies, a namespace that never registered, a
+    // finding whose subject this deployment cannot resolve. Candidates are
+    // additive to the picture, never a dependency of it, exactly as
+    // `node_sources` and the near miss already are.
+    let candidates = evidence_candidates(&catalog, id, &graph.nodes, near_miss.as_ref()).await;
+    let mut rendered_candidates = Vec::with_capacity(candidates.len());
+    for candidate in &candidates {
+        let sources = catalog
+            .node_sources(&candidate.subject)
+            .await
+            .unwrap_or_default();
+        rendered_candidates.push(json!({
+            "id": candidate.subject.id,
+            "iri": candidate.subject.to_iri(),
+            "sources": sources,
+            // Which strategy agreed. A reviewer's next move differs between
+            // "the normalized key collided" and "an n-gram key collided",
+            // and one word for both would hide that.
+            "by": candidate.by,
+        }));
+    }
+
     let near_miss = match near_miss {
         Some(sid) => {
             let sources = catalog.node_sources(&sid).await.unwrap_or_default();
@@ -9033,8 +9095,81 @@ async fn finding_evidence_graph(
         })).collect::<Vec<_>>(),
         "truncated": graph.truncated,
         "nearMiss": near_miss,
+        "candidates": rendered_candidates,
     })))
 }
+
+/// The pack's blocking candidates for one finding's subject, or an empty list
+/// — Plan 111 Slice F.
+///
+/// **Every failure here is an empty list, and that is the whole design.** A
+/// pack with no `[[matching.blocking]]`, a namespace this deployment never
+/// registered, a finding whose subject resolves to nothing, a graph read that
+/// fails: none of them should take down a reviewer's evidence panel over a
+/// section that is additive to it. The one thing this must never do is
+/// *invent* a candidate, which is why an unresolvable namespace returns
+/// nothing rather than a guessed code.
+///
+/// How many to consider is capped twice — once on the scan
+/// (`blocking_candidates`' own bound) and once on what is shown. An unbounded
+/// "might be the same" list on a hub record is a wall of noise.
+async fn evidence_candidates(
+    catalog: &Catalog,
+    finding: Uuid,
+    walked: &[graph_owl_core::flake::Sid],
+    near_miss: Option<&graph_owl_core::flake::Sid>,
+) -> Vec<graph_owl_api::BlockingCandidate> {
+    let Ok(Some((subject, pack))) = catalog.finding_subject(finding).await else {
+        return Vec::new();
+    };
+    let base_dir = pack_install::packs_base_dir();
+    let declared = pack_install::read_blocking_strategies(&base_dir, &pack);
+    if declared.is_empty() {
+        return Vec::new();
+    }
+    let Some((prefix, namespace)) = pack_install::read_pack_vocabulary(&base_dir, &pack) else {
+        return Vec::new();
+    };
+    let Ok(namespaces) = catalog.namespaces().await else {
+        return Vec::new();
+    };
+    let Some(code) = namespaces
+        .into_iter()
+        .find(|declared| declared.iri == namespace)
+        .map(|declared| declared.code)
+    else {
+        return Vec::new();
+    };
+
+    let strategies: Vec<_> = declared
+        .iter()
+        .map(|strategy| pack_install::resolve_strategy_fields(strategy, &prefix, code))
+        .collect();
+
+    let Ok(found) = catalog
+        .blocking_candidates(&subject, &strategies, EVIDENCE_CANDIDATE_SCAN)
+        .await
+    else {
+        return Vec::new();
+    };
+    surviving_candidates(
+        &found.candidates,
+        walked,
+        near_miss,
+        EVIDENCE_CANDIDATE_SHOWN,
+    )
+}
+
+/// How many other subjects the blocking scan considers for one finding.
+/// Chosen as the same order as the traversal's own default node cap: a
+/// reviewer's evidence panel is a bounded picture of a neighbourhood, and a
+/// candidate search that outgrew it would make opening a finding cost more
+/// than running the rule did.
+const EVIDENCE_CANDIDATE_SCAN: usize = 1_000;
+
+/// How many are shown. Past a handful the list stops being "look at these
+/// two" and becomes a second queue, which is a different feature.
+const EVIDENCE_CANDIDATE_SHOWN: usize = 5;
 
 /// Whether a `source` may name an import graph.
 ///
@@ -13087,5 +13222,79 @@ mod import_source_tests {
         // somebody's naming convention is exactly that long.
         assert!(is_usable_import_source(&"a".repeat(64)));
         assert!(!is_usable_import_source(&"a".repeat(65)));
+    }
+}
+
+#[cfg(test)]
+mod finding_candidate_tests {
+    //! Plan 111 Slice F — which blocking candidates are worth showing beside
+    //! a finding's evidence graph.
+    //!
+    //! **A candidate the walk already reached is not a candidate, it is a
+    //! node.** Listing it twice tells a reviewer there is a second record
+    //! when there is one, which is the direction that costs somebody a wrong
+    //! decision rather than a wasted click.
+
+    use super::surviving_candidates;
+    use graph_owl_api::BlockingCandidate;
+    use graph_owl_core::flake::Sid;
+
+    fn candidate(id: &str, by: &[&str]) -> BlockingCandidate {
+        BlockingCandidate {
+            subject: Sid::dsc(id),
+            by: by.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_candidate_the_walk_never_reached_survives() {
+        let kept = surviving_candidates(
+            &[candidate("other", &["ngram"])],
+            &[Sid::dsc("subject")],
+            None,
+            10,
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].subject, Sid::dsc("other"));
+    }
+
+    /// **The whole reason this filter exists.** A node already drawn in the
+    /// evidence graph re-listed as "might be the same record" reads as a
+    /// second, separate record.
+    #[test]
+    fn a_node_already_in_the_evidence_graph_is_dropped() {
+        let kept = surviving_candidates(
+            &[candidate("drawn", &["normalized"])],
+            &[Sid::dsc("subject"), Sid::dsc("drawn")],
+            None,
+            10,
+        );
+        assert!(kept.is_empty(), "{kept:?}");
+    }
+
+    /// The exact-value near miss is already shown under its own heading, and
+    /// with a stronger claim attached. Repeating it as a blocking candidate
+    /// would present the same record twice at two different strengths.
+    #[test]
+    fn the_near_miss_already_on_screen_is_not_repeated() {
+        let kept = surviving_candidates(
+            &[candidate("twin", &["ngram"])],
+            &[Sid::dsc("subject")],
+            Some(&Sid::dsc("twin")),
+            10,
+        );
+        assert!(kept.is_empty(), "{kept:?}");
+    }
+
+    /// **A capped list is cut, and the caller is told how many it asked
+    /// for.** An unbounded list of "might be the same" is a wall of noise on
+    /// a hub record; a silently cut one claims there are no others.
+    #[test]
+    fn the_list_is_capped_at_what_was_asked_for() {
+        let many: Vec<_> = (0..5)
+            .map(|i| candidate(&format!("c{i}"), &["ngram"]))
+            .collect();
+        assert_eq!(surviving_candidates(&many, &[], None, 2).len(), 2);
+        assert_eq!(surviving_candidates(&many, &[], None, 50).len(), 5);
     }
 }

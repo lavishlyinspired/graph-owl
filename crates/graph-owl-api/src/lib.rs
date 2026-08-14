@@ -3725,6 +3725,38 @@ impl Catalog {
         Ok(sources)
     }
 
+    /// Which subject a finding is about, and which pack raised it — Plan 111
+    /// Slice F.
+    ///
+    /// **The blocking fallback needs both halves and [`near_miss_node`] keeps
+    /// neither.** The subject is what gets keyed; the pack is what declares
+    /// *how* it gets keyed, since `[[matching.blocking]]` lives in that
+    /// pack's own manifest.
+    ///
+    /// **The subject is returned as a resolved [`Sid`], never as the raw IRI
+    /// string the finding stores.** A blocking key computed against an
+    /// identity the graph cannot resolve matches nothing and reads as a clean
+    /// result — the quiet-wrong-answer shape this project keeps finding.
+    /// A subject in a namespace this deployment does not resolve is therefore
+    /// `None`, not a fabricated id.
+    ///
+    /// `None` for a finding that does not exist, for the same reason
+    /// [`near_miss_node`] returns `None` rather than erroring: a caller
+    /// adding candidates to a picture must degrade rather than take the
+    /// picture down.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no findings store is configured, or the read fails.
+    ///
+    /// [`near_miss_node`]: Self::near_miss_node
+    pub async fn finding_subject(&self, id: Uuid) -> Result<Option<(Sid, String)>, CatalogError> {
+        let Some(finding) = self.findings_store()?.get_finding(id).await? else {
+            return Ok(None);
+        };
+        Ok(Sid::from_iri(&finding.subject).map(|subject| (subject, finding.pack)))
+    }
+
     /// The second candidate a rule's `[findings.similarity]` band suspects
     /// is the same entity as this finding's own subject, resolved by value
     /// rather than reached by traversal — Epic 105 P7's near-miss half
@@ -44293,6 +44325,73 @@ mod near_miss_node_tests {
         // ingested is exactly as absent as one that does not exist.
         let catalog = catalog_with(findings, rules, RecordingGraph::working());
         assert_eq!(catalog.near_miss_node(finding.id).await.expect("ok"), None);
+    }
+
+    /// Plan 111 Slice F — **a finding knows which subject and which pack it
+    /// is about, so a caller can run that pack's blocking strategies against
+    /// it.**
+    ///
+    /// `near_miss_node` reads the finding and throws the identity away. The
+    /// blocking fallback needs both halves: the subject to key, and the pack
+    /// whose `[[matching.blocking]]` declares how.
+    mod a_finding_names_its_own_subject {
+        use super::*;
+
+        #[tokio::test]
+        async fn reports_the_subject_and_the_pack_that_raised_it() {
+            register_test_gst_namespace();
+            let findings = Arc::new(FakeFindings::default());
+            let finding = transposition_finding();
+            findings
+                .rows
+                .lock()
+                .expect("not poisoned")
+                .push(finding.clone());
+
+            let catalog = catalog_with(
+                findings,
+                Arc::new(FakeFindingRuleRegistry::default()),
+                RecordingGraph::working(),
+            );
+
+            let (subject, pack) = catalog
+                .finding_subject(finding.id)
+                .await
+                .expect("ok")
+                .expect("the finding exists");
+
+            assert_eq!(pack, "gst");
+            assert_eq!(
+                subject,
+                Sid::from_iri("https://graph-owl.dev/packs/gst#pr-INV-1004")
+                    .expect("registered namespace"),
+                "the subject must be the graph identity, not the raw IRI string \
+                 — a blocking key computed against an unresolvable id finds \
+                 nothing and looks like a clean result",
+            );
+        }
+
+        /// **A finding that does not exist is `None`, not an error**, and a
+        /// subject in a namespace this deployment does not resolve is `None`
+        /// too — the same posture `near_miss_node` already takes, because a
+        /// caller adding candidates to a picture must degrade rather than
+        /// take the picture down.
+        #[tokio::test]
+        async fn an_unknown_finding_is_absent_rather_than_a_failure() {
+            let catalog = catalog_with(
+                Arc::new(FakeFindings::default()),
+                Arc::new(FakeFindingRuleRegistry::default()),
+                RecordingGraph::working(),
+            );
+
+            assert_eq!(
+                catalog
+                    .finding_subject(Uuid::new_v4())
+                    .await
+                    .expect("not an error"),
+                None,
+            );
+        }
     }
 }
 

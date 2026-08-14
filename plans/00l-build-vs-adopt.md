@@ -1065,3 +1065,17 @@ promising that "a pack's `matching.yaml` deserializes straight into it". The
 build-vs-adopt question ("has somebody already written this?") is what led to
 reading the module closely enough to notice that *we* had not finished writing
 it either.
+
+## Near-miss candidate surfacing — checked before Plan 111 Slice F
+
+**Nothing to adopt, and the check took one minute** because the slice adds no
+algorithm at all: it calls `graph_owl_core::blocking_strategy` (this project's
+own, adopted-nothing module) from a place that had never called it, filters the
+result, and renders it. The candidate crates for the *underlying* problem —
+`strsim` for scoring, `pathfinding` for walking, `rphonetic` for phonetic keys
+— were each evaluated in the two entries above and none of them changes.
+
+Recorded so the row exists: a check that returns "no candidate, and here is why
+that is the expected answer for wiring work" is worth writing down once per
+class of slice, so the next wiring slice can point at it instead of re-running
+the same searches.

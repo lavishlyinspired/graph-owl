@@ -205,6 +205,23 @@ strategy = "ngram"
 fields = ["gst:supplierGstin"]
 n = 3
 
+# **Every strategy above keys a *supplier*, and every finding this pack raises
+# is about an *invoice*** — so until Plan 111 Slice F ran them against a real
+# finding's subject, blocking could never fire on one. Found by wiring the
+# candidates into the evidence panel and getting an empty list for a scenario
+# that plainly has a near-miss in it.
+#
+# `ngram` rather than `normalized`: the reconciliation's own join already
+# matches identical invoice numbers, so a normalized key adds nothing it does
+# not already have. What no exact join can see is a *mistyped* number —
+# `INV-1014` against `INV-10I4`, `RST/2026/0455` against `RST/2026/455` — and
+# a shared-window key is what surfaces it as one pair to look at rather than
+# two unrelated exceptions.
+[[matching.blocking]]
+strategy = "ngram"
+fields = ["gst:invoiceNumber"]
+n = 3
+
 # **A finding rule is a query plus a binding, and nothing else.** `query` names
 # a `[[queries]]` entry, `subject` names the variable holding the graph subject
 # the finding is about, and `evidence` says which predicate each remaining

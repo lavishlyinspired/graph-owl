@@ -470,11 +470,19 @@ async fn seed_transposition_scenario(app: &axum::Router) {
     assert_eq!(status, StatusCode::OK, "import: {body}");
 }
 
-async fn register_and_run_gstin_transposition(app: &axum::Router) -> serde_json::Value {
+/// `pack` is a parameter because Plan 111 Slice F needs two findings from two
+/// *differently configured* packs in this one binary — one whose manifest
+/// declares blocking and one whose does not. Registering both under `gst`
+/// would force the two tests to disagree about one process-wide setting, and
+/// a test that races another test is a test that lies intermittently.
+async fn register_and_run_gstin_transposition_for(
+    app: &axum::Router,
+    pack: &str,
+) -> serde_json::Value {
     let (status, body) = json(
         app,
         "POST",
-        "/packs/gst/finding-rules",
+        &format!("/packs/{pack}/finding-rules"),
         serde_json::json!({
             "rules": [{
                 "label": "gst:GstinTransposition",
@@ -503,11 +511,20 @@ async fn register_and_run_gstin_transposition(app: &axum::Router) -> serde_json:
     .await;
     assert_eq!(status, StatusCode::OK, "register rule: {body}");
 
-    let (status, outcome) =
-        json(app, "POST", "/packs/gst/reconcile", serde_json::Value::Null).await;
+    let (status, outcome) = json(
+        app,
+        "POST",
+        &format!("/packs/{pack}/reconcile"),
+        serde_json::Value::Null,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{outcome}");
     assert_eq!(outcome["opened"], 1, "{outcome}");
     outcome
+}
+
+async fn register_and_run_gstin_transposition(app: &axum::Router) -> serde_json::Value {
+    register_and_run_gstin_transposition_for(app, "gst").await
 }
 
 #[tokio::test]
@@ -701,4 +718,168 @@ async fn find_evidence_names_the_near_miss_through_the_real_adapter() {
         .expect("a near-miss candidate for this finding");
     assert_eq!(near_miss.id, "supplier-27AABCU9603R1ZM");
     assert_eq!(near_miss.sources, vec!["gst-gstr2b".to_string()]);
+}
+
+/// A pack directory this binary points at **once**, containing two packs: the
+/// real shipped `gst` manifest and a `quietpack` that declares no matching at
+/// all.
+///
+/// **Set once, never per test.** `GRAPH_OWL_PACKS_DIR` is process-wide, and
+/// two tests writing different values to it race — a test that races another
+/// test is a test that lies intermittently, and this one did: the first
+/// mutation run of Slice F aborted with "cargo test failed in an unmutated
+/// tree" because the two tests below each set it. Both configurations now
+/// live side by side and a test selects between them by *which pack it
+/// registers its rule under*, which is a per-request choice rather than a
+/// process one.
+///
+/// The `gst` half is a symlink-free copy of the manifest that actually ships,
+/// so these run against the real declaration rather than a fixture's second
+/// opinion of one.
+fn packs_dir() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let shipped = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs");
+        let base = std::env::temp_dir().join(format!("graph-owl-p111f-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("gst")).expect("gst directory");
+        std::fs::create_dir_all(base.join("quietpack")).expect("quiet directory");
+        std::fs::copy(
+            shipped.join("gst").join("pack.toml"),
+            base.join("gst").join("pack.toml"),
+        )
+        .expect("copy the shipped manifest");
+        std::fs::write(
+            base.join("quietpack").join("pack.toml"),
+            "[pack]\nid = \"quietpack\"\nnamespace = \"https://graph-owl.dev/packs/gst#\"\n\
+             prefix = \"gst\"\ndescription = \"declares no matching at all\"\n",
+        )
+        .expect("quiet manifest");
+        // SAFETY: written exactly once, before any handler reads it, and never
+        // again for the life of this process.
+        unsafe { std::env::set_var("GRAPH_OWL_PACKS_DIR", &base) };
+        base
+    })
+    .as_path()
+}
+
+/// Plan 111 Slice F — **the pack's blocking strategies reach the reviewer.**
+///
+/// The transposition scenario has a purchase invoice and a GSTR-2B invoice
+/// carrying the same invoice number under near-identical GSTINs. The
+/// evidence walk cannot reach the 2B invoice — no edge joins them, which is
+/// the rule's entire premise — so before this the panel showed a finding with
+/// no way to see the record it is really about.
+///
+/// **The candidate says which strategy agreed.** "An n-gram key collided" and
+/// "a normalized key collided" are different strengths of evidence and a
+/// reviewer's next move differs; one word for both would hide that.
+#[tokio::test]
+async fn a_findings_evidence_carries_the_packs_own_blocking_candidates() {
+    packs_dir();
+    let (app, _db, _url) = test_app().await;
+    seed_transposition_scenario(&app).await;
+    register_and_run_gstin_transposition_for(&app, "gst").await;
+
+    let (_, findings) = call(
+        &app,
+        "GET",
+        "/findings?pack=gst",
+        "application/json",
+        String::new(),
+    )
+    .await;
+    let id = findings[0]["id"].as_str().expect("finding id");
+
+    let (status, graph) = call(
+        &app,
+        "GET",
+        &format!("/findings/{id}/evidence-graph"),
+        "application/json",
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+
+    let candidates = graph["candidates"].as_array().expect("candidates array");
+    let twin = candidates
+        .iter()
+        .find(|c| c["id"] == "2b-INV-1004")
+        .unwrap_or_else(|| panic!("the 2B invoice sharing this invoice number: {graph}"));
+    assert_eq!(
+        twin["by"].as_array().expect("by").as_slice(),
+        [serde_json::Value::String("ngram".to_string())],
+        "which strategy agreed is part of the answer: {twin}",
+    );
+    assert!(
+        twin["sources"]
+            .as_array()
+            .expect("sources")
+            .iter()
+            .any(|s| s == "gst-gstr2b"),
+        "a candidate carries its provenance like every other node here: {twin}",
+    );
+
+    // **The finding's own subject is never its own candidate**, and neither
+    // is anything the walk already drew — a node listed twice tells a
+    // reviewer there is a second record when there is one.
+    let walked: Vec<&str> = graph["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .map(|n| n["id"].as_str().expect("id"))
+        .collect();
+    for candidate in candidates {
+        let id = candidate["id"].as_str().expect("id");
+        assert!(!walked.contains(&id), "`{id}` is already drawn: {graph}");
+        assert_ne!(id, "pr-INV-1004", "a record is not its own near miss");
+    }
+}
+
+/// **A deployment whose pack declares no blocking gets an empty list, not a
+/// failure.** The candidates section is additive to a reviewer's evidence
+/// panel; a pack that says nothing about matching must not take the panel
+/// down with it.
+#[tokio::test]
+async fn a_pack_that_declares_no_blocking_still_serves_the_evidence_graph() {
+    packs_dir();
+    let (app, _db, _url) = test_app().await;
+    seed_transposition_scenario(&app).await;
+    // The rule is registered under the pack whose manifest declares no
+    // matching, so the finding this produces carries that pack — which is how
+    // a per-request choice replaces a process-wide one.
+    register_and_run_gstin_transposition_for(&app, "quietpack").await;
+
+    let (_, findings) = call(
+        &app,
+        "GET",
+        "/findings?pack=quietpack",
+        "application/json",
+        String::new(),
+    )
+    .await;
+    let id = findings[0]["id"].as_str().expect("finding id");
+
+    let (status, graph) = call(
+        &app,
+        "GET",
+        &format!("/findings/{id}/evidence-graph"),
+        "application/json",
+        String::new(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{graph}");
+    assert!(
+        graph["candidates"]
+            .as_array()
+            .expect("candidates")
+            .is_empty(),
+        "{graph}"
+    );
+    // The rest of the panel is unaffected — the point of degrading rather
+    // than failing.
+    assert!(
+        !graph["nodes"].as_array().expect("nodes").is_empty(),
+        "{graph}"
+    );
 }

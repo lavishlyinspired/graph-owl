@@ -1,6 +1,6 @@
 # Plan 111 — Engine → API → UI: the capabilities that stop at the second arrow
 
-**Status**: all five slices shipped, 14 August 2026. **Branch**: main. **Trigger**: a capability assessment
+**Status**: complete — all six slices shipped, 14 August 2026. **Branch**: main. **Trigger**: a capability assessment
 (`missing core and ui capabilities`) arguing that the product "has not yet
 become a deeply connected knowledge graph", and that the larger gap is not
 missing engine work but capability that no human can reach.
@@ -196,12 +196,11 @@ What shipped:
   `key(x) == key(x)` is true of every function. That tautology is why the
   point above survived from Epic 105 to now.
 
-### What is still open, and stated rather than implied
+### Closed by Slice F
 
-`reconcile_pack` does not yet consult candidates when a rule reports an
-absence. The capability is now reachable and proven; wiring it *into* the
-finding pipeline changes what the product asserts about a taxpayer's money and
-wants its own slice, with the evidence surfaces above it in place first.
+`reconcile_pack` consulting candidates was left open here and is now done —
+see Slice F below, which puts them where a reviewer actually looks rather than
+into the recorded finding.
 
 ## Slice E — Packs declare their own upload surfaces ✅ shipped
 
@@ -236,6 +235,59 @@ printed identity, which looks like a working page.
 `config?.imports ?? []` with `["Stryker was here"]`; a string has no `.format`,
 so no reader matches and the result is still `[]`. Contorting a test to kill it
 would test the mutation rather than the behaviour.
+
+## Slice F — the candidates reach the reviewer ✅ shipped
+
+Slice D made the pack's blocking strategies runnable and left one thing open:
+nothing in the finding pipeline consulted them. Slice F closes it, and the
+placement is the decision worth recording.
+
+**Not attached to the recorded finding — computed when the finding is
+opened.** Attaching candidates at reconcile time would bake a judgement into
+stored evidence, re-run a blocking scan per finding written rather than per
+finding read, and go stale the moment the next import lands. `GET
+/findings/{id}/evidence-graph` already assembles the picture a reviewer looks
+at; the candidates belong in that assembly.
+
+**A separate wire field from `nearMiss`, deliberately.** They are different
+claims, and this plan has refused to flatten strengths of evidence at every
+step: `nearMiss` means *the rule declared a similarity band and a value
+matched exactly*; a candidate means *a blocking key collided*. The first is
+close to an assertion, the second an invitation to look. Each candidate
+carries `by` — which strategies agreed — because "an n-gram key collided" and
+"a normalized key collided" change what a reviewer does next.
+
+What shipped:
+
+1. **`Catalog::finding_subject`** — the subject as a *resolved* `Sid` and the
+   pack that raised it. A key computed against an identity the graph cannot
+   resolve matches nothing and reads as a clean result, so an unresolvable
+   namespace is `None` rather than a fabricated id.
+2. **`surviving_candidates`** — a node the walk already drew is not a
+   candidate, it is a node; the near miss is excluded because it is already on
+   screen carrying a *stronger* claim, and the same record shown twice at two
+   strengths teaches a reviewer to trust neither.
+3. **Two caps, both stated**: 1,000 subjects scanned, 5 shown. Past a handful
+   the list stops being "look at these two" and becomes a second queue.
+4. **Console**: a "Might be the same record" section in the findings queue's
+   evidence panel, strategy tags first — the tag is what tells a reviewer how
+   much weight the row carries, and burying it after the provenance would make
+   every candidate read alike.
+
+### The defect this found in the shipped GST pack
+
+**Every strategy the pack declared keyed a *supplier*, and every finding it
+raises is about an *invoice*** — so blocking could never fire on a finding, no
+matter how well the machinery worked. Found by wiring the candidates into the
+panel and getting an empty list for a scenario that plainly has a near-miss in
+it. The pack now declares an n-gram over `gst:invoiceNumber`: the
+reconciliation's own join already matches identical numbers, and what no exact
+join can see is a *mistyped* one.
+
+This is the third time in Plan 111 that running a capability for the first
+time found the declaration around it to be wrong — after `ngram`/`n_gram` and
+after `NGram::key`'s doc comment. **A capability nobody calls is not merely
+unused; the configuration and documentation around it decay unobserved.**
 
 ## Not scheduled, and why
 

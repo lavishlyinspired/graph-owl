@@ -10,6 +10,7 @@ import {
   describeEvidenceEdge,
   displayTerm,
   evidenceGraphIsJustTheSeed,
+  evidenceCandidates,
   evidenceNearMiss,
   evidenceNodeSources,
   evidencePicture,
@@ -414,6 +415,62 @@ describe("evidenceTriples", () => {
         truncated: false,
         nearMiss: null,
       }),
+    ).toEqual([]);
+  });
+});
+
+/** Plan 111 Slice F — the pack's blocking strategies reach the reviewer.
+ *
+ *  **A different claim from a near miss, and it must read as one.** A near
+ *  miss means the rule declared a similarity band and a value matched
+ *  exactly; a candidate means a blocking key collided. The first is close to
+ *  an assertion, the second an invitation to look. */
+describe("evidenceCandidates", () => {
+  const graph = (candidates?: EvidenceGraph["candidates"]): EvidenceGraph => ({
+    nodes: [],
+    edges: [],
+    truncated: false,
+    nearMiss: null,
+    candidates,
+  });
+
+  it("names each candidate and reports which strategies agreed", () => {
+    const [found] = evidenceCandidates(
+      graph([
+        {
+          id: "2b-INV-1004",
+          iri: "https://graph-owl.dev/packs/gst#2b-INV-1004",
+          sources: ["gst-gstr2b"],
+          by: ["ngram"],
+        },
+      ]),
+    );
+    expect(found).toEqual({
+      id: "2b-INV-1004",
+      name: "2b-INV-1004",
+      sources: ["gst-gstr2b"],
+      by: ["ngram"],
+    });
+  });
+
+  /** **A console newer than its server, and one older than its pack, must
+   *  both render.** The field is absent from a server that predates this
+   *  slice, and empty for a pack that declares no blocking — neither is an
+   *  error, and reading `undefined` as a failure would blank a panel over a
+   *  section that is additive to it. */
+  it("treats an absent field exactly as an empty one", () => {
+    expect(evidenceCandidates(graph(undefined))).toEqual([]);
+    expect(evidenceCandidates(graph([]))).toEqual([]);
+  });
+
+  /** A candidate with no strategy named is dropped rather than shown as an
+   *  unexplained "might be the same record". The *reason* is the only thing
+   *  that makes the row actionable; without it the row is a bare assertion. */
+  it("drops a candidate that cannot say why it matched", () => {
+    expect(
+      evidenceCandidates(
+        graph([{ id: "x", iri: null, sources: [], by: [] }]),
+      ),
     ).toEqual([]);
   });
 });

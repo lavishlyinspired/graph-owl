@@ -61,6 +61,9 @@ const COPY = {
   nearMissLabel: "Possible match — not linked",
   nearMissHint:
     "A near-identical candidate this rule found by value, not by a graph edge. No link exists between it and the finding's own subject — that absence is the finding.",
+  candidatesLabel: "Might be the same record",
+  candidatesHint:
+    "Records this pack's own matching rules say are worth comparing with this one. A key collision is not a match — it is a reason to look, and the strategy that agreed is shown so you can weigh it.",
   triplesLabel: "Triples",
   predicateLabel: "Predicate",
   objectLabel: "Object",
@@ -190,6 +193,35 @@ export function evidenceNearMiss(
   };
 }
 
+/** Records the **pack's own blocking strategies** say are worth comparing
+ *  with this finding's subject — Plan 111 Slice F.
+ *
+ *  **A different claim from a near miss, and it must read as one.** A near
+ *  miss means the rule declared a similarity band and a value matched
+ *  exactly; a candidate means a blocking key collided. The first is close to
+ *  an assertion, the second an invitation to look — presenting them
+ *  identically would flatten two strengths of evidence into one.
+ *
+ *  **An absent field reads as an empty list**, so a console older than its
+ *  server and a pack that declares no blocking both render rather than fail:
+ *  this section is additive to the panel, never a dependency of it.
+ *
+ *  **A candidate that cannot say why it matched is dropped.** The reason is
+ *  the only thing that makes the row actionable; without it the row is a bare
+ *  assertion that two records might be one. */
+export function evidenceCandidates(
+  graph: EvidenceGraph,
+): { id: string; name: string; sources: readonly string[]; by: readonly string[] }[] {
+  return (graph.candidates ?? [])
+    .filter((candidate) => candidate.by.length > 0)
+    .map((candidate) => ({
+      id: candidate.id,
+      name: nodeLabel(candidate),
+      sources: candidate.sources,
+      by: candidate.by,
+    }));
+}
+
 /** One row per edge — a finding's evidence graph, as the triples it actually
  *  is. `{from, relationship, to}` on the wire *is* `{subject, predicate,
  *  object}`; this just names it the way a reader who wants to see raw
@@ -293,6 +325,9 @@ export function findingsQueue(): QueueConfig {
       // addition to it, not a dependency of it.
       const graph = await api.findingEvidenceGraph(entry.id).catch(() => null);
       const nearMiss = graph ? evidenceNearMiss(graph) : null;
+  // Plan 111 Slice F. Separate from the near miss above because the two are
+  // different claims — see `evidenceCandidates`.
+  const candidates = graph ? evidenceCandidates(graph) : [];
       return (
         <Space direction="vertical" size="small" style={{ width: "100%" }}>
           <div>
@@ -389,6 +424,34 @@ export function findingsQueue(): QueueConfig {
                           )}
                         </Text>
                       </div>
+                    </div>
+                  )}
+                  {candidates.length > 0 && (
+                    <div style={{ marginTop: 8 }}>
+                      <Text strong>{COPY.candidatesLabel}</Text>
+                      <div>
+                        <Text type="secondary">{COPY.candidatesHint}</Text>
+                      </div>
+                      {candidates.map((candidate) => (
+                        <div key={candidate.id}>
+                          <Text type="secondary">
+                            {candidate.name}
+                            {COPY.separator}
+                            {/* Which strategy agreed, first: it is what tells
+                                a reviewer how much weight the row carries,
+                                and burying it after the provenance would make
+                                every candidate read alike. */}
+                            {candidate.by.map((strategy) => (
+                              <Tag key={strategy} color="processing" style={{ marginLeft: 6 }}>
+                                {strategy}
+                              </Tag>
+                            ))}
+                            {candidate.sources.map((source) => (
+                              <Tag key={source}>{source}</Tag>
+                            ))}
+                          </Text>
+                        </div>
+                      ))}
                     </div>
                   )}
                   <div style={{ marginTop: 8 }}>
