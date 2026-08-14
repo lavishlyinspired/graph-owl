@@ -1,6 +1,41 @@
 # Plan 110 — Capability built, capability unreachable: closing the console's gap
 
-**Status**: audited, sequenced, first slice identified. **Branch**: main.
+**Status**: **all five slices shipped.** **Branch**: main.
+
+## What shipped, and what is deliberately still unreachable
+
+| Slice | State |
+|---|---|
+| 0 — console neutrality check | shipped; proven red on a planted violation and green on the tree |
+| 1 — reasoning: profile, classify, explain | shipped |
+| 2 — data-quality tests and contracts | shipped, read-only |
+| 3 — governance queues | shipped, and the suggestion queue is actionable (confirm/reject) |
+| 4 — business metrics and custom properties | shipped, read-only |
+
+**34 routes remain unreached, and most of them should.** Re-measured after the
+work rather than assumed:
+
+- **Operator actions, not console features** — `/ingest`, `/ingest/batch`,
+  `/usage/prune`, `/test-results/prune`, `/lineage/reconcile`,
+  `/validation/shapes/seed`, `POST /predicates`, `/webhooks/receive/{path}`.
+  `00g-operations.md` is their home. A button that prunes retention from a web
+  page is a footgun, and seeding shapes is an install-time act the pack loader
+  owns.
+- **Write twins of things now visible** — `/contradictions/reviews`,
+  `/drift/reports`, `/validation/assignments`, `/certifications/{targetFqn}`,
+  `/extraction/runs`. Their read sides are reachable; the writes need an
+  authoring surface, not a button.
+- **Genuinely worth doing next, in order**: `/webhooks/*` (seven routes —
+  endpoints, mappings, dead-letters, replay; `OutboundWebhooksPanel.tsx` covers
+  only part), `/business-metrics/search` and `/glossary-terms/search` (search
+  over lists this plan just made visible), `/certification-types`,
+  `/connectors/configs`.
+
+**The read-only decision is the one most worth revisiting.** Slices 2 and 4
+show tests, contracts and metrics and cannot create them, because authoring
+needs an assertion-language editor, a cadence picker and a formula builder.
+That is a real feature and it is the honest next plan — but a deployment can
+now *see* what it has, which is what stops tests accumulating unnoticed.
 
 **Trigger**: a direct observation that the console reaches only part of what the
 server offers, and that the reconciliation page had been built GST-shaped. Both

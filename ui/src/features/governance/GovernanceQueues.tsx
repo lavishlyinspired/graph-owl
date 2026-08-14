@@ -20,7 +20,7 @@
  *  "nothing to review". */
 
 import { useEffect, useState } from "react";
-import { Alert, Card, Empty, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Empty, Popconfirm, Space, Table, Tag, Typography, message } from "antd";
 import { ApiError, api, type Certification, type TagLabel } from "../../api";
 
 const { Text, Paragraph } = Typography;
@@ -42,6 +42,13 @@ const COPY = {
   source: "Source",
   state: "State",
   appliedBy: "Applied by",
+  confirm: "Confirm",
+  reject: "Reject",
+  confirmed: "Confirmed.",
+  rejected: "Rejected.",
+  actionFailed: "That decision could not be recorded",
+  rejectTitle: "Reject this suggestion?",
+  rejectBody: "The label will not be applied. The classifier may propose it again on the next run.",
   type: "Certification",
   issuer: "Issuer",
   expires: "Expires",
@@ -85,6 +92,23 @@ function useQueue<T>(load: () => Promise<readonly T[]>) {
 export function GovernanceQueues() {
   const labels = useQueue<TagLabel>(() => api.labelSuggestions());
   const recert = useQueue<Certification>(() => api.recertificationQueue());
+  /** Decided rows, removed locally rather than by refetching the whole queue —
+   *  a reviewer working down a list should not have it reorder under them
+   *  after every decision. */
+  const [decided, setDecided] = useState<ReadonlySet<string>>(new Set());
+
+  const decide = async (row: TagLabel, confirm: boolean) => {
+    const key = `${row.targetFqn}-${row.tagFqn}`;
+    try {
+      await (confirm ? api.confirmLabel(row.targetFqn, row.tagFqn) : api.rejectLabel(row.targetFqn, row.tagFqn));
+      setDecided((seen) => new Set(seen).add(key));
+      message.success(confirm ? COPY.confirmed : COPY.rejected);
+    } catch (error) {
+      message.error(error instanceof ApiError ? error.problem.title : COPY.actionFailed);
+    }
+  };
+
+  const pending = (labels.rows ?? []).filter((row) => !decided.has(`${row.targetFqn}-${row.tagFqn}`));
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -93,7 +117,7 @@ export function GovernanceQueues() {
           {COPY.labelsHint}
         </Paragraph>
         {labels.failure && <Alert type="error" showIcon message={labels.failure} style={{ marginBottom: 8 }} />}
-        {labels.rows !== null && labels.rows.length === 0 && !labels.failure ? (
+        {labels.rows !== null && pending.length === 0 && !labels.failure ? (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
             description={
@@ -108,8 +132,8 @@ export function GovernanceQueues() {
             size="small"
             loading={labels.rows === null}
             rowKey={(row) => `${row.targetFqn}-${row.tagFqn}`}
-            dataSource={labels.rows ? [...labels.rows] : []}
-            pagination={(labels.rows?.length ?? 0) > 10 ? { pageSize: 10 } : false}
+            dataSource={[...pending]}
+            pagination={pending.length > 10 ? { pageSize: 10 } : false}
             scroll={{ x: "max-content" }}
             columns={[
               { title: COPY.target, dataIndex: "targetFqn", key: "targetFqn" },
@@ -117,6 +141,31 @@ export function GovernanceQueues() {
               { title: COPY.source, dataIndex: "labelType", key: "labelType" },
               { title: COPY.state, dataIndex: "state", key: "state" },
               { title: COPY.appliedBy, dataIndex: "appliedBy", key: "appliedBy" },
+              {
+                title: "",
+                key: "decide",
+                width: 180,
+                render: (_: unknown, row: TagLabel) => (
+                  <Space size={4}>
+                    <Button size="small" onClick={() => void decide(row, true)}>
+                      {COPY.confirm}
+                    </Button>
+                    {/* **Confirming is instant, rejecting asks.** Confirming
+                      *  applies what a classifier already proposed; rejecting
+                      *  discards work and is the one a misclick should not do
+                      *  silently — the same asymmetry the findings queue draws. */}
+                    <Popconfirm
+                      title={COPY.rejectTitle}
+                      description={COPY.rejectBody}
+                      onConfirm={() => void decide(row, false)}
+                    >
+                      <Button size="small" danger>
+                        {COPY.reject}
+                      </Button>
+                    </Popconfirm>
+                  </Space>
+                ),
+              },
             ]}
           />
         )}

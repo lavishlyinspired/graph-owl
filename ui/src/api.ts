@@ -1648,6 +1648,21 @@ export const api = {
   /** Labels a classifier proposed that nobody has vouched for yet. */
   labelSuggestions: () => request<readonly TagLabel[]>("/label-suggestions"),
 
+  /** **Vouch for a suggested label, or refuse it.** A suggestion queue with no
+   *  actions is half a feature: the labels stay in the state that looks like a
+   *  decision and is not. Both are `POST` and answer no body. */
+  confirmLabel: (targetFqn: string, tagFqn: string) =>
+    request<void>(
+      `/labels/${encodeURIComponent(targetFqn)}/${encodeURIComponent(tagFqn)}/confirm`,
+      { method: "POST" },
+    ),
+
+  rejectLabel: (targetFqn: string, tagFqn: string) =>
+    request<void>(
+      `/labels/${encodeURIComponent(targetFqn)}/${encodeURIComponent(tagFqn)}/reject`,
+      { method: "POST" },
+    ),
+
   /** Certifications expired or expiring — the queue that says what has to be
    *  looked at again. */
   recertificationQueue: () => request<readonly Certification[]>("/recertification-queue"),
