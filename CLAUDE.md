@@ -109,13 +109,13 @@ openCypher" means two different things and only one of them was ever in doubt.
 
 ## Licensing — binding during implementation
 
-**Neither reference under `.claude/docs/referenceRepo/` is permissively licensed throughout, and one is not open source at all.** graph-owl contains no code from either, and that is the entire basis on which their non-compete terms do not bind this project. It is a property to actively maintain while writing code, not a claim made once.
+**Two of the three references under `.claude/docs/referenceRepo/` are not permissively licensed throughout, and one of those is not open source at all. The third is mixed: one component is genuinely permissive (Apache-2.0), the other two are proprietary and restricted-use.** graph-owl contains no code from any of them, and that is the entire basis on which their non-compete or restricted-use terms do not bind this project. It is a property to actively maintain while writing code, not a claim made once.
 
 Full rules in **`plans/00i-licensing.md`** — read it before implementing anything in Phase 1. Named specifics (which licence, which directories, incident log) are in `.claude/docs/licensing-detail.md`, gitignored.
 
 The four that matter most while coding:
 
-1. **Do not open reference source while writing the corresponding graph-owl code.** Study and implementation happen in separate sessions. This is the only mechanically checkable rule and the most effective one.
+1. **Do not open reference source while writing the corresponding graph-owl code** — except the third reference's Apache-2.0 component, which may be read and explored freely, including in the same session as implementation, because a genuinely permissive licence removes the reason this rule exists. That component's siblings (a documentation corpus and a set of screenshots, neither Apache-2.0) are not covered by the exception and stay under the full rule. Study of everything else happens in a separate session from implementation. This is the only mechanically checkable rule and the most effective one.
 2. **Specifications are the source; implementations are not.** W3C for RDF/SPARQL/OWL/SHACL/SKOS/JSON-LD, ISO/IEC 39075 and openCypher for Cypher, the published Bolt/PackStream spec, RFC 9457 for errors. If a capability has a spec, the spec is the *only* permitted reference — including when the spec is unclear.
 3. **Never copy anything**: source (including translated or "adapted"), constant tables, thresholds, tuning numbers, size classes, timeouts, error strings, metric names, config keys, test fixtures, golden files, or comments. **Every magic number in graph-owl must be derivable from a stated reason in a plan** — "the reference used this" is not a reason, and a number without one was never justified for this system anyway.
 4. **When stuck**: the spec first, then a permissively licensed implementation (licence checked *before* reading), then ask a human. Never open the source-available or community-licensed reference to unblock a task — that is exactly the moment the rule exists for.

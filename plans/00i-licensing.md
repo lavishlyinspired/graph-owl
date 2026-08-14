@@ -6,14 +6,15 @@
 
 ## The situation in one paragraph
 
-Two reference implementations were studied during planning. Their clones live under `.claude/docs/referenceRepo/`, which is gitignored and never committed. **Neither is permissively licensed throughout**, and one is not open source at all:
+Three reference sources have been studied — two during initial planning, a third added afterward. Their clones live under `.claude/docs/referenceRepo/`, which is gitignored and never committed. The first two are **not permissively licensed throughout**, and one of those is not open source at all. The third is a mixed set: one component is genuinely permissive, the other two are proprietary and restricted-use:
 
 | Reference | Shape of the licence | Consequence |
 |---|---|---|
 | Engine reference | **Source-available, not open source.** A non-compete grant blocks using the work to offer a hosted database/graph/ledger service. Converts to a permissive licence four years after each version ships | The code may be read. It may not be reused, vendored, or copied |
 | Catalog reference | **Permissive core**, but three subdirectories — the web UI, the ingestion/connector framework, and the agent-protocol server — carry a **community licence with a non-compete** | The three most heavily studied directories are the three least freely licensed |
+| Data-platform reference | **Mixed.** One component (an IDE/tooling repo) is genuinely permissive (Apache-2.0). The other two components (a documentation corpus and a set of product screenshots) are proprietary, restricted-use material with no comparable grant | The permissive component may be read and explored freely, including in the same session as implementation — see the rule 1 exception below. The other two stay under the full rule set, same as the first two references |
 
-**graph-owl contains no code from either.** That is the entire basis on which neither non-compete binds this project, and it is a property that has to be actively maintained during implementation, not just asserted once during planning.
+**graph-owl contains no code from any of the three.** That is the entire basis on which none of their non-compete or restricted-use terms bind this project, and it is a property that has to be actively maintained during implementation, not just asserted once during planning.
 
 ## Why this is a live risk during implementation, not just planning
 
@@ -26,11 +27,17 @@ Copyright protects **expression**, not ideas. Reading an architecture and reachi
 
 One instance of this already happened during planning and was caught and reverted: a cache-sizing table was reproduced near-verbatim from a doc comment in a source-available file, **including its rationale**. It was thin material and would probably never have mattered — and it was still copying, and it is still gone. Assume the same failure mode will present itself during implementation, because it will.
 
+That is the exact scenario "What to do when genuinely stuck" (below) now permits under guard, as of 14 August 2026: read to unblock, close, then write from understanding — never type from the open file. The guard is rules 3 and 5, not the same-session restriction that used to be the only thing standing in the way.
+
 ## The rules
 
 ### 1. Do not open reference source while writing the corresponding graph-owl code
 
-The single most effective rule, and the only one that is mechanically checkable. Study happens in a separate session from implementation. If a reference file has been open in the current session, the corresponding graph-owl file is not written in that session.
+The default, and previously the only mechanically checkable rule: study happens in a separate session from implementation. If a reference file has been open in the current session, the corresponding graph-owl file is not written in that session — **unless the "genuinely stuck" fallback below has actually been invoked**, in which case that section's guards apply instead of this one.
+
+**Exception: the Data-platform reference's Apache-2.0 component.** A genuinely permissive licence removes the reason this rule exists — there is no non-compete or restricted-use term to protect against — so that component may be read and explored freely, including in the same session as writing the corresponding graph-owl code. This is the same treatment "What to do when genuinely stuck" (below) already gives a permissively licensed implementation generally; this just says so explicitly for a reference that is already on disk. **The other two components of the same reference (its documentation corpus and its screenshots) are not Apache-2.0** and are not covered by this exception — they stay under the full rule, same-session restriction included, because their licences grant no comparable freedom.
+
+**Exception: any reference, as a genuinely-stuck last resort — added 14 August 2026 by direct user instruction, reversing what this rule used to forbid outright.** When the specification (rule 2) and a permissively licensed implementation (the "genuinely stuck" list, step 2) have both failed to resolve a specific blocker, any of the three references under `.claude/docs/referenceRepo/` may be opened in the same session as the implementation it unblocks — including the source-available engine reference and the community-licensed catalog directories, which carry non-compete terms that have not changed and are not waived by this exception. What changes is only the same-session restriction; **rules 3 (never copy) and 5 (never name the reference) apply with no exception, in-session or not**, and are what makes this narrow case safe rather than a reopening of the original risk. See "What to do when genuinely stuck" below for the exact sequence.
 
 ### 2. Specifications are the source; implementations are not
 
@@ -59,9 +66,9 @@ Everything the engine layer needs is a published standard, and the standard is a
 
 A constant with a written justification cannot have been copied thoughtlessly, which makes this rule a control rather than a formality. `plans/` is where the justification lives. A PR introducing an unexplained threshold is incomplete.
 
-### 5. Never name either reference in a committed artifact
+### 5. Never name any reference in a committed artifact
 
-Pre-existing rule, restated here because it is now also a licensing hygiene rule. Not in code, comments, commit messages, plan files, tests, or fixtures. Write the pattern and the reasoning, never the source. Named detail for local use lives in `.claude/docs/`, which is gitignored.
+Pre-existing rule, restated here because it is now also a licensing hygiene rule. Not in code, comments, commit messages, plan files, tests, or fixtures. Write the pattern and the reasoning, never the source. **This applies to all three references without exception — the Data-platform reference's Apache-2.0 component included.** Apache-2.0 permitting attribution is not the same as this project choosing to give it; the rule 1 exception above relaxes *when* that component may be read, not whether it may be named. Named detail for local use lives in `.claude/docs/licensing-detail.md`, which is gitignored.
 
 ### 6. Convergent design is expected — say so, do not hide it
 
@@ -103,6 +110,5 @@ In order:
 
 1. **The specification.** Nine times in ten it is there, and it is normative where an implementation is merely one interpretation.
 2. **A permissively licensed implementation** — Apache-2.0 or MIT, checked before reading. Even then: read for understanding, then write from understanding, and attribute if anything is genuinely derived.
-3. **Ask.** A design question routed to a human costs an hour. A licensing question discovered at acquisition due diligence costs considerably more.
-
-**Never**: open the source-available or community-licensed reference to unblock an implementation task. That is precisely the moment the rule exists for.
+3. **The reference under `.claude/docs/referenceRepo/`, any of the three, including the source-available and community-licensed material.** Added 14 August 2026 by direct user instruction — this step used to be an outright "Never", reversed on request. Permitted only once steps 1 and 2 have both genuinely failed to resolve the specific blocker, not as a first move. Read for understanding, close it, then write from understanding — the same discipline step 2 already requires of a permissive reference, applied here to material that isn't permissive. **Rules 3 (never copy — source, tables, thresholds, strings, fixtures, comments) and 5 (never name the reference in any committed artifact) apply with no exception, in-session or not.** The non-compete and restricted-use terms on this material are unchanged; this step accepts the risk of reading it deliberately, in a guarded way, rather than removing that risk.
+4. **Ask.** A design question routed to a human costs an hour. A licensing question discovered at acquisition due diligence costs considerably more.
