@@ -33,7 +33,7 @@ export function toCytoscapeElements(model: OntologyModel): OntologyElement[] {
     classes: "entity-type",
   }));
 
-  const edges: OntologyElement[] = model.relationships.map((rel, index) => ({
+  const edges: OntologyElement[] = model.relationships.map((rel) => ({
     group: "edges",
     data: {
       id: rel.id,

@@ -88,7 +88,7 @@ export function OntologyCanvas({
           selector: "node:selected",
           style: {
             "border-color": colors.primary,
-            "border-width": 4,
+            "border-width": "4",
           },
         },
         {
@@ -104,7 +104,7 @@ export function OntologyCanvas({
             color: colors.textMuted,
             "text-background-color": colors.raised,
             "text-background-opacity": 1,
-            "text-background-padding": 2,
+            "text-background-padding": "2",
             "text-background-shape": "roundrectangle",
           },
         },

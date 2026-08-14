@@ -8,6 +8,8 @@ import SaveOutlined from "@ant-design/icons/es/icons/SaveOutlined";
 import type { OntologyModel, Relationship } from "./types";
 import { CARDINALITY_LABELS, removeRelationship, updateRelationship } from "./state";
 
+const { Text } = Typography;
+
 interface RelationshipPanelProps {
   readonly model: OntologyModel;
   readonly relationship: Relationship;

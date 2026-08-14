@@ -1,7 +1,6 @@
 /** Manage interactions, reference data, and sources — the counts that sit
  *  beside Entities and Relationships in the ontology header. */
 
-import { useState } from "react";
 import {
   Button,
   Card,
@@ -16,7 +15,6 @@ import {
 } from "antd";
 import DeleteOutlined from "@ant-design/icons/es/icons/DeleteOutlined";
 import PlusOutlined from "@ant-design/icons/es/icons/PlusOutlined";
-import SaveOutlined from "@ant-design/icons/es/icons/SaveOutlined";
 import type { OntologyModel, OntologyPackOption } from "./types";
 import {
   addInteraction,

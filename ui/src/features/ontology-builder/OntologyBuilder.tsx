@@ -38,8 +38,8 @@ import { EntityTypePanel } from "./EntityTypePanel";
 import { RelationshipPanel } from "./RelationshipPanel";
 import { SupportingVocabulary } from "./SupportingVocabulary";
 import { OntologyCanvas, type EdgeStyle, type LayoutName } from "./OntologyCanvas";
-import { entityById, exportJson, importJson, loadModel, relationshipById, saveModel } from "./state";
-import { toCytoscapeElements } from "./cytoscapeModel";
+import { exportJson, importJson, loadModel, saveModel } from "./state";
+import { entityById, relationshipById, toCytoscapeElements } from "./cytoscapeModel";
 import type { OntologyModel, OntologyPackOption } from "./types";
 
 const { Title, Text } = Typography;
@@ -75,7 +75,7 @@ export function OntologyBuilder({ colors }: OntologyBuilderProps) {
   const [layout, setLayout] = useState<LayoutName>("radial");
   const [edgeStyle, setEdgeStyle] = useState<EdgeStyle>("polyline");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [filterText, setFilterText] = useState("");
+  const [filterText] = useState("");
   const [packs, setPacks] = useState<readonly OntologyPackOption[]>([]);
   const [packsLoading, setPacksLoading] = useState(true);
   const [vocabularyOpen, setVocabularyOpen] = useState(false);
