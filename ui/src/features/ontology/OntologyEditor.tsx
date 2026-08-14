@@ -25,6 +25,15 @@ import {
   type GraphFilter,
   type ParseOutcome,
 } from "./ontologyDocument";
+import {
+  loadedSourcesFromSparql,
+  NAMED_GRAPHS_QUERY,
+  ntriplesFromRows,
+  ontologySourceFor,
+  triplesQuery,
+  type LoadedSource,
+} from "../packs/packData";
+import { installedPacks, type InstalledPack } from "../packs/packSurfaces";
 import type {
   OntologyDryRunResult,
   OntologyPreviewResult,
@@ -48,6 +57,10 @@ const COPY = {
   allPredicates: "All predicates",
   check: "Check",
   save: "Save",
+  loadPackLabel: "Load installed pack",
+  loadPackPlaceholder: "Choose a pack…",
+  load: "Load",
+  noOntologyLoaded: "This pack has no ontology loaded yet.",
   checkedTitle: "Would be accepted",
   newInferences: "New inferences",
   rejectedTitle: "Would be refused",
@@ -158,6 +171,48 @@ export function OntologyEditor({ colors }: { colors: (typeof palette)["light"] }
   const [saveResult, setSaveResult] = useState<OntologySaveResult | null>(null);
   const [saveBusy, setSaveBusy] = useState(false);
 
+  // The installed-pack picker's own state — Plan 116 Slice A. Fetched once
+  // on mount, the same two calls `PackDataExplorer` already makes, so this
+  // picker can never offer a pack or source the Explore sider does not also
+  // know about.
+  const [packs, setPacks] = useState<readonly InstalledPack[]>([]);
+  const [sources, setSources] = useState<readonly LoadedSource[]>([]);
+  const [selectedPack, setSelectedPack] = useState<string | null>(null);
+  const [loadBusy, setLoadBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const [namespaces, graphs] = await Promise.all([api.namespaces(), api.sparql(NAMED_GRAPHS_QUERY)]);
+        if (!live) return;
+        setPacks(installedPacks(namespaces));
+        setSources(loadedSourcesFromSparql(graphs.rows));
+      } catch {
+        // No packs installed, or the graph could not be read — the picker
+        // simply offers nothing, the same "absent is the default" rule
+        // `PackDataExplorer` already applies; manual paste is unaffected.
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const ontologySource = selectedPack ? ontologySourceFor(selectedPack, sources) : null;
+
+  const runLoad = () => {
+    if (!ontologySource) return;
+    setLoadBusy(true);
+    api
+      .sparql(triplesQuery(ontologySource.iri))
+      .then((result) => {
+        const document = ntriplesFromRows(result.rows);
+        setState((prev) => ({ ...prev, format: "ntriples", document }));
+      })
+      .finally(() => setLoadBusy(false));
+  };
+
   // Debounced, not per-keystroke — "as the author types" without a network
   // round trip on every code point. `prev.document` (not the closed-over
   // `state.document`) is what `applyParseOutcome` writes back, so a
@@ -239,6 +294,27 @@ export function OntologyEditor({ colors }: { colors: (typeof palette)["light"] }
           {COPY.save}
         </Button>
       </Space>
+
+      {packs.length > 0 && (
+        <Space wrap>
+          <Select
+            allowClear
+            virtual={false}
+            aria-label={COPY.loadPackLabel}
+            placeholder={COPY.loadPackPlaceholder}
+            style={{ minWidth: 200 }}
+            value={selectedPack}
+            onChange={(packId) => setSelectedPack(packId ?? null)}
+            options={packs.map((pack) => ({ value: pack.packId, label: pack.label }))}
+          />
+          <Button onClick={runLoad} loading={loadBusy} disabled={!ontologySource}>
+            {COPY.load}
+          </Button>
+          {selectedPack !== null && !ontologySource && (
+            <Text type="secondary">{COPY.noOntologyLoaded}</Text>
+          )}
+        </Space>
+      )}
 
       <div style={{ display: "flex", gap: 16, width: "100%" }}>
         <div style={{ flex: 1, minWidth: 0 }}>

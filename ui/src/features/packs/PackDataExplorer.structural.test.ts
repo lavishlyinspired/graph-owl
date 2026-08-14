@@ -15,7 +15,7 @@ describe("the Pack data block in the Explore sider", () => {
     expect(source).toMatch(/api\.namespaces\(\)/);
     expect(source).toMatch(/installedPacks/);
     expect(source).toMatch(/loadedSourcesFromSparql/);
-    expect(source).toMatch(/GROUP BY \?g/);
+    expect(source).toMatch(/NAMED_GRAPHS_QUERY/);
   });
 
   it("files each loaded source under its own pack", () => {

@@ -1,6 +1,6 @@
 # Plan 115 — Import traceability and discoverability: name the import, filter by period, surface pack data in Explore
 
-**Status**: C1, C2, B1 shipped. B2 deferred, A rejected. **Branch**: main.
+**Status**: C1, C2, B1, B2 shipped. A rejected. **Branch**: main.
 
 **Trigger**: "I uploaded GST data — what was imported, where did it go, and how
 do I inspect it?" Investigated as a navigation gap rather than a missing
@@ -44,10 +44,15 @@ all assume `Asset`; generalizing selection to `Sid` is real surface area for a
 path the target user (a CA) does not take. `packSurfaces.ts`'s own rule —
 "the console has no GST tab, and must not grow one" — is the same boundary.
 
-**B2 — graph-subject browsing from Explore — deferred.** A subject
-picker/explorer workflow ("show me the entities this source produced") has no
-demonstrated user need yet. It would cost a seed picker and a browse flow;
-revisit only when a real user asks for it.
+**B2 — graph-subject browsing from Explore — shipped.** The deferred plan
+called for a subject picker; the user who surfaced it ("clicking a source
+takes me to the reconciliation — why can't I see the pack data in Explore?")
+made clear the picker was never the gap. The gap was that a source *opened*
+somewhere else. B2 as built: clicking a source in the "Pack data" block opens
+its subjects in the Explore content pane itself (`PackSourceView`), scoped to
+the graph IRI the wire itself reported; a subject's neighbourhood opens in
+place through `SubjectExplorer`; the Reconciliation is one explicit button
+away, never the click's default destination.
 
 ## Conceptual model the plan makes visible
 
@@ -97,10 +102,16 @@ worksheet through to the graph.
   is untouched.
 - **Tests**: structural test with a stubbed `/namespaces` response.
 
-### Slice B2 — Browse a source's graph subjects (deferred)
+### Slice B2 — Browse a source's graph subjects ✅ part of this commit
 
 Open a source's subjects from Explore via `SubjectExplorer` seeded at a `gst:`
-subject. Not built: no demonstrated need; costs a subject picker.
+subject. Built as: `PackSourceView` in the Explore content pane — reads the
+source's own graph (`subjectsQuery`/`typesQuery` in `packData.ts`, both scoped
+to `source.iri` as reported by `/sparql`), lists subjects by the graph's own
+local names with their `rdf:type` and triple counts, and opens a subject's
+neighbourhood in place via `SubjectExplorer` (a full IRI seed — `parse_node_id`
+accepts one). `onOpen` on the sider block carries the clicked source; the
+Reconciliation is one explicit button.
 
 ## Verification
 

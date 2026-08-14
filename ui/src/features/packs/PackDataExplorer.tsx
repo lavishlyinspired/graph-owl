@@ -28,7 +28,12 @@ import { useEffect, useState } from "react";
 import { Space, Tag, Typography } from "antd";
 import { DatabaseOutlined } from "@ant-design/icons";
 import { api } from "../../api";
-import { loadedSourcesFromSparql, sourcesForPack, type LoadedSource } from "./packData";
+import {
+  loadedSourcesFromSparql,
+  NAMED_GRAPHS_QUERY,
+  sourcesForPack,
+  type LoadedSource,
+} from "./packData";
 import { installedPacks, type InstalledPack } from "./packSurfaces";
 
 const { Text, Paragraph } = Typography;
@@ -36,14 +41,17 @@ const { Text, Paragraph } = Typography;
 const COPY = {
   heading: "PACK DATA",
   nothingLoaded: "Nothing imported yet — upload from the Reconciliation section.",
-  hint: "Pack data lives in the graph, outside the asset tree above. Open the Reconciliation to work a source's period.",
+  hint: "Pack data lives in the graph, outside the asset tree above. Open a source to see its subjects here; the Reconciliation is where you work a period.",
 };
 
-/** Every named graph and how much it holds. One query answers "what has
- *  actually been imported", which is what this block exists to show. */
-const NAMED_GRAPHS_QUERY = "SELECT ?g (COUNT(?s) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g";
-
-export function PackDataExplorer({ onOpen }: { onOpen: () => void }) {
+export function PackDataExplorer({
+  onOpen,
+}: {
+  /** Called with the clicked source and its pack's label, so the caller can
+   *  show that source's data — the caller decides where the click lands, not
+   *  this block. */
+  onOpen: (source: LoadedSource, packLabel: string) => void;
+}) {
   const [packs, setPacks] = useState<readonly InstalledPack[] | null>(null);
   const [sources, setSources] = useState<readonly LoadedSource[]>([]);
   const [failed, setFailed] = useState(false);
@@ -99,7 +107,7 @@ export function PackDataExplorer({ onOpen }: { onOpen: () => void }) {
                       key={source.name}
                       type="secondary"
                       style={{ cursor: "pointer", display: "block", fontSize: 12 }}
-                      onClick={onOpen}
+                      onClick={() => onOpen(source, pack.label)}
                     >
                       <DatabaseOutlined style={{ marginRight: 6 }} />
                       {source.name}

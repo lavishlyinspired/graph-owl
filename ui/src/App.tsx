@@ -110,6 +110,8 @@ import { ReconciliationWorkspace } from "./features/reconciliation/Reconciliatio
 import { AgentChat } from "./features/agentChat/AgentChat";
 import { PackAdminPanel } from "./features/packs/PackAdminPanel";
 import { PackDataExplorer } from "./features/packs/PackDataExplorer";
+import { PackSourceView } from "./features/packs/PackSourceView";
+import type { LoadedSource } from "./features/packs/packData";
 import { KnowledgeGraphToggle } from "./features/knowledge/KnowledgeGraphToggle";
 import { AgentActivityPanel } from "./features/agents/AgentActivityPanel";
 import { BoltSessionsPanel } from "./features/agents/BoltSessionsPanel";
@@ -3965,6 +3967,15 @@ function AppShell() {
     writeParam("section", next === "overview" ? null : next);
   }, []);
   const [selected, setSelectedRaw] = useState<Asset | null>(null);
+  // A pack source opened from the "Pack data" block (Plan 115 B2). Kept
+  // beside `selected` because they are the same slot: one thing the Explore
+  // content pane shows. Only one is ever set — opening a source clears the
+  // asset, and opening an asset clears the source — so the pane never has to
+  // decide which of two claims to the screen wins.
+  const [openSource, setOpenSource] = useState<{
+    source: LoadedSource;
+    packLabel: string;
+  } | null>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Asset[] | null>(null);
   // A search that failed to load is not a search that found nothing — the
@@ -4157,6 +4168,7 @@ function AppShell() {
         // `undefined` would blank the detail pane with no explanation.
         const row = visibleResults[cursor];
         if (row) {
+          setOpenSource(null);
           setSelected(row);
           setQuery("");
         }
@@ -4415,7 +4427,10 @@ function AppShell() {
                       loadData={loadChildren}
                       onSelect={(keys) => {
                         const asset = index[String(keys[0])];
-                        if (asset) setSelected(asset);
+                        if (asset) {
+                          setOpenSource(null);
+                          setSelected(asset);
+                        }
                       }}
                     />
                   )}
@@ -4424,8 +4439,14 @@ function AppShell() {
                       Imported pack data lives in named import graphs, never in
                       the `assets` table the hierarchy above reads (Plan 115).
                       This block names what has been imported and files it
-                      under its pack; a source opens the reconciliation. */}
-                  <PackDataExplorer onOpen={() => setSection("reconciliation")} />
+                      under its pack; a source opens **here**, in Explore, with
+                      the Reconciliation one action away (B2). */}
+                  <PackDataExplorer
+                    onOpen={(source, packLabel) => {
+                      setSelected(null);
+                      setOpenSource({ source, packLabel });
+                    }}
+                  />
                 </div>
               </Sider>
             )}
@@ -4448,6 +4469,7 @@ function AppShell() {
                   colors={colors}
                   onOpen={(asset) => {
                     setSection("explore");
+                    setOpenSource(null);
                     setSelected(asset);
                   }}
                   onAddSource={() => setSection("connectors")}
@@ -4534,6 +4556,7 @@ function AppShell() {
                       rowClassName={(_row, i) => (i === cursor ? "gowl-row-cursor" : "")}
                       onRow={(row, i) => ({
                         onClick: () => {
+                          setOpenSource(null);
                           setSelected(row);
                           setQuery("");
                         },
@@ -4575,6 +4598,16 @@ function AppShell() {
                 </Space>
                   </Col>
                 </Row>
+              ) : openSource !== null ? (
+                <PackSourceView
+                  source={openSource.source}
+                  packLabel={openSource.packLabel}
+                  colors={colors}
+                  onReconcile={() => {
+                    setOpenSource(null);
+                    setSection("reconciliation");
+                  }}
+                />
               ) : selected ? (
                 <>
                   {asOf && (
