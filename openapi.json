@@ -6837,6 +6837,18 @@
         "summary": "Import an RDF document into a named import graph (admin only)"
       }
     },
+    "/graph/paths": {
+      "post": {
+        "operationId": "post_graph_paths",
+        "responses": {
+          "200": {
+            "description": "Routes between two nodes"
+          }
+        },
+        "security": [],
+        "summary": "Routes between two nodes"
+      }
+    },
     "/graph/reconcile": {
       "post": {
         "operationId": "post_graph_reconcile",

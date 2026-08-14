@@ -164,6 +164,16 @@ import {
   verdict,
 } from "./workbench/results";
 import { GraphCanvas } from "./graph/GraphCanvas";
+import { PathFinder } from "./graph/PathFinder";
+import { Disagreements } from "./memory/Disagreements";
+import {
+  type Drafts,
+  type Language,
+  defaultQuery,
+  isLanguage,
+  keepDrafts,
+  pastTenseNote,
+} from "./workbench/language";
 import type { ConnectorRun, ReasoningReport } from "./api";
 import { describeReasoningRun } from "./governance/reasoningRun";
 import { ReasoningPanel } from "./features/reasoning/ReasoningPanel";
@@ -773,10 +783,14 @@ function LineageView({
  */
 function GraphExplorer({
   assetId,
+  assetName,
   asOf,
   colors,
 }: {
   assetId: string;
+  /** Only so the connection finder below can name this end of a route.
+   *  The traversal itself never sees it — identities travel, labels do not. */
+  assetName: string;
   asOf: string | null;
   colors: (typeof palette)["light"];
 }) {
@@ -1127,6 +1141,16 @@ function GraphExplorer({
           ]}
         />
       </details>
+
+      {/* **A different question from the one above, in the same place.** The
+          neighbourhood answers "what is near this"; this answers "how is this
+          related to *that*" — the question whose answer nobody can predict the
+          shape of, and the one the traversal engine could answer since Epic 7a
+          with nothing in the product able to ask it (Plan 111 Slice A). It
+          lives inside this tab rather than as a route of its own: `routes.ts`
+          rewards one surface absorbing many questions, and starting from the
+          asset already on screen is what makes it discoverable at all. */}
+      <PathFinder seedId={assetId} seedName={assetName} asOf={asOf} colors={colors} />
     </Space>
   );
 }
@@ -1675,7 +1699,12 @@ function AssetDetail({
             // and running it for everyone who opens an asset would make the
             // graph the cost of every page view.
             children: (
-              <GraphExplorer assetId={asset.id} asOf={asOf} colors={colors} />
+              <GraphExplorer
+                assetId={asset.id}
+                assetName={asset.fullyQualifiedName}
+                asOf={asOf}
+                colors={colors}
+              />
             ),
           },
           // Lineage only for the kinds that carry it. Offering the tab on a
@@ -1918,23 +1947,47 @@ function RunHistory({ colors }: { colors: (typeof palette)["light"] }) {
  *  An author who cannot see the plan cannot tell a query that is inherently
  *  expensive from one that is a single triple pattern away from being cheap.
  */
-function WorkbenchPage({ colors }: { colors: (typeof palette)["light"] }) {
+function WorkbenchPage({ colors, asOf }: { colors: (typeof palette)["light"]; asOf: string | null }) {
   const [view, setView] = useState<"query" | "ontology">(
     () => (readParam("workbenchView") === "ontology" ? "ontology" : "query"),
   );
-  const [query, setQuery] = useState(
-    "SELECT ?s ?p ?o WHERE { ?s ?p ?o }\nLIMIT 50",
-  );
+  // Plan 111 Slice B. `POST /cypher` had no console caller at all before
+  // this — a property-graph query language implemented end to end and
+  // reachable only with curl.
+  const [language, setLanguageRaw] = useState<Language>(() => {
+    const saved = readParam("lang");
+    return isLanguage(saved) ? saved : "sparql";
+  });
+  const [query, setQuery] = useState(() => defaultQuery(language));
+  // Per-language drafts. Toggling to look at the other language and back
+  // must not silently discard real work.
+  const [drafts, setDrafts] = useState<Drafts>({});
   const [result, setResult] = useState<SparqlResult | null>(null);
   const [running, setRunning] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   const [asGraph, setAsGraph] = useState(false);
 
+  const setLanguage = (next: Language) => {
+    const kept = keepDrafts(drafts, language, query);
+    setDrafts(kept);
+    setQuery(kept[next] ?? defaultQuery(next));
+    setLanguageRaw(next);
+    writeParam("lang", next === "sparql" ? null : next);
+    // A result answered in the other language beside a query in this one
+    // would be attributed to the wrong text. Clearing is the honest reset.
+    setResult(null);
+    setFailed(null);
+  };
+
   const run = async () => {
     setRunning(true);
     setFailed(null);
     try {
-      setResult(await api.sparql(query));
+      // Both routes render the identical outcome envelope server-side, which
+      // is what lets one results table serve both without knowing which ran.
+      setResult(
+        language === "cypher" ? await api.cypher(query, asOf) : await api.sparql(query, asOf),
+      );
     } catch (error) {
       // A parse error is the author's to fix and belongs on screen verbatim —
       // "query failed" sends them guessing at which line.
@@ -1944,6 +1997,8 @@ function WorkbenchPage({ colors }: { colors: (typeof palette)["light"] }) {
       setRunning(false);
     }
   };
+
+  const asOfNote = pastTenseNote(asOf);
 
   const rows: Solution[] = useMemo(() => [...(result?.rows ?? [])], [result]);
   const shape = useMemo(() => graphShape(rows), [rows]);
@@ -1972,8 +2027,8 @@ function WorkbenchPage({ colors }: { colors: (typeof palette)["light"] }) {
             Workbench
           </Title>
           <Paragraph type="secondary" style={{ margin: "4px 0 0", fontSize: 13 }}>
-            SPARQL over the catalog graph, filtered to what you may see. The plan
-            shows what the engine read to answer you.
+            SPARQL or Cypher over the same catalog graph, filtered to what you may
+            see. The plan shows what the engine read to answer you.
           </Paragraph>
         </div>
         <Segmented
@@ -1996,6 +2051,22 @@ function WorkbenchPage({ colors }: { colors: (typeof palette)["light"] }) {
 
       <div style={{ display: view === "query" ? "block" : "none" }}>
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      {/* **Two languages, one graph, one results table.** The server renders
+          both through the identical outcome envelope, which is what lets the
+          plan, the budget and the error shape below be written once. */}
+      <Segmented
+        value={language}
+        aria-label="Query language"
+        onChange={(value) => setLanguage(value as Language)}
+        options={[
+          { label: "SPARQL", value: "sparql" },
+          { label: "Cypher", value: "cypher" },
+        ]}
+      />
+      {/* A result from the past that looks like a result from now is the one
+          failure this surface cannot afford: historical and stale data are
+          indistinguishable on screen unless something says which this is. */}
+      {asOfNote && <Alert type="warning" showIcon message={asOfNote} />}
       <Input.TextArea
         value={query}
         onChange={(e) => setQuery(e.target.value)}
@@ -2437,6 +2508,16 @@ function KnowledgeView({
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <KnowledgeGraphToggle assetId={assetId} />
+
+      {/* **What this deployment believes twice, incompatibly** — Plan 111
+          Slice C. `GET /assets/{id}/contradictions` shipped with Epic 31 and
+          no browser ever called it, so a product whose claim is that
+          conflicting institutional knowledge becomes *visible* was keeping
+          the conflicts where only an integrator could find them. It sits
+          above the memories rather than below: a reader who has already
+          scrolled past both sides has formed a view of each in isolation,
+          which is the exact mistake the pairing exists to prevent. */}
+      <Disagreements assetId={assetId} memories={visible.map((item) => item.memory)} />
 
       <Divider />
 
@@ -4482,7 +4563,7 @@ function AppShell() {
               ) : section === "governance" ? (
                 <GovernancePage colors={colors} />
               ) : section === "workbench" ? (
-                <WorkbenchPage colors={colors} />
+                <WorkbenchPage colors={colors} asOf={asOf} />
               ) : section === "vocabulary" ? (
                 <VocabularySection />
               ) : section === "review" ? (

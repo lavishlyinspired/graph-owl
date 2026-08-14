@@ -550,7 +550,10 @@ party_id = "supplierGstin"
 
         assert_eq!(found["reconciliation"]["matchKey"], "invoiceKey");
         assert_eq!(found["reconciliation"]["recordNoun"], "invoice");
-        assert_eq!(found["reconciliation"]["fields"]["partyId"], "supplierGstin");
+        assert_eq!(
+            found["reconciliation"]["fields"]["partyId"],
+            "supplierGstin"
+        );
     }
 
     /// A pack that declares no console section is the ordinary case, not a

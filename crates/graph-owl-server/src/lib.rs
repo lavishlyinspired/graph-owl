@@ -79,6 +79,11 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         .route("/assets/stats", get(asset_stats))
         .route("/overview", get(overview))
         .route("/graph/reconcile", post(reconcile_projection))
+        // Plan 111 Slice A. `POST` rather than `GET` because the request
+        // carries two node identities and a list of edge names — a query
+        // string long enough to hit a proxy's URL limit, and one that would
+        // put identities in a logged URL for no gain.
+        .route("/graph/paths", post(graph_paths))
         .route("/graph/export/graphml", get(export_graphml))
         .route("/graph/export/bulk-csv", get(export_bulk_csv))
         .route("/graph/export/cypher", get(export_cypher_script))
@@ -2656,6 +2661,149 @@ async fn asset_analytics(
         "orphans": analytics.orphans.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
         "edgeTypes": analytics.edge_types.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
         "truncated": analytics.truncated,
+    })))
+}
+
+/// Plan 111 Slice A — what a caller asks when they want to know *how* two
+/// things are connected rather than *whether* something is asserted.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PathRequest {
+    from: String,
+    to: String,
+    direction: Option<String>,
+    hops: Option<usize>,
+    max_nodes: Option<usize>,
+    /// Absent asks for the shortest route only. Present asks for every
+    /// distinct route up to this many — a hard stop, because enumeration
+    /// between two nodes in a dense graph is exponential.
+    max_paths: Option<usize>,
+    relationship_types: Option<Vec<String>>,
+    as_of: Option<String>,
+}
+
+impl ValidateBody for PathRequest {
+    /// **Both endpoints, reported together.** A client that omitted both
+    /// should learn that in one round trip, which is the whole reason
+    /// `AppJson` accumulates rather than stopping at serde's first error.
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        for field in ["from", "to"] {
+            require_non_empty_string(
+                value,
+                &graph_owl_api::validation::FieldPath::root().key(field),
+                &mut errors,
+            );
+        }
+        errors
+    }
+}
+
+/// A node identity as a caller most naturally writes one.
+///
+/// A bare UUID is an asset — the shape `graph_owl_core::projection::asset_sid`
+/// stores, and the only identity a console has for an asset it is looking at.
+/// Anything containing a colon is a full `namespace:local` identifier, so a
+/// node landed by an import is nameable too. A UUID has no colon, which is
+/// what makes the two unambiguous rather than merely usually distinguishable.
+fn parse_node_id(field: &str, raw: &str) -> Result<graph_owl_core::flake::Sid, AppError> {
+    if raw.contains(':') {
+        return parse_sid(field, raw);
+    }
+    raw.parse::<Uuid>()
+        .map(|id| {
+            graph_owl_core::flake::Sid::new(graph_owl_core::flake::namespace::DSC, id.to_string())
+        })
+        .map_err(|_| {
+            AppError::Validation(vec![FieldError::new(
+                field,
+                FieldErrorCode::Type,
+                format!("`{raw}` is neither an asset id nor a `namespace:name` identifier"),
+            )])
+        })
+}
+
+/// The route between two nodes — `Catalog::find_paths` over HTTP.
+///
+/// **This is the route for a capability the engine has answered since Epic 7a
+/// and no human could ask for.** `TraversalEngine::shortest_path` and
+/// `all_paths` were implemented, integration-tested, and called by nothing —
+/// `plans/110-console-capability-gap.md`'s "a capability that only one caller
+/// can reach is not a capability" one layer further down.
+///
+/// **`200` with an empty set for two unconnected nodes**, never `404`: "these
+/// are not related" is the commonest true answer to the question, and a
+/// not-found would make the normal case indistinguishable from a bad request.
+/// `404` is reserved for an endpoint the principal may not see, where it is
+/// deliberately indistinguishable from one that does not exist.
+async fn graph_paths(
+    State(catalog): State<Catalog>,
+    Auth(principal): Auth,
+    AppJson(request): AppJson<PathRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let direction = match request.direction.as_deref() {
+        None | Some("both") => graph_owl_traversal::Direction::Both,
+        Some("outgoing") => graph_owl_traversal::Direction::Outgoing,
+        Some("incoming") => graph_owl_traversal::Direction::Incoming,
+        Some(other) => {
+            return Err(AppError::Validation(vec![FieldError::new(
+                "direction",
+                FieldErrorCode::Type,
+                format!("`{other}` is not one of: outgoing, incoming, both"),
+            )]));
+        }
+    };
+
+    let defaults = graph_owl_traversal::Bounds::default();
+    let bounds = graph_owl_traversal::Bounds {
+        // Capped server-side for the same reason `asset_graph` caps: a client
+        // asking for 50 hops on a real estate is asking for the whole graph,
+        // and the bound protects the server rather than the client.
+        max_hops: request.hops.unwrap_or(defaults.max_hops).min(6),
+        max_nodes: request.max_nodes.unwrap_or(defaults.max_nodes).min(1_000),
+    };
+
+    let as_of = match request.as_of {
+        None => None,
+        Some(raw) => Some(
+            chrono::DateTime::parse_from_rfc3339(&raw)
+                .map_err(|e| {
+                    AppError::Validation(vec![FieldError::new(
+                        "asOf",
+                        FieldErrorCode::Type,
+                        format!("`{raw}` is not an RFC 3339 timestamp: {e}"),
+                    )])
+                })?
+                .with_timezone(&chrono::Utc),
+        ),
+    };
+
+    let found = catalog
+        .find_paths(
+            &principal,
+            graph_owl_api::PathQuery {
+                from: parse_node_id("from", &request.from)?,
+                to: parse_node_id("to", &request.to)?,
+                direction,
+                bounds,
+                mode: match request.max_paths {
+                    None => graph_owl_api::PathMode::Shortest,
+                    Some(max_paths) => graph_owl_api::PathMode::All {
+                        max_paths: max_paths.min(100),
+                    },
+                },
+                relationship_types: request.relationship_types,
+                as_of,
+            },
+        )
+        .await?;
+
+    Ok(Json(json!({
+        "paths": found.paths.iter().map(|path| json!({
+            "nodes": path.nodes.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+            "length": path.length,
+        })).collect::<Vec<_>>(),
+        "truncated": found.truncated,
     })))
 }
 

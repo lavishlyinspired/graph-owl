@@ -466,6 +466,15 @@ pub static ROUTES: &[Route] = &[
         true,
     ),
     route(
+        "post",
+        "/graph/paths",
+        "Routes between two nodes",
+        None,
+        None,
+        200,
+        false,
+    ),
+    route(
         "get",
         "/graph/export/graphml",
         "Export the caller's authorized estate as GraphML",

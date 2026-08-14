@@ -587,6 +587,28 @@ export interface AssetAnalytics {
   readonly truncated: boolean;
 }
 
+/** One route between two nodes — Plan 111 Slice A.
+ *
+ *  `nodes` runs start to end inclusive, so `nodes.length` is `length + 1`.
+ *  **The intermediate nodes are the answer**: a response carrying only the
+ *  hop count would be the one answer a reader cannot act on. */
+export interface GraphPath {
+  readonly nodes: readonly string[];
+  /** Logical edges, not stored hops. */
+  readonly length: number;
+}
+
+/** What `POST /graph/paths` answers.
+ *
+ *  **An empty `paths` is a real answer, not a failure** — "these are not
+ *  connected within the bounds you gave" is the commonest true result of
+ *  asking. `truncated` is the other half: presenting one of several routes as
+ *  the only route is a stronger claim than the server ever made. */
+export interface PathAnswer {
+  readonly paths: readonly GraphPath[];
+  readonly truncated: boolean;
+}
+
 /** A node in a finding's evidence graph — Epic 105 P7
  *  (`GET /findings/{id}/evidence-graph`).
  *
@@ -1248,12 +1270,30 @@ export const api = {
    *  `features/export/exportDialog.ts`, already carrying `?scope=`/`?asOf=`. */
   exportPreview: (path: string) => request<ExportPreview>(path),
   /** Run a SPARQL query. The budget is the server's, not ours — a client that
-   *  could raise its own limit does not have one. */
-  sparql: (query: string) =>
+   *  could raise its own limit does not have one.
+   *
+   *  `asOf` runs the query against the graph as it stood at that instant —
+   *  **Plan 111 Slice B**. The route has accepted it since Epic 4 and no
+   *  console caller passed it, so the one surface where re-running a question
+   *  against the past is the obvious thing to want could only ask about now. */
+  sparql: (query: string, asOf?: string | null) =>
     request<SparqlResult>("/sparql", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, asOf: asOf ?? undefined }),
+    }),
+  /** Run a Cypher query — the same envelope, the same budget, the same error
+   *  shape as {@link sparql}, because the server renders both through one
+   *  `SparqlOutcome`.
+   *
+   *  **`POST /cypher` had no console caller at all** before Plan 111 Slice B:
+   *  a property-graph query language this product implements end to end was
+   *  reachable only with curl. */
+  cypher: (query: string, asOf?: string | null) =>
+    request<SparqlResult>("/cypher", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query, asOf: asOf ?? undefined }),
     }),
   /** One asset as a property-graph node — the other half of the Knowledge
    *  tab's toggle. `404` both when the asset does not exist and when it
@@ -1390,6 +1430,33 @@ export const api = {
   federationEndpoints: () => request<{ endpoints: string[] }>("/admin/federation"),
   /** What we know about a subject, best first, each with its staleness and
    *  score decomposition. Entity-scoped — the Knowledge tab's own read. */
+  /** Open disagreements about one asset — Plan 111 Slice C.
+   *
+   *  **Shipped with Epic 31 and never called from a browser.** A product
+   *  whose claim is that conflicting institutional knowledge becomes
+   *  *visible* was keeping the conflicts where only an integrator could find
+   *  them. */
+  contradictions: (subjectId: string) =>
+    request<import("./memory/contradictions").Contradiction[]>(
+      `/assets/${encodeURIComponent(subjectId)}/contradictions`,
+    ),
+  /** Confirm or dismiss a flagged pair.
+   *
+   *  **Confirming does not close it.** The pair stays in the queue marked
+   *  confirmed; only a dismissal removes it, and neither memory is ever
+   *  hidden or picked as the winner. `note` is nullable on purpose — "these
+   *  are about different quarters" is worth capturing, and forcing a note
+   *  gets the field filled with "n/a". */
+  reviewContradiction: (body: {
+    a: string;
+    b: string;
+    verdict: "confirmed" | "dismissed";
+    note?: string | null;
+  }) =>
+    request<void>("/contradictions/reviews", {
+      method: "POST",
+      body: JSON.stringify({ ...body, note: body.note?.trim() || null }),
+    }),
   recallMemories: (subjectId: string, query = "", includeSuperseded = false) =>
     request<import("./memory/memory").RecalledMemory[]>(
       `/assets/${encodeURIComponent(subjectId)}/memories?q=${encodeURIComponent(query)}` +
@@ -1684,6 +1751,35 @@ export const api = {
     request<readonly string[]>(
       `/reasoning/el/explain?subclass=${encodeURIComponent(subclass)}&superclass=${encodeURIComponent(superclass)}`,
     ),
+
+  /** Routes between two nodes — `POST /graph/paths`, Plan 111 Slice A.
+   *
+   *  **The engine has answered this since Epic 7a and nothing asked.**
+   *  `shortest_path` and `all_paths` were implemented, tested, and called by
+   *  no facade method, no route and no console — the same defect Plan 110
+   *  named for routes, one layer further down.
+   *
+   *  `maxPaths` absent asks for the shortest route only; present asks for
+   *  every distinct route up to that many, and the answer says when it
+   *  stopped early. An empty `paths` array is a real answer — "these are not
+   *  connected within the bounds you gave" — never an error. */
+  findPaths: (body: {
+    from: string;
+    to: string;
+    direction?: "outgoing" | "incoming" | "both";
+    hops?: number;
+    maxPaths?: number;
+    relationshipTypes?: readonly string[];
+    asOf?: string | null;
+  }) =>
+    request<PathAnswer>("/graph/paths", {
+      method: "POST",
+      body: JSON.stringify({
+        ...body,
+        relationshipTypes: body.relationshipTypes ? [...body.relationshipTypes] : undefined,
+        asOf: body.asOf ?? undefined,
+      }),
+    }),
 
   assetAnalytics: (assetId: string, params: { hops?: number; maxNodes?: number } = {}) => {
     const query = new URLSearchParams();

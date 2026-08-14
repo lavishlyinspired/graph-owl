@@ -1728,6 +1728,52 @@ pub struct GraphContext {
     pub truncated: bool,
 }
 
+/// What a caller wants to know about the route between two nodes —
+/// Plan 111 Slice A.
+///
+/// **Nothing here names a domain.** Two identities, a direction, two
+/// bounds and an optional vocabulary of edges to follow: GST asks
+/// *invoice → supplier → filing*, a healthcare pack asks *patient →
+/// encounter → medication*, and the call is the same one with different
+/// strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathQuery {
+    /// Where the walk starts.
+    pub from: Sid,
+    /// Where it is trying to reach.
+    pub to: Sid,
+    /// Which way edges may be followed. `Both` treats the graph as
+    /// undirected, which is the right default for "are these related at
+    /// all" and the wrong one for "does this flow into that".
+    pub direction: Direction,
+    /// How far and how wide the walk may go.
+    pub bounds: Bounds,
+    /// One route or several.
+    pub mode: PathMode,
+    /// Only follow these relationship types. `None` follows every edge.
+    /// The values are the caller's, never a list compiled in here.
+    pub relationship_types: Option<Vec<String>>,
+    /// Walk the graph as it stood at this instant. `None` is now.
+    pub as_of: Option<DateTime<Utc>>,
+}
+
+/// One route or all of them.
+///
+/// **`All` carries its own cap rather than defaulting to one**: path
+/// enumeration between two nodes in a dense graph is exponential, so the
+/// limit is part of the question rather than a courtesy — the alternative
+/// is a request that runs until something else times it out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathMode {
+    /// The fewest logical edges from `from` to `to`.
+    Shortest,
+    /// Every distinct route, up to a hard stop.
+    All {
+        /// How many routes to return before giving up and saying so.
+        max_paths: usize,
+    },
+}
+
 /// One node in a [`GraphContext`], with the source document(s) that
 /// asserted its own flakes already resolved.
 #[derive(Debug, Clone, PartialEq)]
@@ -3029,6 +3075,140 @@ impl Catalog {
             )
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// The route between two nodes — Plan 111 Slice A.
+    ///
+    /// **The engine has answered this since Epic 7a and nothing asked.**
+    /// `TraversalEngine::shortest_path` and `all_paths` are implemented and
+    /// integration-tested in `graph-owl-engine-postgres`; before this method
+    /// no `Catalog` method, no route and no tool called either. That is the
+    /// defect `plans/110-console-capability-gap.md` named one layer up
+    /// ("a capability that only one caller can reach is not a capability"),
+    /// one layer down: a capability that stops at the engine is a tested
+    /// function with no callers at all.
+    ///
+    /// **Why it is worth a facade method rather than a handler calling the
+    /// trait directly**: the authorization posture below is the whole reason
+    /// this exists, and a second caller reimplementing it slightly
+    /// differently is exactly how an existence oracle gets shipped.
+    ///
+    /// **Both endpoints are authorized before the walk, and a refusal is
+    /// indistinguishable from an absence.** `NotFound` for an endpoint the
+    /// principal may not see is not politeness — "you may not see this" and
+    /// "there is nothing here" must read identically to a caller probing for
+    /// what a deployment holds. Visibility is decided by the same
+    /// [`Self::authorization_key`] every other graph-flake check uses: a
+    /// real asset's graph identity is a UUID and its FQN lives as a `dsc:fqn`
+    /// property, so checking a prefix policy against the subject id alone
+    /// fails *open*.
+    ///
+    /// **Not connected is `Ok`, not an error** — it is the commonest true
+    /// answer, and the trait's own `Ok(None)` already takes that position.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no traversal engine (or, for `as_of`, no graph engine) is
+    /// configured, or the walk fails. `NotFound` if either endpoint is
+    /// outside what `principal` may see.
+    pub async fn find_paths(
+        &self,
+        principal: &Principal,
+        query: PathQuery,
+    ) -> Result<graph_owl_traversal::PathSet, CatalogError> {
+        let traversal = self.traversal.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no traversal engine configured".to_string(),
+            ))
+        })?;
+
+        for endpoint in [&query.from, &query.to] {
+            if !self.graph_subject_visible(principal, endpoint).await? {
+                return Err(CatalogError::NotFound);
+            }
+        }
+
+        // Same resolution `asset_subgraph` performs: a wall-clock instant
+        // means nothing to the walk until the graph engine turns it into the
+        // transaction time it stores.
+        let as_of_t = match (query.as_of, &self.graph) {
+            (Some(at), Some(graph)) => graph
+                .time_at(at)
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?,
+            _ => None,
+        };
+
+        let filter = EdgeFilter {
+            relationship_types: query.relationship_types.clone(),
+            as_of: as_of_t,
+            valid_at: None,
+        };
+
+        match query.mode {
+            PathMode::Shortest => {
+                let found = traversal
+                    .shortest_path(
+                        &query.from,
+                        &query.to,
+                        query.direction,
+                        query.bounds,
+                        &filter,
+                    )
+                    .await
+                    .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+                Ok(graph_owl_traversal::PathSet {
+                    paths: found.into_iter().collect(),
+                    // A single-route answer is never "truncated": the caller
+                    // asked for one and got one. Reporting truncation here
+                    // would make every shortest-path answer look incomplete.
+                    truncated: false,
+                    truncation_reason: None,
+                })
+            }
+            PathMode::All { max_paths } => traversal
+                .all_paths(
+                    &query.from,
+                    &query.to,
+                    query.direction,
+                    query.bounds,
+                    max_paths,
+                    &filter,
+                )
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string()))),
+        }
+    }
+
+    /// Whether `principal` may see a bare graph subject.
+    ///
+    /// A subject with no flakes of its own is not special-cased:
+    /// [`Self::authorization_key`] falls back to the subject id, so an
+    /// unknown node is judged by the same policy as a known one and an
+    /// unrestricted principal still sees it. Making absence a refusal here
+    /// would turn "no such node" into a different answer from "no such
+    /// route", which is the distinction this deliberately does not draw.
+    async fn graph_subject_visible(
+        &self,
+        principal: &Principal,
+        subject: &Sid,
+    ) -> Result<bool, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+        let flakes = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                s: Some(subject.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        let predicate = self
+            .predicate_for(principal, MetadataOperation::ViewBasic)
+            .await?;
+        Ok(predicate.admits(&Self::authorization_key(subject, &flakes)))
     }
 
     /// Degree centrality, connected components and orphan detection over
@@ -28955,6 +29135,465 @@ mod projection_isolation_tests {
             "the analyst's policy does not cover the target, even though the real adapter reached it: {:?}",
             restricted.rows
         );
+    }
+
+    /// Plan 111 Slice A — **path finding, which the engine has answered since
+    /// Epic 7a and which no caller could reach.**
+    ///
+    /// `TraversalEngine::shortest_path` and `all_paths` are implemented and
+    /// integration-tested in `graph-owl-engine-postgres`, and a grep across
+    /// `crates/` finds no `Catalog` method, no route and no tool that calls
+    /// either. That is the defect Plan 110 named one layer up, one layer
+    /// down: **a capability that stops at the engine is a tested function
+    /// with no callers.**
+    ///
+    /// Every test below walks a *real* `InMemoryTraversalEngine` over real
+    /// reified relationship flakes, and seeds its endpoints through
+    /// `upsert_asset` rather than hand-keying `Sid::dsc(fqn)` — the
+    /// hand-keyed shape makes a subject's id equal to its FQN by
+    /// construction, which is exactly what once masked an authorization
+    /// check that failed *open* (see `Catalog::authorization_key`).
+    mod paths_are_reachable {
+        use super::*;
+        use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+
+        /// A reified relationship in the shape `graph-owl-traversal-memory`
+        /// actually reads — `fromEntity`/`toEntity`/`relType`.
+        ///
+        /// `t` is explicit because it is what makes history observable: two
+        /// edges asserted at the same instant cannot be told apart by an
+        /// `as_of` walk, so a fixture that let the clock choose could not
+        /// test time travel at all.
+        async fn link_at(
+            graph: &Arc<RecordingGraph>,
+            name: &str,
+            from: Uuid,
+            to: Uuid,
+            kind: &str,
+            t: i64,
+        ) {
+            let rel = Sid::dsc(name);
+            graph
+                .assert_flakes(&[
+                    Flake::assert(
+                        rel.clone(),
+                        Sid::new(namespace::RDF, "type"),
+                        FlakeValue::Ref(Sid::dsc("Relationship")),
+                        t,
+                    ),
+                    Flake::assert(
+                        rel.clone(),
+                        Sid::dsc("fromEntity"),
+                        FlakeValue::Ref(Sid::new(namespace::DSC, from.to_string())),
+                        t,
+                    ),
+                    Flake::assert(
+                        rel.clone(),
+                        Sid::dsc("toEntity"),
+                        FlakeValue::Ref(Sid::new(namespace::DSC, to.to_string())),
+                        t,
+                    ),
+                    Flake::assert(rel, Sid::dsc("relType"), FlakeValue::String(kind.into()), t),
+                ])
+                .await
+                .expect("seed the relationship");
+        }
+
+        async fn link(graph: &Arc<RecordingGraph>, name: &str, from: Uuid, to: Uuid, kind: &str) {
+            link_at(graph, name, from, to, kind, 1).await;
+        }
+
+        fn sid(id: Uuid) -> Sid {
+            Sid::new(namespace::DSC, id.to_string())
+        }
+
+        struct Fixture {
+            catalog: Catalog,
+            ids: Vec<Uuid>,
+        }
+
+        /// `names` become assets in order; `edges` are `(from, to, relType)`
+        /// index triples over them.
+        async fn fixture(names: &[&str], edges: &[(usize, usize, &str)]) -> Fixture {
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let seeder =
+                Catalog::new(storage.clone()).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+            let mut ids = Vec::new();
+            for name in names {
+                let asset = seeder
+                    .upsert_asset(&Principal::system(), service(name))
+                    .await
+                    .expect("seed asset");
+                ids.push(asset.id);
+            }
+            for (index, (from, to, kind)) in edges.iter().enumerate() {
+                link(&graph, &format!("rel-{index}"), ids[*from], ids[*to], kind).await;
+            }
+
+            let traversal: Arc<dyn TraversalEngine> =
+                Arc::new(graph_owl_traversal_memory::InMemoryTraversalEngine::new(
+                    graph.clone() as Arc<dyn TripleStore>,
+                ));
+            Fixture {
+                catalog: Catalog::new(storage)
+                    .with_graph(graph as Arc<dyn TripleStore>)
+                    .with_traversal(traversal),
+                ids,
+            }
+        }
+
+        fn query(from: &Sid, to: &Sid) -> PathQuery {
+            PathQuery {
+                from: from.clone(),
+                to: to.clone(),
+                direction: Direction::Outgoing,
+                bounds: Bounds::default(),
+                mode: PathMode::Shortest,
+                relationship_types: None,
+                as_of: None,
+            }
+        }
+
+        /// **The route, not just its length.** A caller asking "how are these
+        /// connected" is asking *through what*; answering "in 2 hops" is the
+        /// one answer that cannot be acted on.
+        #[tokio::test]
+        async fn a_connected_pair_comes_back_as_the_chain_between_them() {
+            let f = fixture(
+                &["alpha", "beta", "gamma"],
+                &[(0, 1, "FEEDS"), (1, 2, "FEEDS")],
+            )
+            .await;
+
+            let found = f
+                .catalog
+                .find_paths(&Principal::system(), query(&sid(f.ids[0]), &sid(f.ids[2])))
+                .await
+                .expect("path query");
+
+            assert_eq!(found.paths.len(), 1, "{:?}", found.paths);
+            assert_eq!(found.paths[0].length, 2);
+            assert_eq!(
+                found.paths[0].nodes,
+                vec![sid(f.ids[0]), sid(f.ids[1]), sid(f.ids[2])],
+                "the middle node is the whole answer",
+            );
+            assert!(!found.truncated);
+        }
+
+        /// **"Not connected" is an answer, not a failure.** It is the
+        /// commonest true result of asking, and an error would force every
+        /// caller to treat the normal case as exceptional — the same posture
+        /// `TraversalEngine::shortest_path`'s own `Ok(None)` already takes.
+        #[tokio::test]
+        async fn an_unconnected_pair_is_an_empty_set_rather_than_an_error() {
+            let f = fixture(&["alpha", "beta", "gamma"], &[(0, 1, "FEEDS")]).await;
+
+            let found = f
+                .catalog
+                .find_paths(&Principal::system(), query(&sid(f.ids[0]), &sid(f.ids[2])))
+                .await
+                .expect("an unconnected pair is not an error");
+
+            assert!(found.paths.is_empty(), "{:?}", found.paths);
+            assert!(
+                !found.truncated,
+                "nothing was cut short — there was nothing"
+            );
+        }
+
+        /// **Direction is load-bearing, and a symmetric fixture cannot prove
+        /// it.** `alpha → gamma` exists; `gamma → alpha` does not, and an
+        /// implementation that ignored `direction` would pass the first test
+        /// and fail this one.
+        #[tokio::test]
+        async fn following_edges_backwards_finds_nothing_a_forward_walk_finds() {
+            let f = fixture(
+                &["alpha", "beta", "gamma"],
+                &[(0, 1, "FEEDS"), (1, 2, "FEEDS")],
+            )
+            .await;
+
+            let backwards = f
+                .catalog
+                .find_paths(&Principal::system(), query(&sid(f.ids[2]), &sid(f.ids[0])))
+                .await
+                .expect("path query");
+            assert!(backwards.paths.is_empty(), "{:?}", backwards.paths);
+
+            let either_way = f
+                .catalog
+                .find_paths(
+                    &Principal::system(),
+                    PathQuery {
+                        direction: Direction::Both,
+                        ..query(&sid(f.ids[2]), &sid(f.ids[0]))
+                    },
+                )
+                .await
+                .expect("path query");
+            assert_eq!(
+                either_way.paths.len(),
+                1,
+                "undirected, the same two nodes are connected: {:?}",
+                either_way.paths,
+            );
+        }
+
+        /// **Enumeration is capped, and a capped answer says so.** Path
+        /// enumeration in a dense graph is exponential; presenting a
+        /// truncated set as complete is the dangerous direction to get wrong,
+        /// because the reader's conclusion is "there is only one way these
+        /// are connected".
+        #[tokio::test]
+        async fn alternative_routes_are_enumerated_and_a_cut_short_answer_says_so() {
+            let f = fixture(
+                &["alpha", "beta", "gamma", "delta"],
+                &[
+                    (0, 1, "FEEDS"),
+                    (0, 2, "FEEDS"),
+                    (1, 3, "FEEDS"),
+                    (2, 3, "FEEDS"),
+                ],
+            )
+            .await;
+
+            let both = f
+                .catalog
+                .find_paths(
+                    &Principal::system(),
+                    PathQuery {
+                        mode: PathMode::All { max_paths: 10 },
+                        ..query(&sid(f.ids[0]), &sid(f.ids[3]))
+                    },
+                )
+                .await
+                .expect("path query");
+            assert_eq!(
+                both.paths.len(),
+                2,
+                "a diamond has two routes: {:?}",
+                both.paths
+            );
+            assert!(!both.truncated);
+
+            let capped = f
+                .catalog
+                .find_paths(
+                    &Principal::system(),
+                    PathQuery {
+                        mode: PathMode::All { max_paths: 1 },
+                        ..query(&sid(f.ids[0]), &sid(f.ids[3]))
+                    },
+                )
+                .await
+                .expect("path query");
+            assert_eq!(capped.paths.len(), 1);
+            assert!(
+                capped.truncated,
+                "one of two routes returned, and the caller must be told",
+            );
+        }
+
+        /// **The filter's vocabulary comes from the caller, never from a list
+        /// compiled into Rust** — the same posture `EdgeFilter` already takes.
+        /// A pack naming its edges `DERIVED_FROM` and one naming them
+        /// `prescribedIn` are the same call with different strings.
+        #[tokio::test]
+        async fn a_relationship_filter_excludes_the_route_that_uses_another_edge() {
+            let f = fixture(
+                &["alpha", "beta", "gamma"],
+                &[(0, 1, "FEEDS"), (1, 2, "MENTIONS")],
+            )
+            .await;
+
+            let unfiltered = f
+                .catalog
+                .find_paths(&Principal::system(), query(&sid(f.ids[0]), &sid(f.ids[2])))
+                .await
+                .expect("path query");
+            assert_eq!(unfiltered.paths.len(), 1, "{:?}", unfiltered.paths);
+
+            let feeds_only = f
+                .catalog
+                .find_paths(
+                    &Principal::system(),
+                    PathQuery {
+                        relationship_types: Some(vec!["FEEDS".to_string()]),
+                        ..query(&sid(f.ids[0]), &sid(f.ids[2]))
+                    },
+                )
+                .await
+                .expect("path query");
+            assert!(
+                feeds_only.paths.is_empty(),
+                "the second hop is a MENTIONS edge the filter excludes: {:?}",
+                feeds_only.paths,
+            );
+        }
+
+        /// **A route that did not exist yet must not be found in the past.**
+        ///
+        /// Written to kill a surviving mutant: deleting the `as_of` arm of
+        /// `find_paths` left every one of the tests above passing, because
+        /// none of them ever asked about a moment other than now. That is the
+        /// dangerous direction for a time-travelling walk — a route reported
+        /// as of July that only came into existence in August is a fact about
+        /// the present wearing a date from the past.
+        #[tokio::test]
+        async fn a_walk_in_the_past_does_not_follow_an_edge_asserted_later() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let seeder =
+                Catalog::new(storage.clone()).with_graph(graph.clone() as Arc<dyn TripleStore>);
+
+            let mut ids = Vec::new();
+            for name in ["alpha", "beta", "gamma"] {
+                ids.push(
+                    seeder
+                        .upsert_asset(&Principal::system(), service(name))
+                        .await
+                        .expect("seed asset")
+                        .id,
+                );
+            }
+            link_at(&graph, "rel-0", ids[0], ids[1], "FEEDS", 1).await;
+            // The second hop is asserted long after the instant asked about
+            // below. Two edges at one `t` would make history unobservable.
+            link_at(&graph, "rel-1", ids[1], ids[2], "FEEDS", 100).await;
+            graph
+                .at_resolves_to
+                .store(50, std::sync::atomic::Ordering::SeqCst);
+
+            let traversal: Arc<dyn TraversalEngine> =
+                Arc::new(graph_owl_traversal_memory::InMemoryTraversalEngine::new(
+                    graph.clone() as Arc<dyn TripleStore>,
+                ));
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_traversal(traversal);
+
+            let then = catalog
+                .find_paths(
+                    &Principal::system(),
+                    PathQuery {
+                        as_of: Some(chrono::Utc::now()),
+                        ..query(&sid(ids[0]), &sid(ids[2]))
+                    },
+                )
+                .await
+                .expect("path query");
+            assert!(
+                then.paths.is_empty(),
+                "the second hop did not exist at that instant: {:?}",
+                then.paths,
+            );
+
+            // And the same question about *now* finds it — without this the
+            // assertion above would pass on a walk that finds nothing ever.
+            let now = catalog
+                .find_paths(&Principal::system(), query(&sid(ids[0]), &sid(ids[2])))
+                .await
+                .expect("path query");
+            assert_eq!(now.paths.len(), 1, "{:?}", now.paths);
+        }
+
+        /// **An endpoint the principal cannot see answers exactly as one that
+        /// does not exist.** Anything else is an existence oracle: "you may
+        /// not see this" and "there is nothing here" must be indistinguishable
+        /// to a caller probing for what a deployment holds.
+        #[tokio::test]
+        async fn an_endpoint_outside_the_principals_policy_is_refused() {
+            use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+
+            let storage = Arc::new(InMemoryStorage::default());
+            storage
+                .upsert_policy(
+                    &Policy {
+                        name: "analyst".to_string(),
+                        rules: vec![Rule {
+                            name: "read-alpha".to_string(),
+                            effect: Effect::Allow,
+                            operations: vec![MetadataOperation::ViewBasic],
+                            resources: ResourceMatcher::FqnPrefix("alpha".to_string()),
+                        }],
+                    },
+                    &["analyst".to_string()],
+                )
+                .await
+                .expect("policy");
+
+            let graph = RecordingGraph::working();
+            let seeder =
+                Catalog::new(storage.clone()).with_graph(graph.clone() as Arc<dyn TripleStore>);
+            let alpha = seeder
+                .upsert_asset(&Principal::system(), service("alpha"))
+                .await
+                .expect("seed");
+            let omega = seeder
+                .upsert_asset(&Principal::system(), service("omega"))
+                .await
+                .expect("seed");
+            link(&graph, "rel-0", alpha.id, omega.id, "FEEDS").await;
+
+            let traversal: Arc<dyn TraversalEngine> =
+                Arc::new(graph_owl_traversal_memory::InMemoryTraversalEngine::new(
+                    graph.clone() as Arc<dyn TripleStore>,
+                ));
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_traversal(traversal);
+
+            let analyst = Principal {
+                id: "asha".to_string(),
+                name: "Asha".to_string(),
+                kind: graph_owl_core::PrincipalKind::User,
+                roles: vec!["analyst".to_string()],
+                is_admin: false,
+            };
+
+            let refused = catalog
+                .find_paths(&analyst, query(&sid(alpha.id), &sid(omega.id)))
+                .await
+                .expect_err("`omega` is outside the analyst's policy");
+            assert!(matches!(refused, CatalogError::NotFound), "{refused:?}");
+
+            // And the same call under a principal who *can* see both really
+            // does find the edge — without this the test above would pass on
+            // a `find_paths` that refuses everything.
+            let allowed = catalog
+                .find_paths(&Principal::system(), query(&sid(alpha.id), &sid(omega.id)))
+                .await
+                .expect("path query");
+            assert_eq!(allowed.paths.len(), 1, "{:?}", allowed.paths);
+
+            // **The two endpoints must be judged separately, on their own
+            // flakes.** Asserted directly rather than through `find_paths`,
+            // because the pair of calls above cannot prove it *reliably*: a
+            // check that read every subject's flakes instead of one
+            // subject's would resolve both endpoints to the same arbitrary
+            // key, and whether that key happens to be the allowed one
+            // decides whether the assertions above notice — which is a
+            // coin toss over hash order, not a test. Found by a mutation run
+            // that caught this exact mutant once and missed it the next time.
+            assert!(
+                catalog
+                    .graph_subject_visible(&analyst, &sid(alpha.id))
+                    .await
+                    .expect("visibility"),
+                "the analyst's policy covers `alpha`",
+            );
+            assert!(
+                !catalog
+                    .graph_subject_visible(&analyst, &sid(omega.id))
+                    .await
+                    .expect("visibility"),
+                "and does not cover `omega` — a check reading every subject's \
+                 flakes would give these two the same answer",
+            );
+        }
     }
 
     /// **A variable-length pattern with nothing binding its start is refused,

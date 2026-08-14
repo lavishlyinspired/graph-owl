@@ -1017,3 +1017,30 @@ it — but it belongs in the resolution engine (`[[matching.blocking]]`, which
 already declares `normalized`/`composite`/`ngram` strategies), not in a SPARQL
 finding rule. Recorded as the shape of the next slice rather than half-built
 into a query where it would be invisible to the engine that should own it.
+
+## Path finding over an existing traversal engine — checked before Plan 111 Slice A
+
+**The check ran and returned nothing to adopt, which is the right answer for a
+reason worth writing down**: Slice A adds no algorithm. `shortest_path` and
+`all_paths` are already implemented behind `TraversalEngine`, in
+`graph-owl-engine-postgres` (recursive SQL) and `graph-owl-traversal-memory`
+(petgraph, itself an adoption recorded above). What was missing was a facade
+method, a route and a screen — wiring, and there is no crate for wiring
+somebody else's trait to somebody else's HTTP framework.
+
+**The question that could have had a candidate was asked anyway**, because the
+failure mode this check exists to catch is not "we wrote a parser that
+existed", it is "we did not think to look":
+
+| Crate | Licence | Does | Verdict |
+|---|---|---|---|
+| `petgraph` | MIT OR Apache-2.0 | Graph structures plus the classic algorithms | **Already adopted** — `graph-owl-traversal-memory` is built on it (0.8.3, 2025-09-30, 464M downloads). Nothing new to take |
+| `pathfinding` | Apache-2.0/MIT | "Pathfinding, flow, and graph algorithms" — `directed::dijkstra`, `directed::yen` (k-shortest-paths) and the rest, over a caller-supplied successor function | **Reject for this slice, and it is close.** 4.15.0, 2026-03-10, 2.65M downloads, `evenfurther/pathfinding` — every gate passed. Its `yen` is a better k-shortest-paths than enumerate-and-cap, but the API takes a *successor function evaluated in-process*, and the Postgres adapter's whole point is that the walk runs in the database. Adopting it would mean pulling the neighbourhood into memory first — the opposite of the bound the traversal engine exists to enforce. **Revisit if a ranked "best k routes" is ever asked for**, where the ranking is the hard part rather than the walk |
+| `rust-igraph` | GPL-2.0-or-later | Every graph algorithm this project could want | **Rejected, permanently** — copyleft. Already recorded above; repeated here only because it is the crate that comes up every time a path question is asked |
+
+**The row that matters is the second one.** `pathfinding` is genuinely good and
+genuinely wrong here, and the reason is architectural rather than a defect: the
+`TraversalEngine` port exists so a walk can be bounded *where the data is*, and
+a library that needs the graph in memory first cannot honour that bound. That
+is the same argument `00l` already makes against Apache AGE's parser, applied
+to a much smaller decision.
