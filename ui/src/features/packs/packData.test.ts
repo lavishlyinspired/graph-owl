@@ -20,8 +20,24 @@ describe("an import graph's source name", () => {
     expect(importSourceOf("graph:import:gst-gstr2b-2025-07")).toBe("gst-gstr2b-2025-07");
   });
 
+  /** **The shape the endpoint actually returns.** A `Sid` is
+   *  `dsc:{id}`, and `/sparql` renders one as its full IRI —
+   *  `https://graph-owl.dev/ns/catalog#graph:import:gst-gstr2b-2026-08`
+   *  (`graph-owl-core/src/flake.rs`). The bare `graph:import:` form above is
+   *  the server's internal address; the block must name the source out of
+   *  what the wire actually carries, not out of an internal address it never
+   *  sees. This was a live bug: the listing matched only the bare form,
+   *  every real graph was dropped, and the block read "Nothing imported
+   *  yet" against a fully-loaded pack. */
+  it("reads the source out of the namespaced IRI the wire actually returns", () => {
+    expect(
+      importSourceOf("https://graph-owl.dev/ns/catalog#graph:import:gst-gstr2b-2026-08"),
+    ).toBe("gst-gstr2b-2026-08");
+  });
+
   it("is not every named graph, and not an empty import graph", () => {
     expect(importSourceOf("graph:vocab")).toBeNull();
+    expect(importSourceOf("https://graph-owl.dev/ns/catalog#graph:vocab")).toBeNull();
     expect(importSourceOf("graph:import:")).toBeNull();
   });
 });
@@ -29,8 +45,8 @@ describe("an import graph's source name", () => {
 describe("the named-graph listing", () => {
   it("parses import graphs into sources with their triple counts", () => {
     const sources = loadedSourcesFromSparql([
-      { g: "<graph:import:gst-books-2025-07>", n: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>' },
-      { g: "<graph:import:gst-gstr2b-2025-07>", n: '"168"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+      { g: "<https://graph-owl.dev/ns/catalog#graph:import:gst-books-2025-07>", n: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+      { g: "<https://graph-owl.dev/ns/catalog#graph:import:gst-gstr2b-2025-07>", n: '"168"^^<http://www.w3.org/2001/XMLSchema#integer>' },
     ]);
 
     expect(sources).toEqual([
@@ -43,8 +59,8 @@ describe("the named-graph listing", () => {
    *  not offered as "data you imported" — it was not uploaded by anybody. */
   it("drops graphs that are not import graphs", () => {
     const sources = loadedSourcesFromSparql([
-      { g: "<graph:import:gst-books-2025-07>", n: '"42"^^<…integer>' },
-      { g: "<graph:vocab>", n: '"9"^^<…integer>' },
+      { g: "<https://graph-owl.dev/ns/catalog#graph:import:gst-books-2025-07>", n: '"42"^^<…integer>' },
+      { g: "<https://graph-owl.dev/ns/catalog#graph:vocab>", n: '"9"^^<…integer>' },
     ]);
 
     expect(sources).toEqual([{ name: "gst-books-2025-07", packId: "gst", triples: 42 }]);
@@ -52,8 +68,8 @@ describe("the named-graph listing", () => {
 
   it("orders the listing by source name, so a CA can scan it", () => {
     const sources = loadedSourcesFromSparql([
-      { g: "<graph:import:gst-gstr2b-2025-07>", n: '"168"^^<…integer>' },
-      { g: "<graph:import:gst-books-2025-07>", n: '"42"^^<…integer>' },
+      { g: "<https://graph-owl.dev/ns/catalog#graph:import:gst-gstr2b-2025-07>", n: '"168"^^<…integer>' },
+      { g: "<https://graph-owl.dev/ns/catalog#graph:import:gst-books-2025-07>", n: '"42"^^<…integer>' },
     ]);
 
     expect(sources.map((s) => s.name)).toEqual(["gst-books-2025-07", "gst-gstr2b-2025-07"]);

@@ -27,10 +27,20 @@ const IMPORT_GRAPH_PREFIX = "graph:import:";
 
 /** `graph:import:gst-gstr2b-2025-07` → `gst-gstr2b-2025-07`. Anything that is
  *  not an import graph is `null` — a vocabulary graph is a real graph and
- *  must not be offered as "data you imported". */
+ *  must not be offered as "data you imported".
+ *
+ *  **The graph arrives as its full IRI, not its internal address.** A `Sid`
+ *  is stored as `dsc:{id}` and `/sparql` renders one as
+ *  `https://graph-owl.dev/ns/catalog#{id}` (see `graph-owl-core/src/flake.rs`),
+ *  so the source name has to be read out of the IRI *fragment* — the part
+ *  after the final `#` — not matched against the bare `graph:import:` prefix
+ *  the internal form uses. Deriving the fragment instead of hardcoding the
+ *  catalog IRI means the same function works whichever namespace a graph
+ *  address eventually lives under. */
 export function importSourceOf(graphIri: string): string | null {
-  return graphIri.startsWith(IMPORT_GRAPH_PREFIX) && graphIri.length > IMPORT_GRAPH_PREFIX.length
-    ? graphIri.slice(IMPORT_GRAPH_PREFIX.length)
+  const local = graphIri.includes("#") ? graphIri.slice(graphIri.lastIndexOf("#") + 1) : graphIri;
+  return local.startsWith(IMPORT_GRAPH_PREFIX) && local.length > IMPORT_GRAPH_PREFIX.length
+    ? local.slice(IMPORT_GRAPH_PREFIX.length)
     : null;
 }
 
