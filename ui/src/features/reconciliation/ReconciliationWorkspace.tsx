@@ -48,11 +48,12 @@ import {
   CheckCircleOutlined,
   DownloadOutlined,
   InboxOutlined,
+  QuestionCircleOutlined,
   SyncOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
 import type { UploadFile } from "antd/es/upload/interface";
-import { api, type PackConsoleConfig, type PackFinding } from "../../api";
+import { api, type FindingRuleDef, type PackConsoleConfig, type PackFinding } from "../../api";
 import { lexical } from "../../workbench/results";
 import { importThroughSurface } from "../packs/importFile";
 import {
@@ -67,6 +68,7 @@ import {
   evidenceOf,
   first,
   guidanceFrom,
+  localName,
   scenarioFor,
   sourceSummary,
   statementCsv,
@@ -76,6 +78,7 @@ import {
   type Heads,
   type ReconcilingItem,
   type SourceInvoice,
+  type SourceSummary,
   type SupplierRow,
   type Statement,
 } from "./statement";
@@ -160,6 +163,17 @@ const COPY = {
   graphVocabHint: "classes and predicates the pack registered at runtime",
   openWorkbench: "Query the graph directly",
   openVocabulary: "Browse the vocabulary",
+  totalRow: "Total",
+  rulesTrigger: "What these rules are",
+  noRules: "No rule is registered for this pack yet.",
+  statementHelp: "How the statement is built",
+  graphTileTitles: {
+    invoices: "Invoice records in the graph",
+    suppliers: "Supplier subjects",
+    graphs: "Named graphs",
+  },
+  graphSource: "Source",
+  graphRecordCount: "Records",
 };
 
 /** Every invoice in one class, with the fields the statement totals.
@@ -431,8 +445,9 @@ function SourceCard({
           rowKey="invoiceNumber"
           dataSource={[...rows]}
           columns={invoiceColumns(money)}
-          pagination={rows.length > 10 ? { pageSize: 10 } : false}
-          scroll={{ x: "max-content" }}
+          pagination={false}
+          scroll={{ x: "max-content", y: 360 }}
+          summary={invoiceTotals(summary, money)}
         />
       </Modal>
     </Card>
@@ -441,26 +456,87 @@ function SourceCard({
 
 function invoiceColumns(money: (v: number) => string) {
   return [
-  { title: "Invoice", dataIndex: "invoiceNumber", key: "invoiceNumber", width: 130 },
-  { title: "Supplier", dataIndex: "supplierName", key: "supplierName", render: (v: string) => v || "—" },
-  { title: "GSTIN", dataIndex: "gstin", key: "gstin", width: 170 },
-  { title: "Date", dataIndex: "invoiceDate", key: "invoiceDate", width: 110 },
-  { title: "Period", dataIndex: "period", key: "period", width: 90 },
-  {
-    title: "Taxable",
-    dataIndex: "taxableValue",
-    key: "taxableValue",
-    align: "right" as const,
-    render: (v: string) => money(Number(v || 0)),
-  },
-  {
-    title: "Tax",
-    dataIndex: "taxAmount",
-    key: "taxAmount",
-    align: "right" as const,
-    render: (v: string) => money(Number(v || 0)),
-  },
+    { title: "Invoice", dataIndex: "invoiceNumber", key: "invoiceNumber", width: 130 },
+    { title: "Supplier", dataIndex: "supplierName", key: "supplierName", render: (v: string) => v || "—" },
+    { title: "GSTIN", dataIndex: "gstin", key: "gstin", width: 170 },
+    { title: "Date", dataIndex: "invoiceDate", key: "invoiceDate", width: 110 },
+    { title: "Period", dataIndex: "period", key: "period", width: 90 },
+    {
+      title: "Taxable",
+      dataIndex: "taxableValue",
+      key: "taxableValue",
+      align: "right" as const,
+      render: (v: string) => money(Number(v || 0)),
+    },
+    {
+      title: "IGST",
+      dataIndex: "igst",
+      key: "igst",
+      align: "right" as const,
+      render: (v: string) => money(Number(v || 0)),
+    },
+    {
+      title: "CGST",
+      dataIndex: "cgst",
+      key: "cgst",
+      align: "right" as const,
+      render: (v: string) => money(Number(v || 0)),
+    },
+    {
+      title: "SGST",
+      dataIndex: "sgst",
+      key: "sgst",
+      align: "right" as const,
+      render: (v: string) => money(Number(v || 0)),
+    },
+    {
+      title: "Cess",
+      dataIndex: "cess",
+      key: "cess",
+      align: "right" as const,
+      render: (v: string) => money(Number(v || 0)),
+    },
+    {
+      title: "Tax",
+      dataIndex: "taxAmount",
+      key: "taxAmount",
+      align: "right" as const,
+      render: (v: string) => money(Number(v || 0)),
+    },
   ];
+}
+
+/** The totals row every invoice table ends on — the source's own sums, never
+ *  a per-page total, because a table of ₹ values that does not total the rows
+ *  it actually shows is not a table of ₹ values. `offset`/`labelSpan` let a
+ *  table with a leading column (e.g. per-source records) keep the amounts
+ *  under the same columns they describe. */
+function invoiceTotals(summary: SourceSummary, money: (v: number) => string, offset = 0, labelSpan = 5) {
+  return () => (
+    <Table.Summary.Row>
+      <Table.Summary.Cell index={0} colSpan={labelSpan}>
+        <Text strong>{COPY.totalRow}</Text>
+      </Table.Summary.Cell>
+      <Table.Summary.Cell index={offset + 5} align="right">
+        <Text strong>{money(summary.taxableValue)}</Text>
+      </Table.Summary.Cell>
+      <Table.Summary.Cell index={offset + 6} align="right">
+        <Text strong>{money(summary.igst)}</Text>
+      </Table.Summary.Cell>
+      <Table.Summary.Cell index={offset + 7} align="right">
+        <Text strong>{money(summary.cgst)}</Text>
+      </Table.Summary.Cell>
+      <Table.Summary.Cell index={offset + 8} align="right">
+        <Text strong>{money(summary.sgst)}</Text>
+      </Table.Summary.Cell>
+      <Table.Summary.Cell index={offset + 9} align="right">
+        <Text strong>{money(summary.cess)}</Text>
+      </Table.Summary.Cell>
+      <Table.Summary.Cell index={offset + 10} align="right">
+        <Text strong>{money(summary.taxAmount)}</Text>
+      </Table.Summary.Cell>
+    </Table.Summary.Row>
+  );
 }
 
 /** The statement's own arithmetic, laid out the way a practitioner's format
@@ -689,6 +765,225 @@ function FindingGroup({
   );
 }
 
+/** One supplier per row, and which documents describe it — used by the
+ *  "By supplier" section and opened again from the graph's "Supplier
+ *  subjects" tile, so the two can never disagree about a standing. */
+function SupplierTable({
+  suppliers,
+  money,
+}: {
+  suppliers: readonly SupplierRow[];
+  money: (value: number) => string;
+}) {
+  return (
+    <Table
+      size="small"
+      rowKey="gstin"
+      dataSource={[...suppliers]}
+      pagination={suppliers.length > 10 ? { pageSize: 10 } : false}
+      scroll={{ x: "max-content" }}
+      columns={[
+        {
+          title: "Supplier",
+          key: "supplier",
+          render: (_: unknown, row: SupplierRow) => (
+            <Space direction="vertical" size={0}>
+              <Text>{row.supplierName || "—"}</Text>
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {row.gstin}
+              </Text>
+            </Space>
+          ),
+        },
+        {
+          title: "Described by",
+          key: "sources",
+          render: (_: unknown, row: SupplierRow) => (
+            <Space size={4} wrap>
+              {row.inBooks && <Tag>{COPY.sourceBooks}</Tag>}
+              {row.inGstr1 && <Tag>{COPY.sourceGstr1}</Tag>}
+              {row.inAuthority && <Tag color="green">{COPY.sourceAuthority}</Tag>}
+            </Space>
+          ),
+        },
+        {
+          title: "Standing",
+          key: "standing",
+          render: (_: unknown, row: SupplierRow) =>
+            row.inBooks && row.inGstr1 && row.inAuthority ? (
+              <Tag color="green">{COPY.inAll}</Tag>
+            ) : !row.inGstr1 && !row.inAuthority ? (
+              <Tag color="red">{COPY.notFiled}</Tag>
+            ) : !row.inBooks ? (
+              <Tag color="blue">{COPY.notBooked}</Tag>
+            ) : (
+              <Tag color="orange">{COPY.partial}</Tag>
+            ),
+        },
+        {
+          title: "Your invoices",
+          dataIndex: "invoices",
+          key: "invoices",
+          align: "right" as const,
+        },
+        {
+          title: "Tax in books",
+          dataIndex: "booksTax",
+          key: "booksTax",
+          align: "right" as const,
+          render: (v: number) => money(v),
+        },
+        {
+          title: "Tax in GSTR-2B",
+          dataIndex: "authorityTax",
+          key: "authorityTax",
+          align: "right" as const,
+          render: (v: number) => money(v),
+        },
+      ]}
+    />
+  );
+}
+
+/** The registered rules, each with the pack's own words for it — opened from
+ *  the "Run the rules" section and from the graph's "Rules evaluated" tile,
+ *  so neither can drift from the other. `scenarioFor` supplies the meaning
+ *  and next action the pack declared; the rule's one-line `summary` comes
+ *  from the registry itself. */
+function RulesPanel({
+  rules,
+  guidance,
+}: {
+  rules: readonly FindingRuleDef[] | null;
+  guidance: GuidanceIndex;
+}) {
+  if (!rules) return <Text type="secondary">{COPY.loading}</Text>;
+  if (rules.length === 0) return <Text type="secondary">{COPY.noRules}</Text>;
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      {rules.map((rule) => {
+        const scenario = scenarioFor(rule.label, guidance);
+        return (
+          <Card key={rule.label} size="small">
+            <Space wrap>
+              <Tag>{localName(rule.label)}</Tag>
+              <Tag color="blue">{localName(rule.governedBy)}</Tag>
+            </Space>
+            <Paragraph style={{ margin: "8px 0 0" }}>{rule.summary}</Paragraph>
+            {scenario.meaning !== "" && (
+              <Paragraph type="secondary" style={{ margin: "8px 0 0", fontSize: 12 }}>
+                {scenario.meaning}
+              </Paragraph>
+            )}
+            {scenario.nextAction !== "" && (
+              <Paragraph style={{ margin: "8px 0 0", fontSize: 12 }}>
+                <Text strong>{`${COPY.nextAction}: `}</Text>
+                {scenario.nextAction}
+              </Paragraph>
+            )}
+          </Card>
+        );
+      })}
+    </Space>
+  );
+}
+
+/** What the statement's four figures mean and where each one comes from —
+ *  the answer to "where does the books taxable figure come from" that a
+ *  total with no provenance cannot give. Amounts are described, never
+ *  printed, so another pack's statement explains itself in the same words. */
+function StatementHelp({
+  statement,
+}: {
+  statement: Statement;
+}) {
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Paragraph style={{ margin: 0 }}>
+        <Text strong>{`${COPY.booksTotal}: `}</Text>
+        {`what your own register records — ${statement.books.count} ${COPY.invoicesSuffix}. The card's taxable figure is the sum of the taxable values of the invoices; its tax figure is the sum of their tax.`}
+      </Paragraph>
+      <Paragraph style={{ margin: 0 }}>
+        <Text strong>{`${COPY.authorityTotal}: `}</Text>
+        {`what the authority made available to claim — ${statement.authority.count} ${COPY.invoicesSuffix}.`}
+      </Paragraph>
+      <Paragraph style={{ margin: 0 }}>
+        <Text strong>{`${COPY.differenceTotal}: `}</Text>
+        {`books minus GSTR-2B (${COPY.differenceHint}). This is the number the period is driven to zero.`}
+      </Paragraph>
+      <Paragraph style={{ margin: 0 }}>
+        <Text strong>{`${COPY.explainedTotal}: `}</Text>
+        {`the sum of the finding rows below (${COPY.explainedHint}). Whatever they do not cover stays as ${COPY.unexplainedTitle} — the amount the statement is honest about not having explained yet.`}
+      </Paragraph>
+      <Paragraph style={{ margin: 0 }}>
+        <Text strong>{`${COPY.headsTitle}: `}</Text>
+        {`ITC is claimed head by head in GSTR-3B, so IGST, CGST, SGST and Cess are compared separately. A total can agree while a head disagrees — that is the reversal exposure a total-only reconciliation cannot see.`}
+      </Paragraph>
+    </Space>
+  );
+}
+
+/** Every invoice record the graph holds, one row per record with the source
+ *  it arrived in — the graph's own subject count, which is deliberately not
+ *  the statement's invoice count, because the same invoice is three subjects
+ *  (register, GSTR-1, GSTR-2B). */
+function InvoiceRecordsModal({
+  rows,
+  money,
+}: {
+  rows: Record<string, SourceInvoice[]>;
+  money: (value: number) => string;
+}) {
+  const sources = Object.entries(rows).filter(([, list]) => list.length > 0);
+  const flat = sources.flatMap(([sourceKey, list]) => list.map((row) => ({ ...row, sourceKey })));
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Space wrap>
+        {sources.map(([sourceKey, list]) => (
+          <Tag key={sourceKey}>{`${sourceKey}: ${list.length}`}</Tag>
+        ))}
+        <Tag color="blue">{`${COPY.totalRow}: ${flat.length}`}</Tag>
+      </Space>
+      <Table
+        size="small"
+        rowKey={(row) => `${row.sourceKey}:${row.invoiceNumber}`}
+        dataSource={flat}
+        pagination={false}
+        scroll={{ x: "max-content", y: 320 }}
+        columns={[
+          { title: COPY.graphSource, dataIndex: "sourceKey", key: "sourceKey", width: 130 },
+          ...invoiceColumns(money),
+        ]}
+        summary={invoiceTotals(sourceSummary(flat), money, 1, 6)}
+      />
+    </Space>
+  );
+}
+
+/** The loaded named graphs, one row each, with what it holds — "one per
+ *  imported document, never the default graph" made concrete. */
+function NamedGraphsModal({
+  sources,
+  rows,
+}: {
+  sources: readonly SourceSpec[];
+  rows: Record<string, SourceInvoice[]>;
+}) {
+  return (
+    <Table
+      size="small"
+      rowKey="key"
+      pagination={false}
+      dataSource={sources.map((source) => ({ ...source, count: rows[source.key]?.length ?? 0 }))}
+      columns={[
+        { title: COPY.graphSource, dataIndex: "label", key: "label" },
+        { title: COPY.graphRecordCount, dataIndex: "count", key: "count", align: "right" as const },
+        { title: "Role", dataIndex: "role", key: "role" },
+      ]}
+    />
+  );
+}
+
 export function ReconciliationWorkspace({
   onReview,
   onWorkbench,
@@ -700,7 +995,10 @@ export function ReconciliationWorkspace({
   onWorkbench: () => void;
   onVocabulary: () => void;
 }) {
-  const [ruleCount, setRuleCount] = useState<number | null>(null);
+  const [rules, setRules] = useState<readonly FindingRuleDef[] | null>(null);
+  const [rulesOpen, setRulesOpen] = useState(false);
+  const [statementHelpOpen, setStatementHelpOpen] = useState(false);
+  const [graphTileOpen, setGraphTileOpen] = useState<"invoices" | "suppliers" | "graphs" | null>(null);
   const [config, setConfig] = useState<PackConsoleConfig | null>(null);
   const [guidance, setGuidance] = useState<GuidanceIndex>({});
   /** Which pack this page is showing. Discovered, never assumed — the page
@@ -792,7 +1090,7 @@ export function ReconciliationWorkspace({
       setFindings(await api.findings({ pack: pack.packId }));
       // The pack's own registered rules — real data, already admin-gated, and
       // the honest answer to "what is actually evaluating my data".
-      setRuleCount(await api.findingRules(pack.packId).then((r) => r.length).catch(() => null));
+      setRules(await api.findingRules(pack.packId).catch(() => null));
       // Per-rule wording as the pack declared it. It arrives with the console
       // config rather than with the rules, because the finding-rule registry
       // has no field for it — see `read_console_config`.
@@ -850,6 +1148,10 @@ export function ReconciliationWorkspace({
       })),
     [config],
   );
+
+  /** The number of registered rules — derived from the same fetch that powers
+   *  the rules popup, so the tile can never disagree with what it opens. */
+  const ruleCount = rules?.length ?? 0;
 
   /** Currency and grouping are a domain fact, not a global preference: ₹ in
    *  Indian grouping for GST, and whatever a different pack declares for
@@ -956,6 +1258,9 @@ export function ReconciliationWorkspace({
             {statement.items.length === 0 ? COPY.nothingToExport : COPY.exportCsv}
           </Button>
           <Button onClick={onReview}>{COPY.openInReview}</Button>
+          <Button size="small" icon={<QuestionCircleOutlined />} onClick={() => setRulesOpen(true)}>
+            {COPY.rulesTrigger}
+          </Button>
         </Space>
         <div style={{ marginTop: 6 }}>
           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -965,7 +1270,14 @@ export function ReconciliationWorkspace({
       </div>
 
       <div>
-        <Title level={5}>{COPY.step3}</Title>
+        <Title level={5}>
+          <Space size={4}>
+            {COPY.step3}
+            <Button type="link" size="small" icon={<QuestionCircleOutlined />} onClick={() => setStatementHelpOpen(true)}>
+              {COPY.statementHelp}
+            </Button>
+          </Space>
+        </Title>
         <StatementPanel statement={statement} measures={measures} money={money} />
       </div>
 
@@ -982,20 +1294,35 @@ export function ReconciliationWorkspace({
         <Row gutter={[16, 16]}>
           {[
             {
+              key: "invoices" as const,
               label: COPY.graphSubjects,
               hint: COPY.graphSubjectsHint,
               value: (rows.books?.length ?? 0) + (rows.gstr1?.length ?? 0) + (rows.authority?.length ?? 0),
             },
-            { label: COPY.graphSuppliers, hint: COPY.graphSuppliersHint, value: suppliers.length },
             {
+              key: "suppliers" as const,
+              label: COPY.graphSuppliers,
+              hint: COPY.graphSuppliersHint,
+              value: suppliers.length,
+            },
+            {
+              key: "graphs" as const,
               label: COPY.graphSources,
               hint: COPY.graphSourcesHint,
               value: sources.filter((s) => (rows[s.key]?.length ?? 0) > 0).length,
             },
-            { label: COPY.graphRules, hint: COPY.graphRulesHint, value: ruleCount ?? 0 },
+            { key: "rules" as const, label: COPY.graphRules, hint: COPY.graphRulesHint, value: ruleCount },
           ].map((tile) => (
-            <Col xs={12} md={6} key={tile.label}>
-              <Card size="small">
+            <Col xs={12} md={6} key={tile.key}>
+              {/* **Every figure here is a door into the graph it came from.** A
+                  number with nothing behind it is the very thing this section
+                  exists to disprove — the rules tile opens the same rules the
+                  "Run the rules" section opens, so neither can drift. */}
+              <Card
+                size="small"
+                hoverable
+                onClick={() => (tile.key === "rules" ? setRulesOpen(true) : setGraphTileOpen(tile.key))}
+              >
                 <Statistic title={tile.label} value={tile.value} valueStyle={{ fontSize: 22 }} />
                 <Text type="secondary" style={{ fontSize: 11 }}>
                   {tile.hint}
@@ -1019,72 +1346,7 @@ export function ReconciliationWorkspace({
         <Paragraph type="secondary" style={{ fontSize: 12 }}>
           {COPY.supplierHint}
         </Paragraph>
-        <Table
-          size="small"
-          rowKey="gstin"
-          dataSource={[...suppliers]}
-          pagination={suppliers.length > 10 ? { pageSize: 10 } : false}
-          scroll={{ x: "max-content" }}
-          columns={[
-            {
-              title: "Supplier",
-              key: "supplier",
-              render: (_: unknown, row: SupplierRow) => (
-                <Space direction="vertical" size={0}>
-                  <Text>{row.supplierName || "—"}</Text>
-                  <Text type="secondary" style={{ fontSize: 11 }}>
-                    {row.gstin}
-                  </Text>
-                </Space>
-              ),
-            },
-            {
-              title: "Described by",
-              key: "sources",
-              render: (_: unknown, row: SupplierRow) => (
-                <Space size={4} wrap>
-                  {row.inBooks && <Tag>{COPY.sourceBooks}</Tag>}
-                  {row.inGstr1 && <Tag>{COPY.sourceGstr1}</Tag>}
-                  {row.inAuthority && <Tag color="green">{COPY.sourceAuthority}</Tag>}
-                </Space>
-              ),
-            },
-            {
-              title: "Standing",
-              key: "standing",
-              render: (_: unknown, row: SupplierRow) =>
-                row.inBooks && row.inGstr1 && row.inAuthority ? (
-                  <Tag color="green">{COPY.inAll}</Tag>
-                ) : !row.inGstr1 && !row.inAuthority ? (
-                  <Tag color="red">{COPY.notFiled}</Tag>
-                ) : !row.inBooks ? (
-                  <Tag color="blue">{COPY.notBooked}</Tag>
-                ) : (
-                  <Tag color="orange">{COPY.partial}</Tag>
-                ),
-            },
-            {
-              title: "Your invoices",
-              dataIndex: "invoices",
-              key: "invoices",
-              align: "right" as const,
-            },
-            {
-              title: "Tax in books",
-              dataIndex: "booksTax",
-              key: "booksTax",
-              align: "right" as const,
-              render: (v: number) => money(v),
-            },
-            {
-              title: "Tax in GSTR-2B",
-              dataIndex: "authorityTax",
-              key: "authorityTax",
-              align: "right" as const,
-              render: (v: number) => money(v),
-            },
-          ]}
-        />
+        <SupplierTable suppliers={suppliers} money={money} />
       </div>
 
       <div>
@@ -1104,6 +1366,41 @@ export function ReconciliationWorkspace({
           ))
         )}
       </div>
+
+      {/* The three explanations the page can give about itself, opened from
+          where the question arises: the rules behind the run button, the
+          arithmetic behind the statement, and each graph tile's own content. */}
+      <Modal
+        open={rulesOpen}
+        title={`${COPY.rulesTrigger} · ${ruleCount}`}
+        onCancel={() => setRulesOpen(false)}
+        footer={null}
+        width={720}
+      >
+        <RulesPanel rules={rules} guidance={guidance} />
+      </Modal>
+
+      <Modal
+        open={statementHelpOpen}
+        title={COPY.statementHelp}
+        onCancel={() => setStatementHelpOpen(false)}
+        footer={null}
+        width={640}
+      >
+        <StatementHelp statement={statement} />
+      </Modal>
+
+      <Modal
+        open={graphTileOpen !== null}
+        title={graphTileOpen ? COPY.graphTileTitles[graphTileOpen] : ""}
+        onCancel={() => setGraphTileOpen(null)}
+        footer={null}
+        width={960}
+      >
+        {graphTileOpen === "invoices" && <InvoiceRecordsModal rows={rows} money={money} />}
+        {graphTileOpen === "suppliers" && <SupplierTable suppliers={suppliers} money={money} />}
+        {graphTileOpen === "graphs" && <NamedGraphsModal sources={sources} rows={rows} />}
+      </Modal>
     </Space>
   );
 }

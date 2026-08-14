@@ -262,7 +262,7 @@ export interface Scenario {
  *
  *  The `:` cut is tried last, never first: an IRI's own scheme separator is a
  *  colon, and cutting there would turn every IRI into `//graph-owl.dev/…`. */
-function localName(term: string): string {
+export function localName(term: string): string {
   const slash = Math.max(term.lastIndexOf("#"), term.lastIndexOf("/"));
   const cut = slash >= 0 ? slash : term.lastIndexOf(":");
   const tail = cut >= 0 ? term.slice(cut + 1) : term;
