@@ -54,7 +54,12 @@ import type { UploadFile } from "antd/es/upload/interface";
 import { api, type PackConsoleConfig, type PackFinding } from "../../api";
 import { lexical } from "../../workbench/results";
 import { importThroughSurface } from "../packs/importFile";
-import { surfacesFor, type PackImportSurface } from "../packs/packSurfaces";
+import {
+  surfacesFor,
+  surfacesFromConsole,
+  unreadableFormats,
+  type PackImportSurface,
+} from "../packs/packSurfaces";
 import {
   buildStatement,
   distinctInvoices,
@@ -113,6 +118,8 @@ const COPY = {
   truncated:
     "The graph returned more rows than one read allows, so these totals are of what was read, not of everything held. Narrow the period before relying on them.",
   noSurface: "This pack declares no upload surface for this source.",
+  unreadable:
+    "This pack declares a file format this console cannot read, so that upload is not offered. Either the manifest names the wrong format, or this console is older than the pack it is serving.",
   whereToGetIt: "Where do I get this?",
   booksTotal: "As per your books",
   authorityTotal: "As per GSTR-2B",
@@ -678,6 +685,10 @@ export function ReconciliationWorkspace({
   const [running, setRunning] = useState(false);
   const [surfaces, setSurfaces] = useState<readonly PackImportSurface[]>([]);
   const [packInstalled, setPackInstalled] = useState<boolean | null>(null);
+  /** Formats this pack declared that this console cannot read. Named rather
+   *  than dropped: a surface silently missing looks like a pack that forgot
+   *  to declare it. */
+  const [unreadable, setUnreadable] = useState<readonly string[]>([]);
 
   const refresh = useCallback(async () => {
     setFailure(null);
@@ -696,14 +707,24 @@ export function ReconciliationWorkspace({
       }
       setPackInstalled(pack !== undefined);
       setPackId(pack?.packId ?? null);
-      setSurfaces(pack?.imports ?? []);
       if (!pack) {
+        setSurfaces([]);
         setRows({});
         return;
       }
 
       const declared = await api.packConsole(pack.packId);
       setConfig(declared);
+      // **The pack's own `[[console.imports]]` wins over the built-in
+      // registry** — Plan 111 Slice E. The registry is the fallback for a
+      // pack installed before it declared its files, not the source of truth:
+      // a second domain's upload surfaces must not need a React change, which
+      // is the test this whole plan applies to itself. `unreadableFormats`
+      // reports a declared format this console has no reader for rather than
+      // dropping it silently.
+      const fromPack = surfacesFromConsole(pack.packId, pack.label, declared);
+      setSurfaces(fromPack.length > 0 ? fromPack : pack.imports);
+      setUnreadable(unreadableFormats(declared));
       const specs = sourcesFromConfig(declared);
       if (specs.length === 0) {
         // A pack with no declared reconciliation is not an error — it simply
@@ -862,6 +883,20 @@ export function ReconciliationWorkspace({
       </div>
 
       {truncated && <Alert type="warning" showIcon message={COPY.truncated} />}
+
+      {/* **A declared format this console cannot read is named, not dropped.**
+          A surface that silently disappears looks like a pack that forgot to
+          declare it; naming the format tells an operator exactly which line of
+          `pack.toml` to fix, or that this console build is older than the pack
+          it is serving. */}
+      {unreadable.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          message={COPY.unreadable}
+          description={unreadable.join(", ")}
+        />
+      )}
 
       <div>
         <Title level={5}>{COPY.step1}</Title>

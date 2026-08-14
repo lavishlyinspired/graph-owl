@@ -687,6 +687,29 @@ party_id = "supplierGstin"
         );
     }
 
+    /// **Against the pack that actually ships.** Plan 111 Slice E moved the
+    /// console's import surfaces into `[[console.imports]]`, and the console
+    /// reads them as JSON — so `how_to_obtain` has to arrive as
+    /// `howToObtain`. A key that camelCases wrong reaches the console under a
+    /// name nothing reads, which is the exact failure `match_key` already had
+    /// once: a working-looking page silently missing a field.
+    #[test]
+    fn a_shipped_packs_import_surfaces_arrive_camel_cased() {
+        let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs");
+        let console = read_console_config(&packs, "gst").expect("gst declares a console");
+
+        let imports = console["imports"].as_array().expect("declared imports");
+        assert!(!imports.is_empty(), "gst declares its own upload surfaces");
+        for surface in imports {
+            assert!(surface["key"].is_string(), "{surface}");
+            assert!(surface["format"].is_string(), "{surface}");
+            assert!(
+                surface["howToObtain"].is_string(),
+                "`how_to_obtain` must reach the console camelCased: {surface}",
+            );
+        }
+    }
+
     /// A pack that declares no console section is the ordinary case, not a
     /// failure — hospitality has never had one. The console must render an
     /// honest empty state for it rather than an error.

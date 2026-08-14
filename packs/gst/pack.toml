@@ -782,3 +782,48 @@ labels = [
 actions = ["accept", "reject-with-reason", "defer"]
 evidence = "side-by-side"
 
+
+# **The files this pack knows how to read — Plan 111 Slice E.**
+#
+# These lived in `ui/src/features/packs/packSurfaces.ts` as a TypeScript
+# constant, so a second domain's upload surfaces needed a React change. The
+# *prose* is the pack's: what the file is called, why it matters, and where to
+# download it are domain facts and belong beside the domain's ontology.
+#
+# `format` names a reader the console implements — a parser cannot be declared
+# in TOML, and that is the honest boundary of this mechanism. A pack naming a
+# format this console has no reader for is refused with that format named,
+# never rendered as a surface that accepts a file and then cannot parse it.
+#
+# **Ordered the way the reconciliation is actually done**, not alphabetically:
+# your books first, then what your suppliers declared, then what the authority
+# made available. A CA reads down the list and it is the workflow.
+[[console.imports]]
+key = "books"
+label = "Purchase register (your books)"
+description = "What you have recorded. Everything else is reconciled against this, so it is the one to load first."
+format = "csv"
+accept = ".csv,.tsv,.txt,text/csv"
+how_to_obtain = """
+Export the purchase register from your accounting system as CSV — in Tally, Display → Account Books → Purchase Register → Export (CSV). It needs at least a supplier GSTIN, invoice number, invoice date and taxable value; tax columns (IGST/CGST/SGST/Cess) and a reverse-charge column are used when present.\
+"""
+
+[[console.imports]]
+key = "gstr1"
+label = "GSTR-2A / GSTR-1 (what your suppliers declared)"
+description = "What your suppliers reported to GST. This is what separates 'the supplier never filed it' from 'they filed it and it never reached you' — two problems with opposite next actions."
+format = "gstr1-json"
+accept = "application/json,.json"
+how_to_obtain = """
+Download it from the GST portal: Returns Dashboard → select the period → GSTR-2A → Download JSON. GSTR-2A carries what your suppliers declared in their GSTR-1, which is exactly what this compares against.\
+"""
+
+[[console.imports]]
+key = "gstr2b"
+label = "GSTR-2B (what credit is available)"
+description = "The authority's own statement of the credit available to you for a period. This is what gates the claim."
+format = "gstr2b-json"
+accept = "application/json,.json"
+how_to_obtain = """
+Download it from the GST portal: Returns Dashboard → select the period → GSTR-2B → Download JSON. A response saved from a GSP API works too — the two are the same document.\
+"""

@@ -1,6 +1,6 @@
 # Plan 111 — Engine → API → UI: the capabilities that stop at the second arrow
 
-**Status**: Slices A–D shipped 14 August 2026; Slice E planned. **Branch**: main. **Trigger**: a capability assessment
+**Status**: all five slices shipped, 14 August 2026. **Branch**: main. **Trigger**: a capability assessment
 (`missing core and ui capabilities`) arguing that the product "has not yet
 become a deeply connected knowledge graph", and that the larger gap is not
 missing engine work but capability that no human can reach.
@@ -203,15 +203,39 @@ absence. The capability is now reachable and proven; wiring it *into* the
 finding pipeline changes what the product asserts about a taxpayer's money and
 wants its own slice, with the evidence surfaces above it in place first.
 
-## Slice E — Packs declare which surfaces they want
+## Slice E — Packs declare their own upload surfaces ✅ shipped
 
-`[console.reconciliation]` and `[[console.queues]]` proved the pattern. Extend
-it so a pack names the capability surfaces it participates in and the
-vocabulary each uses, and the console renders that list rather than a fixed one.
+`[console.reconciliation]` and `[[console.queues]]` proved the pattern; the
+*import* surfaces had never moved. `ui/src/features/packs/packSurfaces.ts`
+held a `REGISTRY` constant containing GST's file list — its keys, its labels,
+the sentence telling a user where to download each file — so a second pack's
+uploads needed a React change. That is exactly the test this plan applies to
+itself: *delete `packs/gst/`, install `packs/healthcare/`, does it still work
+without changing Rust, server logic or React?*
 
-Scheduled last on purpose: **doing it before A–D would be declaring surfaces
-that do not exist yet.** The declaration should follow the capability, never
-lead it.
+`[[console.imports]]` now carries the key, label, description, `accept` and
+where-to-obtain prose. The console prefers a pack's declaration and falls back
+to the registry for a pack installed before it declared its files.
+
+**The honest boundary, stated rather than discovered later: a parser is code.**
+A pack cannot declare a CSV reader in TOML, so `format` selects a reader the
+console implements (`csv`, `gstr1-json`, `gstr2b-json`). **A format this
+console has no reader for is named on screen, not silently dropped** — a
+surface that quietly disappears looks like a pack that forgot to declare it,
+where the truth is usually that the console build is older than the pack it is
+serving.
+
+**One guard is worth more than the feature.** `read_console_config` camelCases
+the whole table, so `how_to_obtain` must arrive as `howToObtain`; a test reads
+the *shipped* pack and asserts it does. That exact key-name failure has
+happened here once already — `match_key` reached the console under a name
+nothing read, and the reconciliation silently fell back to matching on the
+printed identity, which looks like a working page.
+
+**One equivalent mutant, recorded rather than chased.** Stryker replaces
+`config?.imports ?? []` with `["Stryker was here"]`; a string has no `.format`,
+so no reader matches and the result is still `[]`. Contorting a test to kill it
+would test the mutation rather than the behaviour.
 
 ## Not scheduled, and why
 

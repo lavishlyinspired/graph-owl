@@ -529,6 +529,19 @@ export interface ElClassification {
  *  `404` for a pack with no `[console]` section, which is ordinary rather than
  *  exceptional and renders as an honest empty state. */
 export interface PackConsoleConfig {
+  /** The files this pack knows how to read — `[[console.imports]]`, Plan 111
+   *  Slice E. These were a TypeScript constant, so a second domain's upload
+   *  surfaces needed a React change. The prose is the pack's; `format` names
+   *  a reader the console implements, which is the honest boundary — a parser
+   *  cannot be declared in TOML. */
+  readonly imports?: readonly {
+    readonly key: string;
+    readonly label: string;
+    readonly description?: string;
+    readonly format: string;
+    readonly accept?: string;
+    readonly howToObtain?: string;
+  }[];
   /** Each rule's reviewer-facing wording, keyed by label — `[findings.guidance]`
    *  in the manifest. Delivered here because the finding-rule registry the
    *  loader posts has no field for it. */

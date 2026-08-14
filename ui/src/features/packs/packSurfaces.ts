@@ -104,6 +104,91 @@ const GST: PackSurfaces = {
 
 const REGISTRY: readonly PackSurfaces[] = [GST];
 
+/** Plan 111 Slice E — **the readers a pack may name, and the whole of what
+ *  stays in code.**
+ *
+ *  A pack cannot declare a CSV parser in TOML, so `format` selects one of
+ *  these. Everything *around* the reader — the key, the label, the sentence
+ *  telling somebody where to download the file — is the pack's to write, and
+ *  a second domain whose files are CSV needs no change here at all.
+ *
+ *  **Naming a format this console does not implement is a refusal, not a
+ *  silent omission.** A surface that accepts a file and cannot parse it is
+ *  worse than no surface, because the user has already done the work of
+ *  finding the file. `unreadableFormats` is what lets the caller say so. */
+const READERS: Readonly<Record<string, (text: string) => { turtle: string; count: number }>> = {
+  /** A delimited register: the shape every accounting system exports. */
+  csv: (text) => {
+    const rows = books.normalize(text);
+    return { turtle: books.toTurtle(rows), count: rows.length };
+  },
+  /** A supplier-declaration return, as the portal serves it. */
+  "gstr1-json": (text) => {
+    const rows = gstr1.normalize(JSON.parse(text));
+    return { turtle: gstr1.toTurtle(rows), count: rows.length };
+  },
+  /** An authority statement, as the portal serves it. */
+  "gstr2b-json": (text) => {
+    const rows = normalize(JSON.parse(text));
+    return { turtle: toTurtle(rows), count: rows.length };
+  },
+};
+
+/** What a pack writes under `[[console.imports]]`. */
+export interface DeclaredImport {
+  readonly key: string;
+  readonly label: string;
+  readonly description?: string;
+  /** Which reader parses this file. See {@link READERS}. */
+  readonly format: string;
+  readonly accept?: string;
+  readonly howToObtain?: string;
+}
+
+/** The `[console]` shape this module reads. Deliberately narrow — the console
+ *  config carries several unrelated sections and this one only needs its own. */
+export interface DeclaredConsole {
+  readonly imports?: readonly DeclaredImport[];
+}
+
+/** Every declared format this console has no reader for.
+ *
+ *  Returned rather than thrown so a pack with one bad entry still contributes
+ *  its good ones, and an operator can be told exactly which line to fix. */
+export function unreadableFormats(config: DeclaredConsole | null | undefined): readonly string[] {
+  return (config?.imports ?? [])
+    .map((declared) => declared.format)
+    .filter((format) => !(format in READERS));
+}
+
+/** A pack's own declared import surfaces.
+ *
+ *  **This is what stops `REGISTRY` being the only way to get a surface.**
+ *  Nothing here reads a domain word: the label, the description and the
+ *  where-to-get-it sentence are the pack's own prose, rendered verbatim. */
+export function surfacesFromConsole(
+  packId: string,
+  label: string,
+  config: DeclaredConsole | null | undefined,
+): readonly PackImportSurface[] {
+  void packId;
+  void label;
+  return (config?.imports ?? []).flatMap((declared) => {
+    const reader = READERS[declared.format];
+    if (reader === undefined) return [];
+    return [
+      {
+        key: declared.key,
+        label: declared.label,
+        description: declared.description ?? "",
+        accept: declared.accept ?? "",
+        howToObtain: declared.howToObtain ?? "",
+        convert: reader,
+      },
+    ];
+  });
+}
+
 /** A pack id out of a namespace's `declaredBy`, or null if it was not a pack.
  *
  *  The loader writes `pack:<id>`; a namespace declared by an operator or a

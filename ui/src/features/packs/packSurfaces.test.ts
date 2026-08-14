@@ -1,7 +1,13 @@
 /** The gating: a pack surface exists only while its pack does. */
 
 import { describe, expect, it } from "vitest";
-import { installedPacks, packIdOf, surfacesFor } from "./packSurfaces";
+import {
+  installedPacks,
+  packIdOf,
+  surfacesFor,
+  surfacesFromConsole,
+  unreadableFormats,
+} from "./packSurfaces";
 import { invoicePeriod } from "./PackAdminPanel";
 
 describe("packIdOf", () => {
@@ -164,5 +170,92 @@ describe("invoicePeriod", () => {
 
   it("returns null for Turtle with no period, falling back to the pack-wide source", () => {
     expect(invoicePeriod("gst:2b-X rdf:type gst:Gstr2bInvoice .")).toBeNull();
+  });
+});
+
+/** Plan 111 Slice E — **the import surfaces stop being a TypeScript
+ *  constant.**
+ *
+ *  `REGISTRY` held GST's file list: its keys, its labels, the sentence
+ *  telling a user where to download each file. A second pack's surfaces
+ *  needed a React change, which is exactly the test Plan 111 applies to
+ *  itself — *if I delete `packs/gst/` and install `packs/healthcare/`, does
+ *  this still work without changing Rust, server logic or React?*
+ *
+ *  **The honest boundary: a parser is code, a description is data.** A pack
+ *  cannot declare a CSV reader in TOML, so `format` names a reader this
+ *  console has, and a pack naming one it does not have gets an honest
+ *  refusal rather than a surface that fails on upload. */
+describe("import surfaces a pack declares for itself", () => {
+  const declared = {
+    imports: [
+      {
+        key: "register",
+        label: "Ledger export",
+        description: "What you have recorded.",
+        format: "csv",
+        accept: ".csv",
+        howToObtain: "Export it from your system as CSV.",
+      },
+    ],
+  };
+
+  /** **Every field the pack wrote is carried through, not just the ones a
+   *  card happens to show today.** A description or an `accept` silently
+   *  emptied leaves a surface that renders but cannot be used — the file
+   *  picker offers every file type and the user is told nothing about which
+   *  one to choose. */
+  it("renders a pack's own declared surface without the console naming it", () => {
+    const [surface] = surfacesFromConsole("anything", "Anything", declared);
+    expect(surface!.key).toBe("register");
+    expect(surface!.label).toBe("Ledger export");
+    expect(surface!.description).toBe("What you have recorded.");
+    expect(surface!.accept).toBe(".csv");
+    expect(surface!.howToObtain).toContain("CSV");
+  });
+
+  /** The optional fields default to empty rather than `undefined`, so a card
+   *  renders a blank instead of the word "undefined". */
+  it("a surface declaring only what is required still renders", () => {
+    const [surface] = surfacesFromConsole("anything", "Anything", {
+      imports: [{ key: "k", label: "L", format: "csv" }],
+    });
+    expect(surface!.description).toBe("");
+    expect(surface!.accept).toBe("");
+    expect(surface!.howToObtain).toBe("");
+  });
+
+  /** **A format this console has no reader for is refused, not rendered.**
+   *  A surface that accepts a file and then cannot parse it is worse than no
+   *  surface: the user has done the work of finding the file. */
+  it("drops a surface whose format no reader implements, and says which", () => {
+    const withUnknown = {
+      imports: [...declared.imports, { key: "x", label: "X", format: "telepathy", accept: ".x" }],
+    };
+    const rendered = surfacesFromConsole("anything", "Anything", withUnknown);
+    expect(rendered.map((s) => s.key)).toEqual(["register"]);
+    expect(unreadableFormats(withUnknown)).toEqual(["telepathy"]);
+  });
+
+  /** A pack that declares no imports contributes nothing — a heading with
+   *  nothing under it reads as a broken feature, not an empty one. */
+  it("a pack declaring no imports contributes no surface", () => {
+    expect(surfacesFromConsole("quiet", "Quiet", {})).toEqual([]);
+    expect(surfacesFromConsole("quiet", "Quiet", null)).toEqual([]);
+    // A pack with no `[console]` at all is the ordinary case — `packConsole`
+    // answers `null` for it — and asking what it cannot read must not throw.
+    expect(unreadableFormats(null)).toEqual([]);
+    expect(unreadableFormats(undefined)).toEqual([]);
+  });
+
+  /** **The declared surface must actually parse.** Wiring a label to a
+   *  reader that is never exercised is how a surface ships broken. */
+  it("the declared csv reader really converts a register", () => {
+    const [surface] = surfacesFromConsole("anything", "Anything", declared);
+    const converted = surface!.convert(
+      "GSTIN,Invoice No,Invoice Date,Taxable Value\n27AAACR5055K1ZM,INV-1,01-07-2026,1000\n",
+    );
+    expect(converted.count).toBe(1);
+    expect(converted.turtle.length).toBeGreaterThan(0);
   });
 });
