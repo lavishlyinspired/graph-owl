@@ -380,6 +380,33 @@ export interface FindingRuleDef {
   readonly span: unknown;
 }
 
+/** A classification label applied to an asset — `GET /label-suggestions`
+ *  returns the ones a classifier proposed and no human has vouched for yet.
+ *
+ *  **Domain-agnostic**: a classification is `{classification}.{tag}` over an
+ *  asset FQN, and what those tags mean is the deployment's business, not the
+ *  console's. */
+export interface TagLabel {
+  readonly tagFqn: string;
+  readonly targetFqn: string;
+  readonly labelType: string;
+  readonly state: string;
+  readonly appliedBy: string;
+  readonly appliedAt: string;
+}
+
+/** A certification that has expired or is about to —
+ *  `GET /recertification-queue`. */
+export interface Certification {
+  readonly id: string;
+  readonly targetFqn: string;
+  readonly typeName: string;
+  readonly issuer: string;
+  readonly issuedAt: string;
+  readonly expiresAt: string;
+  readonly status: string;
+}
+
 /** Which OWL profiles the loaded ontology fits, and which one reasoning was
  *  routed to — `GET /ontology/profile`.
  *
@@ -1520,6 +1547,13 @@ export const api = {
    *  — an ordinary answer, not a failure. */
   packConsole: (pack: string) =>
     request<PackConsoleConfig>(`/packs/${encodeURIComponent(pack)}/console`).catch(() => null),
+
+  /** Labels a classifier proposed that nobody has vouched for yet. */
+  labelSuggestions: () => request<readonly TagLabel[]>("/label-suggestions"),
+
+  /** Certifications expired or expiring — the queue that says what has to be
+   *  looked at again. */
+  recertificationQueue: () => request<readonly Certification[]>("/recertification-queue"),
 
   /** Which OWL profiles the ontology fits, and where reasoning was routed. */
   ontologyProfile: () => request<OntologyProfiles>("/ontology/profile"),

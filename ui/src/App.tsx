@@ -167,6 +167,7 @@ import { GraphCanvas } from "./graph/GraphCanvas";
 import type { ConnectorRun, ReasoningReport } from "./api";
 import { describeReasoningRun } from "./governance/reasoningRun";
 import { ReasoningPanel } from "./features/reasoning/ReasoningPanel";
+import { GovernanceQueues } from "./features/governance/GovernanceQueues";
 import { ExportDialog } from "./features/export/ExportDialog";
 import watermarkImg from "./assets/watermark1.png";
 
@@ -2790,6 +2791,9 @@ function GovernancePage({ colors }: { colors: (typeof palette)["light"] }) {
         *  profile detector — were reachable only by the MCP agent. Plan 110
         *  Slice 1. */}
       <ReasoningPanel />
+
+      {/* Plan 110 Slice 3 — two queues that were one route away from visible. */}
+      <GovernanceQueues />
 
       {lastRun && (
         <Alert
