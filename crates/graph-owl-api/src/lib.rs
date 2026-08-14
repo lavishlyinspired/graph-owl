@@ -3323,15 +3323,27 @@ impl Catalog {
     /// this exists, and a second caller reimplementing it slightly
     /// differently is exactly how an existence oracle gets shipped.
     ///
-    /// **Both endpoints are authorized before the walk, and a refusal is
-    /// indistinguishable from an absence.** `NotFound` for an endpoint the
-    /// principal may not see is not politeness — "you may not see this" and
-    /// "there is nothing here" must read identically to a caller probing for
-    /// what a deployment holds. Visibility is decided by the same
-    /// [`Self::authorization_key`] every other graph-flake check uses: a
-    /// real asset's graph identity is a UUID and its FQN lives as a `dsc:fqn`
-    /// property, so checking a prefix policy against the subject id alone
-    /// fails *open*.
+    /// **An endpoint that is a catalog asset is authorized as one before the
+    /// walk, and a refusal is indistinguishable from an absence.** `NotFound`
+    /// for an asset the principal may not see is not politeness — "you may not
+    /// see this" and "there is nothing here" must read identically to a caller
+    /// probing for what a deployment holds.
+    ///
+    /// **An endpoint in a pack's own vocabulary is not authorized per subject,
+    /// and that is a stated limitation rather than an oversight.** There are
+    /// no policies about graph subjects in this system — only about asset
+    /// names — so applying an asset predicate to a pack subject refuses
+    /// everything: a GST invoice has no `dsc:fqn`, and no `FqnPrefix` rule
+    /// matches `pr-INV-1012`. The first version of this method did exactly
+    /// that and answered `404` for every subject on a live deployment. Pack
+    /// subjects therefore fall through, matching [`graph_context`],
+    /// [`finding_evidence_graph`] and [`blocking_candidates`], none of which
+    /// authorize a subject either. Narrowing that gap is a policy-model
+    /// change, not something this method can invent.
+    ///
+    /// [`graph_context`]: Self::graph_context
+    /// [`finding_evidence_graph`]: Self::finding_evidence_graph
+    /// [`blocking_candidates`]: Self::blocking_candidates
     ///
     /// **Not connected is `Ok`, not an error** — it is the commonest true
     /// answer, and the trait's own `Ok(None)` already takes that position.
@@ -3423,22 +3435,72 @@ impl Catalog {
         principal: &Principal,
         subject: &Sid,
     ) -> Result<bool, CatalogError> {
-        let graph = self.graph.as_ref().ok_or_else(|| {
-            CatalogError::Storage(StorageError::Unexpected(
-                "this server has no graph engine configured".to_string(),
-            ))
-        })?;
-        let flakes = graph
-            .query_pattern(&graph_owl_core::flake::TriplePattern {
-                s: Some(subject.clone()),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+        // **An asset is judged as an asset; anything else is not judged by an
+        // asset policy at all.**
+        //
+        // The first version of this applied the compiled `FqnPrefix` predicate
+        // to every subject, via `authorization_key`'s fall back to the bare
+        // subject id. On a live deployment that refused *everything* in a
+        // pack's vocabulary — a GST invoice has no `dsc:fqn`, and no policy
+        // written about asset names will ever match `pr-INV-1012`. `POST
+        // /graph/paths` answered `404` for every subject, including ones the
+        // same principal could reach through `/packs/{pack}/candidates` in the
+        // same breath. `graph_subject_visible`'s own name was the tell: there
+        // is no such thing as a policy about a graph subject in this system
+        // yet, only policies about assets.
+        //
+        // So this is the *asset* check `asset_subgraph` has always applied,
+        // narrowed to the case where it means something. A pack subject falls
+        // through, which is what every other graph-subject surface in this
+        // crate already does — `graph_context`, `finding_evidence_graph` and
+        // `blocking_candidates` authorize no subject at all, and `sparql`
+        // filters facts during evaluation rather than refusing a subject up
+        // front. Making this one route stricter than all of them did not add
+        // safety, it removed the feature.
+        //
+        // **Recorded as a real limitation, not a resolved one**: pack-vocabulary
+        // subjects have no per-subject authorization anywhere in this system.
+        // Fixing that is a policy-model change (a matcher that can name a
+        // namespace or a class), not something this method can invent — and
+        // inventing it here is exactly what produced a route nobody could use.
+        let Some(uuid) = Self::asset_id_of(subject) else {
+            return Ok(true);
+        };
+        // **Read the row, then judge it — rather than asking `get_asset_for`.**
+        // That method collapses "no such asset" and "an asset you may not see"
+        // into one `NotFound`, deliberately, so it cannot be used to tell them
+        // apart — and here they need opposite answers. A `dsc:`-namespaced
+        // UUID is not necessarily an asset: `tables` and `assets` are
+        // different relations in this schema, so a table's id looks exactly
+        // like an asset's and has no asset row. Treating that absence as a
+        // refusal made every table endpoint a `404`, which the integration
+        // tests caught immediately after the first fix went in.
+        //
+        // Against relational state, not the graph — decision 7: the projection
+        // lags, so a permission revoked in that window must not be honoured by
+        // a graph read.
+        let Some(asset) = self.storage.get_asset(uuid).await? else {
+            return Ok(true);
+        };
         let predicate = self
             .predicate_for(principal, MetadataOperation::ViewBasic)
             .await?;
-        Ok(predicate.admits(&Self::authorization_key(subject, &flakes)))
+        // `fully_qualified_name`, not the subject id — the comparison every
+        // other asset-level check in this crate already makes, and the one
+        // `authorization_key` exists to reach for a graph subject.
+        Ok(predicate.admits(&asset.fully_qualified_name))
+    }
+
+    /// The catalog asset a graph subject stands for, if it is one.
+    ///
+    /// `graph_owl_core::projection::asset_sid` keys every projected asset as a
+    /// `dsc:`-namespaced UUID, so that pair — right namespace, parses as a
+    /// UUID — is exactly what makes a subject an asset. Anything else is a
+    /// pack's own vocabulary and has no asset to check.
+    fn asset_id_of(subject: &Sid) -> Option<Uuid> {
+        (subject.namespace_code == graph_owl_core::flake::namespace::DSC)
+            .then(|| subject.id.parse::<Uuid>().ok())
+            .flatten()
     }
 
     /// Degree centrality, connected components and orphan detection over
@@ -29694,6 +29756,200 @@ mod projection_isolation_tests {
                 "the second hop is a MENTIONS edge the filter excludes: {:?}",
                 feeds_only.paths,
             );
+        }
+
+        /// **A pack-vocabulary subject is not an asset, and must not be
+        /// judged by a policy written about asset names.**
+        ///
+        /// Found on a live deployment, not here: `POST /graph/paths` returned
+        /// `404` for *every* subject — including ones the same principal could
+        /// reach through `/packs/{pack}/candidates` in the same breath. The
+        /// cause is this crate's own already-documented trap, in the opposite
+        /// direction. `authorization_key` falls back to the bare subject id
+        /// when there is no `dsc:fqn`, a GST invoice has none, and no
+        /// `FqnPrefix` policy ever matches `pr-INV-1012` — so the check failed
+        /// **closed** for all pack data and Slice A was unusable exactly where
+        /// it mattered.
+        ///
+        /// **Every other test here missed it because they all use a
+        /// policy-less `Principal::system()`, which compiles to
+        /// `AccessPredicate::All`.** This one installs a real policy, so the
+        /// predicate is genuinely restrictive, and asks for a route between two
+        /// subjects in a pack's own vocabulary — the shape a real deployment
+        /// has.
+        #[tokio::test]
+        async fn a_policy_about_assets_does_not_hide_a_packs_own_subjects() {
+            use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+
+            let storage = Arc::new(InMemoryStorage::default());
+            storage
+                .upsert_policy(
+                    &Policy {
+                        name: "analyst".to_string(),
+                        rules: vec![Rule {
+                            name: "read-warehouse".to_string(),
+                            effect: Effect::Allow,
+                            operations: vec![MetadataOperation::ViewBasic],
+                            // Names an asset prefix, as a real policy does.
+                            // Nothing mentions the pack's vocabulary, because
+                            // a policy author has no reason to.
+                            resources: ResourceMatcher::FqnPrefix("warehouse".to_string()),
+                        }],
+                    },
+                    &["analyst".to_string()],
+                )
+                .await
+                .expect("policy");
+
+            // Two subjects in a pack's own namespace — not assets, no
+            // `dsc:fqn`, exactly what an import lands.
+            let pack_ns = 1024;
+            let invoice = Sid::new(pack_ns, "pr-INV-1012");
+            let supplier = Sid::new(pack_ns, "supplier-27AABCU9603R1ZM");
+            let graph = RecordingGraph::working();
+            graph
+                .assert_flakes(&[
+                    Flake::assert(
+                        invoice.clone(),
+                        Sid::new(pack_ns, "invoiceNumber"),
+                        FlakeValue::String("INV-1012".to_string()),
+                        1,
+                    ),
+                    Flake::assert(
+                        supplier.clone(),
+                        Sid::new(pack_ns, "supplierGstin"),
+                        FlakeValue::String("27AABCU9603R1ZM".to_string()),
+                        1,
+                    ),
+                ])
+                .await
+                .expect("seed subjects");
+            let rel = Sid::dsc("rel-issued-by");
+            graph
+                .assert_flakes(&[
+                    Flake::assert(
+                        rel.clone(),
+                        Sid::new(namespace::RDF, "type"),
+                        FlakeValue::Ref(Sid::dsc("Relationship")),
+                        1,
+                    ),
+                    Flake::assert(
+                        rel.clone(),
+                        Sid::dsc("fromEntity"),
+                        FlakeValue::Ref(invoice.clone()),
+                        1,
+                    ),
+                    Flake::assert(
+                        rel.clone(),
+                        Sid::dsc("toEntity"),
+                        FlakeValue::Ref(supplier.clone()),
+                        1,
+                    ),
+                    Flake::assert(
+                        rel,
+                        Sid::dsc("relType"),
+                        FlakeValue::String("ISSUED_BY".to_string()),
+                        1,
+                    ),
+                ])
+                .await
+                .expect("seed the edge");
+
+            let traversal: Arc<dyn TraversalEngine> =
+                Arc::new(graph_owl_traversal_memory::InMemoryTraversalEngine::new(
+                    graph.clone() as Arc<dyn TripleStore>,
+                ));
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_traversal(traversal);
+
+            let analyst = Principal {
+                id: "asha".to_string(),
+                name: "Asha".to_string(),
+                kind: graph_owl_core::PrincipalKind::User,
+                roles: vec!["analyst".to_string()],
+                is_admin: false,
+            };
+
+            let found = catalog
+                .find_paths(
+                    &analyst,
+                    PathQuery {
+                        direction: Direction::Both,
+                        ..query(&invoice, &supplier)
+                    },
+                )
+                .await
+                .expect("a pack subject is not refused by an asset policy");
+
+            assert_eq!(
+                found.paths.len(),
+                1,
+                "the invoice reaches its supplier: {:?}",
+                found.paths,
+            );
+        }
+
+        /// **And the asset half of the check still holds.** The fix must not
+        /// become "authorize nothing": an endpoint that *is* a catalog asset is
+        /// still judged by whether this principal may see that asset — the
+        /// check `asset_subgraph` has always applied, and the only one that is
+        /// meaningful for an asset.
+        #[tokio::test]
+        async fn an_asset_endpoint_outside_the_policy_is_still_refused() {
+            use graph_owl_authz::{Effect, MetadataOperation, Policy, ResourceMatcher, Rule};
+
+            let storage = Arc::new(InMemoryStorage::default());
+            storage
+                .upsert_policy(
+                    &Policy {
+                        name: "analyst".to_string(),
+                        rules: vec![Rule {
+                            name: "read-alpha".to_string(),
+                            effect: Effect::Allow,
+                            operations: vec![MetadataOperation::ViewBasic],
+                            resources: ResourceMatcher::FqnPrefix("alpha".to_string()),
+                        }],
+                    },
+                    &["analyst".to_string()],
+                )
+                .await
+                .expect("policy");
+
+            let graph = RecordingGraph::working();
+            let seeder =
+                Catalog::new(storage.clone()).with_graph(graph.clone() as Arc<dyn TripleStore>);
+            let alpha = seeder
+                .upsert_asset(&Principal::system(), service("alpha"))
+                .await
+                .expect("seed");
+            let omega = seeder
+                .upsert_asset(&Principal::system(), service("omega"))
+                .await
+                .expect("seed");
+            link(&graph, "rel-0", alpha.id, omega.id, "FEEDS").await;
+
+            let traversal: Arc<dyn TraversalEngine> =
+                Arc::new(graph_owl_traversal_memory::InMemoryTraversalEngine::new(
+                    graph.clone() as Arc<dyn TripleStore>,
+                ));
+            let catalog = Catalog::new(storage)
+                .with_graph(graph as Arc<dyn TripleStore>)
+                .with_traversal(traversal);
+
+            let analyst = Principal {
+                id: "asha".to_string(),
+                name: "Asha".to_string(),
+                kind: graph_owl_core::PrincipalKind::User,
+                roles: vec!["analyst".to_string()],
+                is_admin: false,
+            };
+
+            let refused = catalog
+                .find_paths(&analyst, query(&sid(alpha.id), &sid(omega.id)))
+                .await
+                .expect_err("`omega` is an asset outside the analyst's policy");
+            assert!(matches!(refused, CatalogError::NotFound), "{refused:?}");
         }
 
         /// **A route that did not exist yet must not be found in the past.**

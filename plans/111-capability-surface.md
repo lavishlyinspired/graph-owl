@@ -77,7 +77,58 @@ mechanism names any of them.
 
 ---
 
-## Slice A — Path finding, engine to screen ★
+## Slice A — Path finding, engine to screen ★ ✅ shipped
+
+`Catalog::find_paths`, `POST /graph/paths`, and a **How is this connected?**
+panel inside the asset's Graph tab. Verified live against the real GST estate:
+`1024:pr-INV-1012 → 1024:supplier-27AABCU9603R1ZM` returns the route, an
+unconnected pair returns `200` with an empty set, and a bad direction is a
+`400` naming the field.
+
+**Two deviations from the plan below, both deliberate.** The panel takes *one*
+picker, not two — the seed is the asset already on screen, which is what makes
+it discoverable at all; and it lives inside the Graph tab rather than at the
+top of Explore, because `routes.ts` rewards one surface absorbing many
+questions.
+
+### The authorization design was wrong, and only real data showed it
+
+**`POST /graph/paths` answered `404` for every subject on a live
+deployment** — including subjects the same principal could reach through
+`/packs/{pack}/candidates` in the same breath. Two layers, found in that order:
+
+1. **A pack-vocabulary subject was judged by a policy about asset names.**
+   `authorization_key` falls back to the bare subject id when there is no
+   `dsc:fqn`; a GST invoice has none; no `FqnPrefix` rule matches
+   `pr-INV-1012`. So the check failed **closed** for all pack data — the exact
+   inverse of the fail-*open* trap this crate already documents. Every unit
+   test missed it because they all used a policy-less `Principal::system()`,
+   which compiles to `AccessPredicate::All`.
+2. **A `dsc:`-namespaced UUID is not necessarily an asset.** `tables` and
+   `assets` are different relations, so a table's id looks exactly like an
+   asset's and has no asset row. The first fix asked `get_asset_for`, which
+   collapses "no such asset" and "an asset you may not see" into one
+   `NotFound` — deliberately, so it cannot tell them apart, and here they need
+   opposite answers. Every table endpoint became a `404`. The integration
+   suite caught this one immediately.
+
+The shipped check reads the asset row, falls through when there is none, and
+otherwise compares the predicate against `fully_qualified_name` — the
+comparison every other asset-level check in the crate already makes.
+
+**And the guarantee is now stated narrowly rather than overstated.** The
+original doc comment claimed "both endpoints are authorized before the walk".
+Pack-vocabulary subjects have **no per-subject authorization anywhere in this
+system** — `graph_context`, `finding_evidence_graph` and `blocking_candidates`
+authorize none either, and `sparql` filters facts during evaluation instead.
+Making this one route stricter than all of them did not add safety; it removed
+the feature. Narrowing that gap is a policy-model change (a matcher that can
+name a namespace or a class), recorded as a limitation rather than invented
+here.
+
+### Original plan, kept for the record
+
+
 
 **RED first**: `Catalog::find_paths` returns the route between two connected
 nodes, `None`-equivalent for two unconnected ones, and refuses a pair the
@@ -114,7 +165,23 @@ finds symmetric routes — the negative test needs an asymmetric graph); the
 truncation flag inverted (a truncated answer presented as complete is the
 dangerous direction).
 
-## Slice B — Ask a question of the past, and ask it in either language
+## Slice B — Ask a question of the past, and ask it in either language ✅ shipped
+
+Shipped: `api.sparql(query, asOf?)`, a new `api.cypher(query, asOf?)`, and a
+SPARQL/Cypher toggle on the Workbench that persists as `?lang=`, keeps a draft
+per language, clears results on switch (a result answered in the other
+language beside a query in this one is attributed to the wrong text), and
+shows a banner naming the instant when the clock is not now.
+
+**Verified on the wire, not in the browser.** Both routes answer with the
+right variables and an invalid `asOf` is a `400` naming the field. Row counts
+could not be confirmed against the live deployment: it is OIDC-only with no
+CLI-mintable credential, and a principal with no roles is denied by default —
+documented behaviour, not a defect, but it means the console half of this
+slice is still unverified by a signed-in human.
+
+### Original plan, kept for the record
+
 
 **Corrected after checking the tree rather than the assessment.** The console
 *does* time-travel: `TimeControl` is a global clock, `?asOf=` deep-links, the
@@ -143,7 +210,19 @@ domain. GST reads it as "before and after the supplier filed"; healthcare as
 than at now; an invalid `asOf` is a `400` naming the field; a Cypher query
 returns rows through the console; the language choice survives a reload.
 
-## Slice C — Contradictions
+## Slice C — Contradictions ✅ shipped
+
+`GET /assets/{id}/contradictions` and `POST /contradictions/reviews` into a
+`Disagreements` card above the memories on the Knowledge tab — above rather
+than below, because a reader who has scrolled past both sides has already
+formed a view of each in isolation, which is what the pairing exists to
+prevent. Nothing is auto-resolved, neither side is hidden, and a confirmed
+pair stays in the queue.
+
+**Also unverified by a signed-in human**, for the same reason as Slice B.
+
+### Original plan, kept for the record
+
 
 `/assets/{id}/contradictions` and `/contradictions/reviews` into
 `ReviewSection`'s existing generic queue abstraction — it already has five
