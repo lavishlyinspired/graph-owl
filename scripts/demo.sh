@@ -20,11 +20,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 say() { printf "\n\033[1;36m▸ %s\033[0m\n" "$1"; }
 die() { printf "\n\033[1;31m✗ %s\033[0m\n" "$1" >&2; exit 1; }
 
+AGENT_PORT=8899
+
 stop() {
   say "Stopping"
   lsof -ti:${APP_PORT} 2>/dev/null | xargs kill -9 2>/dev/null || true
+  lsof -ti:${AGENT_PORT} 2>/dev/null | xargs kill -9 2>/dev/null || true
   docker rm -f ${CONTAINER} >/dev/null 2>&1 || true
-  echo "  server and database stopped"
+  echo "  server, agent service and database stopped"
   exit 0
 }
 
@@ -183,6 +186,61 @@ curl -fsS "http://localhost:${APP_PORT}/health" >/dev/null 2>&1 || {
 }
 head -1 /tmp/graphowl.log | sed 's/^/  /'
 
+# ---------------------------------------------------------------- agent service
+# The console's Agent tab is a consumer of a *second*, separate process —
+# `integrations/langchain/agent_service` — never ported into graph-owl-server
+# itself (`00j-language-boundaries.md`). Skipping this step is not a
+# degraded demo, it's a broken one: the Agent tab has no fallback and fails
+# every question with "Failed to fetch". So this is not "not fatal" the way
+# auto-cataloguing above is — a failure here still gets a loud warning, on
+# purpose, rather than a silent gap discovered only when someone clicks Agent.
+say "Starting the reconciliation agent on :${AGENT_PORT}"
+lsof -ti:${AGENT_PORT} 2>/dev/null | xargs kill -9 2>/dev/null || true
+AGENT_DIR="${ROOT}/integrations/langchain"
+AGENT_VENV="${AGENT_DIR}/.venv"
+if [ ! -d "${AGENT_VENV}" ]; then
+  echo "  creating venv and installing dependencies (first run only)"
+  python3 -m venv "${AGENT_VENV}" 2>/dev/null || true
+  (cd "${AGENT_DIR}" && "${AGENT_VENV}/bin/pip" install -q -e ".[langgraph]" langchain-openai fastapi uvicorn) \
+    || echo "  ⚠ dependency install failed — see above"
+fi
+if [ -x "${AGENT_VENV}/bin/uvicorn" ] || [ -x "${AGENT_VENV}/bin/python3" ]; then
+  # This service does no .env loading of its own (by design — it only sees
+  # what launches it), so the three LLM_* values it needs are pulled the
+  # same way OIDC_CLIENT_ID/SECRET already are above: grepped out of .env,
+  # never sourced wholesale, so this can't shadow the OIDC override logic
+  # earlier in the script.
+  _llm_base=$(grep '^LLM_API_BASE_URL=' "${ROOT}/.env" 2>/dev/null | head -1 | sed 's/^LLM_API_BASE_URL=//' || true)
+  _llm_model=$(grep '^LLM_MODEL=' "${ROOT}/.env" 2>/dev/null | head -1 | sed 's/^LLM_MODEL=//' || true)
+  _llm_key=$(grep '^LLM_API_KEY=' "${ROOT}/.env" 2>/dev/null | head -1 | sed 's/^LLM_API_KEY=//' || true)
+  # Only OIDC mode gives the browser a real per-request token to forward
+  # (`getAccessToken()` in agentClient.ts). Light and --secure mode both
+  # leave agent_service with nothing to check unless given this placeholder
+  # — matching agent_service/README.md's own documented rule, not a guess.
+  _agent_token=""
+  [ "${OIDC_MODE}" = false ] && _agent_token="demo-placeholder-token"
+  (cd "${AGENT_DIR}" && \
+    GRAPH_OWL_SERVER="http://localhost:${APP_PORT}" \
+    ${_agent_token:+GRAPH_OWL_TOKEN="${_agent_token}"} \
+    ${_llm_base:+LLM_API_BASE_URL="${_llm_base}"} \
+    ${_llm_model:+LLM_MODEL="${_llm_model}"} \
+    ${_llm_key:+LLM_API_KEY="${_llm_key}"} \
+    nohup "${AGENT_VENV}/bin/python3" -m uvicorn agent_service.server:app --port ${AGENT_PORT} \
+    > /tmp/graphowl-agent.log 2>&1 &)
+  for _ in $(seq 1 30); do
+    curl -fsS "http://localhost:${AGENT_PORT}/providers" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  curl -fsS "http://localhost:${AGENT_PORT}/providers" >/dev/null 2>&1 || {
+    echo "  ⚠ agent service did not come up — the Agent tab will show 'Failed to fetch'"
+    tail -10 /tmp/graphowl-agent.log | sed 's/^/    /'
+  }
+  echo "  ready"
+else
+  echo "  ⚠ no working venv at ${AGENT_VENV} — the Agent tab will show 'Failed to fetch'"
+  echo "    see integrations/langchain/agent_service/README.md to set one up"
+fi
+
 # ---------------------------------------------------------------- catalogue
 token() {
   python3 - "$1" <<'PY'
@@ -314,8 +372,10 @@ cat <<EOF
   ────────────────────────────────────────────────────────────
    Console   http://localhost:${APP_PORT}
    API      http://localhost:${APP_PORT}/assets/stats
+   Agent    http://localhost:${AGENT_PORT}  (console's Agent tab)
    Postgres localhost:${PG_PORT}  (postgres/postgres)
    Logs     tail -f /tmp/graphowl.log
+            tail -f /tmp/graphowl-agent.log
    Stop     ./scripts/demo.sh --stop
   ────────────────────────────────────────────────────────────
 
