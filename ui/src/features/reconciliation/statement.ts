@@ -324,6 +324,55 @@ export function sourceSummary(rows: readonly SourceInvoice[]): SourceSummary {
   };
 }
 
+/** The one value meaning "every period" in the period filter. A shared
+ *  constant, so the Select's option and the filter function cannot disagree
+ *  about the word that means "no filter". */
+export const ALL_PERIODS = "all";
+
+/** The distinct filing periods across the given sources, sorted — the union
+ *  the period filter offers. Empty when nothing is loaded. */
+export function periodsOf(...sources: readonly (readonly SourceInvoice[])[]): readonly string[] {
+  const seen = new Set<string>();
+  for (const rows of sources) {
+    for (const row of rows) {
+      if (row.period !== "") seen.add(row.period);
+    }
+  }
+  return [...seen].sort();
+}
+
+/** Rows narrowed to one filing period.
+ *
+ *  **`"all"` returns the array itself, unchanged** — no filter must behave
+ *  exactly like the workspace did before the filter existed, including a
+ *  record that shipped without a period. A source exported without a period
+ *  column still reconciles on totals, and its rupees must never vanish from
+ *  "all" because an earlier filter dropped them. */
+export function forPeriod(rows: readonly SourceInvoice[], period: string): readonly SourceInvoice[] {
+  if (period === ALL_PERIODS || period === "") return rows;
+  return rows.filter((row) => row.period === period);
+}
+
+/** Findings narrowed to a period, by joining on the invoices the narrowed rows
+ *  still hold.
+ *
+ *  A finding is about an invoice, so the period of a finding is the period of
+ *  that invoice — and the join uses both the declared key and the printed
+ *  identity, exactly as the statement's own join does, so a finding cannot
+ *  survive into a period that no longer holds the row it explains. */
+export function findingsForPeriod(
+  findings: readonly PackFinding[],
+  books: readonly SourceInvoice[],
+  authority: readonly SourceInvoice[],
+): readonly PackFinding[] {
+  const held = new Set<string>();
+  for (const row of [...books, ...authority]) {
+    held.add(keyOf(row));
+    if (row.invoiceNumber !== "") held.add(row.invoiceNumber);
+  }
+  return findings.filter((finding) => held.has(invoiceKey(finding)));
+}
+
 /** The statement's reconciling lines, one per kind of finding.
  *
  *  **Every amount comes from the source rows, never from the finding's own

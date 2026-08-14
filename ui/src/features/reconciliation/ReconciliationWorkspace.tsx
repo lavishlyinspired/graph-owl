@@ -35,6 +35,7 @@ import {
   Empty,
   Modal,
   Row,
+  Select,
   Space,
   Spin,
   Statistic,
@@ -63,12 +64,16 @@ import {
   type PackImportSurface,
 } from "../packs/packSurfaces";
 import {
+  ALL_PERIODS,
   buildStatement,
   distinctInvoices,
   evidenceOf,
+  findingsForPeriod,
   first,
+  forPeriod,
   guidanceFrom,
   localName,
+  periodsOf,
   scenarioFor,
   sourceSummary,
   statementCsv,
@@ -119,6 +124,10 @@ const COPY = {
   sourceLoaded: "loaded",
   sourceEmpty: "not loaded",
   periodsLabel: "Periods",
+  filterPeriod: "GST period",
+  filterAll: "All",
+  filterHint:
+    "Narrows the statement, the findings and the by-supplier view to one filing period. Your uploads stay loaded — a period you are not working on is not deleted.",
   truncated:
     "The graph returned more rows than one read allows, so these totals are of what was read, not of everything held. Narrow the period before relying on them.",
   noSurface: "This pack declares no upload surface for this source.",
@@ -339,7 +348,7 @@ function SourceCard({
         message.success(
           outcome.count === 0
             ? "That file held no invoices — a period nobody filed against is a valid answer."
-            : `${outcome.count} invoice(s) read, ${outcome.landed} facts added.`,
+            : `${outcome.source}: ${outcome.count} invoice(s) read, ${outcome.landed} facts added.`,
         );
         onImported();
       } catch (error) {
@@ -1017,6 +1026,10 @@ export function ReconciliationWorkspace({
    *  than dropped: a surface silently missing looks like a pack that forgot
    *  to declare it. */
   const [unreadable, setUnreadable] = useState<readonly string[]>([]);
+  /** Which filing period the statement, findings and suppliers are narrowed to.
+   *  `"all"` is the default, and must behave exactly as the workspace did
+   *  before the filter existed. */
+  const [period, setPeriod] = useState<string>(ALL_PERIODS);
 
   const refresh = useCallback(async () => {
     setFailure(null);
@@ -1124,18 +1137,56 @@ export function ReconciliationWorkspace({
     }
   }, [refresh]);
 
-  const statement = useMemo(
-    () =>
-      rows
-        ? buildStatement({ books: rows.books ?? [], authority: rows.authority ?? [], findings, guidance })
-        : null,
-    [rows, findings],
-  );
-
   /** Whatever the installed pack declares — empty for a pack that declares no
    *  reconciliation, which renders an honest empty state rather than GST's
    *  headings over somebody else's data. */
   const sources = useMemo(() => sourcesFromConfig(config), [config]);
+
+  /** The periods any loaded source covers — the union the period filter offers.
+   *  Computed here, beside the rows it reads, so the Select and the filter can
+   *  never disagree about what a period is. */
+  const allPeriods = useMemo(
+    () => (rows === null ? [] : periodsOf(...sources.map((source) => rows[source.key] ?? []))),
+    [rows, sources],
+  );
+
+  /** The rows narrowed to the selected period, per source. The source cards
+   *  keep the full load — a card answers "what have I uploaded" — while the
+   *  statement, findings and supplier view work from the narrowed set, so one
+   *  CA filing July does not read a statement that mixes July and August.
+   *
+   *  `"all"` is identity: no filter behaves exactly like the workspace did
+   *  before the filter existed, including a record that shipped without a
+   *  period. */
+  const filteredRows = useMemo(() => {
+    const out: Record<string, SourceInvoice[]> = {};
+    for (const source of sources) out[source.key] = [...forPeriod(rows?.[source.key] ?? [], period)];
+    return out;
+  }, [rows, sources, period]);
+
+  /** Findings narrowed by the same join the statement uses — a finding about an
+   *  invoice outside the period must not explain rupees that are not on the
+   *  screen. */
+  const filteredFindings = useMemo(
+    () =>
+      period === ALL_PERIODS
+        ? findings
+        : findingsForPeriod(findings, filteredRows.books ?? [], filteredRows.authority ?? []),
+    [period, findings, filteredRows],
+  );
+
+  const statement = useMemo(
+    () =>
+      rows
+        ? buildStatement({
+            books: filteredRows.books ?? [],
+            authority: filteredRows.authority ?? [],
+            findings: filteredFindings,
+            guidance,
+          })
+        : null,
+    [rows, filteredRows, filteredFindings, guidance],
+  );
 
   /** The measures this pack reconciles in. A pack reconciling something other
    *  than tax declares its own — quantities, claim amounts, whatever has to
@@ -1171,12 +1222,12 @@ export function ReconciliationWorkspace({
     () =>
       rows
         ? supplierView({
-            books: rows.books ?? [],
-            gstr1: rows.gstr1 ?? [],
-            authority: rows.authority ?? [],
+            books: filteredRows.books ?? [],
+            gstr1: filteredRows.gstr1 ?? [],
+            authority: filteredRows.authority ?? [],
           })
         : [],
-    [rows],
+    [rows, filteredRows],
   );
 
   const download = useCallback(() => {
@@ -1228,6 +1279,33 @@ export function ReconciliationWorkspace({
           message={COPY.unreadable}
           description={unreadable.join(", ")}
         />
+      )}
+
+      {/* **The period filter, placed where the truncated alert tells the CA to
+          narrow the period.** One filing period at a time is how a CA works,
+          and a statement mixing July and August is the failure the filter
+          exists to prevent. Hidden until something is loaded, because a filter
+          with nothing to filter is noise. */}
+      {allPeriods.length > 0 && (
+        <Space direction="vertical" size={2}>
+          <Space wrap align="center">
+            <Text strong style={{ fontSize: 13 }}>
+              {COPY.filterPeriod}
+            </Text>
+            <Select
+              value={period}
+              onChange={setPeriod}
+              style={{ minWidth: 120 }}
+              options={[
+                { value: ALL_PERIODS, label: COPY.filterAll },
+                ...allPeriods.map((value) => ({ value, label: value })),
+              ]}
+            />
+          </Space>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {COPY.filterHint}
+          </Text>
+        </Space>
       )}
 
       <div>

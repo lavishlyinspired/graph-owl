@@ -1,6 +1,6 @@
 # Plan 115 — Import traceability and discoverability: name the import, filter by period, surface pack data in Explore
 
-**Status**: Planned. **Branch**: main.
+**Status**: C1, C2, B1 shipped. B2 deferred, A rejected. **Branch**: main.
 
 **Trigger**: "I uploaded GST data — what was imported, where did it go, and how
 do I inspect it?" Investigated as a navigation gap rather than a missing

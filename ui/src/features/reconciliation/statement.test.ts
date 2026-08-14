@@ -13,11 +13,15 @@
 import { describe, expect, it } from "vitest";
 import type { PackFinding } from "../../api";
 import {
+  ALL_PERIODS,
   buildStatement,
   distinctInvoices,
   evidenceOf,
+  findingsForPeriod,
+  forPeriod,
   invoiceKey,
   values,
+  periodsOf,
   reconcilingItems,
   scenarioFor,
   sourceSummary,
@@ -146,6 +150,52 @@ describe("what each source holds", () => {
     ]);
 
     expect(summary.periods).toEqual(["2026-07", "2026-08"]);
+  });
+});
+
+describe("the GST period filter", () => {
+  const july = invoice({ invoiceNumber: "INV-1", period: "2025-07" });
+  const august = invoice({ invoiceNumber: "INV-2", period: "2025-08" });
+  const unperioded = invoice({ invoiceNumber: "INV-3", period: "" });
+
+  /** A source exported without a period column is not nothing — it still
+   *  reconciles on totals, and it must survive the filter so its rupees are
+   *  never quietly dropped. */
+  it("offers the union of periods across sources, sorted", () => {
+    expect(periodsOf([august], [unperioded, july], [july])).toEqual(["2025-07", "2025-08"]);
+  });
+
+  it("treats \"all\" as no filter at all", () => {
+    const rows = [july, august, unperioded];
+    expect(forPeriod(rows, ALL_PERIODS)).toBe(rows);
+    expect(forPeriod(rows, "")).toBe(rows);
+  });
+
+  it("narrows rows to the selected period", () => {
+    expect(forPeriod([july, august, unperioded], "2025-07")).toEqual([july]);
+  });
+});
+
+describe("narrowing findings to a period", () => {
+  /** A finding is about an invoice; the period of a finding is the period of
+   *  the invoice the narrowed rows still hold. Joined on both the declared
+   *  key and the printed identity, exactly like the statement joins. */
+  it("keeps a finding whose invoice the narrowed rows still hold", () => {
+    const findings = [finding("gst:SupplierNotFiled", "pr-INV-1", { invoiceNumber: "INV-1" })];
+    expect(
+      findingsForPeriod(findings, [invoice({ invoiceNumber: "INV-1", period: "2025-07" })], []),
+    ).toHaveLength(1);
+  });
+
+  it("drops a finding about an invoice outside the period", () => {
+    const findings = [finding("gst:SupplierNotFiled", "pr-INV-2", { invoiceNumber: "INV-2" })];
+    expect(findingsForPeriod(findings, [invoice({ invoiceNumber: "INV-1", period: "2025-07" })], [])).toEqual([]);
+  });
+
+  it("still finds an invoice the narrowed rows hold under its printed identity", () => {
+    const findings = [finding("gst:SupplierNotFiled", "pr-INV-1", { invoiceNumber: "INV-1" })];
+    const row = invoice({ invoiceNumber: "INV-1", period: "2025-07", matchKey: "INV1" });
+    expect(findingsForPeriod(findings, [row], [])).toHaveLength(1);
   });
 });
 

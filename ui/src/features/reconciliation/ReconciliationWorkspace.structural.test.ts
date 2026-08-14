@@ -9,6 +9,33 @@ import source from "./ReconciliationWorkspace.tsx?raw";
  *  test of the visible output cannot tell a real modal from a figure that
  *  happens to agree with it. */
 
+/** C1 — the success toast names the graph source (`gst-gstr2b-2025-07`), not
+ *  just the counts, so a CA can match the worksheet to the imported source.
+ *  Structural, because `handle` only runs against a real upload and the
+ *  visible message is a toast no unit test renders. */
+describe("an upload names where it landed", () => {
+  it("tells the CA the source name alongside the counts", () => {
+    const handle = source.match(/const outcome = await importThroughSurface[\s\S]*?onImported\(\)/)?.[0];
+    expect(handle).toBeDefined();
+    expect(handle).toMatch(/message\.success/);
+    expect(handle).toMatch(/outcome\.source/);
+  });
+});
+
+/** C2 — the period filter narrows the reconciliation to one filing period, so
+ *  a CA works July and August against their own rows rather than a statement
+ *  mixing both. Structural, like the rest of this file: the Select only
+ *  matters when the workspace renders against a real graph, and the *logic* it
+ *  feeds is unit-tested in `statement.test.ts` — this pins the wiring. */
+describe("the GST period filter narrows the workspace", () => {
+  it("offers a period Select and feeds narrowed rows to the statement", () => {
+    expect(source).toMatch(/\bSelect\b/);
+    expect(source).toMatch(/setPeriod/);
+    expect(source).toMatch(/forPeriod/);
+    expect(source).toMatch(/findingsForPeriod/);
+  });
+});
+
 describe("a source card's invoice count opens the invoices behind it", () => {
   it("renders the count as a trigger, not a plain figure", () => {
     expect(source).toMatch(/type="link"/);

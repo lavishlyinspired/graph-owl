@@ -109,6 +109,7 @@ import { ObligationCalendar, setObligationCalendarParams } from "./features/obli
 import { ReconciliationWorkspace } from "./features/reconciliation/ReconciliationWorkspace";
 import { AgentChat } from "./features/agentChat/AgentChat";
 import { PackAdminPanel } from "./features/packs/PackAdminPanel";
+import { PackDataExplorer } from "./features/packs/PackDataExplorer";
 import { KnowledgeGraphToggle } from "./features/knowledge/KnowledgeGraphToggle";
 import { AgentActivityPanel } from "./features/agents/AgentActivityPanel";
 import { BoltSessionsPanel } from "./features/agents/BoltSessionsPanel";
@@ -4418,6 +4419,13 @@ function AppShell() {
                       }}
                     />
                   )}
+
+                  {/* **Pack data is a sibling of the tree, not a subtree.**
+                      Imported pack data lives in named import graphs, never in
+                      the `assets` table the hierarchy above reads (Plan 115).
+                      This block names what has been imported and files it
+                      under its pack; a source opens the reconciliation. */}
+                  <PackDataExplorer onOpen={() => setSection("reconciliation")} />
                 </div>
               </Sider>
             )}
