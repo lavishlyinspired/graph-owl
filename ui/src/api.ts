@@ -380,6 +380,44 @@ export interface FindingRuleDef {
   readonly span: unknown;
 }
 
+/** Which OWL profiles the loaded ontology fits, and which one reasoning was
+ *  routed to — `GET /ontology/profile`.
+ *
+ *  **Domain-agnostic by construction.** The profile of an ontology is a fact
+ *  about its axioms, not about its subject: GST's class hierarchy, a
+ *  healthcare pack's and a banking pack's are all answered by the same
+ *  detector. */
+export interface OntologyProfiles {
+  readonly rl: ProfileMembership;
+  readonly el: ProfileMembership;
+  readonly ql: ProfileMembership;
+  readonly routing:
+    | { readonly outcome: "route"; readonly profile: string }
+    | { readonly outcome: "refused"; readonly firstOffendingAxiom: string; readonly reason: string };
+}
+
+export interface ProfileMembership {
+  readonly member: boolean;
+  /** **Why it is not a member, axiom by axiom.** A bare "not EL" is
+   *  unactionable; the axiom that put it outside the profile is the thing an
+   *  author can change. */
+  readonly violations: readonly { readonly subject: string; readonly reason: string }[];
+}
+
+/** What OWL EL classification derived — `POST /reasoning/el/classify`.
+ *
+ *  **Different in kind from every finding this console shows.** A finding is
+ *  the result of a query: something asserted, or something absent. A
+ *  subsumption is a fact *nobody wrote down* that follows necessarily from the
+ *  ones that were. */
+export interface ElClassification {
+  readonly subsumptions: readonly { readonly subclass: string; readonly superclass: string }[];
+  /** Axioms the classifier could not use, with the construct that put them
+   *  outside EL. Reported rather than skipped: a classification that silently
+   *  ignored half the ontology would look complete and be wrong. */
+  readonly refusedAxioms: readonly { readonly subject: string; readonly construct: string }[];
+}
+
 /** A pack's own console configuration — `GET /packs/{pack}/console`.
  *
  *  **What this replaced.** The reconciliation page's source list, its measures
@@ -1482,6 +1520,24 @@ export const api = {
    *  — an ordinary answer, not a failure. */
   packConsole: (pack: string) =>
     request<PackConsoleConfig>(`/packs/${encodeURIComponent(pack)}/console`).catch(() => null),
+
+  /** Which OWL profiles the ontology fits, and where reasoning was routed. */
+  ontologyProfile: () => request<OntologyProfiles>("/ontology/profile"),
+
+  /** Classify the loaded ontology under OWL EL. Admin-gated server-side. */
+  classifyEl: () => request<ElClassification>("/reasoning/el/classify", { method: "POST" }),
+
+  /** **Why one class is classified under another** — the derivation path, as a
+   *  list of steps. `404` when no such subsumption holds, which is an answer
+   *  rather than a failure.
+   *
+   *  An entailment a reviewer cannot interrogate is worse than none: it looks
+   *  authoritative and cannot be checked. The same argument `governedBy` makes
+   *  for a finding. */
+  explainSubsumption: (subclass: string, superclass: string) =>
+    request<readonly string[]>(
+      `/reasoning/el/explain?subclass=${encodeURIComponent(subclass)}&superclass=${encodeURIComponent(superclass)}`,
+    ),
 
   assetAnalytics: (assetId: string, params: { hops?: number; maxNodes?: number } = {}) => {
     const query = new URLSearchParams();

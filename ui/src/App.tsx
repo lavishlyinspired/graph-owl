@@ -166,6 +166,7 @@ import {
 import { GraphCanvas } from "./graph/GraphCanvas";
 import type { ConnectorRun, ReasoningReport } from "./api";
 import { describeReasoningRun } from "./governance/reasoningRun";
+import { ReasoningPanel } from "./features/reasoning/ReasoningPanel";
 import { ExportDialog } from "./features/export/ExportDialog";
 import watermarkImg from "./assets/watermark1.png";
 
@@ -2782,6 +2783,13 @@ function GovernancePage({ colors }: { colors: (typeof palette)["light"] }) {
             </>
           );
         })()}
+
+      {/* **The half of reasoning that had no console caller at all.** "Run
+        *  reasoning" above applies RL rules; profile detection and EL
+        *  classification — 947 lines in `graph-owl-reasoning-el` plus the
+        *  profile detector — were reachable only by the MCP agent. Plan 110
+        *  Slice 1. */}
+      <ReasoningPanel />
 
       {lastRun && (
         <Alert
