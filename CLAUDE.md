@@ -303,6 +303,16 @@ via Homebrew), and moving the full gate to CI so it never blocks local work.
 - **`--lib` blinds the run to whatever only integration tests cover, and the report calls that a survivor.** Measured on `observability.rs`: `observe` and `metrics_endpoint` are HTTP middleware and a handler, exercised only by `tests/observability.rs`, and a `--lib` run reported all three of their mutants as MISSED. Re-run without `--lib`, scoped with `--re`, **all three were caught in 3 minutes**.
   So: `--lib` for code with unit coverage, which is where pure decisions belong anyway; drop it — and pay the container cost, scoped tightly with `--re` — for the thin imperative shells that only an end-to-end test reaches. A MISSED line from a `--lib` run is a question about coverage *shape*, not automatically a gap.
 
+- **Dropping `--lib` re-exposes the baseline failure `--lib` was hiding, and the fix is to scope the *test target*, not just the mutants.** Measured 14 August 2026 on `derived_about`: `cargo mutants -p graph-owl-server --re derived_about` aborts with **"cargo test failed in an unmutated tree"** — nine `authorization` tests fail with 500s, because cargo-mutants runs `cargo test` **without `--test-threads=1`** and this workspace requires it. Those same 21 tests pass serially, so it is the documented container contention, not a regression: **verify that before believing a baseline failure**, or the mutation run looks like it found a real break. The working invocation names the covering test binary, which avoids the whole-crate container storm entirely:
+
+  ```
+  cargo mutants -p graph-owl-server --re "<fn>" \
+    --cargo-test-arg --test --cargo-test-arg <test_file_stem> \
+    --cargo-test-arg -- --cargo-test-arg --test-threads=1
+  ```
+
+- **"0 viable mutants" is an answer, not a broken run — and it relocates the question.** All four candidates for `derived_about` were unviable because they could not compile (`Json<serde_json::Value>` has no `new`/`from_iter`, so cargo-mutants' stock return-value substitutions do not typecheck). That is the honest result for a *parse → delegate → serialize* shell: it has no branch of its own to get wrong. **Where a handler has no viable mutants, mutate the function it delegates to** — here `parse_node_id`, which holds the actual decision and mutates cleanly under `--lib` (1 caught, 1 unviable, 0 survivors). Reading "no mutants were viable" as a tooling failure and moving on leaves the real logic unmutated.
+
 - **The single biggest cost in this project is macOS scanning each freshly linked test binary on its FIRST execution — ~200 seconds each, ~75 of them per build.** Measured 30 July 2026 by running one binary directly, twice, with no cargo involved:
 
   | `wire_conventions` (57 MB) | Wall | Tests inside |
