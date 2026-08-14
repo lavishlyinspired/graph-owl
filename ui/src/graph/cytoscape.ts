@@ -78,7 +78,15 @@ export function nodeClasses(
   if (picture.truncatedAt.includes(node.id)) classes.push("truncated");
   // A node the reader may not see keeps its place in the picture but not its
   // label — removing it would claim a smaller neighbourhood than exists.
-  if (node.kind === null) classes.push("hidden-kind");
+  //
+  // **Not just `kind === null`.** Every pack-subject node has a `null` kind
+  // structurally — it is not a catalog asset, not a case of authorization
+  // hiding anything — so that alone would mark every evidence-graph node
+  // hidden regardless of whether a `semanticType` could colour it instead.
+  // Found live: `.hidden-kind`'s style rule unconditionally overrides
+  // `background-color`, so this silently repainted every semantically
+  // typed node grey before the fix.
+  if (node.kind === null && !node.semanticType) classes.push("hidden-kind");
   return classes.join(" ");
 }
 
@@ -122,20 +130,89 @@ export function kindColor(kind: AssetKind | null, mode: ColorMode, colors: Style
  *  palette table, rather than a second, possibly-drifting order of its own. */
 const KIND_ORDER: readonly AssetKind[] = ["service", "database", "schema", "table", "column"];
 
+/** Plan 114 Slice F: a pack subject's own `rdf:type`, resolved server-side
+ *  ({@link api.EvidenceGraphNode.semanticType}) — a GST invoice or supplier
+ *  has no `AssetKind`. The set of semantic types is open-ended (whatever a
+ *  pack's ontology declares), unlike `kindColor`'s closed 5, so this hashes
+ *  into the same validated 8-slot categorical palette rather than assigning
+ *  a fixed order. Both rows ran through the dataviz skill's own
+ *  `validate_palette.js` against this project's real surfaces, same as
+ *  {@link KIND_COLORS}. Two types can collide beyond 8 distinct values in
+ *  one picture — the node's own label still carries identity; colour here
+ *  is a secondary aid, which is the dataviz skill's own stated tolerance
+ *  for a hashed assignment. */
+const SEMANTIC_TYPE_COLORS: Record<ColorMode, readonly string[]> = {
+  light: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"],
+  dark: ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"],
+};
+
+export function semanticTypeColor(type: string, mode: ColorMode): string {
+  let hash = 0;
+  for (let i = 0; i < type.length; i += 1) {
+    // A mutant flipping `+` to `-` here is equivalent, not untested: proven
+    // by brute-forcing 100,000 random strings and confirming `Math.abs()`
+    // erases the sign difference every time (the accumulator's sign under
+    // `-` is the negation of its sign under `+` at every step, and the final
+    // `Math.abs(...) % palette.length` cannot distinguish a number from its
+    // negation). Left as `+` for readability, not because `-` would change
+    // anything a caller could observe.
+    hash = (hash * 31 + type.charCodeAt(i)) | 0;
+  }
+  const palette = SEMANTIC_TYPE_COLORS[mode];
+  // `% palette.length` is mathematically guaranteed in `[0, palette.length)`
+  // — the assertion is `noUncheckedIndexedAccess` friction, not a real
+  // possibility of `undefined` reaching a caller.
+  return palette[Math.abs(hash) % palette.length]!;
+}
+
 export interface LegendEntry {
-  readonly kind: AssetKind;
+  /** An `AssetKind` for a catalog-asset entry, a semantic type's own name
+   *  for a pack-subject entry — the two never appear in the same picture
+   *  (`kind` and `semanticType` are mutually exclusive per node), so one
+   *  string key is enough to identify either. */
+  readonly key: string;
   readonly label: string;
   readonly color: string;
 }
 
-/** What a legend renders — the same colour {@link kindColor} would give a
- *  real node of that kind, so the legend can never drift from the canvas. */
-export function legendEntries(mode: ColorMode, colors: StyleColors): LegendEntry[] {
-  return KIND_ORDER.map((kind) => ({
-    kind,
-    label: kind.charAt(0).toUpperCase() + kind.slice(1),
-    color: kindColor(kind, mode, colors),
+/** What a legend renders for *this* picture, not a static universal list —
+ *  a fixed 5-entry `AssetKind` legend made no sense on an evidence graph,
+ *  where every node is kind-null. `AssetKind` entries keep `KIND_COLORS`'
+ *  fixed slot order; semantic-type entries follow first-seen order within
+ *  the picture, since there is no fixed order for an open-ended set. Colours
+ *  are the same functions {@link toElements} itself uses, so the legend can
+ *  never drift from the canvas. */
+export function legendEntries(picture: Picture, mode: ColorMode, colors: StyleColors): LegendEntry[] {
+  // Dropping the `!== null` filter here is an equivalent mutant, not an
+  // untested branch: `KIND_ORDER.filter((kind) => kindsPresent.has(kind))`
+  // below only ever asks the set about a real `AssetKind` string — whether
+  // `null` also happens to sit in the set alongside them is unobservable
+  // from that call. Kept for the type narrowing (`Set<AssetKind>` rather
+  // than `Set<AssetKind | null>`), not because a caller could tell.
+  const kindsPresent = new Set(
+    picture.nodes.map((node) => node.kind).filter((kind): kind is AssetKind => kind !== null),
+  );
+  const kindEntries: LegendEntry[] = KIND_ORDER.filter((kind) => kindsPresent.has(kind)).map(
+    (kind) => ({
+      key: kind,
+      label: kind.charAt(0).toUpperCase() + kind.slice(1),
+      color: kindColor(kind, mode, colors),
+    }),
+  );
+
+  const typesSeen: string[] = [];
+  for (const node of picture.nodes) {
+    if (node.kind === null && node.semanticType && !typesSeen.includes(node.semanticType)) {
+      typesSeen.push(node.semanticType);
+    }
+  }
+  const typeEntries: LegendEntry[] = typesSeen.map((type) => ({
+    key: type,
+    label: type,
+    color: semanticTypeColor(type, mode),
   }));
+
+  return [...kindEntries, ...typeEntries];
 }
 
 /** Plan 114 Slice B: a reader temporarily hiding a node they do not want to
@@ -157,26 +234,35 @@ export function visiblePicture(picture: Picture, hidden: ReadonlySet<string>): P
  *  Order matters: Cytoscape rejects an edge whose endpoints it has not seen, so
  *  an edge listed first is dropped rather than deferred.
  */
+/** A catalog kind wins when present; a pack subject's semantic type is the
+ *  fallback for a `null` kind (Plan 114 Slice F); `undefined` — never
+ *  resolved through `kindColor`'s own grey fallback — for a node with
+ *  neither, so `node.hidden-kind`'s style rule stays the one place that
+ *  decision is made, not two that have to agree. */
+function nodeColor(node: Picture["nodes"][number], mode: ColorMode): string | undefined {
+  if (node.kind !== null) return KIND_COLORS[mode][node.kind];
+  if (node.semanticType) return semanticTypeColor(node.semanticType, mode);
+  return undefined;
+}
+
 export function toElements(picture: Picture, mode: ColorMode = "light"): Element[] {
   const present = new Set(picture.nodes.map((node) => node.id));
 
-  const nodes: Element[] = picture.nodes.map((node) => ({
-    group: "nodes" as const,
-    // `canvasLabel`: Cytoscape draws this straight onto a `<canvas>`, which
-    // has no `dir` attribute — a right-to-left name needs to arrive already
-    // in visual order (`bidiLabel.ts`'s own doc comment).
-    //
-    // `color` omitted for a `null` kind rather than resolved through
-    // `kindColor`'s own fallback: `node.hidden-kind`'s style rule already
-    // sets the same grey via the class cascade, so there is one place that
-    // decision is made, not two that have to agree.
-    data: {
-      id: node.id,
-      label: canvasLabel(node.name),
-      ...(node.kind === null ? {} : { color: KIND_COLORS[mode][node.kind] }),
-    },
-    classes: nodeClasses(node, picture),
-  }));
+  const nodes: Element[] = picture.nodes.map((node) => {
+    const color = nodeColor(node, mode);
+    return {
+      group: "nodes" as const,
+      // `canvasLabel`: Cytoscape draws this straight onto a `<canvas>`, which
+      // has no `dir` attribute — a right-to-left name needs to arrive already
+      // in visual order (`bidiLabel.ts`'s own doc comment).
+      data: {
+        id: node.id,
+        label: canvasLabel(node.name),
+        ...(color === undefined ? {} : { color }),
+      },
+      classes: nodeClasses(node, picture),
+    };
+  });
 
   const edges: Element[] = picture.edges
     // An edge to a node that is not in the picture is dropped rather than

@@ -242,6 +242,64 @@ async fn a_finding_s_evidence_graph_reaches_the_supplier_node_its_issuedby_edge_
     );
 }
 
+/// Plan 114: a pack subject has no `AssetKind` — no relational row, no
+/// catalog kind — which is exactly why the console's graph canvas had drawn
+/// every evidence-graph node in one uniform grey. This proves the *virtual*
+/// fix over the real HTTP layer: the fixture's own turtle already asserts
+/// `rdf:type` for both nodes (`seed_invoice_with_a_real_supplier_node`), so
+/// nothing new is seeded here — the type comes back because it was already
+/// in the graph, not because this test adds anything to persist it.
+#[tokio::test]
+async fn a_node_s_own_rdf_type_reaches_the_evidence_graph_as_its_semantic_type() {
+    let (app, _db, _url) = test_app().await;
+    seed_invoice_with_a_real_supplier_node(&app).await;
+    register_and_run_missing_in_gstr2b(&app).await;
+
+    let (status, findings) = call(
+        &app,
+        "GET",
+        "/findings?pack=gst",
+        "application/json",
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = findings.as_array().expect("array")[0]["id"]
+        .as_str()
+        .expect("finding id");
+
+    let (status, graph) = call(
+        &app,
+        "GET",
+        &format!("/findings/{id}/evidence-graph"),
+        "application/json",
+        String::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+    let nodes = graph["nodes"].as_array().expect("nodes array");
+
+    let invoice_node = nodes
+        .iter()
+        .find(|n| n["id"] == "p-INV-1003")
+        .expect("invoice node present");
+    assert_eq!(
+        invoice_node["semanticType"],
+        serde_json::json!("PurchaseInvoice"),
+        "{invoice_node:?}"
+    );
+
+    let supplier_node = nodes
+        .iter()
+        .find(|n| n["id"] == "supplier-29AACCG0527D1Z8")
+        .expect("supplier node present — reached only by traversal, not the flat evidence list");
+    assert_eq!(
+        supplier_node["semanticType"],
+        serde_json::json!("Supplier"),
+        "{supplier_node:?}"
+    );
+}
+
 /// The two-source case `plans/105g-evidence-provenance-and-near-miss.md`
 /// names explicitly: a `gst:Supplier` referenced from both the purchase
 /// register and GSTR-2B must report both, over a real Postgres-backed

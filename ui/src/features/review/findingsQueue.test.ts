@@ -233,7 +233,7 @@ describe("describeEvidenceEdge", () => {
 describe("evidenceGraphIsJustTheSeed", () => {
   it("is true when the walk found nothing beyond the finding's own subject", () => {
     const graph: EvidenceGraph = {
-      nodes: [{ id: "pr-INV-1003", iri: null, sources: [] }],
+      nodes: [{ id: "pr-INV-1003", iri: null, sources: [], semanticType: null }],
       edges: [],
       truncated: false,
       nearMiss: null,
@@ -244,8 +244,13 @@ describe("evidenceGraphIsJustTheSeed", () => {
   it("is false once the walk reaches a second node", () => {
     const graph: EvidenceGraph = {
       nodes: [
-        { id: "pr-INV-1003", iri: null, sources: ["gst-purchase-register"] },
-        { id: "supplier-29AACCG0527D1Z8", iri: null, sources: [] },
+        {
+          id: "pr-INV-1003",
+          iri: null,
+          sources: ["gst-purchase-register"],
+          semanticType: null,
+        },
+        { id: "supplier-29AACCG0527D1Z8", iri: null, sources: [], semanticType: null },
       ],
       edges: [getEdge()],
       truncated: false,
@@ -272,11 +277,13 @@ describe("evidencePicture", () => {
         id: "pr-INV-1003",
         iri: "https://graph-owl.dev/packs/gst#pr-INV-1003",
         sources: ["gst-purchase-register"],
+        semanticType: "PurchaseInvoice",
       },
       {
         id: "supplier-29AACCG0527D1Z8",
         iri: "https://graph-owl.dev/packs/gst#supplier-29AACCG0527D1Z8",
         sources: ["gst-purchase-register", "gst-gstr2b"],
+        semanticType: "Supplier",
       },
     ],
     edges: [getEdge()],
@@ -292,25 +299,26 @@ describe("evidencePicture", () => {
   it("carries every node through, named by its resolved IRI's local part", () => {
     const picture = evidencePicture(getFinding(), graph);
     expect(picture.nodes).toEqual([
-      { id: "pr-INV-1003", name: "pr-INV-1003", kind: null },
+      { id: "pr-INV-1003", name: "pr-INV-1003", kind: null, semanticType: "PurchaseInvoice" },
       {
         id: "supplier-29AACCG0527D1Z8",
         name: "supplier-29AACCG0527D1Z8",
         kind: null,
+        semanticType: "Supplier",
       },
     ]);
   });
 
   it("falls back to the bare id when a node's namespace never resolved to an IRI", () => {
     const unresolved: EvidenceGraph = {
-      nodes: [{ id: "pr-INV-1003", iri: null, sources: [] }],
+      nodes: [{ id: "pr-INV-1003", iri: null, sources: [], semanticType: null }],
       edges: [],
       truncated: false,
       nearMiss: null,
     };
     const picture = evidencePicture(getFinding(), unresolved);
     expect(picture.nodes).toEqual([
-      { id: "pr-INV-1003", name: "pr-INV-1003", kind: null },
+      { id: "pr-INV-1003", name: "pr-INV-1003", kind: null, semanticType: null },
     ]);
   });
 
@@ -352,6 +360,7 @@ describe("evidenceNodeSources", () => {
           id: "pr-INV-1003",
           iri: "https://graph-owl.dev/packs/gst#pr-INV-1003",
           sources: ["gst-purchase-register"],
+          semanticType: null,
         },
       ],
       edges: [],
@@ -377,6 +386,7 @@ describe("evidenceNodeSources", () => {
           id: "supplier-29AACCG0527D1Z8",
           iri: null,
           sources: ["gst-purchase-register", "gst-gstr2b"],
+          semanticType: null,
         },
       ],
       edges: [],
@@ -391,7 +401,7 @@ describe("evidenceNodeSources", () => {
 
   it("falls back to the bare id when a node's namespace never resolved to an IRI", () => {
     const graph: EvidenceGraph = {
-      nodes: [{ id: "pr-INV-1003", iri: null, sources: [] }],
+      nodes: [{ id: "pr-INV-1003", iri: null, sources: [], semanticType: null }],
       edges: [],
       truncated: false,
       nearMiss: null,
@@ -401,7 +411,7 @@ describe("evidenceNodeSources", () => {
 
   it("reports an empty source list as empty, not absent — a real answer, not a missing field", () => {
     const graph: EvidenceGraph = {
-      nodes: [{ id: "pr-INV-1003", iri: null, sources: [] }],
+      nodes: [{ id: "pr-INV-1003", iri: null, sources: [], semanticType: null }],
       edges: [],
       truncated: false,
       nearMiss: null,
@@ -434,6 +444,7 @@ describe("evidenceNearMiss", () => {
         id: "supplier-27AABCU9603R1ZM",
         iri: "https://graph-owl.dev/packs/gst#supplier-27AABCU9603R1ZM",
         sources: ["gst-gstr2b"],
+        semanticType: null,
       },
     };
     // Plan 113 Slice C: `iri` is what `ClickableSubject` needs to open this
@@ -522,6 +533,7 @@ describe("evidenceCandidates", () => {
           id: "2b-INV-1004",
           iri: "https://graph-owl.dev/packs/gst#2b-INV-1004",
           sources: ["gst-gstr2b"],
+          semanticType: null,
           by: ["ngram"],
         },
       ]),
@@ -551,7 +563,7 @@ describe("evidenceCandidates", () => {
   it("drops a candidate that cannot say why it matched", () => {
     expect(
       evidenceCandidates(
-        graph([{ id: "x", iri: null, sources: [], by: [] }]),
+        graph([{ id: "x", iri: null, sources: [], semanticType: null, by: [] }]),
       ),
     ).toEqual([]);
   });

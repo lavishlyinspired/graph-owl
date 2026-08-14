@@ -24,6 +24,12 @@ export interface DiffNode {
   readonly change: Change;
   /** Present only on a rename. */
   readonly wasName?: string;
+  /** A diffed node is always a catalog asset (`00c`: time-travel/lineage is
+   *  asset-only) and so never carries a pack subject's semantic type — kept
+   *  here, always absent in practice, only so `Picture["nodes"]`
+   *  (`GraphNode | DiffNode`) stays one uniform shape to read rather than
+   *  needing a type guard at every access site. */
+  readonly semanticType?: string | null;
 }
 
 export interface DiffEdge extends GraphEdge {

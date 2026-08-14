@@ -122,7 +122,7 @@ export function GraphCanvas({
 
   const visible = useMemo(() => visiblePicture(picture, hidden), [picture, hidden]);
   const elements = useMemo(() => toElements(visible, mode), [visible, mode]);
-  const legend = useMemo(() => legendEntries(mode, colors), [mode, colors]);
+  const legend = useMemo(() => legendEntries(visible, mode, colors), [visible, mode, colors]);
 
   useEffect(() => {
     if (!host.current) return undefined;
@@ -233,7 +233,7 @@ export function GraphCanvas({
           // through the mark beside it, never through its own colour, so a
           // low-contrast hue (the amber `table` slot against white) never
           // has to double as a text colour.
-          <Space key={entry.kind} size={4}>
+          <Space key={entry.key} size={4}>
             <span
               aria-hidden
               style={{
@@ -298,7 +298,11 @@ export function GraphCanvas({
             <Space direction="vertical" size={4} style={{ width: "100%" }}>
               <Space>
                 <Text type="secondary">{COPY.kind}</Text>
-                <Text>{selected.kind ?? COPY.kindHidden}</Text>
+                {/* Same precedence `nodeColor`/`nodeClasses` already use: a
+                    real AssetKind first, then a pack subject's own semantic
+                    type, and only "hidden by authorization" — a claim about
+                    *why* a kind is missing — when neither is true. */}
+                <Text>{selected.kind ?? selected.semanticType ?? COPY.kindHidden}</Text>
               </Space>
               <Space>
                 <Text type="secondary">{COPY.id}</Text>

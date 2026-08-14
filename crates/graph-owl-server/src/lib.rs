@@ -9264,10 +9264,18 @@ async fn finding_evidence_graph(
     let mut nodes = Vec::with_capacity(graph.nodes.len());
     for sid in &graph.nodes {
         let sources = catalog.node_sources(sid).await.unwrap_or_default();
+        // Plan 114: a pack subject has no `AssetKind` — resolved virtually
+        // from the same flakes `node_sources` just read, so the console can
+        // colour it by what it actually is rather than drawing it grey.
+        // Degrades to `null` the same way `sources` degrades to empty: a
+        // lookup failure is a missing fact, not a reason to fail the whole
+        // picture.
+        let semantic_type = catalog.node_semantic_type(sid).await.unwrap_or_default();
         nodes.push(json!({
             "id": sid.id,
             "iri": sid.to_iri(),
             "sources": sources,
+            "semanticType": semantic_type,
         }));
     }
 

@@ -656,6 +656,12 @@ export interface EvidenceGraphNode {
    *  subject's edge target), never absent — an empty array is a real
    *  answer, not a missing field. */
   readonly sources: readonly string[];
+  /** The pack's own `rdf:type` for this subject, resolved virtually from the
+   *  same flakes `sources` above already reads — a GST invoice or supplier
+   *  has no `AssetKind`, the catalog's closed relational enum, so this is
+   *  what the graph canvas colours it by instead. `null` when the subject
+   *  has no `rdf:type` assertion, not an error. */
+  readonly semanticType: string | null;
 }
 
 export interface EvidenceGraphEdge {
@@ -1042,6 +1048,11 @@ export interface GraphNode {
    *  bare node — removing it would claim a smaller neighbourhood than exists. */
   kind: AssetKind | null;
   fullyQualifiedName?: string;
+  /** A pack subject's own `rdf:type` (Plan 114 Slice F), threaded through
+   *  from `EvidenceGraphNode.semanticType` for a node with no `AssetKind` —
+   *  optional because a catalog asset's own `/assets/{id}/graph` response
+   *  never carries one, only `findingsQueue.tsx`'s `evidencePicture()` does. */
+  semanticType?: string | null;
 }
 
 export interface GraphEdge {

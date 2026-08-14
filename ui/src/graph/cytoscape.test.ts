@@ -11,6 +11,7 @@ import {
   legendEntries,
   MAX_ZOOM,
   nodeClasses,
+  semanticTypeColor,
   toElements,
   visiblePicture,
   wantsWebgl,
@@ -214,6 +215,30 @@ describe("the classes a reader can act on", () => {
 
   it("does not mark an ordinary node as hidden", () => {
     expect(classesOf(picture().nodes[1]!, picture())).not.toContain("hidden-kind");
+  });
+
+  // Plan 114 Slice F, found live: a pack subject's `kind` is *always* `null`
+  // — not because authorization hid it, but because it structurally has no
+  // `AssetKind` — so the original rule marked every evidence-graph node
+  // `hidden-kind` regardless of whether a `semanticType` could colour it
+  // instead. `.hidden-kind`'s style rule unconditionally overrides
+  // `background-color`, so this silently repainted every semantically
+  // typed node grey — the real bug a live render caught, code-reading and
+  // the unit suite both missed.
+  it("does not mark a kind-null node hidden when it has a semantic type to colour it by instead", () => {
+    const p = picture({
+      nodes: [{ id: "a", name: "g1-INV-1008", kind: null, semanticType: "Gstr1Invoice" }],
+    });
+
+    expect(classesOf(p.nodes[0]!, p)).not.toContain("hidden-kind");
+  });
+
+  it("still marks a kind-null node hidden when it has no semantic type either", () => {
+    const p = picture({
+      nodes: [{ id: "a", name: "?", kind: null, semanticType: null }],
+    });
+
+    expect(classesOf(p.nodes[0]!, p)).toContain("hidden-kind");
   });
 });
 
@@ -555,19 +580,221 @@ describe("colouring a node by its kind — Plan 114 Slice D", () => {
 });
 
 describe("the legend — Plan 114 Slice D", () => {
-  it("names every kind toElements can colour, in the same fixed order", () => {
-    const entries = legendEntries("light", colors);
-    expect(entries.map((e) => e.kind)).toEqual(["service", "database", "schema", "table", "column"]);
+  // Plan 114 Slice F: a fixed 5-entry AssetKind legend made no sense on an
+  // evidence graph, where every node is kind-null — the legend is now
+  // derived from the picture actually on screen, not a static universal
+  // list. Order still matters: AssetKind entries keep the fixed slot order;
+  // an unrecognised kind or semantic type is never legended for a picture
+  // that does not contain one.
+  const catalogPicture: Picture = {
+    seedId: "a",
+    nodes: [
+      { id: "a", name: "a", kind: "table" },
+      { id: "b", name: "b", kind: "column" },
+      { id: "c", name: "c", kind: "table" },
+    ],
+    edges: [],
+    expanded: ["a"],
+    truncatedAt: [],
+  };
+
+  it("lists only the kinds actually present in the picture, in fixed slot order", () => {
+    const entries = legendEntries(catalogPicture, "light", colors);
+    expect(entries.map((e) => e.key)).toEqual(["table", "column"]);
+  });
+
+  it("recognises every one of the five kinds, in their fixed order", () => {
+    const allFive: Picture = {
+      ...catalogPicture,
+      nodes: (["column", "service", "table", "database", "schema"] as const).map((kind, i) => ({
+        id: `n${i}`,
+        name: `n${i}`,
+        kind,
+      })),
+    };
+    // Listed out of that insertion order deliberately: the slot order is
+    // `KIND_ORDER`'s own, not the order nodes happened to arrive in.
+    expect(legendEntries(allFive, "light", colors).map((e) => e.key)).toEqual([
+      "service",
+      "database",
+      "schema",
+      "table",
+      "column",
+    ]);
+  });
+
+  it("a kind-null node contributes no AssetKind entry of its own", () => {
+    const mixed: Picture = {
+      ...catalogPicture,
+      nodes: [...catalogPicture.nodes, { id: "d", name: "d", kind: null }],
+    };
+    // Same two keys as the kind-only picture — the null-kind node adds
+    // nothing to this list (it may still earn a semantic-type entry,
+    // covered separately below).
+    expect(legendEntries(mixed, "light", colors).map((e) => e.key)).toEqual([
+      "table",
+      "column",
+    ]);
   });
 
   it("each entry's colour is exactly what a node of that kind would be drawn in", () => {
-    for (const entry of legendEntries("dark", colors)) {
-      expect(entry.color).toBe(kindColor(entry.kind, "dark", colors));
+    for (const entry of legendEntries(catalogPicture, "dark", colors)) {
+      expect(entry.color).toBe(kindColor(entry.key as AssetKind, "dark", colors));
     }
   });
 
   it("labels read for a human, not the raw kind string", () => {
-    const table = legendEntries("light", colors).find((e) => e.kind === "table");
+    const table = legendEntries(catalogPicture, "light", colors).find((e) => e.key === "table");
     expect(table?.label).toBe("Table");
+  });
+
+  it("an empty picture legends nothing", () => {
+    expect(
+      legendEntries({ ...catalogPicture, nodes: [] }, "light", colors),
+    ).toEqual([]);
+  });
+});
+
+describe("colouring a node by its pack-declared semantic type — Plan 114 Slice F", () => {
+  // A pack subject (a GST invoice, a supplier) has no `AssetKind` — resolved
+  // virtually server-side from its own `rdf:type` flake. The set of
+  // semantic types is open-ended (whatever a pack's ontology declares), so
+  // — unlike `kindColor`'s fixed 5 slots — this hashes into the same
+  // 8-slot validated categorical palette rather than assigning a fixed
+  // order, and two types can collide beyond 8 distinct values in one
+  // picture. The node's own label still carries identity; colour is a
+  // secondary aid, which is exactly the dataviz skill's own tolerance for
+  // this.
+  it("is deterministic — the same type always resolves to the same colour", () => {
+    expect(semanticTypeColor("Gstr2bInvoice", "light")).toBe(
+      semanticTypeColor("Gstr2bInvoice", "light"),
+    );
+  });
+
+  // The exact slot, not just "one of the eight" — a broken hash (the loop
+  // never running, reading one character past the end, `-`/`/` in place of
+  // `+`/`*`) still lands somewhere in the palette, so only pinning the real
+  // computed value for a real multi-character input catches it.
+  it("resolves this exact type to its actual hashed slot, not just a member of the palette", () => {
+    expect(semanticTypeColor("Gstr2bInvoice", "light")).toBe("#eda100");
+  });
+
+  it("resolves to one of the validated 8-slot hexes for that mode", () => {
+    const LIGHT_HEXES = [
+      "#2a78d6",
+      "#eb6834",
+      "#1baf7a",
+      "#eda100",
+      "#e87ba4",
+      "#008300",
+      "#4a3aa7",
+      "#e34948",
+    ];
+    expect(LIGHT_HEXES).toContain(semanticTypeColor("Supplier", "light"));
+  });
+
+  // Every slot, in both modes — `A`.."H" are single characters whose hash
+  // (`charCodeAt(0) % 8`, effectively, for a one-character input) lands on
+  // slots 1..7 then 0, found by brute force once. Pinning the full table
+  // this way, not just two names from the pack's own vocabulary, is what
+  // catches a single mis-typed hex anywhere in either array.
+  it("every one of the 8 slots resolves to its own validated hex, in both modes", () => {
+    const bySlot = ["H", "A", "B", "C", "D", "E", "F", "G"];
+    expect(bySlot.map((s) => semanticTypeColor(s, "light"))).toEqual([
+      "#2a78d6",
+      "#eb6834",
+      "#1baf7a",
+      "#eda100",
+      "#e87ba4",
+      "#008300",
+      "#4a3aa7",
+      "#e34948",
+    ]);
+    expect(bySlot.map((s) => semanticTypeColor(s, "dark"))).toEqual([
+      "#3987e5",
+      "#d95926",
+      "#199e70",
+      "#c98500",
+      "#d55181",
+      "#008300",
+      "#9085e9",
+      "#e66767",
+    ]);
+  });
+
+  it("uses a different hex set for dark mode", () => {
+    const DARK_HEXES = [
+      "#3987e5",
+      "#d95926",
+      "#199e70",
+      "#c98500",
+      "#d55181",
+      "#008300",
+      "#9085e9",
+      "#e66767",
+    ];
+    expect(DARK_HEXES).toContain(semanticTypeColor("Supplier", "dark"));
+  });
+
+  it("carries the type into toElements' node data when the kind is null", () => {
+    const elements = toElements(
+      {
+        seedId: "a",
+        nodes: [{ id: "a", name: "a", kind: null, semanticType: "Gstr2bInvoice" }],
+        edges: [],
+        expanded: ["a"],
+        truncatedAt: [],
+      },
+      "light",
+    );
+    const node = elements.find((e) => e.data.id === "a");
+    expect(node?.data.color).toBe(semanticTypeColor("Gstr2bInvoice", "light"));
+  });
+
+  it("leaves an untyped, kind-null node's data without a colour, same as before", () => {
+    const elements = toElements({
+      seedId: "a",
+      nodes: [{ id: "a", name: "a", kind: null, semanticType: null }],
+      edges: [],
+      expanded: ["a"],
+      truncatedAt: [],
+    });
+    const data = elements.find((e) => e.data.id === "a")?.data;
+    expect(data && "color" in data).toBe(false);
+  });
+
+  it("the legend lists semantic types actually present, after any AssetKind entries", () => {
+    const picture: Picture = {
+      seedId: "a",
+      nodes: [
+        { id: "a", name: "a", kind: null, semanticType: "Gstr2bInvoice" },
+        { id: "b", name: "b", kind: null, semanticType: "Supplier" },
+        // A repeat of an already-seen type must not duplicate the entry.
+        { id: "c", name: "c", kind: null, semanticType: "Gstr2bInvoice" },
+      ],
+      edges: [],
+      expanded: ["a"],
+      truncatedAt: [],
+    };
+
+    const entries = legendEntries(picture, "light", colors);
+    expect(entries.map((e) => e.key)).toEqual(["Gstr2bInvoice", "Supplier"]);
+    expect(entries.find((e) => e.key === "Gstr2bInvoice")?.color).toBe(
+      semanticTypeColor("Gstr2bInvoice", "light"),
+    );
+  });
+
+  it("a node with a real kind never earns a semantic-type entry too, even if semanticType is set", () => {
+    // Should not happen in real data (the two are mutually exclusive by
+    // construction server-side), but the guard exists on purpose: a kind
+    // takes precedence, so this must never double-legend one node.
+    const picture: Picture = {
+      seedId: "a",
+      nodes: [{ id: "a", name: "a", kind: "table", semanticType: "Gstr2bInvoice" }],
+      edges: [],
+      expanded: ["a"],
+      truncatedAt: [],
+    };
+    expect(legendEntries(picture, "light", colors).map((e) => e.key)).toEqual(["table"]);
   });
 });

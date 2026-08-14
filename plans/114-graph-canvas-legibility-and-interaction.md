@@ -1,7 +1,7 @@
 # Plan 114 — Graph canvas legibility and interaction: labels, colour, inspector, temporary hide
 
-**Status**: Slices A, B, D, E shipped. Slice C (collapse — undo one expansion)
-planned, not started. **Branch**: main.
+**Status**: Slices A, B, D, E, F shipped. Slice C (collapse — undo one
+expansion) planned, not started. **Branch**: main.
 **Trigger**: user feedback that "the current cytoscape is not looking good",
 plus explicit asks for legible node/edge labels, expand/contract, temporarily
 removing nodes, colourful nodes with a legend, draggable nodes, a full-screen
@@ -212,6 +212,90 @@ screen canvas.
 
 All copy externalized to a `COPY` object per this repo's
 `local/no-raw-jsx-text` lint rule, matching `AgentChat.tsx`'s own convention.
+
+### Slice F — Colour a pack subject by its own `rdf:type`, virtually ✅ shipped
+
+Also not in the original list — asked for directly, with the follow-up
+question "why is `kind` null" leading to the actual investigation.
+
+**Why `kind` is null, verified rather than guessed.** `evidencePicture()`
+(`findingsQueue.tsx`) has always hardcoded `kind: null` for every evidence-
+graph node, with its own stated reason: a finding's subject is not a catalog
+asset, so it has no `AssetKind` — the storage layer's closed five-value enum
+— to report. That is correct, not a bug. What made it colour as uniform grey
+was Slice D's own `kindColor(null, mode, colors)` fallback to `colors.border`,
+the same treatment `node.hidden-kind` already used for "authorization hid
+this" — a different situation entirely, now colliding with it.
+
+**"Make use of the catalog virtually and persist only what's necessary"**
+— the user's own framing — turned out to already be true of the data:
+queried the live Postgres flakes table directly before writing any code and
+found real `rdf:type` triples already asserted for every relevant subject
+(`Gstr2bInvoice`, `PurchaseInvoice`, `Supplier`, `Gstr1Invoice`, and 8 more
+across the pack — 12 distinct types, no schema change needed). Better still,
+`Catalog::node_sources` already fetches every flake for a subject via one
+`query_pattern` call and only reads the `cx` (context/source) off each —
+`Catalog::node_semantic_type` (`graph-owl-api`) reads the *same* fetched
+flakes for the first `rdf:type` object instead. One additional per-node
+Rust-side lookup, mirroring `node_sources`' own existing N+1 pattern rather
+than inventing a new one; nothing new persisted anywhere — genuinely virtual,
+computed at answer time from data already in the graph.
+
+- `Catalog::node_semantic_type(sid) -> Option<String>` — TDD'd in isolation
+  (`graph-owl-api`, 4 tests, 100% mutation score: 5/5 real mutants killed, 1
+  unviable) — then wired into `GET /findings/{id}/evidence-graph`'s existing
+  per-node loop alongside `node_sources`, and proven over the real HTTP
+  layer against the fixture's own pre-existing turtle (which already
+  declares `rdf:type` for both nodes — nothing new seeded) rather than only
+  against a fake `TraversalEngine`.
+- Frontend: `EvidenceGraphNode`/`GraphNode` gain `semanticType: string |
+  null`; `evidencePicture()` threads it through unchanged. Since the set of
+  semantic types is open-ended (whatever a pack's ontology declares, unlike
+  `AssetKind`'s fixed five), `semanticTypeColor` hashes into the *same*
+  dataviz-validated 8-slot categorical palette rather than assigning a fixed
+  order — collisions possible beyond 8 distinct types in one picture,
+  accepted deliberately since the node's own label still carries identity.
+  `legendEntries` stopped being a static 5-`AssetKind` list and became
+  picture-derived: it lists whichever kinds *and* semantic types are
+  actually present, kinds in fixed slot order then types in first-seen
+  order, never a category absent from what's on screen.
+- **A real bug, found only by looking at the live render, that unit tests
+  and code review both missed**: `nodeClasses` marked *every* `kind === null`
+  node `hidden-kind` — correct when authorization hid a kind, wrong when the
+  node structurally never had one and a `semanticType` was available
+  instead. `.hidden-kind`'s own style rule unconditionally overrides
+  `background-color`, so it silently repainted every semantically typed
+  node grey regardless of what `toElements` had just computed for it — the
+  legend was right, the canvas was not, and the mismatch was only visible by
+  actually looking. Fixed to `node.kind === null && !node.semanticType`,
+  with two new RED tests pinning both directions (has a type → not hidden;
+  has neither → still hidden) before the fix, confirmed live afterward on
+  the real `g1-INV-1008` / `supplier-33AAGCV2109L1ZH` / `2b-INV-1008`
+  evidence graph: purple / pink / gold, matching the legend exactly.
+- **A second instance of the same defect, one layer up**: the inspector
+  panel's own "Kind" row read `selected.kind ?? "hidden by authorization"` —
+  for a typed pack subject this claimed authorization hid something that
+  was never hidden at all. Fixed to fall back through `semanticType` before
+  the authorization copy, matching the same precedence `nodeColor` and
+  `nodeClasses` already use. `.tsx`, untested directly per this file's
+  standing convention; verified live instead (`Kind: Gstr1Invoice`, not
+  `Kind: hidden by authorization`).
+- 100% mutation score maintained throughout on `cytoscape.ts` (98.54% file
+  score; the 3 remaining survivors are proven equivalent, not gaps — one
+  arithmetic-operator flip verified sign-cancelling across 100,000 random
+  inputs via `Math.abs`, two filter-drop mutants verified unobservable by
+  tracing the one call site that ever reads the filtered set — documented
+  inline at each site rather than chased with a test for a distinction
+  nothing can observe).
+
+Both the colouring bug and the inspector bug were invisible to `npx tsc -b`,
+`npx vitest run`, and the mutation run — every one of those was green before
+either fix. Both were found by rebuilding the real release binary,
+restarting it against the *same* running Postgres data (not `scripts/
+demo.sh`'s full reseed, which would have discarded whatever review state was
+already there), and actually looking at a real evidence graph. Verifying a
+rendering change by reading the code that produces it is not the same
+verification as looking at what it produces.
 
 ### Slice C — Collapse: undo one expansion (planned, not started)
 

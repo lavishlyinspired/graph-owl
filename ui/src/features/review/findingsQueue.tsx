@@ -173,8 +173,11 @@ export function evidenceGraphIsJustTheSeed(graph: EvidenceGraph): boolean {
  *
  *  **`EvidenceGraphEdge` already has the shape `GraphEdge` does** — `{from,
  *  to, relationship, derived?}` — so edges pass through unchanged; only the
- *  nodes need adapting, since a finding's subject is not a catalog asset
- *  and so has no `name`/`kind` the way `/assets/{id}/graph`'s nodes do.
+ *  nodes need adapting, since a finding's subject is not a catalog asset and
+ *  so has no `name`/`kind` the way `/assets/{id}/graph`'s nodes do. `kind`
+ *  stays `null` always; `semanticType` (Plan 114 Slice F) carries what the
+ *  pack's own `rdf:type` resolved to instead, so the canvas can still colour
+ *  the node by something rather than drawing it uniformly grey.
  *
  *  **Every node counts as already expanded.** The evidence graph is fetched
  *  whole in one call, unlike the asset explorer's click-to-reveal picture —
@@ -197,6 +200,7 @@ export function evidencePicture(finding: PackFinding, graph: EvidenceGraph): Pic
       id: node.id,
       name: nodeLabel(node),
       kind: null,
+      semanticType: node.semanticType,
     })),
     edges: graph.edges,
     expanded: nodeIds,

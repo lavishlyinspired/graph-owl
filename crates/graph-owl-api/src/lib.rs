@@ -3988,6 +3988,56 @@ impl Catalog {
         Ok(sources)
     }
 
+    /// A pack subject's own declared `rdf:type`, resolved virtually from the
+    /// same flakes [`node_sources`] already proves this walk can see —
+    /// nothing new is persisted, and no second concept of "kind" enters
+    /// storage. Domain-neutral: this asks the graph what class a subject
+    /// belongs to, whatever pack asserted it, the same way `node_sources`
+    /// asks what documents did.
+    ///
+    /// **Not `AssetKind`.** A catalog asset's kind is the storage layer's own
+    /// closed enum (`table`/`column`/…); a pack subject has no relational row
+    /// and so no such kind — this is a different, open-ended axis the console
+    /// uses to colour a node it cannot otherwise classify, never a
+    /// replacement for the catalog's own concept.
+    ///
+    /// The first `rdf:type` found wins, matching `node_sources`' own
+    /// dedup-by-first-name posture; multiple types on one subject is a real
+    /// possibility (multi-inheritance instance typing) this does not attempt
+    /// to disambiguate further, since a single colour is all the console has
+    /// a use for today.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured, or the read fails.
+    ///
+    /// [`node_sources`]: Self::node_sources
+    pub async fn node_semantic_type(&self, sid: &Sid) -> Result<Option<String>, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        let flakes = graph
+            .query_pattern(&graph_owl_core::flake::TriplePattern {
+                s: Some(sid.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+        let rdf_type = Sid::new(graph_owl_core::flake::namespace::RDF, "type");
+        for flake in &flakes {
+            if flake.p == rdf_type
+                && let graph_owl_core::flake::FlakeValue::Ref(class) = &flake.o
+            {
+                return Ok(Some(class.id.clone()));
+            }
+        }
+        Ok(None)
+    }
+
     /// Which subject a finding is about, and which pack raised it — Plan 111
     /// Slice F.
     ///
@@ -43923,6 +43973,121 @@ mod node_sources_tests {
             catalog.node_sources(&Sid::dsc("anything")).await.is_err(),
             "a missing graph engine must be a named error, not an empty answer \
              indistinguishable from 'this node genuinely has no sources'"
+        );
+    }
+}
+
+#[cfg(test)]
+mod node_semantic_type_tests {
+    //! `Catalog::node_semantic_type` — a pack subject (a GST invoice, a
+    //! supplier) has no `AssetKind`, the catalog's own closed enum of five
+    //! relational kinds; it has whatever `rdf:type` its pack asserted. This
+    //! resolves that virtually, from flakes `node_sources` already proves
+    //! this walk can see — nothing new is persisted, and no second concept
+    //! of "kind" is introduced into storage.
+
+    use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+
+    use super::*;
+    use projection_isolation_tests::RecordingGraph;
+
+    fn imported(source: &str) -> Sid {
+        Sid::dsc(format!("graph:import:{source}"))
+    }
+
+    #[tokio::test]
+    async fn a_subject_with_a_declared_type_reports_its_local_name() {
+        let graph = RecordingGraph::working();
+        let subject = Sid::dsc("2b-INV-1001");
+        graph
+            .assert_flakes(&[Flake {
+                s: subject.clone(),
+                p: Sid::new(namespace::RDF, "type"),
+                o: FlakeValue::Ref(Sid::dsc("Gstr2bInvoice")),
+                cx: Some(imported("gst-gstr2b")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_graph(graph);
+
+        let kind = catalog.node_semantic_type(&subject).await.expect("ok");
+        assert_eq!(kind, Some("Gstr2bInvoice".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_subject_with_no_type_assertion_reports_none_not_an_error() {
+        let graph = RecordingGraph::working();
+        let subject = Sid::dsc("pr-INV-1015");
+        graph
+            .assert_flakes(&[Flake {
+                s: subject.clone(),
+                p: Sid::dsc("invoiceNumber"),
+                o: FlakeValue::String("INV-1015".to_string()),
+                cx: Some(imported("gst-purchase-register")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_graph(graph);
+
+        let kind = catalog.node_semantic_type(&subject).await.expect("ok");
+        assert_eq!(
+            kind, None,
+            "a subject with real flakes but no rdf:type is untyped, not an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_subjects_type_does_not_leak_in() {
+        let graph = RecordingGraph::working();
+        graph
+            .assert_flakes(&[Flake {
+                s: Sid::dsc("some-other-subject"),
+                p: Sid::new(namespace::RDF, "type"),
+                o: FlakeValue::Ref(Sid::dsc("Supplier")),
+                cx: Some(imported("gst-purchase-register")),
+                t: 1,
+                op: true,
+            }])
+            .await
+            .expect("seed");
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_graph(graph);
+
+        let kind = catalog
+            .node_semantic_type(&Sid::dsc("pr-INV-1003"))
+            .await
+            .expect("ok");
+        assert_eq!(
+            kind, None,
+            "an unrelated subject's own type must not leak in"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catalog_with_no_graph_engine_says_so_rather_than_pretending() {
+        let catalog = Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ));
+
+        assert!(
+            catalog
+                .node_semantic_type(&Sid::dsc("anything"))
+                .await
+                .is_err(),
+            "a missing graph engine must be a named error, not an empty answer \
+             indistinguishable from 'this node genuinely has no type'"
         );
     }
 }
