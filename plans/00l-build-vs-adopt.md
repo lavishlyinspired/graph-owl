@@ -1044,3 +1044,24 @@ genuinely wrong here, and the reason is architectural rather than a defect: the
 a library that needs the graph in memory first cannot honour that bound. That
 is the same argument `00l` already makes against Apache AGE's parser, applied
 to a much smaller decision.
+
+## Blocking-key strategies — checked before Plan 111 Slice D
+
+**The check ran and returned nothing to adopt, and the reason is the same as
+path finding's**: Slice D adds no algorithm. `graph_owl_core::blocking_strategy`
+already implements every strategy both shipped packs declare. What was missing
+was that nothing called it.
+
+The near-miss worth recording, because it will be proposed again:
+
+| Crate | Licence | Does | Verdict |
+|---|---|---|---|
+| `strsim` | MIT | "Implementations of string similarity metrics" — Hamming, Levenshtein, OSA, Damerau-Levenshtein, Jaro, Jaro-Winkler, Sørensen-Dice. 0.11.1, 2024-04-02, 985M downloads | **Not for blocking, and it is the crate people reach for.** A *similarity score* answers "how alike are these two", which is the comparison stage; a *blocking key* answers "which pairs are worth comparing at all", and computing a score for every pair is exactly the quadratic cost blocking exists to avoid. `graph-owl-resolution`'s `rule_match` already owns the scoring side. Revisit if the scorer needs a metric it does not have — not for this |
+| `rphonetic` | Apache-2.0 | A Rust port of the Apache commons-codec phonetic algorithms. 3.0.6, 2026-04-03, 214k downloads | **Reject for now, worth revisiting.** `Strategy::Phonetic` is Soundex only and Latin-alphabet by construction, which this crate would genuinely improve for a pack whose names are not English. Rejected here because Slice D changes no algorithm, and swapping a phonetic key changes which records block together — a behaviour change that wants its own slice and its own corpus rather than riding along |
+
+**And one thing the check itself found, which is the point of running it.**
+`Strategy` carried no `Deserialize` derive at all despite its own doc comment
+promising that "a pack's `matching.yaml` deserializes straight into it". The
+build-vs-adopt question ("has somebody already written this?") is what led to
+reading the module closely enough to notice that *we* had not finished writing
+it either.

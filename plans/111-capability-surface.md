@@ -1,6 +1,6 @@
 # Plan 111 — Engine → API → UI: the capabilities that stop at the second arrow
 
-**Status**: planned. **Branch**: main. **Trigger**: a capability assessment
+**Status**: Slices A–D shipped 14 August 2026; Slice E planned. **Branch**: main. **Trigger**: a capability assessment
 (`missing core and ui capabilities`) arguing that the product "has not yet
 become a deeply connected knowledge graph", and that the larger gap is not
 missing engine work but capability that no human can reach.
@@ -157,20 +157,51 @@ exactly the architecture this product has and a row-store does not.
 document that carried each; adjudication records who decided and why; an empty
 queue and an unreachable one look different.
 
-## Slice D — Reconciliation consults the pack's blocking strategies
+## Slice D — the pack's blocking strategies get run ✅ shipped
 
-Recorded in `plans/109` as unbuilt and still the largest correctness gap in the
-GST pack, expressed neutrally: **a rule that finds nothing and a rule that
-found a near-match it could not confirm are different answers, and today they
-look identical.**
+Expressed neutrally: **a rule that finds nothing and a rule that found a
+near-match it could not confirm are different answers, and they looked
+identical.**
 
-`[[matching.blocking]]` already declares normalized / composite / date-window /
-ngram strategies per pack. Reconciliation should generate candidates through
-them before reporting an absence, so `INV/1014` against `INV-1014` becomes *one
-proposed match to confirm* rather than *two independent exceptions*.
+**The gap was worse than `plans/109` recorded.** It was not that reconciliation
+declined to call blocking — `graph_owl_core::blocking_strategy`, 963 lines and
+38 tests of domain-neutral blocking, had **no callers anywhere in the
+workspace**. Both shipped packs have declared `[[matching.blocking]]` since
+Epic 105 and nothing read it. Same defect as `shortest_path`, one crate over.
 
-Deliberately after A–C: it changes what the product asserts about a taxpayer's
-money, so it wants the evidence surfaces above it to exist first.
+What shipped:
+
+1. **`Strategy` can be deserialized at all.** Its own doc comment promised
+   "the configuration *is* the strategy, with no translation step where a
+   domain name could sneak in" and it carried no `Deserialize` derive.
+2. **`pack_install::read_blocking_strategies`** reads `[[matching.blocking]]`
+   at request time, like `read_console_config` reads `[console]`.
+3. **`Catalog::blocking_candidates`** keys the subject and every candidate,
+   bounded, reporting truncation, and returns *which strategy* agreed.
+4. **`POST /packs/{pack}/candidates`**, with prefix resolution in the handler
+   so the facade only ever sees `1024:partyName`.
+
+### Three defects this found, each invisible until the code ran
+
+- **`ngram` vs `n_gram`.** `rename_all = "snake_case"` derives `n_gram`; both
+  packs write `ngram`. The packs are the contract, so the wire name is pinned
+  with an explicit rename. Caught by a round-trip test written against a real
+  pack's own shape rather than a convenient one.
+- **`NGram::key` cannot find a transposition, and its doc comment said it
+  could.** The key joins the whole sorted window set, so *any* changed window
+  changes the key — a transposed identifier never blocks with its correction,
+  which is the exact case the variant was added for. `Strategy::keys` is the
+  fix: index under each window, which is what n-gram blocking means.
+- **The test that appeared to check ordering compared a record with itself.**
+  `key(x) == key(x)` is true of every function. That tautology is why the
+  point above survived from Epic 105 to now.
+
+### What is still open, and stated rather than implied
+
+`reconcile_pack` does not yet consult candidates when a rule reports an
+absence. The capability is now reachable and proven; wiring it *into* the
+finding pipeline changes what the product asserts about a taxpayer's money and
+wants its own slice, with the evidence surfaces above it in place first.
 
 ## Slice E — Packs declare which surfaces they want
 

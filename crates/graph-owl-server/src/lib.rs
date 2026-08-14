@@ -84,6 +84,9 @@ pub fn app_with_admission(catalog: Catalog, admission: Arc<admission::Admission>
         // string long enough to hit a proxy's URL limit, and one that would
         // put identities in a logged URL for no gain.
         .route("/graph/paths", post(graph_paths))
+        // Plan 111 Slice D: the pack's own `[[matching.blocking]]` finally
+        // runs. `POST` for the same reason — the subject is an identity.
+        .route("/packs/{pack}/candidates", post(pack_candidates))
         .route("/graph/export/graphml", get(export_graphml))
         .route("/graph/export/bulk-csv", get(export_bulk_csv))
         .route("/graph/export/cypher", get(export_cypher_script))
@@ -2802,6 +2805,94 @@ async fn graph_paths(
         "paths": found.paths.iter().map(|path| json!({
             "nodes": path.nodes.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
             "length": path.length,
+        })).collect::<Vec<_>>(),
+        "truncated": found.truncated,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CandidatesRequest {
+    subject: String,
+    /// How many other subjects to consider before stopping and saying so.
+    limit: Option<usize>,
+}
+
+impl ValidateBody for CandidatesRequest {
+    fn validate_body(value: &serde_json::Value) -> Vec<FieldError> {
+        let mut errors = Vec::new();
+        require_non_empty_string(
+            value,
+            &graph_owl_api::validation::FieldPath::root().key("subject"),
+            &mut errors,
+        );
+        errors
+    }
+}
+
+/// What else a pack's own blocking strategies say might be this — Plan 111
+/// Slice D.
+///
+/// **`graph_owl_core::blocking_strategy` had no callers anywhere.** Both
+/// shipped packs have declared `[[matching.blocking]]` since Epic 105 and
+/// nothing read it: the strategies that exist to see through a typo were
+/// configured and inert, so a rule reporting "this is not in the other
+/// source" and a near-miss it could not confirm looked identical.
+///
+/// **The prefix resolution happens here, and that is the whole point.** A
+/// pack writes `gst:supplierGstin`; `Catalog::blocking_candidates` sees
+/// `1024:supplierGstin` and cannot tell which domain it is looking at.
+///
+/// A pack that declares no strategies gets an empty answer, not an error —
+/// saying nothing about matching is a legitimate thing for a pack to do.
+async fn pack_candidates(
+    State(catalog): State<Catalog>,
+    Auth(_principal): Auth,
+    Path(pack): Path<String>,
+    AppJson(request): AppJson<CandidatesRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let base_dir = pack_install::packs_base_dir();
+    let declared = pack_install::read_blocking_strategies(&base_dir, &pack);
+    let Some((prefix, namespace)) = pack_install::read_pack_vocabulary(&base_dir, &pack) else {
+        return Ok(Json(json!({ "candidates": [], "truncated": false })));
+    };
+
+    // The pack names its namespace by IRI; the graph stores a code. A pack
+    // whose vocabulary was never registered resolves to nothing, and an empty
+    // answer is the honest result — inventing a code would key against
+    // predicates that do not exist and report "no candidates" for a different
+    // reason than the true one.
+    let Some(code) = catalog
+        .namespaces()
+        .await?
+        .into_iter()
+        .find(|declared| declared.iri == namespace)
+        .map(|declared| declared.code)
+    else {
+        return Ok(Json(json!({ "candidates": [], "truncated": false })));
+    };
+
+    let strategies: Vec<_> = declared
+        .iter()
+        .map(|strategy| pack_install::resolve_strategy_fields(strategy, &prefix, code))
+        .collect();
+
+    let subject = parse_node_id("subject", &request.subject)?;
+    let found = catalog
+        .blocking_candidates(
+            &subject,
+            &strategies,
+            request.limit.unwrap_or(1_000).min(10_000),
+        )
+        .await?;
+
+    Ok(Json(json!({
+        "candidates": found.candidates.iter().map(|candidate| json!({
+            "subject": candidate.subject.to_string(),
+            // Which strategy agreed, because "the n-gram key collided" and
+            // "the normalized key collided" are different strengths of
+            // evidence and a reviewer's next move differs.
+            "by": candidate.by,
         })).collect::<Vec<_>>(),
         "truncated": found.truncated,
     })))

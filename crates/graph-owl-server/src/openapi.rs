@@ -475,6 +475,15 @@ pub static ROUTES: &[Route] = &[
         false,
     ),
     route(
+        "post",
+        "/packs/{pack}/candidates",
+        "What else a pack's blocking strategies say might be this",
+        None,
+        None,
+        200,
+        false,
+    ),
+    route(
         "get",
         "/graph/export/graphml",
         "Export the caller's authorized estate as GraphML",

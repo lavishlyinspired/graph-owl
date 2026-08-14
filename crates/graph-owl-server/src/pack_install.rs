@@ -262,6 +262,137 @@ pub fn read_console_config(base_dir: &Path, pack: &str) -> Option<serde_json::Va
     Some(console)
 }
 
+/// A pack's own `[[matching.blocking]]` declarations — Plan 111 Slice D.
+///
+/// **These have been declared by both shipped packs since Epic 105 and read
+/// by nothing.** `graph_owl_core::blocking_strategy` is 963 lines and 38
+/// tests of domain-neutral blocking with, until this, **zero callers
+/// anywhere in the workspace** — the same defect as `shortest_path` one crate
+/// over: a capability that stops at the engine is a tested function nobody
+/// can reach.
+///
+/// Read at request time from `pack.toml`, exactly as
+/// [`read_console_config`] reads `[console]`, and for the same reason: the
+/// manifest stays the single source of truth, with no migration, no storage
+/// table and no loader change.
+///
+/// **A malformed declaration yields nothing rather than a partial list.** A
+/// pack that asked for three strategies and silently gets two blocks on
+/// weaker evidence than it configured, finds fewer near-misses, and reports
+/// nothing wrong — the same all-or-nothing reasoning `Strategy::key` already
+/// applies to a composite's parts.
+#[must_use]
+pub fn read_blocking_strategies(
+    base_dir: &Path,
+    pack: &str,
+) -> Vec<graph_owl_core::blocking_strategy::Strategy> {
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        matching: Option<Matching>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Matching {
+        #[serde(default)]
+        blocking: Vec<graph_owl_core::blocking_strategy::Strategy>,
+    }
+
+    if !crate::pack_id_is_safe(pack) {
+        return Vec::new();
+    }
+    let Ok(text) = std::fs::read_to_string(base_dir.join(pack).join("pack.toml")) else {
+        return Vec::new();
+    };
+    toml::from_str::<Manifest>(&text)
+        .ok()
+        .and_then(|manifest| manifest.matching)
+        .map(|matching| matching.blocking)
+        .unwrap_or_default()
+}
+
+/// A pack's declared `prefix` and `namespace` IRI — the two halves needed to
+/// turn `gst:supplierGstin` in a `[[matching.blocking]]` declaration into an
+/// identifier the graph engine understands.
+///
+/// **The resolution happens here, not in `graph-owl-api`.** That crate does
+/// not read `pack.toml` and must not learn to: a facade that could see a
+/// pack's prefixed vocabulary is a facade that can name a domain.
+#[must_use]
+pub fn read_pack_vocabulary(base_dir: &Path, pack: &str) -> Option<(String, String)> {
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        pack: Vocabulary,
+    }
+    #[derive(serde::Deserialize)]
+    struct Vocabulary {
+        prefix: String,
+        namespace: String,
+    }
+
+    if !crate::pack_id_is_safe(pack) {
+        return None;
+    }
+    let text = std::fs::read_to_string(base_dir.join(pack).join("pack.toml")).ok()?;
+    let manifest: Manifest = toml::from_str(&text).ok()?;
+    Some((manifest.pack.prefix, manifest.pack.namespace))
+}
+
+/// Rewrite a strategy's field names from a pack's prefixed vocabulary into
+/// rendered `Sid`s (`code:local`).
+///
+/// **A field this cannot resolve is dropped, and `values`' all-or-nothing
+/// rule then makes the whole strategy unkeyable.** That is the safe
+/// direction: a strategy silently keyed on a subset of the fields the pack
+/// named would block records together on weaker evidence than the
+/// configuration asked for, invisibly.
+#[must_use]
+pub fn resolve_strategy_fields(
+    strategy: &graph_owl_core::blocking_strategy::Strategy,
+    prefix: &str,
+    code: u16,
+) -> graph_owl_core::blocking_strategy::Strategy {
+    use graph_owl_core::blocking_strategy::Strategy;
+
+    let rewrite = |fields: &Vec<String>| -> Vec<String> {
+        fields
+            .iter()
+            .filter_map(|field| {
+                let local = field.strip_prefix(prefix)?.strip_prefix(':')?;
+                Some(format!("{code}:{local}"))
+            })
+            .collect()
+    };
+
+    match strategy {
+        Strategy::Exact { fields } => Strategy::Exact {
+            fields: rewrite(fields),
+        },
+        Strategy::Normalized { fields } => Strategy::Normalized {
+            fields: rewrite(fields),
+        },
+        Strategy::Phonetic { fields } => Strategy::Phonetic {
+            fields: rewrite(fields),
+        },
+        Strategy::NGram { fields, n } => Strategy::NGram {
+            fields: rewrite(fields),
+            n: *n,
+        },
+        Strategy::NumericBucket { fields, width } => Strategy::NumericBucket {
+            fields: rewrite(fields),
+            width: *width,
+        },
+        Strategy::DateWindow { fields, days } => Strategy::DateWindow {
+            fields: rewrite(fields),
+            days: *days,
+        },
+        Strategy::Composite { of } => Strategy::Composite {
+            of: of
+                .iter()
+                .map(|part| resolve_strategy_fields(part, prefix, code))
+                .collect(),
+        },
+    }
+}
+
 /// Every key in a value tree, camelCased, recursively.
 fn camel_case_keys(value: serde_json::Value) -> serde_json::Value {
     match value {
@@ -574,5 +705,189 @@ party_id = "supplierGstin"
         let base = temp_dir("console-traversal");
 
         assert!(read_console_config(&base, "../../etc").is_none());
+    }
+
+    /// Plan 111 Slice D — the pack's blocking strategies stop being
+    /// configuration nothing reads.
+    mod blocking_strategies_are_read {
+        use super::*;
+
+        /// **Against the packs that actually ship, not a fixture.** A
+        /// hand-written fixture is a second opinion about what a pack looks
+        /// like, and the two drift — this is the assertion that would have
+        /// caught `strategy = "ngram"` against a derive that produced
+        /// `n_gram`, which is exactly what it did catch one crate over.
+        #[test]
+        fn every_shipped_pack_s_declarations_parse() {
+            let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs");
+            let mut ids: Vec<String> = std::fs::read_dir(&packs)
+                .expect("the packs directory")
+                .filter_map(|entry| {
+                    let entry = entry.ok()?;
+                    entry
+                        .path()
+                        .join("pack.toml")
+                        .exists()
+                        .then(|| entry.file_name().to_string_lossy().into_owned())
+                })
+                .collect();
+            ids.sort();
+            assert!(
+                ids.len() >= 2,
+                "expected at least two shipped packs: {ids:?}"
+            );
+
+            for id in &ids {
+                let declared = read_blocking_strategies(&packs, id);
+                // Every pack in the tree today declares blocking. If one
+                // stops, this should be relaxed deliberately rather than by
+                // an empty vector quietly passing.
+                assert!(
+                    !declared.is_empty(),
+                    "`{id}` declares `[[matching.blocking]]` and it did not parse",
+                );
+            }
+        }
+
+        /// The composite is the one worth asserting whole: its parts are
+        /// strategies in their own right, so a tagging scheme that works at
+        /// the top level and not inside `of` passes every other check.
+        #[test]
+        fn a_composite_declaration_keeps_its_parts() {
+            use graph_owl_core::blocking_strategy::Strategy;
+            let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs");
+
+            let composites: Vec<_> = read_blocking_strategies(&packs, "gst")
+                .into_iter()
+                .filter_map(|strategy| match strategy {
+                    Strategy::Composite { of } => Some(of),
+                    _ => None,
+                })
+                .collect();
+
+            assert_eq!(composites.len(), 1, "gst declares one composite");
+            assert_eq!(
+                composites[0].len(),
+                2,
+                "with two parts: {:?}",
+                composites[0]
+            );
+            assert!(
+                matches!(composites[0][1], Strategy::DateWindow { days: 7, .. }),
+                "the second part is a 7-day window: {:?}",
+                composites[0][1],
+            );
+        }
+
+        /// A pack that declares no matching table is not an error — it simply
+        /// blocks on nothing, which is the honest reading of saying nothing.
+        #[test]
+        fn a_pack_with_no_matching_table_declares_nothing() {
+            let base = temp_dir("blocking-none");
+            write_pack(&base, "quiet", "d");
+
+            assert!(read_blocking_strategies(&base, "quiet").is_empty());
+        }
+
+        #[test]
+        fn refuses_a_path_traversal_shaped_id() {
+            let base = temp_dir("blocking-traversal");
+
+            assert!(read_blocking_strategies(&base, "../../etc").is_empty());
+        }
+
+        /// Both shipped packs declare a prefix and a namespace, and the
+        /// blocking fields are written in that prefix — the two have to be
+        /// read from the same file or a rename in one desynchronises the
+        /// other silently.
+        #[test]
+        fn a_packs_own_prefix_and_namespace_are_readable() {
+            let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs");
+
+            let (prefix, namespace) =
+                read_pack_vocabulary(&packs, "hospitality").expect("hospitality declares both");
+            assert_eq!(prefix, "hosp");
+            assert!(namespace.ends_with('#'), "{namespace}");
+        }
+
+        /// **Resolution is what keeps `graph-owl-api` unable to name a
+        /// domain.** The facade sees `1024:supplierGstin`; only this layer
+        /// ever sees `gst:`.
+        #[test]
+        fn fields_are_rewritten_from_the_packs_prefix_into_rendered_ids() {
+            use graph_owl_core::blocking_strategy::Strategy;
+
+            let resolved = resolve_strategy_fields(
+                &Strategy::Normalized {
+                    fields: vec!["ns:partyId".to_string(), "ns:documentNumber".to_string()],
+                },
+                "ns",
+                1024,
+            );
+
+            assert_eq!(
+                resolved,
+                Strategy::Normalized {
+                    fields: vec![
+                        "1024:partyId".to_string(),
+                        "1024:documentNumber".to_string()
+                    ],
+                },
+            );
+        }
+
+        /// A composite's parts are strategies in their own right, so a
+        /// rewrite that stops at the top level leaves the part that does the
+        /// real narrowing pointing at names nothing resolves.
+        #[test]
+        fn a_composites_parts_are_rewritten_too() {
+            use graph_owl_core::blocking_strategy::Strategy;
+
+            let resolved = resolve_strategy_fields(
+                &Strategy::Composite {
+                    of: vec![Strategy::DateWindow {
+                        fields: vec!["ns:documentDate".to_string()],
+                        days: 7,
+                    }],
+                },
+                "ns",
+                1024,
+            );
+
+            assert_eq!(
+                resolved,
+                Strategy::Composite {
+                    of: vec![Strategy::DateWindow {
+                        fields: vec!["1024:documentDate".to_string()],
+                        days: 7,
+                    }],
+                },
+            );
+        }
+
+        /// **A field in someone else's prefix is dropped, not guessed at.**
+        /// `values`' all-or-nothing rule then makes the strategy unkeyable,
+        /// which is the safe direction: a key built from a subset of the
+        /// named fields blocks on weaker evidence than the pack asked for,
+        /// and reports nothing wrong.
+        #[test]
+        fn a_field_in_another_prefix_is_dropped_rather_than_assumed() {
+            use graph_owl_core::blocking_strategy::Strategy;
+
+            let resolved = resolve_strategy_fields(
+                &Strategy::Normalized {
+                    fields: vec!["ns:partyId".to_string(), "other:thing".to_string()],
+                },
+                "ns",
+                1024,
+            );
+
+            assert_eq!(
+                resolved,
+                Strategy::Normalized {
+                    fields: vec!["1024:partyId".to_string()],
+                },
+            );
+        }
     }
 }

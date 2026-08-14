@@ -69,7 +69,20 @@ const KEY_SEPARATOR: char = '\u{1}';
 /// carries an `f64`, and a bucket width is a quantity a pack writes rather
 /// than a token the code compares — pretending it has total equality would be
 /// claiming NaN is orderable, which is exactly the value `key` refuses below.
-#[derive(Debug, Clone, PartialEq)]
+/// **Internally tagged on `strategy`, matching what both shipped packs
+/// already write** — `strategy = "date_window"`, its parameters beside it,
+/// and a `composite`'s parts under `of` as strategies in their own right.
+/// This derive is what the doc comment above has promised since Epic 105
+/// DN-2 and did not have: `Strategy` carried no `Deserialize` at all, so
+/// every `[[matching.blocking]]` in the tree was configuration nothing could
+/// read. Plan 111 Slice D.
+///
+/// **`deny_unknown_fields` is deliberate.** A pack that writes `window = 7`
+/// where the strategy expects `days` has made a mistake that a permissive
+/// parser turns into a *silently different key* — the block narrows, the
+/// near-misses stop being found, and nothing anywhere reports a problem.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(tag = "strategy", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Strategy {
     /// The field values verbatim, joined. Case- and whitespace-sensitive.
     ///
@@ -99,12 +112,27 @@ pub enum Strategy {
         /// Fields to read, in order.
         fields: Vec<String>,
     },
-    /// Every `n`-character window of the normalized value, sorted and joined.
+    /// Every `n`-character window of the normalized value.
     ///
-    /// Tolerates insertion, deletion and transposition anywhere in the value,
-    /// which exact and normalized keys cannot: a transposed identifier
-    /// (`27AAA` vs `27AAA` with two characters swapped) shares most of its
-    /// n-grams and blocks together.
+    /// **Which behaviour you get depends on which method you call, and the
+    /// difference is the whole point of this variant.** [`Strategy::keys`]
+    /// indexes a record under *each* window, so two values sharing any window
+    /// block together — a transposed identifier (`…1ZM` against `…1MZ`)
+    /// leaves most windows intact and is found. [`Strategy::key`] joins the
+    /// whole sorted window **set** into one string, which is an exact match on
+    /// the set and cannot see a transposition at all.
+    ///
+    /// The doc comment here used to claim the single key tolerated
+    /// transposition. It never did, and the ordering test that appeared to
+    /// check compared a record with itself — found by Plan 111 Slice D, the
+    /// first time this strategy was run against real data.
+    // **`ngram`, not the `n_gram` that `rename_all = "snake_case"` derives.**
+    // Both shipped packs already write `strategy = "ngram"`, and the packs are
+    // the contract this parser has to meet — renaming the wire name to suit
+    // the Rust identifier would silently stop reading configuration that has
+    // been on disk since Epic 105. Found by the round-trip test, which is the
+    // only place the two spellings ever meet.
+    #[serde(rename = "ngram")]
     NGram {
         /// Fields to read, in order.
         fields: Vec<String>,
@@ -202,11 +230,72 @@ fn days_from_epoch(value: &str) -> Option<i64> {
 }
 
 impl Strategy {
+    /// **Every** key this strategy indexes a record under — Plan 111 Slice D.
+    ///
+    /// For every strategy but one this is `key` in a vector, and the extra
+    /// method would be pointless. [`Strategy::NGram`] is the exception, and
+    /// it is the reason this exists: `key` joins a value's *whole* sorted
+    /// window set into one string, so any change to any window changes the
+    /// key — which means a transposed identifier, the classic data-entry
+    /// error `NGram` was added for, never blocks with its own correction.
+    /// **The doc comment on that variant claimed otherwise and no test
+    /// checked**; the ordering test that looked like it did compared a record
+    /// with itself. Found by running the strategy against real data for the
+    /// first time.
+    ///
+    /// Indexing under each window is what n-gram blocking means: two records
+    /// sharing any window are worth comparing, and a transposition leaves
+    /// most windows intact. Windows are prefixed by field position so two
+    /// fields cannot collide into one bucket.
+    ///
+    /// **A `Composite` keys through `key`, not through this.** A conjunction
+    /// over multi-key parts is a cross product, which multiplies rather than
+    /// narrows — and narrowing is the entire job of a blocking stage. No
+    /// shipped pack composes an n-gram, so this costs nothing today and is
+    /// stated rather than discovered later.
+    #[must_use]
+    pub fn keys(&self, record: &Record) -> Vec<String> {
+        let Self::NGram { fields, n } = self else {
+            return self.key(record).into_iter().collect();
+        };
+        if *n == 0 {
+            return Vec::new();
+        }
+        let Some(values) = values(record, fields) else {
+            return Vec::new();
+        };
+        let mut keys: Vec<String> = Vec::new();
+        for (index, value) in values.into_iter().enumerate() {
+            let chars: Vec<char> = normalize(value).chars().collect();
+            if chars.len() < *n {
+                // One unkeyable field makes the whole record unkeyable by this
+                // strategy — `values`' own all-or-nothing rule, applied here
+                // too, so a partial key never masquerades as the configured
+                // one.
+                return Vec::new();
+            }
+            for window in chars.windows(*n) {
+                let key = format!(
+                    "{index}{KEY_SEPARATOR}{}",
+                    window.iter().collect::<String>()
+                );
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
+        keys
+    }
+
     /// Derive this strategy's key for one record.
     ///
     /// `None` means "this record cannot be blocked by this strategy" — a
     /// missing field, an unparsable value, a degenerate parameter. The caller
     /// indexes nothing rather than indexing everything under one key.
+    ///
+    /// **One key, so an [`Strategy::NGram`] here is an exact match on the
+    /// whole window set** — see [`Strategy::keys`], which is what a caller
+    /// wanting n-gram blocking's actual behaviour should use.
     #[must_use]
     pub fn key(&self, record: &Record) -> Option<String> {
         match self {
@@ -532,16 +621,133 @@ mod tests {
 
     #[test]
     fn ngram_is_order_insensitive_within_a_value() {
-        // Sorted windows, so two anagrams of the same n-gram multiset agree.
+        // Sorted windows, so two values with the same n-gram set agree even
+        // when the windows occur in a different order.
         let s = Strategy::NGram {
             fields: fields(&["id"]),
             n: 2,
         };
 
+        // **This assertion used to be `key(x) == key(x)` on one record**, which
+        // is true of every function and proved nothing about ordering. Two
+        // genuinely different strings with the same 2-gram set is the claim.
+        // Sorted *and deduplicated*, so the key is the window **set**: two
+        // values with the same set agree however long they are and whatever
+        // order the windows fall in.
         assert_eq!(
-            s.key(&record(&[("id", "ab")])),
-            s.key(&record(&[("id", "ab")])),
+            s.key(&record(&[("id", "abab")])),
+            s.key(&record(&[("id", "ababab")])),
+            "both are the 2-gram set ab/ba",
         );
+        assert_ne!(
+            s.key(&record(&[("id", "abab")])),
+            s.key(&record(&[("id", "abdab")])),
+            "a different 2-gram set is a different key",
+        );
+    }
+
+    /// **`key` cannot find a transposition, and the doc comment above said it
+    /// could.** The whole-set key changes whenever any window changes, so
+    /// `…1ZM` and `…1MZ` — the classic data-entry error `NGram` was added for
+    /// — produce different keys and never block together. Plan 111 Slice D
+    /// found this by running the strategy against real data for the first
+    /// time; the tautological ordering test above is why it survived.
+    ///
+    /// [`Strategy::keys`] is the fix, and this is the pair of assertions that
+    /// pins the difference between the two.
+    mod a_near_miss_needs_more_than_one_key {
+        use super::*;
+
+        fn transposed() -> (Strategy, Record, Record) {
+            (
+                Strategy::NGram {
+                    fields: fields(&["id"]),
+                    n: 3,
+                },
+                record(&[("id", "27AAACR5055K1ZM")]),
+                record(&[("id", "27AAACR5055K1MZ")]),
+            )
+        }
+
+        #[test]
+        fn the_single_whole_set_key_does_not_see_a_transposition() {
+            let (strategy, left, right) = transposed();
+            assert_ne!(strategy.key(&left), strategy.key(&right));
+        }
+
+        #[test]
+        fn but_the_two_share_windows_so_keys_brings_them_together() {
+            let (strategy, left, right) = transposed();
+            let mine = strategy.keys(&left);
+            let theirs = strategy.keys(&right);
+
+            assert!(mine.len() > 1, "an n-gram record indexes under each window");
+            assert!(
+                mine.iter().any(|key| theirs.contains(key)),
+                "a transposition leaves most windows intact:\n{mine:?}\n{theirs:?}",
+            );
+        }
+
+        /// **And two genuinely unrelated identifiers still do not meet.**
+        /// Without this, `keys` returning every window would look correct
+        /// while blocking the entire estate into one bucket.
+        #[test]
+        fn two_unrelated_values_share_no_window() {
+            let strategy = Strategy::NGram {
+                fields: fields(&["id"]),
+                n: 3,
+            };
+            let mine = strategy.keys(&record(&[("id", "27AAACR5055K1ZM")]));
+            let theirs = strategy.keys(&record(&[("id", "09XYZPQ1234B2WQ")]));
+
+            assert!(
+                !mine.iter().any(|key| theirs.contains(key)),
+                "\n{mine:?}\n{theirs:?}",
+            );
+        }
+
+        /// Every other strategy has exactly one key, and `keys` must not
+        /// quietly change what they mean.
+        #[test]
+        fn a_single_key_strategy_reports_exactly_its_own_key() {
+            let strategy = Strategy::Normalized {
+                fields: fields(&["name"]),
+            };
+            let value = record(&[("name", "ACME  Ltd")]);
+
+            assert_eq!(
+                strategy.keys(&value),
+                vec![strategy.key(&value).expect("a key")],
+            );
+        }
+
+        /// **The boundary, from both sides.** A value exactly `n` characters
+        /// long has exactly one window and must index under it; one character
+        /// shorter has none. Written to kill two surviving mutants that moved
+        /// the guard from `<` to `==` and `<=` — both of which throw away the
+        /// shortest keyable value, and neither of which any other test could
+        /// see, because every other fixture is comfortably longer than `n`.
+        #[test]
+        fn a_value_exactly_n_long_has_one_window_and_a_shorter_one_has_none() {
+            let strategy = Strategy::NGram {
+                fields: fields(&["id"]),
+                n: 3,
+            };
+
+            assert_eq!(strategy.keys(&record(&[("id", "abc")])).len(), 1);
+            assert!(strategy.keys(&record(&[("id", "ab")])).is_empty());
+        }
+
+        /// A record a strategy cannot key at all indexes under nothing —
+        /// never under an empty key, which would block every incomplete
+        /// record together and make the cheapest stage the most expensive.
+        #[test]
+        fn an_unkeyable_record_indexes_under_nothing() {
+            let strategy = Strategy::Normalized {
+                fields: fields(&["name"]),
+            };
+            assert!(strategy.keys(&record(&[("other", "x")])).is_empty());
+        }
     }
 
     #[test]
@@ -959,5 +1165,126 @@ mod tests {
             .key(&record(&[("name", "Orders"), ("parent", "prod.db")])),
             Some(expected),
         );
+    }
+
+    /// **The module's own doc comment has promised this since Epic 105 DN-2 —
+    /// "the configuration *is* the strategy, with no translation step where a
+    /// domain name could sneak in" — and `Strategy` derived no `Deserialize`
+    /// at all.** Both shipped packs declare `[[matching.blocking]]` in exactly
+    /// this shape and nothing in the workspace has ever parsed one.
+    ///
+    /// The translation step the doc comment warns about is the point: a
+    /// hand-written `match` from a strategy name to a variant is where
+    /// somebody adds a domain-shaped special case, so there must not be one.
+    mod a_pack_declares_its_strategies_in_data {
+        use super::*;
+
+        #[test]
+        fn every_strategy_a_shipped_pack_declares_round_trips_from_its_own_toml() {
+            #[derive(serde::Deserialize)]
+            struct Matching {
+                blocking: Vec<Strategy>,
+            }
+
+            // Copied in shape, not in content, from `packs/gst/pack.toml` and
+            // `packs/hospitality/pack.toml` — every strategy either declares
+            // today, so a parser that handles only the simple ones fails here
+            // rather than in production on the second pack.
+            let declared: Matching = toml::from_str(
+                r#"
+[[blocking]]
+strategy = "normalized"
+fields = ["ns:partyId", "ns:documentNumber"]
+
+[[blocking]]
+strategy = "phonetic"
+fields = ["ns:surname"]
+
+[[blocking]]
+strategy = "ngram"
+fields = ["ns:partyId"]
+n = 3
+
+[[blocking]]
+strategy = "composite"
+
+[[blocking.of]]
+strategy = "normalized"
+fields = ["ns:partyId"]
+
+[[blocking.of]]
+strategy = "date_window"
+fields = ["ns:documentDate"]
+days = 7
+"#,
+            )
+            .expect("a pack's own blocking declaration must parse");
+
+            assert_eq!(declared.blocking.len(), 4);
+            assert_eq!(
+                declared.blocking[0],
+                Strategy::Normalized {
+                    fields: fields(&["ns:partyId", "ns:documentNumber"]),
+                },
+            );
+            assert_eq!(
+                declared.blocking[2],
+                Strategy::NGram {
+                    fields: fields(&["ns:partyId"]),
+                    n: 3,
+                },
+            );
+            // The composite is the one worth asserting whole: its parts are
+            // themselves strategies, so a tagging scheme that works at the top
+            // level and not inside `of` would pass the three above.
+            assert_eq!(
+                declared.blocking[3],
+                Strategy::Composite {
+                    of: vec![
+                        Strategy::Normalized {
+                            fields: fields(&["ns:partyId"]),
+                        },
+                        Strategy::DateWindow {
+                            fields: fields(&["ns:documentDate"]),
+                            days: 7,
+                        },
+                    ],
+                },
+            );
+        }
+
+        /// **A strategy name this crate does not implement is a refusal, not a
+        /// default.** Silently falling back to `Exact` would give a pack a key
+        /// far narrower than it asked for and report nothing wrong — the
+        /// blocking stage would simply stop finding the near-misses it was
+        /// configured to find.
+        #[test]
+        fn an_unknown_strategy_name_fails_to_parse_rather_than_defaulting() {
+            #[derive(serde::Deserialize)]
+            struct One {
+                blocking: Vec<Strategy>,
+            }
+            assert!(
+                toml::from_str::<One>(
+                    "[[blocking]]\nstrategy = \"telepathy\"\nfields = [\"ns:x\"]\n"
+                )
+                .is_err(),
+            );
+        }
+
+        /// A declaration missing the parameter its algorithm needs is the same
+        /// class of mistake, caught the same way.
+        #[test]
+        fn a_strategy_missing_its_own_parameter_fails_to_parse() {
+            #[derive(serde::Deserialize)]
+            struct One {
+                blocking: Vec<Strategy>,
+            }
+            assert!(
+                toml::from_str::<One>("[[blocking]]\nstrategy = \"ngram\"\nfields = [\"ns:x\"]\n")
+                    .is_err(),
+                "`ngram` without `n` has no window size to use",
+            );
+        }
     }
 }

@@ -1728,6 +1728,64 @@ pub struct GraphContext {
     pub truncated: bool,
 }
 
+/// Another subject a pack's blocking strategies say is worth comparing with
+/// the one asked about — Plan 111 Slice D.
+///
+/// **A collision is a candidate, never a match.** `by` names which strategies
+/// agreed, because "the n-gram key collided" and "the normalized key
+/// collided" are different strengths of evidence and a reviewer's next move
+/// differs — presenting them identically would flatten a strong signal and a
+/// weak one into one word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockingCandidate {
+    /// The other subject worth comparing against.
+    pub subject: Sid,
+    /// Strategy names that keyed both records the same, in declaration order.
+    pub by: Vec<String>,
+}
+
+/// The bounded answer to "what else might be this".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BlockingCandidates {
+    /// Every candidate found, by subject id.
+    pub candidates: Vec<BlockingCandidate>,
+    /// Whether the scan hit its cap before considering every subject. **Never
+    /// inferred from a count** — a truncated search presented as exhaustive
+    /// says "there is nothing else like this", which is a stronger claim than
+    /// was made.
+    pub truncated: bool,
+}
+
+/// The algorithm's own name, for saying *why* two records blocked together.
+/// Matches the wire spelling a pack writes, so a reviewer reading the answer
+/// and an author reading `pack.toml` see the same word.
+fn strategy_name(strategy: &graph_owl_core::blocking_strategy::Strategy) -> &'static str {
+    use graph_owl_core::blocking_strategy::Strategy;
+    match strategy {
+        Strategy::Exact { .. } => "exact",
+        Strategy::Normalized { .. } => "normalized",
+        Strategy::Phonetic { .. } => "phonetic",
+        Strategy::NGram { .. } => "ngram",
+        Strategy::NumericBucket { .. } => "numeric_bucket",
+        Strategy::DateWindow { .. } => "date_window",
+        Strategy::Composite { .. } => "composite",
+    }
+}
+
+/// A flake's object as text, for blocking. **Only literal-ish values** — a
+/// reference is an identity, not a value two records could agree on by
+/// spelling, and keying on one would block records together for pointing at
+/// the same thing rather than for looking alike.
+fn flake_text(value: &FlakeValue) -> Option<String> {
+    match value {
+        FlakeValue::String(text) => Some(text.clone()),
+        FlakeValue::Int(n) => Some(n.to_string()),
+        FlakeValue::Float(n) => Some(n.to_string()),
+        FlakeValue::Instant(t) => Some(t.to_rfc3339()),
+        _ => None,
+    }
+}
+
 /// What a caller wants to know about the route between two nodes —
 /// Plan 111 Slice A.
 ///
@@ -2707,6 +2765,178 @@ impl Catalog {
             .namespaces()
             .await
             .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))
+    }
+
+    /// Every other subject a pack's own blocking strategies say might be the
+    /// same thing as `subject` — Plan 111 Slice D.
+    ///
+    /// **`graph_owl_core::blocking_strategy` is 963 lines and 38 tests of
+    /// domain-neutral blocking with, until this, no callers anywhere.** Both
+    /// shipped packs have declared `[[matching.blocking]]` since Epic 105 and
+    /// nothing read it, so the strategies that exist precisely to see through
+    /// a typo — an n-gram key over a transposed identifier, a date window, a
+    /// composite — never ran. A rule reporting "this is not in the other
+    /// source" and a near-miss it could not confirm looked identical.
+    ///
+    /// **Field names are rendered [`Sid`]s (`code:local`), not prefixed pack
+    /// vocabulary.** Resolving `gst:supplierGstin` needs the pack's own
+    /// namespace declaration, which lives in `pack.toml` — a file this crate
+    /// deliberately does not read. The caller resolves; this walks. That
+    /// boundary is what keeps the facade unable to name a domain even by
+    /// accident.
+    ///
+    /// **Bounded, and it says when it stopped.** A strategy names predicates,
+    /// and every subject carrying one is a candidate to key — an unbounded
+    /// scan on a large estate. `limit` caps the subjects considered and the
+    /// result reports truncation rather than presenting a partial answer as
+    /// the whole one.
+    ///
+    /// **A key collision is never a match.** These narrow who is worth
+    /// comparing, exactly as the module's own contract says: being
+    /// over-inclusive costs a few comparisons, and being under-inclusive
+    /// costs a missed duplicate. The caller decides.
+    ///
+    /// # Errors
+    ///
+    /// `Storage` if no graph engine is configured or a read fails.
+    pub async fn blocking_candidates(
+        &self,
+        subject: &Sid,
+        strategies: &[graph_owl_core::blocking_strategy::Strategy],
+        limit: usize,
+    ) -> Result<BlockingCandidates, CatalogError> {
+        let graph = self.graph.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no graph engine configured".to_string(),
+            ))
+        })?;
+
+        // **One condition, not two.** `strategies.is_empty()` was also tested
+        // here and is dead: fields come *from* the strategies, so no
+        // strategies implies no fields. Mutation testing reported the `||`
+        // flipped to `&&` as a survivor, which is the correct verdict — the
+        // two are equivalent, and the honest response to an untestable branch
+        // is to delete it rather than to invent a test that cannot fail.
+        let fields = Self::fields_named_by(strategies);
+        if fields.is_empty() {
+            return Ok(BlockingCandidates::default());
+        }
+
+        // One scan per named predicate rather than one per subject: a strategy
+        // names a handful of predicates and the estate has many subjects, so
+        // reading by predicate is the narrow side of the join.
+        let mut records: std::collections::BTreeMap<
+            Sid,
+            graph_owl_core::blocking_strategy::Record,
+        > = std::collections::BTreeMap::new();
+        for field in &fields {
+            let Some(predicate) = Self::field_to_sid(field) else {
+                continue;
+            };
+            let flakes = graph
+                .query_pattern(&graph_owl_core::flake::TriplePattern {
+                    p: Some(predicate),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+            for flake in flakes {
+                if let Some(text) = flake_text(&flake.o) {
+                    records
+                        .entry(flake.s.clone())
+                        .or_default()
+                        .insert(field.clone(), text);
+                }
+            }
+        }
+
+        let Some(mine) = records.get(subject) else {
+            // The subject carries none of the fields the strategies name, so
+            // no strategy can key it. Nothing to compare, and that is an
+            // answer rather than an error.
+            return Ok(BlockingCandidates::default());
+        };
+
+        let mut matched: std::collections::BTreeMap<Sid, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut considered = 0usize;
+        let mut truncated = false;
+        for (candidate, record) in &records {
+            if candidate == subject {
+                continue;
+            }
+            if considered >= limit {
+                truncated = true;
+                break;
+            }
+            considered += 1;
+            for strategy in strategies {
+                // **`keys`, not `key`.** For every strategy but `NGram` the
+                // two are the same single key; for `NGram` the single key is
+                // an exact match on the whole window set and cannot see the
+                // transposition the strategy exists to catch. Sharing *any*
+                // window is what n-gram blocking means.
+                let theirs = strategy.keys(record);
+                if theirs.is_empty() {
+                    continue;
+                }
+                let ours = strategy.keys(mine);
+                if ours.iter().any(|key| theirs.contains(key)) {
+                    matched
+                        .entry(candidate.clone())
+                        .or_default()
+                        .push(strategy_name(strategy).to_string());
+                }
+            }
+        }
+
+        Ok(BlockingCandidates {
+            candidates: matched
+                .into_iter()
+                .map(|(subject, mut by)| {
+                    by.dedup();
+                    BlockingCandidate { subject, by }
+                })
+                .collect(),
+            truncated,
+        })
+    }
+
+    /// Every field name any strategy reads, including a composite's parts,
+    /// deduplicated.
+    fn fields_named_by(strategies: &[graph_owl_core::blocking_strategy::Strategy]) -> Vec<String> {
+        use graph_owl_core::blocking_strategy::Strategy;
+        let mut found: Vec<String> = Vec::new();
+        let mut stack: Vec<&Strategy> = strategies.iter().collect();
+        while let Some(strategy) = stack.pop() {
+            let fields = match strategy {
+                Strategy::Exact { fields }
+                | Strategy::Normalized { fields }
+                | Strategy::Phonetic { fields }
+                | Strategy::NGram { fields, .. }
+                | Strategy::NumericBucket { fields, .. }
+                | Strategy::DateWindow { fields, .. } => fields,
+                Strategy::Composite { of } => {
+                    stack.extend(of.iter());
+                    continue;
+                }
+            };
+            for field in fields {
+                if !found.contains(field) {
+                    found.push(field.clone());
+                }
+            }
+        }
+        found
+    }
+
+    /// `"1:supplierGstin"` back into an identifier. Split on the **first**
+    /// colon, for the same reason `parse_sid` does: a local name may contain
+    /// one.
+    fn field_to_sid(field: &str) -> Option<Sid> {
+        let (code, local) = field.split_once(':')?;
+        let code: u16 = code.parse().ok()?;
+        (!local.is_empty()).then(|| Sid::new(code, local))
     }
 
     /// Register a pack's `[[findings]]` rule — Epic 105 P5b
@@ -29593,6 +29823,351 @@ mod projection_isolation_tests {
                 "and does not cover `omega` — a check reading every subject's \
                  flakes would give these two the same answer",
             );
+        }
+    }
+
+    /// Plan 111 Slice D — **the pack's own blocking strategies get run.**
+    ///
+    /// `graph_owl_core::blocking_strategy` is 963 lines and 38 tests of
+    /// domain-neutral blocking, and until this had **no callers anywhere in
+    /// the workspace**. Both shipped packs have declared
+    /// `[[matching.blocking]]` since Epic 105; nothing read it. The
+    /// strategies that exist precisely to see through a typo were configured
+    /// and inert.
+    ///
+    /// Field names below are rendered `Sid`s, which is the contract: the
+    /// caller resolves a pack's prefixed vocabulary, and the facade never
+    /// sees a domain name.
+    mod blocking_strategies_find_the_near_miss {
+        use super::*;
+        use graph_owl_core::blocking_strategy::Strategy;
+        use graph_owl_core::flake::{Flake, FlakeValue, Sid, namespace};
+
+        fn field(local: &str) -> String {
+            format!("{}:{local}", namespace::DSC)
+        }
+
+        async fn seeded(rows: &[(&str, &str, &str)]) -> Catalog {
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let flakes: Vec<Flake> = rows
+                .iter()
+                .map(|(subject, predicate, value)| {
+                    Flake::assert(
+                        Sid::dsc(*subject),
+                        Sid::dsc(*predicate),
+                        FlakeValue::String((*value).to_string()),
+                        1,
+                    )
+                })
+                .collect();
+            graph.assert_flakes(&flakes).await.expect("seed");
+            Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>)
+        }
+
+        /// **The case the whole slice exists for.** Two records for the same
+        /// document whose identifier is written with a different separator
+        /// have no exact match and no shared normalized key beyond
+        /// punctuation — a normalized strategy over the punctuation-free
+        /// value is what sees them as one.
+        #[tokio::test]
+        async fn a_normalized_key_pairs_two_spellings_of_one_identifier() {
+            let catalog = seeded(&[
+                ("row-a", "reference", "ACME  Ltd"),
+                ("row-b", "reference", "acme ltd"),
+                ("row-c", "reference", "Contoso"),
+            ])
+            .await;
+
+            let found = catalog
+                .blocking_candidates(
+                    &Sid::dsc("row-a"),
+                    &[Strategy::Normalized {
+                        fields: vec![field("reference")],
+                    }],
+                    100,
+                )
+                .await
+                .expect("candidates");
+
+            assert_eq!(found.candidates.len(), 1, "{:?}", found.candidates);
+            assert_eq!(found.candidates[0].subject, Sid::dsc("row-b"));
+            assert_eq!(found.candidates[0].by, vec!["normalized".to_string()]);
+            assert!(!found.truncated);
+        }
+
+        /// **And a genuinely different value does not pair.** Without this
+        /// the test above passes on a search that returns everything, which
+        /// is the failure mode a blocking stage is most likely to have.
+        #[tokio::test]
+        async fn an_unrelated_record_is_not_a_candidate() {
+            let catalog = seeded(&[
+                ("row-a", "reference", "ACME Ltd"),
+                ("row-c", "reference", "Contoso"),
+            ])
+            .await;
+
+            let found = catalog
+                .blocking_candidates(
+                    &Sid::dsc("row-a"),
+                    &[Strategy::Normalized {
+                        fields: vec![field("reference")],
+                    }],
+                    100,
+                )
+                .await
+                .expect("candidates");
+
+            assert!(found.candidates.is_empty(), "{:?}", found.candidates);
+        }
+
+        /// **Which strategy agreed is part of the answer.** "The n-gram key
+        /// collided" and "the normalized key collided" are different
+        /// strengths of evidence, and a reviewer's next move differs;
+        /// reporting them identically flattens a strong signal into a weak
+        /// one.
+        #[tokio::test]
+        async fn a_transposed_identifier_is_found_by_ngram_and_says_so() {
+            let catalog = seeded(&[
+                ("row-a", "taxId", "27AAACR5055K1ZM"),
+                ("row-b", "taxId", "27AAACR5055K1MZ"),
+            ])
+            .await;
+
+            let found = catalog
+                .blocking_candidates(
+                    &Sid::dsc("row-a"),
+                    &[
+                        Strategy::Normalized {
+                            fields: vec![field("taxId")],
+                        },
+                        Strategy::NGram {
+                            fields: vec![field("taxId")],
+                            n: 3,
+                        },
+                    ],
+                    100,
+                )
+                .await
+                .expect("candidates");
+
+            assert_eq!(found.candidates.len(), 1, "{:?}", found.candidates);
+            assert_eq!(
+                found.candidates[0].by,
+                vec!["ngram".to_string()],
+                "the normalized keys differ — only the n-gram sees the transposition",
+            );
+        }
+
+        /// A composite is a conjunction, so a record agreeing on one part and
+        /// not the other is **not** a candidate. Getting this wrong widens
+        /// every composite block to its loosest part, silently.
+        #[tokio::test]
+        async fn a_composite_needs_every_part_to_agree() {
+            let catalog = seeded(&[
+                ("row-a", "party", "ACME"),
+                ("row-a", "issued", "2026-07-03"),
+                ("row-b", "party", "ACME"),
+                ("row-b", "issued", "2026-07-06"),
+                ("row-c", "party", "ACME"),
+                ("row-c", "issued", "2026-11-30"),
+            ])
+            .await;
+
+            let found = catalog
+                .blocking_candidates(
+                    &Sid::dsc("row-a"),
+                    &[Strategy::Composite {
+                        of: vec![
+                            Strategy::Normalized {
+                                fields: vec![field("party")],
+                            },
+                            Strategy::DateWindow {
+                                fields: vec![field("issued")],
+                                days: 7,
+                            },
+                        ],
+                    }],
+                    100,
+                )
+                .await
+                .expect("candidates");
+
+            assert_eq!(
+                found
+                    .candidates
+                    .iter()
+                    .map(|c| &c.subject)
+                    .collect::<Vec<_>>(),
+                vec![&Sid::dsc("row-b")],
+                "row-c shares the party and is months away: {:?}",
+                found.candidates,
+            );
+        }
+
+        /// **A capped scan says it was capped.** Presenting a partial search
+        /// as complete says "there is nothing else like this", which is a
+        /// stronger claim than was made.
+        #[tokio::test]
+        async fn a_scan_that_hits_its_cap_reports_it() {
+            let catalog = seeded(&[
+                ("row-a", "reference", "ACME"),
+                ("row-b", "reference", "ACME"),
+                ("row-c", "reference", "ACME"),
+            ])
+            .await;
+
+            let found = catalog
+                .blocking_candidates(
+                    &Sid::dsc("row-a"),
+                    &[Strategy::Normalized {
+                        fields: vec![field("reference")],
+                    }],
+                    1,
+                )
+                .await
+                .expect("candidates");
+
+            assert!(
+                found.truncated,
+                "two others exist and only one was considered"
+            );
+
+            let whole = catalog
+                .blocking_candidates(
+                    &Sid::dsc("row-a"),
+                    &[Strategy::Normalized {
+                        fields: vec![field("reference")],
+                    }],
+                    100,
+                )
+                .await
+                .expect("candidates");
+            assert_eq!(whole.candidates.len(), 2);
+            assert!(!whole.truncated);
+        }
+
+        /// **A blocking field is not always a string, and every fixture above
+        /// makes one.** `numeric_bucket` exists for amounts and `date_window`
+        /// for dates — both of which a real import lands as `Int`, `Float` or
+        /// `Instant` flakes, never as text. Written to kill three surviving
+        /// mutants that deleted those arms from the value reader: with only
+        /// string fixtures, a reader that silently ignored every number and
+        /// every timestamp passed the whole suite.
+        #[tokio::test]
+        async fn a_numeric_or_dated_field_is_keyed_as_readily_as_a_string() {
+            let storage = Arc::new(InMemoryStorage::default());
+            let graph = RecordingGraph::working();
+            let at = |day: u32| {
+                chrono::DateTime::parse_from_rfc3339(&format!("2026-07-{day:02}T00:00:00Z"))
+                    .expect("a date")
+                    .with_timezone(&chrono::Utc)
+            };
+            graph
+                .assert_flakes(&[
+                    Flake::assert(
+                        Sid::dsc("row-a"),
+                        Sid::dsc("amount"),
+                        FlakeValue::Int(1_004),
+                        1,
+                    ),
+                    Flake::assert(
+                        Sid::dsc("row-a"),
+                        Sid::dsc("at"),
+                        FlakeValue::Instant(at(3)),
+                        1,
+                    ),
+                    Flake::assert(
+                        Sid::dsc("row-b"),
+                        Sid::dsc("amount"),
+                        FlakeValue::Float(1_007.5),
+                        1,
+                    ),
+                    Flake::assert(
+                        Sid::dsc("row-b"),
+                        Sid::dsc("at"),
+                        FlakeValue::Instant(at(6)),
+                        1,
+                    ),
+                    // Same bucket on amount, months away on date — so the
+                    // composite must reject it and a test asserting only the
+                    // match above could not tell the difference.
+                    Flake::assert(
+                        Sid::dsc("row-c"),
+                        Sid::dsc("amount"),
+                        FlakeValue::Int(1_009),
+                        1,
+                    ),
+                    Flake::assert(
+                        Sid::dsc("row-c"),
+                        Sid::dsc("at"),
+                        FlakeValue::Instant(
+                            chrono::DateTime::parse_from_rfc3339("2026-11-30T00:00:00Z")
+                                .expect("a date")
+                                .with_timezone(&chrono::Utc),
+                        ),
+                        1,
+                    ),
+                ])
+                .await
+                .expect("seed");
+            let catalog = Catalog::new(storage).with_graph(graph as Arc<dyn TripleStore>);
+
+            let found = catalog
+                .blocking_candidates(
+                    &Sid::dsc("row-a"),
+                    &[Strategy::Composite {
+                        of: vec![
+                            Strategy::NumericBucket {
+                                fields: vec![field("amount")],
+                                width: 100.0,
+                            },
+                            Strategy::DateWindow {
+                                fields: vec![field("at")],
+                                days: 7,
+                            },
+                        ],
+                    }],
+                    100,
+                )
+                .await
+                .expect("candidates");
+
+            assert_eq!(
+                found
+                    .candidates
+                    .iter()
+                    .map(|c| &c.subject)
+                    .collect::<Vec<_>>(),
+                vec![&Sid::dsc("row-b")],
+                "an Int, a Float and two Instants all had to be read: {:?}",
+                found.candidates,
+            );
+        }
+
+        /// A subject carrying none of the fields the strategies name cannot
+        /// be keyed at all, and that is an answer rather than an error.
+        #[tokio::test]
+        async fn a_subject_with_none_of_the_named_fields_has_no_candidates() {
+            let catalog = seeded(&[
+                ("row-a", "somethingElse", "x"),
+                ("row-b", "reference", "ACME"),
+            ])
+            .await;
+
+            let found = catalog
+                .blocking_candidates(
+                    &Sid::dsc("row-a"),
+                    &[Strategy::Normalized {
+                        fields: vec![field("reference")],
+                    }],
+                    100,
+                )
+                .await
+                .expect("candidates");
+
+            assert!(found.candidates.is_empty());
+            assert!(!found.truncated);
         }
     }
 

@@ -17,5 +17,14 @@ uuid.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 
+# Test-only. A pack's `[[matching.blocking]]` is TOML, so the round-trip test
+# for `blocking_strategy::Strategy`'s deserialization has to parse real TOML —
+# asserting against a hand-built `serde_json::Value` would test a shape no pack
+# ever writes. Kept out of `[dependencies]` because this crate is deliberately
+# I/O- and format-free: the *strategies* are pure, and only their test reads a
+# file format.
+[dev-dependencies]
+toml.workspace = true
+
 [lints]
 workspace = true

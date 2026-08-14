@@ -8099,6 +8099,18 @@
         "summary": "Everything the landing page needs"
       }
     },
+    "/packs/{pack}/candidates": {
+      "post": {
+        "operationId": "post_packs__pack__candidates",
+        "responses": {
+          "200": {
+            "description": "What else a pack's blocking strategies say might be this"
+          }
+        },
+        "security": [],
+        "summary": "What else a pack's blocking strategies say might be this"
+      }
+    },
     "/packs/{pack}/finding-rules": {
       "get": {
         "operationId": "get_packs__pack__finding-rules",
