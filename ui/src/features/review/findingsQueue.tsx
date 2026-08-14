@@ -20,8 +20,7 @@
  *  from "nobody has looked yet". There is no defer — leaving it pending
  *  already *is* deferring, the same reasoning Epic 17's queue records. */
 
-import { Space, Tag, Typography } from "antd";
-import type { CSSProperties } from "react";
+import { Descriptions, Space, Table, Tag, Typography } from "antd";
 import {
   api,
   type EvidenceGraph,
@@ -79,28 +78,22 @@ const COPY = {
     "A dismissal has to say why. Without a reason the next reconciliation run cannot tell 'considered and dismissed' from 'nobody has looked yet' — and neither can the next reviewer.",
   rejectPlaceholder: "Why should this finding not stand?",
   separator: " · ",
-};
-
-const triplesHeaderStyle: CSSProperties = {
-  textAlign: "left",
-  fontSize: 12,
-  fontWeight: 600,
-  padding: "4px 8px 4px 0",
-  borderBottom: "1px solid rgba(0, 0, 0, 0.08)",
-};
-
-const triplesCellStyle: CSSProperties = {
-  fontSize: 13,
-  padding: "4px 8px 4px 0",
-  borderBottom: "1px solid rgba(0, 0, 0, 0.04)",
+  edgesLabel: "Edges",
 };
 
 /** The local name of a term, for a reviewer who does not want to read IRIs.
  *
+ *  The `:` cut is tried last, never first: an IRI's own scheme separator is a
+ *  colon, and cutting there would turn every IRI into `//graph-owl.dev/…`.
+ *  Curies (`gst:Section16`) are cut the same way a namespace-cut IRI is, so
+ *  the Rule and Subject fields render the name a human decodes, not the term
+ *  the registry emitted.
+ *
  *  Falls back to the whole string rather than an empty one: a subject with no
  *  separator is unusual, but a blank row in a review queue is unusable. */
 export function displayTerm(term: string): string {
-  const cut = Math.max(term.lastIndexOf("#"), term.lastIndexOf("/"));
+  const slash = Math.max(term.lastIndexOf("#"), term.lastIndexOf("/"));
+  const cut = slash >= 0 ? slash : term.lastIndexOf(":");
   const tail = cut >= 0 ? term.slice(cut + 1) : term;
   return tail.length > 0 ? tail : term;
 }
@@ -336,36 +329,53 @@ export function findingsQueue(): QueueConfig {
       // addition to it, not a dependency of it.
       const graph = await api.findingEvidenceGraph(entry.id).catch(() => null);
       const nearMiss = graph ? evidenceNearMiss(graph) : null;
-  // Plan 111 Slice F. Separate from the near miss above because the two are
-  // different claims — see `evidenceCandidates`.
-  const candidates = graph ? evidenceCandidates(graph) : [];
+      // Plan 111 Slice F. Separate from the near miss above because the two are
+      // different claims — see `evidenceCandidates`.
+      const candidates = graph ? evidenceCandidates(graph) : [];
+      const triples = graph ? evidenceTriples(graph) : [];
+      const subjectLabel = displayTerm(finding.subject);
       return (
         <Space direction="vertical" size="small" style={{ width: "100%" }}>
-          <div>
-            <Text strong>{COPY.governedByLabel}</Text>
-            <div>
-              <Tag>{finding.governedBy}</Tag>
-            </div>
-          </div>
-          <div>
-            <Text strong>{COPY.subjectLabel}</Text>
-            <div>{finding.subject}</div>
-          </div>
-          <div>
-            <Text strong>{COPY.evidenceLabel}</Text>
-            {finding.evidence.map((fact, index) => (
-              <div key={`${fact.predicate}-${index}`}>
-                <Text type="secondary">{displayTerm(fact.predicate)}</Text>
-                {COPY.separator}
-                {fact.value}
-              </div>
-            ))}
-          </div>
+          {/* The citation as a definition block, not free text — a reviewer
+              reads "Rule: Rule36-4 · Subject: 2b-INV-1001" the way a
+              practitioner's file is laid out, and every term here is the
+              local name a human decodes, never the raw IRI. */}
+          <Descriptions
+            size="small"
+            column={1}
+            items={[
+              {
+                key: "rule",
+                label: COPY.governedByLabel,
+                children: <Tag>{displayTerm(finding.governedBy)}</Tag>,
+              },
+              {
+                key: "subject",
+                label: COPY.subjectLabel,
+                children: <Text code>{subjectLabel}</Text>,
+              },
+              {
+                key: "evidence",
+                label: COPY.evidenceLabel,
+                children: (
+                  <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                    {finding.evidence.map((fact, index) => (
+                      <Space key={`${fact.predicate}-${index}`} size={6}>
+                        <Tag>{displayTerm(fact.predicate)}</Tag>
+                        <Text type="secondary">{fact.value}</Text>
+                      </Space>
+                    ))}
+                  </Space>
+                ),
+              },
+            ]}
+          />
+
           {graph && (
             <div>
               <Text strong>{COPY.evidenceGraphLabel}</Text>
               {evidenceGraphIsJustTheSeed(graph) ? (
-                <div>
+                <div style={{ marginTop: 4 }}>
                   <Text type="secondary">{COPY.evidenceGraphSeedOnly}</Text>
                 </div>
               ) : (
@@ -375,7 +385,7 @@ export function findingsQueue(): QueueConfig {
                       picture={evidencePicture(finding, graph)}
                       colors={currentGraphColors()}
                       onExpand={() => {}}
-                      label={`Evidence graph for ${displayTerm(finding.subject)}`}
+                      label={`Evidence graph for ${subjectLabel}`}
                     />
                   </div>
                   {/* The canvas's own `role="img"`/`aria-label` names the
@@ -383,34 +393,35 @@ export function findingsQueue(): QueueConfig {
                    *  non-visual equivalent `00f` requires of any rendered
                    *  graph, not a duplicate of the canvas above it. */}
                   <div style={{ marginTop: 8 }}>
+                    <Text strong>{COPY.edgesLabel}</Text>
                     {graph.edges.map((edge, index) => (
-                      <div key={`${edge.from}-${edge.relationship}-${edge.to}-${index}`}>
-                        <Text type="secondary">{describeEvidenceEdge(edge)}</Text>
+                      <div key={`${edge.from}-${edge.relationship}-${edge.to}-${index}`} style={{ marginTop: 4 }}>
+                        <Text code style={{ fontSize: 12, wordBreak: "break-all" }}>
+                          {describeEvidenceEdge(edge)}
+                        </Text>
                       </div>
                     ))}
                   </div>
                   {graph.truncated && (
-                    <div>
+                    <div style={{ marginTop: 4 }}>
                       <Text type="secondary">{COPY.evidenceGraphTruncated}</Text>
                     </div>
                   )}
+                  {/* One node per row, name then the documents that assert it —
+                      the same row a near miss and a candidate use below, so the
+                      provenance of anything named on this page reads alike. */}
                   <div style={{ marginTop: 8 }}>
                     <Text strong>{COPY.sourcesLabel}</Text>
                     {evidenceNodeSources(graph).map((row) => (
-                      <div key={row.id}>
-                        <Text type="secondary">
-                          {row.name}
-                          {COPY.separator}
+                      <div key={row.id} style={{ marginTop: 4 }}>
+                        <Space wrap size={[4, 4]}>
+                          <Text>{row.name}</Text>
                           {row.sources.length > 0 ? (
-                            row.sources.map((source, index) => (
-                              <Tag key={source} style={{ marginLeft: index === 0 ? 6 : 0 }}>
-                                {source}
-                              </Tag>
-                            ))
+                            row.sources.map((source) => <Tag key={source}>{source}</Tag>)
                           ) : (
                             <Text type="secondary">{COPY.sourcesEmpty}</Text>
                           )}
-                        </Text>
+                        </Space>
                       </div>
                     ))}
                   </div>
@@ -420,24 +431,19 @@ export function findingsQueue(): QueueConfig {
                       <div>
                         <Text type="secondary">{COPY.nearMissHint}</Text>
                       </div>
-                      <div>
-                        <Text type="secondary">
+                      <div style={{ marginTop: 4 }}>
+                        <Space wrap size={[4, 4]}>
                           {nearMiss.iri ? (
                             <ClickableSubject seed={nearMiss.iri} label={nearMiss.name} />
                           ) : (
-                            nearMiss.name
+                            <Text>{nearMiss.name}</Text>
                           )}
-                          {COPY.separator}
                           {nearMiss.sources.length > 0 ? (
-                            nearMiss.sources.map((source, index) => (
-                              <Tag key={source} style={{ marginLeft: index === 0 ? 6 : 0 }}>
-                                {source}
-                              </Tag>
-                            ))
+                            nearMiss.sources.map((source) => <Tag key={source}>{source}</Tag>)
                           ) : (
                             <Text type="secondary">{COPY.sourcesEmpty}</Text>
                           )}
-                        </Text>
+                        </Space>
                       </div>
                     </div>
                   )}
@@ -448,56 +454,57 @@ export function findingsQueue(): QueueConfig {
                         <Text type="secondary">{COPY.candidatesHint}</Text>
                       </div>
                       {candidates.map((candidate) => (
-                        <div key={candidate.id}>
-                          <Text type="secondary">
+                        <div key={candidate.id} style={{ marginTop: 4 }}>
+                          <Space wrap size={[4, 4]}>
                             {candidate.iri ? (
                               <ClickableSubject seed={candidate.iri} label={candidate.name} />
                             ) : (
-                              candidate.name
+                              <Text>{candidate.name}</Text>
                             )}
-                            {COPY.separator}
                             {/* Which strategy agreed, first: it is what tells
                                 a reviewer how much weight the row carries,
                                 and burying it after the provenance would make
                                 every candidate read alike. */}
                             {candidate.by.map((strategy) => (
-                              <Tag key={strategy} color="processing" style={{ marginLeft: 6 }}>
+                              <Tag key={strategy} color="processing">
                                 {strategy}
                               </Tag>
                             ))}
                             {candidate.sources.map((source) => (
                               <Tag key={source}>{source}</Tag>
                             ))}
-                          </Text>
+                          </Space>
                         </div>
                       ))}
                     </div>
                   )}
                   <div style={{ marginTop: 8 }}>
                     <Text strong>{COPY.triplesLabel}</Text>
-                    <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
-                      <thead>
-                        <tr>
-                          <th style={triplesHeaderStyle}>{COPY.subjectLabel}</th>
-                          <th style={triplesHeaderStyle}>{COPY.predicateLabel}</th>
-                          <th style={triplesHeaderStyle}>{COPY.objectLabel}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {evidenceTriples(graph).map((row, index) => (
-                          <tr key={`${row.subject}-${row.predicate}-${row.object}-${index}`}>
-                            <td style={triplesCellStyle}>{row.subject}</td>
-                            <td style={triplesCellStyle}>
-                              {row.predicate}
-                              {row.derived && (
-                                <Tag style={{ marginLeft: 6 }}>{COPY.derivedTag}</Tag>
-                              )}
-                            </td>
-                            <td style={triplesCellStyle}>{row.object}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                    <Table
+                      style={{ marginTop: 4 }}
+                      size="small"
+                      pagination={false}
+                      rowKey="key"
+                      dataSource={triples.map((row, index) => ({
+                        key: `${row.subject}—${row.predicate}—${row.object}—${index}`,
+                        ...row,
+                      }))}
+                      columns={[
+                        { title: COPY.subjectLabel, dataIndex: "subject", key: "subject" },
+                        {
+                          title: COPY.predicateLabel,
+                          dataIndex: "predicate",
+                          key: "predicate",
+                          render: (value: string, row: { derived: boolean }) => (
+                            <Space size={6}>
+                              {value}
+                              {row.derived && <Tag>{COPY.derivedTag}</Tag>}
+                            </Space>
+                          ),
+                        },
+                        { title: COPY.objectLabel, dataIndex: "object", key: "object" },
+                      ]}
+                    />
                   </div>
                 </>
               )}

@@ -57,6 +57,14 @@ describe("displayTerm", () => {
     );
   });
 
+  it("cuts a curie's prefix the same way it cuts an IRI's path", () => {
+    // A rule's `governedBy` arrives as `gst:Section16`, not as a full IRI —
+    // the registry emits curies, and a reviewer reads the name, not the
+    // pack's own prefix on top of it.
+    expect(displayTerm("gst:Section16")).toBe("Section16");
+    expect(displayTerm("gst:TaxHeadMismatch")).toBe("TaxHeadMismatch");
+  });
+
   it("falls back to the whole term rather than rendering a blank row", () => {
     // A subject with no separator is unusual; a blank row in a review queue
     // is unusable, and would look like a bug in the queue rather than in the
