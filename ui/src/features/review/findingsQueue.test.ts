@@ -15,6 +15,8 @@ import {
   evidenceNodeSources,
   evidencePicture,
   evidenceTriples,
+  humanizeTerm,
+  titleFor,
   toQueueEntry,
 } from "./findingsQueue";
 
@@ -77,8 +79,18 @@ describe("displayTerm", () => {
 });
 
 describe("toQueueEntry", () => {
-  it("leads with what kind of finding it is", () => {
-    expect(toQueueEntry(getFinding()).summary).toBe("MissingInGstr2b");
+  it("leads with what kind of finding it is, read as a sentence not an identifier", () => {
+    // The row's badge is for a reviewer deciding *whether to open this*, so
+    // it says what the finding is in words a reviewer can scan, not the
+    // registry's local name ("MissingInGstr2b") it arrived as.
+    expect(toQueueEntry(getFinding()).summary).toBe("Missing In Gstr2b");
+  });
+
+  it("uses the pack's own declared wording when the caller supplies a title", () => {
+    // The pack owns what a finding is called (`[findings.guidance]`); its
+    // words outrank any generic humanizing the console could invent.
+    const entry = toQueueEntry(getFinding(), "Supplier has not filed");
+    expect(entry.summary).toBe("Supplier has not filed");
   });
 
   it("names the pack in the detail line, because one queue serves every pack", () => {
@@ -127,8 +139,65 @@ describe("toQueueEntry", () => {
       }),
     );
 
-    expect(entry.summary).toBe("DuplicateGuest");
+    expect(entry.summary).toBe("Duplicate Guest");
     expect(entry.detail).toContain("hospitality");
+  });
+});
+
+describe("humanizeTerm", () => {
+  it("turns a camelCase local name into a spaced, human-readable title", () => {
+    expect(humanizeTerm("SupplierNotFiled")).toBe("Supplier Not Filed");
+    expect(humanizeTerm("TaxHeadMismatch")).toBe("Tax Head Mismatch");
+  });
+
+  it("keeps an acronym together instead of splitting it across words", () => {
+    expect(humanizeTerm("ITCNotAvailable")).toBe("ITC Not Available");
+  });
+
+  it("leaves already-spaced wording alone — a pack title is not a camel identifier", () => {
+    // A pack's own guidance title ("Supplier has not filed") reaches a
+    // reader as-is; re-capitalising or re-spacing it would corrupt the
+    // pack's voice.
+    expect(humanizeTerm("Supplier has not filed")).toBe("Supplier has not filed");
+  });
+
+  it("capitalises the first letter of every word", () => {
+    expect(humanizeTerm("supplierNotFiled")).toBe("Supplier Not Filed");
+  });
+
+  it("leaves a single-word name alone", () => {
+    expect(humanizeTerm("Reversed")).toBe("Reversed");
+  });
+
+  it("leaves a term with no camel transitions alone", () => {
+    // A bare subject id is not a finding label and reads fine untouched.
+    expect(humanizeTerm("2b-INV-1003")).toBe("2b-INV-1003");
+  });
+
+  it("handles an empty term without inventing a row", () => {
+    expect(humanizeTerm("")).toBe("");
+  });
+});
+
+describe("titleFor", () => {
+  it("prefers the pack's own declared title over a humanized name", () => {
+    const guidance = {
+      "gst:SupplierNotFiled": { title: "Supplier has not filed" },
+    };
+    expect(titleFor("gst:SupplierNotFiled", guidance)).toBe("Supplier has not filed");
+  });
+
+  it("humanizes the local name when the pack declares no guidance for it", () => {
+    expect(titleFor("gst:SupplierNotFiled", undefined)).toBe("Supplier Not Filed");
+    expect(titleFor("gst:SupplierNotFiled", {})).toBe("Supplier Not Filed");
+  });
+
+  it("falls back to the humanized local name when a full-IRI label has no guidance entry", () => {
+    // A pack that emits full IRIs rather than curies still renders — the
+    // console never blanks a row over a registry convention.
+    expect(
+      titleFor("https://graph-owl.dev/packs/gst#MissingInGstr2b", {}),
+    ).toBe("Missing In Gstr2b");
   });
 });
 

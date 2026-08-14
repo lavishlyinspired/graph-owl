@@ -20,12 +20,13 @@
  *  from "nobody has looked yet". There is no defer — leaving it pending
  *  already *is* deferring, the same reasoning Epic 17's queue records. */
 
-import { Descriptions, Space, Table, Tag, Typography } from "antd";
+import { Card, Descriptions, Flex, Space, Table, Tag, Typography } from "antd";
 import {
   api,
   type EvidenceGraph,
   type EvidenceGraphEdge,
   type EvidenceGraphNode,
+  type PackConsoleConfig,
   type PackFinding,
 } from "../../api";
 import type { Picture } from "../../graph/cytoscape";
@@ -36,7 +37,7 @@ import { readParam } from "../deepLink";
 import { performAsAction } from "./apiAction";
 import type { QueueConfig, QueueEntry } from "./queues";
 
-const { Text } = Typography;
+const { Text, Title } = Typography;
 
 const COPY = {
   label: "Findings",
@@ -96,6 +97,58 @@ export function displayTerm(term: string): string {
   const cut = slash >= 0 ? slash : term.lastIndexOf(":");
   const tail = cut >= 0 ? term.slice(cut + 1) : term;
   return tail.length > 0 ? tail : term;
+}
+
+/** The local name as a sentence a reviewer can scan — "SupplierNotFiled"
+ *  becomes "Supplier Not Filed".
+ *
+ *  **A fallback, never the first choice.** A pack that declares
+ *  `[findings.guidance]` owns what its findings are called, and that wording
+ *  outranks anything this console could invent — see {@link titleFor}. This
+ *  is what a pack without guidance renders instead of an identifier.
+ *
+ *  **An identifier, not prose.** The function refuses already-spaced input
+ *  (a pack title reaching this path would otherwise get re-capitalised into
+ *  the pack's voice), keeps acronyms together ("ITCNotAvailable" → "ITC Not
+ *  Available"), and leaves a term with no camel transitions exactly alone.
+ *  One console serves every pack, so a label this cannot parse must degrade
+ *  to the raw name, never to an empty row. */
+export function humanizeTerm(term: string): string {
+  if (term === "") return term;
+  if (term.includes(" ")) return term;
+  // Two split rules, and both are insertions, not substitutions: between a
+  // lower-case letter or digit and an upper-case one ("supplierNotFiled"),
+  // and between an acronym run and the word after it ("ITCNotAvailable" —
+  // the trailing `[A-Z][a-z]` guard is what keeps "ITC" intact). The
+  // capture is only there to say where the space goes; both alternatives
+  // replace themselves plus the space.
+  const spaced = term.replace(
+    /([a-z0-9])(?=[A-Z])|([A-Z])(?=[A-Z][a-z])/g,
+    (_match, lower: string | undefined, acronym: string | undefined) =>
+      `${acronym ?? lower} `,
+  );
+  return spaced
+    .split(" ")
+    .map((word) => (word.length > 0 ? word[0]!.toUpperCase() + word.slice(1) : word))
+    .join(" ");
+}
+
+/** What a finding is called, for a reviewer — the pack's own declared title
+ *  when it has one (`[findings.guidance]`, keyed by the finding's label),
+ *  and the humanized local name when it does not.
+ *
+ *  **The pack owns the wording.** The GST pack calls `gst:SupplierNotFiled`
+ *  "Supplier has not filed"; a hospitality pack calls its own findings
+ *  whatever its manifest says. Hardcoding either here would be the first
+ *  per-domain constant in a file whose whole purpose is domain neutrality
+ *  (`plans/105-domain-neutrality.md`). The fallback exists only so a pack
+ *  that declares no guidance still renders words rather than identifiers. */
+export function titleFor(
+  label: string,
+  guidance: PackConsoleConfig["guidance"] | undefined,
+): string {
+  const declared = guidance?.[label]?.title;
+  return declared ?? humanizeTerm(displayTerm(label));
 }
 
 /** One edge, as a sentence a reviewer can follow without decoding IRIs —
@@ -255,11 +308,32 @@ function currentGraphColors(): (typeof palette)["light"] {
   return dark ? palette.dark : palette.light;
 }
 
-export function toQueueEntry(finding: PackFinding): QueueEntry {
+/** A pack's declared finding guidance, `undefined` when the pack declares
+ *  none — `[findings.guidance]` is optional, and a pack without it is
+ *  ordinary rather than broken (the console falls back to humanizing the
+ *  label itself).
+ *
+ *  **Cached per pack, because two surfaces need it.** The list rows and the
+ *  detail headline both read the pack's own wording, and a status-tab switch
+ *  refetches entries but not guidance — the console has already fetched the
+ *  whole console config once, so re-requesting it per finding would be
+ *  paying the same round trip repeatedly for the same string. */
+const guidanceCache = new Map<string, PackConsoleConfig["guidance"] | undefined>();
+
+async function guidanceFor(pack: string): Promise<PackConsoleConfig["guidance"] | undefined> {
+  const cached = guidanceCache.get(pack);
+  if (cached !== undefined || guidanceCache.has(pack)) return cached;
+  const config = await api.packConsole(pack);
+  const guidance = config?.guidance;
+  guidanceCache.set(pack, guidance);
+  return guidance;
+}
+
+export function toQueueEntry(finding: PackFinding, title?: string): QueueEntry {
   return {
     id: finding.id,
     status: finding.status,
-    summary: displayTerm(finding.label),
+    summary: title ?? humanizeTerm(displayTerm(finding.label)),
     detail: `${finding.pack}${COPY.separator}${displayTerm(finding.subject)}${COPY.separator}${finding.summary}`,
     decidedSummary:
       finding.status === "pending"
@@ -318,11 +392,22 @@ export function findingsQueue(): QueueConfig {
       const findings = await api.findings({ status });
       raw.clear();
       for (const finding of findings) raw.set(finding.id, finding);
-      return findings.map(toQueueEntry);
+      // The list rows are built from the pack's own wording, so the row
+      // labels and the detail headline can never disagree about what a
+      // finding is called. One request per distinct pack, then a cache —
+      // a status-tab switch refetches entries, not guidance.
+      const packs = [...new Set(findings.map((finding) => finding.pack))];
+      const guidances = await Promise.all(packs.map((pack) => guidanceFor(pack)));
+      const byPack = new Map(packs.map((pack, index) => [pack, guidances[index]]));
+      return findings.map((finding) =>
+        toQueueEntry(finding, titleFor(finding.label, byPack.get(finding.pack))),
+      );
     },
     async fetchDetail(entry) {
       const finding = raw.get(entry.id);
       if (!finding) return null;
+      const guidance = await guidanceFor(finding.pack);
+      const title = titleFor(finding.label, guidance);
       // A missing traversal engine or an unresolvable subject must not take
       // down the rest of the detail pane — the flat evidence list above
       // already carries the finding's citation, and this section is an
@@ -335,7 +420,21 @@ export function findingsQueue(): QueueConfig {
       const triples = graph ? evidenceTriples(graph) : [];
       const subjectLabel = displayTerm(finding.subject);
       return (
-        <Space direction="vertical" size="small" style={{ width: "100%" }}>
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          {/* The headline, in the pack's own words — what a reviewer scans
+              for before deciding whether the citation below matters. */}
+          <div>
+            <Title level={3} style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>
+              {title}
+            </Title>
+            <Space size={8} style={{ marginTop: 6 }}>
+              <Tag>{finding.pack}</Tag>
+              <Text type="secondary" style={{ fontSize: 13 }}>
+                {finding.summary}
+              </Text>
+            </Space>
+          </div>
+
           {/* The citation as a definition block, not free text — a reviewer
               reads "Rule: Rule36-4 · Subject: 2b-INV-1001" the way a
               practitioner's file is laid out, and every term here is the
@@ -372,46 +471,58 @@ export function findingsQueue(): QueueConfig {
           />
 
           {graph && (
-            <div>
-              <Text strong>{COPY.evidenceGraphLabel}</Text>
-              {evidenceGraphIsJustTheSeed(graph) ? (
-                <div style={{ marginTop: 4 }}>
+            <>
+              <Card size="small" title={COPY.evidenceGraphLabel}>
+                {evidenceGraphIsJustTheSeed(graph) ? (
                   <Text type="secondary">{COPY.evidenceGraphSeedOnly}</Text>
-                </div>
-              ) : (
-                <>
-                  <div style={{ marginTop: 8 }}>
+                ) : (
+                  <>
                     <GraphCanvas
                       picture={evidencePicture(finding, graph)}
                       colors={currentGraphColors()}
                       onExpand={() => {}}
                       label={`Evidence graph for ${subjectLabel}`}
                     />
-                  </div>
-                  {/* The canvas's own `role="img"`/`aria-label` names the
-                   *  picture but not its content — this is the same
-                   *  non-visual equivalent `00f` requires of any rendered
-                   *  graph, not a duplicate of the canvas above it. */}
-                  <div style={{ marginTop: 8 }}>
-                    <Text strong>{COPY.edgesLabel}</Text>
-                    {graph.edges.map((edge, index) => (
-                      <div key={`${edge.from}-${edge.relationship}-${edge.to}-${index}`} style={{ marginTop: 4 }}>
-                        <Text code style={{ fontSize: 12, wordBreak: "break-all" }}>
-                          {describeEvidenceEdge(edge)}
-                        </Text>
+                    {graph.truncated && (
+                      <div style={{ marginTop: 8 }}>
+                        <Text type="secondary">{COPY.evidenceGraphTruncated}</Text>
                       </div>
-                    ))}
+                    )}
+                  </>
+                )}
+              </Card>
+
+              {/* The edges and the provenance sit side by side — one answers
+                  "what connects to what", the other "which document says so",
+                  and a reviewer weighing the graph needs both at once. */}
+              <Flex wrap gap={16}>
+                {/* The canvas's own `role="img"`/`aria-label` names the
+                    picture but not its content — this prose list is the same
+                    non-visual equivalent `00f` requires of any rendered
+                    graph, not a duplicate of the canvas above it. */}
+                {graph.edges.length > 0 && (
+                  <div style={{ flex: "1 1 280px", minWidth: 240 }}>
+                    <Card size="small" title={COPY.edgesLabel} style={{ height: "100%" }}>
+                      {graph.edges.map((edge, index) => (
+                        <div
+                          key={`${edge.from}-${edge.relationship}-${edge.to}-${index}`}
+                          style={{ marginTop: 4 }}
+                        >
+                          <Text code style={{ fontSize: 12, wordBreak: "break-all" }}>
+                            {describeEvidenceEdge(edge)}
+                          </Text>
+                        </div>
+                      ))}
+                    </Card>
                   </div>
-                  {graph.truncated && (
-                    <div style={{ marginTop: 4 }}>
-                      <Text type="secondary">{COPY.evidenceGraphTruncated}</Text>
-                    </div>
-                  )}
-                  {/* One node per row, name then the documents that assert it —
-                      the same row a near miss and a candidate use below, so the
-                      provenance of anything named on this page reads alike. */}
-                  <div style={{ marginTop: 8 }}>
-                    <Text strong>{COPY.sourcesLabel}</Text>
+                )}
+                {/* One node per row, name then the documents that assert it —
+                    the same row a near miss and a candidate use below, so the
+                    provenance of anything named on this page reads alike.
+                    Always shown: even a lone, unresolvable seed has a source,
+                    and that provenance is part of the finding. */}
+                <div style={{ flex: "1 1 280px", minWidth: 240 }}>
+                  <Card size="small" title={COPY.sourcesLabel} style={{ height: "100%" }}>
                     {evidenceNodeSources(graph).map((row) => (
                       <div key={row.id} style={{ marginTop: 4 }}>
                         <Space wrap size={[4, 4]}>
@@ -424,91 +535,92 @@ export function findingsQueue(): QueueConfig {
                         </Space>
                       </div>
                     ))}
+                  </Card>
+                </div>
+              </Flex>
+
+              {nearMiss && (
+                <Card size="small" title={COPY.nearMissLabel}>
+                  <div>
+                    <Text type="secondary">{COPY.nearMissHint}</Text>
                   </div>
-                  {nearMiss && (
-                    <div style={{ marginTop: 8 }}>
-                      <Text strong>{COPY.nearMissLabel}</Text>
-                      <div>
-                        <Text type="secondary">{COPY.nearMissHint}</Text>
-                      </div>
-                      <div style={{ marginTop: 4 }}>
-                        <Space wrap size={[4, 4]}>
-                          {nearMiss.iri ? (
-                            <ClickableSubject seed={nearMiss.iri} label={nearMiss.name} />
-                          ) : (
-                            <Text>{nearMiss.name}</Text>
-                          )}
-                          {nearMiss.sources.length > 0 ? (
-                            nearMiss.sources.map((source) => <Tag key={source}>{source}</Tag>)
-                          ) : (
-                            <Text type="secondary">{COPY.sourcesEmpty}</Text>
-                          )}
-                        </Space>
-                      </div>
-                    </div>
-                  )}
-                  {candidates.length > 0 && (
-                    <div style={{ marginTop: 8 }}>
-                      <Text strong>{COPY.candidatesLabel}</Text>
-                      <div>
-                        <Text type="secondary">{COPY.candidatesHint}</Text>
-                      </div>
-                      {candidates.map((candidate) => (
-                        <div key={candidate.id} style={{ marginTop: 4 }}>
-                          <Space wrap size={[4, 4]}>
-                            {candidate.iri ? (
-                              <ClickableSubject seed={candidate.iri} label={candidate.name} />
-                            ) : (
-                              <Text>{candidate.name}</Text>
-                            )}
-                            {/* Which strategy agreed, first: it is what tells
-                                a reviewer how much weight the row carries,
-                                and burying it after the provenance would make
-                                every candidate read alike. */}
-                            {candidate.by.map((strategy) => (
-                              <Tag key={strategy} color="processing">
-                                {strategy}
-                              </Tag>
-                            ))}
-                            {candidate.sources.map((source) => (
-                              <Tag key={source}>{source}</Tag>
-                            ))}
-                          </Space>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                   <div style={{ marginTop: 8 }}>
-                    <Text strong>{COPY.triplesLabel}</Text>
-                    <Table
-                      style={{ marginTop: 4 }}
-                      size="small"
-                      pagination={false}
-                      rowKey="key"
-                      dataSource={triples.map((row, index) => ({
-                        key: `${row.subject}—${row.predicate}—${row.object}—${index}`,
-                        ...row,
-                      }))}
-                      columns={[
-                        { title: COPY.subjectLabel, dataIndex: "subject", key: "subject" },
-                        {
-                          title: COPY.predicateLabel,
-                          dataIndex: "predicate",
-                          key: "predicate",
-                          render: (value: string, row: { derived: boolean }) => (
-                            <Space size={6}>
-                              {value}
-                              {row.derived && <Tag>{COPY.derivedTag}</Tag>}
-                            </Space>
-                          ),
-                        },
-                        { title: COPY.objectLabel, dataIndex: "object", key: "object" },
-                      ]}
-                    />
+                    <Space wrap size={[4, 4]}>
+                      {nearMiss.iri ? (
+                        <ClickableSubject seed={nearMiss.iri} label={nearMiss.name} />
+                      ) : (
+                        <Text>{nearMiss.name}</Text>
+                      )}
+                      {nearMiss.sources.length > 0 ? (
+                        nearMiss.sources.map((source) => <Tag key={source}>{source}</Tag>)
+                      ) : (
+                        <Text type="secondary">{COPY.sourcesEmpty}</Text>
+                      )}
+                    </Space>
                   </div>
-                </>
+                </Card>
               )}
-            </div>
+
+              {candidates.length > 0 && (
+                <Card size="small" title={COPY.candidatesLabel}>
+                  <div>
+                    <Text type="secondary">{COPY.candidatesHint}</Text>
+                  </div>
+                  {candidates.map((candidate) => (
+                    <div key={candidate.id} style={{ marginTop: 8 }}>
+                      <Space wrap size={[4, 4]}>
+                        {candidate.iri ? (
+                          <ClickableSubject seed={candidate.iri} label={candidate.name} />
+                        ) : (
+                          <Text>{candidate.name}</Text>
+                        )}
+                        {/* Which strategy agreed, first: it is what tells
+                            a reviewer how much weight the row carries,
+                            and burying it after the provenance would make
+                            every candidate read alike. */}
+                        {candidate.by.map((strategy) => (
+                          <Tag key={strategy} color="processing">
+                            {strategy}
+                          </Tag>
+                        ))}
+                        {candidate.sources.map((source) => (
+                          <Tag key={source}>{source}</Tag>
+                        ))}
+                      </Space>
+                    </div>
+                  ))}
+                </Card>
+              )}
+
+              {triples.length > 0 && (
+                <Card size="small" title={COPY.triplesLabel}>
+                  <Table
+                    size="small"
+                    pagination={false}
+                    rowKey="key"
+                    dataSource={triples.map((row, index) => ({
+                      key: `${row.subject}—${row.predicate}—${row.object}—${index}`,
+                      ...row,
+                    }))}
+                    columns={[
+                      { title: COPY.subjectLabel, dataIndex: "subject", key: "subject" },
+                      {
+                        title: COPY.predicateLabel,
+                        dataIndex: "predicate",
+                        key: "predicate",
+                        render: (value: string, row: { derived: boolean }) => (
+                          <Space size={6}>
+                            {value}
+                            {row.derived && <Tag>{COPY.derivedTag}</Tag>}
+                          </Space>
+                        ),
+                      },
+                      { title: COPY.objectLabel, dataIndex: "object", key: "object" },
+                    ]}
+                  />
+                </Card>
+              )}
+            </>
           )}
         </Space>
       );
