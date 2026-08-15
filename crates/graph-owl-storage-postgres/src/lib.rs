@@ -7309,37 +7309,6 @@ impl Storage for PostgresStorage {
             .map_err(|e| StorageError::Unexpected(e.to_string()))
     }
 
-    async fn rebuild_usage_rollups(&self, asset_fqn: &str) -> Result<i64, StorageError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
-
-        sqlx::query("DELETE FROM usage_rollups WHERE asset_fqn = $1")
-            .bind(asset_fqn)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
-        let rebuilt = sqlx::query(
-            "INSERT INTO usage_rollups (asset_fqn, consumer_key, day, operation, count, total_rows)
-             SELECT asset_fqn, consumer_key, occurred_at::date, operation,
-                    COUNT(*), NULLIF(SUM(coalesce(row_count, 0)), 0)
-               FROM usage_observations WHERE asset_fqn = $1
-              GROUP BY asset_fqn, consumer_key, occurred_at::date, operation",
-        )
-        .bind(asset_fqn)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| StorageError::Unexpected(e.to_string()))?
-        .rows_affected();
-
-        tx.commit()
-            .await
-            .map_err(|e| StorageError::Unexpected(e.to_string()))?;
-        Ok(i64::try_from(rebuilt).unwrap_or(i64::MAX))
-    }
-
     async fn prune_usage(
         &self,
         before: chrono::DateTime<chrono::Utc>,

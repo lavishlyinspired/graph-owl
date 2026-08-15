@@ -7151,15 +7151,6 @@ impl Catalog {
         Ok(self.storage.usage_rollups(asset_fqn).await?)
     }
 
-    /// Rebuild an asset's rollups from its raw observations.
-    ///
-    /// # Errors
-    ///
-    /// `Storage` if the read or write fails.
-    pub async fn rebuild_usage_rollups(&self, asset_fqn: &str) -> Result<i64, CatalogError> {
-        Ok(self.storage.rebuild_usage_rollups(asset_fqn).await?)
-    }
-
     /// Delete raw observations older than the retention window.
     ///
     /// # Errors

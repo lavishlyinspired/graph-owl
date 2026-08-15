@@ -3912,18 +3912,6 @@ pub trait Storage: Send + Sync {
         asset_fqn: &str,
     ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError>;
 
-    /// Rebuild an asset's rollups from its raw observations.
-    ///
-    /// **Exists to be compared against the incremental path**, which is the
-    /// only way to know that path is correct — Slice B's equivalence test. Not
-    /// a repair tool: after pruning the raw rows are gone and a rebuild would
-    /// produce *less* than the truth, which is why nothing calls it in
-    /// production.
-    ///
-    /// # Errors
-    /// [`StorageError::Unexpected`] if the read or write fails.
-    async fn rebuild_usage_rollups(&self, asset_fqn: &str) -> Result<i64, StorageError>;
-
     /// Delete raw observations older than `before`, keeping the most recent one
     /// per asset.
     ///

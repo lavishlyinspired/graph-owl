@@ -4100,13 +4100,6 @@ impl Storage for InMemoryStorage {
             .max())
     }
 
-    async fn rebuild_usage_rollups(&self, asset_fqn: &str) -> Result<i64, StorageError> {
-        // Derived on read here, so a rebuild is by construction identical
-        // to the incremental answer — which is exactly what the equivalence
-        // test asserts of the *real* adapter, where they are two paths.
-        Ok(i64::try_from(self.usage_rollups(asset_fqn).await?.len()).unwrap_or(i64::MAX))
-    }
-
     async fn prune_usage(&self, before: DateTime<Utc>) -> Result<i64, StorageError> {
         self.guard_write("prune_usage");
         let mut held = self.observations.lock().unwrap();
