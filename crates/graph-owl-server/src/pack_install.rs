@@ -384,6 +384,10 @@ pub fn resolve_strategy_fields(
             fields: rewrite(fields),
             days: *days,
         },
+        Strategy::FiscalYear { fields, starts_in } => Strategy::FiscalYear {
+            fields: rewrite(fields),
+            starts_in: *starts_in,
+        },
         Strategy::Composite { of } => Strategy::Composite {
             of: of
                 .iter()

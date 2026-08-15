@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 mod findings;
+mod subject_attachments;
 use graph_owl_authz::{AccessPredicate, Policy};
 use graph_owl_core::classification::{Classification, LabelState, LabelType, Tag, TagLabel};
 use graph_owl_core::contract::{Contract, ContractBreach, ContractStatus, SchemaChange};

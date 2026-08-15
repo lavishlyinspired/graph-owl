@@ -162,6 +162,27 @@ pub enum Strategy {
         /// Window width in days. `0` yields no key.
         days: i64,
     },
+    /// A date bucketed by which fiscal year it falls in.
+    ///
+    /// **Not `DateWindow` with a 365-day width**: a fixed-width day window
+    /// from an arbitrary epoch offset does not align with a fiscal-year
+    /// boundary, and a leap year makes even 365 days drift from one year to
+    /// the next. This buckets on calendar year and month directly, adjusted
+    /// by `starts_in`, so every fiscal year is the true span between two
+    /// real calendar dates.
+    ///
+    /// Named after the algorithm, not any one pack's calendar: `starts_in:
+    /// 1` is an ordinary calendar year; `starts_in: 4` is the April-start
+    /// year some jurisdictions' tax years use. A pack names its own
+    /// boundary rather than this module assuming one.
+    FiscalYear {
+        /// Fields to read, in order.
+        fields: Vec<String>,
+        /// The calendar month (`1..=12`) the fiscal year begins in. Any
+        /// other value yields no key — there is no month `0` or `13` to
+        /// silently fall back from.
+        starts_in: u8,
+    },
     /// Several strategies joined into one key.
     ///
     /// The composed key is `None` if **any** part is `None`: a composite is a
@@ -205,13 +226,10 @@ fn join(parts: impl IntoIterator<Item = String>) -> String {
         .join(&KEY_SEPARATOR.to_string())
 }
 
-/// Days since the Unix epoch for a `YYYY-MM-DD`-prefixed value.
-///
-/// Hand-rolled rather than pulled from `chrono` because this crate's blocking
-/// module is deliberately dependency-free, and the arithmetic needed is a
-/// day count, not calendar handling. Uses the standard civil-from-days
-/// algorithm, which is exact for every Gregorian date.
-fn days_from_epoch(value: &str) -> Option<i64> {
+/// A `(year, month, day)` triple parsed from a `YYYY-MM-DD`-prefixed value,
+/// with month/day range-checked. Shared by every strategy that reads a
+/// calendar date, so "how to read this pack's date format" has one answer.
+fn parse_ymd(value: &str) -> Option<(i64, i64, i64)> {
     let date = value.get(..10)?;
     let mut parts = date.split('-');
     let year: i64 = parts.next()?.parse().ok()?;
@@ -220,6 +238,17 @@ fn days_from_epoch(value: &str) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
+    Some((year, month, day))
+}
+
+/// Days since the Unix epoch for a `YYYY-MM-DD`-prefixed value.
+///
+/// Hand-rolled rather than pulled from `chrono` because this crate's blocking
+/// module is deliberately dependency-free, and the arithmetic needed is a
+/// day count, not calendar handling. Uses the standard civil-from-days
+/// algorithm, which is exact for every Gregorian date.
+fn days_from_epoch(value: &str) -> Option<i64> {
+    let (year, month, day) = parse_ymd(value)?;
     let year = if month <= 2 { year - 1 } else { year };
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let year_of_era = year - era * 400;
@@ -227,6 +256,22 @@ fn days_from_epoch(value: &str) -> Option<i64> {
     let day_of_year = (153 * month_shift + 2) / 5 + day - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     Some(era * 146_097 + day_of_era - 719_468)
+}
+
+/// Which fiscal year a `YYYY-MM-DD`-prefixed value falls in, labeled by the
+/// calendar year it *starts* in — so a fiscal year beginning April 2025 and
+/// ending March 2026 is labeled `2025` regardless of which side of the
+/// boundary the date falls on.
+///
+/// `None` for an unparsable date or a `starts_in` outside `1..=12` — there
+/// is no month `0` or `13` to silently normalize to January.
+fn fiscal_year_of(value: &str, starts_in: u8) -> Option<i64> {
+    if !(1..=12).contains(&starts_in) {
+        return None;
+    }
+    let (year, month, _day) = parse_ymd(value)?;
+    let starts_in = i64::from(starts_in);
+    Some(if month >= starts_in { year } else { year - 1 })
 }
 
 impl Strategy {
@@ -386,6 +431,13 @@ impl Strategy {
                     })
                     .collect();
                 Some(join(windows?))
+            }
+            Self::FiscalYear { fields, starts_in } => {
+                let years: Option<Vec<String>> = values(record, fields)?
+                    .into_iter()
+                    .map(|v| Some(fiscal_year_of(v, *starts_in)?.to_string()))
+                    .collect();
+                Some(join(years?))
             }
             Self::Composite { of } => {
                 if of.is_empty() {
@@ -1015,6 +1067,127 @@ mod tests {
             }
             .key(&record(&[("date", "2026-08-03")])),
             None,
+        );
+    }
+
+    // ── fiscal year ──────────────────────────────────────────────────────
+    //
+    // Plan 109 Slice 1's collision guard: two records with the same
+    // business-identity key are only compatible if their dates fall in the
+    // same fiscal year. `DateWindow` cannot express this — a fixed-width
+    // day window from an arbitrary epoch offset does not align with a
+    // fiscal-year boundary — so this is a distinct strategy, not a
+    // `DateWindow` configuration. Named after the algorithm, not GST:
+    // `starts_in` is the calendar month the fiscal year begins in, so a
+    // pack with a calendar-year fiscal year configures `starts_in: 1` and
+    // one with India's April-start year configures `starts_in: 4`.
+
+    #[test]
+    fn two_dates_either_side_of_a_fiscal_year_start_share_a_bucket() {
+        // India's FY2025-26: 1 April 2025 – 31 March 2026.
+        let s = Strategy::FiscalYear {
+            fields: fields(&["date"]),
+            starts_in: 4,
+        };
+
+        assert_eq!(
+            s.key(&record(&[("date", "2025-04-01")])),
+            s.key(&record(&[("date", "2026-03-31")])),
+        );
+    }
+
+    #[test]
+    fn two_dates_a_year_apart_crossing_the_fiscal_boundary_do_not_share_a_bucket() {
+        // The user's own example: the same invoice number reused a
+        // calendar year apart is exactly the collision this guard exists
+        // to catch.
+        let s = Strategy::FiscalYear {
+            fields: fields(&["date"]),
+            starts_in: 4,
+        };
+
+        assert_ne!(
+            s.key(&record(&[("date", "2025-01-10")])),
+            s.key(&record(&[("date", "2026-01-10")])),
+        );
+    }
+
+    /// **The boundary itself.** One day before the fiscal year starts must
+    /// land in the *previous* fiscal year, not the one that is about to
+    /// begin — the case a mutant flipping `>=` to `>` would get wrong.
+    #[test]
+    fn the_day_before_the_fiscal_year_starts_is_the_previous_fiscal_year() {
+        let s = Strategy::FiscalYear {
+            fields: fields(&["date"]),
+            starts_in: 4,
+        };
+
+        assert_ne!(
+            s.key(&record(&[("date", "2025-03-31")])),
+            s.key(&record(&[("date", "2025-04-01")])),
+        );
+    }
+
+    /// `starts_in: 1` is an ordinary calendar year — the degenerate case
+    /// that proves this strategy is a generalization of "same year", not a
+    /// GST-specific concept wearing a general-purpose name.
+    #[test]
+    fn starts_in_january_is_an_ordinary_calendar_year() {
+        let s = Strategy::FiscalYear {
+            fields: fields(&["date"]),
+            starts_in: 1,
+        };
+
+        assert_eq!(
+            s.key(&record(&[("date", "2026-01-01")])),
+            s.key(&record(&[("date", "2026-12-31")])),
+        );
+        assert_ne!(
+            s.key(&record(&[("date", "2025-12-31")])),
+            s.key(&record(&[("date", "2026-01-01")])),
+        );
+    }
+
+    #[test]
+    fn a_datetime_is_read_by_its_date_prefix_for_fiscal_year_too() {
+        let s = Strategy::FiscalYear {
+            fields: fields(&["date"]),
+            starts_in: 4,
+        };
+
+        assert_eq!(
+            s.key(&record(&[("date", "2026-08-03T14:30:00Z")])),
+            s.key(&record(&[("date", "2026-08-03")])),
+        );
+    }
+
+    #[test]
+    fn an_unparsable_date_and_an_out_of_range_month_both_yield_no_key() {
+        assert_eq!(
+            Strategy::FiscalYear {
+                fields: fields(&["date"]),
+                starts_in: 4,
+            }
+            .key(&record(&[("date", "not-a-date")])),
+            None,
+        );
+        assert_eq!(
+            Strategy::FiscalYear {
+                fields: fields(&["date"]),
+                starts_in: 13,
+            }
+            .key(&record(&[("date", "2026-08-03")])),
+            None,
+            "a fiscal year cannot start in a 13th month",
+        );
+        assert_eq!(
+            Strategy::FiscalYear {
+                fields: fields(&["date"]),
+                starts_in: 0,
+            }
+            .key(&record(&[("date", "2026-08-03")])),
+            None,
+            "month 0 does not exist — this must not silently mean January",
         );
     }
 

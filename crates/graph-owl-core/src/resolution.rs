@@ -119,6 +119,94 @@ pub struct MergeRecord {
     pub split_at: Option<DateTime<Utc>>,
 }
 
+/// The `governed_by` every domain-agnostic identity-ambiguity
+/// [`crate::finding::Finding`] carries, regardless of which pack raised it
+/// — Plan 109 Slice 1.
+///
+/// **Why a shared constant rather than each pack naming its own
+/// `governed_by`.** Accepting an ordinary reconciliation finding (a
+/// `gst:GstinTransposition`, say) must never write a [`SubjectAttachment`]
+/// — only accepting an *identity-ambiguity* finding should. The two are
+/// told apart by `governed_by` rather than by `label`, because `label` is
+/// pack-owned and open-ended (`gst:InvoiceIdentityAmbiguity`,
+/// `healthcare:PatientIdentityAmbiguity`, …) while the decision of *whether
+/// accepting writes an attachment* is a platform concern that must hold for
+/// every pack without each one re-implementing the check.
+pub const RESOLUTION_GOVERNED_BY: &str = "graph-owl:EntityResolution";
+
+/// The evidence `predicate` naming the *other* candidate subject on an
+/// identity-ambiguity finding — Plan 109 Slice 1.
+///
+/// `Finding.subject` is one subject (the record under review); this is how
+/// the finding also carries the subject it might be the same entity as,
+/// using [`crate::finding::Evidence`]'s own per-row `subject` field to name
+/// it rather than a new `Finding` field.
+pub const CANONICAL_SUBJECT_PREDICATE: &str = "graph-owl:canonicalSubject";
+
+/// [`MergeRecord`]'s domain-pack-subject counterpart — Plan 109 Slice 1.
+///
+/// **Why not `MergeRecord` itself.** `MergeRecord` is keyed on catalog-asset
+/// `Uuid`s, wired specifically to `Storage`'s asset-merge machinery. A
+/// domain-pack subject (a `gst:Invoice`, in the first pack to use this) is a
+/// `Sid` — an IRI in a pack-owned namespace — with no catalog row behind it
+/// at all, so reusing `MergeRecord`'s fields would mean either fabricating a
+/// `Uuid` for something that is not a catalog entity, or loosening
+/// `MergeRecord` itself to accept two different identity shapes. Same
+/// reversibility contract as `MergeRecord`: an attachment is a record, not a
+/// destructive rewrite, and `split_at` turns it from a live attachment into
+/// a historical one without deleting the evidence that produced it.
+///
+/// `canonical`/`attached` are `String`, not [`Sid`](crate::flake::Sid) — `Sid` has no
+/// `Serialize`/`Deserialize`/`ToSchema` of its own, and every other
+/// wire-facing type that names a graph subject already carries it as a
+/// `String` in `Sid`'s own `{namespace}:{id}` form (`Finding.subject`,
+/// `Evidence.subject`); this matches that convention rather than inventing a
+/// second one.
+///
+/// No `utoipa::ToSchema` — `crate::finding::Evidence` and `Finding` itself
+/// are not schema-registered either (a pre-existing, separate gap this
+/// slice does not widen), and nothing returns a `SubjectAttachment`
+/// directly over HTTP: the review flow goes through the existing
+/// `/findings/{id}/decision` endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubjectAttachment {
+    /// The stable identifier of this attachment record.
+    pub id: Uuid,
+    /// The canonical subject the attached one was resolved against, in
+    /// [`Sid`](crate::flake::Sid)'s own `{namespace}:{id}` wire form.
+    pub canonical: String,
+    /// The source-record subject attached to the canonical one, in [`Sid`](crate::flake::Sid)'s
+    /// own `{namespace}:{id}` wire form.
+    pub attached: String,
+    /// Why the two were judged the same.
+    ///
+    /// [`crate::finding::Evidence`], not this module's own [`Evidence`] —
+    /// deliberately. `resolution::Evidence` is a closed set of *kinds* of
+    /// catalog-entity reasoning (`ExactFqn`, `NormalizedFqn`, …), which does
+    /// not fit a domain-pack field-level comparison (`supplierGstin`
+    /// matched, `invoiceKey` matched) at all. `finding::Evidence`'s open
+    /// `{subject, predicate, value}` shape is what an identity-ambiguity
+    /// [`crate::finding::Finding`] already carries — reusing it here means
+    /// an accepted finding's evidence copies straight onto the attachment
+    /// record with no reshaping.
+    pub evidence: Vec<crate::finding::Evidence>,
+    /// The resolver's confidence in the attachment.
+    pub confidence: f64,
+    /// Who or what decided it.
+    pub decided_by: MergeDecidedBy,
+    /// When the attachment was decided.
+    pub decided_at: DateTime<Utc>,
+    /// The engine transaction time the attachment itself wrote at — the same
+    /// role `MergeRecord.merged_at_t` plays, for the same reason: what makes
+    /// a split able to restore exactly the state just before the attachment,
+    /// via time-travel, rather than reconstructing it from wall-clock time.
+    pub attached_at_t: i64,
+    /// When the attachment was reversed, if it has been.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_at: Option<DateTime<Utc>>,
+}
+
 /// One candidate, scored, with the evidence that produced the score — what
 /// a review queue displays and what an `Ambiguous` resolution carries so a
 /// steward sees why each candidate was proposed, not only that it was.
@@ -267,6 +355,17 @@ pub struct MentionResolution {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::finding::Evidence as FindingEvidence;
+    use crate::flake::Sid;
+
+    fn field_evidence(subject: &str, predicate: &str, value: &str) -> FindingEvidence {
+        FindingEvidence {
+            subject: subject.to_string(),
+            predicate: predicate.to_string(),
+            value: value.to_string(),
+            var: None,
+        }
+    }
 
     /// `#[serde(rename_all)]` on an enum renames the *variants*, not their
     /// fields — `rename_all_fields` is the separate attribute for that, and
@@ -290,5 +389,72 @@ mod tests {
         let json = serde_json::to_value(&decided_by).expect("serialize");
         assert_eq!(json["userId"], "alice");
         assert!(json.get("user_id").is_none());
+    }
+
+    /// [`SubjectAttachment`] is [`MergeRecord`]'s domain-pack-subject
+    /// counterpart — Plan 109 Slice 1. Same wire-shape discipline: a round
+    /// trip alone would pass even if a field went out `snake_case`, so this
+    /// asserts the actual serialized bytes.
+    #[test]
+    fn subject_attachment_round_trips_and_is_camel_case_on_the_wire() {
+        let attachment = SubjectAttachment {
+            id: Uuid::nil(),
+            canonical: Sid::dsc("invoice-INV1001-27AABCU9603R1ZM").to_string(),
+            attached: Sid::dsc("pr-INV-1001").to_string(),
+            evidence: vec![field_evidence(
+                "pr-INV-1001",
+                "supplierGstin",
+                "27AABCU9603R1ZM",
+            )],
+            confidence: 1.0,
+            decided_by: MergeDecidedBy::Auto,
+            decided_at: DateTime::<Utc>::UNIX_EPOCH,
+            attached_at_t: 1,
+            split_at: None,
+        };
+
+        let json = serde_json::to_value(&attachment).expect("serialize");
+        assert_eq!(json["attachedAtT"], 1);
+        assert!(json.get("attached_at_t").is_none());
+        assert!(
+            json.get("splitAt").is_none(),
+            "an unsplit attachment must not carry a null splitAt field: {json}"
+        );
+
+        let parsed: SubjectAttachment = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(parsed, attachment);
+    }
+
+    /// A split marks the attachment historical without erasing it — the same
+    /// reversibility contract `MergeRecord.split_at` already carries.
+    #[test]
+    fn a_split_subject_attachment_keeps_its_evidence_and_carries_split_at() {
+        let split_time = Utc::now();
+        let attachment = SubjectAttachment {
+            id: Uuid::nil(),
+            canonical: Sid::dsc("invoice-INV1001-27AABCU9603R1ZM").to_string(),
+            attached: Sid::dsc("pr-INV-1001").to_string(),
+            evidence: vec![field_evidence(
+                "pr-INV-1001",
+                "supplierGstin",
+                "27AABCU9603R1ZM",
+            )],
+            confidence: 1.0,
+            decided_by: MergeDecidedBy::Auto,
+            decided_at: DateTime::<Utc>::UNIX_EPOCH,
+            attached_at_t: 1,
+            split_at: Some(split_time),
+        };
+
+        assert_eq!(attachment.split_at, Some(split_time));
+        assert_eq!(
+            attachment.evidence,
+            vec![field_evidence(
+                "pr-INV-1001",
+                "supplierGstin",
+                "27AABCU9603R1ZM"
+            )],
+            "splitting must not erase why the attachment was made"
+        );
     }
 }

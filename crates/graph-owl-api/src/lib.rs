@@ -35,7 +35,10 @@ use graph_owl_authz::{
 use graph_owl_connectors::DeletionPlan;
 use graph_owl_core::flake::{Flake, FlakeValue, Sid, TriplePattern, namespace};
 use graph_owl_core::projection;
-use graph_owl_core::resolution::{Candidate, Evidence, MergeDecidedBy, MergeRecord, Resolution};
+use graph_owl_core::resolution::{
+    CANONICAL_SUBJECT_PREDICATE, Candidate, Evidence, MergeDecidedBy, MergeRecord,
+    RESOLUTION_GOVERNED_BY, Resolution, SubjectAttachment,
+};
 use graph_owl_core::{
     Asset, AssetKind, AssetUpdate, AssetVersion, Principal, Relationship, Table, TableUpdate,
     envelope::{ChangeDescription, EntityVersion, FieldChange},
@@ -1768,6 +1771,7 @@ fn strategy_name(strategy: &graph_owl_core::blocking_strategy::Strategy) -> &'st
         Strategy::NGram { .. } => "ngram",
         Strategy::NumericBucket { .. } => "numeric_bucket",
         Strategy::DateWindow { .. } => "date_window",
+        Strategy::FiscalYear { .. } => "fiscal_year",
         Strategy::Composite { .. } => "composite",
     }
 }
@@ -2156,6 +2160,13 @@ pub struct Catalog {
     /// findings table it never writes to is a table it should not have to
     /// migrate. The console asks for the queue and is told there is none.
     findings: Option<Arc<dyn graph_owl_storage::FindingStore>>,
+    /// Where domain-pack subject identity attachments are recorded — Plan
+    /// 109 Slice 1.
+    ///
+    /// Optional for the same reason `findings` is: a deployment that
+    /// installs no pack never resolves a domain-pack subject and never
+    /// needs the table.
+    attachments: Option<Arc<dyn graph_owl_storage::AttachmentStore>>,
     /// The same backend seen through its predicate registry — Epic 105. A
     /// fourth field for the same reason the third exists: defining a
     /// vocabulary's *terms* is a separate contract from declaring the
@@ -2270,6 +2281,75 @@ pub struct Catalog {
     embedding_client: Option<Arc<graph_owl_search::embeddings::EmbeddingClient>>,
 }
 
+/// What [`Catalog::resolve_subject_identity`] needs to decide one candidate
+/// against one canonical subject — Plan 109 Slice 1.
+///
+/// `pack`/`label`/`summary` are caller-supplied rather than computed,
+/// because they are inherently pack-specific — a healthcare pack's
+/// candidate is a `Patient`, not an `Invoice`, and only the pack knows what
+/// to call it. Everything domain-neutral (the decision itself, the
+/// `governed_by` that marks a finding as this engine's own) is the
+/// platform's to own, not the caller's.
+pub struct SubjectIdentityRequest<'a> {
+    /// Which pack this resolution is for.
+    pub pack: &'a str,
+    /// The pack's own vocabulary for this ambiguity kind
+    /// (`gst:InvoiceIdentityAmbiguity`).
+    pub label: &'a str,
+    /// One line: what a reviewer is being asked to confirm.
+    pub summary: &'a str,
+    /// The canonical subject's own `Sid` wire-string — the entity `candidate`
+    /// might already be the same as. Not required to exist as a real graph
+    /// subject yet; it is simply the identity `candidate` is being resolved
+    /// against.
+    pub canonical: &'a str,
+    /// `canonical`'s own field values, keyed the way `policy` expects.
+    pub canonical_record: &'a graph_owl_core::blocking_strategy::Record,
+    /// The source-record subject being resolved, in `Sid` wire-string form.
+    pub candidate: &'a str,
+    /// `candidate`'s own field values.
+    pub candidate_record: &'a graph_owl_core::blocking_strategy::Record,
+    /// The engine transaction time an eventual attachment record carries —
+    /// the same role `MergeRecord.merged_at_t` plays, passed through rather
+    /// than computed here since this method does not itself touch the graph
+    /// engine (see [`Catalog::resolve_subject_identity`]'s own note on why).
+    pub engine_time: i64,
+}
+
+/// What [`Catalog::resolve_subject_identity`] decided — Plan 109 Slice 1.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubjectResolutionOutcome {
+    /// Written directly: an exact business-identity key match whose
+    /// collision-guard fields agreed.
+    Attached(SubjectAttachment),
+    /// Nothing written. A reviewable finding now exists at `finding_id`;
+    /// accepting it (via [`Catalog::decide_finding`]) is what writes the
+    /// attachment.
+    Ambiguous {
+        /// The raised finding's id.
+        finding_id: Uuid,
+    },
+}
+
+/// Every field in `record`, as [`Evidence`] against `subject` — Plan 109
+/// Slice 1. Generic over whatever fields a pack's identity policy happens to
+/// read, rather than introspecting which ones specifically, so a reviewer
+/// sees the whole record a decision was made from.
+fn record_evidence(
+    subject: &str,
+    record: &graph_owl_core::blocking_strategy::Record,
+) -> Vec<graph_owl_core::finding::Evidence> {
+    record
+        .iter()
+        .map(|(predicate, value)| graph_owl_core::finding::Evidence {
+            subject: subject.to_string(),
+            predicate: predicate.clone(),
+            value: value.clone(),
+            var: None,
+        })
+        .collect()
+}
+
 /// See [`Catalog`]'s own `reasoning_cache` field doc comment.
 #[derive(Clone)]
 struct CachedReasoning {
@@ -2295,6 +2375,7 @@ impl Catalog {
             traversal: None,
             namespaces: None,
             findings: None,
+            attachments: None,
             predicates: None,
             finding_rules: None,
             pack_queries: None,
@@ -2441,6 +2522,149 @@ impl Catalog {
         self
     }
 
+    /// Where domain-pack subject identity attachments are recorded — Plan
+    /// 109 Slice 1.
+    #[must_use]
+    pub fn with_attachments(
+        mut self,
+        attachments: Arc<dyn graph_owl_storage::AttachmentStore>,
+    ) -> Self {
+        self.attachments = Some(attachments);
+        self
+    }
+
+    fn attachment_store(
+        &self,
+    ) -> Result<&Arc<dyn graph_owl_storage::AttachmentStore>, CatalogError> {
+        self.attachments.as_ref().ok_or_else(|| {
+            CatalogError::Storage(StorageError::Unexpected(
+                "this server has no subject-attachment store configured".to_string(),
+            ))
+        })
+    }
+
+    /// Resolve one candidate subject against one canonical (possibly
+    /// not-yet-attached-to-anything) subject, under a pack's own identity
+    /// policy — Plan 109 Slice 1.
+    ///
+    /// **The three-way outcome, per the plan's own decision**: an exact
+    /// business-identity key match whose collision-guard fields are
+    /// compatible writes a [`graph_owl_core::resolution::SubjectAttachment`]
+    /// directly and raises no finding at all. Everything else — an exact
+    /// key match with an *incompatible* guard, or no key match found only
+    /// through the pack's own blocking — raises a reviewable
+    /// [`graph_owl_core::finding::Finding`] and writes nothing until a
+    /// human decides it via [`Self::decide_finding`].
+    ///
+    /// **Idempotent.** If `request.canonical`/`request.attached` already
+    /// have a live (unsplit) attachment between them, that same record is
+    /// returned rather than a second one being written — re-ingesting the
+    /// same source record must not duplicate the decision.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::Storage`] if no attachment store or findings store is
+    /// configured, or a read/write fails.
+    pub async fn resolve_subject_identity(
+        &self,
+        request: SubjectIdentityRequest<'_>,
+        policy: &graph_owl_resolution::subject_identity::IdentityPolicy,
+    ) -> Result<SubjectResolutionOutcome, CatalogError> {
+        use graph_owl_resolution::subject_identity::{SubjectDecision, decide};
+
+        // Idempotency: a live attachment between this exact pair already
+        // answers the question, however it was decided the first time.
+        let existing = self
+            .attachment_store()?
+            .subject_attachments_for(request.candidate)
+            .await?;
+        if let Some(already) = existing.into_iter().find(|a| {
+            a.split_at.is_none()
+                && a.canonical == request.canonical
+                && a.attached == request.candidate
+        }) {
+            return Ok(SubjectResolutionOutcome::Attached(already));
+        }
+
+        let decision = decide(policy, request.canonical_record, request.candidate_record);
+
+        match decision {
+            SubjectDecision::Attach => {
+                // The candidate's own field values, not a vague placeholder
+                // — an auto-attach is exactly as auditable as an accepted
+                // ambiguous one, per the same `finding::Evidence` shape.
+                let record = SubjectAttachment {
+                    id: Uuid::new_v4(),
+                    canonical: request.canonical.to_string(),
+                    attached: request.candidate.to_string(),
+                    evidence: record_evidence(request.candidate, request.candidate_record),
+                    confidence: 1.0,
+                    decided_by: MergeDecidedBy::Auto,
+                    decided_at: Utc::now(),
+                    attached_at_t: request.engine_time,
+                    split_at: None,
+                };
+                let written = self
+                    .attachment_store()?
+                    .create_subject_attachment(record)
+                    .await?;
+                Ok(SubjectResolutionOutcome::Attached(written))
+            }
+            SubjectDecision::Ambiguous => {
+                let mut evidence = vec![graph_owl_core::finding::Evidence {
+                    subject: request.canonical.to_string(),
+                    predicate: CANONICAL_SUBJECT_PREDICATE.to_string(),
+                    value: request.canonical.to_string(),
+                    var: None,
+                }];
+                evidence.extend(record_evidence(request.canonical, request.canonical_record));
+                evidence.extend(record_evidence(request.candidate, request.candidate_record));
+
+                let finding = graph_owl_core::finding::Finding::new(
+                    request.pack,
+                    request.label,
+                    request.candidate,
+                    request.summary,
+                    RESOLUTION_GOVERNED_BY,
+                    evidence,
+                )
+                .map_err(|e| CatalogError::Storage(StorageError::Unexpected(e.to_string())))?;
+
+                let store = self.findings_store()?;
+                let created = store.record_finding(&finding).await?;
+                let id = if created {
+                    finding.id
+                } else {
+                    // Idempotency: `record_finding`'s own `(pack, label,
+                    // subject)` uniqueness while pending means this exact
+                    // pair already has an open finding — `finding.id` above
+                    // is a fresh id that was never actually stored, so the
+                    // real, already-open one has to be looked up rather
+                    // than assumed. Re-running resolution on an unresolved
+                    // ambiguous pair must report the *same* finding, not a
+                    // phantom one nothing points at.
+                    store
+                        .list_findings(
+                            Some(request.pack),
+                            Some(graph_owl_core::finding::FindingStatus::Pending),
+                        )
+                        .await?
+                        .into_iter()
+                        .find(|f| f.label == request.label && f.subject == request.candidate)
+                        .ok_or_else(|| {
+                            CatalogError::Storage(StorageError::Unexpected(
+                                "record_finding reported a duplicate but no matching pending \
+                                 finding could be found"
+                                    .to_string(),
+                            ))
+                        })?
+                        .id
+                };
+                Ok(SubjectResolutionOutcome::Ambiguous { finding_id: id })
+            }
+        }
+    }
+
     fn findings_store(&self) -> Result<&Arc<dyn graph_owl_storage::FindingStore>, CatalogError> {
         self.findings.as_ref().ok_or_else(|| {
             CatalogError::Storage(StorageError::Unexpected(
@@ -2547,11 +2771,79 @@ impl Catalog {
             )]));
         }
 
-        if store.decide_finding(id, status, actor, reason).await? {
-            Ok(())
-        } else {
-            Err(CatalogError::NotFound)
+        // Read before deciding: a resolution finding's canonical subject and
+        // evidence are what a reviewer actually saw, not whatever state the
+        // decision write happens to leave behind — Plan 109 Slice 1.
+        let finding = store.get_finding(id).await?;
+
+        if !store.decide_finding(id, status, actor, reason).await? {
+            return Err(CatalogError::NotFound);
         }
+
+        // The attachment side effect — reusing this one decision endpoint
+        // for every finding kind, per the plan's own instruction not to add
+        // a second one. Only for a finding this resolution engine itself
+        // raised: `RESOLUTION_GOVERNED_BY`'s own doc comment is why
+        // `governed_by` is the check rather than `label` — an ordinary
+        // reconciliation finding (`gst:GstinTransposition`, say) must never
+        // reach this, however it is labeled.
+        if status == FindingStatus::Accepted
+            && let Some(finding) = finding
+            && finding.governed_by == RESOLUTION_GOVERNED_BY
+        {
+            self.attach_from_resolution_finding(&finding, actor).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Writes the [`SubjectAttachment`] an accepted identity-ambiguity
+    /// finding decided — Plan 109 Slice 1. Split out of
+    /// [`Self::decide_finding`] only for readability; it is not meant to be
+    /// called from anywhere else, since the check for *whether* a finding
+    /// warrants this belongs there, not here.
+    async fn attach_from_resolution_finding(
+        &self,
+        finding: &graph_owl_core::finding::Finding,
+        actor: &str,
+    ) -> Result<(), CatalogError> {
+        let canonical = finding
+            .evidence
+            .iter()
+            .find(|e| e.predicate == CANONICAL_SUBJECT_PREDICATE)
+            .map(|e| e.value.clone())
+            .ok_or_else(|| {
+                CatalogError::Storage(StorageError::Unexpected(format!(
+                    "resolution finding {} has no {CANONICAL_SUBJECT_PREDICATE} evidence to \
+                     attach from",
+                    finding.id
+                )))
+            })?;
+
+        let record = SubjectAttachment {
+            id: Uuid::new_v4(),
+            canonical,
+            attached: finding.subject.clone(),
+            evidence: finding.evidence.clone(),
+            // A human's own "yes" is the maximal confidence this system
+            // expresses — the same standing this file already gives
+            // `MergeDecidedBy::Human` elsewhere.
+            confidence: 1.0,
+            decided_by: MergeDecidedBy::Human {
+                user_id: actor.to_string(),
+            },
+            decided_at: Utc::now(),
+            // No graph engine transaction corresponds to this yet — Slice 1
+            // never writes graph triples (see `resolve_subject_identity`'s
+            // own note); a real transaction time arrives once Slice 2 wires
+            // an accepted attachment into an actual graph write.
+            attached_at_t: 0,
+            split_at: None,
+        };
+        self.attachment_store()?
+            .create_subject_attachment(record)
+            .await?;
+        Ok(())
     }
 
     /// The predicate registry a domain pack defines its terms through —
@@ -2915,7 +3207,8 @@ impl Catalog {
                 | Strategy::Phonetic { fields }
                 | Strategy::NGram { fields, .. }
                 | Strategy::NumericBucket { fields, .. }
-                | Strategy::DateWindow { fields, .. } => fields,
+                | Strategy::DateWindow { fields, .. }
+                | Strategy::FiscalYear { fields, .. } => fields,
                 Strategy::Composite { of } => {
                     stack.extend(of.iter());
                     continue;
@@ -43521,6 +43814,716 @@ mod finding_runtime_tests {
                 .decide_finding(Uuid::new_v4(), FindingStatus::Accepted, "asha", None)
                 .await
                 .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod subject_identity_runtime_tests {
+    //! `Catalog::resolve_subject_identity` and the attachment side effect on
+    //! `Catalog::decide_finding` — Plan 109 Slice 1.
+    //!
+    //! **The property under test throughout**: exact business-key match with
+    //! a compatible collision guard attaches directly and raises no finding;
+    //! everything else — an incompatible collision guard, or no business-key
+    //! match at all — raises a reviewable finding and writes **nothing**
+    //! until a human accepts it. Accepting an *ordinary* reconciliation
+    //! finding (not one this resolution engine raised) must never write an
+    //! attachment — the false-merge path the second review pass on Plan 109
+    //! found and closed.
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use graph_owl_core::finding::{Evidence, Finding, FindingStatus};
+    use graph_owl_core::resolution::{
+        CANONICAL_SUBJECT_PREDICATE, RESOLUTION_GOVERNED_BY, SubjectAttachment,
+    };
+    use graph_owl_resolution::subject_identity::IdentityPolicy;
+    use graph_owl_storage::{AttachmentSplitOutcome, AttachmentStore, FindingStore};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct FakeFindings {
+        rows: Mutex<Vec<Finding>>,
+    }
+
+    #[async_trait]
+    impl FindingStore for FakeFindings {
+        async fn record_finding(&self, finding: &Finding) -> Result<bool, StorageError> {
+            let mut rows = self.rows.lock().expect("not poisoned");
+            let open = rows.iter().any(|r| {
+                r.status == FindingStatus::Pending && r.dedup_key() == finding.dedup_key()
+            });
+            if open {
+                return Ok(false);
+            }
+            rows.push(finding.clone());
+            Ok(true)
+        }
+
+        async fn get_finding(&self, id: Uuid) -> Result<Option<Finding>, StorageError> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .find(|r| r.id == id)
+                .cloned())
+        }
+
+        async fn list_findings(
+            &self,
+            pack: Option<&str>,
+            status: Option<FindingStatus>,
+        ) -> Result<Vec<Finding>, StorageError> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .filter(|r| pack.is_none_or(|p| r.pack == p))
+                .filter(|r| status.is_none_or(|s| r.status == s))
+                .cloned()
+                .collect())
+        }
+
+        async fn decide_finding(
+            &self,
+            id: Uuid,
+            status: FindingStatus,
+            actor: &str,
+            reason: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            let mut rows = self.rows.lock().expect("not poisoned");
+            let Some(row) = rows.iter_mut().find(|r| r.id == id) else {
+                return Ok(false);
+            };
+            row.status = status;
+            row.decided_by = Some(actor.to_string());
+            row.reason = reason.map(str::to_string);
+            Ok(true)
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeAttachments {
+        rows: Mutex<Vec<SubjectAttachment>>,
+    }
+
+    #[async_trait]
+    impl AttachmentStore for FakeAttachments {
+        async fn create_subject_attachment(
+            &self,
+            record: SubjectAttachment,
+        ) -> Result<SubjectAttachment, StorageError> {
+            self.rows.lock().expect("not poisoned").push(record.clone());
+            Ok(record)
+        }
+
+        async fn get_subject_attachment(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<SubjectAttachment>, StorageError> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .find(|r| r.id == id)
+                .cloned())
+        }
+
+        async fn subject_attachments_for(
+            &self,
+            subject: &str,
+        ) -> Result<Vec<SubjectAttachment>, StorageError> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .filter(|r| r.canonical == subject || r.attached == subject)
+                .cloned()
+                .collect())
+        }
+
+        async fn split_subject_attachment(
+            &self,
+            id: Uuid,
+            split_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<AttachmentSplitOutcome, StorageError> {
+            let mut rows = self.rows.lock().expect("not poisoned");
+            let Some(row) = rows.iter_mut().find(|r| r.id == id) else {
+                return Ok(AttachmentSplitOutcome::NotFound);
+            };
+            if let Some(existing) = row.split_at {
+                return Ok(AttachmentSplitOutcome::AlreadySplit { split_at: existing });
+            }
+            row.split_at = Some(split_at);
+            Ok(AttachmentSplitOutcome::Split(Box::new(row.clone())))
+        }
+    }
+
+    fn catalog_with(findings: Arc<FakeFindings>, attachments: Arc<FakeAttachments>) -> Catalog {
+        Catalog::new(Arc::new(
+            graph_owl_storage_memory::InMemoryStorage::default(),
+        ))
+        .with_findings(findings)
+        .with_attachments(attachments)
+    }
+
+    fn gst_invoice_policy() -> IdentityPolicy {
+        use graph_owl_core::blocking_strategy::Strategy;
+        IdentityPolicy {
+            business_key: Strategy::Exact {
+                fields: vec![
+                    "supplierGstin".to_string(),
+                    "invoiceKey".to_string(),
+                    "documentType".to_string(),
+                ],
+            },
+            collision_guard: Some(Strategy::FiscalYear {
+                fields: vec!["invoiceDate".to_string()],
+                starts_in: 4,
+            }),
+        }
+    }
+
+    fn invoice_record(
+        gstin: &str,
+        key: &str,
+        date: &str,
+    ) -> graph_owl_core::blocking_strategy::Record {
+        [
+            ("supplierGstin", gstin),
+            ("invoiceKey", key),
+            ("documentType", "Invoice"),
+            ("invoiceDate", date),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
+
+    // ── exact match, compatible guard: attaches directly ────────────────
+
+    #[tokio::test]
+    async fn an_exact_match_with_a_compatible_date_attaches_directly_and_raises_no_finding() {
+        let findings = Arc::new(FakeFindings::default());
+        let attachments = Arc::new(FakeAttachments::default());
+        let catalog = catalog_with(findings.clone(), attachments.clone());
+
+        let canonical_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2026-08-03");
+        let candidate_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2026-08-05");
+
+        let outcome = catalog
+            .resolve_subject_identity(
+                SubjectIdentityRequest {
+                    pack: "gst",
+                    label: "gst:InvoiceIdentityAmbiguity",
+                    summary: "Candidate may be the same invoice",
+                    canonical: "gst:invoice-INV001-29ABCDE1234F1Z5",
+                    canonical_record: &canonical_record,
+                    candidate: "gst:pr-INV-001",
+                    candidate_record: &candidate_record,
+                    engine_time: 1,
+                },
+                &gst_invoice_policy(),
+            )
+            .await
+            .expect("resolve");
+
+        match outcome {
+            SubjectResolutionOutcome::Attached(record) => {
+                assert_eq!(record.canonical, "gst:invoice-INV001-29ABCDE1234F1Z5");
+                assert_eq!(record.attached, "gst:pr-INV-001");
+            }
+            SubjectResolutionOutcome::Ambiguous { .. } => panic!("expected Attached"),
+        }
+
+        assert_eq!(attachments.rows.lock().expect("not poisoned").len(), 1);
+        assert!(
+            findings.rows.lock().expect("not poisoned").is_empty(),
+            "an exact, compatible match must not raise a finding at all"
+        );
+    }
+
+    // ── exact match, incompatible guard: Ambiguous, nothing attached ────
+
+    #[tokio::test]
+    async fn an_exact_match_with_an_incompatible_date_raises_a_finding_and_attaches_nothing() {
+        let findings = Arc::new(FakeFindings::default());
+        let attachments = Arc::new(FakeAttachments::default());
+        let catalog = catalog_with(findings.clone(), attachments.clone());
+
+        let canonical_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2025-01-10");
+        let candidate_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2026-01-10");
+
+        let outcome = catalog
+            .resolve_subject_identity(
+                SubjectIdentityRequest {
+                    pack: "gst",
+                    label: "gst:InvoiceIdentityAmbiguity",
+                    summary: "Candidate may be the same invoice",
+                    canonical: "gst:invoice-INV001-29ABCDE1234F1Z5",
+                    canonical_record: &canonical_record,
+                    candidate: "gst:pr-INV-001",
+                    candidate_record: &candidate_record,
+                    engine_time: 1,
+                },
+                &gst_invoice_policy(),
+            )
+            .await
+            .expect("resolve");
+
+        assert!(matches!(
+            outcome,
+            SubjectResolutionOutcome::Ambiguous { .. }
+        ));
+        assert!(attachments.rows.lock().expect("not poisoned").is_empty());
+        let raised = findings.rows.lock().expect("not poisoned");
+        assert_eq!(raised.len(), 1);
+        assert_eq!(raised[0].governed_by, RESOLUTION_GOVERNED_BY);
+        assert_eq!(raised[0].pack, "gst");
+        assert_eq!(raised[0].label, "gst:InvoiceIdentityAmbiguity");
+        assert_eq!(raised[0].subject, "gst:pr-INV-001");
+        assert!(
+            raised[0]
+                .evidence
+                .iter()
+                .any(|e| e.predicate == CANONICAL_SUBJECT_PREDICATE
+                    && e.value == "gst:invoice-INV001-29ABCDE1234F1Z5"),
+            "the finding must name the other candidate: {:?}",
+            raised[0].evidence
+        );
+    }
+
+    // ── no business-key match at all: Ambiguous, however it was found ───
+
+    #[tokio::test]
+    async fn a_transposed_gstin_raises_a_finding_never_auto_attaches() {
+        let findings = Arc::new(FakeFindings::default());
+        let attachments = Arc::new(FakeAttachments::default());
+        let catalog = catalog_with(findings.clone(), attachments.clone());
+
+        let canonical_record = invoice_record("27AABCU9603R1ZM", "INV1004", "2026-07-21");
+        let candidate_record = invoice_record("27AABCU9603R1MZ", "INV1004", "2026-07-21");
+
+        let outcome = catalog
+            .resolve_subject_identity(
+                SubjectIdentityRequest {
+                    pack: "gst",
+                    label: "gst:InvoiceIdentityAmbiguity",
+                    summary: "Candidate may be the same invoice",
+                    canonical: "gst:invoice-INV1004-27AABCU9603R1ZM",
+                    canonical_record: &canonical_record,
+                    candidate: "gst:2b-INV-1004",
+                    candidate_record: &candidate_record,
+                    engine_time: 1,
+                },
+                &gst_invoice_policy(),
+            )
+            .await
+            .expect("resolve");
+
+        assert!(matches!(
+            outcome,
+            SubjectResolutionOutcome::Ambiguous { .. }
+        ));
+        assert!(attachments.rows.lock().expect("not poisoned").is_empty());
+        assert_eq!(findings.rows.lock().expect("not poisoned").len(), 1);
+    }
+
+    // ── accepting a resolution finding writes the attachment ────────────
+
+    #[tokio::test]
+    async fn accepting_a_resolution_finding_writes_the_attachment() {
+        let findings = Arc::new(FakeFindings::default());
+        let attachments = Arc::new(FakeAttachments::default());
+        let catalog = catalog_with(findings.clone(), attachments.clone());
+
+        let canonical_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2025-01-10");
+        let candidate_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2026-01-10");
+        let outcome = catalog
+            .resolve_subject_identity(
+                SubjectIdentityRequest {
+                    pack: "gst",
+                    label: "gst:InvoiceIdentityAmbiguity",
+                    summary: "Candidate may be the same invoice",
+                    canonical: "gst:invoice-INV001-29ABCDE1234F1Z5",
+                    canonical_record: &canonical_record,
+                    candidate: "gst:pr-INV-001",
+                    candidate_record: &candidate_record,
+                    engine_time: 1,
+                },
+                &gst_invoice_policy(),
+            )
+            .await
+            .expect("resolve");
+        let SubjectResolutionOutcome::Ambiguous { finding_id } = outcome else {
+            panic!("expected Ambiguous");
+        };
+
+        catalog
+            .decide_finding(finding_id, FindingStatus::Accepted, "asha", None)
+            .await
+            .expect("accept");
+
+        let written = attachments.rows.lock().expect("not poisoned");
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].canonical, "gst:invoice-INV001-29ABCDE1234F1Z5");
+        assert_eq!(written[0].attached, "gst:pr-INV-001");
+        assert_eq!(
+            written[0].decided_by,
+            graph_owl_core::resolution::MergeDecidedBy::Human {
+                user_id: "asha".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn rejecting_a_resolution_finding_writes_no_attachment() {
+        let findings = Arc::new(FakeFindings::default());
+        let attachments = Arc::new(FakeAttachments::default());
+        let catalog = catalog_with(findings.clone(), attachments.clone());
+
+        let canonical_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2025-01-10");
+        let candidate_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2026-01-10");
+        let outcome = catalog
+            .resolve_subject_identity(
+                SubjectIdentityRequest {
+                    pack: "gst",
+                    label: "gst:InvoiceIdentityAmbiguity",
+                    summary: "Candidate may be the same invoice",
+                    canonical: "gst:invoice-INV001-29ABCDE1234F1Z5",
+                    canonical_record: &canonical_record,
+                    candidate: "gst:pr-INV-001",
+                    candidate_record: &candidate_record,
+                    engine_time: 1,
+                },
+                &gst_invoice_policy(),
+            )
+            .await
+            .expect("resolve");
+        let SubjectResolutionOutcome::Ambiguous { finding_id } = outcome else {
+            panic!("expected Ambiguous");
+        };
+
+        catalog
+            .decide_finding(
+                finding_id,
+                FindingStatus::Rejected,
+                "asha",
+                Some("different invoices, different years"),
+            )
+            .await
+            .expect("reject");
+
+        assert!(
+            attachments.rows.lock().expect("not poisoned").is_empty(),
+            "a rejected resolution finding must attach nothing"
+        );
+    }
+
+    // ── accepting an ORDINARY finding never writes an attachment ────────
+    // The specific false-merge path the user's second review pass on Plan
+    // 109 named directly: `gst:GstinTransposition`/`gst:SupplierPanMismatch`
+    // are reconciliation findings, not the attachment decision.
+
+    #[tokio::test]
+    async fn accepting_an_ordinary_reconciliation_finding_never_writes_an_attachment() {
+        let findings = Arc::new(FakeFindings::default());
+        let attachments = Arc::new(FakeAttachments::default());
+        let catalog = catalog_with(findings.clone(), attachments.clone());
+
+        let ordinary = Finding::new(
+            "gst",
+            "gst:GstinTransposition",
+            "gst:pr-INV-1004",
+            "Near-identical GSTIN on the same invoice number",
+            "gst:MatchingPolicy",
+            vec![Evidence {
+                subject: "gst:pr-INV-1004".to_string(),
+                predicate: "gst:supplierGstin".to_string(),
+                value: "27AABCU9603R1ZM".to_string(),
+                var: None,
+            }],
+        )
+        .expect("valid finding");
+        catalog
+            .record_findings(std::slice::from_ref(&ordinary))
+            .await
+            .expect("record");
+
+        catalog
+            .decide_finding(ordinary.id, FindingStatus::Accepted, "asha", None)
+            .await
+            .expect("accept");
+
+        assert!(
+            attachments.rows.lock().expect("not poisoned").is_empty(),
+            "accepting an ordinary reconciliation finding must never write a SubjectAttachment"
+        );
+    }
+
+    // ── idempotency: re-resolving an already-attached pair changes nothing
+
+    #[tokio::test]
+    async fn re_resolving_an_already_attached_pair_does_not_duplicate_the_attachment() {
+        let findings = Arc::new(FakeFindings::default());
+        let attachments = Arc::new(FakeAttachments::default());
+        let catalog = catalog_with(findings.clone(), attachments.clone());
+
+        let canonical_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2026-08-03");
+        let candidate_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2026-08-05");
+        let request = || SubjectIdentityRequest {
+            pack: "gst",
+            label: "gst:InvoiceIdentityAmbiguity",
+            summary: "Candidate may be the same invoice",
+            canonical: "gst:invoice-INV001-29ABCDE1234F1Z5",
+            canonical_record: &canonical_record,
+            candidate: "gst:pr-INV-001",
+            candidate_record: &candidate_record,
+            engine_time: 1,
+        };
+
+        catalog
+            .resolve_subject_identity(request(), &gst_invoice_policy())
+            .await
+            .expect("first resolution");
+        catalog
+            .resolve_subject_identity(request(), &gst_invoice_policy())
+            .await
+            .expect("second resolution — the same source record ingested again");
+
+        assert_eq!(
+            attachments.rows.lock().expect("not poisoned").len(),
+            1,
+            "re-ingesting the same source record must not create a second attachment"
+        );
+    }
+
+    /// **Mutation-testing survivor, killed.** The idempotency pre-check
+    /// compares three fields with `&&`. The first attempt at this test
+    /// seeded an attachment for a subject unrelated to either side of the
+    /// new pair — which `subject_attachments_for(request.candidate)`
+    /// already filters out at the storage layer before the `&&`/`||` in
+    /// question ever runs, so it never actually exercised the mutant.
+    /// **This version seeds an attachment that *does* pass that storage
+    /// filter** — same `attached` subject as the new candidate, but a
+    /// *different* `canonical` — so the closure genuinely has to tell them
+    /// apart. A mutant turning `&&` into `||` would treat "attached to
+    /// *some* canonical" as "attached to *this* canonical" and wrongly
+    /// short-circuit.
+    #[tokio::test]
+    async fn an_attachment_to_a_different_canonical_does_not_short_circuit_a_new_resolution() {
+        let findings = Arc::new(FakeFindings::default());
+        let attachments = Arc::new(FakeAttachments::default());
+        let catalog = catalog_with(findings.clone(), attachments.clone());
+
+        // The same candidate subject, already attached to a *different*
+        // canonical invoice than the one about to be resolved against.
+        attachments
+            .create_subject_attachment(SubjectAttachment {
+                id: Uuid::new_v4(),
+                canonical: "gst:invoice-SOME-OTHER-INVOICE".to_string(),
+                attached: "gst:pr-INV-001".to_string(),
+                evidence: vec![],
+                confidence: 1.0,
+                decided_by: MergeDecidedBy::Auto,
+                decided_at: Utc::now(),
+                attached_at_t: 1,
+                split_at: None,
+            })
+            .await
+            .expect("seed an attachment to a different canonical");
+
+        let canonical_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2026-08-03");
+        let candidate_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2026-08-05");
+        let outcome = catalog
+            .resolve_subject_identity(
+                SubjectIdentityRequest {
+                    pack: "gst",
+                    label: "gst:InvoiceIdentityAmbiguity",
+                    summary: "Candidate may be the same invoice",
+                    canonical: "gst:invoice-INV001-29ABCDE1234F1Z5",
+                    canonical_record: &canonical_record,
+                    candidate: "gst:pr-INV-001",
+                    candidate_record: &candidate_record,
+                    engine_time: 1,
+                },
+                &gst_invoice_policy(),
+            )
+            .await
+            .expect("resolve against the genuinely correct canonical");
+
+        match outcome {
+            SubjectResolutionOutcome::Attached(record) => {
+                assert_eq!(
+                    record.canonical, "gst:invoice-INV001-29ABCDE1234F1Z5",
+                    "must attach to the canonical actually requested, not the pre-existing one"
+                );
+            }
+            SubjectResolutionOutcome::Ambiguous { .. } => panic!("expected Attached"),
+        }
+        assert_eq!(
+            attachments.rows.lock().expect("not poisoned").len(),
+            2,
+            "the pre-existing attachment (to a different canonical) must be left alone \
+             and a second, new attachment must be written"
+        );
+    }
+
+    /// **Mutation-testing survivor, killed.** Idempotency on the *ambiguous*
+    /// path specifically: re-running resolution on a pair whose finding is
+    /// still pending (not yet accepted or rejected) must report the *same*
+    /// finding id, not a second, unstored one — the exact bug this
+    /// implementation's own `record_finding` return-value check exists to
+    /// avoid (see the comment at its call site).
+    ///
+    /// **A stray pending finding sharing the label but not the subject is
+    /// seeded first, deliberately.** Without it, the lookup's `&&` has
+    /// nothing to discriminate against — a single finding in the list is
+    /// found the same way whether the filter is `&&` or `||`. Inserted
+    /// *before* the real pair's finding so it sorts first in the (unsorted,
+    /// insertion-ordered) fake store: a mutant turning `&&` into `||` would
+    /// then match the stray purely on `label` and hand back its id instead.
+    #[tokio::test]
+    async fn re_resolving_an_unresolved_ambiguous_pair_reports_the_same_finding() {
+        let findings = Arc::new(FakeFindings::default());
+        let attachments = Arc::new(FakeAttachments::default());
+        let catalog = catalog_with(findings.clone(), attachments.clone());
+
+        let stray = graph_owl_core::finding::Finding::new(
+            "gst",
+            "gst:InvoiceIdentityAmbiguity",
+            "gst:pr-INV-999",
+            "An unrelated candidate under review",
+            RESOLUTION_GOVERNED_BY,
+            vec![graph_owl_core::finding::Evidence {
+                subject: "gst:pr-INV-999".to_string(),
+                predicate: CANONICAL_SUBJECT_PREDICATE.to_string(),
+                value: "gst:invoice-UNRELATED".to_string(),
+                var: None,
+            }],
+        )
+        .expect("valid finding");
+        catalog
+            .record_findings(std::slice::from_ref(&stray))
+            .await
+            .expect("seed the stray finding");
+
+        let canonical_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2025-01-10");
+        let candidate_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2026-01-10");
+        let request = || SubjectIdentityRequest {
+            pack: "gst",
+            label: "gst:InvoiceIdentityAmbiguity",
+            summary: "Candidate may be the same invoice",
+            canonical: "gst:invoice-INV001-29ABCDE1234F1Z5",
+            canonical_record: &canonical_record,
+            candidate: "gst:pr-INV-001",
+            candidate_record: &candidate_record,
+            engine_time: 1,
+        };
+
+        let first = catalog
+            .resolve_subject_identity(request(), &gst_invoice_policy())
+            .await
+            .expect("first resolution");
+        let second = catalog
+            .resolve_subject_identity(request(), &gst_invoice_policy())
+            .await
+            .expect("second resolution — the same unresolved pair ingested again");
+
+        let SubjectResolutionOutcome::Ambiguous {
+            finding_id: first_id,
+        } = first
+        else {
+            panic!("expected Ambiguous");
+        };
+        let SubjectResolutionOutcome::Ambiguous {
+            finding_id: second_id,
+        } = second
+        else {
+            panic!("expected Ambiguous");
+        };
+
+        assert_ne!(
+            first_id, stray.id,
+            "must not be confused with the stray finding sharing only the label"
+        );
+        assert_eq!(
+            first_id, second_id,
+            "the second call must report the same, real finding — not a fresh id nothing stored"
+        );
+        assert_eq!(
+            findings.rows.lock().expect("not poisoned").len(),
+            2,
+            "no duplicate finding was created (the stray plus the one real pair)"
+        );
+        // And the reported id actually resolves to *this pair's* stored
+        // finding — the exact failure mode this test exists to rule out.
+        assert!(
+            findings
+                .rows
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .any(|f| f.id == second_id)
+        );
+    }
+
+    /// **Mutation-testing survivor, killed.** `record_evidence`'s actual
+    /// output — not merely that *some* evidence exists — is what lets a
+    /// reviewer see the field values a decision rests on. A mutant
+    /// replacing it with an empty `vec![]` survived every other test here,
+    /// because none of them asserted on a specific field's evidence.
+    #[tokio::test]
+    async fn an_ambiguous_findings_evidence_carries_the_actual_field_values() {
+        let findings = Arc::new(FakeFindings::default());
+        let attachments = Arc::new(FakeAttachments::default());
+        let catalog = catalog_with(findings.clone(), attachments.clone());
+
+        let canonical_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2025-01-10");
+        let candidate_record = invoice_record("29ABCDE1234F1Z5", "INV001", "2026-01-10");
+        catalog
+            .resolve_subject_identity(
+                SubjectIdentityRequest {
+                    pack: "gst",
+                    label: "gst:InvoiceIdentityAmbiguity",
+                    summary: "Candidate may be the same invoice",
+                    canonical: "gst:invoice-INV001-29ABCDE1234F1Z5",
+                    canonical_record: &canonical_record,
+                    candidate: "gst:pr-INV-001",
+                    candidate_record: &candidate_record,
+                    engine_time: 1,
+                },
+                &gst_invoice_policy(),
+            )
+            .await
+            .expect("resolve");
+
+        let raised = findings.rows.lock().expect("not poisoned");
+        assert_eq!(raised.len(), 1);
+        assert!(
+            raised[0].evidence.iter().any(|e| {
+                e.subject == "gst:pr-INV-001"
+                    && e.predicate == "invoiceDate"
+                    && e.value == "2026-01-10"
+            }),
+            "the candidate's own field values must be in the evidence: {:?}",
+            raised[0].evidence
+        );
+        assert!(
+            raised[0].evidence.iter().any(|e| {
+                e.subject == "gst:invoice-INV001-29ABCDE1234F1Z5"
+                    && e.predicate == "invoiceDate"
+                    && e.value == "2025-01-10"
+            }),
+            "the canonical side's own field values must be in the evidence too: {:?}",
+            raised[0].evidence
         );
     }
 }

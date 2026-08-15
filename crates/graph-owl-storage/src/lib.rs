@@ -211,6 +211,19 @@ pub enum SplitOutcome {
     },
 }
 
+/// [`SplitOutcome`]'s counterpart for [`AttachmentStore::split_subject_attachment`]
+/// — Plan 109 Slice 1. A separate type rather than a generic one over
+/// `SplitOutcome`, matching [`graph_owl_core::resolution::SubjectAttachment`]
+/// being a separate type from `MergeRecord` rather than a generic over it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttachmentSplitOutcome {
+    Split(Box<graph_owl_core::resolution::SubjectAttachment>),
+    NotFound,
+    AlreadySplit {
+        split_at: chrono::DateTime<chrono::Utc>,
+    },
+}
+
 /// What saving a memory did.
 ///
 /// Not a `Result<(), StorageError>`: an unresolvable link is a **client**
@@ -4618,4 +4631,71 @@ pub trait FindingStore: Send + Sync {
         decided_by: &str,
         reason: Option<&str>,
     ) -> Result<bool, StorageError>;
+}
+
+/// Domain-pack subject attachments — Plan 109 Slice 1.
+///
+/// **A separate trait from [`Storage`] and from [`FindingStore`], for the
+/// same reason `FindingStore` is separate from `Storage`**: storing a
+/// catalog, recording what a rule concluded, and recording that one source
+/// record was resolved to the same real-world entity as another are three
+/// different contracts. [`graph_owl_core::resolution::SubjectAttachment`]
+/// is keyed on `Sid` wire-strings, not catalog-asset `Uuid`s, so it cannot
+/// live beside [`Storage`]'s `create_merge_record`/`get_merge_record`
+/// without forcing every domain-pack subject to pretend it is a catalog
+/// asset — exactly what `plans/105-domain-neutrality.md` DN-3 already
+/// refuses for [`FindingStore`].
+#[async_trait]
+pub trait AttachmentStore: Send + Sync {
+    /// Record an attachment. The caller has already decided (via
+    /// `graph_owl_resolution::subject_identity::decide`, an accepted
+    /// resolution finding, or equivalent) that `record.attached` is the
+    /// same real-world entity as `record.canonical` — this only persists
+    /// that decision, which is what makes it reviewable and splittable
+    /// later.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn create_subject_attachment(
+        &self,
+        record: graph_owl_core::resolution::SubjectAttachment,
+    ) -> Result<graph_owl_core::resolution::SubjectAttachment, StorageError>;
+
+    /// One attachment record by id.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn get_subject_attachment(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<graph_owl_core::resolution::SubjectAttachment>, StorageError>;
+
+    /// Every attachment naming `subject` as either the canonical entity or
+    /// the attached one — idempotency's own read: before writing a new
+    /// attachment, a caller checks whether this exact pair already has one,
+    /// so re-ingesting the same source record twice does not create a
+    /// second attachment record for the same decision.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the read fails.
+    async fn subject_attachments_for(
+        &self,
+        subject: &str,
+    ) -> Result<Vec<graph_owl_core::resolution::SubjectAttachment>, StorageError>;
+
+    /// Marks an attachment split at `split_at`, without deleting the row —
+    /// the same reversibility contract [`Storage::split_merge_record`]
+    /// already carries.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unexpected`] if the write fails.
+    async fn split_subject_attachment(
+        &self,
+        id: Uuid,
+        split_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AttachmentSplitOutcome, StorageError>;
 }
