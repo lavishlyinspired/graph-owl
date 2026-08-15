@@ -199,14 +199,17 @@ neutrality checks above pass.
 
 ### Slice 2 — reconciliation runs through graph-owl's native engine
 
-**Value**: the four-way match (matched / review / only-books / only-portal)
-comes from `POST /packs/reco/reconcile` — the same native engine
-`packs/gst` already exercises — instead of `reconciliation.py`'s in-process
-join. Needs: `[[findings]]`/`[[queries]]`/`[matching.blocking]` added to
-`ext-apps/Reco/graphowl-pack/pack.toml` (reco-now's own matching thresholds,
-not gst's), and a translation from the engine's finding+evidence shape into
-the `{status, reason, book, portal}` rows the frontend already renders —
-its own acceptance criteria, not folded into Slice 1.
+**Superseded by `plans/119-architecture-audit.md` §5a/§5b** — read there for
+the authoritative scope. Summary: `reconciliation.py` is **not** simply
+deleted in favor of `POST /packs/reco/reconcile`. Every behavior it provides
+is mapped first (§5a: most of it is superseded by native findings that are
+strictly more capable — real fuzzy/transposition matching, two causes where
+Reco has one status — but the amount-tolerance semantics differ and need a
+decision, and `supplier_health`/`ims_actions`/`match_stats` stay Reco-owned).
+Retirement follows the 7-step sequence in §5b: fix the pack duplication
+first (§3.1), add findings/queries to Reco's pack, run the engine
+*alongside* `reconciliation.py`, prove parity with tests against real data,
+only then cut over — deletion is the last step, not the plan.
 
 ### Slice 3 — grounded AI drafting via MCP
 
