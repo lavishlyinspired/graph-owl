@@ -186,10 +186,12 @@ describe("toTurtle", () => {
 
   it("terminates the last predicate of each subject with a period", () => {
     // A stray semicolon on the final line makes the whole document unparseable
-    // and the import fails wholesale rather than per-row.
+    // and the import fails wholesale rather than per-row. The canonical
+    // Invoice subject's own last line is the one checked here — Plan 109
+    // Slice 2 moved `period` off being the invoice's own last field.
     const turtle = toTurtle(normalize(getPayload()));
 
-    expect(turtle).toMatch(/"2026-07" \./);
+    expect(turtle).toMatch(/gst:reflectedIn {3}gst:2b-INV-1001 \./);
   });
 
   // ---- Supplier as a real graph node, not a literal on the invoice ----
@@ -233,5 +235,103 @@ describe("toTurtle", () => {
 
     expect(first).toContain("gst:issuedBy      gst:supplier-27AABCU9603R1ZM");
     expect(second).toContain("gst:issuedBy      gst:supplier-27AABCU9603R1ZM");
+  });
+});
+
+describe("the Gstr2bStatement and canonical gst:Invoice — Plan 109 Slice 2", () => {
+  it("emits one Gstr2bStatement per period, generated for the single well-known Recipient", () => {
+    const turtle = toTurtle(normalize(getPayload()));
+
+    expect(turtle).toContain("gst:g2bstatement-2026-07 rdf:type gst:Gstr2bStatement");
+    expect(turtle).toContain("gst:recipient-self rdf:type gst:Recipient");
+    const statementBlock = turtle.slice(turtle.indexOf("gst:g2bstatement-2026-07"));
+    expect(statementBlock).toContain("gst:generatedFor  gst:recipient-self");
+    expect((turtle.match(/rdf:type gst:Gstr2bStatement/g) ?? []).length).toBe(1);
+  });
+
+  it("points each per-line record at its statement with reflectedIn, not period directly", () => {
+    const turtle = toTurtle(normalize(getPayload()));
+    const start = turtle.indexOf("gst:2b-INV-1001");
+    const invoiceBlock = turtle.slice(start, turtle.indexOf("\n\n", start));
+
+    expect(invoiceBlock).toContain("gst:reflectedIn   gst:g2bstatement-2026-07");
+  });
+
+  it("emits a canonical gst:Invoice subject with reflectedIn to the per-line record", () => {
+    const turtle = toTurtle(normalize(getPayload()));
+
+    expect(turtle).toContain("gst:invoice-27AABCU9603R1ZM-INV1001 rdf:type gst:Invoice");
+    const canonicalStart = turtle.indexOf("gst:invoice-27AABCU9603R1ZM-INV1001");
+    const canonicalBlock = turtle.slice(canonicalStart, turtle.indexOf("\n\n", canonicalStart));
+    expect(canonicalBlock).toContain("gst:reflectedIn   gst:2b-INV-1001");
+    expect(canonicalBlock).toContain("gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;");
+    expect(canonicalBlock).not.toContain('"gst:supplier-27AABCU9603R1ZM"');
+  });
+
+  /** **Every subject is its own blank-line-separated block — one `rdf:type`
+   *  declaration each.** Catches a blank-line separator silently replaced by
+   *  stray content, which would merge two subjects into one unparseable
+   *  block or leave a bogus fragment neither block claims — the same
+   *  "unparseable document" failure mode the very first `toTurtle` test in
+   *  this file guards for on the register side.
+   */
+  it("separates every subject with a genuine blank line, never merging two into one block", () => {
+    const turtle = toTurtle(normalize(getPayload()));
+
+    for (const block of turtle.split("\n\n")) {
+      expect((block.match(/rdf:type/g) ?? []).length).toBeLessThanOrEqual(1);
+    }
+    // Ten subjects — two suppliers, one recipient, one statement, three
+    // per-line invoices, three canonical invoices — each its own block.
+    expect((turtle.match(/rdf:type/g) ?? []).length).toBe(10);
+  });
+
+  it("emits two different statements for two different periods", () => {
+    const payload = getPayload();
+    payload.data.data.docdata.b2b[1]!.supprd = "082026";
+
+    const turtle = toTurtle(normalize(payload));
+
+    expect(turtle).toContain("gst:g2bstatement-2026-07 rdf:type gst:Gstr2bStatement");
+    expect(turtle).toContain("gst:g2bstatement-2026-08 rdf:type gst:Gstr2bStatement");
+    expect((turtle.match(/rdf:type gst:Gstr2bStatement/g) ?? []).length).toBe(2);
+  });
+
+  /** `toTurtle` is a pure function over its own input type, not only over
+   *  what `normalize` happens to produce — an invoice with no period at all
+   *  must get no Statement, no Recipient, and no `reflectedIn` edge, and the
+   *  invoice's own last field must still be correctly period-terminated. */
+  it("emits no statement, no recipient and no reflectedIn edge for an invoice with no period", () => {
+    const invoice = normalize(getPayload())[0]!;
+    const turtle = toTurtle([{ ...invoice, period: "" }]);
+
+    expect(turtle).not.toContain("gst:Gstr2bStatement");
+    expect(turtle).not.toContain("gst:Recipient");
+    const invoiceStart = turtle.indexOf("gst:2b-INV-1001");
+    const invoiceBlock = turtle.slice(invoiceStart, turtle.indexOf("\n\n", invoiceStart));
+    expect(invoiceBlock).not.toContain("gst:reflectedIn");
+    // The last present field must still terminate with a period, not a
+    // stray semicolon left over from an off-by-one total — the same class
+    // of bug `terminates the last predicate of each subject` guards above.
+    expect(invoiceBlock).toMatch(/"27" \.$/);
+  });
+
+  it("still terminates the invoice's own last field with a period, and reflectedIn with its own, when a statement is present", () => {
+    const turtle = toTurtle(normalize(getPayload()));
+    const invoiceStart = turtle.indexOf("gst:2b-INV-1001");
+    const invoiceBlock = turtle.slice(invoiceStart, turtle.indexOf("\n\n", invoiceStart));
+
+    expect(invoiceBlock).toMatch(/"27" ;$/m);
+    expect(invoiceBlock).toMatch(/gst:reflectedIn {3}gst:g2bstatement-2026-07 \.$/);
+    // **The reflectedIn line is unconditionally period-terminated, on its
+    // own — so `total`'s only remaining job is making sure no *literal*
+    // field ever wrongly picks up that period instead.** An off-by-one
+    // `total` (e.g. excluding the trailing `reflectedIn` slot) makes an
+    // earlier field — `invoiceType`, second-to-last — terminate with a
+    // period mid-list, which is exactly the "stray semicolon/period makes
+    // the whole document unparseable" failure this file's very first
+    // `toTurtle` test already guards for the register side.
+    const periodTerminatedLines = (invoiceBlock.match(/ \.$/gm) ?? []).length;
+    expect(periodTerminatedLines).toBe(1);
   });
 });

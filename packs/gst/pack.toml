@@ -181,6 +181,35 @@ value_type = 0
 name = "issuedBy"
 value_type = 0
 
+# The canonical-entity edges — Plan 109 Slice 2. All point from the
+# canonical `gst:Invoice` down to the per-source evidence record.
+[[predicates]]
+name = "recordedIn"
+value_type = 0
+
+[[predicates]]
+name = "appearsIn"
+value_type = 0
+
+[[predicates]]
+name = "reflectedIn"
+value_type = 0
+
+[[predicates]]
+name = "filedIn"
+value_type = 0
+
+[[predicates]]
+name = "filedBy"
+value_type = 0
+
+[[predicates]]
+name = "generatedFor"
+value_type = 0
+
+[[predicates]]
+name = "generatedDate"
+
 [[matching.blocking]]
 strategy = "normalized"
 fields = ["gst:supplierGstin", "gst:invoiceNumber"]

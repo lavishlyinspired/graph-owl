@@ -15,8 +15,8 @@
 #   INV-1009  reverse-charge, supplier files nothing      → nothing
 #   INV-1010  matched, goods received the next month      → GoodsReceiptTiming
 #   INV-1011  matched, goods received within the period   → nothing
-#   INV-2001  2020 invoice, 5% delta, cap was 10%         → nothing
-#   INV-2002  2020 invoice, 20% delta, cap was 10%        → AmountMismatch
+#   INV-2001  2020 invoice, 5% delta, cap was 10%          → nothing
+#   INV-2002  2020 invoice, 20% delta, cap was 10%          → AmountMismatch
 #
 # …and one invoice that is deliberately **not** here at all: INV-1008 exists
 # in GSTR-1 and in GSTR-2B with no register row, which is what `MissingInBooks`
@@ -34,6 +34,20 @@
 # is not a typo in this fixture: it is a *second, distinct* Supplier subject,
 # because that is exactly what a transposition means at the graph level — two
 # nodes an ngram similarity band suspects are one entity, not yet merged.
+#
+# **Plan 109 Slice 2: every invoice below also gets a canonical `gst:Invoice`
+# subject, `gst:invoice-{supplierGstin}-{invoiceKey}` — deterministic, so the
+# same computation in `gstr1.ts`/`gstr2b.py` lands on the identical subject
+# for the identical real invoice, with no explicit merge step.** The edge is
+# `recordedIn`, one per register row, and it is asserted here rather than
+# implied, exactly the way `gst:Supplier` is redundantly (re-)asserted in
+# every document that references it. Two rows deliberately compute a
+# *different* canonical subject than their GSTR-1/GSTR-2B counterpart:
+# INV-1004 (the transposed GSTIN is a different supplier at the graph level,
+# so its business-identity key differs) and INV-1015 (booked under a
+# different, if equally valid, state registration of the same PAN). Neither
+# is a bug — a hard-key mismatch is supposed to leave two canonical subjects
+# unmerged; see `plans/109-gst-canonical-invoice-model.md` decision 6.
 
 @prefix gst: <https://graph-owl.dev/packs/gst#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
@@ -62,6 +76,10 @@ gst:pr-INV-1001 rdf:type gst:PurchaseInvoice ;
     gst:sgst          "0.00" ;
     gst:period        "2026-07" .
 
+gst:invoice-27AABCU9603R1ZM-INV1001 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-27AABCU9603R1ZM ;
+    gst:recordedIn gst:pr-INV-1001 .
+
 gst:pr-INV-1002 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1002" ;
@@ -70,6 +88,10 @@ gst:pr-INV-1002 rdf:type gst:PurchaseInvoice ;
     gst:taxableValue  "100000.00" ;
     gst:taxAmount     "18000.00" ;
     gst:period        "2026-07" .
+
+gst:invoice-27AABCU9603R1ZM-INV1002 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-27AABCU9603R1ZM ;
+    gst:recordedIn gst:pr-INV-1002 .
 
 gst:pr-INV-1003 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-29AACCG0527D1Z8 ;
@@ -80,6 +102,10 @@ gst:pr-INV-1003 rdf:type gst:PurchaseInvoice ;
     gst:taxAmount     "45000.00" ;
     gst:period        "2026-07" .
 
+gst:invoice-29AACCG0527D1Z8-INV1003 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-29AACCG0527D1Z8 ;
+    gst:recordedIn gst:pr-INV-1003 .
+
 gst:pr-INV-1004 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1MZ ;
     gst:invoiceNumber "INV-1004" ;
@@ -88,6 +114,13 @@ gst:pr-INV-1004 rdf:type gst:PurchaseInvoice ;
     gst:taxableValue  "50000.00" ;
     gst:taxAmount     "9000.00" ;
     gst:period        "2026-07" .
+
+# The transposed GSTIN means this computes a *different* canonical subject
+# than GSTR-1/GSTR-2B's `gst:invoice-27AABCU9603R1ZM-INV1004` — deliberately:
+# a hard-key mismatch must not auto-merge.
+gst:invoice-27AABCU9603R1MZ-INV1004 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-27AABCU9603R1MZ ;
+    gst:recordedIn gst:pr-INV-1004 .
 
 gst:pr-INV-1005 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -98,6 +131,10 @@ gst:pr-INV-1005 rdf:type gst:PurchaseInvoice ;
     gst:taxAmount     "7200.00" ;
     gst:period        "2026-07" .
 
+gst:invoice-27AABCU9603R1ZM-INV1005 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-27AABCU9603R1ZM ;
+    gst:recordedIn gst:pr-INV-1005 .
+
 gst:pr-INV-1006 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1006" ;
@@ -106,6 +143,10 @@ gst:pr-INV-1006 rdf:type gst:PurchaseInvoice ;
     gst:taxableValue  "60000.00" ;
     gst:taxAmount     "10800.00" ;
     gst:period        "2026-07" .
+
+gst:invoice-27AABCU9603R1ZM-INV1006 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-27AABCU9603R1ZM ;
+    gst:recordedIn gst:pr-INV-1006 .
 
 # The four rows Plan 108 adds, each planted for one of the new rules.
 
@@ -122,6 +163,10 @@ gst:pr-INV-1007 rdf:type gst:PurchaseInvoice ;
     gst:taxAmount     "5400.00" ;
     gst:period        "2026-07" .
 
+gst:invoice-29AACCG0527D1Z8-INV1007 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-29AACCG0527D1Z8 ;
+    gst:recordedIn gst:pr-INV-1007 .
+
 # **The negative case `SupplierNotFiled` exists to not fire on.** A
 # reverse-charge purchase: the recipient self-assesses the tax, so there is no
 # supplier-side GSTR-1 line to wait for and its absence means nothing is
@@ -137,6 +182,10 @@ gst:pr-INV-1009 rdf:type gst:PurchaseInvoice ;
     gst:reverseCharge "Y" ;
     gst:period        "2026-07" .
 
+gst:invoice-29AACCG0527D1Z8-INV1009 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-29AACCG0527D1Z8 ;
+    gst:recordedIn gst:pr-INV-1009 .
+
 # Matched everywhere — books, GSTR-1 and August's 2B all agree — and still not
 # claimable in August, because the goods arrived on 4 September. Every
 # document check passes; `GoodsReceiptTiming` is the only rule that catches
@@ -150,6 +199,10 @@ gst:pr-INV-1010 rdf:type gst:PurchaseInvoice ;
     gst:taxAmount     "3600.00" ;
     gst:period        "2026-08" .
 
+gst:invoice-27AABCU9603R1ZM-INV1010 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-27AABCU9603R1ZM ;
+    gst:recordedIn gst:pr-INV-1010 .
+
 # The same shape with the goods received *inside* the period — the row that
 # proves the rule reads the receipt date rather than merely the presence of a
 # receipt.
@@ -161,6 +214,10 @@ gst:pr-INV-1011 rdf:type gst:PurchaseInvoice ;
     gst:taxableValue  "15000.00" ;
     gst:taxAmount     "2700.00" ;
     gst:period        "2026-08" .
+
+gst:invoice-27AABCU9603R1ZM-INV1011 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-27AABCU9603R1ZM ;
+    gst:recordedIn gst:pr-INV-1011 .
 
 # **Every total agrees and the tax heads do not.** Booked as an inter-state
 # supply (IGST 18,000); the supplier filed it as intra-state (CGST 9,000 +
@@ -185,6 +242,10 @@ gst:pr-INV-1012 rdf:type gst:PurchaseInvoice ;
     gst:sgst          "0.00" ;
     gst:period        "2026-07" .
 
+gst:invoice-27AABCU9603R1ZM-INV1012 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-27AABCU9603R1ZM ;
+    gst:recordedIn gst:pr-INV-1012 .
+
 # **A negative control for two guards at once, and it must produce nothing.**
 #
 # 50 paise below what the authority reports, and absent from GSTR-1 while
@@ -202,6 +263,10 @@ gst:pr-INV-1013 rdf:type gst:PurchaseInvoice ;
     gst:taxAmount     "9000.09" ;
     gst:period        "2026-07" .
 
+gst:invoice-27AABCU9603R1ZM-INV1013 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-27AABCU9603R1ZM ;
+    gst:recordedIn gst:pr-INV-1013 .
+
 # **One invoice, three printed formats, and it must produce nothing.** The
 # register writes `INV/1014`, the supplier declared `INV 1014`, the authority
 # reports `INV-1014`. An exact join on the printed number sees three unrelated
@@ -216,6 +281,10 @@ gst:pr-INV-1014 rdf:type gst:PurchaseInvoice ;
     gst:taxableValue  "70000.00" ;
     gst:taxAmount     "12600.00" ;
     gst:period        "2026-07" .
+
+gst:invoice-27AABCU9603R1ZM-INV1014 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-27AABCU9603R1ZM ;
+    gst:recordedIn gst:pr-INV-1014 .
 
 # **The same legal entity under a different state registration.** Booked
 # against 29AABCU9603R1ZK (Karnataka); the supplier filed under
@@ -236,6 +305,15 @@ gst:pr-INV-1015 rdf:type gst:PurchaseInvoice ;
     gst:taxAmount     "14400.00" ;
     gst:period        "2026-07" .
 
+# The Maharashtra registration GSTR-1/GSTR-2B filed under computes a
+# *different* canonical subject (`gst:invoice-27AABCU9603R1ZM-INV1015`) —
+# deliberately: same PAN, different state, so a hard-key mismatch and no
+# auto-merge, exactly like INV-1004 above for the opposite (keying-error)
+# reason.
+gst:invoice-29AABCU9603R1ZK-INV1015 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-29AABCU9603R1ZK ;
+    gst:recordedIn gst:pr-INV-1015 .
+
 gst:pr-INV-2001 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-2001" ;
@@ -245,6 +323,10 @@ gst:pr-INV-2001 rdf:type gst:PurchaseInvoice ;
     gst:taxAmount     "18000.00" ;
     gst:period        "2020-07" .
 
+gst:invoice-27AABCU9603R1ZM-INV2001 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-27AABCU9603R1ZM ;
+    gst:recordedIn gst:pr-INV-2001 .
+
 gst:pr-INV-2002 rdf:type gst:PurchaseInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-2002" ;
@@ -253,3 +335,7 @@ gst:pr-INV-2002 rdf:type gst:PurchaseInvoice ;
     gst:taxableValue  "100000.00" ;
     gst:taxAmount     "18000.00" ;
     gst:period        "2020-07" .
+
+gst:invoice-27AABCU9603R1ZM-INV2002 rdf:type gst:Invoice ;
+    gst:issuedBy   gst:supplier-27AABCU9603R1ZM ;
+    gst:recordedIn gst:pr-INV-2002 .

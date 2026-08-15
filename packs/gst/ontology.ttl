@@ -18,6 +18,38 @@ gst:PurchaseInvoice rdf:type gst:Class ; gst:label "Purchase invoice (taxpayer's
 gst:Gstr2bInvoice   rdf:type gst:Class ; gst:label "GSTR-2B invoice (as filed by the supplier)" .
 gst:Section         rdf:type gst:Class ; gst:label "Statutory section" .
 
+# **The canonical business entity — Plan 109 Slice 2.** One per real invoice,
+# not one per source that reported it. `PurchaseInvoice`/`Gstr1Invoice`/
+# `Gstr2bInvoice` (below) remain exactly what they were — the per-source
+# evidence layer, unrenamed — and this is the subject a reviewer or a query
+# reaches first: "what do we know about this invoice across every source",
+# one traversal instead of three separately-typed subjects joined by a
+# shared key value. See `plans/109-gst-canonical-invoice-model.md` decision 4
+# for the full wiring diagram.
+gst:Invoice         rdf:type gst:Class ; gst:label "Invoice (canonical, across every source)" .
+
+# **A GSTR-1/IFF filing — one per (supplier, return period), not one per
+# invoice line.** Today's per-line `Gstr1Invoice` records each repeat
+# `period`/`filedDate` identically for every invoice from the same filing;
+# this is the subject those two properties move to, so "was this filing
+# late" is asked once rather than answered identically many times over.
+gst:Gstr1Filing     rdf:type gst:Class ; gst:label "GSTR-1/IFF filing (one per supplier, per period)" .
+
+# **A GSTR-2B statement — one per return period, not one per supplier.**
+# Unlike GSTR-1 (the supplier's own filing), GSTR-2B is auto-drafted by the
+# authority *for the recipient*, aggregating every supplier's filings for
+# that period. `generatedDate` is optional: no fixture or API payload field
+# has been confirmed to carry it.
+gst:Gstr2bStatement rdf:type gst:Class ; gst:label "GSTR-2B statement (one per return period)" .
+
+# **The taxpayer this deployment represents — a single-tenant pack context
+# anchor, not a globally reusable identity.** Exactly one instance exists,
+# `gst:recipient-self`, and every `Gstr2bStatement` points at it. Must not
+# be used as the basis for cross-tenant identity resolution; if multi-tenant
+# GST support is introduced later, the recipient subject becomes
+# tenant-scoped and can carry the taxpayer's own GSTIN.
+gst:Recipient       rdf:type gst:Class ; gst:label "Recipient (this deployment's own taxpayer identity)" .
+
 # **The third evidence source, and the one that turns "unmatched" into a
 # reason** — `plans/108-books-gstr1-gstr2b-reconciliation.md` Slice 1.
 #
@@ -93,3 +125,27 @@ gst:amount        rdf:type gst:Property ; gst:label "amount" .
 # invoice carried its GSTIN as a bare literal, unreachable by a graph walk.
 # `issuedBy` is the edge that closes that: `plans/105c-gst-causal-graph.md`.
 gst:issuedBy      rdf:type gst:Property ; gst:label "issued by" .
+
+# The canonical-entity edges — Plan 109 Slice 2. All three point *down*, from
+# the canonical `gst:Invoice` to the per-source evidence record it was built
+# from — never the reverse, and never collapsing the per-source record out of
+# the graph. `reflectedIn` is deliberately reused at two levels: canonical
+# Invoice to its `Gstr2bInvoice` line, and that line on to the
+# `Gstr2bStatement` it came from — both mean the same thing, "the authority's
+# own record of this," at different granularity.
+gst:recordedIn    rdf:type gst:Property ; gst:label "recorded in (purchase register)" .
+gst:appearsIn     rdf:type gst:Property ; gst:label "appears in (GSTR-1/IFF)" .
+gst:reflectedIn   rdf:type gst:Property ; gst:label "reflected in (GSTR-2B)" .
+
+# The one genuinely new hop: a declared GSTR-1 line to the filing it came
+# from, and that filing to the supplier who filed it.
+gst:filedIn       rdf:type gst:Property ; gst:label "filed in (which GSTR-1/IFF filing)" .
+gst:filedBy       rdf:type gst:Property ; gst:label "filed by" .
+
+# A GSTR-2B statement to the recipient it was generated for — always
+# `gst:recipient-self` today, since this pack is single-tenant.
+gst:generatedFor  rdf:type gst:Property ; gst:label "generated for" .
+
+# When the authority generated the statement — optional, since no current
+# source has been confirmed to carry it.
+gst:generatedDate rdf:type gst:Property ; gst:label "date the authority generated this statement" .

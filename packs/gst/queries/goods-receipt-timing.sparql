@@ -35,24 +35,28 @@
 # 108's parking lot keeps the second as its own slice rather than letting this
 # rule quietly mean both.
 
+# **The register and GSTR-2B sides are joined through a shared canonical
+# `gst:Invoice` subject — Plan 109 Slice 2** — and `?period` has moved off
+# the per-line `Gstr2bInvoice` record onto its `Gstr2bStatement`, reached
+# through `reflectedIn`'s second-level reuse.
+
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
 SELECT ?purchase ?number ?gstin ?period ?receivedAt
 WHERE {
   GRAPH ?register {
+    ?canonical gst:recordedIn ?purchase .
     ?purchase a gst:PurchaseInvoice ;
               gst:issuedBy ?supplier ;
-              gst:invoiceNumber ?number ;
-              gst:invoiceKey    ?key .
+              gst:invoiceNumber ?number .
     ?supplier gst:supplierGstin ?gstin .
   }
 
   GRAPH ?authority {
+    ?canonical gst:reflectedIn ?filed .
     ?filed a gst:Gstr2bInvoice ;
-           gst:issuedBy ?filedSupplier ;
-           gst:invoiceKey    ?key ;
-           gst:period        ?period .
-    ?filedSupplier gst:supplierGstin ?gstin .
+           gst:reflectedIn ?statement .
+    ?statement gst:period ?period .
   }
 
   GRAPH ?receipts {

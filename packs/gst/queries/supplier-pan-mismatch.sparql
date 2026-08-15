@@ -28,12 +28,20 @@
 # `OPTIONAL` + `!BOUND` for the exclusion, and every pattern inside its own
 # `GRAPH ?var { }` — both traps are documented at length in
 # `missing-in-gstr2b.sparql`, where they were found against real data.
+#
+# **Each side is reached through its own canonical `gst:Invoice` subject's
+# `recordedIn`/`reflectedIn` edge — Plan 109 Slice 2 — but the two canonical
+# subjects are never compared to each other.** A PAN-mismatch pair
+# necessarily computes *different* canonical subjects (different GSTIN), so
+# this rule's actual match — same `invoiceKey`, same PAN, different state —
+# stays exactly as it was.
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
 SELECT ?invoice ?number ?bookedGstin ?filedGstin ?pan ?taxAmount
 WHERE {
   GRAPH ?register {
+    ?bookedInvoice gst:recordedIn ?invoice .
     ?invoice a gst:PurchaseInvoice ;
              gst:issuedBy ?supplier ;
              gst:invoiceNumber ?number ;
@@ -43,6 +51,7 @@ WHERE {
   }
 
   GRAPH ?authority {
+    ?filedInvoice gst:reflectedIn ?filed .
     ?filed a gst:Gstr2bInvoice ;
            gst:issuedBy ?filedSupplier ;
            gst:invoiceKey ?key .

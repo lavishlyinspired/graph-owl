@@ -38,6 +38,7 @@ PREFIX gst: <https://graph-owl.dev/packs/gst#>
 SELECT ?invoice ?number ?gstin ?taxAmount ?invoiceDate
 WHERE {
   GRAPH ?register {
+    ?canonical gst:recordedIn ?invoice .
     ?invoice a gst:PurchaseInvoice ;
              gst:issuedBy ?supplier ;
              gst:invoiceNumber ?number ;
@@ -57,17 +58,25 @@ WHERE {
     }
   }
 
+  # **The primary check, through the canonical subject — Plan 109 Slice 2.**
+  # `?canonical gst:appearsIn` replaces what used to be a shared `?key`+`?gstin`
+  # binding: it only finds a declared line whose *own* GSTR-1 importer
+  # computed the identical canonical URI, i.e. the identical GSTIN and key.
   OPTIONAL {
     GRAPH ?gstr1 {
-      ?declared a gst:Gstr1Invoice ;
-                gst:issuedBy ?declaredSupplier ;
-                gst:invoiceKey    ?key .
-      ?declaredSupplier gst:supplierGstin ?gstin .
+      ?canonical gst:appearsIn ?declared .
+      ?declared a gst:Gstr1Invoice .
     }
   }
 
   # **The keying-error guard, and it is not optional politeness — without it
   # this rule tells a CA to chase a supplier who filed correctly.**
+  #
+  # **Deliberately still `?key`-based, not canonical-subject-based — Plan 109
+  # Slice 2 does not change this guard.** The whole point is to match *any*
+  # GSTIN, and the canonical `gst:Invoice` subject is computed *from* the
+  # GSTIN, so routing this guard through it would silently narrow it back to
+  # an exact-GSTIN match and reintroduce the very bug it exists to prevent.
   #
   # Found against real data, not reasoned about in advance. The register books
   # INV-1004 under `…1MZ` and the supplier filed it under `…1ZM`: two

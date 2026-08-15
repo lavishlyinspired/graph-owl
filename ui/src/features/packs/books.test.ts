@@ -243,3 +243,52 @@ describe("the Turtle a pack rule cannot tell from a hand-written fixture", () =>
     expect(toTurtle(normalize(csv))).not.toContain("gst:reverseCharge");
   });
 });
+
+describe("the canonical gst:Invoice — Plan 109 Slice 2", () => {
+  it("emits a canonical subject, deterministically keyed on the GSTIN and invoice number", () => {
+    const turtle = toTurtle(normalize(`${HEADER}\n${ROW}`));
+
+    expect(turtle).toContain("gst:invoice-27AABCU9603R1ZM-INV1001 rdf:type gst:Invoice");
+  });
+
+  it("points the canonical subject at the register row with recordedIn", () => {
+    const turtle = toTurtle(normalize(`${HEADER}\n${ROW}`));
+    const canonicalBlock = turtle.slice(turtle.indexOf("gst:invoice-27AABCU9603R1ZM-INV1001"));
+
+    expect(canonicalBlock).toContain("gst:recordedIn    gst:pr-INV-1001");
+  });
+
+  /** The canonical subject also carries `issuedBy` — the diagram's own top
+   *  edge — as a real, unquoted reference to the supplier, not a quoted
+   *  string that happens to look like one. */
+  it("points the canonical subject at the supplier with an unquoted issuedBy edge", () => {
+    const turtle = toTurtle(normalize(`${HEADER}\n${ROW}`));
+    const canonicalStart = turtle.indexOf("gst:invoice-27AABCU9603R1ZM-INV1001");
+    const canonicalBlock = turtle.slice(canonicalStart, turtle.indexOf("\n\n", canonicalStart));
+
+    expect(canonicalBlock).toContain("gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;");
+    expect(canonicalBlock).not.toContain('"gst:supplier-27AABCU9603R1ZM"');
+  });
+
+  /** No Filing/Statement concept on the books side — Plan 109 decision 3. A
+   *  purchase-register entry is the taxpayer's own bookkeeping, not a
+   *  government submission. */
+  it("emits no filedIn or appearsIn edge, only recordedIn", () => {
+    const turtle = toTurtle(normalize(`${HEADER}\n${ROW}`));
+    const canonicalBlock = turtle.slice(
+      turtle.indexOf("gst:invoice-27AABCU9603R1ZM-INV1001"),
+      turtle.indexOf("gst:invoice-27AABCU9603R1ZM-INV1001") + 200,
+    );
+
+    expect(canonicalBlock).not.toContain("gst:filedIn");
+    expect(canonicalBlock).not.toContain("gst:appearsIn");
+  });
+
+  it("computes one canonical subject per invoice, not one per register row shared across invoices", () => {
+    const csv = `${HEADER}\n${ROW}\n27AABCU9603R1ZM,Umbrella Supplies,INV-1002,09-07-2026,95000,17100,0,0,0`;
+    const turtle = toTurtle(normalize(csv));
+
+    expect(turtle).toContain("gst:invoice-27AABCU9603R1ZM-INV1001 rdf:type gst:Invoice");
+    expect(turtle).toContain("gst:invoice-27AABCU9603R1ZM-INV1002 rdf:type gst:Invoice");
+  });
+});

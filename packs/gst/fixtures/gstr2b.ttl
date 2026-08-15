@@ -16,6 +16,18 @@
 # `purchase-register.ttl`'s matching invoices point at, which is what makes a
 # join across the two documents a graph traversal rather than a string
 # comparison.
+#
+# **Plan 109 Slice 2: `period` moves off every per-line record here onto a
+# `gst:Gstr2bStatement` — one per return period, generated for the single
+# well-known `gst:Recipient` this pack is single-tenant for — and each line
+# points at its statement with `reflectedIn`, reused at the second level
+# exactly as `plans/109-gst-canonical-invoice-model.md` decision 4 describes.
+# Every invoice below also gets a `reflectedIn` edge (the first-level one)
+# from its canonical `gst:Invoice` subject, computed identically to
+# `purchase-register.ttl`/`gstr1.ttl`.** This file mixes two periods
+# (2026-07 and the historical 2020-07 pair) exactly as it already did before
+# this migration — that pre-existing shape is unchanged; only the
+# canonical-entity and Filing/Statement layers are new.
 
 @prefix gst: <https://graph-owl.dev/packs/gst#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
@@ -27,6 +39,18 @@ gst:supplier-27AABCU9603R1ZM rdf:type gst:Supplier ;
 # entire point of INV-1008 below.
 gst:supplier-33AAGCV2109L1ZH rdf:type gst:Supplier ;
     gst:supplierGstin "33AAGCV2109L1ZH" .
+
+# The taxpayer this deployment represents — single-tenant, so exactly one
+# instance, and every statement below points at it.
+gst:recipient-self rdf:type gst:Recipient .
+
+gst:g2bstatement-2026-07 rdf:type gst:Gstr2bStatement ;
+    gst:period       "2026-07" ;
+    gst:generatedFor gst:recipient-self .
+
+gst:g2bstatement-2020-07 rdf:type gst:Gstr2bStatement ;
+    gst:period       "2020-07" ;
+    gst:generatedFor gst:recipient-self .
 
 gst:2b-INV-1001 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -40,7 +64,11 @@ gst:2b-INV-1001 rdf:type gst:Gstr2bInvoice ;
     gst:sgst          "0.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
-    gst:period        "2026-07" .
+    gst:reflectedIn   gst:g2bstatement-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1001 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-1001 .
 
 gst:2b-INV-1002 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -51,7 +79,11 @@ gst:2b-INV-1002 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "17100.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
-    gst:period        "2026-07" .
+    gst:reflectedIn   gst:g2bstatement-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1002 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-1002 .
 
 gst:2b-INV-1004 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -62,7 +94,14 @@ gst:2b-INV-1004 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "9000.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
-    gst:period        "2026-07" .
+    gst:reflectedIn   gst:g2bstatement-2026-07 .
+
+# Filed under the correct GSTIN — the same canonical subject GSTR-1's own
+# INV-1004 line computes. The register's INV-1004 (transposed GSTIN) computes
+# a different one and stays unmerged.
+gst:invoice-27AABCU9603R1ZM-INV1004 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-1004 .
 
 gst:2b-INV-1005 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -73,7 +112,11 @@ gst:2b-INV-1005 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "7200.00" ;
     gst:itcAvailable  "N" ;
     gst:reverseCharge "N" ;
-    gst:period        "2026-07" .
+    gst:reflectedIn   gst:g2bstatement-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1005 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-1005 .
 
 gst:2b-INV-1006 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -84,7 +127,11 @@ gst:2b-INV-1006 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "10800.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "R" ;
-    gst:period        "2026-07" .
+    gst:reflectedIn   gst:g2bstatement-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1006 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-1006 .
 
 # Filed by the supplier and made available to this taxpayer, with no register
 # row to match — `MissingInBooks`. Credit sitting unclaimed, or somebody
@@ -98,7 +145,11 @@ gst:2b-INV-1008 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "8100.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
-    gst:period        "2026-07" .
+    gst:reflectedIn   gst:g2bstatement-2026-07 .
+
+gst:invoice-33AAGCV2109L1ZH-INV1008 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-33AAGCV2109L1ZH ;
+    gst:reflectedIn gst:2b-INV-1008 .
 
 # The same invoice the register booked as inter-state, filed as intra-state.
 # Totals identical on both sides; only the heads disagree.
@@ -114,7 +165,11 @@ gst:2b-INV-1012 rdf:type gst:Gstr2bInvoice ;
     gst:sgst          "9000.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
-    gst:period        "2026-07" .
+    gst:reflectedIn   gst:g2bstatement-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1012 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-1012 .
 
 # 50 paise above the register, and no GSTR-1 row — the pair that proves the
 # de-minimis floor and the 2B-presence guard both hold.
@@ -127,7 +182,11 @@ gst:2b-INV-1013 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "9000.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
-    gst:period        "2026-07" .
+    gst:reflectedIn   gst:g2bstatement-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1013 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-1013 .
 
 # The authority's own spelling of the invoice the register writes `INV/1014`.
 gst:2b-INV-1014 rdf:type gst:Gstr2bInvoice ;
@@ -139,7 +198,11 @@ gst:2b-INV-1014 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "12600.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
-    gst:period        "2026-07" .
+    gst:reflectedIn   gst:g2bstatement-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1014 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-1014 .
 
 # Filed under the Maharashtra registration of the entity the register booked
 # under its Karnataka one. Same PAN, different state.
@@ -152,7 +215,14 @@ gst:2b-INV-1015 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "14400.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
-    gst:period        "2026-07" .
+    gst:reflectedIn   gst:g2bstatement-2026-07 .
+
+# Filed under Maharashtra — the same canonical subject GSTR-1's INV-1015 line
+# computes. The register's INV-1015 (booked under Karnataka) computes a
+# different one and stays unmerged.
+gst:invoice-27AABCU9603R1ZM-INV1015 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-1015 .
 
 gst:2b-INV-2001 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -163,7 +233,11 @@ gst:2b-INV-2001 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "17100.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
-    gst:period        "2020-07" .
+    gst:reflectedIn   gst:g2bstatement-2020-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV2001 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-2001 .
 
 gst:2b-INV-2002 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -174,4 +248,8 @@ gst:2b-INV-2002 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "14400.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
-    gst:period        "2020-07" .
+    gst:reflectedIn   gst:g2bstatement-2020-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV2002 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-2002 .

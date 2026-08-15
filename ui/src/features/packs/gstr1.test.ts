@@ -190,8 +190,46 @@ describe("the Turtle a pack rule cannot tell from a hand-written fixture", () =>
     expect(turtle).not.toContain("gst:Gstr2bInvoice");
   });
 
-  it("writes the filing date as its own predicate", () => {
-    expect(toTurtle(normalize(payload()))).toContain('gst:filedDate     "2026-08-11"');
+  /** **Plan 109 Slice 2: `filedDate`/`period` moved off the per-line record
+   *  onto a `gst:Gstr1Filing` — one per (supplier, period), not one per
+   *  invoice line.** Every invoice from the same supplier block shares the
+   *  identical filing date in the source format (it lives on the supplier
+   *  block, not the invoice), which is exactly what made the old repetition
+   *  redundant. */
+  it("writes the filing date on the Gstr1Filing subject, not the per-line record", () => {
+    const turtle = toTurtle(normalize(payload()));
+
+    expect(turtle).toContain("gst:g1filing-27AABCU9603R1ZM-2026-07 rdf:type gst:Gstr1Filing");
+    const filingBlock = turtle.slice(turtle.indexOf("gst:g1filing-27AABCU9603R1ZM-2026-07"));
+    expect(filingBlock).toContain('gst:filedDate     "2026-08-11"');
+    expect(filingBlock).toContain('gst:period        "2026-07"');
+    expect(filingBlock).toContain("gst:filedBy       gst:supplier-27AABCU9603R1ZM");
+
+    const invoiceStart = turtle.indexOf("gst:g1-INV-1001");
+    const invoiceBlock = turtle.slice(invoiceStart, turtle.indexOf("\n\n", invoiceStart));
+    expect(invoiceBlock).not.toContain("gst:filedDate");
+    expect(invoiceBlock).not.toContain("gst:period ");
+    // Unquoted — a real edge to the Filing subject, not a string that
+    // happens to look like one.
+    expect(invoiceBlock).toContain("gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2026-07 .");
+    expect(invoiceBlock).not.toContain('"gst:g1filing-27AABCU9603R1ZM-2026-07"');
+  });
+
+  it("writes one Gstr1Filing subject for every invoice the same supplier filed in the same period", () => {
+    const doc = payload();
+    doc.b2b[0]!.inv.push({
+      inum: "INV-1002",
+      idt: "09-07-2026",
+      val: 112100.0,
+      pos: "27",
+      rchrg: "N",
+      inv_typ: "R",
+      itms: [{ num: 1, itm_det: { rt: 18, txval: 95000.0, iamt: 17100.0, camt: 0, samt: 0, csamt: 0 } }],
+    });
+
+    const turtle = toTurtle(normalize(doc));
+
+    expect((turtle.match(/rdf:type gst:Gstr1Filing/g) ?? []).length).toBe(1);
   });
 
   /** One `gst:Supplier` subject per GSTIN, pointed at by `issuedBy` — the
@@ -241,5 +279,82 @@ describe("the Turtle a pack rule cannot tell from a hand-written fixture", () =>
     (doc.b2b[0] as unknown as Record<string, unknown>).trdnm = 'Acme "Best" \\ Co';
 
     expect(toTurtle(normalize(doc))).toContain('gst:supplierName  "Acme \\"Best\\" \\\\ Co"');
+  });
+});
+
+describe("the canonical gst:Invoice — Plan 109 Slice 2", () => {
+  it("emits a canonical subject, deterministically keyed on the GSTIN and invoice number", () => {
+    const turtle = toTurtle(normalize(payload()));
+
+    expect(turtle).toContain("gst:invoice-27AABCU9603R1ZM-INV1001 rdf:type gst:Invoice");
+  });
+
+  it("points the canonical subject at the declared line with appearsIn", () => {
+    const turtle = toTurtle(normalize(payload()));
+    const canonicalBlock = turtle.slice(turtle.indexOf("gst:invoice-27AABCU9603R1ZM-INV1001"));
+
+    expect(canonicalBlock).toContain("gst:appearsIn     gst:g1-INV-1001");
+  });
+
+  it("points the canonical subject at the supplier with an unquoted issuedBy edge", () => {
+    const turtle = toTurtle(normalize(payload()));
+    const canonicalStart = turtle.indexOf("gst:invoice-27AABCU9603R1ZM-INV1001");
+    const canonicalBlock = turtle.slice(canonicalStart, turtle.indexOf("\n\n", canonicalStart));
+
+    expect(canonicalBlock).toContain("gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;");
+    expect(canonicalBlock).not.toContain('"gst:supplier-27AABCU9603R1ZM"');
+  });
+
+  /** No filing/no `filedIn` when the return carries neither a supplier-level
+   *  nor a document-level declared period — the ternary and the Map-dedup
+   *  guard both have to hold on this, not just on the ordinary case where a
+   *  period is always present. */
+  it("emits no Gstr1Filing and no filedIn edge when the return carries no period at all", () => {
+    const doc = payload();
+    delete (doc.b2b[0] as unknown as Record<string, unknown>).flprdr1;
+    delete (doc as unknown as Record<string, unknown>).fp;
+
+    const turtle = toTurtle(normalize(doc));
+
+    expect(turtle).not.toContain("gst:Gstr1Filing");
+    const invoiceStart = turtle.indexOf("gst:g1-INV-1001");
+    const invoiceBlock = turtle.slice(invoiceStart, turtle.indexOf("\n\n", invoiceStart));
+    expect(invoiceBlock).not.toContain("gst:filedIn");
+  });
+
+  /** The first invoice's filing date wins when a (contrived, malformed)
+   *  payload somehow disagrees within one supplier+period group — proving
+   *  the dedup guard actually guards, not merely that a `Map` with identical
+   *  values happens to look right either way. */
+  it("keeps the first-seen filing date for a group, not the last", () => {
+    const doc = payload();
+    doc.b2b[0]!.inv.push({
+      inum: "INV-1002",
+      idt: "09-07-2026",
+      val: 112100.0,
+      pos: "27",
+      rchrg: "N",
+      inv_typ: "R",
+      itms: [{ num: 1, itm_det: { rt: 18, txval: 95000.0, iamt: 17100.0, camt: 0, samt: 0, csamt: 0 } }],
+    });
+    // A second, differently-dated filing under the same GSTIN and period —
+    // not realistic for a genuine GSTR-2A/1 export, but exactly what the
+    // dedup guard's own correctness (first-wins) has to prove.
+    const secondBlock = { ...doc.b2b[0]!, fldtr1: "20-08-2026" };
+    doc.b2b.push(secondBlock as (typeof doc.b2b)[number]);
+
+    const turtle = toTurtle(normalize(doc));
+
+    expect((turtle.match(/rdf:type gst:Gstr1Filing/g) ?? []).length).toBe(1);
+    const filingBlock = turtle.slice(turtle.indexOf("gst:g1filing-27AABCU9603R1ZM-2026-07"));
+    expect(filingBlock).toContain('gst:filedDate     "2026-08-11"');
+  });
+
+  /** The same canonical subject `books.ts` computes for the identical real
+   *  invoice — the whole point of the deterministic key. */
+  it("matches the canonical subject purchase-register.ttl's own convention would compute", () => {
+    const turtle = toTurtle(normalize(payload()));
+
+    expect(turtle).toContain(`gst:invoice-27AABCU9603R1ZM-${"INV1001"}`);
   });
 });

@@ -25,9 +25,11 @@
 # guessing. Three independent comparisons need no such judgement and say
 # precisely which head disagrees.
 #
-# The join is on `gst:invoiceKey`, the normalized matching key, for the reason
-# `ontology.ttl` gives: an exact join on the printed number reports a punctuation
-# difference as two unrelated invoices.
+# The two sides are joined through a shared canonical `gst:Invoice`
+# subject — Plan 109 Slice 2 — computed deterministically from
+# `gst:invoiceKey`, the normalized matching key, for the reason `ontology.ttl`
+# gives: an exact join on the printed number reports a punctuation difference
+# as two unrelated invoices.
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
@@ -35,10 +37,10 @@ PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 SELECT ?purchase ?number ?gstin ?booked ?filed ?bookedIgst ?filedIgst
 WHERE {
   GRAPH ?register {
+    ?canonical gst:recordedIn ?purchase .
     ?purchase a gst:PurchaseInvoice ;
               gst:issuedBy ?supplier ;
               gst:invoiceNumber ?number ;
-              gst:invoiceKey    ?key ;
               gst:igst          ?bookedIgst ;
               gst:cgst          ?bookedCgst ;
               gst:sgst          ?bookedSgst .
@@ -46,13 +48,11 @@ WHERE {
   }
 
   GRAPH ?authority {
+    ?canonical gst:reflectedIn ?filedLine .
     ?filedLine a gst:Gstr2bInvoice ;
-               gst:issuedBy ?filedSupplier ;
-               gst:invoiceKey ?key ;
-               gst:igst       ?filedIgst ;
-               gst:cgst       ?filedCgst ;
-               gst:sgst       ?filedSgst .
-    ?filedSupplier gst:supplierGstin ?gstin .
+               gst:igst ?filedIgst ;
+               gst:cgst ?filedCgst ;
+               gst:sgst ?filedSgst .
   }
 
   # The two figures a reviewer needs to see the shape of the error at a glance:

@@ -27,27 +27,36 @@
 # `OPTIONAL` + `!BOUND` rather than `FILTER NOT EXISTS`, and every pattern
 # inside its own `GRAPH ?var { }` — both traps are documented at length in
 # `missing-in-gstr2b.sparql`, which is where they were found against real data.
+#
+# **The register and GSTR-1 sides are joined through a shared canonical
+# `gst:Invoice` subject — Plan 109 Slice 2** — and `filedDate`/`?declaredPeriod`
+# have moved off the per-line `Gstr1Invoice` record onto its `Gstr1Filing`,
+# reached through `filedIn`. **The "no 2B in any period" guard is now simpler
+# than it was**: `?canonical gst:reflectedIn ?filed`, with no `GRAPH` bound to
+# one specific period, naturally ranges over every period's 2B at once —
+# exactly the "no 2B in *any* period this deployment has imported" property
+# the old `?key`+`?gstin` join had to achieve by leaving `?authority`
+# unbound across every graph.
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
 SELECT ?invoice ?number ?gstin ?taxAmount ?filedDate ?declaredPeriod
 WHERE {
   GRAPH ?register {
+    ?canonical gst:recordedIn ?invoice .
     ?invoice a gst:PurchaseInvoice ;
              gst:issuedBy ?supplier ;
              gst:invoiceNumber ?number ;
-             gst:invoiceKey    ?key ;
              gst:taxAmount     ?taxAmount .
     ?supplier gst:supplierGstin ?gstin .
   }
 
   GRAPH ?gstr1 {
+    ?canonical gst:appearsIn ?declared .
     ?declared a gst:Gstr1Invoice ;
-              gst:issuedBy ?declaredSupplier ;
-              gst:invoiceKey    ?key ;
-              gst:filedDate     ?filedDate ;
-              gst:period        ?declaredPeriod .
-    ?declaredSupplier gst:supplierGstin ?gstin .
+              gst:filedIn ?filing .
+    ?filing gst:filedDate ?filedDate ;
+            gst:period    ?declaredPeriod .
   }
 
   OPTIONAL {
@@ -57,11 +66,8 @@ WHERE {
   }
 
   OPTIONAL {
-    GRAPH ?authority {
-      ?filed a gst:Gstr2bInvoice ;
-             gst:issuedBy ?filedSupplier ;
-             gst:invoiceKey    ?key .
-      ?filedSupplier gst:supplierGstin ?gstin .
+    GRAPH ?anyAuthority {
+      ?canonical gst:reflectedIn ?filed .
     }
   }
 

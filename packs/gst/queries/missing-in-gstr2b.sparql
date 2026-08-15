@@ -17,19 +17,20 @@
 # without a `GRAPH` clause matches nothing at all — silently, which reads
 # exactly like "the reconciliation found no problems".
 #
-# **What this query cannot do, and the pack says so.** It joins on an *exact*
-# GSTIN and invoice number. INV-1004's GSTIN is transposed by two characters,
-# so this reports it as unmatched even though the supplier did file it. That is
+# **What this query cannot do, and the pack says so.** The register and the
+# authority sides are joined through a shared canonical `gst:Invoice`
+# subject — Plan 109 Slice 2 — computed deterministically from the *exact*
+# GSTIN and normalized invoice number. INV-1004's GSTIN is transposed by two
+# characters, so the two sides compute *different* canonical subjects and
+# this reports it as unmatched even though the supplier did file it. That is
 # not a bug in the query — it is the reason `pack.toml` configures an `ngram`
-# blocking strategy, which sees through a transposition where an exact join
+# blocking strategy, which sees through a transposition where an exact key
 # cannot. The difference between these two answers is the argument for the
 # fusion engine.
 #
 # **The GSTIN is reached by traversal, not read off a literal — Epic 105c.**
 # `?invoice gst:issuedBy ?supplier` is a real edge to a `gst:Supplier`
-# subject; the GSTIN comparison still happens on that subject's own
-# `supplierGstin` property, which is what keeps the transposed pair joinable
-# as *different* subjects rather than silently merged by a shared literal.
+# subject.
 
 # **Narrowed by Plan 108 Slice 3, and the narrowing is a behaviour change
 # worth stating plainly.** This rule is the answer you get from **books and
@@ -63,19 +64,17 @@ PREFIX gst: <https://graph-owl.dev/packs/gst#>
 SELECT ?invoice ?number ?gstin ?taxAmount
 WHERE {
   GRAPH ?register {
+    ?canonical gst:recordedIn ?invoice .
     ?invoice a gst:PurchaseInvoice ;
              gst:issuedBy ?supplier ;
              gst:invoiceNumber ?number ;
-             gst:invoiceKey    ?key ;
              gst:taxAmount ?taxAmount .
     ?supplier gst:supplierGstin ?gstin .
   }
   OPTIONAL {
     GRAPH ?authority {
-      ?filed a gst:Gstr2bInvoice ;
-             gst:issuedBy ?filedSupplier ;
-             gst:invoiceKey    ?key .
-      ?filedSupplier gst:supplierGstin ?gstin .
+      ?canonical gst:reflectedIn ?filed .
+      ?filed a gst:Gstr2bInvoice .
     }
   }
   # Any GSTR-1 evidence at all, anywhere in the graph — the handover switch.

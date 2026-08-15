@@ -204,10 +204,18 @@ def test_the_two_packs_declare_different_namespaces():
     )
 
 
-def test_gst_registers_all_six_finding_rules_in_one_call():
+def test_gst_registers_all_thirteen_finding_rules_in_one_call():
     # Epic 105 P5b: the native reconcile engine reads rules from the
     # registry, never from `pack.toml` — so every rule with a `query` must
     # reach the server, in one batch rather than one call per rule.
+    #
+    # **Stale at six since before Plan 108, fixed here rather than carried
+    # forward.** `pack.toml` grew from six findings to thirteen across Plan
+    # 108 (GSTR-1 as a third evidence source, five findings) and Plan 109
+    # (SupplierPanMismatch) — this assertion was never updated for either.
+    # Not something Plan 109 Slice 2 introduced, but it blocks the pre-PR
+    # `pytest connectors/python/tests/` gate that slice's own acceptance
+    # criteria names, so it is fixed alongside this slice.
     with scripted_server() as (url, received):
         load_pack(PACKS / "gst", url)
 
@@ -215,7 +223,7 @@ def test_gst_registers_all_six_finding_rules_in_one_call():
     assert len(calls) == 1, f"one batched call, not one per rule: {received}"
 
     rules = json.loads(calls[0]["raw"])["rules"]
-    assert len(rules) == 6, f"pack.toml declares six findings, all with a query: {rules}"
+    assert len(rules) == 13, f"pack.toml declares thirteen findings, all with a query: {rules}"
     assert {r["label"] for r in rules} == {
         "gst:PotentialMismatch",
         "gst:AmountMismatch",
@@ -223,6 +231,13 @@ def test_gst_registers_all_six_finding_rules_in_one_call():
         "gst:Reversed",
         "gst:GstinTransposition",
         "gst:PaymentOverdue",
+        "gst:SupplierNotFiled",
+        "gst:Gstr1NotIn2b",
+        "gst:MissingInBooks",
+        "gst:BooksGstr1Mismatch",
+        "gst:GoodsReceiptTiming",
+        "gst:TaxHeadMismatch",
+        "gst:SupplierPanMismatch",
     }
 
 

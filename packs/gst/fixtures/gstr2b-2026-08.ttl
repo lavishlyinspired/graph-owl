@@ -17,12 +17,24 @@
 # They are identical in every respect a document comparison can see. Only
 # `fixtures/goods-receipt.ttl` tells them apart, and that is exactly the point
 # of Section 16(2)(b) being a condition of its own.
+#
+# **Plan 109 Slice 2**: same canonical-entity/Statement retrofit as
+# `gstr2b.ttl` — one `gst:Gstr2bStatement` for this period, `reflectedIn` from
+# each per-line record to it, and `reflectedIn` from each invoice's canonical
+# `gst:Invoice` subject (the same one `purchase-register.ttl`/`gstr1.ttl`
+# compute for these two invoices) to its per-line record here.
 
 @prefix gst: <https://graph-owl.dev/packs/gst#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 
 gst:supplier-27AABCU9603R1ZM rdf:type gst:Supplier ;
     gst:supplierGstin "27AABCU9603R1ZM" .
+
+gst:recipient-self rdf:type gst:Recipient .
+
+gst:g2bstatement-2026-08 rdf:type gst:Gstr2bStatement ;
+    gst:period       "2026-08" ;
+    gst:generatedFor gst:recipient-self .
 
 gst:2b-INV-1010 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -33,7 +45,11 @@ gst:2b-INV-1010 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "3600.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
-    gst:period        "2026-08" .
+    gst:reflectedIn   gst:g2bstatement-2026-08 .
+
+gst:invoice-27AABCU9603R1ZM-INV1010 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-1010 .
 
 gst:2b-INV-1011 rdf:type gst:Gstr2bInvoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -44,4 +60,8 @@ gst:2b-INV-1011 rdf:type gst:Gstr2bInvoice ;
     gst:taxAmount     "2700.00" ;
     gst:itcAvailable  "Y" ;
     gst:reverseCharge "N" ;
-    gst:period        "2026-08" .
+    gst:reflectedIn   gst:g2bstatement-2026-08 .
+
+gst:invoice-27AABCU9603R1ZM-INV1011 rdf:type gst:Invoice ;
+    gst:issuedBy    gst:supplier-27AABCU9603R1ZM ;
+    gst:reflectedIn gst:2b-INV-1011 .

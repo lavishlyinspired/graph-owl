@@ -18,13 +18,19 @@
 # to threshold, so a model that stored "days to pay" as a column would report
 # nothing wrong about the worst case the section exists for.
 
-# The GSTIN is reached by traversal, not read off a literal — Epic 105c.
+# The GSTIN is reached by traversal, not read off a literal — Epic 105c. The
+# register row is itself reached through its canonical `gst:Invoice`
+# subject's `recordedIn` edge — Plan 109 Slice 2 — though this rule's own
+# join (to the event subjects below, which point at the per-line record
+# directly and are untouched by that migration) does not need the canonical
+# subject for anything further.
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
 SELECT ?purchase ?number ?gstin ?purchasedAt ?paidAt
 WHERE {
   GRAPH ?register {
+    ?canonical gst:recordedIn ?invoice .
     ?invoice a gst:PurchaseInvoice ;
              gst:issuedBy ?supplier ;
              gst:invoiceNumber ?number .

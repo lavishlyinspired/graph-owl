@@ -116,6 +116,23 @@ def invoice_key(value: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
 
 
+def invoice_subject(gstin: str, invoice_number: str) -> str:
+    """The canonical ``gst:Invoice`` subject — Plan 109 Slice 2.
+
+    Deterministic, so every importer that sees the same real invoice computes
+    the identical subject with no explicit merge step. Keyed on the *exact*
+    GSTIN and the normalized ``invoice_key``, not the printed invoice number.
+    A hard-key mismatch (a transposed GSTIN, a different state registration
+    of the same PAN) computes a genuinely *different* subject — deliberate,
+    per ``plans/109-gst-canonical-invoice-model.md`` decision 6: a hard-key
+    collision must be reviewed, never silently merged.
+
+    Kept byte-for-byte equivalent to ``invoiceSubject`` in
+    ``ui/src/features/packs/gstText.ts``.
+    """
+    return f"{PREFIX}:invoice-{subject_suffix(gstin)}-{invoice_key(invoice_number)}"
+
+
 def subject_suffix(value: str) -> str:
     """An identifier as the local part of a prefixed name.
 
@@ -338,6 +355,22 @@ def to_turtle(invoices: list[Gstr2bInvoice], namespace: str | None = None) -> st
             lines.append(f'    {PREFIX}:{field_name:<13} "{_literal(value)}"{terminator}')
         lines.append("")
 
+    # **The statements — one per return period, deduplicated across every
+    # invoice line they cover, generated for the single well-known Recipient
+    # this pack is single-tenant for — Plan 109 Slice 2.**
+    def statement_subject(period: str) -> str:
+        return f"{PREFIX}:g2bstatement-{period}"
+
+    periods = dict.fromkeys(invoice.period for invoice in invoices if invoice.period != "")
+    if periods:
+        lines.append(f"{PREFIX}:recipient-self rdf:type {PREFIX}:Recipient .")
+        lines.append("")
+    for period in periods:
+        lines.append(f"{statement_subject(period)} rdf:type {PREFIX}:Gstr2bStatement ;")
+        lines.append(f'    {PREFIX}:{"period":<13} "{_literal(period)}" ;')
+        lines.append(f'    {PREFIX}:{"generatedFor":<13} {PREFIX}:recipient-self .')
+        lines.append("")
+
     for invoice in invoices:
         lines.append(f"{invoice.subject} rdf:type {PREFIX}:Gstr2bInvoice ;")
         # `issuedBy` is a reference, not a literal — written unquoted, like
@@ -359,13 +392,15 @@ def to_turtle(invoices: list[Gstr2bInvoice], namespace: str | None = None) -> st
             ("reverseCharge", invoice.reverse_charge),
             ("invoiceType", invoice.invoice_type),
             ("placeOfSupply", invoice.place_of_supply),
-            ("period", invoice.period),
+            # `period` moved to `gst:Gstr2bStatement` — Plan 109 Slice 2. The
+            # per-line record reaches it through `reflectedIn` instead.
         ]
         # An absent value is omitted rather than written blank: "not reported"
         # and "reported as empty" are different facts, and a reconciliation is
         # mostly a set of questions about missing data.
         present_literals = [(name, value) for name, value in literal_fields if value != ""]
-        total = len(edges) + len(present_literals)
+        has_statement = invoice.period != ""
+        total = len(edges) + len(present_literals) + (1 if has_statement else 0)
         written = 0
         for name, value in edges:
             written += 1
@@ -375,6 +410,15 @@ def to_turtle(invoices: list[Gstr2bInvoice], namespace: str | None = None) -> st
             written += 1
             terminator = " ." if written == total else " ;"
             lines.append(f'    {PREFIX}:{name:<13} "{_literal(value)}"{terminator}')
+        if has_statement:
+            lines.append(f'    {PREFIX}:{"reflectedIn":<13} {statement_subject(invoice.period)} .')
+        lines.append("")
+
+        # The canonical entity — Plan 109 Slice 2.
+        canonical = invoice_subject(invoice.supplier_gstin, invoice.invoice_number)
+        lines.append(f"{canonical} rdf:type {PREFIX}:Invoice ;")
+        lines.append(f'    {PREFIX}:{"issuedBy":<13} {invoice.supplier_subject} ;')
+        lines.append(f'    {PREFIX}:{"reflectedIn":<13} {invoice.subject} .')
         lines.append("")
     return "\n".join(lines)
 

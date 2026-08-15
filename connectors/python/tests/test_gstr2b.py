@@ -221,10 +221,18 @@ def test_the_period_comes_from_the_declared_return_period_not_the_invoice_date()
     `supprd` (the supplier's own declared return period) is what `gst:period`
     means; deriving it from `dt` instead makes that carry-forward case, and
     the reasoning built on it, permanently untestable.
+
+    **Plan 109 Slice 2: the period now lives once, on the deduplicated
+    `Gstr2bStatement`, not once per invoice line — the exact repetition this
+    slice exists to remove.** All three invoices in `get_payload()` share
+    the declared period "2026-07", so before this slice the string appeared
+    three times, once per per-line record; now it appears exactly once, on
+    the one statement they all point at.
     """
     turtle = to_turtle(normalize(get_payload()))
 
-    assert turtle.count('gst:period        "2026-07"') == 3
+    assert turtle.count('gst:period        "2026-07"') == 1
+    assert "gst:g2bstatement-2026-07 rdf:type gst:Gstr2bStatement" in turtle
 
 
 def test_the_declared_period_is_scoped_to_its_own_supplier() -> None:
@@ -352,3 +360,43 @@ def test_two_invoices_from_the_same_supplier_point_at_the_same_subject() -> None
 
     assert "gst:issuedBy      gst:supplier-27AABCU9603R1ZM" in first
     assert "gst:issuedBy      gst:supplier-27AABCU9603R1ZM" in second
+
+
+# ---- The Gstr2bStatement and canonical gst:Invoice — Plan 109 Slice 2 ----
+
+
+def test_one_statement_per_period_generated_for_the_single_recipient() -> None:
+    turtle = to_turtle(normalize(get_payload()))
+
+    assert "gst:g2bstatement-2026-07 rdf:type gst:Gstr2bStatement" in turtle
+    assert "gst:recipient-self rdf:type gst:Recipient" in turtle
+    statement_block = turtle[turtle.index("gst:g2bstatement-2026-07") :]
+    assert "gst:generatedFor  gst:recipient-self" in statement_block
+    assert turtle.count("rdf:type gst:Gstr2bStatement") == 1
+
+
+def test_each_per_line_record_points_at_its_statement_with_reflected_in() -> None:
+    turtle = to_turtle(normalize(get_payload()))
+    invoice_block = turtle[turtle.index("gst:2b-INV-1001") :]
+    invoice_block = invoice_block[: invoice_block.index("\n\n")]
+
+    assert "gst:reflectedIn   gst:g2bstatement-2026-07" in invoice_block
+
+
+def test_canonical_invoice_subject_carries_reflected_in_to_the_per_line_record() -> None:
+    turtle = to_turtle(normalize(get_payload()))
+
+    assert "gst:invoice-27AABCU9603R1ZM-INV1001 rdf:type gst:Invoice" in turtle
+    canonical_block = turtle[turtle.index("gst:invoice-27AABCU9603R1ZM-INV1001") :]
+    assert "gst:reflectedIn   gst:2b-INV-1001" in canonical_block
+
+
+def test_two_periods_produce_two_statements() -> None:
+    payload = get_payload()
+    payload["data"]["data"]["docdata"]["b2b"][1]["supprd"] = "082026"
+
+    turtle = to_turtle(normalize(payload))
+
+    assert "gst:g2bstatement-2026-07 rdf:type gst:Gstr2bStatement" in turtle
+    assert "gst:g2bstatement-2026-08 rdf:type gst:Gstr2bStatement" in turtle
+    assert turtle.count("rdf:type gst:Gstr2bStatement") == 2

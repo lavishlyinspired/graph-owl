@@ -20,8 +20,12 @@
 
 # **The GSTIN is reached by traversal, not read off a literal — Epic 105c.**
 # `?purchase gst:issuedBy ?supplier` is a real edge to a `gst:Supplier`
-# subject; the comparison against the filed side still happens on that
-# subject's own `supplierGstin` property.
+# subject.
+#
+# **The two sides are joined through a shared canonical `gst:Invoice`
+# subject — Plan 109 Slice 2**, computed deterministically from the exact
+# GSTIN and normalized invoice number, replacing what used to be a shared
+# `?key` binding across both `GRAPH` blocks.
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
@@ -29,21 +33,19 @@ PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 SELECT ?purchase ?number ?gstin ?claimed ?filed ?capPercent ?citation
 WHERE {
   GRAPH ?register {
+    ?canonical gst:recordedIn ?purchase .
     ?purchase a gst:PurchaseInvoice ;
               gst:issuedBy ?supplier ;
               gst:invoiceNumber ?number ;
-              gst:invoiceKey    ?key ;
               gst:invoiceDate   ?date ;
               gst:taxableValue  ?claimed .
     ?supplier gst:supplierGstin ?gstin .
   }
 
   GRAPH ?authority {
+    ?canonical gst:reflectedIn ?filedLine .
     ?filedLine a gst:Gstr2bInvoice ;
-               gst:issuedBy ?filedSupplier ;
-               gst:invoiceKey    ?key ;
-               gst:taxableValue  ?filed .
-    ?filedSupplier gst:supplierGstin ?gstin .
+               gst:taxableValue ?filed .
   }
 
   # The provision in force on the invoice date.

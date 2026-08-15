@@ -36,6 +36,16 @@
 # INV-2001 as a finding every month and a reviewer would be dismissing a
 # compliant invoice forever.
 #
+# **Plan 109 Slice 2: `period`/`filedDate` move off every per-line record
+# here onto a `gst:Gstr1Filing` — one per (supplier, return period), not one
+# per invoice line — and each declared line points at its filing with
+# `filedIn`.** Every invoice below also gets an `appearsIn` edge from its
+# canonical `gst:Invoice` subject, computed the identical deterministic way
+# `purchase-register.ttl` computes it: `gst:invoice-{supplierGstin}-
+# {invoiceKey}`. Where the GSTIN here differs from the register's (INV-1004,
+# INV-1015 — see that file's own comment), the canonical subject computed is
+# *deliberately* a different one; nothing here forces a merge.
+#
 # Authored from the published GST return format, which is the specification
 # (`plans/00i-licensing.md` rule 2).
 
@@ -59,6 +69,35 @@ gst:supplier-33AAGCV2109L1ZH rdf:type gst:Supplier ;
     gst:supplierGstin "33AAGCV2109L1ZH" ;
     gst:supplierName  "Vaigai Packaging LLP" .
 
+# **The filings — one per (supplier, return period), deduplicated across
+# every invoice line they cover.** Five filings below: three suppliers filing
+# for July 2026, one of those three's carry-forward filing for August 2026,
+# and the same first supplier's July 2020 filing (the historical pair).
+gst:g1filing-27AABCU9603R1ZM-2026-07 rdf:type gst:Gstr1Filing ;
+    gst:period    "2026-07" ;
+    gst:filedDate "2026-08-11" ;
+    gst:filedBy   gst:supplier-27AABCU9603R1ZM .
+
+gst:g1filing-29AACCG0527D1Z8-2026-07 rdf:type gst:Gstr1Filing ;
+    gst:period    "2026-07" ;
+    gst:filedDate "2026-08-18" ;
+    gst:filedBy   gst:supplier-29AACCG0527D1Z8 .
+
+gst:g1filing-33AAGCV2109L1ZH-2026-07 rdf:type gst:Gstr1Filing ;
+    gst:period    "2026-07" ;
+    gst:filedDate "2026-08-11" ;
+    gst:filedBy   gst:supplier-33AAGCV2109L1ZH .
+
+gst:g1filing-27AABCU9603R1ZM-2026-08 rdf:type gst:Gstr1Filing ;
+    gst:period    "2026-08" ;
+    gst:filedDate "2026-09-09" ;
+    gst:filedBy   gst:supplier-27AABCU9603R1ZM .
+
+gst:g1filing-27AABCU9603R1ZM-2020-07 rdf:type gst:Gstr1Filing ;
+    gst:period    "2020-07" ;
+    gst:filedDate "2020-08-11" ;
+    gst:filedBy   gst:supplier-27AABCU9603R1ZM .
+
 gst:g1-INV-1001 rdf:type gst:Gstr1Invoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
     gst:invoiceNumber "INV-1001" ;
@@ -66,8 +105,11 @@ gst:g1-INV-1001 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2026-07-04" ;
     gst:taxableValue  "100000.00" ;
     gst:taxAmount     "18000.00" ;
-    gst:filedDate     "2026-08-11" ;
-    gst:period        "2026-07" .
+    gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1001 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-27AABCU9603R1ZM ;
+    gst:appearsIn gst:g1-INV-1001 .
 
 # Declared 5,000 lower than the register claims. The supplier is not
 # necessarily wrong here — that is precisely why the finding names both
@@ -79,8 +121,11 @@ gst:g1-INV-1002 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2026-07-09" ;
     gst:taxableValue  "95000.00" ;
     gst:taxAmount     "17100.00" ;
-    gst:filedDate     "2026-08-11" ;
-    gst:period        "2026-07" .
+    gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1002 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-27AABCU9603R1ZM ;
+    gst:appearsIn gst:g1-INV-1002 .
 
 # INV-1003 is deliberately absent — the supplier has filed nothing for it.
 
@@ -91,8 +136,15 @@ gst:g1-INV-1004 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2026-07-22" ;
     gst:taxableValue  "50000.00" ;
     gst:taxAmount     "9000.00" ;
-    gst:filedDate     "2026-08-11" ;
-    gst:period        "2026-07" .
+    gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2026-07 .
+
+# Filed under the *correct* GSTIN — this is the canonical subject that
+# GSTR-2B's own INV-1004 line also computes, below in `gstr2b.ttl`. The
+# register's INV-1004 computes a different one (`…1MZ`, the transposed GSTIN)
+# and is deliberately never merged into this one.
+gst:invoice-27AABCU9603R1ZM-INV1004 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-27AABCU9603R1ZM ;
+    gst:appearsIn gst:g1-INV-1004 .
 
 gst:g1-INV-1005 rdf:type gst:Gstr1Invoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -101,8 +153,11 @@ gst:g1-INV-1005 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2026-07-24" ;
     gst:taxableValue  "40000.00" ;
     gst:taxAmount     "7200.00" ;
-    gst:filedDate     "2026-08-11" ;
-    gst:period        "2026-07" .
+    gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1005 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-27AABCU9603R1ZM ;
+    gst:appearsIn gst:g1-INV-1005 .
 
 gst:g1-INV-1006 rdf:type gst:Gstr1Invoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -111,8 +166,11 @@ gst:g1-INV-1006 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2026-07-26" ;
     gst:taxableValue  "60000.00" ;
     gst:taxAmount     "10800.00" ;
-    gst:filedDate     "2026-08-11" ;
-    gst:period        "2026-07" .
+    gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1006 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-27AABCU9603R1ZM ;
+    gst:appearsIn gst:g1-INV-1006 .
 
 # **The Gstr1NotIn2b case.** Declared for the July period and filed on 18
 # August, and present in no GSTR-2B this pack holds — July's was generated
@@ -126,8 +184,11 @@ gst:g1-INV-1007 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2026-07-28" ;
     gst:taxableValue  "30000.00" ;
     gst:taxAmount     "5400.00" ;
-    gst:filedDate     "2026-08-18" ;
-    gst:period        "2026-07" .
+    gst:filedIn       gst:g1filing-29AACCG0527D1Z8-2026-07 .
+
+gst:invoice-29AACCG0527D1Z8-INV1007 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-29AACCG0527D1Z8 ;
+    gst:appearsIn gst:g1-INV-1007 .
 
 # **The MissingInBooks case.** The supplier declared it, the authority made it
 # available, and the taxpayer's register has no such invoice. Either the
@@ -141,8 +202,11 @@ gst:g1-INV-1008 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2026-07-19" ;
     gst:taxableValue  "45000.00" ;
     gst:taxAmount     "8100.00" ;
-    gst:filedDate     "2026-08-11" ;
-    gst:period        "2026-07" .
+    gst:filedIn       gst:g1filing-33AAGCV2109L1ZH-2026-07 .
+
+gst:invoice-33AAGCV2109L1ZH-INV1008 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-33AAGCV2109L1ZH ;
+    gst:appearsIn gst:g1-INV-1008 .
 
 # INV-1009 is deliberately absent. It is a reverse-charge purchase, and the
 # recipient self-assesses the tax — there is no supplier-side GSTR-1 line to
@@ -157,8 +221,11 @@ gst:g1-INV-1010 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2026-08-30" ;
     gst:taxableValue  "20000.00" ;
     gst:taxAmount     "3600.00" ;
-    gst:filedDate     "2026-09-09" ;
-    gst:period        "2026-08" .
+    gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2026-08 .
+
+gst:invoice-27AABCU9603R1ZM-INV1010 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-27AABCU9603R1ZM ;
+    gst:appearsIn gst:g1-INV-1010 .
 
 gst:g1-INV-1011 rdf:type gst:Gstr1Invoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -167,8 +234,11 @@ gst:g1-INV-1011 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2026-08-12" ;
     gst:taxableValue  "15000.00" ;
     gst:taxAmount     "2700.00" ;
-    gst:filedDate     "2026-09-09" ;
-    gst:period        "2026-08" .
+    gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2026-08 .
+
+gst:invoice-27AABCU9603R1ZM-INV1011 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-27AABCU9603R1ZM ;
+    gst:appearsIn gst:g1-INV-1011 .
 
 # The 2020 pair. Same delta shape as `AmountMismatch`'s own, against a
 # different named graph — 5% under a 10% cap is compliant, 20% is not.
@@ -179,8 +249,11 @@ gst:g1-INV-1012 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2026-07-29" ;
     gst:taxableValue  "100000.00" ;
     gst:taxAmount     "18000.00" ;
-    gst:filedDate     "2026-08-11" ;
-    gst:period        "2026-07" .
+    gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1012 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-27AABCU9603R1ZM ;
+    gst:appearsIn gst:g1-INV-1012 .
 
 # The supplier's own spelling of the same invoice — a third format.
 gst:g1-INV-1014 rdf:type gst:Gstr1Invoice ;
@@ -190,8 +263,11 @@ gst:g1-INV-1014 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2026-07-31" ;
     gst:taxableValue  "70000.00" ;
     gst:taxAmount     "12600.00" ;
-    gst:filedDate     "2026-08-11" ;
-    gst:period        "2026-07" .
+    gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2026-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV1014 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-27AABCU9603R1ZM ;
+    gst:appearsIn gst:g1-INV-1014 .
 
 gst:g1-INV-1015 rdf:type gst:Gstr1Invoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -200,8 +276,15 @@ gst:g1-INV-1015 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2026-07-31" ;
     gst:taxableValue  "80000.00" ;
     gst:taxAmount     "14400.00" ;
-    gst:filedDate     "2026-08-11" ;
-    gst:period        "2026-07" .
+    gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2026-07 .
+
+# Filed under the Maharashtra registration — the canonical subject this
+# computes is deliberately different from the register's, which booked this
+# invoice against the Karnataka registration of the same PAN. See
+# `purchase-register.ttl`'s own comment on INV-1015.
+gst:invoice-27AABCU9603R1ZM-INV1015 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-27AABCU9603R1ZM ;
+    gst:appearsIn gst:g1-INV-1015 .
 
 gst:g1-INV-2001 rdf:type gst:Gstr1Invoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -210,8 +293,11 @@ gst:g1-INV-2001 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2020-07-10" ;
     gst:taxableValue  "95000.00" ;
     gst:taxAmount     "17100.00" ;
-    gst:filedDate     "2020-08-11" ;
-    gst:period        "2020-07" .
+    gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2020-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV2001 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-27AABCU9603R1ZM ;
+    gst:appearsIn gst:g1-INV-2001 .
 
 gst:g1-INV-2002 rdf:type gst:Gstr1Invoice ;
     gst:issuedBy      gst:supplier-27AABCU9603R1ZM ;
@@ -220,5 +306,8 @@ gst:g1-INV-2002 rdf:type gst:Gstr1Invoice ;
     gst:invoiceDate   "2020-07-12" ;
     gst:taxableValue  "80000.00" ;
     gst:taxAmount     "14400.00" ;
-    gst:filedDate     "2020-08-11" ;
-    gst:period        "2020-07" .
+    gst:filedIn       gst:g1filing-27AABCU9603R1ZM-2020-07 .
+
+gst:invoice-27AABCU9603R1ZM-INV2002 rdf:type gst:Invoice ;
+    gst:issuedBy  gst:supplier-27AABCU9603R1ZM ;
+    gst:appearsIn gst:g1-INV-2002 .

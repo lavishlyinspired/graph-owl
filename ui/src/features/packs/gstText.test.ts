@@ -6,7 +6,7 @@
  *  proved was wrong. */
 
 import { describe, expect, it } from "vitest";
-import { invoiceKey, subjectSuffix } from "./gstText";
+import { invoiceKey, invoiceSubject, subjectSuffix } from "./gstText";
 
 describe("turning an invoice number into a subject", () => {
   /** **The bug a real upload found, and it is not an edge case.** Indian
@@ -92,5 +92,47 @@ describe("the key two records are the same invoice by", () => {
     expect(invoiceKey("")).toBe("");
     expect(invoiceKey("  ")).toBe("");
     expect(invoiceKey("///")).toBe("");
+  });
+});
+
+describe("the canonical invoice subject — Plan 109 Slice 2", () => {
+  /** Deterministic and computed the same way every importer computes it: an
+   *  exact business-key match (same GSTIN, same normalized invoice number)
+   *  must land on the identical subject with no explicit merge step. */
+  it("computes the same subject from the same GSTIN and invoice number", () => {
+    expect(invoiceSubject("gst", "27AABCU9603R1ZM", "INV-1001")).toBe(
+      invoiceSubject("gst", "27AABCU9603R1ZM", "INV-1001"),
+    );
+  });
+
+  /** The matching key, not the printed number — the same reason
+   *  `gst:invoiceKey` exists at all: three printed spellings of one invoice
+   *  number must not compute three different canonical subjects. */
+  it("agrees across every printed spelling of the same invoice number", () => {
+    expect(invoiceSubject("gst", "27AABCU9603R1ZM", "INV/1014")).toBe(
+      invoiceSubject("gst", "27AABCU9603R1ZM", "INV 1014"),
+    );
+    expect(invoiceSubject("gst", "27AABCU9603R1ZM", "INV/1014")).toBe(
+      invoiceSubject("gst", "27AABCU9603R1ZM", "INV-1014"),
+    );
+  });
+
+  /** **A hard-key mismatch must not silently merge — the collision-guard
+   *  premise this whole capability rests on.** A transposed GSTIN computes a
+   *  genuinely different subject, not the same one with a typo tolerated. */
+  it("computes a different subject when the GSTIN differs, even by one transposed pair of characters", () => {
+    expect(invoiceSubject("gst", "27AABCU9603R1ZM", "INV-1004")).not.toBe(
+      invoiceSubject("gst", "27AABCU9603R1MZ", "INV-1004"),
+    );
+  });
+
+  it("computes a different subject for a genuinely different invoice number", () => {
+    expect(invoiceSubject("gst", "27AABCU9603R1ZM", "INV-1001")).not.toBe(
+      invoiceSubject("gst", "27AABCU9603R1ZM", "INV-1002"),
+    );
+  });
+
+  it("matches this pack's own fixture naming, so a live upload and a fixture converge on one subject", () => {
+    expect(invoiceSubject("gst", "27AABCU9603R1ZM", "INV-1001")).toBe("gst:invoice-27AABCU9603R1ZM-INV1001");
   });
 });

@@ -189,6 +189,22 @@ export function supplierSubject(prefix: string, gstin: string): string {
   return `${prefix}:supplier-${subjectSuffix(gstin)}`;
 }
 
+/** The canonical `gst:Invoice` subject — Plan 109 Slice 2.
+ *
+ *  **Deterministic, so every importer that sees the same real invoice
+ *  computes the identical subject with no explicit merge step.** Keyed on
+ *  the *exact* GSTIN and the normalized `invoiceKey`, not the printed
+ *  invoice number — three printed spellings of one invoice must land on one
+ *  canonical subject, the same reason `invoiceKey` exists at all. A hard-key
+ *  mismatch (a transposed GSTIN, a different state registration of the same
+ *  PAN) computes a genuinely *different* subject, which is deliberate: this
+ *  function is the exact-match path only, and per
+ *  `plans/109-gst-canonical-invoice-model.md` decision 6 a hard-key
+ *  collision must be reviewed, never silently merged. */
+export function invoiceSubject(prefix: string, gstin: string, invoiceNumber: string): string {
+  return `${prefix}:invoice-${subjectSuffix(gstin)}-${invoiceKey(invoiceNumber)}`;
+}
+
 /** One subject's predicate block, with the terminator each line needs.
  *
  *  **An absent value is omitted rather than written blank.** "Not reported"

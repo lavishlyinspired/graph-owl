@@ -33,7 +33,17 @@ export { GstImportError as Gstr2bError } from "./gstText";
  *
  *  Re-exported because the pinned Python-twin tests import `isoDate` and
  *  `returnPeriod` from this module by name. */
-import { GstImportError, invoiceKey, isoDate, literal, money, returnPeriod, subjectSuffix, supplierSubject } from "./gstText";
+import {
+  GstImportError,
+  invoiceKey,
+  invoiceSubject,
+  isoDate,
+  literal,
+  money,
+  returnPeriod,
+  subjectSuffix,
+  supplierSubject,
+} from "./gstText";
 
 export { isoDate, returnPeriod };
 
@@ -137,7 +147,8 @@ const LITERAL_FIELDS: readonly (readonly [string, keyof Gstr2bInvoice])[] = [
   ["reverseCharge", "reverseCharge"],
   ["invoiceType", "invoiceType"],
   ["placeOfSupply", "placeOfSupply"],
-  ["period", "period"],
+  // `period` moved to `gst:Gstr2bStatement` — Plan 109 Slice 2. The per-line
+  // record reaches it through `reflectedIn` instead of carrying it directly.
 ];
 
 /** The same shape `packs/gst/fixtures/gstr2b.ttl` carries, so the six finding
@@ -176,13 +187,31 @@ export function toTurtle(invoices: readonly Gstr2bInvoice[], prefix = "gst", iri
     lines.push("");
   }
 
+  // **The statements — one per return period, deduplicated across every
+  // invoice line they cover, generated for the single well-known Recipient
+  // this pack is single-tenant for — Plan 109 Slice 2.**
+  const statementSubject = (period: string): string => `${prefix}:g2bstatement-${period}`;
+  const periods = new Set(invoices.map((invoice) => invoice.period).filter((period) => period !== ""));
+  if (periods.size > 0) {
+    lines.push(`${prefix}:recipient-self rdf:type ${prefix}:Recipient .`, "");
+  }
+  for (const period of periods) {
+    lines.push(
+      `${statementSubject(period)} rdf:type ${prefix}:Gstr2bStatement ;`,
+      `    ${prefix}:${"period".padEnd(13)} "${literal(period)}" ;`,
+      `    ${prefix}:${"generatedFor".padEnd(13)} ${prefix}:recipient-self .`,
+      "",
+    );
+  }
+
   for (const invoice of invoices) {
     lines.push(`${prefix}:2b-${subjectSuffix(invoice.invoiceNumber)} rdf:type ${prefix}:Gstr2bInvoice ;`);
     // An absent value is omitted rather than written blank: "not reported" and
     // "reported as empty" are different facts, and a reconciliation is mostly
     // a set of questions about missing data.
     const presentLiterals = LITERAL_FIELDS.filter(([, key]) => invoice[key] !== "");
-    const total = 1 + presentLiterals.length;
+    const hasStatement = invoice.period !== "";
+    const total = 1 + presentLiterals.length + (hasStatement ? 1 : 0);
     let written = 0;
     written += 1;
     lines.push(
@@ -195,7 +224,19 @@ export function toTurtle(invoices: readonly Gstr2bInvoice[], prefix = "gst", iri
       const terminator = written === total ? " ." : " ;";
       lines.push(`    ${prefix}:${name.padEnd(13)} "${literal(invoice[key])}"${terminator}`);
     });
+    if (hasStatement) {
+      lines.push(`    ${prefix}:${"reflectedIn".padEnd(13)} ${statementSubject(invoice.period)} .`);
+    }
     lines.push("");
+
+    // The canonical entity — Plan 109 Slice 2.
+    const canonical = invoiceSubject(prefix, invoice.supplierGstin, invoice.invoiceNumber);
+    lines.push(
+      `${canonical} rdf:type ${prefix}:Invoice ;`,
+      `    ${prefix}:${"issuedBy".padEnd(13)} ${supplierSubject(prefix, invoice.supplierGstin)} ;`,
+      `    ${prefix}:${"reflectedIn".padEnd(13)} ${prefix}:2b-${subjectSuffix(invoice.invoiceNumber)} .`,
+      "",
+    );
   }
   return lines.join("\n");
 }

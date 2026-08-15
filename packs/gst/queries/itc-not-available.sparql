@@ -5,26 +5,26 @@
 # 17(5). A reconciliation that only compared amounts would report this invoice
 # as perfectly fine, and the taxpayer would claim credit they do not have.
 
-# The GSTIN is reached by traversal, not read off a literal — Epic 105c.
+# The GSTIN is reached by traversal, not read off a literal — Epic 105c. The
+# two sides are joined through a shared canonical `gst:Invoice` subject —
+# Plan 109 Slice 2 — replacing what used to be a shared `?key` binding.
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
 SELECT ?purchase ?number ?gstin ?taxAmount ?itcAvailable
 WHERE {
   GRAPH ?register {
+    ?canonical gst:recordedIn ?purchase .
     ?purchase a gst:PurchaseInvoice ;
               gst:issuedBy ?supplier ;
               gst:invoiceNumber ?number ;
-              gst:invoiceKey    ?key ;
               gst:taxAmount     ?taxAmount .
     ?supplier gst:supplierGstin ?gstin .
   }
   GRAPH ?authority {
+    ?canonical gst:reflectedIn ?filed .
     ?filed a gst:Gstr2bInvoice ;
-           gst:issuedBy ?filedSupplier ;
-           gst:invoiceKey    ?key ;
-           gst:itcAvailable  ?itcAvailable .
-    ?filedSupplier gst:supplierGstin ?gstin .
+           gst:itcAvailable ?itcAvailable .
   }
   FILTER (?itcAvailable != "Y")
 }

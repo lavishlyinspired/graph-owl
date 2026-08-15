@@ -33,6 +33,7 @@
 import {
   GstImportError,
   invoiceKey,
+  invoiceSubject,
   isoDate,
   money,
   monthNameDate,
@@ -197,6 +198,31 @@ export function toTurtle(invoices: readonly Gstr1Invoice[], prefix = "gst", iri?
     );
   }
 
+  // **The filings — one per (supplier, return period), deduplicated across
+  // every invoice line they cover — Plan 109 Slice 2.** `fldtr1`/`flprdr1`
+  // live on the supplier block in the source format, not the invoice, so
+  // every invoice in one group shares the identical filing date and period
+  // by construction; the first one seen is as good as any other.
+  const filingSubject = (gstin: string, period: string): string =>
+    `${prefix}:g1filing-${subjectSuffix(gstin)}-${period}`;
+  const filings = new Map<string, { readonly gstin: string; readonly period: string; readonly filedDate: string }>();
+  for (const invoice of invoices) {
+    if (invoice.period === "") continue;
+    const key = filingSubject(invoice.supplierGstin, invoice.period);
+    if (!filings.has(key)) {
+      filings.set(key, { gstin: invoice.supplierGstin, period: invoice.period, filedDate: invoice.filedDate });
+    }
+  }
+  for (const [subject, filing] of filings) {
+    lines.push(
+      ...turtleSubject(prefix, subject, "Gstr1Filing", [
+        ["period", filing.period],
+        ["filedDate", filing.filedDate],
+        ["filedBy", supplierSubject(prefix, filing.gstin), true],
+      ]),
+    );
+  }
+
   for (const invoice of invoices) {
     lines.push(
       ...turtleSubject(prefix, `${prefix}:g1-${subjectSuffix(invoice.invoiceNumber)}`, "Gstr1Invoice", [
@@ -213,8 +239,18 @@ export function toTurtle(invoices: readonly Gstr1Invoice[], prefix = "gst", iri?
         ["reverseCharge", invoice.reverseCharge],
         ["invoiceType", invoice.invoiceType],
         ["placeOfSupply", invoice.placeOfSupply],
-        ["filedDate", invoice.filedDate],
-        ["period", invoice.period],
+        [
+          "filedIn",
+          invoice.period === "" ? "" : filingSubject(invoice.supplierGstin, invoice.period),
+          true,
+        ],
+      ]),
+    );
+    // The canonical entity — Plan 109 Slice 2.
+    lines.push(
+      ...turtleSubject(prefix, invoiceSubject(prefix, invoice.supplierGstin, invoice.invoiceNumber), "Invoice", [
+        ["issuedBy", supplierSubject(prefix, invoice.supplierGstin), true],
+        ["appearsIn", `${prefix}:g1-${subjectSuffix(invoice.invoiceNumber)}`, true],
       ]),
     );
   }

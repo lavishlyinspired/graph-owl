@@ -22,6 +22,10 @@
 # "Latest provision in force" is `OPTIONAL` + `!BOUND`, not `FILTER NOT
 # EXISTS` — see `amount-mismatch.sparql` for why that distinction is not
 # stylistic.
+#
+# **The two sides are joined through a shared canonical `gst:Invoice`
+# subject — Plan 109 Slice 2** — replacing what used to be a shared
+# `?key`+`?gstin` binding.
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
@@ -29,21 +33,19 @@ PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 SELECT ?purchase ?number ?gstin ?claimed ?declaredValue ?capPercent ?citation
 WHERE {
   GRAPH ?register {
+    ?canonical gst:recordedIn ?purchase .
     ?purchase a gst:PurchaseInvoice ;
               gst:issuedBy ?supplier ;
               gst:invoiceNumber ?number ;
-              gst:invoiceKey    ?key ;
               gst:invoiceDate   ?date ;
               gst:taxableValue  ?claimed .
     ?supplier gst:supplierGstin ?gstin .
   }
 
   GRAPH ?gstr1 {
+    ?canonical gst:appearsIn ?declared .
     ?declared a gst:Gstr1Invoice ;
-              gst:issuedBy ?declaredSupplier ;
-              gst:invoiceKey    ?key ;
-              gst:taxableValue  ?declaredValue .
-    ?declaredSupplier gst:supplierGstin ?gstin .
+              gst:taxableValue ?declaredValue .
   }
 
   # The provision in force on the invoice date.

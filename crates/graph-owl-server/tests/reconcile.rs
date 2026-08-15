@@ -464,3 +464,274 @@ async fn reconcile_is_admin_gated() {
         "refused as not-found rather than forbidden, matching every other admin route"
     );
 }
+
+// ---- Plan 109 Slice 2: the canonical gst:Invoice, against a real graph ----
+//
+// Both tests below seed a minimal, self-contained shape rather than loading
+// the real pack — the same pattern every other test in this file already
+// uses — and prove the *traversal*, not a finding rule. Each import lands in
+// its own named graph exactly as a real pack load does, so a canonical
+// subject's edges to its per-source records are only findable if every
+// pattern below sits inside its own `GRAPH` block — the same discipline
+// `packs/gst/queries/*.sparql` document at length.
+
+async fn sparql(app: &axum::Router, query: &str) -> serde_json::Value {
+    let (status, body) = json(
+        app,
+        "POST",
+        "/sparql",
+        serde_json::json!({ "query": query }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+async fn declare_gst_namespace_and_predicates(app: &axum::Router, string_predicates: &[&str]) {
+    let (status, _) = json(
+        app,
+        "POST",
+        "/namespaces",
+        serde_json::json!({"iri": "https://graph-owl.dev/packs/gst#"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "namespace declare");
+
+    for name in string_predicates {
+        let (status, _) = json(
+            app,
+            "POST",
+            "/predicates",
+            serde_json::json!({"namespace": 1024, "name": name, "valueType": 1, "many": false}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "predicate {name}");
+    }
+    for name in ["issuedBy", "recordedIn", "appearsIn", "reflectedIn"] {
+        let (status, _) = json(
+            app,
+            "POST",
+            "/predicates",
+            serde_json::json!({"namespace": 1024, "name": name, "valueType": 0, "many": false}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "predicate {name}");
+    }
+}
+
+/// **The user's own words: "the most important end-to-end test in the whole
+/// plan."** A Books record, a GSTR-1 record and a GSTR-2B record
+/// representing the same real invoice resolve to exactly one canonical
+/// `gst:Invoice`, and all three source records remain independently
+/// reachable — and queryable in their own named graphs — from it.
+#[tokio::test]
+async fn a_books_gstr1_and_gstr2b_record_for_one_invoice_converge_on_one_canonical_subject() {
+    let (app, _db, _url) = test_app().await;
+    declare_gst_namespace_and_predicates(&app, &["supplierGstin", "invoiceNumber"]).await;
+
+    let books = r#"
+        @prefix gst: <https://graph-owl.dev/packs/gst#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+        gst:pr-INV-9001 rdf:type gst:PurchaseInvoice ;
+            gst:supplierGstin "27AABCU9603R1ZM" ;
+            gst:invoiceNumber "INV-9001" .
+
+        gst:invoice-27AABCU9603R1ZM-INV9001 rdf:type gst:Invoice ;
+            gst:recordedIn gst:pr-INV-9001 .
+    "#;
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/graph/import/rdf?source=gst-purchase-register&format=turtle",
+        "text/turtle",
+        books.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "books import: {body}");
+
+    let gstr1 = r#"
+        @prefix gst: <https://graph-owl.dev/packs/gst#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+        gst:g1-INV-9001 rdf:type gst:Gstr1Invoice ;
+            gst:supplierGstin "27AABCU9603R1ZM" ;
+            gst:invoiceNumber "INV-9001" .
+
+        gst:invoice-27AABCU9603R1ZM-INV9001 rdf:type gst:Invoice ;
+            gst:appearsIn gst:g1-INV-9001 .
+    "#;
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/graph/import/rdf?source=gst-gstr1&format=turtle",
+        "text/turtle",
+        gstr1.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "gstr1 import: {body}");
+
+    let gstr2b = r#"
+        @prefix gst: <https://graph-owl.dev/packs/gst#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+        gst:2b-INV-9001 rdf:type gst:Gstr2bInvoice ;
+            gst:supplierGstin "27AABCU9603R1ZM" ;
+            gst:invoiceNumber "INV-9001" .
+
+        gst:invoice-27AABCU9603R1ZM-INV9001 rdf:type gst:Invoice ;
+            gst:reflectedIn gst:2b-INV-9001 .
+    "#;
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/graph/import/rdf?source=gst-gstr2b&format=turtle",
+        "text/turtle",
+        gstr2b.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "gstr2b import: {body}");
+
+    // One traversal, from the one canonical subject, to all three
+    // independently-imported, independently-graphed per-source records —
+    // never a value join on a shared key.
+    let result = sparql(
+        &app,
+        r"
+            PREFIX gst: <https://graph-owl.dev/packs/gst#>
+            SELECT ?canonical ?purchase ?declared ?filed
+            WHERE {
+              GRAPH ?g1 { ?canonical a gst:Invoice ; gst:recordedIn ?purchase . }
+              GRAPH ?g2 { ?canonical gst:appearsIn ?declared . }
+              GRAPH ?g3 { ?canonical gst:reflectedIn ?filed . }
+            }
+        ",
+    )
+    .await;
+
+    let rows = result["rows"].as_array().expect("rows array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "one canonical subject must reach all three records exactly once: {result}"
+    );
+    let row = &rows[0];
+    let field = |key: &str| {
+        row[key]
+            .as_str()
+            .unwrap_or("")
+            .trim_matches(['"', '<', '>'])
+    };
+    assert!(
+        field("canonical").contains("invoice-27AABCU9603R1ZM-INV9001"),
+        "{row}"
+    );
+    assert!(field("purchase").contains("pr-INV-9001"), "{row}");
+    assert!(field("declared").contains("g1-INV-9001"), "{row}");
+    assert!(field("filed").contains("2b-INV-9001"), "{row}");
+}
+
+/// **Proving Filing/Statement's period-scoping does the temporal job it
+/// exists for.** An invoice declared by the supplier in July and reflected
+/// in *August's* GSTR-2B (a late filing carrying forward — GST's own
+/// published guidance for exactly this) queries as reflected in the later
+/// period, never the invoice's own, earlier one — traversing `Invoice
+/// --reflectedIn--> Gstr2bInvoice --reflectedIn--> Gstr2bStatement
+/// --period-->`.
+#[tokio::test]
+async fn an_invoice_carried_forward_into_a_later_periods_2b_reports_the_later_period() {
+    let (app, _db, _url) = test_app().await;
+    declare_gst_namespace_and_predicates(
+        &app,
+        &["supplierGstin", "invoiceNumber", "invoiceDate", "period"],
+    )
+    .await;
+    for name in ["generatedFor"] {
+        let (status, _) = json(
+            &app,
+            "POST",
+            "/predicates",
+            serde_json::json!({"namespace": 1024, "name": name, "valueType": 0, "many": false}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "predicate {name}");
+    }
+
+    let gstr1 = r#"
+        @prefix gst: <https://graph-owl.dev/packs/gst#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+        gst:g1-INV-9002 rdf:type gst:Gstr1Invoice ;
+            gst:supplierGstin "27AABCU9603R1ZM" ;
+            gst:invoiceNumber "INV-9002" ;
+            gst:invoiceDate "2026-07-15" .
+
+        gst:invoice-27AABCU9603R1ZM-INV9002 rdf:type gst:Invoice ;
+            gst:appearsIn gst:g1-INV-9002 .
+    "#;
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/graph/import/rdf?source=gst-gstr1&format=turtle",
+        "text/turtle",
+        gstr1.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "gstr1 import: {body}");
+
+    // Filed on time — declared for July — but the July 2B was generated
+    // before this line arrived, so it never reflected it. It only surfaces
+    // once August's 2B is generated, one period later.
+    let gstr2b_august = r#"
+        @prefix gst: <https://graph-owl.dev/packs/gst#> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+        gst:recipient-self rdf:type gst:Recipient .
+
+        gst:g2bstatement-2026-08 rdf:type gst:Gstr2bStatement ;
+            gst:period "2026-08" ;
+            gst:generatedFor gst:recipient-self .
+
+        gst:2b-INV-9002 rdf:type gst:Gstr2bInvoice ;
+            gst:supplierGstin "27AABCU9603R1ZM" ;
+            gst:invoiceNumber "INV-9002" ;
+            gst:reflectedIn gst:g2bstatement-2026-08 .
+
+        gst:invoice-27AABCU9603R1ZM-INV9002 rdf:type gst:Invoice ;
+            gst:reflectedIn gst:2b-INV-9002 .
+    "#;
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/graph/import/rdf?source=gst-gstr2b-2026-08&format=turtle",
+        "text/turtle",
+        gstr2b_august.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "gstr2b import: {body}");
+
+    let result = sparql(
+        &app,
+        r"
+            PREFIX gst: <https://graph-owl.dev/packs/gst#>
+            SELECT ?period
+            WHERE {
+              GRAPH ?g1 { ?canonical a gst:Invoice ; gst:appearsIn ?declared . }
+              GRAPH ?g2 {
+                ?canonical gst:reflectedIn ?filed .
+                ?filed gst:reflectedIn ?statement .
+                ?statement gst:period ?period .
+              }
+            }
+        ",
+    )
+    .await;
+
+    let rows = result["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 1, "{result}");
+    let period = rows[0]["period"].as_str().unwrap_or("").trim_matches('"');
+    assert_eq!(
+        period, "2026-08",
+        "must report the period the 2B actually reflected it in, not the invoice's own July date: {result}"
+    );
+}

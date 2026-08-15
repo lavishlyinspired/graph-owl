@@ -19,13 +19,22 @@
 # filed sides are now genuinely different `gst:Supplier` subjects (a
 # transposed GSTIN is a second node, not a second string on the same one),
 # which is the graph-level shape this rule's whole premise depends on: it
-# exists to suspect two subjects are one entity, so there have to be two.
+# exists to suspect two subjects are one entity, so there have to be two. For
+# the identical reason, the two sides necessarily compute *different*
+# canonical `gst:Invoice` subjects — Plan 109 Slice 2 — so this rule reaches
+# each per-line record through its own `recordedIn`/`reflectedIn` edge
+# without ever comparing the two canonical subjects to each other; the match
+# is still made on invoice number and period, exactly as before. `period`
+# lives on the register's `PurchaseInvoice` directly (books carries no
+# Filing/Statement concept) but on the authority side has moved to
+# `Gstr2bStatement`, reached through `reflectedIn`'s second-level reuse.
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
 SELECT ?purchase ?number ?claimedGstin ?filedGstin ?period
 WHERE {
   GRAPH ?register {
+    ?purchaseInvoice gst:recordedIn ?purchase .
     ?purchase a gst:PurchaseInvoice ;
               gst:issuedBy ?supplier ;
               gst:invoiceNumber ?number ;
@@ -33,11 +42,13 @@ WHERE {
     ?supplier gst:supplierGstin ?claimedGstin .
   }
   GRAPH ?authority {
+    ?filedInvoice gst:reflectedIn ?filed .
     ?filed a gst:Gstr2bInvoice ;
            gst:issuedBy ?filedSupplier ;
            gst:invoiceNumber ?number ;
-           gst:period        ?period .
+           gst:reflectedIn ?statement .
     ?filedSupplier gst:supplierGstin ?filedGstin .
+    ?statement gst:period ?period .
   }
   FILTER (?claimedGstin != ?filedGstin)
 

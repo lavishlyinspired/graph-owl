@@ -135,8 +135,18 @@ assert scanned > 0, (
 )
 
 unmatched = sorted(field(r, "number") for r in missing)
-assert unmatched == ["INV-1003", "INV-1004"], (
-    f"expected INV-1003 (never filed) and INV-1004 (transposed GSTIN), got {unmatched}"
+# **Stale since Plan 108, fixed here rather than carried forward.** This
+# query stands down *entirely* once any GSTR-1 evidence is loaded — the
+# global handover guard `missing-in-gstr2b.sparql`'s own header explains —
+# and `fixtures/gstr1.ttl` has been one of this pack's `[[documents]]` since
+# that plan shipped. `unmatched == ["INV-1003", "INV-1004"]` predates that
+# guard and has asserted a result this query cannot produce for as long as
+# GSTR-1 has been loaded; not something Plan 109 Slice 2 introduced, but it
+# blocks the check below (no pack ships code) if left failing, so it is
+# fixed alongside this slice rather than filed separately.
+assert unmatched == [], (
+    f"missing-in-gstr2b should stand down entirely once GSTR-1 evidence is "
+    f"loaded (it is, via fixtures/gstr1.ttl) — got {unmatched}"
 )
 
 deltas = {field(r, "number"): (field(r, "claimed"), field(r, "filed")) for r in mismatch}
@@ -146,15 +156,21 @@ deltas = {field(r, "number"): (field(r, "claimed"), field(r, "filed")) for r in 
 # prove the *dated* cap matters (5% delta tolerated at the 2020 10% cap,
 # 20% delta not) — this query has no notion of "tolerated" at all, so both
 # show up as a raw delta regardless of what the cap-aware rule concludes.
+#
+# **INV-1013 likewise, and this too predates Plan 109 Slice 2.** It was
+# planted by Plan 108 as a negative control for `amount-mismatch.sparql`'s
+# de-minimis floor and `missing-in-gstr1.sparql`'s 2B-presence guard — both
+# of which this unconditional, unregistered query has neither of, so its
+# genuine 9 paise delta (9000.09 booked, 9000.00 filed) was always going to
+# show up here. This assertion simply never accounted for it.
 assert deltas == {
     "INV-1002": ("18000.00", "17100.00"),
+    "INV-1013": ("9000.09", "9000.00"),
     "INV-2001": ("18000.00", "17100.00"),
     "INV-2002": ("18000.00", "14400.00"),
 }, deltas
 
-print("ok: INV-1003 never filed; INV-1004 unmatched on an exact join (its GSTIN "
-      "is transposed — the `ngram` strategy is what would pair it, which is the "
-      "argument for the fusion engine); INV-1001 correctly produces nothing; "
+print("ok: missing-in-gstr2b correctly stands down with GSTR-1 evidence loaded; "
       "INV-1002/INV-2001/INV-2002 all show a raw delta on this uncapped query "
       "(only INV-2002's survives the dated Rule 36(4) cap in amount-mismatch.sparql)")
 PYCHECK

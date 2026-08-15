@@ -24,12 +24,17 @@
 # `OPTIONAL` — the mirror image of `missing-in-gstr2b.sparql`, with the same
 # `OPTIONAL` + `!BOUND` idiom and the same `GRAPH ?var { }` discipline, both
 # documented there.
+#
+# **The two sides are joined through a shared canonical `gst:Invoice`
+# subject — Plan 109 Slice 2** — `?canonical gst:recordedIn ?booked` replaces
+# what used to be a shared `?key`+`?gstin` binding.
 
 PREFIX gst: <https://graph-owl.dev/packs/gst#>
 
 SELECT ?declared ?number ?gstin ?taxableValue ?taxAmount ?invoiceDate
 WHERE {
   GRAPH ?gstr1 {
+    ?canonical gst:appearsIn ?declared .
     ?declared a gst:Gstr1Invoice ;
               gst:issuedBy ?declaredSupplier ;
               gst:invoiceNumber ?number ;
@@ -42,14 +47,15 @@ WHERE {
 
   OPTIONAL {
     GRAPH ?register {
-      ?booked a gst:PurchaseInvoice ;
-              gst:issuedBy ?bookedSupplier ;
-              gst:invoiceKey    ?key .
-      ?bookedSupplier gst:supplierGstin ?gstin .
+      ?canonical gst:recordedIn ?booked .
+      ?booked a gst:PurchaseInvoice .
     }
   }
 
-  # **The same keying-error guard `missing-in-gstr1.sparql` carries, mirrored**
+  # **The same keying-error guard `missing-in-gstr1.sparql` carries, mirrored
+  # — and, like that one, deliberately still `?key`-based rather than
+  # canonical-subject-based, for the identical reason: it must match *any*
+  # GSTIN, and the canonical subject is computed from the GSTIN.**
   # — and found the same way, against real data. A GSTIN transposed between
   # the register and the filing makes the exact join above fail in *both*
   # directions, so one typo produced "the supplier never filed it" and "you
