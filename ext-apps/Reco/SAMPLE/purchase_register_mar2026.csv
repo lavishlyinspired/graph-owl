@@ -1,0 +1,17 @@
+Invoice No,Invoice Date,Supplier GSTIN,Supplier Name,Taxable Amount,IGST,CGST,SGST,Cess,HSN Code,Place of Supply,Voucher No,Voucher Type,Reverse Charge,Note Type,Original Invoice No,IMS Status
+INV-MAR-001,01-03-2026,27AABCS1429B1Z8,Sharma Infrastructure Pvt Ltd,250000,45000,0,0,0,9954,27-Maharashtra,VCH/2026/001,Purchase,No,,,No Action
+INV-MAR-002,03-03-2026,29AACCS9460D1Z4,TechCorp Solutions LLP,85000,0,7650,7650,0,8471,29-Karnataka,VCH/2026/002,Purchase,No,,,Accepted
+INV-MAR-003,05-03-2026,06AAKCA0977G1Z3,Allied Services Ltd,42000,7560,0,0,0,9985,06-Haryana,VCH/2026/003,Purchase,No,,,Accepted
+INV-MAR-004,07-03-2026,33AABCT6996D1ZX,Tamil Traders Company,120000,0,10800,10800,0,3004,33-Tamil Nadu,VCH/2026/004,Purchase,No,,,No Action
+INV-MAR-005,10-03-2026,07AAACN0082H1ZJ,Naresh Enterprises Delhi,65000,11700,0,0,0,7318,07-Delhi,VCH/2026/005,Purchase,No,,,Accepted
+INV-MAR-006,12-03-2026,19AABCP8087C1ZV,Patel Chemicals & Co,310000,55800,0,0,2500,2902,19-West Bengal,VCH/2026/006,Purchase,No,,,No Action
+INV-MAR-007,15-03-2026,24AABCR6898D1ZY,Rajan Textiles Exports,38000,0,3420,3420,0,5208,24-Gujarat,VCH/2026/007,Purchase,No,,,Accepted
+INV-MAR-008,18-03-2026,36AAACV1234P1ZH,Vijay Auto Components,175000,31500,0,0,0,8708,36-Telangana,VCH/2026/008,Purchase,No,,,Accepted
+INV-MAR-009,20-03-2026,09AABCM4567R1ZK,Mohan & Sons Kanpur,92000,16560,0,0,0,6403,09-Uttar Pradesh,VCH/2026/009,Purchase,No,,,No Action
+INV-MAR-010,22-03-2026,32AABCK1112B1ZP,Kerala Logistics Hub,55000,0,4950,4950,0,9965,32-Kerala,VCH/2026/010,Purchase,No,,,Accepted
+INV-MAR-011,24-03-2026,27AABCS1429B1Z8,Sharma Infrastructure Pvt Ltd,180000,32400,0,0,0,9954,27-Maharashtra,VCH/2026/011,Purchase,No,,,No Action
+INV-MAR-012,25-03-2026,29AACCS9460D1Z4,TechCorp Solutions LLP,45000.5,0,4050.05,4050.05,0,8523,29-Karnataka,VCH/2026/012,Purchase,No,,,Accepted
+INV-MAR-013,27-03-2026,11AABCZ9999A1Z1,Ghost Vendor Pvt Ltd,95000,17100,0,0,0,8471,11-Sikkim,VCH/2026/013,Purchase,No,,,
+INV-MAR-014,29-03-2026,22AABCX8888B1ZQ,Phantom Supplies Co,48000,8640,0,0,0,3926,22-Chhattisgarh,VCH/2026/014,Purchase,No,,,
+INV-MAR-015,30-03-2026,24AABCL5566H1ZR,Legal Advisory Services,25000,4500,0,0,0,9982,29-Karnataka,VCH/2026/015,Purchase,Yes,,,Accepted
+CN-MAR-001,31-03-2026,06AAKCA0977G1Z3,Allied Services Ltd,-12000,-2160,0,0,0,9985,06-Haryana,VCH/2026/016,Credit Note,No,Credit Note,INV-MAR-003,Accepted

@@ -1,0 +1,54 @@
+# reco-now's own domain, as terms — owned by this app (ext-apps/Reco/),
+# never by graph-owl's packs/ directory.
+#
+# Every term here is a *runtime* term: the namespace is allocated by
+# POST /namespaces and each predicate registered by POST /predicates, so
+# nothing here required a line of Rust — the same claim
+# plans/105-domain-neutrality.md makes checkable for packs/gst and
+# packs/hospitality, now checked a third time by a pack this repository
+# did not author.
+#
+# Field set and labels are reco-now's own (ext-apps/Reco/backend/app/
+# main.py's FIELD_LABELS) — not copied from packs/gst/ontology.ttl, whose
+# invoice model has no HSN code, IMS status, note type, voucher fields or
+# original-invoice-number.
+
+@prefix reco: <https://reconow.dev/pack#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# **Two classes, matching reco-now's own `kind` values** (main.py's
+# dataset "books"/"gstr2b") rather than inventing new vocabulary for a
+# distinction the app already draws. A books row and a portal row for the
+# same real invoice are two separate subjects here, same as
+# gst:PurchaseInvoice/gst:Gstr2bInvoice keep separate per-source evidence
+# — Slice 2's reconciliation is what relates them, not this ontology.
+reco:BooksInvoice  rdf:type reco:Class ; reco:label "Purchase register entry (your books)" .
+reco:PortalInvoice rdf:type reco:Class ; reco:label "GSTR-2B entry (government data)" .
+
+reco:invoiceNumber rdf:type reco:Property ; reco:label "Invoice Number" .
+reco:supplierGstin rdf:type reco:Property ; reco:label "Supplier GSTIN" .
+reco:supplierName  rdf:type reco:Property ; reco:label "Supplier Name" .
+reco:taxableValue  rdf:type reco:Property ; reco:label "Taxable Amount" .
+reco:invoiceDate   rdf:type reco:Property ; reco:label "Invoice Date" .
+reco:placeOfSupply rdf:type reco:Property ; reco:label "Place of Supply" .
+reco:hsnCode       rdf:type reco:Property ; reco:label "HSN Code" .
+reco:imsStatus     rdf:type reco:Property ; reco:label "IMS Status" .
+reco:reverseCharge rdf:type reco:Property ; reco:label "Reverse Charge" .
+reco:noteType      rdf:type reco:Property ; reco:label "Note Type" .
+reco:voucherType   rdf:type reco:Property ; reco:label "Voucher Type" .
+
+# Debit/credit-note fields — a note references the invoice it corrects,
+# by number, as the source data carries it. Not modelled as a graph edge
+# in Slice 1: the referenced invoice may not be in the same upload, and a
+# dangling `reco:Ref` would be a broken edge rather than a missing fact.
+reco:originalInvoiceNumber rdf:type reco:Property ; reco:label "Original Invoice No" .
+reco:voucherNumber         rdf:type reco:Property ; reco:label "Voucher No" .
+
+# The four tax components the authority reports separately. reco-now's
+# own reconciliation.py already sums these as `record_tax`; kept as
+# separate facts here for the same reason packs/gst keeps them separate —
+# an intra-/inter-state mismatch the total alone would hide.
+reco:igst rdf:type reco:Property ; reco:label "IGST" .
+reco:cgst rdf:type reco:Property ; reco:label "CGST" .
+reco:sgst rdf:type reco:Property ; reco:label "SGST" .
+reco:cess rdf:type reco:Property ; reco:label "Cess" .

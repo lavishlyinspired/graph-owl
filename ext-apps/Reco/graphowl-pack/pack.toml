@@ -1,0 +1,81 @@
+# reco-now's own graph-owl pack — owned by this app, not by graph-owl.
+#
+# Lives inside ext-apps/Reco/, never inside graph-owl's own packs/
+# directory, so that "an app configures its own pack" is demonstrated by
+# where this file lives, not just asserted. Loaded through the same
+# generic mechanism packs/gst and packs/hospitality already use
+# (`connectors/python/graph_owl_packs`) — no engine change, per
+# plans/105-domain-neutrality.md.
+#
+# Field set is reco-now's own — `ext-apps/Reco/backend/app/main.py`'s
+# FIELD_LABELS, 17 columns it already extracts from an uploaded Purchase
+# Register or GSTR-2B file — authored fresh, not copied from
+# packs/gst/ontology.ttl, which does not carry HSN code, IMS status, note
+# type, voucher type/number or original invoice number.
+#
+# Slice 1 (plans/118-reco-now-integration.md) is ingestion only: no
+# [[documents]], [[findings]], [[queries]] or [matching.blocking] yet.
+# Reconciliation-specific configuration is Slice 2's, added when there is
+# a reconciliation behaviour to configure — not invented ahead of it.
+
+[pack]
+id = "reco"
+namespace = "https://reconow.dev/pack#"
+prefix = "reco"
+description = "reco-now: Purchase Register vs GSTR-2B rows, as graph subjects."
+
+# Amounts stay strings for the same reason packs/gst's do: a monetary
+# value parsed to a float at the graph boundary loses the exactness a tax
+# figure needs, and this pack's own reconciliation (Slice 2) compares them
+# as decimals, not IEEE doubles.
+
+[[predicates]]
+name = "invoiceNumber"
+
+[[predicates]]
+name = "supplierGstin"
+
+[[predicates]]
+name = "supplierName"
+
+[[predicates]]
+name = "taxableValue"
+
+[[predicates]]
+name = "invoiceDate"
+
+[[predicates]]
+name = "placeOfSupply"
+
+[[predicates]]
+name = "hsnCode"
+
+[[predicates]]
+name = "imsStatus"
+
+[[predicates]]
+name = "reverseCharge"
+
+[[predicates]]
+name = "noteType"
+
+[[predicates]]
+name = "voucherType"
+
+[[predicates]]
+name = "originalInvoiceNumber"
+
+[[predicates]]
+name = "voucherNumber"
+
+[[predicates]]
+name = "igst"
+
+[[predicates]]
+name = "cgst"
+
+[[predicates]]
+name = "sgst"
+
+[[predicates]]
+name = "cess"

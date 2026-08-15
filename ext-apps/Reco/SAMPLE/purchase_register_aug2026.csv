@@ -1,0 +1,11 @@
+Invoice No,Invoice Date,Supplier GSTIN,Supplier Name,Taxable Amount,IGST,CGST,SGST,Cess,HSN Code,Place of Supply,Voucher No,Voucher Type,Reverse Charge,Note Type,Original Invoice No,IMS Status
+INV-AUG-101,05-08-2026,27AAAFN2938K1Z2,Nimbus Freight Logistics,180000,32400,0,0,0,9965,27-Maharashtra,VCH/2026/101,Purchase,No,,,
+INV-AUG-102,06-08-2026,29AAECK4410L1Z7,Kavya Cloud Systems LLP,95000,0,8550,8550,0,8523,29-Karnataka,VCH/2026/102,Purchase,No,,,
+INV-AUG-103,07-08-2026,07AABCP7712M1Z9,Prithvi Office Supplies Pvt Ltd,42000,0,3780,3780,0,4820,07-Delhi,VCH/2026/103,Purchase,No,,,
+INV-AUG-104,07-08-2026,33AADCS5521N1Z3,Suryan Textiles Ltd,260000,46800,0,0,0,5208,33-Tamil Nadu,VCH/2026/104,Purchase,No,,,
+INV-AUG-105,08-08-2026,24AABCV3390P1Z6,Vraj Chemicals Pvt Ltd,75000,0,6750,6750,0,2902,24-Gujarat,VCH/2026/105,Purchase,No,,,
+INV-AUG-106,09-08-2026,09AAFCR8834Q1Z1,Ridhira Engineering Works,310000,55800,0,0,0,8479,09-Uttar Pradesh,VCH/2026/106,Purchase,No,,,
+INV-AUG-107,10-08-2026,19AABCM2207R1Z4,Meghla Packaging Co,58000,0,5220,5220,0,4819,19-West Bengal,VCH/2026/107,Purchase,No,,,
+INV-AUG-108,10-08-2026,36AADCT6650S1Z8,Trisha Digital Media Pvt Ltd,120000,0,10800,10800,0,9983,36-Telangana,VCH/2026/108,Purchase,No,,,
+INV-AUG-109,11-08-2026,27AAAFN2938K1Z2,Nimbus Freight Logistics,22000,3960,0,0,0,9965,27-Maharashtra,VCH/2026/109,Purchase,No,Credit Note,INV-AUG-101,
+INV-AUG-110,12-08-2026,08AABCD5567T1Z2,Deccan Hardware Traders,68000,0,6120,6120,0,7318,08-Rajasthan,VCH/2026/110,Purchase,No,,,
