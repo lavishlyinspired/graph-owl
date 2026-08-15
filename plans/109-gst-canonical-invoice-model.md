@@ -1,8 +1,12 @@
 # Plan: GST canonical Invoice model — the B+C semantic-ingestion migration
 
-**Status**: Planned, not started. Blocking design decisions confirmed with the
-user; the exact ontology wiring below is this session's synthesis of those
-decisions and needs confirmation before code.
+**Status**: Planned, not started. Second review pass complete — the user
+caught a real semantic error (GSTR-2B modeled as supplier-filed rather than
+recipient-generated) plus three smaller gaps in this plan's first draft; all
+four are corrected below. Two points remain open for confirmation before any
+code: the review-surface question (reuse findings vs a new queue), and this
+session's own proposed resolution for `gst:Recipient` (a single well-known
+subject — new scope neither source document named).
 
 **Origin**: `plans/ingestion_extraction.md` (a design-consultation transcript,
 first-party architectural reasoning — verified not to reference any
@@ -38,16 +42,48 @@ by the user; see "Entity-resolution/attachment capability" below.
 1. **`gst:Invoice` is the canonical business entity.** One per real invoice,
    not one per source that reported it.
 
-2. **`gst:Filing`, period-scoped, per the user's explicit instruction** — one
-   node per (supplier, return period, filing type) tuple, carrying
-   `filingType` (`"GSTR1"` / `"GSTR2B"`, open string, same trade as
-   `extractor`/`extractor_version` elsewhere in this codebase), `period`,
-   `filedDate`, and a `filedBy` edge to `gst:Supplier`. Deduplicated across
-   every invoice line the same filing declares — today `gstr1.ts`/`gstr2b.py`
-   repeat `period`/`filedDate` identically on every line from the same
-   supplier's same filing; Filing is what removes that repetition and gives
-   "was this invoice reflected in *any* filing across periods" somewhere to
-   be asked from later (105c's own stated reason for wanting this node).
+2. **Two separate period-scoped classes, not one generic `gst:Filing` —
+   corrected by the user after this plan's first draft got the GSTR-2B side
+   semantically wrong.** The first draft modeled GSTR-2B as
+   `Supplier --filedBy--> Filing`, i.e. one supplier's filing. That is wrong:
+   GSTR-1 is a supplier's own outward-supply declaration, but **GSTR-2B is an
+   auto-drafted statement the authority generates *for the recipient*,
+   aggregating many suppliers' filings** — a July 2B belongs to the taxpayer
+   running this deployment, not to any one supplier. Corrected:
+
+   - **`gst:Gstr1Filing`** — one per (supplier, return period), carrying
+     `period` and `filedDate`, with a `filedBy` edge to `gst:Supplier`.
+   - **`gst:Gstr2bStatement`** — one per (recipient, return period), carrying
+     `period` and (when the source actually reports it — no current fixture
+     or API payload field has been confirmed to carry this, so it is
+     optional, following this pack's existing "absent is omitted, not
+     blank" convention) `generatedDate`, with a `generatedFor` edge to
+     `gst:Recipient`.
+
+   Two concrete classes rather than one `gst:Filing` with a `filingType`
+   discriminator, because `rdf:type` already carries that distinction once
+   the classes are separate — a redundant string property duplicating what
+   the type already says is exactly the kind of two-sources-of-truth risk
+   this pack's own `invoiceKey`-vs-`invoiceNumber` split already exists to
+   avoid elsewhere. Both are deduplicated across every invoice line they
+   cover — today `gstr1.ts`/`gstr2b.py` repeat `period`/`filedDate`
+   identically on every line from the same supplier's same filing; this is
+   what removes that repetition and gives "was this invoice reflected in
+   *any* statement across periods" somewhere to be asked from later (105c's
+   own stated reason for wanting a Filing-shaped node, now split correctly
+   across the two source types it actually needs to cover).
+
+   **`gst:Recipient` is new scope this plan's first draft didn't name.**
+   Nothing in the pack today tracks the taxpayer's own GSTIN (confirmed by
+   grep — `supplierGstin` exists, no `recipientGstin`/`taxpayerGstin`
+   equivalent does), and this pack is single-tenant: every reconciliation is
+   one taxpayer's own data, so there is exactly one `gst:Recipient` subject
+   ever needed. This plan's proposed resolution — **a single well-known
+   subject** (e.g. `gst:recipient-self`), instantiated once, every
+   `Gstr2bStatement` pointing at the same one — rather than building out a
+   real multi-recipient identity system nothing currently needs. **Flag if
+   wrong**: this is this session's minimal-scope answer to a gap the user's
+   corrected model implies but does not fully specify.
 
 3. **The purchase register stays a separate source/record concept, not a
    Filing** — per the user's explicit instruction. A purchase-register entry
@@ -68,24 +104,49 @@ by the user; see "Entity-resolution/attachment capability" below.
    like." This plan's answer, synthesized from the user's constraint:
 
    ```
-   gst:Invoice (canonical, NEW)
-       --recordedIn-->  gst:PurchaseInvoice   (existing type — books.ts's own per-line record)
-       --appearsIn-->   gst:Gstr1Invoice      (existing type — gstr1.ts's own per-line record)
-       --reflectedIn--> gst:Gstr2bInvoice     (existing type — gstr2b.py/.ts's own per-line record)
-
-   gst:Gstr1Invoice  --filedIn--> gst:Filing   (filingType = "GSTR1")
-   gst:Gstr2bInvoice --filedIn--> gst:Filing   (filingType = "GSTR2B")
-   gst:Filing --filedBy--> gst:Supplier
+                            Supplier
+                               │
+                             issuedBy
+                               │
+                               ▼
+                          gst:Invoice (canonical, NEW)
+                               │
+              ┌────────────────┼────────────────┐
+              │                │                │
+          recordedIn        appearsIn        reflectedIn
+              │                │                │
+              ▼                ▼                ▼
+       gst:PurchaseInvoice  gst:Gstr1Invoice  gst:Gstr2bInvoice
+       (existing type,      (existing type,   (existing type,
+        books.ts)            gstr1.ts)         gstr2b.py/.ts)
+                               │                │
+                             filedIn          reflectedIn
+                               │                │
+                               ▼                ▼
+                        gst:Gstr1Filing   gst:Gstr2bStatement
+                               │                │
+                            filedBy         generatedFor
+                               │                │
+                               ▼                ▼
+                          gst:Supplier      gst:Recipient
    ```
 
-   `appearsIn`/`reflectedIn` keep 105c's own names (the user confirmed them
-   explicitly) but point at the **preserved per-line evidence record**, not
-   directly at Filing — the per-line record is what still lives inside that
-   source's own named graph (`GRAPH ?g { gst:g1-INV-1001 gst:invoiceKey ... }`
-   is unchanged), and `filedIn` is the one new hop connecting it to the
-   Filing it came from. **This is my synthesis, not something either source
-   document states verbatim, and it is the piece of this plan most likely to
-   need adjustment — confirm before implementation starts.**
+   Every class named on the left (`PurchaseInvoice`, `Gstr1Invoice`,
+   `Gstr2bInvoice`) is the **existing type**, unrenamed — the user's own
+   instruction: *"don't make that rename part of this slice unless the
+   existing queries/UI genuinely require it."* `appearsIn`/`reflectedIn`
+   (canonical → per-line record) keep 105c's own names; **`reflectedIn` is
+   deliberately reused a second time** (per-line `Gstr2bInvoice` →
+   `Gstr2bStatement`) rather than a distinct name, because both edges mean
+   the same thing at different levels — "the authority's own record of
+   this" — and RDF predicates are not required to have one fixed
+   subject/object type pair. `filedIn` is the one genuinely new hop on the
+   GSTR-1 side, connecting a per-line declaration to the filing it came
+   from. Each per-line record still lives inside its own source's named
+   graph exactly as today (`GRAPH ?g { gst:g1-INV-1001 gst:invoiceKey ... }`
+   is unchanged) — only the class it links up to on the GSTR-1/GSTR-2B side
+   is now split into the two semantically-correct classes decision 2
+   introduces.
 
 5. **Per-line facts stay on the per-line record, not on canonical Invoice or
    Filing.** `itcAvailable`, `reverseCharge`, `invoiceType`, `placeOfSupply`,
@@ -94,28 +155,88 @@ by the user; see "Entity-resolution/attachment capability" below.
    many invoices) and Slice D (deferred) is what gives `itcAvailable`
    specifically its own claim object rather than moving it to Invoice now.
 
-6. **Identity: deterministic first — refined per the user's explicit
-   correction to include document type and a period/date safeguard.**
-   `gst:Invoice`'s deterministic key is
-   `(normalized supplierGstin, normalized document number, document type,
-   period/date safeguard)` — not just `(gstin, invoiceKey)` as this plan
-   first drafted. Two reasons the extra fields are load-bearing, not
-   defensive padding: **document type** future-proofs against Slice D's
-   deferred CreditNote/DebitNote, which can plausibly share a numbering
-   series with an Invoice at the same supplier; **the period/date safeguard**
-   guards against a supplier reusing invoice numbering across periods or
-   years (`INV-001` every January is an ordinary numbering scheme) — with no
-   date component, two genuinely different invoices years apart would
-   collide onto one canonical subject. Confirmed by the codebase's own
-   `INV-2001`/`INV-2002` fixture pair (2020) sitting beside `INV-2001`-shaped
-   2026 numbers in spirit, even though this particular fixture doesn't
-   collide today — the safeguard is for the case it plausibly will once real
-   uploads arrive.
+6. **Identity: business identity excludes period — corrected by the user.**
+   This plan's first draft put a "period/date safeguard" *inside* the
+   deterministic key. That is wrong, and GST's own GSTR-2B advisory is the
+   reason: a supplier can file an invoice dated in one month into a *later*
+   GSTR-1, and it then surfaces in a *later* period's GSTR-2B than its own
+   invoice date — the exact carry-forward case `gst:filedDate` already
+   exists in this pack to capture. **An invoice's identity does not change
+   because of which period it was declared or reflected in.** Baking period
+   into the identity key would create two different canonical `gst:Invoice`
+   subjects for one real invoice whenever a source system associates it
+   with a different period — precisely the fragmentation this whole plan
+   exists to remove.
+
+   Corrected, in the user's own words: **"Deterministic identity uses
+   supplier GSTIN + normalized document number + document type, with
+   invoice date/financial-year used as a collision guard and candidate
+   discriminator rather than as a mandatory component of the canonical
+   identity."** So:
+
+   - **Business identity (the hard key)**: `(normalized supplierGstin,
+     normalized document number, document type)`. `document type`
+     future-proofs against Slice D's deferred CreditNote/DebitNote, which
+     can plausibly share a numbering series with an Invoice at the same
+     supplier.
+   - **Collision guard / candidate discriminator (not part of identity)**:
+     invoice date / financial year. Used during Slice 1's resolution step
+     to judge whether two records sharing a business-identity key are
+     plausibly the *same* invoice (dates close or compatible) or plausibly
+     *different* invoices that happen to reuse a numbering scheme across
+     years (`INV-001` every January is ordinary) — a signal that lowers
+     confidence or produces an `Ambiguous` result, never something that
+     silently merges or silently splits on its own.
 
    **Entity resolution for ambiguous records is genuinely new platform
    work — corrected by the user after this plan's first draft treated the
    existing read-only near-miss display as sufficient. It is not.** See the
    capability section below.
+
+## Canonical-entity lifecycle — added per the user's explicit instruction
+
+The first draft of this plan left "when is `gst:Invoice` actually created"
+implicit, which risks an implementation that creates a canonical Invoice for
+every source record on ingestion and only *later* claims resolution
+happened — defeating the whole point. Explicit sequence:
+
+```
+SOURCE RECORDS (books / GSTR-1 / GSTR-2B, per-line, as today)
+      │
+      ▼
+Identity evaluation (business-identity key: supplierGstin + normalized
+                      document number + document type)
+      │
+ ┌────┴──────┐
+ │           │
+Exact       Ambiguous (candidate scored below exact but above the
+match       resolution floor — the pack's existing ngram blocking on
+ │           gst:supplierGstin/gst:invoiceNumber)
+ ▼           │
+Create or    ▼
+attach     Candidate(s) only — nothing written, nothing attached
+canonical    │
+gst:Invoice  ▼
+           Review (reuse the findings decision flow — see the open
+             question below)
+             │
+       ┌─────┴──────┐
+       ▼            ▼
+    Accept        Reject
+       │             │
+       ▼             ▼
+ Attach source   No attachment; the two source records stay under
+ record to the   separate canonical gst:Invoice subjects, exactly as
+ chosen          today's GstinTransposition/SupplierPanMismatch findings
+ canonical       already leave two separate source-typed subjects
+ gst:Invoice     unmerged.
+```
+
+**New acceptance criterion, added to Slice 1 below per the user's exact
+wording**: *"Repeated ingestion of the same source records is idempotent:
+exact deterministic matches resolve to exactly one canonical gst:Invoice;
+ambiguous candidates create no canonical attachment until explicitly
+accepted."*
 
 ## Entity-resolution/attachment capability — genuinely new platform work
 
@@ -169,12 +290,13 @@ the `Uuid`-typed types themselves:**
   score."*
 - **GST supplies an identity policy, not identity logic.** Declared in
   `pack.toml`, the same pattern `[[matching.blocking]]` already uses for
-  supplier matching: which predicates form the deterministic key
-  (`supplierGstin`, `invoiceKey`, a document-type marker, a period/date
-  field for the safeguard above), and which existing blocking strategy
-  (`ngram`, already configured for GSTIN and invoice-number transposition)
-  supplies ambiguous candidates when the deterministic key does not match
-  exactly. No GST-specific Rust.
+  supplier matching: which predicates form the **business-identity key**
+  (`supplierGstin`, `invoiceKey`, a document-type marker — no period/date
+  field, per decision 6's correction), which predicate is the
+  **collision-guard/discriminator** (invoice date), and which existing
+  blocking strategy (`ngram`, already configured for GSTIN and
+  invoice-number transposition) supplies ambiguous candidates when the
+  business-identity key does not match exactly. No GST-specific Rust.
 - **Open design question, not resolved by either source document — flag for
   confirmation**: does the review step reuse the pack's *existing* findings
   queue (an ambiguous match surfaces as a `gst:GstinTransposition`-shaped
@@ -232,15 +354,29 @@ applies to.
       resolved and, if findings are reused, an accepted
       `gst:GstinTransposition`/`gst:SupplierPanMismatch` finding is what
       writes the attachment record — exercised end-to-end.
+- [ ] **Idempotency, per the user's exact wording**: repeated ingestion of
+      the same source records is idempotent — exact deterministic matches
+      resolve to exactly one canonical `gst:Invoice` (re-ingesting the same
+      exact-match source record a second time does not create a second
+      canonical subject or a second attachment record); ambiguous
+      candidates create no canonical attachment until explicitly accepted
+      (re-running resolution on an unresolved ambiguous pair produces the
+      same candidates again, not a growing list and not a default
+      attachment).
 
 ### Slice 2 — the B+C ontology/ingestion migration (uses Slice 1)
 
-- [ ] `packs/gst/ontology.ttl` declares `gst:Invoice`, `gst:Filing`, and the
-      new predicates (`recordedIn`, `appearsIn`, `reflectedIn`, `filedIn`,
-      `filedBy`, `filingType`, `filedDate` moved off the per-line classes'
-      doc comments onto Filing's). `PurchaseInvoice`/`Gstr1Invoice`/
-      `Gstr2bInvoice` remain declared, documented as the per-source evidence
-      layer rather than the business entity.
+- [ ] `packs/gst/ontology.ttl` declares `gst:Invoice`, `gst:Gstr1Filing`,
+      `gst:Gstr2bStatement`, `gst:Recipient`, and the new predicates
+      (`recordedIn`, `appearsIn`, `reflectedIn` — reused at both the
+      canonical→per-line-record level and the `Gstr2bInvoice`→
+      `Gstr2bStatement` level — `filedIn`, `filedBy`, `generatedFor`).
+      `filedDate` moves to `Gstr1Filing`'s own doc comment; `generatedDate`
+      is declared on `Gstr2bStatement` and documented as optional, no
+      current source confirmed to populate it.
+      `PurchaseInvoice`/`Gstr1Invoice`/`Gstr2bInvoice` remain declared,
+      unrenamed, documented as the per-source evidence layer rather than
+      the business entity.
 - [ ] `packs/gst/pack.toml` registers the new predicates and updates
       `[console.reconciliation.sources]`'s three `class = "..."` entries
       (currently `PurchaseInvoice`/`Gstr1Invoice`/`Gstr2bInvoice` — confirm
@@ -260,13 +396,41 @@ applies to.
       method), preserving every planted scenario's numbers and every comment
       explaining why that scenario exists.
 - [ ] All four ingestion surfaces (`gstr2b.py`, `gstr2b.ts`, `books.ts`,
-      `gstr1.ts`) emit the new shape — `gst:Invoice` (deterministic subject
-      from `supplierGstin` + `invoiceKey`), the unchanged per-line evidence
-      record, and (for the two GSTR-1/GSTR-2B surfaces) a deduplicated
-      `gst:Filing` subject per (supplier, period, filing type) with the
-      `filedIn` edge from the per-line record. No importer is left emitting
-      the old shape when this plan is done — the release constraint the user
+      `gstr1.ts`) emit the new shape — `gst:Invoice` (business-identity
+      subject from `supplierGstin` + normalized `invoiceKey` + document
+      type; **no period in the identity computation**, per decision 6), the
+      unchanged per-line evidence record, and: `books.ts` emits `recordedIn`
+      only (no Filing/Statement on the purchase-register side, per decision
+      3); `gstr1.ts` emits a deduplicated `gst:Gstr1Filing` subject per
+      (supplier, period) with `filedIn`; `gstr2b.py`/`gstr2b.ts` emit a
+      deduplicated `gst:Gstr2bStatement` subject per (period) — pointing at
+      the single well-known `gst:Recipient` subject, since this pack is
+      single-tenant — with `reflectedIn`. No importer is left emitting the
+      old shape when this plan is done — the release constraint the user
       stated directly.
+- [ ] **The three-source convergence test — the user's own words, "the most
+      important end-to-end test in the whole plan."** A Books record, a
+      GSTR-1 record and a GSTR-2B record representing the same real invoice
+      (same GSTIN, same invoice number, same document type) resolve to
+      exactly one canonical `gst:Invoice`, while all three source records
+      remain independently queryable in their own named graphs and retain
+      their provenance (`recordedIn`/`appearsIn`/`reflectedIn` all present
+      and resolvable from the one canonical subject).
+- [ ] **The cross-period test — proving Filing/Statement's period-scoping
+      does the temporal job it exists for. Checked against the actual
+      fixtures: no existing planted invoice has an invoice-date month
+      different from the 2B period it appears in** (`INV-1010`/`INV-1011`
+      in `gstr2b-2026-08.ttl` are both dated within August, filed within
+      August) — **this is a new fixture scenario Slice 2 adds**, not an
+      existing one it preserves. An invoice dated in one month, declared by
+      the supplier and reflected in a *later* month's GSTR-2B (matching
+      GST's own published guidance that a late-filed document can surface
+      in a later period's 2B than its invoice date — the same carry-forward
+      mechanism `gst:filedDate` already exists in this pack to capture),
+      queries as reflected in the *later* period — traversing `Invoice
+      --reflectedIn--> Gstr2bInvoice --reflectedIn--> Gstr2bStatement
+      --period--> "the later month"` — never the invoice's own, earlier
+      month.
 - [ ] `gstr2b.py` and `gstr2b.ts` stay pinned to identical output on the same
       fixture, per their existing tests (`test_gstr2b.py`/`gstr2b.test.ts`) —
       this pinning is a pre-existing regression guard, not new to this plan.
@@ -357,7 +521,7 @@ missing *negative* test.
 **Done when**: Slice 1's Acceptance Criteria are met, mutation report
 reviewed, human approves commit.
 
-### Slice 2: Canonical `gst:Invoice` + `gst:Filing`, all four ingestion surfaces, zero regression
+### Slice 2: Canonical `gst:Invoice` + `gst:Gstr1Filing`/`gst:Gstr2bStatement`, all four ingestion surfaces, zero regression
 
 **Value**: "Which invoices did Supplier X issue, across the register, GSTR-1
 and GSTR-2B" becomes one traversal from one canonical subject instead of
@@ -397,12 +561,16 @@ proposed wiring specifically, since it's this session's synthesis rather
 than a literal instruction — before any file is edited.**
 
 **RED**: For each of the four ingestion surfaces, a failing test asserting
-the new Turtle shape (a `gst:Invoice` subject present, `recordedIn`/
-`appearsIn`/`reflectedIn` edges present, a deduplicated `gst:Filing` subject
-for the GSTR-1/GSTR-2B surfaces) against a small fixture payload — extending
-the existing `test_gstr2b.py`/`gstr2b.test.ts`/`books.test.ts`/`gstr1.test.ts`
+the new Turtle shape (a `gst:Invoice` subject present with no period in its
+computed identity, `recordedIn`/`appearsIn`/`reflectedIn` edges present, a
+deduplicated `gst:Gstr1Filing` subject for `gstr1.ts` and a deduplicated
+`gst:Gstr2bStatement` subject pointing at the single `gst:Recipient` for
+`gstr2b.py`/`gstr2b.ts`) against a small fixture payload — extending the
+existing `test_gstr2b.py`/`gstr2b.test.ts`/`books.test.ts`/`gstr1.test.ts`
 files rather than replacing their existing assertions outright, since the
-per-line evidence record's own shape is unchanged.
+per-line evidence record's own shape is unchanged. Plus the two new
+end-to-end fixtures/tests this slice's Acceptance Criteria add: the
+three-source convergence case and the cross-period carry-forward case.
 Mutator watch: a mutant that computes the canonical `gst:Invoice` subject
 from `invoiceNumber` instead of the normalized `invoiceKey` must be caught —
 this is exactly the "one invoice, three printed formats" case the fixtures
@@ -421,13 +589,15 @@ and the TypeScript twins' equivalent logic (Stryker, scoped to the four
 changed files per this project's TS mutation practice).
 
 **KILL MUTANTS**: Address survivors; ask before accepting one whose value is
-ambiguous — expect this to matter most on the deterministic-subject
-computation and the Filing-deduplication-by-(supplier,period,type) logic.
+ambiguous — expect this to matter most on the business-identity-key
+computation (no period involved, per decision 6) and the
+`Gstr1Filing`/`Gstr2bStatement` deduplication-by-(supplier-or-recipient,
+period) logic.
 
 **REFACTOR**: Assess only after `scripts/verify-gst-reconciliation.sh` is
 green — a rewrite this size will have real duplication across four
-ingestion surfaces (the Filing-construction logic in particular) worth a
-second look once behavior is proven, not before.
+ingestion surfaces (the Filing/Statement-construction logic in particular)
+worth a second look once behavior is proven, not before.
 
 **Done when**: every Acceptance Criteria item is checked, mutation reports
 for the four ingestion surfaces reviewed, `scripts/verify-gst-reconciliation.sh`
@@ -451,6 +621,3 @@ and `scripts/verify-pack-load.sh` both green, human approves commit.
    confirm nothing did.
 7. `cargo mutants` scoped to Slice 1's new resolution/attachment logic —
    0 missed, per this plan's own Slice 1 acceptance criteria.
-
----
-*Delete this file when the plan is complete.*
